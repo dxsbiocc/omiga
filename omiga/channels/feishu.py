@@ -29,8 +29,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import threading
 import time
+from pathlib import Path
 from typing import Callable, Optional
 
 from omiga.channels.base import Channel, OnChatMetadata, OnInboundMessage
@@ -187,6 +189,105 @@ class FeishuChannel(Channel):
                 await self._send_text(token, chat_id, receive_id_type, text)
         except Exception as exc:
             logger.error("Feishu send_message failed jid=%s: %s", jid, exc)
+
+    async def send_file(self, jid: str, host_path: Path, caption: str = "") -> None:
+        """Upload a file or image to Feishu and send it to the chat.
+
+        Images use the /im/v1/images endpoint; everything else uses
+        /im/v1/files.  A separate text message is sent if *caption* is set.
+        """
+        if not self._connected or self._http is None:
+            return
+        if not host_path.is_file():
+            logger.warning("Feishu send_file: path not found: %s", host_path)
+            return
+
+        import aiohttp
+
+        try:
+            token = await self._get_token()
+            mime, _ = mimetypes.guess_type(str(host_path))
+            mime = mime or "application/octet-stream"
+            is_image = mime.startswith("image/")
+
+            # ── Step 1: upload ─────────────────────────────────────────────
+            with open(host_path, "rb") as fh:
+                if is_image:
+                    form = aiohttp.FormData()
+                    form.add_field("image_type", "message")
+                    form.add_field(
+                        "image", fh,
+                        filename=host_path.name, content_type=mime,
+                    )
+                    async with self._http.post(
+                        "https://open.feishu.cn/open-apis/im/v1/images",
+                        data=form,
+                        headers={"Authorization": f"Bearer {token}"},
+                    ) as resp:
+                        upload_data = await resp.json(content_type=None)
+                    file_key = (upload_data.get("data") or {}).get("image_key")
+                    msg_type = "image"
+                    msg_content = json.dumps({"image_key": file_key}) if file_key else None
+                else:
+                    # Feishu file_type: "mp4" for video, "opus" for audio, else "stream"
+                    if mime.startswith("video/"):
+                        feishu_file_type = "mp4"
+                    elif mime.startswith("audio/"):
+                        feishu_file_type = "opus"
+                    else:
+                        feishu_file_type = "stream"
+                    form = aiohttp.FormData()
+                    form.add_field("file_type", feishu_file_type)
+                    form.add_field("file_name", host_path.name)
+                    form.add_field(
+                        "file", fh,
+                        filename=host_path.name, content_type=mime,
+                    )
+                    async with self._http.post(
+                        "https://open.feishu.cn/open-apis/im/v1/files",
+                        data=form,
+                        headers={"Authorization": f"Bearer {token}"},
+                    ) as resp:
+                        upload_data = await resp.json(content_type=None)
+                    file_key = (upload_data.get("data") or {}).get("file_key")
+                    msg_type = "file"
+                    msg_content = json.dumps({"file_key": file_key}) if file_key else None
+
+            if not msg_content:
+                logger.error(
+                    "Feishu send_file: upload failed for %s — response: %s",
+                    host_path, upload_data,
+                )
+                return
+
+            # ── Step 2: send the file/image message ────────────────────────
+            chat_id = _chat_id(jid)
+            last_msg_id = self._last_msg_id.get(jid)
+            if last_msg_id:
+                url = f"https://open.feishu.cn/open-apis/im/v1/messages/{last_msg_id}/reply"
+                body = {"msg_type": msg_type, "content": msg_content}
+            else:
+                rid_type = "open_id" if chat_id.startswith("ou_") else "chat_id"
+                url = f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={rid_type}"
+                body = {"receive_id": chat_id, "msg_type": msg_type, "content": msg_content}
+
+            async with self._http.post(
+                url, json=body, headers={"Authorization": f"Bearer {token}"}
+            ) as resp:
+                if resp.status >= 400:
+                    logger.error(
+                        "Feishu send_file: send failed %s: %s",
+                        resp.status, await resp.text(),
+                    )
+
+            # ── Step 3: send caption as a follow-up text message ───────────
+            if caption:
+                await self.send_message(jid, caption)
+
+        except Exception as exc:
+            logger.error(
+                "Feishu send_file failed jid=%s path=%s: %s", jid, host_path, exc
+            )
 
     async def set_typing(self, jid: str, is_typing: bool) -> None:
         # Feishu does not support a direct typing indicator over the Bot API.

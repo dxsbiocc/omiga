@@ -80,7 +80,7 @@ from omiga.models import (
 from omiga.api.admin_commands import handle_admin_command, handle_task_command, is_admin_command
 from omiga.api.app import create_app, start_api_server
 from omiga.logging_setup import configure_logging
-from omiga.router import find_channel, format_messages, format_outbound
+from omiga.router import find_channel, format_messages, format_outbound, parse_file_directives
 from omiga.scheduler.task_scheduler import SchedulerDeps, start_scheduler_loop
 
 configure_logging()
@@ -432,9 +432,27 @@ async def _process_group_messages(chat_jid: str) -> bool:
             raw = result.result if isinstance(result.result, str) else json.dumps(result.result)
             text = format_outbound(raw)
             logger.info("Agent output: group=%s preview=%s", group.name, raw[:200])
-            if text:
-                await channel.send_message(chat_jid, text)
+
+            # Extract [SEND_FILE: ...] directives from the agent's reply.
+            # Files are sent first; the remaining text (if any) follows.
+            clean_text, file_directives = parse_file_directives(text)
+
+            group_dir = resolve_group_folder_path(group.folder)
+            for directive in file_directives:
+                host_path = group_dir / directive.workspace_rel_path
+                if host_path.is_file():
+                    await channel.send_file(chat_jid, host_path, directive.caption)
+                    output_sent = True
+                else:
+                    logger.warning(
+                        "send_file: file not found (group=%s path=%s)",
+                        group.name, host_path,
+                    )
+
+            if clean_text:
+                await channel.send_message(chat_jid, clean_text)
                 output_sent = True
+
             _reset_idle()
         if result.status == "success":
             _queue.notify_idle(chat_jid)

@@ -11,6 +11,8 @@ import re
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
+from pathlib import Path
+
 from omiga.models import NewMessage, RegisteredGroup
 
 # Callback types
@@ -64,6 +66,25 @@ class Channel(ABC):
         channels that run their own background thread/task and cannot self-
         heal.
         """
+
+    async def send_file(
+        self,
+        jid: str,
+        host_path: Path,
+        caption: str = "",
+    ) -> None:
+        """Send a file to the chat identified by *jid*.
+
+        *host_path* is the absolute path to the file on the host machine.
+        *caption* is optional accompanying text shown alongside the file.
+
+        Default implementation falls back to sending the filename as a text
+        message so channels that haven't implemented native file sending still
+        produce some output.  Override in concrete channel implementations.
+        """
+        name = host_path.name
+        fallback = f"[{name}]" if not caption else f"{caption}\n[{name}]"
+        await self.send_message(jid, fallback)
 
     async def set_typing(self, jid: str, is_typing: bool) -> None:
         """Optional typing indicator — no-op by default."""

@@ -6,6 +6,7 @@ from omiga.router import (
     escape_xml,
     format_messages,
     format_outbound,
+    parse_file_directives,
     strip_internal_tags,
 )
 
@@ -79,3 +80,59 @@ def test_format_outbound_empty_after_strip():
 
 def test_format_outbound_plain():
     assert format_outbound("hello world") == "hello world"
+
+
+# ---------------------------------------------------------------------------
+# parse_file_directives
+# ---------------------------------------------------------------------------
+
+def test_parse_file_directives_no_directive():
+    text = "Hello, here is your answer."
+    clean, files = parse_file_directives(text)
+    assert clean == text
+    assert files == []
+
+
+def test_parse_file_directives_single():
+    text = "Here is the chart.\n[SEND_FILE: output/chart.png]"
+    clean, files = parse_file_directives(text)
+    assert clean == "Here is the chart."
+    assert len(files) == 1
+    assert files[0].workspace_rel_path == "output/chart.png"
+    assert files[0].caption == ""
+
+
+def test_parse_file_directives_with_caption():
+    text = "[SEND_FILE: output/report.pdf | Monthly report]"
+    clean, files = parse_file_directives(text)
+    assert clean == ""
+    assert files[0].caption == "Monthly report"
+
+
+def test_parse_file_directives_multiple():
+    text = "Files:\n[SEND_FILE: a.png | First]\n[SEND_FILE: b.pdf | Second]"
+    clean, files = parse_file_directives(text)
+    assert "Files:" in clean
+    assert len(files) == 2
+    assert files[0].workspace_rel_path == "a.png"
+    assert files[1].workspace_rel_path == "b.pdf"
+
+
+def test_parse_file_directives_case_insensitive():
+    text = "[send_file: output/chart.png]"
+    _, files = parse_file_directives(text)
+    assert len(files) == 1
+
+
+def test_parse_file_directives_strips_whitespace_in_path():
+    text = "[SEND_FILE:   output/photo.jpg   ]"
+    _, files = parse_file_directives(text)
+    assert files[0].workspace_rel_path == "output/photo.jpg"
+
+
+def test_parse_file_directives_inline_mixed():
+    text = "See [SEND_FILE: chart.png] and [SEND_FILE: data.csv | Raw data] for details."
+    clean, files = parse_file_directives(text)
+    assert "See" in clean
+    assert "for details." in clean
+    assert len(files) == 2

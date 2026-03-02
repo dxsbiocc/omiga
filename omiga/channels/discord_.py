@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Callable, Optional
 
 from omiga.channels.base import Channel, OnChatMetadata, OnInboundMessage
@@ -192,6 +193,42 @@ class DiscordChannel(Channel):
             await self._send_text(jid, text)
         except Exception as exc:
             logger.error("Discord send_message failed jid=%s: %s", jid, exc)
+
+    async def send_file(self, jid: str, host_path: Path, caption: str = "") -> None:
+        """Send a file to a Discord channel or DM using discord.File."""
+        if not self._connected or self._client is None:
+            return
+        if not host_path.is_file():
+            logger.warning("Discord send_file: path not found: %s", host_path)
+            return
+
+        import discord
+
+        target = None
+        try:
+            if jid.startswith("discord:ch:"):
+                channel_id = int(jid[len("discord:ch:"):])
+                target = self._client.get_channel(channel_id)
+                if target is None:
+                    target = await self._client.fetch_channel(channel_id)
+            elif jid.startswith("discord:dm:"):
+                user_id = int(jid[len("discord:dm:"):])
+                user = self._client.get_user(user_id)
+                if user is None:
+                    user = await self._client.fetch_user(user_id)
+                target = user.dm_channel or await user.create_dm()
+
+            if target is None:
+                logger.error("Discord send_file: cannot resolve target for jid=%s", jid)
+                return
+
+            with open(host_path, "rb") as fh:
+                df = discord.File(fh, filename=host_path.name)
+                await target.send(content=caption or None, file=df)
+        except Exception as exc:
+            logger.error(
+                "Discord send_file failed jid=%s path=%s: %s", jid, host_path, exc
+            )
 
     async def set_typing(self, jid: str, is_typing: bool) -> None:
         # discord.py's typing() context manager is per-send; skip for simplicity

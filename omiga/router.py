@@ -6,10 +6,27 @@ Mirrors src/router.ts — message XML formatting and channel routing.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from typing import Optional
 
 # Discord mention prefix: <@BOT_ID> or <@!BOT_ID> (legacy nickname mention)
 _DISCORD_MENTION_RE = re.compile(r"^<@!?\d+>\s*")
+
+# File-send directive written by the agent in its reply:
+#   [SEND_FILE: path/to/file.png]
+#   [SEND_FILE: path/to/report.pdf | Here is your report]
+# path is relative to /workspace/group/ (the group's workspace root).
+_FILE_DIRECTIVE_RE = re.compile(
+    r"\[SEND_FILE:\s*([^\]|]+?)(?:\s*\|\s*([^\]]*?))?\s*\]",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class FileDirective:
+    """A [SEND_FILE:] directive extracted from agent output."""
+    workspace_rel_path: str   # relative to /workspace/group/, e.g. "output/chart.png"
+    caption: str = ""
 
 from omiga.channels.base import Channel
 from omiga.models import NewMessage
@@ -76,6 +93,31 @@ def format_outbound(raw_text: str) -> str:
     """Strip internal tags and return cleaned outbound text (empty string if nothing left)."""
     text = strip_internal_tags(raw_text)
     return text
+
+
+def parse_file_directives(text: str) -> tuple[str, list[FileDirective]]:
+    """Extract [SEND_FILE: path] directives from agent output.
+
+    Returns ``(clean_text, directives)`` where *clean_text* has all
+    ``[SEND_FILE: ...]`` markers removed so only prose remains.
+
+    Example::
+
+        text = "Here is the chart you asked for:\\n[SEND_FILE: output/chart.png | Monthly chart]"
+        clean, files = parse_file_directives(text)
+        # clean  → "Here is the chart you asked for:"
+        # files  → [FileDirective("output/chart.png", "Monthly chart")]
+    """
+    directives: list[FileDirective] = []
+
+    def _replace(m: re.Match) -> str:
+        path = m.group(1).strip()
+        caption = (m.group(2) or "").strip()
+        directives.append(FileDirective(workspace_rel_path=path, caption=caption))
+        return ""
+
+    clean = _FILE_DIRECTIVE_RE.sub(_replace, text).strip()
+    return clean, directives
 
 
 def find_channel(channels: list[Channel], jid: str) -> Optional[Channel]:

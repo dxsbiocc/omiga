@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Optional
 
 from telegram import Bot, Update
@@ -263,6 +265,56 @@ class TelegramChannel(Channel):
             logger.warning("Telegram disconnect error: %s", exc)
         finally:
             self._app = None
+
+    async def send_file(self, jid: str, host_path: Path, caption: str = "") -> None:
+        """Send an image, video, audio clip, or document to the Telegram chat.
+
+        The send method is chosen by MIME type:
+        - image/*  → send_photo
+        - video/*  → send_video
+        - audio/*  → send_audio / send_voice (for .ogg)
+        - other    → send_document
+        """
+        if not self._connected or self._app is None:
+            return
+        if not host_path.is_file():
+            logger.warning("Telegram send_file: path not found: %s", host_path)
+            return
+
+        chat_id = _chat_id(jid)
+        mime, _ = mimetypes.guess_type(str(host_path))
+        mime = mime or "application/octet-stream"
+        cap = caption or None
+
+        try:
+            with open(host_path, "rb") as fh:
+                if mime.startswith("image/"):
+                    await self._app.bot.send_photo(
+                        chat_id=chat_id, photo=fh, caption=cap
+                    )
+                elif mime.startswith("video/"):
+                    await self._app.bot.send_video(
+                        chat_id=chat_id, video=fh, caption=cap
+                    )
+                elif host_path.suffix.lower() == ".ogg" or mime == "audio/ogg":
+                    await self._app.bot.send_voice(
+                        chat_id=chat_id, voice=fh, caption=cap
+                    )
+                elif mime.startswith("audio/"):
+                    await self._app.bot.send_audio(
+                        chat_id=chat_id, audio=fh, caption=cap
+                    )
+                else:
+                    await self._app.bot.send_document(
+                        chat_id=chat_id,
+                        document=fh,
+                        caption=cap,
+                        filename=host_path.name,
+                    )
+        except TelegramError as exc:
+            logger.error(
+                "Telegram send_file failed jid=%s path=%s: %s", jid, host_path, exc
+            )
 
     async def set_typing(self, jid: str, is_typing: bool) -> None:
         """Broadcast a 'typing…' action (only while is_typing=True)."""
