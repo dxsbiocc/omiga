@@ -92,6 +92,12 @@ HTTP_API_PORT: int = int(_get("HTTP_API_PORT", "7891"))  # 0 = disabled
 HTTP_API_HOST: str = _get("HTTP_API_HOST", "127.0.0.1")
 HTTP_API_TOKEN: str = _get("HTTP_API_TOKEN", "")  # empty = no auth
 
+# Voice transcription via OpenAI Whisper
+# Set WHISPER_ENABLED=true and OPENAI_API_KEY=sk-... to enable.
+WHISPER_ENABLED: bool = _get("WHISPER_ENABLED", "false").lower() == "true"
+# Optional BCP-47 language hint (e.g. "zh", "en"). Empty = auto-detect.
+WHISPER_LANGUAGE: str = _get("WHISPER_LANGUAGE", "")
+
 
 def get_secret(key: str) -> str:
     """Read a secret value from the environment or .env file.

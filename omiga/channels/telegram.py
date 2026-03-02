@@ -34,9 +34,10 @@ from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from omiga.channels.base import Channel, OnChatMetadata, OnInboundMessage
-from omiga.config import ASSISTANT_NAME
+from omiga.config import ASSISTANT_NAME, WHISPER_LANGUAGE
 from omiga.media import get_attachment_path
 from omiga.models import MediaAttachment, NewMessage, RegisteredGroup
+from omiga.transcription import transcribe_audio
 
 logger = logging.getLogger(__name__)
 
@@ -400,7 +401,18 @@ class TelegramChannel(Channel):
                 "Failed to download Telegram %s file_id=%s: %s", att_type, file_id, exc
             )
 
-        content = caption or f"[{att_type}]"
+        # Transcribe voice/audio when Whisper is enabled
+        content = caption
+        if not content and att_type in ("voice", "audio") and attachments:
+            transcribed = await transcribe_audio(
+                local_path, language=WHISPER_LANGUAGE or None
+            )
+            if transcribed:
+                content = f"[Voice]: {transcribed}"
+                logger.debug("Telegram voice transcribed: %d chars", len(transcribed))
+        if not content:
+            content = f"[{att_type}]"
+
         new_msg = NewMessage(
             id=str(msg.message_id),
             chat_jid=jid,

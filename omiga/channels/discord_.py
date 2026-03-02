@@ -37,9 +37,10 @@ import logging
 from typing import Callable, Optional
 
 from omiga.channels.base import Channel, OnChatMetadata, OnInboundMessage
-from omiga.config import ASSISTANT_NAME
+from omiga.config import ASSISTANT_NAME, WHISPER_LANGUAGE
 from omiga.media import get_attachment_path
 from omiga.models import MediaAttachment, NewMessage
+from omiga.transcription import transcribe_audio
 
 logger = logging.getLogger(__name__)
 
@@ -335,14 +336,22 @@ class DiscordChannel(Channel):
                     try:
                         data = await att.read()
                         local_path.write_bytes(data)
-                        media_attachments.append(MediaAttachment(
+                        media_att = MediaAttachment(
                             type=att_type,
                             filename=unique_name,
                             mime_type=content_type,
                             local_path=rel_path,
                             url=att.url,
-                        ))
+                        )
+                        media_attachments.append(media_att)
                         logger.debug("Discord: downloaded %s → %s", att_filename, local_path)
+                        # Transcribe audio attachments
+                        if att_type == "audio":
+                            transcribed = await transcribe_audio(
+                                local_path, language=WHISPER_LANGUAGE or None
+                            )
+                            if transcribed and not text:
+                                text = f"[Voice]: {transcribed}"
                     except Exception as exc:
                         logger.error("Discord: failed to download attachment %s: %s", att_filename, exc)
 

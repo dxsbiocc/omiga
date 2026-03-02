@@ -34,9 +34,10 @@ import time
 from typing import Callable, Optional
 
 from omiga.channels.base import Channel, OnChatMetadata, OnInboundMessage
-from omiga.config import ASSISTANT_NAME
+from omiga.config import ASSISTANT_NAME, WHISPER_LANGUAGE
 from omiga.media import get_attachment_path
 from omiga.models import MediaAttachment, NewMessage
+from omiga.transcription import transcribe_audio
 
 logger = logging.getLogger(__name__)
 
@@ -500,8 +501,9 @@ class FeishuChannel(Channel):
                     att_dir, rel_path = get_attachment_path(
                         jid, filename, self._registered_groups()
                     )
+                    local_path = att_dir / filename
                     ok = await self._download_feishu_media(
-                        message_id, file_key, "file", att_dir / filename
+                        message_id, file_key, "file", local_path
                     )
                     if ok:
                         attachments = [MediaAttachment(
@@ -511,6 +513,13 @@ class FeishuChannel(Channel):
                             local_path=rel_path,
                             url=file_key,
                         )]
+                        # Transcribe audio messages
+                        if msg_type == "audio":
+                            transcribed = await transcribe_audio(
+                                local_path, language=WHISPER_LANGUAGE or None
+                            )
+                            if transcribed:
+                                text = f"[Voice]: {transcribed}"
 
             else:
                 try:

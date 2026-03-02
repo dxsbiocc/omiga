@@ -77,7 +77,7 @@ from omiga.models import (
     NewMessage,
     RegisteredGroup,
 )
-from omiga.admin_commands import handle_admin_command, is_admin_command
+from omiga.admin_commands import handle_admin_command, handle_task_command, is_admin_command
 from omiga.api import create_app, start_api_server
 from omiga.logging_setup import configure_logging
 from omiga.router import find_channel, format_messages, format_outbound
@@ -271,19 +271,38 @@ async def _process_admin_command(
     channel,
     missed: list,
 ) -> bool:
-    """Check the last message for an admin command (main group only).
+    """Check the last message for an admin command.
+
+    * ``/task`` subcommands are handled for ANY registered group.
+    * All other admin commands are restricted to MAIN_GROUP_JID.
 
     Returns True if a command was handled (caller should skip container).
     """
-    if chat_jid != MAIN_GROUP_JID:
-        return False
-
     last = missed[-1] if missed else None
     if not last or not is_admin_command(last.content):
         return False
 
+    cmd_word = last.content.strip().split()[0].lower() if last.content.strip() else ""
+
+    # /task commands work from any registered group
+    if cmd_word == "/task":
+        reply = await handle_task_command(
+            last.content,
+            jid=chat_jid,
+            registered_groups=_registered_groups,
+        )
+        if reply is not None:
+            await channel.send_message(chat_jid, reply)
+            _last_agent_timestamp[chat_jid] = last.timestamp
+            await _save_state()
+            return True
+        return False
+
+    # All other admin commands: main group only
+    if chat_jid != MAIN_GROUP_JID:
+        return False
+
     def _register_fn(jid: str, name: str) -> None:
-        from omiga.group_folder import resolve_group_folder_path
         import re
         folder = re.sub(r"[^a-z0-9_-]", "_", name.lower())[:32] or "group"
         group = RegisteredGroup(
@@ -299,9 +318,6 @@ async def _process_admin_command(
 
     def _unregister_fn(jid: str) -> None:
         asyncio.ensure_future(_unregister_group(jid))
-
-    async def _get_tasks_sync():
-        return await get_all_tasks()
 
     tasks = await get_all_tasks()
 

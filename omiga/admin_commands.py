@@ -4,26 +4,37 @@ Inline admin commands for Omiga.
 Commands are intercepted from the main group chat (MAIN_GROUP_JID) before
 messages reach the container, so the agent is not involved.
 
-Available commands
-------------------
-/help                          - List all commands
-/status                        - Channel connection status + system health
-/list                          - List all registered groups
-/register <jid> <name>         - Register a group (jid must start with channel prefix)
-/unregister <jid>              - Unregister a group (preserves folder on disk)
-/tasks                         - List scheduled tasks (id, group, schedule, status)
-/ping                          - Quick liveness check
+Available commands (main group only)
+-------------------------------------
+/help                               - List all commands
+/status                             - Channel connection status + system health
+/list                               - List all registered groups
+/register <jid> <name>              - Register a group
+/unregister <jid>                   - Unregister a group (preserves folder on disk)
+/tasks                              - List scheduled tasks
+/ping                               - Quick liveness check
 
-Authorization
--------------
-Commands are only processed when the message arrives in the main group
-(MAIN_GROUP_JID). Any other origin is ignored and the message flows to the
-container as normal.
+Task management (any registered group)
+----------------------------------------
+/task list                          - List tasks for this group
+/task add "<prompt>" <type> <value> - Create a new task
+/task pause <id>                    - Pause a task
+/task resume <id>                   - Resume a task
+/task delete <id>                   - Delete a task
+/task run <id>                      - Trigger a task immediately (next poll ≤60 s)
+/task info <id>                     - Show full task details
+
+Task type / value examples:
+  cron     "0 8 * * *"      → every day at 08:00 UTC
+  interval 3600              → every hour
+  once     "2026-03-15T09:00"→ one-time at that UTC time
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+import shlex
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
@@ -100,7 +111,18 @@ async def handle_admin_command(
             "/register <jid> <name>— register a group\n"
             "/unregister <jid>     — unregister a group\n"
             "/tasks                — list scheduled tasks\n"
-            "/ping                 — liveness check"
+            "/ping                 — liveness check\n"
+            "\n"
+            "Task commands (any registered group):\n"
+            "/task list\n"
+            '/task add "<prompt>" cron "0 8 * * *"\n'
+            "/task add \"<prompt>\" interval 3600\n"
+            '/task add "<prompt>" once "2026-03-15T09:00"\n'
+            "/task pause <id>\n"
+            "/task resume <id>\n"
+            "/task delete <id>\n"
+            "/task run <id>\n"
+            "/task info <id>"
         )
 
     # ------------------------------------------------------------------
@@ -188,3 +210,227 @@ async def handle_admin_command(
         return "\n".join(lines)
 
     return None  # unknown command — let the container handle it
+
+
+# ---------------------------------------------------------------------------
+# /task subcommands (available from any registered group)
+# ---------------------------------------------------------------------------
+
+def _short_id() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+def _compute_next_run(schedule_type: str, schedule_value: str) -> Optional[str]:
+    """Calculate the first run time for a new task."""
+    now = datetime.now(timezone.utc)
+    if schedule_type == "cron":
+        try:
+            from croniter import croniter
+            return croniter(schedule_value, now).get_next(datetime).isoformat()
+        except Exception as exc:
+            logger.debug("croniter error: %s", exc)
+            return None
+    elif schedule_type == "interval":
+        try:
+            secs = int(float(schedule_value))
+            return (now + timedelta(seconds=secs)).isoformat()
+        except Exception:
+            return None
+    elif schedule_type == "once":
+        try:
+            dt = datetime.fromisoformat(schedule_value)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.isoformat()
+        except Exception:
+            return None
+    return None
+
+
+def _parse_task_add(args: str):
+    """Parse: "prompt" type value  (shlex-split, handles quoted strings).
+
+    Returns ``(prompt, schedule_type, schedule_value)`` or ``(None, None, None)``.
+    """
+    try:
+        tokens = shlex.split(args)
+    except ValueError:
+        return None, None, None
+    if len(tokens) < 3:
+        return None, None, None
+    return tokens[0], tokens[1].lower(), tokens[2]
+
+
+def _fmt_task(t: "ScheduledTask") -> str:
+    next_run = (t.next_run or "—")[:19]
+    return (
+        f"[{t.id[:8]}] {t.schedule_type}:{t.schedule_value} "
+        f"| {t.status} | next={next_run}\n"
+        f"  {t.prompt[:80]}"
+    )
+
+
+async def handle_task_command(
+    text: str,
+    jid: str,
+    registered_groups: "dict[str, RegisteredGroup]",
+) -> Optional[str]:
+    """Handle ``/task <sub> [args]`` from any registered group.
+
+    Returns the reply string, or None if the command is unrecognised.
+    """
+    from omiga.database import (
+        create_task,
+        delete_task,
+        get_all_tasks,
+        get_task_by_id,
+        get_tasks_for_group,
+        update_task,
+    )
+    from omiga.models import ScheduledTask
+
+    parts = text.strip().split(None, 2)  # ["/task", sub, rest?]
+    if len(parts) < 2:
+        return _task_usage()
+
+    sub = parts[1].lower()
+    rest = parts[2].strip() if len(parts) > 2 else ""
+
+    # Determine folder for the calling group
+    group = registered_groups.get(jid)
+    folder = group.folder if group else "main"
+
+    # ------------------------------------------------------------------
+    # list
+    # ------------------------------------------------------------------
+    if sub == "list":
+        tasks = await get_tasks_for_group(folder)
+        if not tasks:
+            return f"No tasks for group '{folder}'."
+        lines = [f"[{len(tasks)} task(s) in '{folder}']"]
+        for t in tasks:
+            lines.append("  " + _fmt_task(t))
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # add "prompt" type value
+    # ------------------------------------------------------------------
+    if sub == "add":
+        if not rest:
+            return _task_usage()
+        prompt, stype, svalue = _parse_task_add(rest)
+        if not prompt or not stype or not svalue:
+            return (
+                "Usage: /task add \"<prompt>\" <type> <value>\n"
+                "Types: cron | interval | once\n"
+                "Examples:\n"
+                '  /task add "Daily report" cron "0 8 * * *"\n'
+                "  /task add \"Hourly ping\" interval 3600"
+            )
+        if stype not in ("cron", "interval", "once"):
+            return f"Unknown schedule type '{stype}'. Use: cron | interval | once"
+
+        next_run = _compute_next_run(stype, svalue)
+        if next_run is None:
+            return f"Invalid schedule value '{svalue}' for type '{stype}'."
+
+        task = ScheduledTask(
+            id=_short_id(),
+            group_folder=folder,
+            chat_jid=jid,
+            prompt=prompt,
+            schedule_type=stype,
+            schedule_value=svalue,
+            context_mode="group",
+            next_run=next_run,
+            last_run=None,
+            last_result=None,
+            status="active",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        await create_task(task)
+        return (
+            f"Task created: [{task.id}]\n"
+            f"  Prompt: {prompt[:80]}\n"
+            f"  Schedule: {stype} {svalue}\n"
+            f"  First run: {next_run[:19]} UTC"
+        )
+
+    # ------------------------------------------------------------------
+    # pause / resume / delete / run / info — require a task id
+    # ------------------------------------------------------------------
+    if sub in ("pause", "resume", "delete", "run", "info"):
+        if not rest:
+            return f"Usage: /task {sub} <id>"
+
+        task_id = rest.split()[0]
+        task = await get_task_by_id(task_id)
+
+        # Also try prefix match (short id)
+        if not task:
+            all_tasks = await get_tasks_for_group(folder)
+            matches = [t for t in all_tasks if t.id.startswith(task_id)]
+            if len(matches) == 1:
+                task = matches[0]
+            elif len(matches) > 1:
+                return f"Ambiguous ID '{task_id}' matches {len(matches)} tasks. Use more characters."
+
+        if not task:
+            return f"Task not found: {task_id}"
+
+        # Restrict non-main groups to their own tasks
+        if task.group_folder != folder and folder != "main":
+            return f"Task [{task.id}] belongs to group '{task.group_folder}', not '{folder}'."
+
+        if sub == "info":
+            return (
+                f"Task [{task.id}]\n"
+                f"  Group:    {task.group_folder}\n"
+                f"  Status:   {task.status}\n"
+                f"  Schedule: {task.schedule_type} {task.schedule_value}\n"
+                f"  Context:  {task.context_mode}\n"
+                f"  Next run: {task.next_run or '—'}\n"
+                f"  Last run: {task.last_run or '—'}\n"
+                f"  Prompt:   {task.prompt}"
+            )
+
+        if sub == "pause":
+            if task.status == "paused":
+                return f"Task [{task.id}] is already paused."
+            await update_task(task.id, status="paused")
+            return f"Task [{task.id}] paused."
+
+        if sub == "resume":
+            if task.status == "active":
+                return f"Task [{task.id}] is already active."
+            # Recalculate next_run from now when resuming
+            next_run = _compute_next_run(task.schedule_type, task.schedule_value)
+            await update_task(task.id, status="active", next_run=next_run)
+            return f"Task [{task.id}] resumed. Next run: {(next_run or '—')[:19]} UTC"
+
+        if sub == "delete":
+            await delete_task(task.id)
+            return f"Task [{task.id}] deleted."
+
+        if sub == "run":
+            # Set next_run to now — scheduler will pick it up within 60 s
+            now = datetime.now(timezone.utc).isoformat()
+            await update_task(task.id, status="active", next_run=now)
+            return f"Task [{task.id}] triggered. Will run within the next scheduler cycle (≤60 s)."
+
+    return _task_usage()
+
+
+def _task_usage() -> str:
+    return (
+        "Task commands:\n"
+        "/task list\n"
+        '/task add "<prompt>" cron "0 8 * * *"\n'
+        "/task add \"<prompt>\" interval 3600\n"
+        '/task add "<prompt>" once "2026-03-15T09:00"\n'
+        "/task pause <id>\n"
+        "/task resume <id>\n"
+        "/task delete <id>\n"
+        "/task run <id>\n"
+        "/task info <id>"
+    )
