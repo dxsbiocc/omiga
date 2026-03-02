@@ -549,6 +549,28 @@ def _recover_pending_messages() -> None:
 # Channel factory
 # ---------------------------------------------------------------------------
 
+def _resolve_proxy(channel_env_key: str) -> str:
+    """Return the proxy URL to use for a channel.
+
+    Priority:
+      1. Channel-specific env var  (e.g. TELEGRAM_HTTP_PROXY)
+      2. System HTTPS_PROXY / ALL_PROXY / HTTP_PROXY env vars
+      3. Empty string (direct connection)
+
+    This lets users rely on a system-wide proxy (set once in the shell or
+    via a VPN tool) and only override per-channel when needed.
+    """
+    explicit = get_secret(channel_env_key)
+    if explicit:
+        return explicit
+    return (
+        os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+        or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
+        or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+        or ""
+    )
+
+
 async def _build_channels(
     on_message,
     on_chat_meta,
@@ -571,7 +593,7 @@ async def _build_channels(
             on_message=on_message,
             on_chat_meta=on_chat_meta,
             registered_groups=lambda: _registered_groups,
-            http_proxy=get_secret("TELEGRAM_HTTP_PROXY") or "",
+            http_proxy=_resolve_proxy("TELEGRAM_HTTP_PROXY"),
         )
         await tg.connect()
         channels.append(tg)
@@ -615,7 +637,7 @@ async def _build_channels(
             on_message=on_message,
             on_chat_meta=on_chat_meta,
             registered_groups=lambda: _registered_groups,
-            http_proxy=get_secret("DISCORD_HTTP_PROXY") or "",
+            http_proxy=_resolve_proxy("DISCORD_HTTP_PROXY"),
         )
         await dc.connect()
         channels.append(dc)
