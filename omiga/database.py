@@ -21,6 +21,7 @@ from omiga.config import ASSISTANT_NAME, DATA_DIR, STORE_DIR
 from omiga.group_folder import is_valid_group_folder
 from omiga.models import (
     ChatInfo,
+    MediaAttachment,
     NewMessage,
     RegisteredGroup,
     ScheduledTask,
@@ -154,6 +155,7 @@ _MIGRATIONS = [
     "ALTER TABLE messages ADD COLUMN is_bot_message INTEGER DEFAULT 0",
     "ALTER TABLE chats ADD COLUMN channel TEXT",
     "ALTER TABLE chats ADD COLUMN is_group INTEGER DEFAULT 0",
+    "ALTER TABLE messages ADD COLUMN attachments TEXT",
 ]
 
 
@@ -320,13 +322,50 @@ async def set_last_group_sync() -> None:
 # Messages
 # ---------------------------------------------------------------------------
 
+def _serialize_attachments(attachments: list) -> Optional[str]:
+    """Serialize a list of MediaAttachment to a JSON string, or None if empty."""
+    if not attachments:
+        return None
+    return json.dumps([
+        {
+            "type": a.type,
+            "filename": a.filename,
+            "mime_type": a.mime_type,
+            "local_path": a.local_path,
+            "url": a.url,
+        }
+        for a in attachments
+    ])
+
+
+def _parse_attachments(raw: Optional[str]) -> list[MediaAttachment]:
+    """Deserialize a JSON string back into a list of MediaAttachment objects."""
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+        return [
+            MediaAttachment(
+                type=a["type"],
+                filename=a["filename"],
+                mime_type=a["mime_type"],
+                local_path=a["local_path"],
+                url=a.get("url", ""),
+            )
+            for a in items
+        ]
+    except Exception:
+        return []
+
+
 async def store_message(msg: NewMessage) -> None:
     async with _connect() as db:
         await db.execute(
             """
             INSERT OR REPLACE INTO messages
-            (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (id, chat_jid, sender, sender_name, content, timestamp,
+             is_from_me, is_bot_message, attachments)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 msg.id,
@@ -337,6 +376,7 @@ async def store_message(msg: NewMessage) -> None:
                 msg.timestamp,
                 1 if msg.is_from_me else 0,
                 1 if msg.is_bot_message else 0,
+                _serialize_attachments(msg.attachments),
             ),
         )
         await db.commit()
@@ -353,7 +393,7 @@ async def get_new_messages(
 
     placeholders = ",".join("?" * len(jids))
     sql = f"""
-        SELECT id, chat_jid, sender, sender_name, content, timestamp
+        SELECT id, chat_jid, sender, sender_name, content, timestamp, attachments
         FROM messages
         WHERE timestamp > ? AND chat_jid IN ({placeholders})
           AND is_bot_message = 0 AND content NOT LIKE ?
@@ -372,6 +412,7 @@ async def get_new_messages(
             sender_name=r["sender_name"],
             content=r["content"],
             timestamp=r["timestamp"],
+            attachments=_parse_attachments(r["attachments"]),
         )
         for r in rows
     ]
@@ -390,7 +431,7 @@ async def get_messages_since(
     bot_prefix: str,
 ) -> list[NewMessage]:
     sql = """
-        SELECT id, chat_jid, sender, sender_name, content, timestamp
+        SELECT id, chat_jid, sender, sender_name, content, timestamp, attachments
         FROM messages
         WHERE chat_jid = ? AND timestamp > ?
           AND is_bot_message = 0 AND content NOT LIKE ?
@@ -409,6 +450,7 @@ async def get_messages_since(
             sender_name=r["sender_name"],
             content=r["content"],
             timestamp=r["timestamp"],
+            attachments=_parse_attachments(r["attachments"]),
         )
         for r in rows
     ]

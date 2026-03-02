@@ -48,6 +48,7 @@ MOUNT_ALLOWLIST_PATH: Path = HOME_DIR / ".config" / "omiga" / "mount-allowlist.j
 STORE_DIR: Path = (PROJECT_ROOT / "store").resolve()
 GROUPS_DIR: Path = (PROJECT_ROOT / "groups").resolve()
 DATA_DIR: Path = (PROJECT_ROOT / "data").resolve()
+MEDIA_DIR: Path = DATA_DIR / "media"  # fallback for media from unregistered groups
 MAIN_GROUP_FOLDER: str = "main"
 
 # Auto-registration of the main group at startup.

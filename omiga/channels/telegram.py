@@ -35,7 +35,8 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from omiga.channels.base import Channel, OnChatMetadata, OnInboundMessage
 from omiga.config import ASSISTANT_NAME
-from omiga.models import NewMessage, RegisteredGroup
+from omiga.media import get_attachment_path
+from omiga.models import MediaAttachment, NewMessage, RegisteredGroup
 
 logger = logging.getLogger(__name__)
 
@@ -177,9 +178,19 @@ class TelegramChannel(Channel):
             .get_updates_read_timeout(self._POLL_TIMEOUT + 5)
             .build()
         )
-        # Handle all plain-text messages (groups and DMs)
+
+        # Handle text messages
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text)
+        )
+        # Handle media messages (photo, audio, document, voice, video)
+        self._app.add_handler(
+            MessageHandler(
+                (filters.PHOTO | filters.AUDIO | filters.Document.ALL
+                 | filters.VOICE | filters.VIDEO)
+                & ~filters.COMMAND,
+                self._handle_media,
+            )
         )
 
         await self._app.initialize()
@@ -295,6 +306,113 @@ class TelegramChannel(Channel):
             logger.debug(
                 "Message from unregistered chat jid=%s — updating metadata only", jid
             )
+
+
+    async def _handle_media(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle photo / audio / document / voice / video messages."""
+        msg = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+
+        if msg is None or chat is None:
+            return
+
+        jid = _jid(chat.id)
+        is_group = chat.type in (ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL)
+        chat_name = chat.title or (user.full_name if user else str(chat.id))
+        ts = _iso_timestamp(msg.date)
+
+        _fire(self._on_chat_meta(jid, ts, chat_name, "telegram", is_group))
+
+        if jid not in self._registered_groups():
+            logger.debug(
+                "Media from unregistered chat jid=%s — metadata only", jid
+            )
+            return
+
+        sender_id = str(user.id) if user else str(chat.id)
+        sender_name = user.full_name if user else chat_name
+        is_from_me = bool(user and user.id == self._bot_id)
+
+        # Determine media type, file_id, original filename, mime_type
+        caption = (msg.caption or "").strip()
+        att_type = file_id = filename = mime_type = ""
+
+        if msg.photo:
+            photo = max(msg.photo, key=lambda p: p.width * p.height)
+            att_type = "image"
+            file_id = photo.file_id
+            filename = f"{msg.message_id}.jpg"
+            mime_type = "image/jpeg"
+        elif msg.audio:
+            att_type = "audio"
+            file_id = msg.audio.file_id
+            filename = msg.audio.file_name or f"{msg.message_id}.mp3"
+            mime_type = msg.audio.mime_type or "audio/mpeg"
+        elif msg.document:
+            att_type = "document"
+            file_id = msg.document.file_id
+            filename = msg.document.file_name or f"{msg.message_id}.bin"
+            mime_type = msg.document.mime_type or "application/octet-stream"
+        elif msg.voice:
+            att_type = "voice"
+            file_id = msg.voice.file_id
+            filename = f"{msg.message_id}.ogg"
+            mime_type = msg.voice.mime_type or "audio/ogg"
+        elif msg.video:
+            att_type = "video"
+            file_id = msg.video.file_id
+            filename = msg.video.file_name or f"{msg.message_id}.mp4"
+            mime_type = msg.video.mime_type or "video/mp4"
+        else:
+            return
+
+        # Make filename unique
+        stem, dot, ext = filename.rpartition(".")
+        unique_name = f"{msg.message_id}_{stem}{dot}{ext}" if stem else f"{msg.message_id}{dot}{ext}"
+
+        # Resolve download path
+        att_dir, rel_path = get_attachment_path(
+            jid, unique_name, self._registered_groups()
+        )
+        local_path = att_dir / unique_name
+
+        # Download
+        attachments: list[MediaAttachment] = []
+        try:
+            file_obj = await context.bot.get_file(file_id)
+            file_bytes = await file_obj.download_as_bytearray()
+            local_path.write_bytes(bytes(file_bytes))
+            attachments = [
+                MediaAttachment(
+                    type=att_type,
+                    filename=unique_name,
+                    mime_type=mime_type,
+                    local_path=rel_path,
+                    url=file_id,
+                )
+            ]
+            logger.debug("Downloaded Telegram %s → %s", att_type, local_path)
+        except Exception as exc:
+            logger.error(
+                "Failed to download Telegram %s file_id=%s: %s", att_type, file_id, exc
+            )
+
+        content = caption or f"[{att_type}]"
+        new_msg = NewMessage(
+            id=str(msg.message_id),
+            chat_jid=jid,
+            sender=sender_id,
+            sender_name=sender_name,
+            content=content,
+            timestamp=ts,
+            is_from_me=is_from_me,
+            is_bot_message=is_from_me,
+            attachments=attachments,
+        )
+        _fire(self._on_message(jid, new_msg))
 
 
 def _fire(coro) -> None:  # type: ignore[type-arg]

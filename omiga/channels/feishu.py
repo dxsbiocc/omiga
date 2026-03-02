@@ -35,7 +35,8 @@ from typing import Callable, Optional
 
 from omiga.channels.base import Channel, OnChatMetadata, OnInboundMessage
 from omiga.config import ASSISTANT_NAME
-from omiga.models import NewMessage
+from omiga.media import get_attachment_path
+from omiga.models import MediaAttachment, NewMessage
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +283,48 @@ class FeishuChannel(Channel):
                     logger.error("Feishu send failed %s: %s", resp.status, data[:200])
 
     # ------------------------------------------------------------------
+    # Media download helper
+    # ------------------------------------------------------------------
+
+    async def _download_feishu_media(
+        self,
+        message_id: str,
+        file_key: str,
+        media_type: str,  # "image" or "file"
+        dest_path,
+    ) -> bool:
+        """Download a Feishu media resource and save it to *dest_path*.
+
+        Returns True on success, False on error.
+        """
+        from pathlib import Path
+        dest_path = Path(dest_path)
+        try:
+            token = await self._get_token()
+            url = (
+                f"https://open.feishu.cn/open-apis/im/v1/messages"
+                f"/{message_id}/resources/{file_key}?type={media_type}"
+            )
+            assert self._http is not None
+            async with self._http.get(
+                url, headers={"Authorization": f"Bearer {token}"}
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error(
+                        "Feishu media download failed %s: %s", resp.status, body[:200]
+                    )
+                    return False
+                data = await resp.read()
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            dest_path.write_bytes(data)
+            logger.debug("Feishu: downloaded %s → %s (%d bytes)", file_key, dest_path, len(data))
+            return True
+        except Exception as exc:
+            logger.error("Feishu: failed to download %s: %s", file_key, exc)
+            return False
+
+    # ------------------------------------------------------------------
     # WebSocket receive (runs in a background thread)
     # ------------------------------------------------------------------
 
@@ -403,17 +446,72 @@ class FeishuChannel(Channel):
                 is_group,
             ))
 
-            # Extract text content
+            # Extract text content + any media attachments
             msg_type = str(getattr(message, "message_type", "text") or "text").strip()
             content_raw = getattr(message, "content", None) or ""
             text = ""
+            attachments: list[MediaAttachment] = []
+
             if msg_type == "text":
                 try:
                     text = json.loads(content_raw).get("text", "").strip()
                 except Exception:
                     text = content_raw.strip()
-            elif msg_type in ("image", "file", "audio", "video"):
-                text = f"[{msg_type}]"  # placeholder; media handling can be added later
+
+            elif msg_type == "image":
+                try:
+                    content_data = json.loads(content_raw)
+                    image_key = content_data.get("image_key", "")
+                except Exception:
+                    image_key = ""
+                text = "[image]"
+                if image_key and message_id and jid in self._registered_groups():
+                    filename = f"{message_id}_image.jpg"
+                    att_dir, rel_path = get_attachment_path(
+                        jid, filename, self._registered_groups()
+                    )
+                    ok = await self._download_feishu_media(
+                        message_id, image_key, "image", att_dir / filename
+                    )
+                    if ok:
+                        attachments = [MediaAttachment(
+                            type="image",
+                            filename=filename,
+                            mime_type="image/jpeg",
+                            local_path=rel_path,
+                            url=image_key,
+                        )]
+
+            elif msg_type in ("file", "audio", "video"):
+                try:
+                    content_data = json.loads(content_raw)
+                    file_key = content_data.get("file_key", "")
+                    orig_name = content_data.get("file_name", "")
+                except Exception:
+                    file_key = ""
+                    orig_name = ""
+                ext_map = {"audio": "ogg", "video": "mp4", "file": "bin"}
+                ext = orig_name.rsplit(".", 1)[-1] if "." in orig_name else ext_map.get(msg_type, "bin")
+                filename = f"{message_id or 'media'}.{ext}"
+                mime_map = {"audio": "audio/ogg", "video": "video/mp4", "file": "application/octet-stream"}
+                mime = mime_map.get(msg_type, "application/octet-stream")
+                text = orig_name or f"[{msg_type}]"
+                if file_key and message_id and jid in self._registered_groups():
+                    att_dir, rel_path = get_attachment_path(
+                        jid, filename, self._registered_groups()
+                    )
+                    ok = await self._download_feishu_media(
+                        message_id, file_key, "file", att_dir / filename
+                    )
+                    if ok:
+                        attachments = [MediaAttachment(
+                            type=msg_type,
+                            filename=filename,
+                            mime_type=mime,
+                            local_path=rel_path,
+                            url=file_key,
+                        )]
+
             else:
                 try:
                     text = json.loads(content_raw).get("text", "").strip()
@@ -438,6 +536,7 @@ class FeishuChannel(Channel):
                 timestamp=ts,
                 is_from_me=is_from_me,
                 is_bot_message=is_from_me,
+                attachments=attachments,
             )
 
             # Only deliver on_message for registered chats

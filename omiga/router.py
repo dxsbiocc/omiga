@@ -25,11 +25,19 @@ def escape_xml(s: str) -> str:
 
 def format_messages(messages: list[NewMessage]) -> str:
     """Format a list of messages into an XML block for the container."""
-    lines = [
-        f'<message sender="{escape_xml(m.sender_name)}" time="{m.timestamp}">'
-        f"{escape_xml(m.content)}</message>"
-        for m in messages
-    ]
+    lines = []
+    for m in messages:
+        open_tag = f'<message sender="{escape_xml(m.sender_name)}" time="{m.timestamp}">'
+        if m.attachments:
+            att_parts = "\n".join(
+                f'  <attachment type="{a.type}" file="{escape_xml(a.local_path)}"'
+                f' filename="{escape_xml(a.filename)}" />'
+                for a in m.attachments
+            )
+            content = escape_xml(m.content)
+            lines.append(f"{open_tag}\n{content}\n{att_parts}\n</message>")
+        else:
+            lines.append(f"{open_tag}{escape_xml(m.content)}</message>")
     return "<messages>\n" + "\n".join(lines) + "\n</messages>"
 
 

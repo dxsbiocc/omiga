@@ -23,6 +23,23 @@ class AllowedRoot:
 
 
 @dataclass
+class MediaAttachment:
+    """A media file attached to a message.
+
+    ``local_path`` is relative to the group workspace root on the host
+    (e.g. ``attachments/photo.jpg``), which maps to
+    ``/workspace/attachments/photo.jpg`` inside the agent container.
+    For unregistered groups it is an absolute host path.
+    """
+
+    type: str       # "image", "audio", "video", "document", "voice"
+    filename: str   # filename on disk (unique per message)
+    mime_type: str  # e.g. "image/jpeg"
+    local_path: str # path used in prompts (relative to workspace or absolute)
+    url: str = ""   # original URL or platform file_id (for reference)
+
+
+@dataclass
 class MountAllowlist:
     allowed_roots: list[AllowedRoot]
     blocked_patterns: list[str]
@@ -55,6 +72,7 @@ class NewMessage:
     timestamp: str
     is_from_me: bool = False
     is_bot_message: bool = False
+    attachments: list[Any] = field(default_factory=list)  # list[MediaAttachment]
 
 
 @dataclass

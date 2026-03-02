@@ -38,7 +38,8 @@ from typing import Callable, Optional
 
 from omiga.channels.base import Channel, OnChatMetadata, OnInboundMessage
 from omiga.config import ASSISTANT_NAME
-from omiga.models import NewMessage
+from omiga.media import get_attachment_path
+from omiga.models import MediaAttachment, NewMessage
 
 logger = logging.getLogger(__name__)
 
@@ -304,14 +305,54 @@ class DiscordChannel(Channel):
                 not is_dm,
             ))
 
-            # Extract text
+            # Extract text content
             text = (message.content or "").strip()
-            if not text:
-                return
 
-            # Skip messages that are our own bot's prefix
+            # Skip bot-prefixed messages
             if text.startswith(f"{ASSISTANT_NAME}:"):
                 return
+
+            # Download any file attachments (only for registered groups)
+            media_attachments: list[MediaAttachment] = []
+            if message.attachments and jid in self._registered_groups():
+                for att in message.attachments:
+                    att_filename = getattr(att, "filename", None) or "file"
+                    unique_name = f"{msg_id}_{att_filename}"
+                    att_dir, rel_path = get_attachment_path(
+                        jid, unique_name, self._registered_groups()
+                    )
+                    local_path = att_dir / unique_name
+                    content_type = getattr(att, "content_type", None) or "application/octet-stream"
+                    # Determine media type from content_type
+                    if content_type.startswith("image/"):
+                        att_type = "image"
+                    elif content_type.startswith("audio/"):
+                        att_type = "audio"
+                    elif content_type.startswith("video/"):
+                        att_type = "video"
+                    else:
+                        att_type = "document"
+                    try:
+                        data = await att.read()
+                        local_path.write_bytes(data)
+                        media_attachments.append(MediaAttachment(
+                            type=att_type,
+                            filename=unique_name,
+                            mime_type=content_type,
+                            local_path=rel_path,
+                            url=att.url,
+                        ))
+                        logger.debug("Discord: downloaded %s → %s", att_filename, local_path)
+                    except Exception as exc:
+                        logger.error("Discord: failed to download attachment %s: %s", att_filename, exc)
+
+            # Require either text or attachments
+            if not text and not media_attachments:
+                return
+
+            if not text and media_attachments:
+                # Build a placeholder from the first attachment
+                text = f"[{media_attachments[0].type}]"
 
             new_msg = NewMessage(
                 id=msg_id,
@@ -322,6 +363,7 @@ class DiscordChannel(Channel):
                 timestamp=ts,
                 is_from_me=False,
                 is_bot_message=False,
+                attachments=media_attachments,
             )
 
             if jid in self._registered_groups():
