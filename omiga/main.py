@@ -180,15 +180,34 @@ def _get_available_groups() -> list[AvailableGroup]:
 # Agent runner
 # ---------------------------------------------------------------------------
 
+_SESSION_CORRUPTION_MARKERS = (
+    # OpenAI-compatible APIs: tool message without preceding tool_calls
+    "messages with role \"tool\" must be a response to a preceeding message with \"tool_calls\"",
+    "messages with role 'tool' must be a response to a preceeding message with 'tool_calls'",
+    # Anthropic: similar orphaned tool_result block
+    "tool_result block(s) provided when previous message does not have tool_calls",
+)
+
+
+def _is_session_corruption_error(error: str) -> bool:
+    """Return True when the error is caused by a corrupted session history."""
+    low = (error or "").lower()
+    return any(marker.lower() in low for marker in _SESSION_CORRUPTION_MARKERS)
+
+
 async def _run_agent(
     group: RegisteredGroup,
     prompt: str,
     chat_jid: str,
     on_output=None,
 ) -> str:
-    """Spawn a container agent and return 'success' or 'error'."""
+    """Spawn a container agent and return 'success' or 'error'.
+
+    If the run fails with a session-corruption error (orphaned tool messages
+    left by a previously interrupted run), the session is cleared automatically
+    and the agent is retried once with a fresh session.
+    """
     is_main = group.folder == MAIN_GROUP_FOLDER
-    session_id = _sessions.get(group.folder)
 
     # Write tasks/groups snapshots
     all_tasks = await get_all_tasks()
@@ -230,35 +249,47 @@ async def _run_agent(
         if on_output:
             await on_output(output)
 
-    try:
-        container_input = ContainerInput(
-            prompt=prompt,
-            session_id=session_id,
-            group_folder=group.folder,
-            chat_jid=chat_jid,
-            is_main=is_main,
-            assistant_name=ASSISTANT_NAME,
-        )
-        output = await run_container_agent(
-            group,
-            container_input,
-            lambda proc, name: _queue.register_process(chat_jid, proc, name, group.folder),
-            _wrapped_on_output if on_output else None,
-        )
+    for attempt in range(2):  # attempt 0 = normal; attempt 1 = fresh session after corruption
+        session_id = _sessions.get(group.folder)
+        try:
+            container_input = ContainerInput(
+                prompt=prompt,
+                session_id=session_id,
+                group_folder=group.folder,
+                chat_jid=chat_jid,
+                is_main=is_main,
+                assistant_name=ASSISTANT_NAME,
+            )
+            output = await run_container_agent(
+                group,
+                container_input,
+                lambda proc, name: _queue.register_process(chat_jid, proc, name, group.folder),
+                _wrapped_on_output if on_output else None,
+            )
 
-        if output.new_session_id:
-            _sessions[group.folder] = output.new_session_id
-            await set_session(group.folder, output.new_session_id)
+            if output.new_session_id:
+                _sessions[group.folder] = output.new_session_id
+                await set_session(group.folder, output.new_session_id)
 
-        if output.status == "error":
-            logger.error("Container agent error: group=%s error=%s", group.name, output.error)
+            if output.status == "error":
+                if attempt == 0 and _is_session_corruption_error(output.error or ""):
+                    logger.warning(
+                        "Session corruption detected for group=%s — clearing session and retrying",
+                        group.name,
+                    )
+                    _sessions.pop(group.folder, None)
+                    await set_session(group.folder, "")
+                    continue  # retry with session_id=None
+                logger.error("Container agent error: group=%s error=%s", group.name, output.error)
+                return "error"
+
+            return "success"
+
+        except Exception as err:
+            logger.error("Agent error: group=%s err=%s", group.name, err)
             return "error"
 
-        return "success"
-
-    except Exception as err:
-        logger.error("Agent error: group=%s err=%s", group.name, err)
-        return "error"
+    return "error"
 
 
 def _effective_trigger(channel: Channel):
