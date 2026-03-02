@@ -749,13 +749,17 @@ async def _main_async() -> None:
     # Shutdown handler: set event to break the message loop, then clean up
     loop = asyncio.get_event_loop()
     _shutdown_in_progress = False
+    _shutdown_task_ref: Optional[asyncio.Task] = None
+    # The task wrapping _main_async itself — excluded from bulk-cancellation so
+    # that we can await _shutdown_task_ref after the message loop exits.
+    _main_task_ref = asyncio.current_task()
 
     def _signal_handler(sig_name: str) -> None:
-        nonlocal _shutdown_in_progress
+        nonlocal _shutdown_in_progress, _shutdown_task_ref
         if _shutdown_in_progress:
             return  # ignore duplicate signals
         _shutdown_in_progress = True
-        asyncio.ensure_future(_do_shutdown(sig_name))
+        _shutdown_task_ref = asyncio.ensure_future(_do_shutdown(sig_name))
 
     async def _do_shutdown(sig_name: str) -> None:
         logger.info("Shutdown signal received: %s — stopping gracefully", sig_name)
@@ -767,16 +771,19 @@ async def _main_async() -> None:
                 await ch.disconnect()
             except Exception as exc:
                 logger.debug("Channel disconnect error (ignored): %s", exc)
-        # Cancel all background asyncio tasks except this one
+        # Cancel background asyncio tasks except this one and the main task.
+        # The main task is excluded because it will be awaiting this coroutine
+        # after the message loop exits — cancelling it would prevent the await
+        # from completing and would leave the event loop open.
         current = asyncio.current_task()
         for task in asyncio.all_tasks():
-            if task is not current and not task.done():
+            if task is not current and task is not _main_task_ref and not task.done():
                 task.cancel()
         # Give OS-level threads (e.g. discord.py heartbeat) a moment to exit
         # after client.close() has been called above.  Without this the event
         # loop closes while the heartbeat thread is still alive, causing
         # "RuntimeError: Event loop is closed" noise on exit.
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.0)
         await close_database()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -862,6 +869,17 @@ async def _main_async() -> None:
         await start_api_server(api_app, port=HTTP_API_PORT, host=HTTP_API_HOST)
 
     await _start_message_loop()
+
+    # The message loop exits as soon as _shutdown_event is set, but
+    # _do_shutdown() may still be running (closing channels, waiting for the
+    # Discord heartbeat thread, closing the database).  Await it here so that
+    # _main_async() doesn't return — and asyncio.run() doesn't close the event
+    # loop — until the full shutdown sequence has completed.
+    if _shutdown_task_ref is not None and not _shutdown_task_ref.done():
+        try:
+            await _shutdown_task_ref
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 async def _notify_error(group: RegisteredGroup, chat_jid: str) -> None:
