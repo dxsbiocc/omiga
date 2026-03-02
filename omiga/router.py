@@ -8,6 +8,9 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+# Discord mention prefix: <@BOT_ID> or <@!BOT_ID> (legacy nickname mention)
+_DISCORD_MENTION_RE = re.compile(r"^<@!?\d+>\s*")
+
 from omiga.channels.base import Channel
 from omiga.models import NewMessage
 
@@ -21,6 +24,17 @@ def escape_xml(s: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
+
+def _clean_content(content: str) -> str:
+    """Strip channel-specific trigger prefixes before sending to the container.
+
+    Currently strips Discord @-mention prefixes (<@ID> / <@!ID>) so the
+    container receives clean text rather than raw snowflake IDs.
+    The original content (with the mention) is stored in the DB so that
+    the trigger-pattern check in the message loop still works.
+    """
+    return _DISCORD_MENTION_RE.sub("", content).strip()
 
 
 def format_messages(messages: list[NewMessage]) -> str:
@@ -44,11 +58,12 @@ def format_messages(messages: list[NewMessage]) -> str:
                     f' filename="{escape_xml(a.filename)}" />'
                 )
 
+        clean = _clean_content(m.content)
         if inner_parts:
             body = "\n".join(inner_parts)
-            lines.append(f"{open_tag}\n{escape_xml(m.content)}\n{body}\n</message>")
+            lines.append(f"{open_tag}\n{escape_xml(clean)}\n{body}\n</message>")
         else:
-            lines.append(f"{open_tag}{escape_xml(m.content)}</message>")
+            lines.append(f"{open_tag}{escape_xml(clean)}</message>")
     return "<messages>\n" + "\n".join(lines) + "\n</messages>"
 
 

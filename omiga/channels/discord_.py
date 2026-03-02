@@ -122,14 +122,18 @@ class DiscordChannel(Channel):
 
     @property
     def trigger_pattern(self):
-        """Match both plain-text @Name and Discord's native <@BOT_ID> mention format."""
+        r"""Match both plain-text @Name and Discord's native <@BOT_ID> mention format.
+
+        Note: \b cannot follow '>' (non-word char → non-word char = no boundary),
+        so Discord mentions use (?:\s|$) as the boundary instead.
+        """
         import re
         from omiga.config import ASSISTANT_NAME
         plain = re.escape(ASSISTANT_NAME)
         if self._bot_id is not None:
-            # <@BOT_ID> or <@!BOT_ID> (legacy nickname mention)
+            # <@BOT_ID> or <@!BOT_ID> followed by whitespace or end-of-string
             return re.compile(
-                rf"^(?:<@!?{self._bot_id}>|@{plain})\b",
+                rf"^(?:<@!?{self._bot_id}>(?:\s|$)|@{plain}\b)",
                 re.IGNORECASE,
             )
         return re.compile(rf"^@{plain}\b", re.IGNORECASE)
@@ -357,12 +361,10 @@ class DiscordChannel(Channel):
                 except Exception as exc:
                     logger.debug("Discord: failed to fetch reference message: %s", exc)
 
-            # Extract text content; strip Discord mention prefix (<@BOT_ID>)
-            # so the container receives clean text instead of raw snowflake IDs.
-            import re as _re
+            # Keep original content including any Discord mention (<@BOT_ID>).
+            # The trigger pattern matches <@BOT_ID> in the stored content.
+            # Mention stripping for the container prompt happens in router.py.
             text = (message.content or "").strip()
-            if self._bot_id is not None:
-                text = _re.sub(rf"^<@!?{self._bot_id}>\s*", "", text).strip()
 
             # Skip bot-prefixed messages
             if text.startswith(f"{ASSISTANT_NAME}:"):
