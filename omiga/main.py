@@ -42,14 +42,14 @@ from omiga.config import (
     TRIGGER_PATTERN,
     get_secret,
 )
-from omiga.container_runner import (
+from omiga.container.runner import (
     ContainerOutput,
     ensure_image,
     run_container_agent,
     write_groups_snapshot,
     write_tasks_snapshot,
 )
-from omiga.container_runtime import cleanup_orphans, ensure_container_runtime_running
+from omiga.container.runtime import cleanup_orphans, ensure_container_runtime_running
 from omiga.database import (
     close_database,
     delete_registered_group,
@@ -69,7 +69,7 @@ from omiga.database import (
 )
 from omiga.group_folder import resolve_group_folder_path
 from omiga.group_queue import GroupQueue
-from omiga.ipc import IpcDeps, start_ipc_watcher
+from omiga.scheduler.ipc import IpcDeps, start_ipc_watcher
 from omiga.models import (
     AvailableGroup,
     ChatInfo,
@@ -77,11 +77,11 @@ from omiga.models import (
     NewMessage,
     RegisteredGroup,
 )
-from omiga.admin_commands import handle_admin_command, handle_task_command, is_admin_command
-from omiga.api import create_app, start_api_server
+from omiga.api.admin_commands import handle_admin_command, handle_task_command, is_admin_command
+from omiga.api.app import create_app, start_api_server
 from omiga.logging_setup import configure_logging
 from omiga.router import find_channel, format_messages, format_outbound
-from omiga.task_scheduler import SchedulerDeps, start_scheduler_loop
+from omiga.scheduler.task_scheduler import SchedulerDeps, start_scheduler_loop
 
 configure_logging()
 logger = logging.getLogger("omiga.main")

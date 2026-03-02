@@ -26,7 +26,7 @@ def _get(key: str, default: str = "") -> str:
 
 
 # Assistant identity
-ASSISTANT_NAME: str = _get("ASSISTANT_NAME", "Omigo")
+ASSISTANT_NAME: str = _get("ASSISTANT_NAME", "Omiga")
 ASSISTANT_HAS_OWN_NUMBER: bool = (
     _get("ASSISTANT_HAS_OWN_NUMBER", "false").lower() == "true"
 )

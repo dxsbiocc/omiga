@@ -11,7 +11,7 @@ import pytest
 
 import omiga.database as db_mod
 from omiga.database import init_database
-from omiga.ipc import IpcDeps, process_task_ipc
+from omiga.scheduler.ipc import IpcDeps, process_task_ipc
 from omiga.models import AvailableGroup, RegisteredGroup, ScheduledTask
 
 

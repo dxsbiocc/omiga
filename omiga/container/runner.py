@@ -28,7 +28,7 @@ from omiga.config import (
     IDLE_TIMEOUT,
     TIMEZONE,
 )
-from omiga.container_runtime import CONTAINER_RUNTIME_BIN, readonly_mount_args, stop_container_cmd
+from omiga.container.runtime import CONTAINER_RUNTIME_BIN, readonly_mount_args, stop_container_cmd
 from omiga.group_folder import resolve_group_folder_path, resolve_group_ipc_path
 from omiga.models import (
     AvailableGroup,
@@ -38,7 +38,7 @@ from omiga.models import (
     VolumeMount,
 )
 from omiga.config import PROJECT_ROOT
-from omiga.mount_security import validate_additional_mounts
+from omiga.container.mount_security import validate_additional_mounts
 
 logger = logging.getLogger(__name__)
 

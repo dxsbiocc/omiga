@@ -35,9 +35,9 @@ from typing import Callable, Optional
 
 from omiga.channels.base import Channel, OnChatMetadata, OnInboundMessage
 from omiga.config import ASSISTANT_NAME, WHISPER_LANGUAGE
-from omiga.media import get_attachment_path
+from omiga.channels.media import get_attachment_path
 from omiga.models import MediaAttachment, NewMessage, ReplyContext
-from omiga.transcription import transcribe_audio
+from omiga.channels.transcription import transcribe_audio
 
 logger = logging.getLogger(__name__)
 

@@ -16,7 +16,7 @@ import omiga.database as db_mod
 from omiga.database import close_database, create_task, get_task_by_id, init_database
 from omiga.group_queue import GroupQueue
 from omiga.models import RegisteredGroup, ScheduledTask
-from omiga.task_scheduler import (
+from omiga.scheduler.task_scheduler import (
     SchedulerDeps,
     _reset_scheduler_for_tests,
     start_scheduler_loop,
@@ -121,7 +121,7 @@ async def test_scheduler_loop_starts_once():
     start_scheduler_loop(deps)
     start_scheduler_loop(deps)  # second call should be idempotent
 
-    import omiga.task_scheduler as ts_mod
+    import omiga.scheduler.task_scheduler as ts_mod
     assert ts_mod._scheduler_running
 
 

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from omiga.config import ASSISTANT_NAME, MAIN_GROUP_FOLDER, SCHEDULER_POLL_INTERVAL, TIMEZONE
-from omiga.container_runner import run_container_agent, write_tasks_snapshot
+from omiga.container.runner import run_container_agent, write_tasks_snapshot
 from omiga.database import (
     get_all_tasks,
     get_due_tasks,

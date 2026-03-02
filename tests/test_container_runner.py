@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from omiga.container_runner import (
+from omiga.container.runner import (
     OUTPUT_END_MARKER,
     OUTPUT_START_MARKER,
     write_groups_snapshot,

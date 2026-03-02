@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-import omiga.mount_security as ms_mod
-from omiga.mount_security import (
+import omiga.container.mount_security as ms_mod
+from omiga.container.mount_security import (
     _is_valid_container_path,
     _matches_blocked,
     load_mount_allowlist,
