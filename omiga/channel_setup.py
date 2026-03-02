@@ -6,12 +6,21 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Callable, Optional, TYPE_CHECKING
 
 import omiga.state as state
 from omiga.channels.base import Channel, StubChannel
+from omiga.channels.manager import ChannelManager
 from omiga.config import get_secret
+from omiga.models import NewMessage
+
+if TYPE_CHECKING:
+    from omiga.models import ChatInfo
 
 logger = logging.getLogger("omiga.channel_setup")
+
+OnInboundMessage = Callable[[str, NewMessage], None]
+OnChatMetadata = Callable[[str, str, Optional[str], Optional[str], Optional[bool]], None]
 
 
 def resolve_proxy(channel_env_key: str) -> str:
@@ -37,8 +46,8 @@ def resolve_proxy(channel_env_key: str) -> str:
 
 
 async def build_channels(
-    on_message,
-    on_chat_meta,
+    on_message: OnInboundMessage,
+    on_chat_meta: OnChatMetadata,
 ) -> list[Channel]:
     """Instantiate and connect channels based on environment config.
 
@@ -118,3 +127,22 @@ async def build_channels(
         channels.append(stub)
 
     return channels
+
+
+async def build_channel_manager(
+    on_message: OnInboundMessage,
+    on_chat_meta: OnChatMetadata,
+) -> ChannelManager:
+    """Build channels and wrap them in a ChannelManager.
+
+    This is the preferred entry point for new code.
+
+    Args:
+        on_message: Callback for inbound messages
+        on_chat_meta: Callback for chat metadata updates
+
+    Returns:
+        ChannelManager instance with all channels configured
+    """
+    channels = await build_channels(on_message, on_chat_meta)
+    return ChannelManager.from_channels(channels)

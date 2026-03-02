@@ -27,7 +27,8 @@ from typing import Optional
 import omiga.state as state
 from omiga.api.app import create_app, start_api_server
 from omiga.bootstrap import bootstrap_main_group, bootstrap_profile
-from omiga.channel_setup import build_channels
+from omiga.channel_setup import build_channel_manager
+from omiga.channels.manager import ChannelManager
 from omiga.config import (
     ASSISTANT_NAME,
     GROUPS_DIR,
@@ -57,29 +58,41 @@ configure_logging()
 logger = logging.getLogger("omiga.main")
 
 
-async def _channel_health_monitor() -> None:
+async def _channel_health_monitor(channel_manager: ChannelManager) -> None:
     """Background task: check channel liveness every 30 s and reconnect if needed."""
     while True:
         await asyncio.sleep(30)
-        for ch in state._channels:
-            try:
-                if not ch.is_connected():
-                    logger.warning(
-                        "Channel '%s' appears disconnected — attempting reconnect", ch.name
-                    )
-                    await ch.reconnect()
-            except Exception as exc:
-                logger.error("Channel '%s' reconnect error: %s", ch.name, exc)
+        for channel_id in channel_manager.list_channels():
+            status = channel_manager.get_channel_status(channel_id)
+            if not status.get("connected", False):
+                logger.warning(
+                    "Channel '%s' appears disconnected — attempting reconnect", channel_id
+                )
+                await channel_manager.restart_channel(channel_id)
 
 
 async def _send_to_channel(jid: str, raw_text: str) -> None:
-    channel = find_channel(state._channels, jid)
-    if not channel:
-        logger.warning("No channel for JID: %s", jid)
+    """Send a message to a channel via the ChannelManager."""
+    # Find the channel that owns this JID
+    channel_manager = state._channel_manager
+    if not channel_manager:
+        logger.warning("ChannelManager not initialized")
         return
+
+    # Find channel by JID ownership
+    target_channel = None
+    for ch in channel_manager.channels:
+        if ch.owns_jid(jid):
+            target_channel = ch
+            break
+
+    if not target_channel:
+        logger.warning("No channel owns JID: %s", jid)
+        return
+
     text = format_outbound(raw_text)
     if text:
-        await channel.send_message(jid, text)
+        await target_channel.send_message(jid, text)
 
 
 async def _main_async() -> None:
@@ -122,13 +135,14 @@ async def _main_async() -> None:
         state._shutdown_event.set()
         stop_ipc_watcher()
         await state._queue.shutdown(10000)
-        for ch in state._channels:
+
+        # Stop channel manager (handles all channels)
+        if state._channel_manager:
             try:
-                await asyncio.wait_for(ch.disconnect(), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("Channel disconnect timed out: %s", ch.name)
+                await state._channel_manager.stop_all()
             except Exception as exc:
-                logger.debug("Channel disconnect error (ignored): %s", exc)
+                logger.error("Error stopping channel manager: %s", exc)
+
         # Cancel background asyncio tasks except this one and the main task.
         current = asyncio.current_task()
         for task in asyncio.all_tasks():
@@ -157,12 +171,18 @@ async def _main_async() -> None:
     ) -> None:
         await store_chat_metadata(chat_jid, timestamp, name, channel_name, is_group)
 
-    # Build channel list from environment
-    state._channels.extend(await build_channels(_on_message, _on_chat_meta))
+    # Build channel manager with all channels
+    state._channel_manager = await build_channel_manager(_on_message, _on_chat_meta)
+
+    # Also populate state._channels for backwards compatibility
+    state._channels.extend(state._channel_manager.channels)
 
     # Wire GroupQueue
     from omiga.processing import process_group_messages
     state._queue.set_process_messages_fn(process_group_messages)
+
+    # Start channel manager (starts all channels and consumer workers)
+    await state._channel_manager.start_all()
 
     # Start subsystems
     start_scheduler_loop(
@@ -190,7 +210,10 @@ async def _main_async() -> None:
     recover_pending_messages()
 
     # Start background health monitor for channel reconnection
-    asyncio.create_task(_channel_health_monitor(), name="channel-health-monitor")
+    asyncio.create_task(
+        _channel_health_monitor(state._channel_manager),
+        name="channel-health-monitor",
+    )
 
     # Start HTTP API server (if enabled)
     if HTTP_API_PORT > 0:

@@ -15,6 +15,8 @@ import json
 import logging
 from typing import TYPE_CHECKING, Optional
 
+from omiga.channels.manager import ChannelManager
+
 from omiga.database import (
     delete_registered_group,
     get_all_chats,
@@ -60,6 +62,9 @@ _debounce_deadlines: dict[str, float] = {}
 
 # Shutdown flag: set by signal handler to stop the message loop cleanly.
 _shutdown_event: Optional[asyncio.Event] = None
+
+# Channel manager for unified channel management
+_channel_manager: Optional[ChannelManager] = None
 
 
 # ---------------------------------------------------------------------------
