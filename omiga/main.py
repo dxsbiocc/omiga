@@ -767,11 +767,16 @@ async def _main_async() -> None:
                 await ch.disconnect()
             except Exception as exc:
                 logger.debug("Channel disconnect error (ignored): %s", exc)
-        # Cancel all background tasks except this one
+        # Cancel all background asyncio tasks except this one
         current = asyncio.current_task()
         for task in asyncio.all_tasks():
             if task is not current and not task.done():
                 task.cancel()
+        # Give OS-level threads (e.g. discord.py heartbeat) a moment to exit
+        # after client.close() has been called above.  Without this the event
+        # loop closes while the heartbeat thread is still alive, causing
+        # "RuntimeError: Event loop is closed" noise on exit.
+        await asyncio.sleep(0.5)
         await close_database()
 
     for sig in (signal.SIGTERM, signal.SIGINT):

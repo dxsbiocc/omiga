@@ -199,16 +199,30 @@ class DiscordChannel(Channel):
 
     async def disconnect(self) -> None:
         self._connected = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await asyncio.wait_for(self._task, timeout=5)
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._task = None
+        # Close the client FIRST so discord.py can send a proper DISCONNECT
+        # and signal the heartbeat keep-alive thread to stop.
+        # Cancelling the gateway task first interrupts client.start() mid-flight
+        # and leaves the heartbeat thread alive, which then tries to use the
+        # already-closed event loop and causes "RuntimeError: Event loop is closed".
         if self._client is not None:
-            await self._client.close()
+            try:
+                await self._client.close()
+            except Exception:
+                pass
             self._client = None
+        # Now wait for the gateway task to finish naturally (heartbeat thread has
+        # stopped by now).  Cancel as a last resort if it takes too long.
+        if self._task is not None:
+            if not self._task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(self._task), timeout=5)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    self._task.cancel()
+                    try:
+                        await self._task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+            self._task = None
 
     async def reconnect(self) -> None:
         """Restart the Discord gateway when the background task has ended.
