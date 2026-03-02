@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.uv/
+
+# Secrets
+.env
+
+# Runtime data (generated at run time, not source)
+store/
+data/
+groups/
+
+# Logs
+*.log
+
+# macOS
+.DS_Store

@@ -1,0 +1,39 @@
+[project]
+name = "omiga"
+version = "0.1.0"
+description = "Personal Claude assistant - Python port"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.13.3",
+    "aiosqlite>=0.20",
+    "croniter>=3.0",
+    "discord-py>=2.3",
+    "fastapi>=0.115",
+    "httpx[socks]>=0.28.1",
+    "lark-oapi>=1.5.3",
+    "openai>=1.0",
+    "playwright>=1.58.0",
+    "python-dotenv>=1.0",
+    "python-socks[asyncio]>=2.8.1",
+    "python-telegram-bot>=21.0",
+    "uvicorn[standard]>=0.30",
+    "websocket-client>=1.9.0",
+]
+
+[project.scripts]
+omiga = "omiga.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "anyio>=4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
