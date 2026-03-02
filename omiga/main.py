@@ -365,6 +365,12 @@ async def _process_group_messages(chat_jid: str) -> bool:
         pat = _effective_trigger(channel)
         has_trigger = any(pat.match(m.content.strip()) for m in missed)
         if not has_trigger:
+            logger.debug(
+                "No trigger in pending messages: jid=%s pattern=%r contents=%r",
+                chat_jid,
+                pat.pattern,
+                [m.content[:80] for m in missed],
+            )
             return True
 
     prompt = format_messages(missed)
@@ -485,6 +491,12 @@ async def _start_message_loop() -> None:
                             pat.match(m.content.strip()) for m in group_messages
                         )
                         if not has_trigger:
+                            logger.debug(
+                                "No trigger in messages: jid=%s pattern=%r contents=%r",
+                                chat_jid,
+                                pat.pattern,
+                                [m.content[:80] for m in group_messages],
+                            )
                             continue
 
                     all_pending = await get_messages_since(
