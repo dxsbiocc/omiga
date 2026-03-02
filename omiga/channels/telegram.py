@@ -119,11 +119,13 @@ class TelegramChannel(Channel):
         on_message: OnInboundMessage,
         on_chat_meta: OnChatMetadata,
         registered_groups: Callable[[], dict[str, RegisteredGroup]],
+        http_proxy: str = "",
     ) -> None:
         self._token = token
         self._on_message = on_message
         self._on_chat_meta = on_chat_meta
         self._registered_groups = registered_groups
+        self._http_proxy = http_proxy or ""
 
         self._app: Optional[Application] = None
         self._bot_id: Optional[int] = None
@@ -174,13 +176,16 @@ class TelegramChannel(Channel):
         logging.getLogger("telegram.ext.Updater").setLevel(logging.CRITICAL)
         logging.getLogger("telegram.ext._utils.networkloop").setLevel(logging.CRITICAL)
 
-        self._app = (
+        builder = (
             Application.builder()
             .token(self._token)
             # read timeout must exceed the long-poll timeout
             .get_updates_read_timeout(self._POLL_TIMEOUT + 5)
-            .build()
         )
+        if self._http_proxy:
+            # Proxy both outbound API calls (send_message, etc.) and polling.
+            builder = builder.proxy(self._http_proxy).get_updates_proxy(self._http_proxy)
+        self._app = builder.build()
 
         # Handle text messages
         self._app.add_handler(

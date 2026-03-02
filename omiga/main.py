@@ -571,6 +571,7 @@ async def _build_channels(
             on_message=on_message,
             on_chat_meta=on_chat_meta,
             registered_groups=lambda: _registered_groups,
+            http_proxy=get_secret("TELEGRAM_HTTP_PROXY") or "",
         )
         await tg.connect()
         channels.append(tg)
