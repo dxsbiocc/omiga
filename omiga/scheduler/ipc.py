@@ -1,7 +1,8 @@
-"""
-IPC watcher for Omiga Python port.
+"""IPC watcher for Omiga.
 
-Polls per-group IPC directories for JSON files written by container agents.
+Watches per-group IPC directories for JSON files written by container agents
+using ``watchfiles.awatch`` instead of a polling loop.
+
 Handles messages, task operations, and group registration.
 
 Mirrors src/ipc.ts exactly (authorization logic, per-group namespaces).
@@ -18,7 +19,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
-from omiga.config import DATA_DIR, IPC_POLL_INTERVAL, MAIN_GROUP_FOLDER, TIMEZONE
+from watchfiles import Change, awatch
+
+from omiga.config import DATA_DIR, MAIN_GROUP_FOLDER, TIMEZONE
 from omiga.database import (
     create_task,
     delete_task,
@@ -34,6 +37,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _ipc_watcher_running = False
+_shutdown_event: Optional[asyncio.Event] = None
 
 
 class IpcDeps:
@@ -212,7 +216,6 @@ async def process_task_ipc(
             return
 
         requires_trigger = data.get("requiresTrigger")
-        # container_config left as None (complex serialization not needed here)
         group = RegisteredGroup(
             name=name,
             folder=folder,
@@ -226,103 +229,118 @@ async def process_task_ipc(
         logger.warning("Unknown IPC task type: %s", task_type)
 
 
-async def _process_ipc_files(deps: IpcDeps) -> None:
-    """Single poll iteration: scan all group IPC directories."""
+async def _process_single_file(
+    path: Path,
+    group_name: str,
+    subdir: str,
+    deps: IpcDeps,
+) -> None:
+    """Process one IPC JSON file from a known group directory."""
     ipc_base = DATA_DIR / "ipc"
-    ipc_base.mkdir(parents=True, exist_ok=True)
+    error_dir = ipc_base / "errors"
+    registered = deps.registered_groups()
+    is_main = group_name == MAIN_GROUP_FOLDER
 
     try:
-        group_folders = [
-            f.name
-            for f in ipc_base.iterdir()
-            if f.is_dir() and f.name != "errors"
-        ]
+        data = json.loads(path.read_text())
     except Exception as err:
-        logger.error("Error reading IPC base directory: %s", err)
+        logger.error("Error reading IPC file %s: %s", path.name, err)
+        error_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            path.rename(error_dir / f"{group_name}-{path.name}")
+        except Exception:
+            pass
         return
 
-    registered = deps.registered_groups()
-    error_dir = ipc_base / "errors"
+    try:
+        if subdir == "messages":
+            if data.get("type") == "message" and data.get("chatJid") and data.get("text"):
+                chat_jid = data["chatJid"]
+                target_group = registered.get(chat_jid)
+                if is_main or (target_group and target_group.folder == group_name):
+                    coro = deps.send_message(chat_jid, data["text"])
+                    if asyncio.iscoroutine(coro):
+                        await coro
+                    logger.info(
+                        "IPC message sent: chatJid=%s source=%s",
+                        chat_jid,
+                        group_name,
+                    )
+                else:
+                    logger.warning(
+                        "Unauthorized IPC message blocked: chatJid=%s source=%s",
+                        chat_jid,
+                        group_name,
+                    )
+            path.unlink(missing_ok=True)
 
-    for source_group in group_folders:
-        is_main = source_group == MAIN_GROUP_FOLDER
+        elif subdir == "tasks":
+            await process_task_ipc(data, group_name, is_main, deps)
+            path.unlink(missing_ok=True)
 
-        # --- Process messages ---
-        messages_dir = ipc_base / source_group / "messages"
-        if messages_dir.exists():
+    except Exception as err:
+        logger.error("Error processing IPC file %s: %s", path.name, err)
+        error_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            path.rename(error_dir / f"{group_name}-{path.name}")
+        except Exception:
+            pass
+
+
+async def _watch_loop(deps: IpcDeps) -> None:
+    """Event-driven IPC loop using watchfiles.awatch."""
+    ipc_base = DATA_DIR / "ipc"
+    ipc_base.mkdir(parents=True, exist_ok=True)
+    logger.info("IPC watcher started (watchfiles)")
+
+    async for changes in awatch(str(ipc_base), stop_event=_shutdown_event):
+        # Process all changes in this batch, sorted by path for deterministic order
+        for change_type, path_str in sorted(changes, key=lambda x: x[1]):
+            if change_type == Change.deleted:
+                continue
+
+            path = Path(path_str)
+            if path.suffix != ".json":
+                continue
+
             try:
-                files = sorted(messages_dir.glob("*.json"))
-                for fp in files:
-                    try:
-                        data = json.loads(fp.read_text())
-                        if data.get("type") == "message" and data.get("chatJid") and data.get("text"):
-                            chat_jid = data["chatJid"]
-                            target_group = registered.get(chat_jid)
-                            if is_main or (target_group and target_group.folder == source_group):
-                                coro = deps.send_message(chat_jid, data["text"])
-                                if asyncio.iscoroutine(coro):
-                                    await coro
-                                logger.info(
-                                    "IPC message sent: chatJid=%s source=%s",
-                                    chat_jid,
-                                    source_group,
-                                )
-                            else:
-                                logger.warning(
-                                    "Unauthorized IPC message blocked: chatJid=%s source=%s",
-                                    chat_jid,
-                                    source_group,
-                                )
-                        fp.unlink()
-                    except Exception as err:
-                        logger.error("Error processing IPC message %s: %s", fp.name, err)
-                        error_dir.mkdir(parents=True, exist_ok=True)
-                        try:
-                            fp.rename(error_dir / f"{source_group}-{fp.name}")
-                        except Exception:
-                            pass
-            except Exception as err:
-                logger.error("Error reading IPC messages dir for %s: %s", source_group, err)
+                parts = path.relative_to(ipc_base).parts
+            except ValueError:
+                continue
 
-        # --- Process tasks ---
-        tasks_dir = ipc_base / source_group / "tasks"
-        if tasks_dir.exists():
-            try:
-                files = sorted(tasks_dir.glob("*.json"))
-                for fp in files:
-                    try:
-                        data = json.loads(fp.read_text())
-                        await process_task_ipc(data, source_group, is_main, deps)
-                        fp.unlink()
-                    except Exception as err:
-                        logger.error("Error processing IPC task %s: %s", fp.name, err)
-                        error_dir.mkdir(parents=True, exist_ok=True)
-                        try:
-                            fp.rename(error_dir / f"{source_group}-{fp.name}")
-                        except Exception:
-                            pass
-            except Exception as err:
-                logger.error("Error reading IPC tasks dir for %s: %s", source_group, err)
+            if len(parts) != 3:  # group_name / {messages|tasks} / file.json
+                continue
+
+            group_name, subdir, _ = parts
+            if group_name == "errors":
+                continue
+            if subdir not in ("messages", "tasks"):
+                continue
+
+            await _process_single_file(path, group_name, subdir, deps)
 
 
 def start_ipc_watcher(deps: IpcDeps) -> None:
-    """Start the async IPC polling loop (idempotent)."""
-    global _ipc_watcher_running
+    """Start the async IPC file watcher (idempotent)."""
+    global _ipc_watcher_running, _shutdown_event
     if _ipc_watcher_running:
         logger.debug("IPC watcher already running")
         return
     _ipc_watcher_running = True
 
+    # Create a fresh stop event for this run
+    _shutdown_event = asyncio.Event()
+
     ipc_base = DATA_DIR / "ipc"
     ipc_base.mkdir(parents=True, exist_ok=True)
 
-    async def _loop() -> None:
-        logger.info("IPC watcher started (per-group namespaces)")
-        while True:
-            try:
-                await _process_ipc_files(deps)
-            except Exception as err:
-                logger.error("Unexpected error in IPC watcher: %s", err)
-            await asyncio.sleep(IPC_POLL_INTERVAL)
+    asyncio.ensure_future(_watch_loop(deps))
 
-    asyncio.ensure_future(_loop())
+
+def stop_ipc_watcher() -> None:
+    """Signal the IPC watcher to stop (called during graceful shutdown)."""
+    global _ipc_watcher_running
+    if _shutdown_event is not None:
+        _shutdown_event.set()
+    _ipc_watcher_running = False
+    logger.debug("IPC watcher stop requested")
