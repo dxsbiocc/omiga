@@ -95,6 +95,11 @@ _registered_groups: dict[str, RegisteredGroup] = {}
 _last_agent_timestamp: dict[str, str] = {}
 _message_loop_running: bool = False
 
+# Consecutive error counter per group (chat_jid → count).
+# Prevents infinite cursor-rollback loops on persistent agent failures.
+_consecutive_errors: dict[str, int] = {}
+MAX_ROLLBACK_RETRIES: int = 3
+
 # Cache of all known chats, refreshed at startup.  Used by IPC's refresh_groups.
 _all_chats_cache: list[ChatInfo] = []
 
@@ -439,7 +444,15 @@ async def _process_group_messages(chat_jid: str) -> bool:
 
             group_dir = resolve_group_folder_path(group.folder)
             for directive in file_directives:
-                host_path = group_dir / directive.workspace_rel_path
+                host_path = (group_dir / directive.workspace_rel_path).resolve()
+                try:
+                    host_path.relative_to(group_dir.resolve())
+                except ValueError:
+                    logger.warning(
+                        "send_file: path traversal blocked (group=%s path=%s)",
+                        group.name, directive.workspace_rel_path,
+                    )
+                    continue
                 if host_path.is_file():
                     await channel.send_file(chat_jid, host_path, directive.caption)
                     output_sent = True
@@ -470,13 +483,28 @@ async def _process_group_messages(chat_jid: str) -> bool:
             logger.warning(
                 "Agent error after output sent, skipping cursor rollback: group=%s", group.name
             )
+            _consecutive_errors.pop(chat_jid, None)
+            return True
+        consecutive = _consecutive_errors.get(chat_jid, 0) + 1
+        _consecutive_errors[chat_jid] = consecutive
+        if consecutive > MAX_ROLLBACK_RETRIES:
+            logger.error(
+                "Agent error repeated %d times, advancing cursor to avoid infinite loop: group=%s",
+                consecutive, group.name,
+            )
+            _consecutive_errors.pop(chat_jid, None)
+            await _notify_error(group, chat_jid)
             return True
         _last_agent_timestamp[chat_jid] = previous_cursor
         await _save_state()
-        logger.warning("Agent error, rolled back cursor: group=%s", group.name)
+        logger.warning(
+            "Agent error (attempt %d/%d), rolled back cursor: group=%s",
+            consecutive, MAX_ROLLBACK_RETRIES, group.name,
+        )
         await _notify_error(group, chat_jid)
         return False
 
+    _consecutive_errors.pop(chat_jid, None)
     return True
 
 
@@ -852,7 +880,9 @@ async def _main_async() -> None:
         await _queue.shutdown(10000)
         for ch in _channels:
             try:
-                await ch.disconnect()
+                await asyncio.wait_for(ch.disconnect(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Channel disconnect timed out: %s", ch.name)
             except Exception as exc:
                 logger.debug("Channel disconnect error (ignored): %s", exc)
         # Cancel background asyncio tasks except this one and the main task.
