@@ -104,6 +104,7 @@ class DiscordChannel(Channel):
 
         self._client = None  # discord.Client
         self._task: Optional[asyncio.Task] = None
+        self._bot_id: Optional[int] = None  # set on on_ready, used for trigger pattern
 
         # Dedup
         self._seen_ids: set[str] = set()
@@ -121,7 +122,17 @@ class DiscordChannel(Channel):
 
     @property
     def trigger_pattern(self):
-        return None  # uses global TRIGGER_PATTERN
+        """Match both plain-text @Name and Discord's native <@BOT_ID> mention format."""
+        import re
+        from omiga.config import ASSISTANT_NAME
+        plain = re.escape(ASSISTANT_NAME)
+        if self._bot_id is not None:
+            # <@BOT_ID> or <@!BOT_ID> (legacy nickname mention)
+            return re.compile(
+                rf"^(?:<@!?{self._bot_id}>|@{plain})\b",
+                re.IGNORECASE,
+            )
+        return re.compile(rf"^@{plain}\b", re.IGNORECASE)
 
     def owns_jid(self, jid: str) -> bool:
         return jid.startswith("discord:")
@@ -153,6 +164,7 @@ class DiscordChannel(Channel):
         # Register event handlers
         @self._client.event
         async def on_ready():
+            self._bot_id = self._client.user.id
             logger.info(
                 "Discord channel connected: %s (id=%s)",
                 self._client.user,
@@ -345,8 +357,12 @@ class DiscordChannel(Channel):
                 except Exception as exc:
                     logger.debug("Discord: failed to fetch reference message: %s", exc)
 
-            # Extract text content
+            # Extract text content; strip Discord mention prefix (<@BOT_ID>)
+            # so the container receives clean text instead of raw snowflake IDs.
+            import re as _re
             text = (message.content or "").strip()
+            if self._bot_id is not None:
+                text = _re.sub(rf"^<@!?{self._bot_id}>\s*", "", text).strip()
 
             # Skip bot-prefixed messages
             if text.startswith(f"{ASSISTANT_NAME}:"):
