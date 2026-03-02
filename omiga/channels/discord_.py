@@ -39,7 +39,7 @@ from typing import Callable, Optional
 from omiga.channels.base import Channel, OnChatMetadata, OnInboundMessage
 from omiga.config import ASSISTANT_NAME, WHISPER_LANGUAGE
 from omiga.media import get_attachment_path
-from omiga.models import MediaAttachment, NewMessage
+from omiga.models import MediaAttachment, NewMessage, ReplyContext
 from omiga.transcription import transcribe_audio
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,8 @@ class DiscordChannel(Channel):
         # Dedup
         self._seen_ids: set[str] = set()
         self._seen_ids_list: list[str] = []
+        # Maps jid → (message_id, channel_id) for outbound reply threading
+        self._last_msg_ref: dict[str, tuple[int, int]] = {}
 
     # ------------------------------------------------------------------
     # Channel ABC
@@ -254,10 +256,20 @@ class DiscordChannel(Channel):
             logger.error("Discord: cannot resolve target for jid=%s", jid)
             return
 
-        # Split at 2000-char limit
+        # Split at 2000-char limit; first chunk replies to last received message
         chunks = [text[i : i + _MAX_MSG_LEN] for i in range(0, len(text), _MAX_MSG_LEN)]
-        for chunk in chunks:
-            await target.send(chunk)
+        ref = None
+        if jid.startswith("discord:ch:"):  # only reply in server channels, not DMs
+            ref_data = self._last_msg_ref.get(jid)
+            if ref_data:
+                ref_msg_id, ref_ch_id = ref_data
+                ref = discord.MessageReference(
+                    message_id=ref_msg_id,
+                    channel_id=ref_ch_id,
+                    fail_if_not_exists=False,
+                )
+        for i, chunk in enumerate(chunks):
+            await target.send(chunk, reference=ref if i == 0 else None)
 
     # ------------------------------------------------------------------
     # Message handler
@@ -305,6 +317,33 @@ class DiscordChannel(Channel):
                 "discord",
                 not is_dm,
             ))
+
+            # Store last message ref for outbound reply threading (channels only)
+            if not is_dm:
+                self._last_msg_ref[jid] = (message.id, message.channel.id)
+
+            # Extract reply context if this message quotes another
+            reply_to: Optional[ReplyContext] = None
+            if message.reference and message.reference.message_id:
+                try:
+                    ref_msg = await message.channel.fetch_message(
+                        message.reference.message_id
+                    )
+                    rt_content = ref_msg.content or ""
+                    if not rt_content and getattr(ref_msg, "attachments", None):
+                        rt_content = f"[{ref_msg.attachments[0].filename}]"
+                    rt_sender = (
+                        getattr(ref_msg.author, "display_name", None)
+                        or getattr(ref_msg.author, "name", None)
+                        or str(ref_msg.author.id)
+                    )
+                    reply_to = ReplyContext(
+                        message_id=str(message.reference.message_id),
+                        sender_name=rt_sender,
+                        content=rt_content[:200],
+                    )
+                except Exception as exc:
+                    logger.debug("Discord: failed to fetch reference message: %s", exc)
 
             # Extract text content
             text = (message.content or "").strip()
@@ -373,6 +412,7 @@ class DiscordChannel(Channel):
                 is_from_me=False,
                 is_bot_message=False,
                 attachments=media_attachments,
+                reply_to=reply_to,
             )
 
             if jid in self._registered_groups():

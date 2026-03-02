@@ -36,7 +36,7 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 from omiga.channels.base import Channel, OnChatMetadata, OnInboundMessage
 from omiga.config import ASSISTANT_NAME, WHISPER_LANGUAGE
 from omiga.media import get_attachment_path
-from omiga.models import MediaAttachment, NewMessage, RegisteredGroup
+from omiga.models import MediaAttachment, NewMessage, RegisteredGroup, ReplyContext
 from omiga.transcription import transcribe_audio
 
 logger = logging.getLogger(__name__)
@@ -129,6 +129,8 @@ class TelegramChannel(Channel):
         self._bot_id: Optional[int] = None
         self._bot_username: str = ""
         self._connected: bool = False
+        # Maps jid → last received message_id, used to send replies
+        self._last_msg_id: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Channel ABC
@@ -215,14 +217,24 @@ class TelegramChannel(Channel):
         self._connected = True
 
     async def send_message(self, jid: str, text: str) -> None:
-        """Send *text* to the Telegram chat identified by *jid*."""
+        """Send *text* to the Telegram chat identified by *jid*.
+
+        The first chunk is sent as a reply to the last received message in
+        that chat; subsequent chunks are sent as plain messages.
+        """
         if not self._connected or self._app is None:
             logger.warning("Telegram not connected — cannot send to jid=%s", jid)
             return
         chat_id = _chat_id(jid)
-        for chunk in _split_text(text):
+        reply_to_id = self._last_msg_id.get(jid)
+        chunks = _split_text(text)
+        for i, chunk in enumerate(chunks):
             try:
-                await self._app.bot.send_message(chat_id=chat_id, text=chunk)
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    reply_to_message_id=reply_to_id if i == 0 else None,
+                )
             except TelegramError as exc:
                 logger.error("Telegram send_message failed jid=%s: %s", jid, exc)
 
@@ -260,7 +272,39 @@ class TelegramChannel(Channel):
             logger.debug("Typing indicator failed jid=%s: %s", jid, exc)
 
     # ------------------------------------------------------------------
-    # Internal handler
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_reply(msg) -> Optional[ReplyContext]:
+        """Build a ReplyContext from msg.reply_to_message, or None."""
+        rt = getattr(msg, "reply_to_message", None)
+        if rt is None:
+            return None
+        sender = rt.from_user.full_name if rt.from_user else "Unknown"
+        content = rt.text or rt.caption or ""
+        if not content:
+            if getattr(rt, "photo", None):
+                content = "[image]"
+            elif getattr(rt, "voice", None):
+                content = "[voice]"
+            elif getattr(rt, "audio", None):
+                content = "[audio]"
+            elif getattr(rt, "video", None):
+                content = "[video]"
+            elif getattr(rt, "document", None):
+                doc = rt.document
+                content = f"[file: {doc.file_name}]" if doc.file_name else "[document]"
+            else:
+                content = "[media]"
+        return ReplyContext(
+            message_id=str(rt.message_id),
+            sender_name=sender,
+            content=content[:200],
+        )
+
+    # ------------------------------------------------------------------
+    # Message handlers
     # ------------------------------------------------------------------
 
     async def _handle_text(
@@ -289,6 +333,10 @@ class TelegramChannel(Channel):
         is_from_me = bool(user and user.id == self._bot_id)
         is_bot_msg = is_from_me or msg.text.startswith(f"{ASSISTANT_NAME}:")
 
+        # Track last message ID for outbound reply threading
+        if not is_from_me:
+            self._last_msg_id[jid] = msg.message_id
+
         new_msg = NewMessage(
             id=str(msg.message_id),
             chat_jid=jid,
@@ -298,6 +346,7 @@ class TelegramChannel(Channel):
             timestamp=ts,
             is_from_me=is_from_me,
             is_bot_message=is_bot_msg,
+            reply_to=self._extract_reply(msg),
         )
 
         # Only deliver on_message for registered groups (mirrors TypeScript behavior)
@@ -336,6 +385,10 @@ class TelegramChannel(Channel):
         sender_id = str(user.id) if user else str(chat.id)
         sender_name = user.full_name if user else chat_name
         is_from_me = bool(user and user.id == self._bot_id)
+
+        # Track last message ID for outbound reply threading
+        if not is_from_me:
+            self._last_msg_id[jid] = msg.message_id
 
         # Determine media type, file_id, original filename, mime_type
         caption = (msg.caption or "").strip()
@@ -423,6 +476,7 @@ class TelegramChannel(Channel):
             is_from_me=is_from_me,
             is_bot_message=is_from_me,
             attachments=attachments,
+            reply_to=self._extract_reply(msg),
         )
         _fire(self._on_message(jid, new_msg))
 

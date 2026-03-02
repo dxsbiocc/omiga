@@ -23,6 +23,7 @@ from omiga.models import (
     ChatInfo,
     MediaAttachment,
     NewMessage,
+    ReplyContext,
     RegisteredGroup,
     ScheduledTask,
     TaskRunLog,
@@ -156,6 +157,7 @@ _MIGRATIONS = [
     "ALTER TABLE chats ADD COLUMN channel TEXT",
     "ALTER TABLE chats ADD COLUMN is_group INTEGER DEFAULT 0",
     "ALTER TABLE messages ADD COLUMN attachments TEXT",
+    "ALTER TABLE messages ADD COLUMN reply_to TEXT",
 ]
 
 
@@ -322,6 +324,32 @@ async def set_last_group_sync() -> None:
 # Messages
 # ---------------------------------------------------------------------------
 
+def _serialize_reply_to(reply_to) -> Optional[str]:
+    """Serialize a ReplyContext to JSON, or None if absent."""
+    if reply_to is None:
+        return None
+    return json.dumps({
+        "message_id": reply_to.message_id,
+        "sender_name": reply_to.sender_name,
+        "content": reply_to.content,
+    })
+
+
+def _parse_reply_to(raw: Optional[str]) -> Optional[ReplyContext]:
+    """Deserialize a JSON string back into a ReplyContext, or None."""
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+        return ReplyContext(
+            message_id=d["message_id"],
+            sender_name=d["sender_name"],
+            content=d["content"],
+        )
+    except Exception:
+        return None
+
+
 def _serialize_attachments(attachments: list) -> Optional[str]:
     """Serialize a list of MediaAttachment to a JSON string, or None if empty."""
     if not attachments:
@@ -364,8 +392,8 @@ async def store_message(msg: NewMessage) -> None:
             """
             INSERT OR REPLACE INTO messages
             (id, chat_jid, sender, sender_name, content, timestamp,
-             is_from_me, is_bot_message, attachments)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             is_from_me, is_bot_message, attachments, reply_to)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 msg.id,
@@ -377,6 +405,7 @@ async def store_message(msg: NewMessage) -> None:
                 1 if msg.is_from_me else 0,
                 1 if msg.is_bot_message else 0,
                 _serialize_attachments(msg.attachments),
+                _serialize_reply_to(msg.reply_to),
             ),
         )
         await db.commit()
@@ -393,7 +422,7 @@ async def get_new_messages(
 
     placeholders = ",".join("?" * len(jids))
     sql = f"""
-        SELECT id, chat_jid, sender, sender_name, content, timestamp, attachments
+        SELECT id, chat_jid, sender, sender_name, content, timestamp, attachments, reply_to
         FROM messages
         WHERE timestamp > ? AND chat_jid IN ({placeholders})
           AND is_bot_message = 0 AND content NOT LIKE ?
@@ -413,6 +442,7 @@ async def get_new_messages(
             content=r["content"],
             timestamp=r["timestamp"],
             attachments=_parse_attachments(r["attachments"]),
+            reply_to=_parse_reply_to(r["reply_to"]),
         )
         for r in rows
     ]
@@ -431,7 +461,7 @@ async def get_messages_since(
     bot_prefix: str,
 ) -> list[NewMessage]:
     sql = """
-        SELECT id, chat_jid, sender, sender_name, content, timestamp, attachments
+        SELECT id, chat_jid, sender, sender_name, content, timestamp, attachments, reply_to
         FROM messages
         WHERE chat_jid = ? AND timestamp > ?
           AND is_bot_message = 0 AND content NOT LIKE ?
@@ -451,6 +481,7 @@ async def get_messages_since(
             content=r["content"],
             timestamp=r["timestamp"],
             attachments=_parse_attachments(r["attachments"]),
+            reply_to=_parse_reply_to(r["reply_to"]),
         )
         for r in rows
     ]

@@ -212,7 +212,9 @@ async def test_send_message_short_text():
         await ch.connect()
         await ch.send_message("tg:9999", "Hello!")
 
-    mock_app.bot.send_message.assert_called_once_with(chat_id=9999, text="Hello!")
+    mock_app.bot.send_message.assert_called_once_with(
+        chat_id=9999, text="Hello!", reply_to_message_id=None
+    )
 
 
 async def test_send_message_long_text_is_split():

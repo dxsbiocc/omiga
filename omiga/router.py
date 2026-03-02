@@ -28,14 +28,25 @@ def format_messages(messages: list[NewMessage]) -> str:
     lines = []
     for m in messages:
         open_tag = f'<message sender="{escape_xml(m.sender_name)}" time="{m.timestamp}">'
-        if m.attachments:
-            att_parts = "\n".join(
-                f'  <attachment type="{a.type}" file="{escape_xml(a.local_path)}"'
-                f' filename="{escape_xml(a.filename)}" />'
-                for a in m.attachments
+        inner_parts: list[str] = []
+
+        if m.reply_to:
+            rt = m.reply_to
+            inner_parts.append(
+                f'  <reply_to sender="{escape_xml(rt.sender_name)}">'
+                f"{escape_xml(rt.content[:200])}</reply_to>"
             )
-            content = escape_xml(m.content)
-            lines.append(f"{open_tag}\n{content}\n{att_parts}\n</message>")
+
+        if m.attachments:
+            for a in m.attachments:
+                inner_parts.append(
+                    f'  <attachment type="{a.type}" file="{escape_xml(a.local_path)}"'
+                    f' filename="{escape_xml(a.filename)}" />'
+                )
+
+        if inner_parts:
+            body = "\n".join(inner_parts)
+            lines.append(f"{open_tag}\n{escape_xml(m.content)}\n{body}\n</message>")
         else:
             lines.append(f"{open_tag}{escape_xml(m.content)}</message>")
     return "<messages>\n" + "\n".join(lines) + "\n</messages>"

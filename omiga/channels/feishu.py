@@ -36,7 +36,7 @@ from typing import Callable, Optional
 from omiga.channels.base import Channel, OnChatMetadata, OnInboundMessage
 from omiga.config import ASSISTANT_NAME, WHISPER_LANGUAGE
 from omiga.media import get_attachment_path
-from omiga.models import MediaAttachment, NewMessage
+from omiga.models import MediaAttachment, NewMessage, ReplyContext
 from omiga.transcription import transcribe_audio
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,9 @@ class FeishuChannel(Channel):
         self._seen_ids: set[str] = set()
         self._seen_ids_list: list[str] = []  # FIFO, capped at 1000
 
+        # Maps jid → last received message_id for outbound reply threading
+        self._last_msg_id: dict[str, str] = {}
+
         # HTTP session (created on connect)
         self._http = None  # aiohttp.ClientSession
 
@@ -171,12 +174,17 @@ class FeishuChannel(Channel):
         chat_id = _chat_id(jid)
         try:
             token = await self._get_token()
-            # Determine receive_id_type: open_id starts with "ou_", chat_id with "oc_"
-            if chat_id.startswith("ou_"):
-                receive_id_type = "open_id"
+            last_msg_id = self._last_msg_id.get(jid)
+            if last_msg_id:
+                # Reply to the last received message for native threading
+                await self._reply_text(token, last_msg_id, text)
             else:
-                receive_id_type = "chat_id"
-            await self._send_text(token, chat_id, receive_id_type, text)
+                # Determine receive_id_type: open_id starts with "ou_", chat_id with "oc_"
+                if chat_id.startswith("ou_"):
+                    receive_id_type = "open_id"
+                else:
+                    receive_id_type = "chat_id"
+                await self._send_text(token, chat_id, receive_id_type, text)
         except Exception as exc:
             logger.error("Feishu send_message failed jid=%s: %s", jid, exc)
 
@@ -282,6 +290,59 @@ class FeishuChannel(Channel):
                 if resp.status >= 400:
                     data = await resp.text()
                     logger.error("Feishu send failed %s: %s", resp.status, data[:200])
+
+    async def _reply_text(self, token: str, message_id: str, text: str) -> None:
+        """Reply to *message_id* using the Feishu reply API (native threading)."""
+        url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply"
+        _MAX = 4000
+        chunks = [text[i : i + _MAX] for i in range(0, len(text), _MAX)] if len(text) > _MAX else [text]
+        assert self._http is not None
+        for chunk in chunks:
+            body = {
+                "msg_type": "text",
+                "content": json.dumps({"text": chunk}),
+            }
+            async with self._http.post(
+                url, json=body, headers={"Authorization": f"Bearer {token}"}
+            ) as resp:
+                if resp.status >= 400:
+                    data = await resp.text()
+                    logger.error("Feishu reply failed %s: %s", resp.status, data[:200])
+
+    async def _fetch_feishu_message(self, message_id: str) -> Optional[tuple[str, str]]:
+        """Fetch a message by ID and return (sender_name, text_content) or None."""
+        try:
+            token = await self._get_token()
+            url = f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}"
+            assert self._http is not None
+            async with self._http.get(
+                url, headers={"Authorization": f"Bearer {token}"}
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json(content_type=None)
+            items = (data.get("data") or {}).get("items") or []
+            if not items:
+                return None
+            item = items[0]
+            # Extract sender name
+            sender_obj = item.get("sender") or {}
+            sender_name = (sender_obj.get("name") or "").strip()
+            if not sender_name:
+                sid = (sender_obj.get("sender_id") or {}).get("open_id", "")
+                sender_name = str(sid)
+            # Extract text content from body
+            body = item.get("body") or {}
+            content_raw = body.get("content", "")
+            try:
+                content_parsed = json.loads(content_raw)
+                text = (content_parsed.get("text") or "").strip()
+            except Exception:
+                text = content_raw.strip()
+            return (sender_name, text[:200])
+        except Exception as exc:
+            logger.debug("Feishu: failed to fetch message %s: %s", message_id, exc)
+            return None
 
     # ------------------------------------------------------------------
     # Media download helper
@@ -447,6 +508,10 @@ class FeishuChannel(Channel):
                 is_group,
             ))
 
+            # Track last received message ID for outbound reply threading
+            if message_id:
+                self._last_msg_id[jid] = message_id
+
             # Extract text content + any media attachments
             msg_type = str(getattr(message, "message_type", "text") or "text").strip()
             content_raw = getattr(message, "content", None) or ""
@@ -536,6 +601,19 @@ class FeishuChannel(Channel):
 
             is_from_me = sender_type == "bot"
 
+            # Extract reply context from parent_id (Feishu threading)
+            reply_to: Optional[ReplyContext] = None
+            parent_id = str(getattr(message, "parent_id", "") or "").strip()
+            if parent_id and jid in self._registered_groups():
+                result = await self._fetch_feishu_message(parent_id)
+                if result:
+                    rt_sender, rt_content = result
+                    reply_to = ReplyContext(
+                        message_id=parent_id,
+                        sender_name=rt_sender,
+                        content=rt_content,
+                    )
+
             new_msg = NewMessage(
                 id=message_id or ts,
                 chat_jid=jid,
@@ -546,6 +624,7 @@ class FeishuChannel(Channel):
                 is_from_me=is_from_me,
                 is_bot_message=is_from_me,
                 attachments=attachments,
+                reply_to=reply_to,
             )
 
             # Only deliver on_message for registered chats

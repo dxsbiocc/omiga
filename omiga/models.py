@@ -23,6 +23,14 @@ class AllowedRoot:
 
 
 @dataclass
+class ReplyContext:
+    """The message being replied to, extracted from platform reply metadata."""
+    message_id: str    # platform message ID of the original
+    sender_name: str   # display name of the original sender
+    content: str       # preview of the original content (≤200 chars)
+
+
+@dataclass
 class MediaAttachment:
     """A media file attached to a message.
 
@@ -73,6 +81,7 @@ class NewMessage:
     is_from_me: bool = False
     is_bot_message: bool = False
     attachments: list[Any] = field(default_factory=list)  # list[MediaAttachment]
+    reply_to: Optional[Any] = None  # ReplyContext | None
 
 
 @dataclass
