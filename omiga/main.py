@@ -52,7 +52,7 @@ from omiga.message_loop import recover_pending_messages, start_message_loop
 from omiga.models import NewMessage, RegisteredGroup
 from omiga.router import find_channel, format_outbound
 from omiga.scheduler.ipc import IpcDeps, start_ipc_watcher, stop_ipc_watcher
-from omiga.scheduler.task_scheduler import SchedulerDeps, start_scheduler_loop
+from omiga.scheduler.task_scheduler import SchedulerDeps, start_scheduler_loop, stop_scheduler
 
 configure_logging()
 logger = logging.getLogger("omiga.main")
@@ -134,6 +134,7 @@ async def _main_async() -> None:
         assert state._shutdown_event is not None
         state._shutdown_event.set()
         stop_ipc_watcher()
+        stop_scheduler()  # Stop APScheduler
         await state._queue.shutdown(10000)
 
         # Stop channel manager (handles all channels)

@@ -1,10 +1,7 @@
-"""
-Task scheduler for Omiga Python port.
+"""Task scheduler for Omiga using APScheduler.
 
-Polls the database every SCHEDULER_POLL_INTERVAL seconds for due tasks and
-enqueues them in GroupQueue.
-
-Mirrors src/task-scheduler.ts.
+Uses APScheduler for cron/interval/once scheduling instead of polling.
+Mirrors src/task-scheduler.ts functionality with APScheduler backend.
 """
 from __future__ import annotations
 
@@ -13,13 +10,17 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
-from omiga.config import ASSISTANT_NAME, MAIN_GROUP_FOLDER, SCHEDULER_POLL_INTERVAL, TIMEZONE
-from omiga.container.runner import run_container_agent, write_tasks_snapshot
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+
+from omiga.config import ASSISTANT_NAME, MAIN_GROUP_FOLDER, TIMEZONE
+from omiga.container.runner import write_tasks_snapshot
 from omiga.database import (
     get_all_tasks,
-    get_due_tasks,
     get_task_by_id,
     log_task_run,
     update_task,
@@ -31,6 +32,8 @@ from omiga.models import ContainerInput, ContainerOutput, RegisteredGroup, Sched
 
 logger = logging.getLogger(__name__)
 
+# Global scheduler instance
+_scheduler: Optional[AsyncIOScheduler] = None
 _scheduler_running = False
 
 TASK_CLOSE_DELAY_S = 10.0  # 10s — give container time to finish MCP calls
@@ -57,7 +60,60 @@ class SchedulerDeps:
         self.send_message = send_message
 
 
+def _create_trigger(task: ScheduledTask) -> Optional[Any]:
+    """Create an APScheduler trigger from a ScheduledTask.
+
+    Args:
+        task: The scheduled task
+
+    Returns:
+        APScheduler trigger or None if invalid
+    """
+    if task.schedule_type == "cron":
+        try:
+            # Parse cron expression: "minute hour day month day_of_week"
+            parts = task.schedule_value.split()
+            if len(parts) == 5:
+                return CronTrigger(
+                    minute=parts[0],
+                    hour=parts[1],
+                    day=parts[2],
+                    month=parts[3],
+                    day_of_week=parts[4],
+                    timezone=TIMEZONE,
+                )
+        except Exception as e:
+            logger.warning("Invalid cron expression '%s': %s", task.schedule_value, e)
+
+    elif task.schedule_type == "interval":
+        try:
+            ms = int(task.schedule_value)
+            if ms > 0:
+                # APScheduler 4.x uses 'seconds' as the minimum unit
+                # Convert milliseconds to seconds
+                seconds = ms / 1000.0
+                return IntervalTrigger(seconds=seconds, timezone=TIMEZONE)
+        except Exception as e:
+            logger.warning("Invalid interval '%s': %s", task.schedule_value, e)
+
+    elif task.schedule_type == "once":
+        try:
+            scheduled = datetime.fromisoformat(task.schedule_value)
+            trigger = DateTrigger(run_date=scheduled, timezone=TIMEZONE)
+            return trigger
+        except Exception as e:
+            logger.warning("Invalid date '%s': %s", task.schedule_value, e)
+
+    return None
+
+
 async def _run_task(task: ScheduledTask, deps: SchedulerDeps) -> None:
+    """Execute a scheduled task.
+
+    Args:
+        task: The task to execute
+        deps: Scheduler dependencies
+    """
     start_time = time.monotonic()
     start_iso = datetime.now(timezone.utc).isoformat()
 
@@ -100,9 +156,6 @@ async def _run_task(task: ScheduledTask, deps: SchedulerDeps) -> None:
             f"Register the group first, then resume with: /task resume {task.id}"
         )
         logger.error("Group not found for task: id=%s folder=%s — task paused", task.id, task.group_folder)
-        # Pause the task so it stops re-firing on every poll cycle.
-        # Mirrors the "invalid group folder" handling above.
-        # Resume with /task resume <id> after registering the group.
         await update_task(task.id, status="paused")
         await log_task_run(
             TaskRunLog(
@@ -219,7 +272,7 @@ async def _run_task(task: ScheduledTask, deps: SchedulerDeps) -> None:
         )
     )
 
-    # Compute next_run
+    # Compute next_run for database update
     next_run: Optional[str] = None
     if task.schedule_type == "cron":
         try:
@@ -246,43 +299,187 @@ async def _run_task(task: ScheduledTask, deps: SchedulerDeps) -> None:
     await update_task_after_run(task.id, next_run, result_summary)
 
 
+def _on_task_executed(job, retval):
+    """Called when a scheduled task completes."""
+    logger.debug("Task job completed: job_id=%s retval=%s", job.id, retval)
+
+
+def _on_task_error(job, exc_type, exc_value, traceback):
+    """Called when a scheduled task fails."""
+    logger.error("Task job failed: job_id=%s error=%s: %s", job.id, exc_type.__name__, exc_value)
+
+
 def start_scheduler_loop(deps: SchedulerDeps) -> None:
-    """Start the async scheduler loop (idempotent)."""
-    global _scheduler_running
+    """Start the APScheduler-based scheduler loop.
+
+    Args:
+        deps: Scheduler dependencies
+    """
+    global _scheduler, _scheduler_running
+
     if _scheduler_running:
-        logger.debug("Scheduler loop already running")
+        logger.debug("Scheduler already running")
         return
+
+    _scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     _scheduler_running = True
-    logger.info("Scheduler loop started")
 
-    async def _loop() -> None:
-        while True:
-            try:
-                due = await get_due_tasks()
-                if due:
-                    logger.info("Found %d due task(s)", len(due))
+    # Load existing tasks and schedule them
+    async def _load_and_schedule():
+        from omiga.database import get_all_tasks as db_get_all_tasks
+        tasks = await db_get_all_tasks()
+        scheduled_count = 0
 
-                for task in due:
-                    # Re-check status in case it was paused/cancelled
-                    current = await get_task_by_id(task.id)
-                    if not current or current.status != "active":
-                        continue
+        for task in tasks:
+            if task.status != "active":
+                continue
 
-                    # Capture for closure
-                    _task = current
-                    deps.queue.enqueue_task(
-                        _task.chat_jid,
-                        _task.id,
-                        lambda t=_task: _run_task(t, deps),
-                    )
-            except Exception as err:
-                logger.error("Error in scheduler loop: %s", err)
+            trigger = _create_trigger(task)
+            if not trigger:
+                logger.warning("Could not create trigger for task: id=%s", task.id)
+                continue
 
-            await asyncio.sleep(SCHEDULER_POLL_INTERVAL)
+            # Create job args
+            job_id = f"task_{task.id}"
 
-    asyncio.ensure_future(_loop())
+            # Schedule the job
+            _scheduler.add_job(
+                _run_task,
+                trigger=trigger,
+                args=[task, deps],
+                id=job_id,
+                name=f"Task-{task.id}",
+                replace_existing=True,
+                on_success=_on_task_executed,
+                on_error=_on_task_error,
+            )
+            scheduled_count += 1
+            logger.info(
+                "Scheduled task: id=%s type=%s next_run=%s",
+                task.id,
+                task.schedule_type,
+                task.next_run,
+            )
+
+        logger.info("Loaded %d active task(s) into APScheduler", scheduled_count)
+
+    # Run the initial load in the event loop
+    asyncio.ensure_future(_load_and_schedule())
+
+    _scheduler.start()
+    logger.info("APScheduler started with timezone=%s", TIMEZONE)
+
+
+def stop_scheduler() -> None:
+    """Stop the scheduler gracefully."""
+    global _scheduler, _scheduler_running
+
+    if _scheduler:
+        try:
+            _scheduler.shutdown(wait=True)
+        except Exception:
+            pass  # Ignore if already stopped
+        _scheduler = None
+        _scheduler_running = False
+        logger.info("Scheduler stopped")
+
+
+def reschedule_task(task: ScheduledTask, deps: SchedulerDeps) -> bool:
+    """Reschedule a task (e.g., after create/update).
+
+    Args:
+        task: The task to reschedule
+        deps: Scheduler dependencies
+
+    Returns:
+        True if successfully rescheduled
+    """
+    global _scheduler
+
+    if not _scheduler or not _scheduler_running:
+        return False
+
+    if task.status != "active":
+        # Remove from scheduler if paused
+        job_id = f"task_{task.id}"
+        try:
+            _scheduler.remove_job(job_id)
+            logger.info("Removed paused task from scheduler: id=%s", task.id)
+        except Exception:
+            pass
+        return True
+
+    trigger = _create_trigger(task)
+    if not trigger:
+        logger.warning("Could not create trigger for task: id=%s", task.id)
+        return False
+
+    job_id = f"task_{task.id}"
+    _scheduler.add_job(
+        _run_task,
+        trigger=trigger,
+        args=[task, deps],
+        id=job_id,
+        name=f"Task-{task.id}",
+        replace_existing=True,
+        on_success=_on_task_executed,
+        on_error=_on_task_error,
+    )
+
+    logger.info(
+        "Rescheduled task: id=%s type=%s",
+        task.id,
+        task.schedule_type,
+    )
+    return True
+
+
+def remove_task(task_id: str) -> bool:
+    """Remove a task from the scheduler.
+
+    Args:
+        task_id: The task ID to remove
+
+    Returns:
+        True if removed successfully
+    """
+    global _scheduler
+
+    if not _scheduler:
+        return False
+
+    job_id = f"task_{task_id}"
+    try:
+        _scheduler.remove_job(job_id)
+        logger.info("Removed task from scheduler: id=%s", task_id)
+        return True
+    except Exception as e:
+        logger.warning("Failed to remove task %s: %s", task_id, e)
+        return False
+
+
+def get_scheduler_status() -> dict:
+    """Get scheduler status information.
+
+    Returns:
+        Status dictionary
+    """
+    global _scheduler
+
+    if not _scheduler:
+        return {"running": False, "job_count": 0}
+
+    return {
+        "running": _scheduler_running,
+        "job_count": len(_scheduler.get_jobs()),
+        "timezone": str(_scheduler.timezone),
+    }
 
 
 def _reset_scheduler_for_tests() -> None:
-    global _scheduler_running
+    """Reset scheduler state for tests."""
+    global _scheduler, _scheduler_running
+    if _scheduler:
+        _scheduler.shutdown(wait=False)
+        _scheduler = None
     _scheduler_running = False
