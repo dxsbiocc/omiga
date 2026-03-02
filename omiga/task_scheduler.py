@@ -95,8 +95,15 @@ async def _run_task(task: ScheduledTask, deps: SchedulerDeps) -> None:
         None,
     )
     if not group:
-        error = f"Group not found: {task.group_folder}"
-        logger.error("Group not found for task: id=%s folder=%s", task.id, task.group_folder)
+        error = (
+            f"Group '{task.group_folder}' is not registered. "
+            f"Register the group first, then resume with: /task resume {task.id}"
+        )
+        logger.error("Group not found for task: id=%s folder=%s — task paused", task.id, task.group_folder)
+        # Pause the task so it stops re-firing on every poll cycle.
+        # Mirrors the "invalid group folder" handling above.
+        # Resume with /task resume <id> after registering the group.
+        await update_task(task.id, status="paused")
         await log_task_run(
             TaskRunLog(
                 task_id=task.id,
@@ -107,25 +114,6 @@ async def _run_task(task: ScheduledTask, deps: SchedulerDeps) -> None:
                 error=error,
             )
         )
-        # Compute next_run so the task is properly rescheduled instead of
-        # re-firing on every poll cycle (next_run stays in the past otherwise).
-        _next_run: Optional[str] = None
-        if task.schedule_type == "cron":
-            try:
-                from croniter import croniter
-                it = croniter(task.schedule_value, datetime.now(timezone.utc))
-                _next_run = it.get_next(datetime).isoformat()
-            except Exception:
-                pass
-        elif task.schedule_type == "interval":
-            try:
-                ms = int(task.schedule_value)
-                _next_run = datetime.fromtimestamp(
-                    time.time() + ms / 1000, tz=timezone.utc
-                ).isoformat()
-            except Exception:
-                pass
-        await update_task_after_run(task.id, _next_run, f"Error: {error}")
         return
 
     is_main = task.group_folder == MAIN_GROUP_FOLDER
