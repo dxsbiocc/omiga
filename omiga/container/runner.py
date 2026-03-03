@@ -653,7 +653,12 @@ async def run_container_agent(
                 "Container timed out after output (idle cleanup): group=%s container=%s duration=%dms",
                 group.name, container_name, duration_ms,
             )
-            return ContainerOutput(status="success", result=None, new_session_id=new_session_id)
+            return ContainerOutput(
+                status="success",
+                result=None,
+                new_session_id=new_session_id,
+                execution_log=stdout_bytes.decode(errors="replace"),
+            )
 
         error_msg = f"Container timed out after {config_timeout}ms"
         dump = write_error_dump(group, input_data, error_msg, stderr_str, duration_ms, None)
@@ -661,7 +666,12 @@ async def run_container_agent(
             "Container timed out with no output: group=%s container=%s dump=%s",
             group.name, container_name, dump.name,
         )
-        return ContainerOutput(status="error", result=None, error=error_msg)
+        return ContainerOutput(
+            status="error",
+            result=None,
+            error=error_msg,
+            execution_log=stdout_bytes.decode(errors="replace"),
+        )
 
     if code != 0:
         error_msg = f"Container exited with code {code}: {stderr_str[-200:]}"
@@ -684,14 +694,24 @@ async def run_container_agent(
                 group.name, code, duration_ms, dump.name,
             )
 
-        return ContainerOutput(status="error", result=None, error=error_msg)
+        return ContainerOutput(
+            status="error",
+            result=None,
+            error=error_msg,
+            execution_log=stdout_bytes.decode(errors="replace"),
+        )
 
     if on_output:
         logger.info(
             "Container completed (streaming mode): group=%s duration=%dms new_session=%s",
             group.name, duration_ms, new_session_id,
         )
-        return ContainerOutput(status="success", result=None, new_session_id=new_session_id)
+        return ContainerOutput(
+            status="success",
+            result=None,
+            new_session_id=new_session_id,
+            execution_log=stdout_bytes.decode(errors="replace"),
+        )
 
     # Legacy mode: parse last sentinel pair from stdout
     stdout_str = stdout_bytes.decode(errors="replace")
@@ -704,11 +724,17 @@ async def run_container_agent(
             lines = stdout_str.strip().splitlines()
             json_str = lines[-1] if lines else "{}"
         raw = json.loads(json_str)
+
+        # Parse tool_calls if available (for SOP generation)
+        tool_calls = raw.get("tool_calls")
+
         result = ContainerOutput(
             status=raw.get("status", "error"),
             result=raw.get("result"),
             new_session_id=raw.get("newSessionId"),
             error=raw.get("error"),
+            execution_log=stdout_str,  # 完整执行日志
+            tool_calls=tool_calls,     # 工具调用记录
         )
         logger.info(
             "Container completed: group=%s duration=%dms status=%s",
@@ -721,6 +747,7 @@ async def run_container_agent(
             status="error",
             result=None,
             error=f"Failed to parse container output: {e}",
+            execution_log=stdout_str,
         )
 
 

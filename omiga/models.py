@@ -137,6 +137,9 @@ class ContainerOutput:
     result: Optional[str]
     new_session_id: Optional[str] = None
     error: Optional[str] = None
+    # 新增：详细执行日志和工具调用记录（用于 SOP 生成）
+    execution_log: Optional[str] = None
+    tool_calls: Optional[list[dict]] = None
 
 
 @dataclass

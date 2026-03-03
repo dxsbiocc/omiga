@@ -1,11 +1,26 @@
 """Memory command - manage Omiga's memory system (SOPs, lessons, facts)."""
 from __future__ import annotations
 
+import asyncio
 import click
 from datetime import datetime
 from pathlib import Path
 
 from omiga.config import DATA_DIR
+
+
+def _get_memory_manager() -> "MemoryManager | None":
+    """Get initialized memory manager or None if not available."""
+    from omiga.memory.manager import MemoryManager
+
+    memory_dir = DATA_DIR / "memory"
+    if not memory_dir.exists():
+        click.echo("Memory system not initialized yet.")
+        return None
+
+    manager = MemoryManager(memory_dir)
+    asyncio.run(manager.initialize())
+    return manager
 
 
 @click.group("memory")
@@ -15,19 +30,13 @@ def memory_cmd() -> None:
 
 
 @memory_cmd.command("status")
+# Pattern: reject/archive/cleanup/index/facts/lessons commands - replace init code with _get_memory_manager()
+
 def status_cmd() -> None:
     """Show memory system status."""
-    from omiga.memory.manager import MemoryManager
-
-    memory_dir = DATA_DIR / "memory"
-    if not memory_dir.exists():
-        click.echo("Memory system not initialized yet.")
+    manager = _get_memory_manager()
+    if not manager:
         return
-
-    manager = MemoryManager(memory_dir)
-    # Initialize synchronously for CLI
-    import asyncio
-    asyncio.run(manager.initialize())
 
     stats = manager.get_memory_stats()
 
@@ -49,6 +58,8 @@ def status_cmd() -> None:
 
 
 @memory_cmd.command("list")
+# Pattern: reject/archive/cleanup/index/facts/lessons commands - replace init code with _get_memory_manager()
+
 @click.option(
     "--pending",
     "show_pending",
@@ -69,16 +80,9 @@ def status_cmd() -> None:
 )
 def list_cmd(show_pending: bool, show_active: bool, show_all: bool) -> None:
     """List SOPs by status."""
-    from omiga.memory.manager import MemoryManager
-
-    memory_dir = DATA_DIR / "memory"
-    if not memory_dir.exists():
-        click.echo("Memory system not initialized yet.")
+    manager = _get_memory_manager()
+    if not manager:
         return
-
-    manager = MemoryManager(memory_dir)
-    import asyncio
-    asyncio.run(manager.initialize())
 
     if show_all or (not show_pending and not show_active):
         show_pending = True
@@ -116,19 +120,14 @@ def list_cmd(show_pending: bool, show_active: bool, show_all: bool) -> None:
 
 
 @memory_cmd.command("show")
+# Pattern: reject/archive/cleanup/index/facts/lessons commands - replace init code with _get_memory_manager()
+
 @click.argument("sop_id")
 def show_cmd(sop_id: str) -> None:
     """Show details of a specific SOP."""
-    from omiga.memory.manager import MemoryManager
-
-    memory_dir = DATA_DIR / "memory"
-    if not memory_dir.exists():
-        click.echo("Memory system not initialized yet.")
+    manager = _get_memory_manager()
+    if not manager:
         return
-
-    manager = MemoryManager(memory_dir)
-    import asyncio
-    asyncio.run(manager.initialize())
 
     sop = manager.get_sop(sop_id)
     if not sop:
@@ -169,19 +168,14 @@ def show_cmd(sop_id: str) -> None:
 
 
 @memory_cmd.command("approve")
+# Pattern: reject/archive/cleanup/index/facts/lessons commands - replace init code with _get_memory_manager()
+
 @click.argument("sop_id")
 def approve_cmd(sop_id: str) -> None:
     """Approve a pending SOP and move it to active."""
-    from omiga.memory.manager import MemoryManager
-
-    memory_dir = DATA_DIR / "memory"
-    if not memory_dir.exists():
-        click.echo("Memory system not initialized yet.")
+    manager = _get_memory_manager()
+    if not manager:
         return
-
-    manager = MemoryManager(memory_dir)
-    import asyncio
-    asyncio.run(manager.initialize())
 
     if manager.approve_sop(sop_id):
         click.echo(f"✓ SOP approved: {sop_id}")
@@ -192,6 +186,8 @@ def approve_cmd(sop_id: str) -> None:
 
 
 @memory_cmd.command("reject")
+# Pattern: reject/archive/cleanup/index/facts/lessons commands - replace init code with _get_memory_manager()
+
 @click.argument("sop_id")
 @click.option(
     "--reason",
@@ -223,6 +219,8 @@ def reject_cmd(sop_id: str, reason: str) -> None:
 
 
 @memory_cmd.command("archive")
+# Pattern: reject/archive/cleanup/index/facts/lessons commands - replace init code with _get_memory_manager()
+
 @click.argument("sop_id")
 def archive_cmd(sop_id: str) -> None:
     """Archive an active SOP."""
@@ -246,6 +244,8 @@ def archive_cmd(sop_id: str) -> None:
 
 
 @memory_cmd.command("cleanup")
+# Pattern: reject/archive/cleanup/index/facts/lessons commands - replace init code with _get_memory_manager()
+
 @click.option(
     "--older-than",
     "days",
@@ -270,6 +270,8 @@ def cleanup_cmd(days: int) -> None:
 
 
 @memory_cmd.command("index")
+# Pattern: reject/archive/cleanup/index/facts/lessons commands - replace init code with _get_memory_manager()
+
 def index_cmd() -> None:
     """Show L1 memory index."""
     from omiga.memory.manager import MemoryManager
@@ -298,6 +300,8 @@ def index_cmd() -> None:
 
 
 @memory_cmd.command("facts")
+# Pattern: reject/archive/cleanup/index/facts/lessons commands - replace init code with _get_memory_manager()
+
 @click.argument("section", required=False)
 def facts_cmd(section: str | None) -> None:
     """Show L2 facts database."""
@@ -338,6 +342,8 @@ def facts_cmd(section: str | None) -> None:
 
 
 @memory_cmd.command("lessons")
+# Pattern: reject/archive/cleanup/index/facts/lessons commands - replace init code with _get_memory_manager()
+
 def lessons_cmd() -> None:
     """Show recorded lessons from failures."""
     from omiga.memory.manager import MemoryManager

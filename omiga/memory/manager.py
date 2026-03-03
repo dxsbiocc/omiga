@@ -14,9 +14,11 @@ Memory Architecture:
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -32,6 +34,39 @@ from omiga.memory.models import (
 )
 
 logger = logging.getLogger("omiga.memory.manager")
+
+# Filename patterns
+SOP_FILENAME_PATTERN = "SOP_{id}_{name}.md"
+LESSON_FILENAME_PATTERN = "{type}_{trigger_hash}.md"
+
+# Confidence thresholds for SOP generation
+SOP_MIN_CONFIDENCE = 0.5
+CONFIDENCE_BASE = 0.5
+CONFIDENCE_LONG_DURATION = 5000  # ms
+CONFIDENCE_MEDIUM_DURATION = 1000  # ms
+LONG_EXECUTION_THRESHOLD = 10000  # ms
+
+
+def _utc_now() -> str:
+    """Get current UTC timestamp in ISO format."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _utc_now_timestamp() -> float:
+    """Get current UTC timestamp as float for comparisons."""
+    return datetime.now(timezone.utc).timestamp()
+
+
+def _make_lesson_filename(lesson_type: LessonType, trigger: str) -> str:
+    """Generate a stable filename for a lesson using SHA256 hash."""
+    trigger_hash = hashlib.sha256(trigger.encode()).hexdigest()[:16]
+    return f"{lesson_type.value}_{trigger_hash}.md"
+
+
+def _make_sop_filename(sop: SOP) -> str:
+    """Generate SOP filename from SOP data."""
+    safe_name = sop.name.replace(" ", "_")
+    return SOP_FILENAME_PATTERN.format(id=sop.id, name=safe_name)
 
 
 class MemoryManager:
@@ -56,32 +91,40 @@ class MemoryManager:
             memory_dir: Base directory for memory storage
         """
         self.memory_dir = memory_dir
-        self.l1_dir = memory_dir / "L1"
-        self.l2_dir = memory_dir / "L2"
-        self.l3_dir = memory_dir / "L3"
+        # Internal directories (private by convention)
+        self._l1_dir = memory_dir / "L1"
+        self._l2_dir = memory_dir / "L2"
+        self._l3_dir = memory_dir / "L3"
 
         # L3 subdirectories
-        self.pending_dir = self.l3_dir / "pending"
-        self.active_dir = self.l3_dir / "active"
-        self.archived_dir = self.l3_dir / "archived"
-        self.lessons_dir = self.l3_dir / "lessons"
-        self.scripts_dir = self.l3_dir / "scripts"
+        self._pending_dir = self._l3_dir / "pending"
+        self._active_dir = self._l3_dir / "active"
+        self._archived_dir = self._l3_dir / "archived"
+        self._lessons_dir = self._l3_dir / "lessons"
+        self._scripts_dir = self._l3_dir / "scripts"
 
         # Cached data
         self._index: Optional[MemoryIndex] = None
         self._facts: Optional[FactsDatabase] = None
         self._sops: dict[str, SOP] = {}
+        self._lessons: dict[str, dict[str, Any]] = {}  # Lessons cache
+
+        # Async lock for state modifications
+        self._lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         """Initialize memory directories and load existing data."""
-        # Create directory structure
-        for directory in [self.l1_dir, self.l2_dir, self.pending_dir,
-                          self.active_dir, self.archived_dir,
-                          self.lessons_dir, self.scripts_dir]:
+        # Create directory structure (async-safe)
+        directories = [
+            self._l1_dir, self._l2_dir, self._pending_dir,
+            self._active_dir, self._archived_dir,
+            self._lessons_dir, self._scripts_dir,
+        ]
+        for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
 
         # Create default files if missing
-        index_file = self.l1_dir / "index.md"
+        index_file = self._l1_dir / "index.md"
         if not index_file.exists():
             self._index = MemoryIndex()
             self._index.add_rule("无执行，不记忆 (No Execution, No Memory)")
@@ -91,33 +134,71 @@ class MemoryManager:
         else:
             self._index = MemoryIndex.from_markdown(index_file.read_text(encoding="utf-8"))
 
-        facts_file = self.l2_dir / "facts.md"
+        facts_file = self._l2_dir / "facts.md"
         if not facts_file.exists():
             self._facts = FactsDatabase()
             facts_file.write_text(self._facts.to_markdown(), encoding="utf-8")
         else:
             self._facts = FactsDatabase.from_markdown(facts_file.read_text(encoding="utf-8"))
 
-        # Load active SOPs
-        await self._load_active_sops()
+        # Load active SOPs and lessons in parallel
+        await asyncio.gather(
+            self._load_active_sops(),
+            self._load_lessons(),
+        )
 
         logger.info(
-            "Memory initialized: %d topics, %d sections, %d active SOPs",
+            "Memory initialized: %d topics, %d sections, %d active SOPs, %d lessons",
             len(self._index.topics) if self._index else 0,
             len(self._facts.entries) if self._facts else 0,
             len(self._sops),
+            len(self._lessons),
         )
 
     async def _load_active_sops(self) -> None:
-        """Load all active SOPs into memory."""
+        """Load all active SOPs into memory in parallel."""
         self._sops.clear()
-        for sop_file in self.active_dir.glob("*.md"):
+        sop_files = list(self._active_dir.glob("*.md"))
+
+        async def load_single(sop_file: Path) -> tuple[str, SOP] | None:
             try:
-                sop = SOP.from_markdown(sop_file)
+                sop = await asyncio.to_thread(SOP.from_markdown, sop_file)
                 if sop:
-                    self._sops[sop.id] = sop
+                    return (sop.id, sop)
             except Exception as e:
                 logger.warning(f"Failed to load SOP {sop_file.name}: {e}")
+            return None
+
+        results = await asyncio.gather(*[load_single(f) for f in sop_files])
+        for result in results:
+            if result:
+                self._sops[result[0]] = result[1]
+
+    async def _load_lessons(self) -> None:
+        """Load all lessons into memory cache for fast lookup."""
+        self._lessons.clear()
+        lesson_files = list(self._lessons_dir.glob("*.md"))
+
+        async def load_single(lesson_file: Path) -> dict[str, Any] | None:
+            try:
+                content = await asyncio.to_thread(lesson_file.read_text, encoding="utf-8")
+                # Extract trigger for indexing
+                import re
+                trigger_match = re.search(r"\*\*触发条件\*\*: `([^`]+)`", content)
+                if trigger_match:
+                    return {
+                        "file": lesson_file.name,
+                        "trigger": trigger_match.group(1),
+                        "content": content,
+                    }
+            except Exception as e:
+                logger.warning(f"Failed to load lesson {lesson_file.name}: {e}")
+            return None
+
+        results = await asyncio.gather(*[load_single(f) for f in lesson_files])
+        for result in results:
+            if result:
+                self._lessons[result["file"]] = result
 
     # -------------------------------------------------------------------------
     # L1 Index Operations
@@ -159,9 +240,15 @@ class MemoryManager:
 
     def _save_index(self) -> None:
         """Persist L1 index to disk."""
-        index_file = self.l1_dir / "index.md"
+        index_file = self._l1_dir / "index.md"
         if self._index:
             index_file.write_text(self._index.to_markdown(), encoding="utf-8")
+
+    def _save_facts(self) -> None:
+        """Persist L2 facts to disk."""
+        facts_file = self._l2_dir / "facts.md"
+        if self._facts:
+            facts_file.write_text(self._facts.to_markdown(), encoding="utf-8")
 
     # -------------------------------------------------------------------------
     # L2 Facts Operations
@@ -213,7 +300,7 @@ class MemoryManager:
 
     def _save_facts(self) -> None:
         """Persist L2 facts to disk."""
-        facts_file = self.l2_dir / "facts.md"
+        facts_file = self._l2_dir / "facts.md"
         if self._facts:
             facts_file.write_text(self._facts.to_markdown(), encoding="utf-8")
 
@@ -257,7 +344,7 @@ class MemoryManager:
         )
 
         # Save to pending directory
-        sop_file = self.pending_dir / f"SOP_{sop.id}_{name.replace(' ', '_')}.md"
+        sop_file = self._pending_dir / f"SOP_{sop.id}_{name.replace(' ', '_')}.md"
         sop_file.write_text(sop.to_markdown(), encoding="utf-8")
 
         logger.info(f"Created pending SOP: {sop.id} - {name}")
@@ -299,21 +386,21 @@ class MemoryManager:
             source_task_id=task_id,
         )
         sop.lessons.append(lesson)
-        sop.updated_at = datetime.utcnow().isoformat()
+        sop.updated_at = _utc_now()
 
         # Save to appropriate directory
         if sop.status == SOPStatus.PENDING:
-            sop_file = self.pending_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
+            sop_file = self._pending_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
         elif sop.status == SOPStatus.ACTIVE:
-            sop_file = self.active_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
+            sop_file = self._active_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
             self._sops[sop_id] = sop
         else:
-            sop_file = self.archived_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
+            sop_file = self._archived_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
 
         sop_file.write_text(sop.to_markdown(), encoding="utf-8")
 
         # Add to lessons directory for quick lookup
-        lesson_file = self.lessons_dir / f"lesson_{sop_id}_{lesson_type.value}.md"
+        lesson_file = self._lessons_dir / f"lesson_{sop_id}_{lesson_type.value}.md"
         lesson_file.write_text(
             f"# Lesson: {lesson_type.value}\n\n"
             f"**SOP**: `{sop_id}`\n\n"
@@ -327,7 +414,7 @@ class MemoryManager:
 
     def _find_sop_by_id(self, sop_id: str) -> Optional[SOP]:
         """Find SOP by ID in pending/active directories."""
-        for sop_file in list(self.pending_dir.glob("*.md")) + list(self.active_dir.glob("*.md")):
+        for sop_file in list(self._pending_dir.glob("*.md")) + list(self._active_dir.glob("*.md")):
             try:
                 sop = SOP.from_markdown(sop_file)
                 if sop and sop.id == sop_id:
@@ -339,7 +426,7 @@ class MemoryManager:
     def list_pending_sops(self) -> list[SOP]:
         """List all pending SOPs awaiting review."""
         sops = []
-        for sop_file in self.pending_dir.glob("*.md"):
+        for sop_file in self._pending_dir.glob("*.md"):
             try:
                 sop = SOP.from_markdown(sop_file)
                 if sop:
@@ -367,11 +454,11 @@ class MemoryManager:
 
         # Update status
         sop.status = SOPStatus.ACTIVE
-        sop.updated_at = datetime.utcnow().isoformat()
+        sop.updated_at = _utc_now()
 
         # Move file from pending to active
-        old_file = self.pending_dir / f"SOP_{sop_id}_{sop.name.replace(' ', '_')}.md"
-        new_file = self.active_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
+        old_file = self._pending_dir / f"SOP_{sop_id}_{sop.name.replace(' ', '_')}.md"
+        new_file = self._active_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
 
         if old_file.exists():
             shutil.move(str(old_file), str(new_file))
@@ -402,11 +489,11 @@ class MemoryManager:
         # Update status
         sop.status = SOPStatus.REJECTED
         sop.metadata["rejection_reason"] = reason
-        sop.updated_at = datetime.utcnow().isoformat()
+        sop.updated_at = _utc_now()
 
         # Move file from pending to archived (keep for reference)
-        old_file = self.pending_dir / f"SOP_{sop_id}_{sop.name.replace(' ', '_')}.md"
-        new_file = self.archived_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}_rejected.md"
+        old_file = self._pending_dir / f"SOP_{sop_id}_{sop.name.replace(' ', '_')}.md"
+        new_file = self._archived_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}_rejected.md"
 
         if old_file.exists():
             shutil.move(str(old_file), str(new_file))
@@ -432,11 +519,11 @@ class MemoryManager:
 
         # Update status
         sop.status = SOPStatus.ARCHIVED
-        sop.updated_at = datetime.utcnow().isoformat()
+        sop.updated_at = _utc_now()
 
         # Move file from active to archived
-        old_file = self.active_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
-        new_file = self.archived_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}_archived.md"
+        old_file = self._active_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
+        new_file = self._archived_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}_archived.md"
 
         if old_file.exists():
             shutil.move(str(old_file), str(new_file))
@@ -470,11 +557,11 @@ class MemoryManager:
 
         sop = self._sops[sop_id]
         sop.executed_count += 1
-        sop.last_executed_at = datetime.utcnow().isoformat()
-        sop.updated_at = datetime.utcnow().isoformat()
+        sop.last_executed_at = _utc_now()
+        sop.updated_at = _utc_now()
 
         # Save updated metadata
-        sop_file = self.active_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
+        sop_file = self._active_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
         sop_file.write_text(sop.to_markdown(), encoding="utf-8")
 
     # -------------------------------------------------------------------------
@@ -508,8 +595,9 @@ class MemoryManager:
             source_task_id=source_task_id,
         )
 
-        # Save to lessons directory
-        lesson_file = self.lessons_dir / f"{lesson_type.value}_{hash(trigger)}.md"
+        # Save to lessons directory using stable hash
+        lesson_filename = _make_lesson_filename(lesson_type, trigger)
+        lesson_file = self._lessons_dir / lesson_filename
         lesson_file.write_text(
             f"# Lesson: {lesson_type.value}\\n\\n"
             f"**来源任务**: `{source_task_id}`\\n\\n"
@@ -518,6 +606,13 @@ class MemoryManager:
             f"**关联 SOP**: `{related_sop_id or '无'}`\\n",
             encoding="utf-8",
         )
+
+        # Update in-memory cache
+        self._lessons[lesson_filename] = {
+            "file": lesson_filename,
+            "trigger": trigger,
+            "content": content,
+        }
 
         # Add related SOP if provided
         if related_sop_id:
@@ -537,7 +632,7 @@ class MemoryManager:
         return lesson
 
     def find_lessons_for_error(self, error_message: str) -> list[Lesson]:
-        """Find lessons that match an error pattern.
+        """Find lessons that match an error pattern using cached data.
 
         Args:
             error_message: Current error message
@@ -546,30 +641,19 @@ class MemoryManager:
             Matching lessons that can help resolve this error
         """
         matching_lessons = []
+        error_lower = error_message.lower()
 
-        for lesson_file in self.lessons_dir.glob("*.md"):
-            content = lesson_file.read_text(encoding="utf-8")
-            # Simple string matching - can be enhanced with fuzzy matching
-            if any(keyword in error_message.lower() for keyword in [lesson_file.stem.lower()]):
-                try:
-                    # Parse lesson from file
-                    lines = content.splitlines()
-                    trigger_line = next((l for l in lines if l.startswith("**触发条件**")), "")
-                    content_line = next((l for l in lines if l.startswith("**教训**")), "")
-
-                    trigger = trigger_line.replace("**触发条件**:", "").strip().strip("`")
-                    lesson_content = content_line.replace("**教训**:", "").strip()
-
-                    if trigger and trigger.lower() in error_message.lower():
-                        lesson = Lesson(
-                            lesson_type=LessonType.ERROR_PATTERN,
-                            trigger=trigger,
-                            content=lesson_content,
-                            source_task_id="unknown",
-                        )
-                        matching_lessons.append(lesson)
-                except Exception:
-                    pass
+        # Use in-memory cache for fast lookup
+        for lesson_data in self._lessons.values():
+            trigger = lesson_data.get("trigger", "")
+            if trigger.lower() in error_lower or trigger.lower() in error_lower:
+                lesson = Lesson(
+                    lesson_type=LessonType.ERROR_PATTERN,
+                    trigger=trigger,
+                    content=lesson_data.get("content", "")[:500],
+                    source_task_id="cached",
+                )
+                matching_lessons.append(lesson)
 
         return matching_lessons
 
@@ -579,11 +663,11 @@ class MemoryManager:
 
     def get_memory_stats(self) -> dict[str, Any]:
         """Get memory system statistics."""
-        pending_count = len(list(self.pending_dir.glob("*.md")))
+        pending_count = len(list(self._pending_dir.glob("*.md")))
         active_count = len(self._sops)
-        archived_count = len(list(self.archived_dir.glob("*.md")))
-        lessons_count = len(list(self.lessons_dir.glob("*.md")))
-        scripts_count = len(list(self.scripts_dir.glob("*.py")))
+        archived_count = len(list(self._archived_dir.glob("*.md")))
+        lessons_count = len(list(self._lessons_dir.glob("*.md")))
+        scripts_count = len(list(self._scripts_dir.glob("*.py")))
 
         return {
             "l1_topics": len(self._index.topics) if self._index else 0,
@@ -606,9 +690,9 @@ class MemoryManager:
             Number of SOPs cleaned up
         """
         cleaned = 0
-        cutoff = datetime.utcnow().timestamp() - (days * 86400)
+        cutoff = _utc_now_timestamp() - (days * 86400)
 
-        for sop_file in self.archived_dir.glob("*.md"):
+        for sop_file in self._archived_dir.glob("*.md"):
             try:
                 sop = SOP.from_markdown(sop_file)
                 if sop and sop.created_at:

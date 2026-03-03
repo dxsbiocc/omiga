@@ -63,7 +63,23 @@ async def _generate_sop_from_execution(
 
         generator = SOPGenerator(memory_manager)
 
-        # Create task execution record
+        # Import ToolCallRecord for building detailed records
+        from omiga.memory.models import ToolCallRecord
+
+        # Build tool call records from container output
+        tool_call_records = []
+        if output.tool_calls:
+            for call in output.tool_calls:
+                tool_call_records.append(ToolCallRecord(
+                    tool_name=call.get("tool_name", "unknown"),
+                    args=call.get("args", {}),
+                    result=call.get("result"),
+                    success=call.get("status") == "success",
+                    error=call.get("error"),
+                    duration_ms=call.get("duration_ms"),
+                ))
+
+        # Create task execution record with detailed trace
         execution = TaskExecution(
             task_id=f"{group.folder}_{duration_ms}",
             skill_name="container_agent",
@@ -73,7 +89,9 @@ async def _generate_sop_from_execution(
             success=success,
             error_message=output.error if not success else None,
             duration_ms=duration_ms,
-            tools_used=None,  # Would need to extract from container output
+            tools_used=[r.tool_name for r in tool_call_records] if tool_call_records else None,
+            tool_call_records=tool_call_records,
+            execution_log=output.execution_log or "",
         )
 
         # Generate SOP (success) or lesson (failure)

@@ -6,13 +6,14 @@ It also extracts lessons from failures.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from omiga.memory.manager import MemoryManager
-from omiga.memory.models import LessonType, SOP, SOPType
+from omiga.memory.models import LessonType, SOP, SOPType, ToolCallRecord
 
 logger = logging.getLogger("omiga.memory.sop_generator")
 
@@ -31,6 +32,8 @@ class TaskExecution:
         error_message: Error message if failed
         duration_ms: Execution duration in milliseconds
         tools_used: List of tools that were called
+        tool_call_records: Detailed tool call records
+        execution_log: Complete execution log output
     """
     task_id: str
     skill_name: str
@@ -40,7 +43,9 @@ class TaskExecution:
     success: bool
     error_message: Optional[str] = None
     duration_ms: Optional[int] = None
-    tools_used: list[str] | None = None
+    tools_used: Optional[list[str]] = None
+    tool_call_records: list[ToolCallRecord] = field(default_factory=list)
+    execution_log: str = ""
 
 
 @dataclass
@@ -54,6 +59,8 @@ class SOPDraft:
         prerequisites: Required preconditions
         pitfalls: Identified pitfalls
         confidence: Confidence score (0.0 - 1.0)
+        tool_details: Detailed tool call information
+        code_samples: Extracted code snippets
     """
     name: str
     sop_type: SOPType
@@ -61,6 +68,8 @@ class SOPDraft:
     prerequisites: list[str]
     pitfalls: list[str]
     confidence: float
+    tool_details: list[dict] = field(default_factory=list)
+    code_samples: list[str] = field(default_factory=list)
 
 
 class SOPGenerator:
@@ -119,6 +128,16 @@ class SOPGenerator:
             return None
 
         # Create SOP with extracted information
+        metadata = {
+            "skill_name": execution.skill_name,
+            "original_prompt": execution.prompt[:200],
+            "duration_ms": execution.duration_ms,
+            "tools_used": execution.tools_used or [],
+            "tool_call_records": draft.tool_details,
+        }
+        if draft.code_samples:
+            metadata["code_samples"] = draft.code_samples
+
         sop = self.memory_manager.create_sop(
             name=draft.name,
             sop_type=draft.sop_type,
@@ -126,12 +145,7 @@ class SOPGenerator:
             steps=draft.steps,
             prerequisites=draft.prerequisites,
             pitfalls=draft.pitfalls,
-            metadata={
-                "skill_name": execution.skill_name,
-                "original_prompt": execution.prompt[:200],
-                "duration_ms": execution.duration_ms,
-                "tools_used": execution.tools_used or [],
-            },
+            metadata=metadata,
         )
 
         logger.info(
@@ -144,9 +158,9 @@ class SOPGenerator:
         """Extract SOP draft from successful execution.
 
         This method analyzes the execution to identify:
-        - Key steps that were taken
-        - Prerequisites that were needed
-        - Common pitfalls to avoid
+        - Key steps that were taken (from tool_call_records)
+        - Prerequisites that were needed (from logs)
+        - Common pitfalls to avoid (from errors and warnings)
 
         Args:
             execution: Successful task execution
@@ -160,19 +174,19 @@ class SOPGenerator:
         # Generate name from skill and prompt
         name = self._generate_sop_name(execution)
 
-        # Extract steps from execution
-        steps = self._extract_steps(execution)
+        # Extract detailed steps from tool_call_records
+        steps = self._extract_detailed_steps(execution)
 
-        # Identify prerequisites
-        prerequisites = self._extract_prerequisites(execution)
+        # Identify prerequisites from execution log
+        prerequisites = self._extract_prerequisites_from_log(execution)
 
-        # Identify pitfalls from result analysis
-        pitfalls = self._extract_pitfalls(execution)
+        # Identify pitfalls from execution analysis
+        pitfalls = self._extract_pitfalls_detailed(execution)
 
-        # Calculate confidence based on:
-        # - Execution duration (longer = more complex = higher confidence)
-        # - Tools used (more tools = more steps = higher confidence)
-        # - Result clarity (clear success = higher confidence)
+        # Extract code samples from execution log
+        code_samples = self._extract_code_samples(execution)
+
+        # Calculate confidence
         confidence = self._calculate_confidence(execution)
 
         return SOPDraft(
@@ -182,7 +196,56 @@ class SOPGenerator:
             prerequisites=prerequisites,
             pitfalls=pitfalls,
             confidence=confidence,
+            tool_details=[self._record_to_dict(r) for r in execution.tool_call_records],
+            code_samples=code_samples,
         )
+
+    def _record_to_dict(self, record: ToolCallRecord) -> dict:
+        """Convert ToolCallRecord to dict for metadata."""
+        return {
+            "tool_name": record.tool_name,
+            "args": record.args,
+            "result": record.result,
+            "success": record.success,
+            "error": record.error,
+            "duration_ms": record.duration_ms,
+        }
+
+    def _extract_detailed_steps(self, execution: TaskExecution) -> list[str]:
+        """从工具调用记录提取详细步骤。"""
+        steps = []
+
+        if execution.tool_call_records:
+            for i, record in enumerate(execution.tool_call_records, 1):
+                step = f"{i}. 调用 `{record.tool_name}`"
+
+                # 添加关键参数
+                if record.args:
+                    key_args = {
+                        k: v for k, v in record.args.items()
+                        if not isinstance(v, (str, bytes)) or len(v) < 100
+                    }
+                    if key_args:
+                        args_str = json.dumps(key_args, ensure_ascii=False)[:150]
+                        step += f" - 参数：{args_str}"
+
+                # 添加结果摘要
+                if record.success and record.result:
+                    result_str = str(record.result)[:80]
+                    step += f" → 成功：{result_str}"
+                elif not record.success and record.error:
+                    step += f" → 失败：{record.error[:50]}"
+
+                steps.append(step)
+        else:
+            # 回退到旧方式
+            steps.append(f"1. 调用技能 `{execution.skill_name}`")
+            if execution.tools_used:
+                for i, tool in enumerate(execution.tools_used, 2):
+                    steps.append(f"{i}. 使用工具 `{tool}`")
+            steps.append(f"{len(steps) + 1}. 确认执行成功")
+
+        return steps
 
     def _determine_sop_type(self, execution: TaskExecution) -> SOPType:
         """Determine SOP type based on execution characteristics."""
@@ -243,6 +306,96 @@ class SOPGenerator:
         steps.append("确认执行成功")
 
         return steps
+
+    def _extract_prerequisites_from_log(self, execution: TaskExecution) -> list[str]:
+        """从执行日志推断前置条件。"""
+        prerequisites = []
+        log = execution.execution_log or ""
+
+        # 检测依赖安装
+        pip_match = re.search(r"pip install ([^\s]+)", log)
+        if pip_match:
+            prerequisites.append(f"需要安装依赖包：{pip_match.group(1)}")
+
+        # 检测文件/目录检查
+        if "FileNotFoundError" in log or "不存在" in log:
+            prerequisites.append("确保目标文件/目录存在")
+
+        # 检测环境变量
+        env_matches = re.findall(r"环境变量 ([^\s]+) 未设置", log)
+        for env in env_matches:
+            prerequisites.append(f"需要设置环境变量：{env}")
+
+        # 检测 API Key
+        if "API_KEY" in log or "api_key" in log or "API Key" in log:
+            prerequisites.append("需要配置有效的 API Key")
+
+        # 检测权限问题
+        if "Permission denied" in log or "权限" in log:
+            prerequisites.append("需要特定文件/目录权限")
+
+        # 检测网络连接
+        if "Connection refused" in log or "network" in log.lower():
+            prerequisites.append("需要网络连接")
+
+        # 添加技能依赖
+        if execution.skill_name:
+            prerequisites.append(f"技能 `{execution.skill_name}` 可用")
+
+        return prerequisites
+
+    def _extract_pitfalls_detailed(self, execution: TaskExecution) -> list[str]:
+        """从执行过程提取陷阱。"""
+        pitfalls = []
+
+        # 分析工具调用记录中的错误恢复
+        for record in execution.tool_call_records:
+            if not record.success and record.error:
+                error_lower = record.error.lower()
+                if "timeout" in error_lower:
+                    pitfalls.append(f"⏱️ `{record.tool_name}` 可能超时，建议设置 timeout 参数")
+                if "permission" in error_lower or "access" in error_lower:
+                    pitfalls.append(f"🔒 `{record.tool_name}` 需要特定权限")
+                if "not found" in error_lower or "不存在" in error_lower:
+                    pitfalls.append(f"📁 `{record.tool_name}` 需要确认文件/路径存在")
+
+        # 分析执行时长
+        if execution.duration_ms:
+            if execution.duration_ms > 60000:
+                pitfalls.append("⏱️ 执行耗时较长（>60s），建议在后台运行或分批处理")
+            elif execution.duration_ms > 30000:
+                pitfalls.append("⏱️ 执行耗时中等（>30s），可能需要等待")
+
+        # 从日志提取警告
+        log = execution.execution_log or ""
+        if "WARNING" in log or "DeprecationWarning" in log:
+            pitfalls.append("⚠️ 执行过程中出现警告，建议查看日志确认无影响")
+
+        # 常见工具特定陷阱
+        if execution.tools_used:
+            if "file_write" in execution.tools_used:
+                pitfalls.append("📝 写入文件前确认路径权限和目标目录存在")
+            if "http_request" in execution.tools_used or "http_client" in execution.tools_used:
+                pitfalls.append("🌐 HTTP 请求可能需要处理超时和重试")
+
+        return pitfalls
+
+    def _extract_code_samples(self, execution: TaskExecution) -> list[str]:
+        """从执行日志提取可复用代码。"""
+        code_samples = []
+        log = execution.execution_log or ""
+
+        # 提取代码块
+        code_pattern = r"```(?:python|py)?\n(.*?)\n```"
+        matches = re.findall(code_pattern, log, re.DOTALL)
+        code_samples.extend(matches[:3])  # 限制数量
+
+        # 提取 Shell 命令
+        cmd_matches = re.findall(r"\$ ([^\n]+)", log)
+        for cmd in cmd_matches[:3]:
+            code_samples.append(f"# Shell 命令\n{cmd}")
+
+        return code_samples
 
     def _extract_prerequisites(self, execution: TaskExecution) -> list[str]:
         """Extract prerequisites from execution context."""

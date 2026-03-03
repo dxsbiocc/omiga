@@ -14,6 +14,65 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+@dataclass
+class ToolCallRecord:
+    """记录单次工具调用的详细信息。
+
+    Attributes:
+        tool_name: 工具名称
+        args: 调用参数
+        result: 调用结果
+        success: 是否成功
+        error: 错误信息（如果失败）
+        duration_ms: 执行时长（毫秒）
+    """
+    tool_name: str
+    args: dict[str, Any]
+    result: Any
+    success: bool = True
+    error: Optional[str] = None
+    duration_ms: Optional[int] = None
+
+
+@dataclass
+class TaskExecution:
+    """任务执行记录，用于 SOP 生成。
+
+    Attributes:
+        task_id: 任务 ID
+        skill_name: 技能名称
+        prompt: 用户提示词
+        args: 技能参数
+        result: 执行结果
+        success: 是否成功
+        error_message: 错误信息
+        duration_ms: 执行时长
+        tools_used: 使用的工具列表
+        tool_call_records: 详细的工具调用记录
+        execution_log: 完整的执行日志
+        state_before: 执行前状态快照
+        state_after: 执行后状态快照
+    """
+    task_id: str
+    skill_name: str
+    prompt: str
+    args: dict[str, Any]
+    result: Any
+    success: bool
+    error_message: Optional[str] = None
+    duration_ms: Optional[int] = None
+    tools_used: Optional[list[str]] = None
+    tool_call_records: list[ToolCallRecord] = field(default_factory=list)
+    execution_log: str = ""
+    state_before: Optional[dict] = None
+    state_after: Optional[dict] = None
+
+
+def _utc_now() -> str:
+    """Get current UTC timestamp in ISO format."""
+    return datetime.now(timezone.utc).isoformat()
+
+
 class SOPStatus(str, Enum):
     """SOP lifecycle status."""
     PENDING = "pending"      # Awaiting review
