@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from pathlib import Path
 
@@ -88,6 +88,14 @@ class Channel(ABC):
 
     async def set_typing(self, jid: str, is_typing: bool) -> None:
         """Optional typing indicator — no-op by default."""
+
+    def set_enqueue(self, callback: Optional[Callable[[Any], None]]) -> None:
+        """Set the enqueue callback for queue-based message processing.
+
+        This is used by ChannelManager to enqueue inbound messages.
+        No-op by default for channels that don't use queue-based processing.
+        """
+        pass
 
 
 class StubChannel(Channel):

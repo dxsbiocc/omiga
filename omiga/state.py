@@ -16,6 +16,7 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 from omiga.channels.manager import ChannelManager
+from omiga.memory.manager import MemoryManager
 
 from omiga.database import (
     delete_registered_group,
@@ -66,6 +67,9 @@ _shutdown_event: Optional[asyncio.Event] = None
 # Channel manager for unified channel management
 _channel_manager: Optional[ChannelManager] = None
 
+# Memory manager for three-layer memory system
+_memory_manager: Optional[MemoryManager] = None
+
 
 # ---------------------------------------------------------------------------
 # State helpers
@@ -86,6 +90,10 @@ async def load_state() -> None:
     _sessions = await get_all_sessions()
     _registered_groups = await get_all_registered_groups()
     _all_chats_cache = await get_all_chats()
+
+    # Initialize memory system
+    await init_memory()
+
     logger.info(
         "State loaded: %d registered groups, %d known chats",
         len(_registered_groups),
@@ -96,6 +104,28 @@ async def load_state() -> None:
 async def save_state() -> None:
     await set_router_state("last_timestamp", _last_timestamp)
     await set_router_state("last_agent_timestamp", json.dumps(_last_agent_timestamp))
+
+
+async def init_memory() -> None:
+    """Initialize the memory manager."""
+    global _memory_manager
+    from omiga.config import DATA_DIR
+    from omiga.memory.manager import MemoryManager
+
+    memory_dir = DATA_DIR / "memory"
+    _memory_manager = MemoryManager(memory_dir)
+    await _memory_manager.initialize()
+    logger.info(
+        "Memory initialized: L1=%d topics, L2=%d sections, L3=%d active SOPs",
+        len(_memory_manager.get_index().topics),
+        len(_memory_manager.get_facts().entries),
+        len(_memory_manager.list_active_sops()),
+    )
+
+
+def get_memory_manager() -> Optional[MemoryManager]:
+    """Get the memory manager instance."""
+    return _memory_manager
 
 
 async def unregister_group(jid: str) -> None:

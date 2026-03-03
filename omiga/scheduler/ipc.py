@@ -17,7 +17,7 @@ import string
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import Any, TYPE_CHECKING, Callable, Optional
 
 from watchfiles import Change, awatch
 
@@ -46,10 +46,10 @@ class IpcDeps:
     def __init__(
         self,
         *,
-        send_message: Callable[[str, str], "asyncio.coroutine | asyncio.Future"],
+        send_message: Callable[[str, str], Any],
         registered_groups: Callable[[], dict[str, RegisteredGroup]],
         register_group: Callable[[str, RegisteredGroup], None],
-        sync_group_metadata: Callable[[bool], "asyncio.coroutine | asyncio.Future"],
+        sync_group_metadata: Callable[[bool], Any],
         get_available_groups: Callable[[], list[AvailableGroup]],
         write_groups_snapshot: Callable[[str, bool, list[AvailableGroup], set[str]], None],
     ) -> None:

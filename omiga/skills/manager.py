@@ -73,6 +73,9 @@ class SkillManager:
 
         try:
             skill_class = self._skill_classes[skill_name]
+            if self.context is None:
+                logger.error(f"Skill context not set for skill '{skill_name}'")
+                return False
             skill = skill_class(self.context)
             await skill.on_load()
             self._skills[skill_name] = skill
@@ -170,7 +173,7 @@ class SkillManager:
         Returns:
             List of available skill names
         """
-        skill_names = []
+        skill_names: list[str] = []
 
         if not self.skills_dir.exists():
             logger.warning(f"Skills directory does not exist: {self.skills_dir}")

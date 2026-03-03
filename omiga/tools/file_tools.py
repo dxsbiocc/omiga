@@ -14,7 +14,7 @@ class ReadFileTool(Tool):
     name = "read_file"
     description = "Read content from a file"
 
-    async def execute(self, path: str, **kwargs: Any) -> ToolResult:
+    async def execute(self, path: str, **kwargs: Any) -> ToolResult:  # type: ignore[override]
         """Read a file.
 
         Args:
@@ -68,7 +68,7 @@ class WriteFileTool(Tool):
         content: str,
         mode: str = "w",
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolResult:  # type: ignore[override]
         """Write to a file.
 
         Args:
@@ -126,7 +126,7 @@ class ListDirTool(Tool):
     name = "list_dir"
     description = "List contents of a directory"
 
-    async def execute(self, path: str, **kwargs: Any) -> ToolResult:
+    async def execute(self, path: str, **kwargs: Any) -> ToolResult:  # type: ignore[override]
         """List directory contents.
 
         Args:
@@ -183,7 +183,7 @@ class FileExistsTool(Tool):
     name = "file_exists"
     description = "Check if a file or directory exists"
 
-    async def execute(self, path: str, **kwargs: Any) -> ToolResult:
+    async def execute(self, path: str, **kwargs: Any) -> ToolResult:  # type: ignore[override]
         """Check if a path exists.
 
         Args:

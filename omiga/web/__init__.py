@@ -1,0 +1,1 @@
+"""Omiga Web Console package."""

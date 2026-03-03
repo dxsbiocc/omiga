@@ -6,15 +6,18 @@ Runs as a FastAPI app inside the main asyncio event loop (via uvicorn with
 
 Endpoints
 ---------
-GET  /                              health + uptime
-GET  /status                        channel status
-GET  /groups                        list registered groups
-POST /groups                        register a group
-DELETE /groups/{jid}                unregister a group
-GET  /chats                         list known chats (all, not just registered)
-GET  /tasks                         list scheduled tasks
-POST /tasks/{task_id}/run           trigger a task immediately
-GET  /workspace/backup              download workspace as zip
+GET  /                           redirect to Web Console
+GET  /console                    Web Console UI
+GET  /static/*                   Static files (JS, CSS)
+GET  /api                        health + uptime
+GET  /api/status                 channel status
+GET  /api/groups                 list registered groups
+POST /api/groups                 register a group
+DELETE /api/groups/{jid}         unregister a group
+GET  /api/chats                  list known chats
+GET  /api/tasks                  list scheduled tasks
+POST /api/tasks/{id}/run         trigger a task immediately
+GET  /api/workspace/backup       download workspace as zip
 
 Configuration
 -------------
@@ -76,16 +79,21 @@ def create_app(
     unregister_group_fn: Callable,
     groups_dir: Path,
     api_token: str = "",
+    serve_static: bool = True,
 ) -> Any:
     """Build and return the FastAPI app.
 
     All state is accessed through callables so the API always sees the latest
     in-memory state without coupling to global variables.
+
+    Args:
+        serve_static: If True, serve the Web Console static files
     """
     try:
         from fastapi import Depends, FastAPI, HTTPException, status
-        from fastapi.responses import StreamingResponse
+        from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse, RedirectResponse
         from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+        from fastapi.staticfiles import StaticFiles
     except ImportError as exc:
         raise RuntimeError("fastapi is required: pip install fastapi uvicorn") from exc
 
@@ -114,10 +122,37 @@ def create_app(
     _auth_dep = [Depends(_check_auth)]
 
     # ------------------------------------------------------------------
-    # Routes
+    # Static files and Web Console
+    # ------------------------------------------------------------------
+    if serve_static:
+        # Find the static files directory
+        import omiga.web
+        static_dir = Path(omiga.web.__file__).parent / "static"
+
+        if static_dir.exists():
+            # Mount static files at /static
+            app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+            # Serve index.html at /console
+            @app.get("/console", include_in_schema=False)
+            async def serve_console():
+                index_path = static_dir / "index.html"
+                if index_path.exists():
+                    return HTMLResponse(index_path.read_text(encoding="utf-8"))
+                raise HTTPException(404, "Console not found")
+
+            # Redirect / to /console for the web UI
+            @app.get("/", include_in_schema=False)
+            async def root_redirect():
+                return RedirectResponse(url="/console")
+        else:
+            logger.warning(f"Static files directory not found: {static_dir}")
+
+    # ------------------------------------------------------------------
+    # API Routes
     # ------------------------------------------------------------------
 
-    @app.get("/", include_in_schema=False, dependencies=_auth_dep)
+    @app.get("/api", include_in_schema=False)
     async def root():
         return {
             "service": "omiga",
@@ -125,7 +160,7 @@ def create_app(
             "time": _now_iso(),
         }
 
-    @app.get("/status", dependencies=_auth_dep)
+    @app.get("/api/status", dependencies=_auth_dep)
     async def get_status():
         channels = channels_fn()
         return {
@@ -138,7 +173,7 @@ def create_app(
             ],
         }
 
-    @app.get("/groups", dependencies=_auth_dep)
+    @app.get("/api/groups", dependencies=_auth_dep)
     async def list_groups():
         groups = registered_groups_fn()
         return [
@@ -152,7 +187,7 @@ def create_app(
             for jid, g in groups.items()
         ]
 
-    @app.post("/groups", status_code=201, dependencies=_auth_dep)
+    @app.post("/api/groups", status_code=201, dependencies=_auth_dep)
     async def register_group(body: GroupIn):
         groups = registered_groups_fn()
         if body.jid in groups:
@@ -163,7 +198,7 @@ def create_app(
             raise HTTPException(400, str(exc)) from exc
         return {"jid": body.jid, "name": body.name, "registered": True}
 
-    @app.delete("/groups/{jid}", status_code=200, dependencies=_auth_dep)
+    @app.delete("/api/groups/{jid}", status_code=200, dependencies=_auth_dep)
     async def unregister_group(jid: str):
         groups = registered_groups_fn()
         # URL-decode colon-like separators encoded by some HTTP clients
@@ -173,7 +208,7 @@ def create_app(
         await unregister_group_fn(jid)
         return {"jid": jid, "unregistered": True}
 
-    @app.get("/chats", dependencies=_auth_dep)
+    @app.get("/api/chats", dependencies=_auth_dep)
     async def list_chats():
         chats = await all_chats_fn()
         registered = set(registered_groups_fn().keys())
@@ -189,7 +224,7 @@ def create_app(
             for c in chats
         ]
 
-    @app.get("/tasks", dependencies=_auth_dep)
+    @app.get("/api/tasks", dependencies=_auth_dep)
     async def list_tasks():
         tasks = await get_tasks_fn()
         return [
@@ -207,7 +242,7 @@ def create_app(
             for t in tasks
         ]
 
-    @app.post("/tasks/{task_id}/run", status_code=202, dependencies=_auth_dep)
+    @app.post("/api/tasks/{task_id}/run", status_code=202, dependencies=_auth_dep)
     async def run_task(task_id: str):
         try:
             await run_task_fn(task_id)
@@ -217,7 +252,7 @@ def create_app(
             raise HTTPException(400, str(exc)) from exc
         return {"task_id": task_id, "queued": True}
 
-    @app.get("/workspace/backup", dependencies=_auth_dep)
+    @app.get("/api/workspace/backup", dependencies=_auth_dep)
     async def workspace_backup():
         """Stream all group folders as a zip archive."""
         if not groups_dir.exists():
@@ -277,4 +312,4 @@ async def start_api_server(
     server = uvicorn.Server(config)
     # Run server in background task
     asyncio.create_task(server.serve(), name="http-api-server")
-    logger.info("HTTP API listening on http://%s:%d", host, port)
+    logger.info("HTTP API (with Web Console) listening on http://%s:%d", host, port)

@@ -16,7 +16,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from omiga.config import DATA_DIR, MAX_CONCURRENT_CONTAINERS
 
@@ -30,7 +30,7 @@ BASE_RETRY_S = 5.0  # seconds (TS uses 5000ms)
 class _QueuedTask:
     id: str
     group_jid: str
-    fn: Callable[[], "asyncio.coroutine | asyncio.Future"]
+    fn: Callable[[], Any]
 
 
 @dataclass
@@ -62,7 +62,7 @@ class GroupQueue:
         return self._groups[jid]
 
     def set_process_messages_fn(
-        self, fn: Callable[[str], "asyncio.coroutine[bool]"]
+        self, fn: Callable[[str], Any]
     ) -> None:
         self._process_messages_fn = fn
 
@@ -97,7 +97,7 @@ class GroupQueue:
         self,
         jid: str,
         task_id: str,
-        fn: Callable[[], "asyncio.coroutine | asyncio.Future"],
+        fn: Callable[[], Any],
     ) -> None:
         if self._shutting_down:
             return

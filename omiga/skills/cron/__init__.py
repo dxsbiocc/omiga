@@ -23,7 +23,7 @@ class CronSkill(Skill):
         super().__init__(context)
         self._tasks_cache: Optional[list[dict]] = None
 
-    async def execute(self, action: str, **kwargs: Any) -> Any:
+    async def execute(self, action: str, **kwargs: Any) -> Any:  # type: ignore[override]
         """Execute the cron skill.
 
         Args:

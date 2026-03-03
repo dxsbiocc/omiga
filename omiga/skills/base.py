@@ -5,9 +5,12 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from omiga.memory.manager import MemoryManager
 
 
 @dataclass
@@ -32,12 +35,14 @@ class SkillContext:
         data_dir: Path to the data directory
         send_message: Async callback to send messages to a channel
         get_registered_groups: Get all registered groups
+        memory_manager: Optional memory manager for SOP generation
     """
 
     groups_dir: Path
     data_dir: Path
     send_message: Any = None  # Callable[[str, str], Awaitable[None]]
     get_registered_groups: Any = None  # Callable[[], dict[str, Any]]
+    memory_manager: Optional["MemoryManager"] = None
 
 
 class Skill(ABC):

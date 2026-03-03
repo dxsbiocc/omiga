@@ -109,7 +109,7 @@ async def _main_async() -> None:
     # Database
     await init_database()
     logger.info("Database initialized")
-    await state.load_state()
+    await state.load_state()  # Also initializes memory system
 
     # Auto-register the main group if configured via MAIN_GROUP_JID
     await bootstrap_main_group()
@@ -255,6 +255,7 @@ async def _main_async() -> None:
 
 
 def main() -> None:
+    """Main entry point - can be called from CLI or directly."""
     try:
         asyncio.run(_main_async())
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -262,6 +263,11 @@ def main() -> None:
     except Exception as err:
         logger.critical("Failed to start Omiga: %s", err)
         sys.exit(1)
+
+
+def run_omiga() -> None:
+    """Alias for main() - used by CLI."""
+    main()
 
 
 if __name__ == "__main__":

@@ -46,7 +46,7 @@ class ExecuteCommandTool(Tool):
         command: str,
         timeout: int = 60,
         **kwargs: Any,
-    ) -> ToolResult:
+    ) -> ToolResult:  # type: ignore[override]
         """Execute a shell command.
 
         Args:

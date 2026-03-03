@@ -18,7 +18,7 @@ from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from omiga.config import ASSISTANT_NAME, MAIN_GROUP_FOLDER, TIMEZONE
-from omiga.container.runner import write_tasks_snapshot
+from omiga.container.runner import ContainerOutput, run_container_agent, write_tasks_snapshot
 from omiga.database import (
     get_all_tasks,
     get_task_by_id,
@@ -51,7 +51,7 @@ class SchedulerDeps:
         on_process: Callable[
             [str, asyncio.subprocess.Process, str, str], None
         ],
-        send_message: Callable[[str, str], "asyncio.coroutine | asyncio.Future"],
+        send_message: Callable[[str, str], Any],
     ) -> None:
         self.registered_groups = registered_groups
         self.get_sessions = get_sessions

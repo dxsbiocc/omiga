@@ -66,7 +66,7 @@ class FileReaderSkill(Skill):
         action: str = "read",
         lines: Optional[int] = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> Any:  # type: ignore[override]
         """Execute the file reader skill.
 
         Args:

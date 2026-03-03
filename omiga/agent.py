@@ -1,11 +1,13 @@
 """Container agent runner for Omiga.
 
 Handles spawning container agents, session management, and session-corruption
-auto-recovery.
+auto-recovery. Also integrates with the memory system to generate SOPs from
+successful executions and record lessons from failures.
 """
 from __future__ import annotations
 
 import logging
+import asyncio
 
 import omiga.state as state
 from omiga.config import ASSISTANT_NAME, MAIN_GROUP_FOLDER
@@ -17,6 +19,7 @@ from omiga.container.runner import (
 )
 from omiga.database import get_all_chats, get_all_tasks, set_session
 from omiga.models import AvailableGroup, ContainerInput, RegisteredGroup
+from omiga.memory.sop_generator import SOPGenerator, TaskExecution
 
 logger = logging.getLogger("omiga.agent")
 
@@ -39,6 +42,45 @@ def effective_trigger(channel):
     """Return the trigger pattern for *channel*, preferring the channel's own."""
     from omiga.config import TRIGGER_PATTERN
     return channel.trigger_pattern or TRIGGER_PATTERN
+
+
+async def _generate_sop_from_execution(
+    group: RegisteredGroup,
+    prompt: str,
+    output: ContainerOutput,
+    success: bool,
+    duration_ms: int = 0,
+) -> None:
+    """Generate SOP or lesson from agent execution.
+
+    This is called after each agent execution to capture learnings.
+    Runs asynchronously in the background to avoid blocking the main flow.
+    """
+    try:
+        memory_manager = state.get_memory_manager()
+        if not memory_manager:
+            return
+
+        generator = SOPGenerator(memory_manager)
+
+        # Create task execution record
+        execution = TaskExecution(
+            task_id=f"{group.folder}_{duration_ms}",
+            skill_name="container_agent",
+            prompt=prompt,
+            args={},
+            result=output.result if success else None,
+            success=success,
+            error_message=output.error if not success else None,
+            duration_ms=duration_ms,
+            tools_used=None,  # Would need to extract from container output
+        )
+
+        # Generate SOP (success) or lesson (failure)
+        await generator.generate(execution)
+
+    except Exception as e:
+        logger.debug(f"SOP generation failed: {e}")
 
 
 async def run_agent(
@@ -127,8 +169,12 @@ async def run_agent(
                     await set_session(group.folder, "")
                     continue  # retry with session_id=None
                 logger.error("Container agent error: group=%s error=%s", group.name, output.error)
+                # Record lesson from failure (async, non-blocking)
+                asyncio.create_task(_generate_sop_from_execution(group, prompt, output, False))
                 return "error"
 
+            # Success - generate SOP from execution (async, non-blocking)
+            asyncio.create_task(_generate_sop_from_execution(group, prompt, output, True))
             return "success"
 
         except Exception as err:
