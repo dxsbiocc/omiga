@@ -16,7 +16,7 @@ import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from omiga.config import (
     ASSISTANT_NAME,
@@ -158,7 +158,7 @@ def _use_direct_mode() -> bool:
     return os.environ.get("NANOCLAW_DIRECT_MODE", "").strip() == "1" and _PY_RUNNER_SCRIPT.exists()
 
 
-OnOutputCallback = Callable[[ContainerOutput], "asyncio.coroutine | None"]
+OnOutputCallback = Callable[[ContainerOutput], Any]
 
 
 def _read_secrets() -> dict[str, str]:
@@ -176,7 +176,8 @@ def _read_secrets() -> dict[str, str]:
       AI_MODEL     — model name        (e.g. deepseek-chat, qwen-plus)
     """
     from dotenv import dotenv_values
-    env_file = Path(__file__).parent.parent / ".env"
+    # .env file is at project root (parent of omiga package directory)
+    env_file = Path(__file__).parent.parent.parent / ".env"
     env = dotenv_values(str(env_file)) if env_file.exists() else {}
     secrets: dict[str, str] = {}
     for key in (
@@ -378,7 +379,7 @@ async def _spawn_direct(
     group: RegisteredGroup,
     input_data: ContainerInput,
     on_process: Callable[[asyncio.subprocess.Process, str], None],
-) -> tuple[asyncio.subprocess.Process, bytes]:
+) -> tuple[asyncio.subprocess.Process, str]:
     """Run agent.py directly as a subprocess (no Docker required)."""
     import sys
 
@@ -418,7 +419,7 @@ async def run_container_agent(
     group: RegisteredGroup,
     input_data: ContainerInput,
     on_process: Callable[[asyncio.subprocess.Process, str], None],
-    on_output: Optional[Callable[[ContainerOutput], asyncio.coroutines]] = None,
+    on_output: Optional[Callable[[ContainerOutput], Any]] = None,
 ) -> ContainerOutput:
     """
     Spawn an agent, feed it JSON via stdin, stream sentinel-wrapped
@@ -434,6 +435,7 @@ async def run_container_agent(
 
     input_json = _build_input_json(input_data)
 
+    container_name: str
     if _use_direct_mode():
         proc, container_name = await _spawn_direct(group, input_data, on_process)
     else:
@@ -664,10 +666,24 @@ async def run_container_agent(
     if code != 0:
         error_msg = f"Container exited with code {code}: {stderr_str[-200:]}"
         dump = write_error_dump(group, input_data, error_msg, stderr_str, duration_ms, code)
-        logger.error(
-            "Container exited with error: group=%s code=%d duration=%dms dump=%s",
-            group.name, code, duration_ms, dump.name,
-        )
+
+        # Check if shutting down (exit code 130 = SIGINT, 137 = SIGKILL, 143 = SIGTERM)
+        # These are expected during graceful shutdown
+        import omiga.state as state
+        is_shutdown = state._shutdown_event is not None and state._shutdown_event.is_set()
+        is_signal_exit = code in (130, 137, 143)
+
+        if is_shutdown and is_signal_exit:
+            logger.info(
+                "Container stopped (shutdown): group=%s code=%d duration=%dms",
+                group.name, code, duration_ms,
+            )
+        else:
+            logger.error(
+                "Container exited with error: group=%s code=%d duration=%dms dump=%s",
+                group.name, code, duration_ms, dump.name,
+            )
+
         return ContainerOutput(status="error", result=None, error=error_msg)
 
     if on_output:

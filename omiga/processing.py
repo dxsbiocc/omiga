@@ -222,6 +222,14 @@ async def process_group_messages(chat_jid: str) -> bool:
         idle_timer.cancel()
 
     if status == "error" or had_error:
+        # Check if shutting down - skip error notifications during shutdown
+        if state._shutdown_event is not None and state._shutdown_event.is_set():
+            logger.info(
+                "Agent stopped (shutdown): group=%s", group.name
+            )
+            state._consecutive_errors.pop(chat_jid, None)
+            return True
+
         if output_sent:
             logger.warning(
                 "Agent error after output sent, skipping cursor rollback: group=%s", group.name
