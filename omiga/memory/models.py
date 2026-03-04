@@ -159,6 +159,9 @@ class SOP:
         updated_at: Last modification timestamp
         executed_count: Number of times this SOP was executed
         last_executed_at: Last execution timestamp
+        success_count: Number of successful executions
+        failure_count: Number of failed executions
+        confidence_score: Auto-calculated confidence (0.0-1.0)
     """
     name: str
     sop_type: SOPType
@@ -174,12 +177,78 @@ class SOP:
     updated_at: str = field(default_factory=_utc_now)
     executed_count: int = 0
     last_executed_at: Optional[str] = None
+    success_count: int = 0
+    failure_count: int = 0
+    confidence_score: float = 0.5  # Base confidence
 
     def __post_init__(self):
         if not self.id:
             # Generate stable ID from name + creation date
             hash_input = f"{self.name}:{self.created_at}"
             self.id = hashlib.sha256(hash_input.encode()).hexdigest()[:12]
+
+        # Calculate initial confidence from metadata if available
+        if "confidence" in self.metadata:
+            self.confidence_score = self.metadata["confidence"]
+
+    def calculate_confidence(self) -> float:
+        """Calculate confidence score based on execution history.
+
+        Returns:
+            Confidence score between 0.0 and 1.0
+        """
+        if self.executed_count == 0:
+            return self.confidence_score
+
+        # Success rate component (50% weight)
+        success_rate = self.success_count / self.executed_count
+        success_component = success_rate * 0.5
+
+        # Volume component (30% weight) - more executions = more confident
+        volume_component = min(self.executed_count / 10, 1.0) * 0.3
+
+        # Recency component (20% weight) - recent success = more confident
+        recency_component = 0.2
+        if self.last_executed_at:
+            try:
+                from datetime import datetime, timezone
+                last_exec = datetime.fromisoformat(self.last_executed_at)
+                days_since = (datetime.now(timezone.utc) - last_exec).days
+                # Within 7 days = full points, decay after that
+                recency_component = 0.2 * max(0, 1 - days_since / 30)
+            except Exception:
+                pass
+
+        self.confidence_score = success_component + volume_component + recency_component
+        return self.confidence_score
+
+    def can_auto_approve(self) -> bool:
+        """Check if SOP meets auto-approval criteria.
+
+        Criteria:
+        - Confidence score > 0.7
+        - At least 3 successful executions
+        - Success rate > 80%
+        - No failures in last 5 executions
+
+        Returns:
+            True if SOP should be auto-approved
+        """
+        if self.executed_count < 3:
+            return False
+        if self.success_count < 3:
+            return False
+
+        success_rate = self.success_count / self.executed_count
+        if success_rate < 0.8:
+            return False
+
+        # Check recent executions (from metadata)
+        recent_failures = self.metadata.get("recent_failures", 0)
+        if recent_failures > 0:
+            return False
+
+        return self.calculate_confidence() > 0.7
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -197,6 +266,9 @@ class SOP:
             "updated_at": self.updated_at,
             "executed_count": self.executed_count,
             "last_executed_at": self.last_executed_at,
+            "success_count": self.success_count,
+            "failure_count": self.failure_count,
+            "confidence_score": self.confidence_score,
         }
 
     @classmethod
@@ -217,6 +289,9 @@ class SOP:
             updated_at=data.get("updated_at", _utc_now()),
             executed_count=data.get("executed_count", 0),
             last_executed_at=data.get("last_executed_at"),
+            success_count=data.get("success_count", 0),
+            failure_count=data.get("failure_count", 0),
+            confidence_score=data.get("confidence_score", 0.5),
         )
 
     def to_markdown(self) -> str:
@@ -228,6 +303,9 @@ class SOP:
             SOPStatus.REJECTED: "❌",
         }.get(self.status, "❓")
 
+        # Calculate success rate for display
+        success_rate = (self.success_count / self.executed_count * 100) if self.executed_count > 0 else 0
+
         lines = [
             f"# SOP: {self.name}",
             "",
@@ -237,6 +315,8 @@ class SOP:
             f"**类型**: {self.sop_type.value}",
             f"**创建时间**: {self.created_at}",
             f"**执行次数**: {self.executed_count}",
+            f"**成功/失败**: {self.success_count}/{self.failure_count} (成功率 {success_rate:.0f}%)",
+            f"**置信度**: {self.confidence_score:.2f}",
             f"**最后执行**: {self.last_executed_at or '从未'}",
             "",
             "---",
@@ -299,6 +379,7 @@ class SOP:
         content = path.read_text(encoding="utf-8")
         # Simple parsing - can be enhanced
         data = {
+            "id": "",
             "name": "",
             "sop_type": "skill",
             "status": "pending",
@@ -319,13 +400,33 @@ class SOP:
             if line.startswith("# SOP:"):
                 data["name"] = line.replace("# SOP:", "").strip()
             elif line.startswith("**ID**"):
-                data.setdefault("metadata", {})["id"] = line.split("**")[2].strip()
+                # Extract ID from "**ID**: `abc123`"
+                parts = line.split("**")
+                if len(parts) >= 3:
+                    id_val = parts[2].strip()
+                    # Remove leading ":" and whitespace
+                    if id_val.startswith(":"):
+                        id_val = id_val[1:].strip()
+                    # Remove backticks
+                    id_val = id_val.strip("`")
+                else:
+                    id_val = ""
+                data["id"] = id_val
             elif line.startswith("**来源任务**"):
                 data["task_id"] = line.split("**")[2].strip()
             elif line.startswith("**类型**"):
-                data["sop_type"] = line.split("**")[2].strip()
+                # Extract value after ": " e.g., "**类型**: workflow" -> "workflow"
+                type_val = line.split("**")[2].strip()
+                if type_val.startswith(":"):
+                    type_val = type_val[1:].strip()
+                data["sop_type"] = type_val
             elif line.startswith("**状态**"):
-                status_text = line.split("**")[2].strip().split()[0]
+                # Extract status value, e.g., "**状态**: pending ⏳" -> "pending"
+                status_text = line.split("**")[2].strip()
+                if status_text.startswith(":"):
+                    status_text = status_text[1:].strip()
+                # Remove emoji and take first word
+                status_text = status_text.split()[0] if status_text else ""
                 data["status"] = status_text
             elif line.startswith("## 前置条件"):
                 current_section = "prerequisites"

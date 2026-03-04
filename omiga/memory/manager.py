@@ -546,23 +546,73 @@ class MemoryManager:
         return None
 
     def record_sop_execution(self, sop_id: str, success: bool) -> None:
-        """Record SOP execution for statistics.
+        """Record SOP execution for statistics and auto-approval.
 
         Args:
             sop_id: SOP that was executed
             success: Whether execution succeeded
         """
         if sop_id not in self._sops:
-            return
+            # Try to find in pending
+            sop = self._find_sop_by_id(sop_id)
+            if not sop:
+                return
+        else:
+            sop = self._sops[sop_id]
 
-        sop = self._sops[sop_id]
         sop.executed_count += 1
         sop.last_executed_at = _utc_now()
         sop.updated_at = _utc_now()
 
-        # Save updated metadata
-        sop_file = self._active_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
+        if success:
+            sop.success_count += 1
+        else:
+            sop.failure_count += 1
+            # Track recent failures for auto-approval
+            sop.metadata["recent_failures"] = sop.metadata.get("recent_failures", 0) + 1
+            # Reset recent failures after 5 successful executions
+            if sop.success_count > 5:
+                sop.metadata["recent_failures"] = 0
+
+        # Recalculate confidence
+        sop.calculate_confidence()
+
+        # Save updated SOP
+        if sop.status == SOPStatus.ACTIVE:
+            sop_file = self._active_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
+        elif sop.status == SOPStatus.PENDING:
+            sop_file = self._pending_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
+        else:
+            sop_file = self._archived_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
+
         sop_file.write_text(sop.to_markdown(), encoding="utf-8")
+
+        # Auto-approve if criteria met (only for pending SOPs)
+        if sop.status == SOPStatus.PENDING and sop.can_auto_approve():
+            logger.info(
+                f"SOP {sop_id} meets auto-approval criteria: "
+                f"executed={sop.executed_count}, success={sop.success_count}, "
+                f"confidence={sop.confidence_score:.2f}"
+            )
+            self.approve_sop(sop_id)
+
+    def check_and_auto_approve_sops(self) -> list[str]:
+        """Check all pending SOPs for auto-approval criteria.
+
+        Returns:
+            List of SOP IDs that were auto-approved
+        """
+        approved = []
+        for sop in self.list_pending_sops():
+            if sop.can_auto_approve():
+                logger.info(
+                    f"Auto-approving SOP {sop.id}: "
+                    f"executed={sop.executed_count}, success_rate={sop.success_count/sop.executed_count:.0%}, "
+                    f"confidence={sop.confidence_score:.2f}"
+                )
+                if self.approve_sop(sop.id):
+                    approved.append(sop.id)
+        return approved
 
     # -------------------------------------------------------------------------
     # Lesson Management (Failure Learning)

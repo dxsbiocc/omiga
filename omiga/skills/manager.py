@@ -125,7 +125,10 @@ class SkillManager:
         skill_name: str,
         **kwargs: Any,
     ) -> Any:
-        """Execute a skill.
+        """Execute a skill with trace recording.
+
+        Uses execute_with_trace() to automatically record tool calls
+        and execution logs for SOP generation.
 
         Args:
             skill_name: Name of the skill to execute
@@ -144,7 +147,8 @@ class SkillManager:
 
         skill = self._skills[skill_name]
         try:
-            return await skill.execute(**kwargs)
+            # Use execute_with_trace to enable automatic trace recording
+            return await skill.execute_with_trace(**kwargs)
         except Exception as e:
             raise SkillError(str(e), skill_name)
 

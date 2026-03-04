@@ -352,3 +352,118 @@ class TestLessonGeneration:
         assert "failing_skill" in content
         assert "Permission denied" in content
         assert "建议恢复步骤" in content
+
+
+class TestSOPAutoApproval:
+    """测试 SOP 自动批准机制。"""
+
+    @pytest.mark.asyncio
+    async def test_sop_can_auto_approve_with_good_stats(self, memory_manager):
+        """测试 SOP 满足条件时可以自动批准。"""
+        from omiga.memory.models import SOP, SOPType, SOPStatus
+
+        # 创建一个有高成功率的 SOP
+        sop = SOP(
+            name="Test Auto Approve SOP",
+            sop_type=SOPType.WORKFLOW,
+            task_id="test-001",
+            status=SOPStatus.PENDING,
+            steps=["Step 1", "Step 2", "Step 3"],
+        )
+        # 模拟执行历史：5 次成功，1 次失败
+        sop.executed_count = 6
+        sop.success_count = 5
+        sop.failure_count = 1
+        sop.confidence_score = 0.75
+
+        # 应该满足自动批准条件
+        assert sop.can_auto_approve() == True
+
+    @pytest.mark.asyncio
+    async def test_sop_cannot_auto_approve_with_low_executions(self, memory_manager):
+        """测试执行次数不足时不能自动批准。"""
+        from omiga.memory.models import SOP, SOPType, SOPStatus
+
+        sop = SOP(
+            name="Test Low Execution SOP",
+            sop_type=SOPType.WORKFLOW,
+            task_id="test-002",
+            status=SOPStatus.PENDING,
+            steps=["Step 1"],
+        )
+        # 只有 2 次执行
+        sop.executed_count = 2
+        sop.success_count = 2
+        sop.failure_count = 0
+
+        # 执行次数不足 3 次，不应批准
+        assert sop.can_auto_approve() == False
+
+    @pytest.mark.asyncio
+    async def test_sop_cannot_auto_approve_with_low_success_rate(self, memory_manager):
+        """测试成功率低时不能自动批准。"""
+        from omiga.memory.models import SOP, SOPType, SOPStatus
+
+        sop = SOP(
+            name="Test Low Success Rate SOP",
+            sop_type=SOPType.WORKFLOW,
+            task_id="test-003",
+            status=SOPStatus.PENDING,
+            steps=["Step 1"],
+        )
+        # 50% 成功率
+        sop.executed_count = 10
+        sop.success_count = 5
+        sop.failure_count = 5
+
+        # 成功率低于 80%，不应批准
+        assert sop.can_auto_approve() == False
+
+    @pytest.mark.asyncio
+    async def test_record_sop_execution_updates_stats(self, memory_manager):
+        """测试记录执行会更新统计数据。"""
+        from omiga.memory.models import SOP, SOPType, SOPStatus
+
+        # 创建 SOP 并保存到 pending
+        sop = SOP(
+            name="Test Record Execution SOP",
+            sop_type=SOPType.WORKFLOW,
+            task_id="test-004",
+            status=SOPStatus.PENDING,
+            steps=["Step 1"],
+        )
+        sop_file = memory_manager._pending_dir / f"SOP_{sop.id}_{sop.name.replace(' ', '_')}.md"
+        sop_file.write_text(sop.to_markdown(), encoding="utf-8")
+
+        # 记录执行
+        memory_manager.record_sop_execution(sop.id, success=True)
+
+        # 验证文件内容包含更新的统计信息
+        content = sop_file.read_text(encoding="utf-8")
+        assert "**执行次数**: 1" in content
+        assert "**成功/失败**: 1/0" in content
+
+    @pytest.mark.asyncio
+    async def test_calculate_confidence_score(self, memory_manager):
+        """测试置信度分数计算。"""
+        from omiga.memory.models import SOP, SOPType, SOPStatus
+
+        sop = SOP(
+            name="Test Confidence SOP",
+            sop_type=SOPType.WORKFLOW,
+            task_id="test-005",
+            status=SOPStatus.PENDING,
+            steps=["Step 1"],
+        )
+
+        # 初始置信度
+        assert sop.confidence_score == 0.5
+
+        # 模拟多次成功执行
+        sop.executed_count = 10
+        sop.success_count = 10
+        sop.failure_count = 0
+
+        # 计算置信度应该大于 0.5
+        confidence = sop.calculate_confidence()
+        assert confidence > 0.5

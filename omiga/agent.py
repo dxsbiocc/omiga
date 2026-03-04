@@ -55,6 +55,7 @@ async def _generate_sop_from_execution(
 
     This is called after each agent execution to capture learnings.
     Runs asynchronously in the background to avoid blocking the main flow.
+    Also records SOP execution statistics for auto-approval.
     """
     try:
         memory_manager = state.get_memory_manager()
@@ -95,7 +96,15 @@ async def _generate_sop_from_execution(
         )
 
         # Generate SOP (success) or lesson (failure)
-        await generator.generate(execution)
+        sop = await generator.generate(execution)
+
+        # Record SOP execution for auto-approval tracking
+        if sop:
+            memory_manager.record_sop_execution(sop.id, success)
+            logger.debug(
+                f"Recorded SOP execution: {sop.id} success={success} "
+                f"total={sop.executed_count} success_rate={sop.success_count/max(1,sop.executed_count):.0%}"
+            )
 
     except Exception as e:
         logger.debug(f"SOP generation failed: {e}")
