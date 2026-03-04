@@ -100,9 +100,28 @@ class OmigaSettings(BaseSettings):
         if not v:
             # 自动检测时区
             try:
-                local_tz = datetime.now().astimezone().tzinfo
-                if local_tz:
-                    return str(local_tz)
+                # 使用 tzname 获取系统时区缩写，然后映射到 IANA 时区
+                import time
+                tzname = time.tzname[0] if time.daylight == 0 else time.tzname[1]
+
+                # CST 有多种可能，在中国通常指 Asia/Shanghai
+                if tzname == "CST":
+                    return "Asia/Shanghai"
+
+                # 尝试使用 zoneinfo 获取标准时区名
+                try:
+                    import zoneinfo
+                    # 从系统获取本地时区
+                    local = datetime.now().astimezone()
+                    # 使用 offset 来查找匹配的时区
+                    offset = local.utcoffset().total_seconds() / 3600
+                    tz = zoneinfo.ZoneInfo(local.tzname() if not tzname.startswith(("GMT", "UTC")) else f"Etc/GMT{ '+' if offset < 0 else '-' }{abs(offset):.0f}")
+                    return str(tz)
+                except Exception:
+                    pass
+
+                # 回退到 UTC
+                return "UTC"
             except Exception:
                 pass
             return "UTC"
