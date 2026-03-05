@@ -53,7 +53,7 @@ class GroupQueue:
         self._groups: dict[str, _GroupState] = {}
         self._active_count: int = 0
         self._waiting_groups: deque[str] = deque()
-        self._process_messages_fn: Optional[Callable[[str], "asyncio.coroutine[bool]"]] = None
+        self._process_messages_fn: Optional[Callable[[str], Any]] = None
         self._shutting_down: bool = False
 
     def _get_group(self, jid: str) -> _GroupState:

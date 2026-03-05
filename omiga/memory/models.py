@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 
 def _utc_now() -> str:
@@ -66,11 +66,6 @@ class TaskExecution:
     execution_log: str = ""
     state_before: Optional[dict] = None
     state_after: Optional[dict] = None
-
-
-def _utc_now() -> str:
-    """Get current UTC timestamp in ISO format."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 class SOPStatus(str, Enum):
@@ -391,8 +386,8 @@ class SOP:
             "metadata": {},
         }
 
-        current_section = None
-        current_list = None
+        current_section: Optional[str] = None
+        current_list: Optional[List[str]] = None
 
         for line in content.splitlines():
             line = line.strip()
@@ -430,13 +425,13 @@ class SOP:
                 data["status"] = status_text
             elif line.startswith("## 前置条件"):
                 current_section = "prerequisites"
-                current_list = data["prerequisites"]
+                current_list = data["prerequisites"]  # type: ignore[assignment]
             elif line.startswith("## 执行步骤"):
                 current_section = "steps"
-                current_list = data["steps"]
+                current_list = data["steps"]  # type: ignore[assignment]
             elif line.startswith("## 避坑指南"):
                 current_section = "pitfalls"
-                current_list = data["pitfalls"]
+                current_list = data["pitfalls"]  # type: ignore[assignment]
             elif line.startswith("## "):
                 current_section = None
                 current_list = None

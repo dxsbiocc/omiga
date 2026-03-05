@@ -16,12 +16,48 @@ from omiga.agent import effective_trigger, run_agent
 from omiga.api.admin_commands import handle_admin_command, handle_task_command, is_admin_command
 from omiga.config import ASSISTANT_NAME, IDLE_TIMEOUT, MAIN_GROUP_FOLDER, MAIN_GROUP_JID
 from omiga.container.runner import ContainerOutput
-from omiga.database import get_all_tasks, get_messages_since
+from omiga.database import get_all_tasks, get_messages_since, get_recent_messages
 from omiga.group_folder import resolve_group_folder_path
 from omiga.models import RegisteredGroup
 from omiga.router import find_channel, format_messages, format_outbound, parse_file_directives
+from omiga.state import AgentState
 
 logger = logging.getLogger("omiga.processing")
+
+
+def is_stuck(chat_jid: str, max_duplicates: int = 2, messages: Optional[list] = None) -> bool:
+    """Detect if agent is stuck in a loop by checking for duplicate responses.
+
+    Args:
+        chat_jid: Group/chat identifier
+        max_duplicates: Number of duplicate responses to trigger detection
+        messages: Optional pre-fetched messages (to avoid sync call)
+
+    Returns:
+        True if agent appears to be stuck in a loop
+    """
+    try:
+        if messages is None:
+            return False  # Skip synchronous check
+
+        if len(messages) < 2:
+            return False
+
+        # Check recent assistant messages for duplicates
+        assistant_contents = [
+            m.content for m in messages if not m.is_from_me and m.content
+        ]
+        if len(assistant_contents) < 2:
+            return False
+
+        last_content = assistant_contents[-1]
+        duplicate_count = sum(
+            1 for c in assistant_contents[:-1] if c == last_content
+        )
+        return duplicate_count >= max_duplicates
+    except Exception as e:
+        logger.debug(f"is_stuck check failed: {e}")
+        return False
 
 
 async def notify_error(group: RegisteredGroup, chat_jid: str) -> None:
@@ -119,7 +155,10 @@ async def process_admin_command(
 
 
 async def process_group_messages(chat_jid: str) -> bool:
-    """Process all pending messages for a group (called by GroupQueue)."""
+    """Process all pending messages for a group (called by GroupQueue).
+
+    Integrates agent state tracking and stuck detection.
+    """
     group = state._registered_groups.get(chat_jid)
     if not group:
         return True
@@ -127,6 +166,12 @@ async def process_group_messages(chat_jid: str) -> bool:
     channel = find_channel(state._channels, chat_jid)
     if not channel:
         logger.warning("No channel owns JID, skipping: jid=%s", chat_jid)
+        return True
+
+    # Check agent state - skip if already running
+    current_state = state.get_agent_state(chat_jid)
+    if current_state == AgentState.RUNNING:
+        logger.warning("Agent already running, skipping: jid=%s", chat_jid)
         return True
 
     is_main_group = group.folder == MAIN_GROUP_FOLDER
@@ -158,6 +203,9 @@ async def process_group_messages(chat_jid: str) -> bool:
     await state.save_state()
 
     logger.info("Processing messages: group=%s count=%d", group.name, len(missed))
+
+    # Set agent state to RUNNING
+    state.set_agent_state(chat_jid, AgentState.RUNNING)
 
     idle_timer: Optional[asyncio.TimerHandle] = None
     loop = asyncio.get_event_loop()
@@ -215,12 +263,45 @@ async def process_group_messages(chat_jid: str) -> bool:
         if result.status == "error":
             had_error = True
 
-    status = await run_agent(group, prompt, chat_jid, _on_output)
+    try:
+        status = await run_agent(group, prompt, chat_jid, _on_output)
 
-    await channel.set_typing(chat_jid, False)
-    if idle_timer:
-        idle_timer.cancel()
+        # Check for stuck state (get recent messages for analysis)
+        recent_messages = await get_recent_messages(chat_jid, limit=4)
+        if is_stuck(chat_jid, messages=recent_messages):
+            logger.warning(
+                "Agent stuck detected (duplicate responses), advancing cursor: group=%s",
+                group.name,
+            )
+            state.reset_agent_retry(chat_jid)
+            state.set_agent_state(chat_jid, AgentState.IDLE)
+            return True
 
+        # Update state based on result
+        if status == "error" or had_error:
+            retry_count = state.increment_agent_retry(chat_jid)
+            logger.warning(
+                "Agent error (retry %d): group=%s", retry_count, group.name
+            )
+            state.set_agent_state(chat_jid, AgentState.ERROR)
+        else:
+            state.reset_agent_retry(chat_jid)
+            state.set_agent_state(chat_jid, AgentState.IDLE)
+
+    except Exception as e:
+        logger.error("Agent exception: group=%s err=%s", group.name, e)
+        state.set_agent_state(chat_jid, AgentState.ERROR)
+        retry_count = state.increment_agent_retry(chat_jid)
+
+        # Re-raise to let caller handle
+        raise
+
+    finally:
+        await channel.set_typing(chat_jid, False)
+        if idle_timer:
+            idle_timer.cancel()
+
+    # Handle error cases with retry tracking
     if status == "error" or had_error:
         # Check if shutting down - skip error notifications during shutdown
         if state._shutdown_event is not None and state._shutdown_event.is_set():
@@ -236,6 +317,7 @@ async def process_group_messages(chat_jid: str) -> bool:
             )
             state._consecutive_errors.pop(chat_jid, None)
             return True
+
         consecutive = state._consecutive_errors.get(chat_jid, 0) + 1
         state._consecutive_errors[chat_jid] = consecutive
         if consecutive > state.MAX_ROLLBACK_RETRIES:
@@ -246,6 +328,7 @@ async def process_group_messages(chat_jid: str) -> bool:
             state._consecutive_errors.pop(chat_jid, None)
             await notify_error(group, chat_jid)
             return True
+
         state._last_agent_timestamp[chat_jid] = previous_cursor
         await state.save_state()
         logger.warning(

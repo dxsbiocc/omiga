@@ -534,7 +534,7 @@ class SOPGenerator:
         """
         lines = [
             f"**技能**: {execution.skill_name}",
-            f"**错误**: {execution.error_message[:200]}",
+            f"**错误**: {(execution.error_message or '')[:200]}",
             "",
             "**建议恢复步骤**:",
             "1. 检查错误信息和日志",

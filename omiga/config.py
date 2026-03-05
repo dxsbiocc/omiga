@@ -114,8 +114,14 @@ class OmigaSettings(BaseSettings):
                     # 从系统获取本地时区
                     local = datetime.now().astimezone()
                     # 使用 offset 来查找匹配的时区
-                    offset = local.utcoffset().total_seconds() / 3600
-                    tz = zoneinfo.ZoneInfo(local.tzname() if not tzname.startswith(("GMT", "UTC")) else f"Etc/GMT{ '+' if offset < 0 else '-' }{abs(offset):.0f}")
+                    offset_delta = local.utcoffset()
+                    if offset_delta is None:
+                        return "UTC"
+                    offset = offset_delta.total_seconds() / 3600
+                    tzname_local = local.tzname()
+                    if tzname_local is None:
+                        return "UTC"
+                    tz = zoneinfo.ZoneInfo(tzname_local if not tzname.startswith(("GMT", "UTC")) else f"Etc/GMT{ '+' if offset < 0 else '-' }{abs(offset):.0f}")
                     return str(tz)
                 except Exception:
                     pass
@@ -215,7 +221,7 @@ IDLE_TIMEOUT: int = _settings_instance.idle_timeout
 MAX_CONCURRENT_CONTAINERS: int = _settings_instance.max_concurrent_containers
 
 # Timezone
-TIMEZONE: str = _settings_instance.timezone
+TIMEZONE: str = _settings_instance.timezone or "UTC"
 
 # HTTP API
 HTTP_API_PORT: int = _settings_instance.http_api_port

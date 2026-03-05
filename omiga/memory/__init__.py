@@ -31,10 +31,13 @@ from omiga.memory.models import (
     SOPType,
 )
 from omiga.memory.sop_generator import SOPGenerator, TaskExecution
+from omiga.memory.agent_memory import AgentMemory
 
 __all__ = [
     # Manager
     "MemoryManager",
+    # Working Memory
+    "AgentMemory",
     # Models
     "SOP",
     "SOPStatus",

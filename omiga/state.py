@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
 from omiga.channels.manager import ChannelManager
@@ -30,11 +31,28 @@ from omiga.database import (
 from omiga.group_folder import resolve_group_folder_path
 from omiga.group_queue import GroupQueue
 from omiga.models import AvailableGroup, ChatInfo, RegisteredGroup
+from omiga.agent import AgentSession
+from omiga.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from omiga.channels.base import Channel
 
 logger = logging.getLogger("omiga.state")
+
+
+# ---------------------------------------------------------------------------
+# Agent state enums (tracking per-group agent execution state)
+# ---------------------------------------------------------------------------
+
+
+class AgentState(str, Enum):
+    """Agent execution state machine."""
+
+    IDLE = "IDLE"  # Idle, ready to accept new messages
+    RUNNING = "RUNNING"  # Currently executing
+    FINISHED = "FINISHED"  # Execution completed
+    ERROR = "ERROR"  # Error state
+
 
 # ---------------------------------------------------------------------------
 # Global state (mirrors index.ts module-level vars)
@@ -45,6 +63,12 @@ _sessions: dict[str, str] = {}
 _registered_groups: dict[str, RegisteredGroup] = {}
 _last_agent_timestamp: dict[str, str] = {}
 _message_loop_running: bool = False
+
+# Agent state tracking per group (chat_jid -> AgentState)
+_agent_states: dict[str, AgentState] = {}
+
+# Agent retry count per group (chat_jid -> retry count)
+_agent_retry_counts: dict[str, int] = {}
 
 # Consecutive error counter per group (chat_jid → count).
 # Prevents infinite cursor-rollback loops on persistent agent failures.
@@ -70,10 +94,42 @@ _channel_manager: Optional[ChannelManager] = None
 # Memory manager for three-layer memory system
 _memory_manager: Optional[MemoryManager] = None
 
+# Agent session manager (chat_jid -> AgentSession)
+_agent_sessions: dict[str, AgentSession] = {}
+
+# Global tool registry
+_tool_registry: Optional[ToolRegistry] = None
+
 
 # ---------------------------------------------------------------------------
 # State helpers
 # ---------------------------------------------------------------------------
+
+
+def get_agent_state(jid: str) -> AgentState:
+    """Get agent execution state for a group."""
+    return _agent_states.get(jid, AgentState.IDLE)
+
+
+def set_agent_state(jid: str, state: AgentState) -> None:
+    """Set agent execution state for a group."""
+    _agent_states[jid] = state
+
+
+def get_agent_retry_count(jid: str) -> int:
+    """Get retry count for a group."""
+    return _agent_retry_counts.get(jid, 0)
+
+
+def increment_agent_retry(jid: str) -> int:
+    """Increment retry count for a group, returns new count."""
+    _agent_retry_counts[jid] = _agent_retry_counts.get(jid, 0) + 1
+    return _agent_retry_counts[jid]
+
+
+def reset_agent_retry(jid: str) -> None:
+    """Reset retry count for a group."""
+    _agent_retry_counts.pop(jid, None)
 
 
 async def load_state() -> None:
@@ -126,6 +182,54 @@ async def init_memory() -> None:
 def get_memory_manager() -> Optional[MemoryManager]:
     """Get the memory manager instance."""
     return _memory_manager
+
+
+# ---------------------------------------------------------------------------
+# Agent Session Management
+# ---------------------------------------------------------------------------
+
+
+def get_agent_session(jid: str) -> Optional[AgentSession]:
+    """Get agent session for a group."""
+    return _agent_sessions.get(jid)
+
+
+def create_agent_session(
+    jid: str, group_folder: str
+) -> AgentSession:
+    """Create a new agent session for a group.
+
+    Args:
+        jid: Group chat JID
+        group_folder: Group folder identifier
+
+    Returns:
+        New AgentSession instance
+    """
+    session = AgentSession(group_folder=group_folder)
+    _agent_sessions[jid] = session
+    logger.info(f"Created agent session: jid={jid} folder={group_folder}")
+    return session
+
+
+def remove_agent_session(jid: str) -> None:
+    """Remove agent session for a group."""
+    _agent_sessions.pop(jid, None)
+    logger.debug(f"Removed agent session: jid={jid}")
+
+
+def get_tool_registry() -> ToolRegistry:
+    """Get the global tool registry."""
+    global _tool_registry
+    if _tool_registry is None:
+        _tool_registry = ToolRegistry()
+    return _tool_registry
+
+
+def set_tool_registry(registry: ToolRegistry) -> None:
+    """Set the global tool registry."""
+    global _tool_registry
+    _tool_registry = registry
 
 
 async def unregister_group(jid: str) -> None:

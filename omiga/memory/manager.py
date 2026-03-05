@@ -298,12 +298,6 @@ class MemoryManager:
         if section not in self._facts.entries or len(self._facts.entries[section]) == 1:
             self.add_index_topic(section, f"L2/{section}")
 
-    def _save_facts(self) -> None:
-        """Persist L2 facts to disk."""
-        facts_file = self._l2_dir / "facts.md"
-        if self._facts:
-            facts_file.write_text(self._facts.to_markdown(), encoding="utf-8")
-
     # -------------------------------------------------------------------------
     # L3 SOP Operations
     # -------------------------------------------------------------------------

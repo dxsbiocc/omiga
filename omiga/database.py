@@ -487,6 +487,47 @@ async def get_messages_since(
     ]
 
 
+async def get_recent_messages(
+    chat_jid: str,
+    limit: int = 10,
+) -> list[NewMessage]:
+    """Get recent messages for a chat, ordered by timestamp descending.
+
+    Args:
+        chat_jid: Group/chat identifier
+        limit: Maximum number of messages to return
+
+    Returns:
+        List of recent messages (most recent first)
+    """
+    sql = """
+        SELECT id, chat_jid, sender, sender_name, content, timestamp, attachments, reply_to
+        FROM messages
+        WHERE chat_jid = ?
+          AND content != '' AND content IS NOT NULL
+        ORDER BY timestamp DESC
+        LIMIT ?
+    """
+    async with _connect() as db:
+        async with db.execute(sql, (chat_jid, limit)) as cursor:
+            rows = await cursor.fetchall()
+
+    # Return in ascending order (oldest first)
+    return [
+        NewMessage(
+            id=r["id"],
+            chat_jid=r["chat_jid"],
+            sender=r["sender"],
+            sender_name=r["sender_name"],
+            content=r["content"],
+            timestamp=r["timestamp"],
+            attachments=_parse_attachments(r["attachments"]),
+            reply_to=_parse_reply_to(r["reply_to"]),
+        )
+        for r in reversed(rows)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Scheduled tasks
 # ---------------------------------------------------------------------------

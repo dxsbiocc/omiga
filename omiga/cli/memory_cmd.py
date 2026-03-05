@@ -5,11 +5,12 @@ import asyncio
 import click
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from omiga.config import DATA_DIR
 
 
-def _get_memory_manager() -> "MemoryManager | None":
+def _get_memory_manager() -> Any:
     """Get initialized memory manager or None if not available."""
     from omiga.memory.manager import MemoryManager
 
@@ -357,7 +358,7 @@ def lessons_cmd() -> None:
     import asyncio
     asyncio.run(manager.initialize())
 
-    lessons_dir = manager.lessons_dir
+    lessons_dir = manager._lessons_dir
     if not lessons_dir.exists() or not any(lessons_dir.glob("*.md")):
         click.echo("\nNo recorded lessons.\n")
         return

@@ -253,7 +253,7 @@ class ExcelSkill(Skill):
         self,
         file_path: str,
         **kwargs: Any,
-    ) -> Dict[str, List[str]]:
+    ) -> Dict[str, Any]:
         """List all sheets in an Excel file."""
         try:
             import openpyxl

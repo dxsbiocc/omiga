@@ -267,7 +267,7 @@ class PdfSkill(Skill):
         self,
         file_path: str,
         **kwargs: Any,
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         """Count pages in a PDF."""
         try:
             from pypdf import PdfReader
