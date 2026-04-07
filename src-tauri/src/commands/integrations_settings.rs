@@ -2,60 +2,23 @@
 
 use crate::app_state::OmigaAppState;
 use crate::commands::CommandResult;
-use crate::domain::integrations_config::{
-    self, IntegrationsConfig,
+use crate::domain::integrations_catalog::{
+    IntegrationsCatalog, McpServerCatalogEntry, McpToolCatalogEntry, SkillCatalogEntry,
 };
+use crate::domain::integrations_config::{self, IntegrationsConfig};
 use crate::domain::mcp_client::list_tools_for_server;
 use crate::domain::mcp_config::merged_mcp_servers;
 use crate::domain::mcp_names::{build_mcp_tool_name, normalize_name_for_mcp};
 use crate::domain::skills::{self, SkillSource};
-use serde::Serialize;
 use std::path::PathBuf;
 use std::time::Duration;
 use tauri::State;
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpToolCatalogEntry {
-    pub wire_name: String,
-    pub description: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpServerCatalogEntry {
-    pub config_key: String,
-    pub normalized_key: String,
-    pub enabled: bool,
-    pub tools: Vec<McpToolCatalogEntry>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillCatalogEntry {
-    pub name: String,
-    pub description: String,
-    pub enabled: bool,
-    /// Where the skill was loaded from (for UI labeling).
-    pub source: crate::domain::skills::SkillSource,
-    /// Folder basename under the skills root (matches `remove_omiga_imported_skill`).
-    pub directory_name: String,
-    /// Skill lives under `~/.omiga/skills` or `<project>/.omiga/skills` — safe to delete that folder.
-    pub can_uninstall_omiga_copy: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IntegrationsCatalog {
-    pub mcp_servers: Vec<McpServerCatalogEntry>,
-    pub skills: Vec<SkillCatalogEntry>,
-}
 
 /// Resolve a project root path to an absolute path.
 /// Falls back gracefully: "." or empty → process cwd → "/"
 /// When no project folder is set, the catalog still resolves MCP from bundled defaults and
 /// `~/.omiga/mcp.json` so we never fail the entire command on path issues.
-fn resolve_project_root(project_root: &str) -> CommandResult<PathBuf> {
+pub(crate) fn resolve_project_root(project_root: &str) -> CommandResult<PathBuf> {
     let t = project_root.trim();
     if t.is_empty() || t == "." {
         // No project path set — use cwd so global configs are still discoverable.
@@ -71,14 +34,11 @@ fn resolve_project_root(project_root: &str) -> CommandResult<PathBuf> {
 /// Chat sessions use their own (longer) timeout from `mcp_tool_pool`.
 const CATALOG_TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Discover configured MCP servers and skills, merge with `.omiga/integrations.json` toggles.
-/// MCP server tool-listing runs in parallel so a dead server does not block the rest.
-#[tauri::command]
-pub async fn get_integrations_catalog(
-    app_state: State<'_, OmigaAppState>,
-    project_root: String,
+/// Build catalog (MCP parallel + skills from disk). Used by the command and startup warm task.
+pub(crate) async fn build_integrations_catalog(
+    app_state: &OmigaAppState,
+    root: PathBuf,
 ) -> CommandResult<IntegrationsCatalog> {
-    let root = resolve_project_root(&project_root)?;
     let include_claude_user_skills = {
         let repo = app_state.repo.lock().await;
         match repo
@@ -108,31 +68,34 @@ pub async fn get_integrations_catalog(
                 let enabled = !integrations_config::is_mcp_config_server_disabled(&cfg_c, &key);
                 let tools_res =
                     list_tools_for_server(&root_c, &key, CATALOG_TOOL_LIST_TIMEOUT).await;
-                let tools = match tools_res {
-                    Ok(list) => list
-                        .into_iter()
-                        .map(|t| {
-                            let wire = build_mcp_tool_name(&key, t.name.as_ref());
-                            let desc = t
-                                .description
-                                .as_deref()
-                                .unwrap_or("MCP tool")
-                                .to_string();
-                            McpToolCatalogEntry {
-                                wire_name: wire,
-                                description: desc,
-                            }
-                        })
-                        .collect(),
+                let (list_tools_error, tools) = match tools_res {
+                    Ok(list) => (
+                        None,
+                        list.into_iter()
+                            .map(|t| {
+                                let wire = build_mcp_tool_name(&key, t.name.as_ref());
+                                let desc = t
+                                    .description
+                                    .as_deref()
+                                    .unwrap_or("MCP tool")
+                                    .to_string();
+                                McpToolCatalogEntry {
+                                    wire_name: wire,
+                                    description: desc,
+                                }
+                            })
+                            .collect(),
+                    ),
                     Err(e) => {
                         tracing::warn!("catalog tools/list failed for \"{key}\": {e}");
-                        vec![]
+                        (Some(e.to_string()), vec![])
                     }
                 };
                 McpServerCatalogEntry {
                     config_key: key,
                     normalized_key,
                     enabled,
+                    list_tools_error,
                     tools,
                 }
             })
@@ -161,12 +124,14 @@ pub async fn get_integrations_catalog(
                 .unwrap_or_default();
             let can_uninstall_omiga_copy =
                 matches!(e.source, SkillSource::OmigaUser | SkillSource::OmigaProject);
+            let skill_md_path = e.skill_dir.join("SKILL.md");
             SkillCatalogEntry {
                 name: e.name,
                 description: e.description,
                 enabled,
                 source: e.source,
                 directory_name,
+                skill_md_path: skill_md_path.to_string_lossy().into_owned(),
                 can_uninstall_omiga_copy,
             }
         })
@@ -178,9 +143,50 @@ pub async fn get_integrations_catalog(
     })
 }
 
+/// Discover configured MCP servers and skills, merge with `.omiga/integrations.json` toggles.
+/// MCP server tool-listing runs in parallel so a dead server does not block the rest.
+///
+/// When `ignore_cache` is true, always rebuilds and replaces the cache entry.
+#[tauri::command]
+pub async fn get_integrations_catalog(
+    app_state: State<'_, OmigaAppState>,
+    project_root: String,
+    ignore_cache: Option<bool>,
+) -> CommandResult<IntegrationsCatalog> {
+    let root = resolve_project_root(&project_root)?;
+    let ignore_cache = ignore_cache.unwrap_or(false);
+
+    if !ignore_cache {
+        if let Ok(guard) = app_state.integrations_catalog_cache.lock() {
+            if let Some(cached) = guard.get(&root) {
+                return Ok(cached.clone());
+            }
+        }
+    }
+
+    let catalog = build_integrations_catalog(&app_state, root.clone()).await?;
+
+    if let Ok(mut guard) = app_state.integrations_catalog_cache.lock() {
+        guard.insert(root, catalog.clone());
+    }
+
+    Ok(catalog)
+}
+
+/// Invalidate cached catalog for this project root (call after integrations file or imports change).
+pub(crate) fn invalidate_integrations_catalog_cache(
+    app_state: &OmigaAppState,
+    root: &PathBuf,
+) {
+    if let Ok(mut guard) = app_state.integrations_catalog_cache.lock() {
+        guard.remove(root);
+    }
+}
+
 /// Persist disabled MCP servers (normalized keys) and disabled skill names.
 #[tauri::command]
 pub fn save_integrations_state(
+    app_state: State<'_, OmigaAppState>,
     project_root: String,
     disabled_mcp_servers: Vec<String>,
     disabled_skills: Vec<String>,
@@ -191,5 +197,32 @@ pub fn save_integrations_state(
         disabled_skills,
     };
     integrations_config::save_integrations_config(&root, &config)
-        .map_err(|e| crate::errors::AppError::Config(e))
+        .map_err(|e| crate::errors::AppError::Config(e))?;
+    invalidate_integrations_catalog_cache(&app_state, &root);
+    Ok(())
+}
+
+/// Warm the integrations catalog cache in the background (e.g. at app startup for the default cwd).
+pub async fn warm_integrations_catalog_cache(app_state: &OmigaAppState, project_root: &str) {
+    let Ok(root) = resolve_project_root(project_root) else {
+        return;
+    };
+    if app_state
+        .integrations_catalog_cache
+        .lock()
+        .ok()
+        .and_then(|g| g.get(&root).map(|_| ()))
+        .is_some()
+    {
+        return;
+    }
+    match build_integrations_catalog(app_state, root.clone()).await {
+        Ok(catalog) => {
+            if let Ok(mut g) = app_state.integrations_catalog_cache.lock() {
+                g.insert(root.clone(), catalog);
+            }
+            tracing::info!("Integrations catalog warmed for {:?}", root);
+        }
+        Err(e) => tracing::warn!("Integrations catalog warm failed: {}", e),
+    }
 }

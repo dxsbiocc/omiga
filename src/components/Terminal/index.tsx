@@ -87,10 +87,11 @@ export function Terminal({ embedded = false }: TerminalProps) {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleExecute();
-    }
+    if (e.key !== "Enter" || e.shiftKey) return;
+    const ne = e.nativeEvent;
+    if (ne.isComposing || ne.keyCode === 229) return;
+    e.preventDefault();
+    handleExecute();
   };
 
   return (

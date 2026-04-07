@@ -1,7 +1,10 @@
 //! Import Claude Code–style MCP (`mcpServers` JSON) and skills directories into the project.
 
 use super::CommandResult;
+use crate::app_state::OmigaAppState;
+use crate::commands::integrations_settings;
 use crate::errors::{AppError, FsError};
+use tauri::State;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -80,6 +83,7 @@ pub struct ImportMcpMergeResult {
 /// are merged with source winning on name clash.
 #[tauri::command]
 pub async fn import_merge_project_mcp_json(
+    app_state: State<'_, OmigaAppState>,
     project_root: String,
     source_path: String,
 ) -> CommandResult<ImportMcpMergeResult> {
@@ -144,6 +148,10 @@ pub async fn import_merge_project_mcp_json(
         .await
         .map_err(io_err)?;
 
+    if let Ok(cache_key) = integrations_settings::resolve_project_root(&project_root) {
+        integrations_settings::invalidate_integrations_catalog_cache(&app_state, &cache_key);
+    }
+
     Ok(ImportMcpMergeResult {
         wrote_path: dest.display().to_string(),
         server_count: n,
@@ -205,6 +213,7 @@ fn resolve_dest_omiga_skills(project_root: &str, target: SkillsImportTarget) -> 
 /// `~/.omiga/skills` or `<project_root>/.omiga/skills` (overwrites destination if present).
 #[tauri::command]
 pub async fn import_skills_from_directory(
+    app_state: State<'_, OmigaAppState>,
     project_root: String,
     source_skills_dir: String,
     target: SkillsImportTarget,
@@ -247,6 +256,10 @@ pub async fn import_skills_from_directory(
 
     imported.sort();
 
+    if let Ok(cache_key) = integrations_settings::resolve_project_root(&project_root) {
+        integrations_settings::invalidate_integrations_catalog_cache(&app_state, &cache_key);
+    }
+
     Ok(ImportSkillsResult {
         dest_skills_root: dest_root.display().to_string(),
         imported_skill_dirs: imported,
@@ -257,6 +270,7 @@ pub async fn import_skills_from_directory(
 /// `$CLAUDE_CONFIG_DIR/skills`) into `~/.omiga/skills` or `<project>/.omiga/skills`.
 #[tauri::command]
 pub async fn import_claude_default_user_skills(
+    app_state: State<'_, OmigaAppState>,
     project_root: String,
     target: SkillsImportTarget,
 ) -> CommandResult<ImportSkillsResult> {
@@ -269,6 +283,7 @@ pub async fn import_claude_default_user_skills(
         )));
     }
     import_skills_from_directory(
+        app_state,
         project_root,
         src.display().to_string(),
         target,
@@ -331,6 +346,7 @@ pub async fn list_omiga_imported_skills(project_root: String) -> CommandResult<O
 /// Remove one imported skill directory under `~/.omiga/skills` or `<project>/.omiga/skills`.
 #[tauri::command]
 pub async fn remove_omiga_imported_skill(
+    app_state: State<'_, OmigaAppState>,
     project_root: String,
     directory_name: String,
     target: SkillsImportTarget,
@@ -359,6 +375,11 @@ pub async fn remove_omiga_imported_skill(
     tokio::fs::remove_dir_all(&dir_canon)
         .await
         .map_err(io_err)?;
+
+    if let Ok(cache_key) = integrations_settings::resolve_project_root(&project_root) {
+        integrations_settings::invalidate_integrations_catalog_cache(&app_state, &cache_key);
+    }
+
     Ok(())
 }
 

@@ -110,7 +110,16 @@ export function ChatComposer({
 }: ChatComposerProps) {
   const theme = useTheme();
   const accent = theme.palette.primary.main;
-  const accent2 = "#a855f7";
+  const paper = theme.palette.background.paper;
+  const def = theme.palette.background.default;
+  const ink = theme.palette.text.primary;
+  const mut = theme.palette.text.secondary;
+  const isDark = theme.palette.mode === "dark";
+  /** Hairline border / shadow tint — theme-aware */
+  const edge = (a: number) =>
+    alpha(isDark ? theme.palette.common.white : theme.palette.common.black, a);
+  /** Input card — closer to solid paper so the typing area reads lighter */
+  const composerBg = alpha(paper, isDark ? 0.97 : 0.99);
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
   const setSettingsTabIndex = useUiStore((s) => s.setSettingsTabIndex);
   const setRightPanelMode = useUiStore((s) => s.setRightPanelMode);
@@ -186,21 +195,21 @@ export function ChatComposer({
   const inputDisabled = !sessionId || isStreaming || isConnecting;
 
   return (
-    <Stack spacing={1.25}>
+    <Stack spacing={0.75}>
       <Paper
         elevation={0}
         sx={{
           borderRadius: 3,
           overflow: "hidden",
           position: "relative",
-          bgcolor: alpha("#FFFFFF", 0.92),
+          bgcolor: composerBg,
           backdropFilter: "blur(12px)",
           WebkitBackdropFilter: "blur(12px)",
-          border: `1px solid ${alpha("#0f172a", 0.08)}`,
+          border: `1px solid ${edge(0.12)}`,
           boxShadow: `
-            0 1px 2px ${alpha("#0f172a", 0.04)},
-            0 8px 24px ${alpha("#6366f1", 0.08)},
-            inset 0 1px 0 ${alpha("#ffffff", 0.9)}
+            0 1px 2px ${edge(0.06)},
+            0 8px 24px ${alpha(accent, 0.08)},
+            inset 0 1px 0 ${edge(0.08)}
           `,
           transition: "box-shadow 0.22s ease, border-color 0.22s ease, transform 0.22s ease",
           "@media (prefers-reduced-motion: reduce)": {
@@ -209,21 +218,13 @@ export function ChatComposer({
           "&:focus-within": {
             borderColor: alpha(accent, 0.45),
             boxShadow: `
-              0 1px 2px ${alpha("#0f172a", 0.06)},
+              0 1px 2px ${edge(0.08)},
               0 0 0 3px ${alpha(accent, 0.18)},
               0 12px 32px ${alpha(accent, 0.12)}
             `,
           },
         }}
       >
-        {/* Accent hairline — ties composer to chat bubble gradient */}
-        <Box
-          sx={{
-            height: 3,
-            background: `linear-gradient(90deg, ${accent} 0%, ${accent2} 55%, ${alpha(accent, 0.35)} 100%)`,
-            opacity: 0.95,
-          }}
-        />
         <Box
           component="textarea"
           ref={inputRef}
@@ -232,48 +233,51 @@ export function ChatComposer({
           onKeyDown={onKeyDown}
           disabled={inputDisabled}
           placeholder={placeholder}
-          rows={3}
+          rows={2}
           aria-label="消息输入"
           sx={{
             width: "100%",
             boxSizing: "border-box",
             border: "none",
             resize: "none",
-            minHeight: 80,
+            minHeight: 56,
             maxHeight: 280,
-            px: 2,
-            py: 1.75,
+            px: 1.75,
+            py: 1.15,
             fontSize: 15,
             fontFamily: "inherit",
             lineHeight: 1.55,
             letterSpacing: "-0.01em",
-            color: "#1C1C1E",
+            color: ink,
             bgcolor: "transparent",
             outline: "none",
             caretColor: accent,
             transition: "color 0.15s ease",
             "&::placeholder": {
-              color: alpha("#3C3C43", 0.55),
+              color: alpha(mut, 0.65),
               opacity: 1,
             },
             "&:disabled": {
-              color: alpha("#1C1C1E", 0.38),
+              color: alpha(ink, 0.38),
               cursor: "not-allowed",
             },
           }}
         />
-        <Divider sx={{ borderColor: alpha("#0f172a", 0.06) }} />
+        <Divider sx={{ borderColor: edge(0.08) }} />
         <Stack
           direction="row"
           alignItems="center"
           spacing={0.5}
           sx={{
             px: 1,
-            py: 0.85,
+            py: 0.5,
             flexWrap: "wrap",
             gap: 0.5,
-            background: `linear-gradient(180deg, ${alpha("#f8fafc", 0.98)} 0%, ${alpha("#f1f5f9", 0.95)} 100%)`,
-            borderTop: `1px solid ${alpha("#ffffff", 0.65)}`,
+            background: isDark
+              ? `linear-gradient(165deg, ${alpha(paper, 0.48)} 0%, ${alpha(def, 0.94)} 48%, ${alpha(def, 0.72)} 100%)`
+              : `linear-gradient(165deg, ${alpha(paper, 0.72)} 0%, ${alpha(def, 0.97)} 48%, ${alpha(paper, 0.65)} 100%)`,
+            borderTop: `1px solid ${edge(0.12)}`,
+            boxShadow: `inset 0 1px 0 ${edge(0.06)}`,
           }}
         >
           <Tooltip title="添加附件、连接器与插件">
@@ -281,11 +285,25 @@ export function ChatComposer({
               size="small"
               onClick={(e) => setPlusAnchor(e.currentTarget)}
               sx={{
-                color: "#3C3C43",
-                width: 40,
-                height: 40,
-                transition: "background-color 0.18s ease, color 0.18s ease",
-                "&:hover": { bgcolor: alpha(accent, 0.08), color: accent },
+                color: mut,
+                width: 36,
+                height: 36,
+                borderRadius: 2,
+                bgcolor: alpha(paper, isDark ? 0.25 : 0.72),
+                border: `1px solid ${edge(0.12)}`,
+                boxShadow: `0 1px 2px ${edge(0.05)}`,
+                transition:
+                  "background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease",
+                "@media (prefers-reduced-motion: reduce)": {
+                  transition: "none",
+                },
+                "&:hover": {
+                  bgcolor: alpha(accent, 0.1),
+                  color: accent,
+                  borderColor: alpha(accent, 0.22),
+                  boxShadow: `0 2px 8px ${alpha(accent, 0.12)}`,
+                  transform: "translateY(-1px)",
+                },
                 "&:focus-visible": {
                   outline: `2px solid ${alpha(accent, 0.45)}`,
                   outlineOffset: 2,
@@ -350,13 +368,25 @@ export function ChatComposer({
             endIcon={<ExpandMore sx={{ fontSize: 18 }} />}
             sx={{
               textTransform: "none",
-              color: "#3C3C43",
-              fontWeight: 500,
-              borderRadius: 2,
+              color: mut,
+              fontWeight: 600,
+              borderRadius: 2.5,
               px: 1,
+              minHeight: 32,
               maxWidth: 200,
-              transition: "background-color 0.18s ease",
-              "&:hover": { bgcolor: alpha(accent, 0.06) },
+              border: `1px solid ${edge(0.1)}`,
+              bgcolor: alpha(paper, isDark ? 0.35 : 0.65),
+              boxShadow: `inset 0 1px 0 ${edge(0.06)}`,
+              transition:
+                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease",
+              "@media (prefers-reduced-motion: reduce)": {
+                transition: "none",
+              },
+              "&:hover": {
+                bgcolor: alpha(accent, 0.07),
+                borderColor: alpha(accent, 0.2),
+                boxShadow: `0 1px 4px ${alpha(accent, 0.08)}`,
+              },
             }}
           >
             <Typography variant="body2" noWrap component="span">
@@ -398,16 +428,24 @@ export function ChatComposer({
             endIcon={<ExpandMore sx={{ fontSize: 18 }} />}
             sx={{
               textTransform: "none",
-              fontWeight: 500,
-              borderColor: alpha("#0f172a", 0.12),
-              color: "#3C3C43",
-              maxWidth: 160,
-              bgcolor: alpha("#ffffff", 0.85),
-              transition: "border-color 0.18s ease, box-shadow 0.18s ease",
+              fontWeight: 600,
+              borderRadius: 2.5,
+              minHeight: 32,
+              px: 1,
+              borderColor: edge(0.14),
+              color: ink,
+              maxWidth: 180,
+              bgcolor: alpha(paper, isDark ? 0.45 : 0.88),
+              boxShadow: `0 1px 2px ${edge(0.05)}, inset 0 1px 0 ${edge(0.06)}`,
+              transition: "border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease",
+              "@media (prefers-reduced-motion: reduce)": {
+                transition: "none",
+              },
               "&:hover": {
-                borderColor: alpha(accent, 0.35),
-                bgcolor: "#fff",
-                boxShadow: `0 0 0 1px ${alpha(accent, 0.12)}`,
+                borderColor: alpha(accent, 0.4),
+                bgcolor: alpha(paper, isDark ? 0.55 : 1),
+                boxShadow: `0 2px 10px ${alpha(accent, 0.12)}, 0 0 0 1px ${alpha(accent, 0.15)}`,
+                transform: "translateY(-1px)",
               },
             }}
           >
@@ -441,11 +479,21 @@ export function ChatComposer({
                 size="small"
                 onClick={onCancel}
                 sx={{
-                  width: 40,
-                  height: 40,
+                  width: 36,
+                  height: 36,
+                  borderRadius: 2,
                   color: "#fff",
                   bgcolor: "#ef4444",
-                  "&:hover": { bgcolor: "#dc2626" },
+                  boxShadow: `0 2px 8px ${alpha("#ef4444", 0.35)}`,
+                  transition: "background-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease",
+                  "@media (prefers-reduced-motion: reduce)": {
+                    transition: "none",
+                  },
+                  "&:hover": {
+                    bgcolor: "#dc2626",
+                    boxShadow: `0 4px 14px ${alpha("#ef4444", 0.45)}`,
+                    transform: "translateY(-1px)",
+                  },
                   "&:focus-visible": {
                     outline: `2px solid ${alpha("#ef4444", 0.6)}`,
                     outlineOffset: 2,
@@ -462,9 +510,12 @@ export function ChatComposer({
                   size="small"
                   disabled
                   sx={{
-                    color: "#8E8E93",
-                    width: 40,
-                    height: 40,
+                    color: "text.disabled",
+                    width: 36,
+                    height: 36,
+                    borderRadius: 2,
+                    border: `1px dashed ${edge(0.18)}`,
+                    bgcolor: alpha(paper, isDark ? 0.2 : 0.4),
                   }}
                 >
                   <Mic fontSize="small" />
@@ -481,15 +532,25 @@ export function ChatComposer({
         alignItems="center"
         justifyContent="space-between"
         flexWrap="wrap"
-        rowGap={1}
-        columnGap={2}
+        rowGap={0.75}
+        columnGap={1.5}
         sx={{
           px: 1.25,
-          py: 1,
+          py: 0.65,
           borderRadius: 2.5,
-          bgcolor: alpha("#f1f5f9", 0.85),
-          border: `1px solid ${alpha("#0f172a", 0.07)}`,
-          boxShadow: `inset 0 1px 0 ${alpha("#ffffff", 0.7)}`,
+          bgcolor: alpha(paper, isDark ? 0.35 : 0.72),
+          backdropFilter: "blur(10px)",
+          WebkitBackdropFilter: "blur(10px)",
+          border: `1px solid ${edge(0.12)}`,
+          boxShadow: `
+            0 1px 2px ${edge(0.05)},
+            0 6px 20px ${alpha(accent, 0.06)},
+            inset 0 1px 0 ${edge(0.06)}
+          `,
+          transition: "box-shadow 0.22s ease, border-color 0.22s ease",
+          "@media (prefers-reduced-motion: reduce)": {
+            transition: "none",
+          },
         }}
       >
         <Stack
@@ -506,9 +567,30 @@ export function ChatComposer({
             onClick={onPickWorkspace}
             sx={{
               textTransform: "none",
-              color: needsWorkspacePath ? "#FF9500" : "#1C1C1E",
+              color: needsWorkspacePath ? "#FF9500" : ink,
               fontWeight: 600,
-              maxWidth: { xs: "100%", sm: 220 },
+              maxWidth: { xs: "100%", sm: 240 },
+              borderRadius: 2.5,
+              px: 1,
+              py: 0.35,
+              minHeight: 32,
+              bgcolor: needsWorkspacePath
+                ? alpha("#FF9500", 0.1)
+                : isDark
+                  ? alpha(def, 0.75)
+                  : alpha("#f1f5f9", 0.9),
+              border: `1px solid ${
+                needsWorkspacePath ? alpha("#FF9500", 0.35) : edge(0.1)
+              }`,
+              boxShadow: `inset 0 1px 0 ${edge(0.06)}`,
+              transition: "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease",
+              "@media (prefers-reduced-motion: reduce)": {
+                transition: "none",
+              },
+              "&:hover": {
+                bgcolor: needsWorkspacePath ? alpha("#FF9500", 0.14) : alpha(accent, 0.06),
+                borderColor: needsWorkspacePath ? alpha("#FF9500", 0.5) : alpha(accent, 0.22),
+              },
             }}
           >
             <Typography variant="body2" noWrap component="span">
@@ -518,8 +600,8 @@ export function ChatComposer({
 
           {gitInfo?.isGit && !needsWorkspacePath && (
             <Stack direction="row" alignItems="center" spacing={0.5}>
-              <Tag sx={{ fontSize: 18, color: "#8E8E93" }} />
-              <FormControl size="small" sx={{ minWidth: 140 }}>
+              <Tag sx={{ fontSize: 18, color: "text.secondary" }} />
+              <FormControl size="small" sx={{ minWidth: 148 }}>
                 <Select
                   value={branchValue || gitInfo.currentBranch}
                   displayEmpty
@@ -528,11 +610,21 @@ export function ChatComposer({
                     setBranchForRoot(rootKey, b);
                   }}
                   sx={{
-                    bgcolor: "#FFFFFF",
-                    borderRadius: 1.5,
+                    bgcolor: alpha(paper, isDark ? 0.5 : 0.95),
+                    borderRadius: 2,
                     fontSize: 13,
+                    fontWeight: 600,
+                    boxShadow: `0 1px 2px ${edge(0.05)}`,
+                    transition: "box-shadow 0.2s ease, border-color 0.2s ease",
                     "& .MuiOutlinedInput-notchedOutline": {
-                      borderColor: alpha("#000", 0.12),
+                      borderColor: edge(0.14),
+                    },
+                    "&:hover .MuiOutlinedInput-notchedOutline": {
+                      borderColor: alpha(accent, 0.35),
+                    },
+                    "&.Mui-focused .MuiOutlinedInput-notchedOutline": {
+                      borderColor: alpha(accent, 0.55),
+                      boxShadow: `0 0 0 3px ${alpha(accent, 0.15)}`,
                     },
                   }}
                 >
@@ -566,15 +658,31 @@ export function ChatComposer({
                 size="small"
                 checked={useWorktree}
                 onChange={(_, v) => setUseWorktree(v)}
-                sx={{ py: 0 }}
+                sx={{
+                  py: 0,
+                  color: alpha(accent, 0.55),
+                  "&.Mui-checked": { color: accent },
+                }}
               />
             }
             label={
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" fontWeight={600} color="text.secondary">
                 worktree
               </Typography>
             }
-            sx={{ mr: 0 }}
+            sx={{
+              mr: 0,
+              px: 0.75,
+              py: 0.25,
+              borderRadius: 2,
+              border: `1px solid ${edge(0.1)}`,
+              bgcolor: isDark ? alpha(def, 0.65) : alpha("#f8fafc", 0.9),
+              transition: "background-color 0.2s ease, border-color 0.2s ease",
+              "&:hover": {
+                bgcolor: alpha(accent, 0.04),
+                borderColor: alpha(accent, 0.18),
+              },
+            }}
           />
 
           <Button
@@ -592,9 +700,20 @@ export function ChatComposer({
             onClick={(e) => setEnvAnchor(e.currentTarget)}
             sx={{
               textTransform: "none",
-              borderColor: "#D1D1D6",
-              color: "#3C3C43",
-              bgcolor: "#FFFFFF",
+              fontWeight: 600,
+              borderRadius: 2.5,
+              minHeight: 32,
+              px: 1,
+              borderColor: edge(0.14),
+              color: ink,
+              bgcolor: alpha(paper, isDark ? 0.45 : 0.95),
+              boxShadow: `0 1px 2px ${edge(0.05)}, inset 0 1px 0 ${edge(0.06)}`,
+              transition: "border-color 0.2s ease, box-shadow 0.2s ease",
+              "&:hover": {
+                borderColor: alpha(accent, 0.35),
+                bgcolor: alpha(paper, isDark ? 0.55 : 1),
+                boxShadow: `0 2px 8px ${alpha(accent, 0.1)}`,
+              },
             }}
           >
             {environment === "local" ? "本地" : "远程"}

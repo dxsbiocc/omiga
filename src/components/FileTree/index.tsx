@@ -21,27 +21,20 @@ import {
   Breadcrumbs,
   Link,
 } from "@mui/material";
+import { useTheme } from "@mui/material/styles";
 import {
   Folder,
-  InsertDriveFile,
   Refresh,
   CreateNewFolder,
   PostAdd,
   DeleteOutline,
   DriveFileRenameOutline,
   Settings,
-  Image as ImageIcon,
-  Code,
-  Description,
   NavigateNext,
   ArrowBack,
-  PictureAsPdf,
-  FolderZip,
-  AudioFile,
-  VideoLibrary,
-  Terminal,
-  DataObject,
 } from "@mui/icons-material";
+import { FileIcon, FolderIcon } from "react-material-icon-theme";
+import { materialIconFileExtension } from "../../utils/materialIconTheme";
 import {
   createColumnHelper,
   flexRender,
@@ -51,7 +44,7 @@ import {
 } from "@tanstack/react-table";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useSessionStore } from "../../state/sessionStore";
-import { pencilNewPenPalette as pen } from "../../theme";
+import { usePencilPalette } from "../../theme";
 
 export interface FileNode {
   name: string;
@@ -155,95 +148,47 @@ function parentWithinRoot(current: string, root: string): string | null {
   return p;
 }
 
-type FileKind =
-  | "folder"
-  | "image"
-  | "code"
-  | "data"
-  | "r"
-  | "pdf"
-  | "archive"
-  | "audio"
-  | "video"
-  | "shell"
-  | "json"
-  | "default";
-
-const iconSx: Record<FileKind, { color: string }> = {
-  folder: { color: pen.fileIconFolder },
-  image: { color: pen.fileIconImage },
-  code: { color: pen.fileIconCode },
-  data: { color: pen.fileIconData },
-  r: { color: pen.fileIconR },
-  pdf: { color: "#E53935" },
-  archive: { color: "#8D6E63" },
-  audio: { color: "#8E44AD" },
-  video: { color: "#2980B9" },
-  shell: { color: "#2E7D32" },
-  json: { color: "#F9A825" },
-  default: { color: pen.fileIconDefault },
-};
-
-function fileKindForNode(node: FileNode): FileKind {
-  if (node.isDirectory) return "folder";
-  const ext = node.name.split(".").pop()?.toLowerCase() ?? "";
-  if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"].includes(ext)) return "image";
-  if (["py", "rs", "ts", "tsx", "js", "jsx", "go", "java", "c", "cpp", "h", "swift", "kt"].includes(ext))
-    return "code";
-  if (ext === "r") return "r";
-  if (["csv", "tsv", "txt", "md", "rmd", "qmd", "doc", "docx"].includes(ext)) return "data";
-  if (ext === "pdf") return "pdf";
-  if (["zip", "tar", "gz", "rar", "7z", "bz2", "xz"].includes(ext)) return "archive";
-  if (["mp3", "wav", "flac", "aac", "ogg", "m4a"].includes(ext)) return "audio";
-  if (["mp4", "mov", "avi", "mkv", "webm"].includes(ext)) return "video";
-  if (["sh", "bash", "zsh", "fish"].includes(ext)) return "shell";
-  if (["json", "yaml", "yml", "toml", "xml", "ipynb"].includes(ext))
-    return ext === "json" || ext === "ipynb" ? "json" : "data";
-  return "default";
-}
-
+/** VS Code Material Icon Theme 风格（react-material-icon-theme）。 */
 function FileTypeIcon({ node }: { node: FileNode }) {
-  const kind = fileKindForNode(node);
-  const sx = {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    width: 24,
-    height: 24,
-    borderRadius: "6px",
-    bgcolor: pen.iconChipBg,
-    flexShrink: 0,
-    ...iconSx[kind],
-  };
+  const theme = useTheme();
+  const pen = usePencilPalette();
+  const light = theme.palette.mode === "dark";
+  const size = 18;
 
-  const icon =
-    kind === "folder" ? (
-      <Folder sx={{ fontSize: 14 }} />
-    ) : kind === "image" ? (
-      <ImageIcon sx={{ fontSize: 14 }} />
-    ) : kind === "code" ? (
-      <Code sx={{ fontSize: 14 }} />
-    ) : kind === "data" ? (
-      <InsertDriveFile sx={{ fontSize: 14 }} />
-    ) : kind === "r" ? (
-      <Description sx={{ fontSize: 14 }} />
-    ) : kind === "pdf" ? (
-      <PictureAsPdf sx={{ fontSize: 14 }} />
-    ) : kind === "archive" ? (
-      <FolderZip sx={{ fontSize: 14 }} />
-    ) : kind === "audio" ? (
-      <AudioFile sx={{ fontSize: 14 }} />
-    ) : kind === "video" ? (
-      <VideoLibrary sx={{ fontSize: 14 }} />
-    ) : kind === "shell" ? (
-      <Terminal sx={{ fontSize: 14 }} />
-    ) : kind === "json" ? (
-      <DataObject sx={{ fontSize: 14 }} />
-    ) : (
-      <InsertDriveFile sx={{ fontSize: 14 }} />
-    );
-
-  return <Box component="span" sx={sx}>{icon}</Box>;
+  return (
+    <Box
+      component="div"
+      sx={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 24,
+        height: 24,
+        borderRadius: "6px",
+        bgcolor: pen.iconChipBg,
+        flexShrink: 0,
+        verticalAlign: "middle",
+      }}
+    >
+      {node.isDirectory ? (
+        <FolderIcon
+          folderName={node.name}
+          isOpen={false}
+          isRoot={false}
+          size={size}
+          light={light}
+          theme="specific"
+        />
+      ) : (
+        <FileIcon
+          fileName={node.name}
+          fileExtension={materialIconFileExtension(node.name)}
+          size={size}
+          light={light}
+        />
+      )}
+    </Box>
+  );
 }
 
 /** 当前 session 工作区文件夹显示名（面包屑首段）；`.` 或空为「工作区」 */
@@ -293,17 +238,20 @@ function workspaceBreadcrumbs(
   return crumbs.length ? crumbs : [{ label: rootLabel, path: root }];
 }
 
-const headerLabelSx = {
-  fontSize: 10,
-  fontWeight: 600,
-  letterSpacing: "0.06em",
-  textTransform: "uppercase" as const,
-  color: pen.textHeader,
-};
-
 const columnHelper = createColumnHelper<FileNode>();
 
 export function FileTree() {
+  const pen = usePencilPalette();
+  const headerLabelSx = useMemo(
+    () => ({
+      fontSize: 10,
+      fontWeight: 600,
+      letterSpacing: "0.06em",
+      textTransform: "uppercase" as const,
+      color: pen.textHeader,
+    }),
+    [pen.textHeader],
+  );
   const openFile = useWorkspaceStore((s) => s.openFile);
   const currentSession = useSessionStore((s) => s.currentSession);
   const sessionId = currentSession?.id;
@@ -558,7 +506,7 @@ export function FileTree() {
         },
       }),
     ],
-    [],
+    [headerLabelSx, pen],
   );
 
   const table = useReactTable({
@@ -583,7 +531,7 @@ export function FileTree() {
           justifyContent: "center",
           p: 3,
           textAlign: "center",
-          bgcolor: pen.surface,
+          bgcolor: "background.paper",
         }}
       >
         <Folder sx={{ fontSize: 40, color: pen.emptyStateIcon, mb: 1.5, opacity: 0.6 }} />
@@ -607,7 +555,7 @@ export function FileTree() {
           justifyContent: "center",
           height: "100%",
           gap: 2,
-          bgcolor: pen.surface,
+          bgcolor: "background.paper",
         }}
       >
         <CircularProgress size={28} thickness={4} sx={{ color: pen.loadingSpinner }} />
@@ -629,7 +577,7 @@ export function FileTree() {
           height: "100%",
           p: 3,
           textAlign: "center",
-          bgcolor: pen.surface,
+          bgcolor: "background.paper",
         }}
       >
         <Typography variant="body2" color="error" sx={{ mb: 2, maxWidth: 280, fontSize: 13 }}>
@@ -668,7 +616,7 @@ export function FileTree() {
           height: "100%",
           display: "flex",
           flexDirection: "column",
-          bgcolor: pen.surface,
+          bgcolor: "background.paper",
           overflow: "hidden",
         }}
       >
@@ -939,9 +887,9 @@ export function FileTree() {
               >
                 <colgroup>
                   <col style={{ width: 34 }} />
-                  <col />
-                  <col style={{ width: 88 }} />
-                  <col style={{ width: 108 }} />
+                  <col style={{ minWidth: 160 }} />
+                  <col style={{ width: 76 }} />
+                  <col style={{ width: 96 }} />
                 </colgroup>
                 <TableHead>
                   {table.getHeaderGroups().map((headerGroup) => (
@@ -951,7 +899,7 @@ export function FileTree() {
                           key={header.id}
                           padding="none"
                           sx={{
-                            bgcolor: pen.headerBar,
+                            bgcolor: "background.paper",
                             borderBottom: `1px solid ${pen.borderSubtle}`,
                             py: 0.75,
                             px: 1,
@@ -971,9 +919,9 @@ export function FileTree() {
                               pl: 0.25,
                             }),
                             ...(header.column.id === "size" && {
-                              width: 88,
-                              maxWidth: 88,
-                              minWidth: 88,
+                              width: 76,
+                              maxWidth: 76,
+                              minWidth: 76,
                               px: 0.5,
                             }),
                           }}
@@ -1033,9 +981,9 @@ export function FileTree() {
                                 pl: 0.25,
                               }),
                               ...(cell.column.id === "size" && {
-                                width: 88,
-                                maxWidth: 88,
-                                minWidth: 88,
+                                width: 76,
+                                maxWidth: 76,
+                                minWidth: 76,
                                 px: 0.5,
                               }),
                             }}

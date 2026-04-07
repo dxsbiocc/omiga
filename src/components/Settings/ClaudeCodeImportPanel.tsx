@@ -6,8 +6,8 @@ import {
   Box,
   Button,
   CircularProgress,
-  FormControlLabel,
-  Switch,
+  Divider,
+  Stack,
   Typography,
 } from "@mui/material";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
@@ -45,9 +45,6 @@ type BusyKey =
   | "skillsClaudeUser"
   | "skillsClaudeProject";
 
-/** SQLite `settings` key — must match `skills::SETTING_KEY_LOAD_CLAUDE_USER_SKILLS` (Rust). */
-const SETTING_LOAD_CLAUDE_USER_SKILLS = "loadClaudeUserSkills";
-
 function resolveProjectPath(raw: string): string {
   const t = raw.trim();
   return t.length > 0 ? t : ".";
@@ -69,9 +66,6 @@ export function ClaudeCodeImportPanel({
     kind: "success" | "error";
     text: string;
   } | null>(null);
-  const [loadClaudeUserSkillsAtRuntime, setLoadClaudeUserSkillsAtRuntime] =
-    useState(false);
-  const [loadClaudeSettingReady, setLoadClaudeSettingReady] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -94,32 +88,6 @@ export function ClaudeCodeImportPanel({
     };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const v = await invoke<string | null>("get_setting", {
-          key: SETTING_LOAD_CLAUDE_USER_SKILLS,
-        });
-        if (!cancelled) {
-          const t = (v ?? "").trim().toLowerCase();
-          setLoadClaudeUserSkillsAtRuntime(
-            t === "true" || t === "1" || t === "yes",
-          );
-          setLoadClaudeSettingReady(true);
-        }
-      } catch {
-        if (!cancelled) {
-          setLoadClaudeUserSkillsAtRuntime(false);
-          setLoadClaudeSettingReady(true);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   const runImportMcp = useCallback(async () => {
     setMessage(null);
     const picked = await open({
@@ -132,10 +100,13 @@ export function ClaudeCodeImportPanel({
     const sourcePath = picked;
     setBusy("mcp");
     try {
-      const res = await invoke<ImportMcpResult>("import_merge_project_mcp_json", {
-        projectRoot: root,
-        sourcePath,
-      });
+      const res = await invoke<ImportMcpResult>(
+        "import_merge_project_mcp_json",
+        {
+          projectRoot: root,
+          sourcePath,
+        },
+      );
       setMessage({
         kind: "success",
         text: `已合并到 ${res.wrotePath}（共 ${res.serverCount} 个 MCP 服务名，后导入的同名项覆盖已有）。`,
@@ -155,10 +126,13 @@ export function ClaudeCodeImportPanel({
     setMessage(null);
     setBusy("mcpGlobal");
     try {
-      const res = await invoke<ImportMcpResult>("import_merge_project_mcp_json", {
-        projectRoot: root,
-        sourcePath: defaults.globalClaudeConfig,
-      });
+      const res = await invoke<ImportMcpResult>(
+        "import_merge_project_mcp_json",
+        {
+          projectRoot: root,
+          sourcePath: defaults.globalClaudeConfig,
+        },
+      );
       setMessage({
         kind: "success",
         text: `已将 ~/.claude.json 中的 MCP 合并到 ${res.wrotePath}（共 ${res.serverCount} 个服务）。`,
@@ -186,11 +160,14 @@ export function ClaudeCodeImportPanel({
         target === "userOmiga" ? "skillsFolderUser" : "skillsFolderProject";
       setBusy(key);
       try {
-        const res = await invoke<ImportSkillsResult>("import_skills_from_directory", {
-          projectRoot: root,
-          sourceSkillsDir: picked,
-          target,
-        });
+        const res = await invoke<ImportSkillsResult>(
+          "import_skills_from_directory",
+          {
+            projectRoot: root,
+            sourceSkillsDir: picked,
+            target,
+          },
+        );
         const n = res.importedSkillDirs.length;
         setMessage({
           kind: "success",
@@ -218,10 +195,13 @@ export function ClaudeCodeImportPanel({
         target === "userOmiga" ? "skillsClaudeUser" : "skillsClaudeProject";
       setBusy(key);
       try {
-        const res = await invoke<ImportSkillsResult>("import_claude_default_user_skills", {
-          projectRoot: root,
-          target,
-        });
+        const res = await invoke<ImportSkillsResult>(
+          "import_claude_default_user_skills",
+          {
+            projectRoot: root,
+            target,
+          },
+        );
         const n = res.importedSkillDirs.length;
         setMessage({
           kind: "success",
@@ -242,25 +222,6 @@ export function ClaudeCodeImportPanel({
     [root],
   );
 
-  const onToggleLoadClaudeUserSkills = useCallback(
-    async (_: unknown, checked: boolean) => {
-      setLoadClaudeUserSkillsAtRuntime(checked);
-      try {
-        await invoke("set_setting", {
-          key: SETTING_LOAD_CLAUDE_USER_SKILLS,
-          value: checked ? "true" : "false",
-        });
-      } catch (e) {
-        setLoadClaudeUserSkillsAtRuntime(!checked);
-        setMessage({
-          kind: "error",
-          text: e instanceof Error ? e.message : String(e),
-        });
-      }
-    },
-    [],
-  );
-
   const showMcp = mode === "mcp" || mode === "both";
   const showSkills = mode === "skills" || mode === "both";
   const busyAny = busy != null;
@@ -269,34 +230,10 @@ export function ClaudeCodeImportPanel({
     <Box sx={{ mt: 2 }}>
       {noWorkspace && showMcp && (
         <Alert severity="warning" sx={{ mb: 2, borderRadius: 2 }}>
-          当前会话未绑定工作区路径，无法将 MCP / 技能导入到当前项目。用户级 ~/.omiga 导入仍可使用。
+          当前会话未绑定工作区路径，无法将 MCP / 技能导入到当前项目。用户级
+          ~/.omiga 导入仍可使用。
         </Alert>
       )}
-      <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 1 }}>
-        导入 Claude Code 形式
-      </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        MCP 合并到项目{" "}
-        <Typography component="span" fontFamily="monospace" fontSize="0.85em">
-          .omiga/mcp.json
-        </Typography>
-        。技能目录：会话始终加载{" "}
-        <Typography component="span" fontFamily="monospace" fontSize="0.85em">
-          ~/.omiga/skills
-        </Typography>
-        与项目{" "}
-        <Typography component="span" fontFamily="monospace" fontSize="0.85em">
-          .omiga/skills
-        </Typography>
-        ；<Typography component="span" fontFamily="monospace" fontSize="0.85em">
-          ~/.claude/skills
-        </Typography>
-        仅在下方开关开启时参与会话（默认关闭）。下方「复制到 Omiga」可把技能复制到
-        <Typography component="span" fontFamily="monospace" fontSize="0.85em">
-          .omiga/skills
-        </Typography>
-        。
-      </Typography>
 
       {defaultsError && (
         <Alert severity="warning" sx={{ mb: 2, borderRadius: 2 }}>
@@ -304,20 +241,26 @@ export function ClaudeCodeImportPanel({
         </Alert>
       )}
       {defaults && showMcp && (
-        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          display="block"
+          sx={{ mb: 1 }}
+        >
           Claude Code 全局 MCP 配置：{defaults.globalClaudeConfig}
           {defaults.globalClaudeConfigExists ? " ✓" : "（文件不存在）"}
         </Typography>
       )}
-      {defaults && showSkills && (
-        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
-          Claude Code 用户 skills 目录（开启下方开关后由会话加载；一键导入亦从此目录复制）
-          {defaults.envClaudeConfigDirSet ? "（已设置 $CLAUDE_CONFIG_DIR）" : ""}：
-          {defaults.defaultUserSkillsDir}
-        </Typography>
-      )}
 
-      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, alignItems: "center" }}>
+      <Box
+        sx={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 3,
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
         {showMcp && (
           <>
             <Button
@@ -331,9 +274,7 @@ export function ClaudeCodeImportPanel({
                 )
               }
               disabled={
-                busyAny ||
-                noWorkspace ||
-                !defaults?.globalClaudeConfigExists
+                busyAny || noWorkspace || !defaults?.globalClaudeConfigExists
               }
               onClick={() => void runImportGlobalClaudeMcp()}
             >
@@ -360,113 +301,147 @@ export function ClaudeCodeImportPanel({
 
       {showSkills && (
         <>
-          <FormControlLabel
-            sx={{ mt: 2, mb: 1, alignItems: "flex-start", ml: 0 }}
-            control={
-              <Switch
-                checked={loadClaudeUserSkillsAtRuntime}
-                disabled={!loadClaudeSettingReady || busyAny}
-                onChange={onToggleLoadClaudeUserSkills}
-                color="primary"
-              />
-            }
-            label={
-              <Box>
-                <Typography variant="body2" component="span" fontWeight={600}>
-                  在会话中加载 ~/.claude/skills
+          <Typography
+            variant="subtitle1"
+            fontWeight={600}
+            sx={{ mt: 2, mb: 1.5 }}
+          >
+            导入技能到 Omiga
+          </Typography>
+          <Stack spacing={2.5}>
+            <Box>
+              <Typography variant="body2" fontWeight={600} sx={{ mb: 0.5 }}>
+                从 Claude 默认目录导入
+              </Typography>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                display="block"
+                sx={{ mb: 1.25 }}
+              >
+                来源{" "}
+                <Typography
+                  component="span"
+                  fontFamily="monospace"
+                  fontSize="0.85em"
+                >
+                  {defaults?.defaultUserSkillsDir ?? "~/.claude/skills"}
                 </Typography>
-                <Typography variant="caption" color="text.secondary" display="block">
-                  关闭时聊天与技能工具不会读取 Claude 用户目录（默认关闭）；仍可使用 ~/.omiga/skills
-                  与项目 .omiga/skills。
-                </Typography>
+              </Typography>
+              <Box
+                sx={{
+                  display: "flex",
+                  justifyContent: "center",
+                  width: "100%",
+                }}
+              >
+                <Stack
+                  direction={{ xs: "column", sm: "row" }}
+                  spacing={3}
+                  useFlexGap
+                  sx={{ width: "100%", maxWidth: "80%" }}
+                >
+                  <Button
+                    fullWidth
+                    variant="contained"
+                    size="small"
+                    color="primary"
+                    startIcon={
+                      busy === "skillsClaudeUser" ? (
+                        <CircularProgress size={16} color="inherit" />
+                      ) : (
+                        <CloudDownloadIcon fontSize="small" />
+                      )
+                    }
+                    disabled={busyAny}
+                    onClick={() =>
+                      void runImportClaudeDefaultSkills("userOmiga")
+                    }
+                  >
+                    用户 ~/.omiga/skills
+                  </Button>
+                  <Button
+                    fullWidth
+                    variant="contained"
+                    size="small"
+                    color="secondary"
+                    startIcon={
+                      busy === "skillsClaudeProject" ? (
+                        <CircularProgress size={16} color="inherit" />
+                      ) : (
+                        <CloudDownloadIcon fontSize="small" />
+                      )
+                    }
+                    disabled={busyAny || noWorkspace}
+                    onClick={() =>
+                      void runImportClaudeDefaultSkills("projectOmiga")
+                    }
+                  >
+                    项目 .omiga/skills
+                  </Button>
+                </Stack>
               </Box>
-            }
-          />
-          <Typography variant="subtitle2" fontWeight={600} sx={{ mt: 1, mb: 1 }}>
-            从 Claude 默认目录导入到 Omiga（一键）
-          </Typography>
-          <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
-            来源为{" "}
-            <Typography component="span" fontFamily="monospace" fontSize="0.85em">
-              {defaults?.defaultUserSkillsDir ?? "~/.claude/skills"}
-            </Typography>
-            （与 Claude Code 用户级 skills 目录一致）。
-          </Typography>
-          <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, alignItems: "center", mb: 2 }}>
-            <Button
-              variant="contained"
-              size="small"
-              color="primary"
-              startIcon={
-                busy === "skillsClaudeUser" ? (
-                  <CircularProgress size={16} color="inherit" />
-                ) : (
-                  <CloudDownloadIcon fontSize="small" />
-                )
-              }
-              disabled={busyAny}
-              onClick={() => void runImportClaudeDefaultSkills("userOmiga")}
-            >
-              Claude 默认目录 → 用户 ~/.omiga/skills
-            </Button>
-            <Button
-              variant="contained"
-              size="small"
-              color="secondary"
-              startIcon={
-                busy === "skillsClaudeProject" ? (
-                  <CircularProgress size={16} color="inherit" />
-                ) : (
-                  <CloudDownloadIcon fontSize="small" />
-                )
-              }
-              disabled={busyAny || noWorkspace}
-              onClick={() => void runImportClaudeDefaultSkills("projectOmiga")}
-            >
-              Claude 默认目录 → 项目 .omiga/skills
-            </Button>
-          </Box>
+            </Box>
 
-          <Typography variant="subtitle2" fontWeight={600} sx={{ mt: 1, mb: 1 }}>
-            从任意文件夹复制到 Omiga
-          </Typography>
-          <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, alignItems: "center", mb: 2 }}>
-            <Button
-              variant="outlined"
-              size="small"
-              color="primary"
-              startIcon={
-                busy === "skillsFolderUser" ? (
-                  <CircularProgress size={16} />
-                ) : (
-                  <FolderOpenIcon fontSize="small" />
-                )
-              }
-              disabled={busyAny}
-              onClick={() => void runImportSkillsFromFolder("userOmiga")}
-            >
-              选择文件夹 → 用户 ~/.omiga/skills
-            </Button>
-            <Button
-              variant="outlined"
-              size="small"
-              color="secondary"
-              startIcon={
-                busy === "skillsFolderProject" ? (
-                  <CircularProgress size={16} />
-                ) : (
-                  <FolderOpenIcon fontSize="small" />
-                )
-              }
-              disabled={busyAny || noWorkspace}
-              onClick={() => void runImportSkillsFromFolder("projectOmiga")}
-            >
-              选择文件夹 → 项目 .omiga/skills
-            </Button>
-          </Box>
-          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
-            删除 ~/.omiga/skills 或项目 .omiga/skills 下的副本：请在下方「当前已加载项」→ Skills 卡片上使用「卸载副本」。
-          </Typography>
+            <Divider flexItem sx={{ borderStyle: "dashed" }} />
+
+            <Box>
+              <Typography variant="body2" fontWeight={600} sx={{ mb: 1 }}>
+                从任意文件夹导入
+              </Typography>
+              <Box
+                sx={{
+                  display: "flex",
+                  justifyContent: "center",
+                  width: "100%",
+                }}
+              >
+                <Stack
+                  direction={{ xs: "column", sm: "row" }}
+                  spacing={3}
+                  useFlexGap
+                  sx={{ width: "100%", maxWidth: "80%" }}
+                >
+                  <Button
+                    fullWidth
+                    variant="outlined"
+                    size="small"
+                    color="primary"
+                    startIcon={
+                      busy === "skillsFolderUser" ? (
+                        <CircularProgress size={16} />
+                      ) : (
+                        <FolderOpenIcon fontSize="small" />
+                      )
+                    }
+                    disabled={busyAny}
+                    onClick={() => void runImportSkillsFromFolder("userOmiga")}
+                  >
+                    用户 ~/.omiga/skills
+                  </Button>
+                  <Button
+                    fullWidth
+                    variant="outlined"
+                    size="small"
+                    color="secondary"
+                    startIcon={
+                      busy === "skillsFolderProject" ? (
+                        <CircularProgress size={16} />
+                      ) : (
+                        <FolderOpenIcon fontSize="small" />
+                      )
+                    }
+                    disabled={busyAny || noWorkspace}
+                    onClick={() =>
+                      void runImportSkillsFromFolder("projectOmiga")
+                    }
+                  >
+                    项目 .omiga/skills
+                  </Button>
+                </Stack>
+              </Box>
+            </Box>
+          </Stack>
         </>
       )}
 

@@ -16,6 +16,7 @@ pub mod search;
 pub mod session;
 pub mod shell;
 pub mod tools;
+pub mod wiki;
 
 use crate::errors::AppError;
 

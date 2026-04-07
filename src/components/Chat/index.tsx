@@ -40,7 +40,10 @@ import {
   Assignment as AssignmentIcon,
 } from "@mui/icons-material";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import {
+  oneDark,
+  oneLight,
+} from "react-syntax-highlighter/dist/esm/styles/prism";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -55,6 +58,7 @@ import {
 } from "../../state";
 import { Terminal } from "../Terminal";
 import { ChatComposer } from "./ChatComposer";
+import { getChatTokens } from "./chatTokens";
 import { AgentSessionStatus } from "./AgentSessionStatus";
 import { formatToolDisplayName } from "../../utils/executionSurfaceLabel";
 
@@ -130,23 +134,6 @@ interface BackgroundShellCompletePayload {
 /** Avatar column + row gap; align with pencil-new.pen (36px avatar, ~10px gap). */
 const MESSAGE_OUTSIDE_GUTTER_PX = 46;
 const AVATAR_PX = 36;
-
-/** OmicsAgent / pencil-new.pen chat tokens */
-const CHAT = {
-  font: '"Inter", system-ui, -apple-system, BlinkMacSystemFont, sans-serif',
-  userGrad: "linear-gradient(315deg, #6366f1 0%, #a855f7 100%)",
-  agentBubbleBg: "#F5F5F7",
-  agentBubbleBorder: "#E5E5EA",
-  agentAvatarBg: "#F3EFFE",
-  accent: "#6366f1",
-  textPrimary: "#1C1C1E",
-  textMuted: "#6C6C70",
-  textLabel: "#3C3C43",
-  labelMuted: "#8E8E93",
-  codeBg: "#ECECF0",
-  outputBg: "#F0F0F2",
-  doneGreen: "#34C759",
-} as const;
 
 function toolRowIcon(toolName: string) {
   const n = toolName.toLowerCase();
@@ -582,6 +569,7 @@ function getNestedToolPanelOpen(
 
 export function Chat({ sessionId }: ChatProps) {
   const theme = useTheme();
+  const CHAT = useMemo(() => getChatTokens(theme), [theme]);
   const isDev = import.meta.env.DEV;
   const [panelTab, setPanelTab] = useState(0);
   const [input, setInput] = useState("");
@@ -832,6 +820,28 @@ export function Chat({ sessionId }: ChatProps) {
       unlistenBg?.();
     };
   }, [sessionId, replaceStoreMessagesSnapshot]);
+
+  // Wiki dispatch: window event "wikiSendMessage" → fill input then auto-send.
+  // Used by WikiSettingsTab (inside Settings modal) to dispatch agent prompts to the chat.
+  const wikiPendingSendRef = useRef<string | null>(null);
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const content = (e as CustomEvent<{ content: string }>).detail?.content;
+      if (!content?.trim()) return;
+      wikiPendingSendRef.current = content.trim();
+      setInput(content.trim());
+    };
+    window.addEventListener("wikiSendMessage", handler);
+    return () => window.removeEventListener("wikiSendMessage", handler);
+  }, []);
+
+  // Trigger send once input has been updated by wikiPendingSendRef
+  useEffect(() => {
+    if (wikiPendingSendRef.current && input === wikiPendingSendRef.current) {
+      wikiPendingSendRef.current = null;
+      handleSend();
+    }
+  });
 
   // Set up stream listener for a specific stream ID
   const setupStreamListener = async (streamId: string) => {
@@ -1291,16 +1301,20 @@ export function Chat({ sessionId }: ChatProps) {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      if (needsWorkspacePath) {
-        if (input.trim()) {
-          showPathRequiredWarning();
-        }
-        return;
+    if (e.key !== "Enter" || e.shiftKey) return;
+
+    // IME（中文/日文等）：Enter 用于确认候选词，不应发送消息
+    const ne = e.nativeEvent;
+    if (ne.isComposing || ne.keyCode === 229) return;
+
+    e.preventDefault();
+    if (needsWorkspacePath) {
+      if (input.trim()) {
+        showPathRequiredWarning();
       }
-      handleSend();
+      return;
     }
+    handleSend();
   };
 
   const handleCancel = async () => {
@@ -1318,6 +1332,7 @@ export function Chat({ sessionId }: ChatProps) {
     tone: "default" | "agent" = "default",
   ) => {
     const isAgent = tone === "agent";
+    const prismStyle = theme.palette.mode === "dark" ? oneDark : oneLight;
     // Handle empty or undefined content
     if (!content || content.trim() === "") {
       return (
@@ -1423,7 +1438,7 @@ export function Chat({ sessionId }: ChatProps) {
                       </Typography>
                     </Box>
                     <SyntaxHighlighter
-                      style={oneDark}
+                      style={prismStyle}
                       language={language}
                       PreTag="div"
                       customStyle={{
@@ -1815,7 +1830,7 @@ export function Chat({ sessionId }: ChatProps) {
                           flexShrink: 0,
                           mt: 0.25,
                           bgcolor: CHAT.agentAvatarBg,
-                          color: CHAT.accent,
+                          color: CHAT.toolIcon,
                         }}
                       >
                         <AgentCpuIcon sx={{ fontSize: 18 }} />
@@ -1846,7 +1861,7 @@ export function Chat({ sessionId }: ChatProps) {
                           <ExpandMore
                             sx={{
                               fontSize: 14,
-                              color: CHAT.accent,
+                              color: CHAT.toolIcon,
                               transform: expandedToolGroups.has(id)
                                 ? "rotate(0deg)"
                                 : "rotate(-90deg)",
@@ -1978,7 +1993,7 @@ export function Chat({ sessionId }: ChatProps) {
                                     sx={{
                                       borderRadius: "10px",
                                       border: `1px solid ${CHAT.agentBubbleBorder}`,
-                                      bgcolor: alpha(CHAT.codeBg, 0.45),
+                                      bgcolor: CHAT.toolCallCardBg,
                                       overflow: "hidden",
                                     }}
                                   >
@@ -1999,14 +2014,14 @@ export function Chat({ sessionId }: ChatProps) {
                                         px: 1.25,
                                         py: 0.85,
                                         "&:hover": {
-                                          bgcolor: alpha("#000", 0.03),
+                                          bgcolor: "action.hover",
                                         },
                                       }}
                                     >
                                       <ExpandMore
                                         sx={{
                                           fontSize: 18,
-                                          color: CHAT.accent,
+                                          color: CHAT.toolIcon,
                                           flexShrink: 0,
                                           transform: nestedOpen
                                             ? "rotate(0deg)"
@@ -2017,7 +2032,7 @@ export function Chat({ sessionId }: ChatProps) {
                                       <StepIcon
                                         sx={{
                                           fontSize: 16,
-                                          color: CHAT.accent,
+                                          color: CHAT.toolIcon,
                                           flexShrink: 0,
                                         }}
                                       />
@@ -2200,7 +2215,7 @@ export function Chat({ sessionId }: ChatProps) {
                                   sx={{
                                     fontSize: 12,
                                     fontWeight: 600,
-                                    color: CHAT.accent,
+                                    color: CHAT.toolIcon,
                                   }}
                                 >
                                   Done
@@ -2292,7 +2307,9 @@ export function Chat({ sessionId }: ChatProps) {
                             py: 1.25,
                             borderRadius: "18px",
                             background: CHAT.userGrad,
-                            color: "#FFFFFF",
+                            color: theme.palette.getContrastText(
+                              theme.palette.primary.main,
+                            ),
                             fontFamily: CHAT.font,
                           }}
                         >
@@ -2401,7 +2418,7 @@ export function Chat({ sessionId }: ChatProps) {
               p: 1.5,
               borderTop: 1,
               borderColor: "divider",
-              bgcolor: "#FFFFFF",
+              bgcolor: "background.paper",
             }}
           >
             <Collapse in={needsWorkspacePath}>

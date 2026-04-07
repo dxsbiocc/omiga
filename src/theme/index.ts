@@ -297,10 +297,20 @@ export const getTheme = (mode: "light" | "dark" = "dark"): ThemeOptions => {
   };
 };
 
-// Create the default dark theme
+export { getPencilPalette, usePencilPalette, pencilLightPenPalette, pencilDarkPenPalette, pencilNewPenPalette } from "./pencilPalette";
+export {
+  ACCENT_PRESET_IDS,
+  ACCENT_PRESET_META,
+  ACCENT_PICKER_SURFACES,
+  COLOR_MODE_PICKER_SURFACES,
+  getAccentPresetOptions,
+  type AccentPresetId,
+} from "./accentPresets";
+
+/** @deprecated Prefer `<AppThemeProvider>` + `useColorModeStore`; kept for tests or one-off `createTheme(getTheme(mode))`. */
 export const theme = createTheme(getTheme("dark"));
 
-// Export light theme for potential use
+/** @deprecated */
 export const lightTheme = createTheme(getTheme("light"));
 
 // Type augmentation for custom palette properties

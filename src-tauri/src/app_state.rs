@@ -5,10 +5,14 @@
 //! logging, and future observability read one managed struct.
 
 use crate::domain::chat_state::ChatState;
+use crate::domain::integrations_catalog::IntegrationsCatalog;
 use crate::commands::CommandResult;
 use crate::domain::persistence::SessionRepository;
 use serde::Serialize;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 use tauri::State;
 use tokio::sync::Mutex;
@@ -19,6 +23,9 @@ pub struct OmigaAppState {
     pub chat: ChatState,
     /// Process start time for uptime in snapshots.
     pub started_at: Instant,
+    /// Warm cache for [`crate::commands::integrations_settings::get_integrations_catalog`]:
+    /// keyed by resolved project root (see `resolve_project_root` there).
+    pub integrations_catalog_cache: Arc<StdMutex<HashMap<PathBuf, IntegrationsCatalog>>>,
 }
 
 impl OmigaAppState {
@@ -27,6 +34,7 @@ impl OmigaAppState {
             repo: Arc::new(Mutex::new(repo)),
             chat: ChatState::default(),
             started_at: Instant::now(),
+            integrations_catalog_cache: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 }

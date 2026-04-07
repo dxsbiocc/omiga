@@ -19,4 +19,7 @@ export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
   notebook: 7,
   jupyter: 7,
   ipynb: 7,
+  /** LLM Wiki knowledge base */
+  wiki: 8,
+  knowledge: 8,
 };

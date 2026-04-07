@@ -5,6 +5,7 @@
  * - `useWorkspaceStore` — open file in editor
  * - `useUiStore` — layout dimensions, settings dialog (layout persisted in localStorage)
  * - `useLocaleStore` — UI locale `en` | `zh-CN` (persisted)
+ * - `useColorModeStore` — light / dark / system appearance (persisted)
  */
 
 export {
@@ -29,6 +30,11 @@ export {
 export { useWorkspaceStore } from "./workspaceStore";
 export { useUiStore, type UiState } from "./uiStore";
 export { useLocaleStore, type AppLocale } from "./localeStore";
+export {
+  useColorModeStore,
+  type ColorModePreference,
+} from "./themeStore";
+export type { AccentPresetId } from "../theme/accentPresets";
 export {
   LAYOUT_LEFT_MIN,
   LAYOUT_LEFT_MAX,

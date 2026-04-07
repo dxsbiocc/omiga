@@ -31,6 +31,16 @@ interface DocRenderResult {
 
 export function CodeWorkspace() {
   const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+  const toolbarStripe = isDark
+    ? alpha(theme.palette.background.default, 0.92)
+    : alpha(theme.palette.grey[100], 0.85);
+  const renderOutBg = isDark
+    ? alpha(theme.palette.background.default, 0.55)
+    : alpha(theme.palette.grey[100], 0.6);
+  const statusBarBg = isDark
+    ? alpha(theme.palette.common.white, 0.06)
+    : alpha(theme.palette.grey[200], 0.45);
   const {
     filePath,
     fileName,
@@ -113,7 +123,7 @@ export function CodeWorkspace() {
         sx={{
           minHeight: 40,
           px: 1,
-          bgcolor: alpha(theme.palette.grey[100], 0.85),
+          bgcolor: toolbarStripe,
           borderBottom: 1,
           borderColor: "divider",
         }}
@@ -313,7 +323,7 @@ export function CodeWorkspace() {
                   borderColor: "divider",
                   px: 1.5,
                   py: 1,
-                  bgcolor: alpha(theme.palette.grey[100], 0.6),
+                  bgcolor: renderOutBg,
                   fontFamily: "JetBrains Mono, Monaco, Consolas, monospace",
                   fontSize: 11,
                   lineHeight: 1.5,
@@ -366,7 +376,7 @@ export function CodeWorkspace() {
           height: 24,
           px: 2,
           flexShrink: 0,
-          bgcolor: alpha(theme.palette.grey[200], 0.45),
+          bgcolor: statusBarBg,
           borderTop: 1,
           borderColor: "divider",
         }}

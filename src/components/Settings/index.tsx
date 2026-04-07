@@ -31,10 +31,13 @@ import {
   ArrowBack,
 } from "@mui/icons-material";
 import { useSessionStore } from "../../state/sessionStore";
+import { useColorModeStore } from "../../state/themeStore";
 import { PermissionSettingsTab } from "./PermissionSettingsTab";
 import { NotebookSettingsTab } from "./NotebookSettingsTab";
 import { ClaudeCodeImportPanel } from "./ClaudeCodeImportPanel";
 import { IntegrationsCatalogPanel } from "./IntegrationsCatalogPanel";
+import { WikiSettingsTab } from "./WikiSettingsTab";
+import { ThemeAppearancePanel } from "./ThemeAppearancePanel";
 
 interface SettingsProps {
   open: boolean;
@@ -66,10 +69,16 @@ const SETTINGS_SECTIONS: {
       { index: 6, label: "Skills" },
     ],
   },
+  {
+    header: "Knowledge",
+    items: [
+      { index: 8, label: "Wiki" },
+    ],
+  },
 ];
 
 const SETTINGS_NAV_FLAT = SETTINGS_SECTIONS.flatMap((s) => s.items);
-const SETTINGS_TAB_MAX = 7;
+const SETTINGS_TAB_MAX = 8;
 
 function clampSettingsTab(i: number): number {
   return Math.min(Math.max(0, Math.floor(Number.isFinite(i) ? i : 0)), SETTINGS_TAB_MAX);
@@ -186,6 +195,10 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
   const projectPath = useSessionStore(
     (s) => s.currentSession?.projectPath ?? ".",
   );
+  const colorMode = useColorModeStore((s) => s.colorMode);
+  const setColorMode = useColorModeStore((s) => s.setColorMode);
+  const accentPreset = useColorModeStore((s) => s.accentPreset ?? "asana");
+  const setAccentPreset = useColorModeStore((s) => s.setAccentPreset);
 
   // Provider selection
   const [provider, setProvider] = useState("anthropic");
@@ -530,7 +543,7 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
         minHeight: 0,
         display: "flex",
         flexDirection: "column",
-        bgcolor: "#ffffff",
+        bgcolor: "background.paper",
         color: "text.primary",
       }}
     >
@@ -545,7 +558,7 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
           py: 1,
           borderBottom: 1,
           borderColor: "divider",
-          bgcolor: "#fafafa",
+          bgcolor: "background.default",
         }}
       >
         <IconButton
@@ -578,7 +591,7 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
             flexShrink: 0,
             borderRight: 1,
             borderColor: "divider",
-            bgcolor: "#ffffff",
+            bgcolor: "background.paper",
             overflow: "auto",
             py: 1,
           }}
@@ -607,10 +620,10 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
                       borderRadius: 1,
                       mb: 0.25,
                       "&.Mui-selected": {
-                        bgcolor: "#e8e8e8",
+                        bgcolor: "action.selected",
                       },
                       "&.Mui-selected:hover": {
-                        bgcolor: "#e0e0e0",
+                        bgcolor: "action.hover",
                       },
                     }}
                   >
@@ -635,7 +648,7 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
             display: "flex",
             flexDirection: "column",
             minHeight: 0,
-            bgcolor: "#ffffff",
+            bgcolor: "background.paper",
           }}
         >
           <Box sx={{ flex: 1, minHeight: 0, overflow: "auto", px: 3, py: 2.5 }}>
@@ -897,15 +910,12 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
         )}
 
         {activeTab === 3 && (
-          <Box>
-            <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
-              Theme (light / dark / system) is not wired yet. Coming in a
-              future release.
-            </Alert>
-            <Typography variant="body2" color="text.secondary">
-              The app currently follows your system / MUI default theme.
-            </Typography>
-          </Box>
+          <ThemeAppearancePanel
+            colorMode={colorMode}
+            onColorModeChange={setColorMode}
+            accentPreset={accentPreset}
+            onAccentPresetChange={setAccentPreset}
+          />
         )}
 
         {activeTab === 4 && (
@@ -953,34 +963,16 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
         {activeTab === 6 && (
           <Box>
             <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
-              Skills 用户级：直接读取{" "}
-              <Typography component="span" fontWeight={600}>
-                ~/.claude/skills
-              </Typography>
-              （或 $CLAUDE_CONFIG_DIR/skills）与{" "}
-              <Typography component="span" fontWeight={600}>
-                ~/.omiga/skills
-              </Typography>
-              ，不做拷贝；同名技能以{" "}
-              <Typography component="span" fontWeight={600}>
-                ~/.omiga/skills
-              </Typography>
-              为准。项目级：{" "}
+              用户级：<Typography component="span" fontWeight={600}>~/.claude/skills</Typography>、
+              <Typography component="span" fontWeight={600}>~/.omiga/skills</Typography>
+              （同名以 Omiga 为准）；项目级{" "}
               <Typography component="span" fontWeight={600}>
                 .omiga/skills
               </Typography>
               。
             </Alert>
-            <Typography variant="body2" color="text.secondary">
-              下方「从文件夹导入」仅写入{" "}
-              <Typography component="span" fontWeight={600}>
-                ~/.omiga/skills
-              </Typography>{" "}
-              或{" "}
-              <Typography component="span" fontWeight={600}>
-                .omiga/skills
-              </Typography>
-              ；Claude 目录由运行时自动扫描。
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              导入仅写入 Omiga 目录；Claude 路径由运行时扫描。
             </Typography>
             <ClaudeCodeImportPanel projectPath={projectPath} mode="skills" />
             <IntegrationsCatalogPanel projectPath={projectPath} mode="skills" />
@@ -990,6 +982,12 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
         {activeTab === 7 && (
           <Box>
             <NotebookSettingsTab />
+          </Box>
+        )}
+
+        {activeTab === 8 && (
+          <Box>
+            <WikiSettingsTab projectPath={projectPath} />
           </Box>
         )}
 
@@ -1014,7 +1012,7 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
                 gap: 1,
                 alignItems: "center",
                 justifyContent: "flex-end",
-                bgcolor: "#fafafa",
+                bgcolor: "background.paper",
               }}
             >
               {savedConfig && (

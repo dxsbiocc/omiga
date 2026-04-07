@@ -3,6 +3,7 @@
 pub mod auto_compact;
 pub mod background_shell;
 pub mod chat_state;
+pub mod integrations_catalog;
 pub mod integrations_config;
 pub mod mcp_client;
 pub mod mcp_config;
@@ -18,3 +19,4 @@ pub mod skills;
 pub mod subagent_tool_filter;
 pub mod tools;
 pub mod tool_permission_rules;
+pub mod wiki;

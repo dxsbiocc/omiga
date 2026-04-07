@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import {
   Box,
   Typography,
@@ -38,9 +38,11 @@ import {
   HelpOutline as HelpOutlineIcon,
   MenuBook as MenuBookIcon,
   Logout as LogoutIcon,
+  GitHub as GitHubIcon,
   ChevronRight,
 } from "@mui/icons-material";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { OMIGA_GITHUB_RELEASES_URL } from "../../constants/appLinks";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   useSessionStore,
@@ -213,6 +215,15 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     }
   };
 
+  const handleOpenGithubUpdates = async () => {
+    handleUserMenuClose();
+    try {
+      await openUrl(OMIGA_GITHUB_RELEASES_URL);
+    } catch (e) {
+      console.error("[SessionList] open GitHub releases URL failed", e);
+    }
+  };
+
   const handleLogOut = async () => {
     handleUserMenuClose();
     try {
@@ -258,26 +269,32 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     );
   });
 
-  const navTextSx = {
-    fontSize: 14,
-    fontWeight: 500,
-    color: "#1C1C1E",
-    lineHeight: 1.3,
-  } as const;
+  const navTextSx = useMemo(
+    () => ({
+      fontSize: 14,
+      fontWeight: 500,
+      color: theme.palette.text.primary,
+      lineHeight: 1.3,
+    }),
+    [theme.palette.text.primary],
+  );
 
-  const navRowSx = {
-    display: "flex",
-    alignItems: "center",
-    gap: 1.25,
-    px: 1.5,
-    py: 1,
-    borderRadius: 1,
-    cursor: "pointer",
-    color: "#1C1C1E",
-    "&:hover": {
-      bgcolor: alpha(theme.palette.common.black, 0.04),
-    },
-  } as const;
+  const navRowSx = useMemo(
+    () => ({
+      display: "flex",
+      alignItems: "center",
+      gap: 1.25,
+      px: 1.5,
+      py: 1,
+      borderRadius: 1,
+      cursor: "pointer",
+      color: theme.palette.text.primary,
+      "&:hover": {
+        bgcolor: "action.hover",
+      },
+    }),
+    [theme.palette.text.primary],
+  );
 
   // Only block the whole panel on the initial list fetch — not when switching sessions
   if (isLoading && sessions.length === 0) {
@@ -304,7 +321,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
         height: "100%",
         display: "flex",
         flexDirection: "column",
-        bgcolor: "#FAFAFA",
+        bgcolor: "transparent",
       }}
     >
       {selectError && (
@@ -325,7 +342,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             handleCreateClick();
           }}
         >
-          <Add sx={{ fontSize: 20, color: "#3C3C43" }} />
+          <Add sx={{ fontSize: 20, color: "text.secondary" }} />
           <Typography sx={navTextSx}>{t("newSession")}</Typography>
         </Box>
         <Box
@@ -334,7 +351,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             searchInputRef.current?.focus();
           }}
         >
-          <Search sx={{ fontSize: 20, color: "#3C3C43" }} />
+          <Search sx={{ fontSize: 20, color: "text.secondary" }} />
           <Typography sx={navTextSx}>{t("search")}</Typography>
         </Box>
         <Box
@@ -345,11 +362,11 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             );
           }}
         >
-          <BusinessCenterOutlined sx={{ fontSize: 20, color: "#3C3C43" }} />
+          <BusinessCenterOutlined sx={{ fontSize: 20, color: "text.secondary" }} />
           <Typography sx={navTextSx}>{t("customize")}</Typography>
         </Box>
         <Box sx={navRowSx} onClick={() => {}}>
-          <FolderOutlined sx={{ fontSize: 20, color: "#3C3C43" }} />
+          <FolderOutlined sx={{ fontSize: 20, color: "text.secondary" }} />
           <Typography sx={navTextSx}>{t("projects")}</Typography>
         </Box>
       </Stack>
@@ -362,7 +379,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             display: "block",
             mb: 1,
             px: 0.5,
-            color: "#8E8E93",
+            color: "text.secondary",
             fontSize: 12,
             fontWeight: 500,
           }}
@@ -377,10 +394,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             px: 1.5,
             py: 0.75,
             borderRadius: 2,
-            bgcolor: "#EBEBEB",
+            bgcolor: "action.hover",
           }}
         >
-          <Search fontSize="small" sx={{ color: "#AEAEB2", fontSize: 16 }} />
+          <Search fontSize="small" sx={{ color: "text.disabled", fontSize: 16 }} />
           <InputBase
             inputRef={searchInputRef}
             placeholder={t("searchPlaceholder")}
@@ -389,7 +406,11 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             sx={{
               flex: 1,
               fontSize: 13,
-              "& input::placeholder": { color: "#AEAEB2", opacity: 1 },
+              color: "text.primary",
+              "& input::placeholder": {
+                color: "text.disabled",
+                opacity: 1,
+              },
             }}
           />
         </Box>
@@ -428,14 +449,11 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                   cursor: "pointer",
                   bgcolor:
                     currentSession?.id === session.id
-                      ? alpha(theme.palette.common.black, 0.06)
+                      ? "action.selected"
                       : "transparent",
                   border: "1px solid transparent",
                   "&:hover": {
-                    bgcolor:
-                      currentSession?.id === session.id
-                        ? alpha(theme.palette.common.black, 0.06)
-                        : alpha(theme.palette.common.black, 0.04),
+                    bgcolor: "action.hover",
                   },
                 }}
               >
@@ -449,11 +467,11 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                       minWidth: 0,
                       ...(isPlaceholder
                         ? {
-                            color: "#8E8E93",
+                            color: "text.secondary",
                             fontStyle: "italic",
                             fontWeight: 400,
                           }
-                        : { color: "#1C1C1E" }),
+                        : { color: "text.primary" }),
                     }}
                   >
                     {isPlaceholder ? UNUSED_SESSION_LABEL : session.name}
@@ -468,9 +486,9 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                     sx={{
                       p: 0.25,
                       flexShrink: 0,
-                      color: "#8E8E93",
+                      color: "text.secondary",
                       "&:hover": {
-                        bgcolor: alpha(theme.palette.common.black, 0.06),
+                        bgcolor: "action.hover",
                       },
                     }}
                   >
@@ -497,7 +515,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
           flexShrink: 0,
           cursor: "pointer",
           "&:hover": {
-            bgcolor: alpha(theme.palette.common.black, 0.04),
+            bgcolor: "action.hover",
           },
         }}
       >
@@ -518,14 +536,14 @@ export function SessionList({ onSelectSession }: SessionListProps) {
           ✿
         </Box>
         <Box sx={{ flex: 1, minWidth: 0 }}>
-          <Typography variant="body2" fontWeight={600} color="#1C1C1E" noWrap>
+          <Typography variant="body2" fontWeight={600} color="text.primary" noWrap>
             dengxsh
           </Typography>
-          <Typography variant="caption" color="#8E8E93" display="block" noWrap>
+          <Typography variant="caption" color="text.secondary" display="block" noWrap>
             {t("proPlan")}
           </Typography>
         </Box>
-        <UnfoldMore sx={{ fontSize: 18, color: "#8E8E93", flexShrink: 0 }} />
+        <UnfoldMore sx={{ fontSize: 18, color: "text.secondary", flexShrink: 0 }} />
       </Box>
 
       {/* User Menu */}
@@ -595,6 +613,12 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             <MenuBookIcon fontSize="small" />
           </ListItemIcon>
           <ListItemText>{t("learnMore")}</ListItemText>
+        </MenuItem>
+        <MenuItem onClick={() => void handleOpenGithubUpdates()}>
+          <ListItemIcon>
+            <GitHubIcon fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>{t("githubUpdates")}</ListItemText>
         </MenuItem>
         <Divider />
         <MenuItem onClick={() => void handleLogOut()}>
@@ -687,6 +711,8 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => {
+              const ne = e.nativeEvent;
+              if (ne.isComposing || ne.keyCode === 229) return;
               if (e.key === "Enter" && newName.trim()) {
                 handleRenameConfirm();
               }

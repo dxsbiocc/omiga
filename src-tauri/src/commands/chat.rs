@@ -477,6 +477,13 @@ pub async fn send_message(
             prompt_parts.push(task_sec);
         }
     }
+    // Transparent wiki hook — inject relevant wiki pages when the project has a wiki.
+    // Cost: one index.md read + up to 3 page reads; returns None when wiki is absent.
+    if let Some(wiki_ctx) =
+        crate::domain::wiki::query_relevant_context(&request.content, &project_root).await
+    {
+        prompt_parts.push(wiki_ctx);
+    }
     llm_config.system_prompt = if prompt_parts.is_empty() {
         None
     } else {
@@ -1345,12 +1352,23 @@ async fn run_subagent_session(
     } else {
         ""
     };
-    prompt_parts.push(format!(
-        "## Sub-agent mode\nYou are an isolated sub-agent (Claude Code parity). \
-         Use tools as needed. Disallowed tools match `ALL_AGENT_DISALLOWED_TOOLS`: \
-         TaskOutput, EnterPlanMode, ExitPlanMode (unless in plan mode), AskUserQuestion, TaskStop. \
-         {exit_plan_note}{nested_agent_note}"
-    ));
+    // wiki-agent subagent type: specialized prompt for wiki management tasks.
+    let is_wiki_agent = args
+        .subagent_type
+        .as_deref()
+        .map(|t| t.eq_ignore_ascii_case("wiki-agent") || t.eq_ignore_ascii_case("wiki_agent"))
+        .unwrap_or(false);
+
+    if is_wiki_agent {
+        prompt_parts.push(crate::domain::wiki::wiki_agent_system_prompt(&effective_root));
+    } else {
+        prompt_parts.push(format!(
+            "## Sub-agent mode\nYou are an isolated sub-agent (Claude Code parity). \
+             Use tools as needed. Disallowed tools match `ALL_AGENT_DISALLOWED_TOOLS`: \
+             TaskOutput, EnterPlanMode, ExitPlanMode (unless in plan mode), AskUserQuestion, TaskStop. \
+             {exit_plan_note}{nested_agent_note}"
+        ));
+    }
     if let Some(ref u) = sub_cfg.system_prompt {
         let t = u.trim();
         if !t.is_empty() {

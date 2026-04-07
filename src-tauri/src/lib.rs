@@ -16,6 +16,7 @@ pub mod llm;
 pub mod utils;
 
 use app_state::OmigaAppState;
+use commands::integrations_settings;
 use domain::persistence::SessionRepository;
 use tauri::Manager;
 
@@ -61,6 +62,18 @@ pub fn run() {
                 app_handle.manage(app_state);
 
                 tracing::info!("Database initialized successfully");
+
+                // Warm integrations catalog (MCP tools/list + skills scan) in the background so
+                // opening Settings → Integrations is usually instant (cache hit for default cwd).
+                let warm_handle = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let Some(state) = warm_handle.try_state::<OmigaAppState>() else {
+                        tracing::warn!("Integrations preload: OmigaAppState not available");
+                        return;
+                    };
+                    integrations_settings::warm_integrations_catalog_cache(&state, "").await;
+                });
             });
 
             Ok(())
@@ -110,6 +123,17 @@ pub fn run() {
             commands::claude_import::get_claude_default_paths,
             commands::integrations_settings::get_integrations_catalog,
             commands::integrations_settings::save_integrations_state,
+            commands::wiki::wiki_get_status,
+            commands::wiki::wiki_write_page,
+            commands::wiki::wiki_read_page,
+            commands::wiki::wiki_delete_page,
+            commands::wiki::wiki_list_pages,
+            commands::wiki::wiki_write_index,
+            commands::wiki::wiki_read_index,
+            commands::wiki::wiki_append_log,
+            commands::wiki::wiki_read_log,
+            commands::wiki::wiki_query,
+            commands::wiki::wiki_get_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -164,7 +164,7 @@ export default function App() {
               borderRadius: 0,
               borderRight: 1,
               borderColor: "divider",
-              bgcolor: alpha(theme.palette.grey[50], 0.9),
+              bgcolor: "background.paper",
             }}
           >
             <ErrorBoundary label="Session list">
@@ -198,7 +198,7 @@ export default function App() {
                 borderRadius: 0,
                 borderLeft: 1,
                 borderColor: "divider",
-                bgcolor: "#ffffff",
+                bgcolor: "background.paper",
               }}
             >
               <Box
@@ -305,7 +305,7 @@ export default function App() {
                   borderRadius: 0,
                   borderLeft: 1,
                   borderColor: "divider",
-                  bgcolor: alpha(theme.palette.grey[50], 0.9),
+                  bgcolor: "background.paper",
                 }}
               >
                 <Box
