@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "pencil": {
+      "args": [
+        "--app",
+        "cursor"
+      ],
+      "command": "/Users/dengxsh/.pencil/mcp/cursor/out/mcp-server-darwin-arm64",
+      "env": {},
+      "type": "stdio"
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Omiga",
+  "version": "0.1.0",
+  "identifier": "com.omiga.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Omiga",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 800,
+        "minHeight": 600,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": true,
+        "decorations": true,
+        "transparent": false,
+        "maximized": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "dangerousDisableAssetCspModification": false,
+      "capabilities": [
+        {
+          "identifier": "default-capability",
+          "windows": [
+            "main"
+          ],
+          "permissions": [
+            "core:default",
+            "opener:default",
+            "dialog:default",
+            "core:path:default",
+            "core:window:default"
+          ]
+        }
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg",
+      "appimage",
+      "deb",
+      "msi"
+    ],
+    "icon": [],
+    "category": "DeveloperTool",
+    "shortDescription": "AI coding assistant",
+    "longDescription": "An IDE-like AI coding assistant with file operations, search, and session persistence"
+  }
+}

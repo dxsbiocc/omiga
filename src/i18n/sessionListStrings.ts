@@ -1,0 +1,76 @@
+import type { AppLocale } from "../state/localeStore";
+
+const STRINGS = {
+  en: {
+    newSession: "New session",
+    search: "Search",
+    customize: "Customize",
+    projects: "Projects",
+    recents: "Recents",
+    searchPlaceholder: "Search...",
+    noSessions: "No sessions found",
+    sessionActions: "Session actions",
+    proPlan: "Pro plan",
+    settings: "Settings",
+    language: "Language",
+    getHelp: "Get help",
+    learnMore: "Learn more",
+    logOut: "Log out",
+    rename: "Rename",
+    delete: "Delete",
+    deleting: "Deleting...",
+    renameSession: "Rename Session",
+    sessionName: "Session name",
+    cancel: "Cancel",
+    save: "Save",
+    theme: "Theme",
+    plugins: "Plugins",
+    mcp: "MCP",
+    skills: "Skills",
+    displayLanguage: "Display language",
+    english: "English",
+    chinese: "简体中文",
+    sessionSwitchErrorPrefix: "Session switch error (see console [OmigaDebug]):",
+  },
+  "zh-CN": {
+    newSession: "新建会话",
+    search: "搜索",
+    customize: "自定义",
+    projects: "项目",
+    recents: "最近",
+    searchPlaceholder: "搜索…",
+    noSessions: "暂无会话",
+    sessionActions: "会话操作",
+    proPlan: "Pro 方案",
+    settings: "设置",
+    language: "语言",
+    getHelp: "获取帮助",
+    learnMore: "了解更多",
+    logOut: "退出登录",
+    rename: "重命名",
+    delete: "删除",
+    deleting: "删除中…",
+    renameSession: "重命名会话",
+    sessionName: "会话名称",
+    cancel: "取消",
+    save: "保存",
+    theme: "主题",
+    plugins: "插件",
+    mcp: "MCP",
+    skills: "技能",
+    displayLanguage: "显示语言",
+    english: "English",
+    chinese: "简体中文",
+    sessionSwitchErrorPrefix: "切换会话失败（见控制台 [OmigaDebug]）：",
+  },
+} as const;
+
+export type SessionListStringKey = keyof typeof STRINGS.en;
+
+export function tSessionList(
+  locale: AppLocale,
+  key: SessionListStringKey,
+): string {
+  const bundle = STRINGS[locale];
+  return bundle[key] ?? STRINGS.en[key];
+}

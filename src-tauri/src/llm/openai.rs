@@ -1,0 +1,446 @@
+//! OpenAI-compatible API client
+//!
+//! Supports OpenAI, Azure OpenAI, and any OpenAI-compatible endpoint (Ollama, vLLM, etc.)
+
+use super::{LlmClient, LlmConfig, LlmMessage, LlmStreamChunk, LlmRole, LlmContent};
+use crate::domain::tools::ToolSchema;
+use crate::errors::ApiError;
+use async_trait::async_trait;
+use futures::{Stream, StreamExt};
+use serde::{Deserialize, Serialize};
+use std::pin::Pin;
+use reqwest::Client;
+
+/// OpenAI-compatible client
+pub struct OpenAiCompatibleClient {
+    client: Client,
+    config: LlmConfig,
+}
+
+impl OpenAiCompatibleClient {
+    pub fn new(config: LlmConfig) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(config.timeout_secs))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
+        Self { client, config }
+    }
+
+    /// Build request headers
+    fn build_headers(&self) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", self.config.api_key).parse().unwrap(),
+        );
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "application/json".parse().unwrap(),
+        );
+
+        // Add any extra headers from config
+        if let Some(extra) = &self.config.extra_headers {
+            for (key, value) in extra {
+                if let Ok(header_name) = reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
+                    if let Ok(header_value) = value.parse() {
+                        headers.insert(header_name, header_value);
+                    }
+                }
+            }
+        }
+
+        headers
+    }
+
+    /// Convert LlmMessage to OpenAI Chat Completions format.
+    ///
+    /// Critical: tool results must use `role: "tool"` + `tool_call_id` (not a user message with
+    /// empty content). Assistant turns with `tool_use` blocks must become `tool_calls`, or the
+    /// model never sees prior tool output and will re-invoke tools in a loop.
+    fn convert_messages(&self, messages: Vec<LlmMessage>) -> Vec<OpenAiMessage> {
+        let mut out = Vec::new();
+
+        for msg in messages {
+            match msg.role {
+                LlmRole::System => {
+                    let text: String = msg
+                        .content
+                        .iter()
+                        .filter_map(|c| {
+                            if let LlmContent::Text { text } = c {
+                                Some(text.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    out.push(OpenAiMessage {
+                        role: "system".to_string(),
+                        content: serde_json::Value::String(text),
+                        name: None,
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                }
+                LlmRole::User => {
+                    if msg
+                        .content
+                        .iter()
+                        .all(|c| matches!(c, LlmContent::ToolResult { .. }))
+                    {
+                        for block in msg.content {
+                            if let LlmContent::ToolResult {
+                                tool_use_id,
+                                content,
+                                ..
+                            } = block
+                            {
+                                out.push(OpenAiMessage {
+                                    role: "tool".to_string(),
+                                    content: serde_json::Value::String(content),
+                                    name: None,
+                                    tool_calls: None,
+                                    tool_call_id: Some(tool_use_id),
+                                });
+                            }
+                        }
+                    } else {
+                        let text: String = msg
+                            .content
+                            .iter()
+                            .filter_map(|c| {
+                                if let LlmContent::Text { text } = c {
+                                    Some(text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        out.push(OpenAiMessage {
+                            role: "user".to_string(),
+                            content: serde_json::Value::String(text),
+                            name: None,
+                            tool_calls: None,
+                            tool_call_id: None,
+                        });
+                    }
+                }
+                LlmRole::Assistant => {
+                    let mut text_parts: Vec<String> = Vec::new();
+                    let mut tool_calls_vec: Vec<OpenAiToolCall> = Vec::new();
+                    for c in &msg.content {
+                        match c {
+                            LlmContent::Text { text } => {
+                                if !text.is_empty() {
+                                    text_parts.push(text.clone());
+                                }
+                            }
+                            LlmContent::ToolUse {
+                                id,
+                                name,
+                                arguments,
+                            } => {
+                                let args_str = match arguments {
+                                    serde_json::Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                tool_calls_vec.push(OpenAiToolCall {
+                                    id: id.clone(),
+                                    r#type: "function".to_string(),
+                                    function: OpenAiToolFunction {
+                                        name: name.clone(),
+                                        arguments: args_str,
+                                    },
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    let content = if text_parts.is_empty() {
+                        serde_json::Value::String(String::new())
+                    } else {
+                        serde_json::Value::String(text_parts.join("\n"))
+                    };
+                    out.push(OpenAiMessage {
+                        role: "assistant".to_string(),
+                        content,
+                        name: None,
+                        tool_calls: if tool_calls_vec.is_empty() {
+                            None
+                        } else {
+                            Some(tool_calls_vec)
+                        },
+                        tool_call_id: None,
+                    });
+                }
+                LlmRole::Tool => {
+                    if let Some(LlmContent::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    }) = msg.content.first()
+                    {
+                        out.push(OpenAiMessage {
+                            role: "tool".to_string(),
+                            content: serde_json::Value::String(content.clone()),
+                            name: None,
+                            tool_calls: None,
+                            tool_call_id: Some(tool_use_id.clone()),
+                        });
+                    }
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Convert ToolSchema to OpenAI tool format
+    fn convert_tools(&self, tools: Vec<ToolSchema>) -> Vec<OpenAiTool> {
+        tools
+            .into_iter()
+            .map(|t| OpenAiTool {
+                r#type: "function".to_string(),
+                function: OpenAiFunction {
+                    name: t.name,
+                    description: Some(t.description),
+                    parameters: Some(t.parameters),
+                },
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl LlmClient for OpenAiCompatibleClient {
+    async fn send_message_streaming(
+        &self,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolSchema>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError> {
+        let url = self.config.api_url();
+        let headers = self.build_headers();
+
+        let openai_messages = self.convert_messages(messages);
+        let openai_tools = if tools.is_empty() {
+            None
+        } else {
+            Some(self.convert_tools(tools))
+        };
+
+        let mut body = serde_json::json!({
+            "model": self.config.model,
+            "messages": openai_messages,
+            "stream": true,
+            "max_tokens": self.config.max_tokens,
+        });
+
+        if let Some(temp) = self.config.temperature {
+            body["temperature"] = serde_json::json!(temp);
+        }
+
+        if let Some(tools) = openai_tools {
+            body["tools"] = serde_json::json!(tools);
+            body["tool_choice"] = serde_json::json!("auto");
+        }
+
+        // Add extra query params if any
+        if let Some(extra_query) = &self.config.extra_query {
+            for (key, value) in extra_query {
+                body[key] = serde_json::json!(value);
+            }
+        }
+
+        let response = self
+            .client
+            .post(&url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(ApiError::from)?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiError::Http { status, message: text });
+        }
+
+        let stream = response
+            .bytes_stream()
+            .filter_map(|result| async move {
+                match result {
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes);
+                        Some(Ok::<_, ApiError>(text.to_string()))
+                    }
+                    Err(e) => Some(Err(ApiError::from(e))),
+                }
+            })
+            .flat_map(|result| {
+                futures::stream::iter(match result {
+                    Ok(text) => parse_sse_events(&text),
+                    Err(e) => vec![Err(e)],
+                })
+            });
+
+        Ok(Box::pin(stream))
+    }
+
+    async fn health_check(&self) -> Result<bool, ApiError> {
+        // Simple check - just verify config is valid
+        Ok(!self.config.api_key.is_empty())
+    }
+
+    fn config(&self) -> &LlmConfig {
+        &self.config
+    }
+}
+
+/// Parse SSE events from OpenAI format
+fn parse_sse_events(text: &str) -> Vec<Result<LlmStreamChunk, ApiError>> {
+    let mut results = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(":") {
+            continue;
+        }
+
+        if !line.starts_with("data: ") {
+            continue;
+        }
+
+        let data = &line[6..]; // Remove "data: " prefix
+
+        if data == "[DONE]" {
+            results.push(Ok(LlmStreamChunk::Stop { stop_reason: Some("complete".to_string()) }));
+            continue;
+        }
+
+        match serde_json::from_str::<OpenAiStreamResponse>(data) {
+            Ok(response) => {
+                if let Some(choice) = response.choices.first() {
+                    if let Some(delta) = &choice.delta {
+                        if let Some(content) = &delta.content {
+                            results.push(Ok(LlmStreamChunk::Text(content.clone())));
+                        }
+
+                        if let Some(tool_calls) = &delta.tool_calls {
+                            for tool_call in tool_calls {
+                                if let Some(id) = &tool_call.id {
+                                    results.push(Ok(LlmStreamChunk::ToolStart {
+                                        id: id.clone(),
+                                        name: tool_call.function.as_ref().and_then(|f| f.name.clone()).unwrap_or_default(),
+                                    }));
+                                }
+                                if let Some(func) = &tool_call.function {
+                                    if let Some(args) = &func.arguments {
+                                        results.push(Ok(LlmStreamChunk::ToolArguments(args.clone())));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(finish_reason) = &choice.finish_reason {
+                        if finish_reason == "stop" || finish_reason == "tool_calls" {
+                            results.push(Ok(LlmStreamChunk::BlockStop));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // Silently skip parse errors for malformed chunks
+                tracing::debug!("Failed to parse SSE chunk: {}", e);
+            }
+        }
+    }
+
+    results
+}
+
+// OpenAI API types
+
+#[derive(Debug, Serialize)]
+struct OpenAiMessage {
+    role: String,
+    content: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiTool {
+    r#type: String,
+    function: OpenAiFunction,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiFunction {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parameters: Option<serde_json::Value>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct OpenAiStreamResponse {
+    id: String,
+    object: String,
+    created: i64,
+    model: String,
+    choices: Vec<OpenAiChoice>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct OpenAiChoice {
+    index: i32,
+    delta: Option<OpenAiDelta>,
+    finish_reason: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct OpenAiDelta {
+    role: Option<String>,
+    content: Option<String>,
+    tool_calls: Option<Vec<OpenAiToolCallDelta>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct OpenAiToolCall {
+    id: String,
+    r#type: String,
+    function: OpenAiToolFunction,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct OpenAiToolCallDelta {
+    index: i32,
+    id: Option<String>,
+    r#type: Option<String>,
+    function: Option<OpenAiToolFunctionDelta>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct OpenAiToolFunction {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct OpenAiToolFunctionDelta {
+    name: Option<String>,
+    arguments: Option<String>,
+}

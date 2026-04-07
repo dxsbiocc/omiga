@@ -1,0 +1,378 @@
+//! Session management commands
+
+use super::CommandResult;
+use crate::app_state::OmigaAppState;
+use crate::domain::session::{Message as DomainMessage, ToolCall as DomainToolCall};
+use crate::domain::session_codec::SessionCodec;
+use crate::errors::OmigaError;
+use serde::{Deserialize, Serialize};
+use tauri::State;
+
+/// Back-end global state (repo + chat runtime). Same managed type as `OmigaAppState`.
+pub type AppState = OmigaAppState;
+
+/// List all sessions
+#[tauri::command]
+pub async fn list_sessions(
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<Vec<SessionSummary>> {
+    let repo = state.repo.lock().await;
+
+    let sessions = repo
+        .list_sessions()
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to list sessions: {}", e)))?;
+
+    Ok(sessions
+        .into_iter()
+        .map(|s| SessionSummary {
+            id: s.id,
+            name: s.name,
+            message_count: s.message_count as usize,
+            updated_at: s.updated_at,
+        })
+        .collect())
+}
+
+/// Load a session by ID
+#[tauri::command]
+pub async fn load_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> CommandResult<SessionData> {
+    let repo = state.repo.lock().await;
+
+    let session = repo
+        .get_session(&session_id)
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to load session: {}", e)))?;
+
+    let Some(session) = session else {
+        return Err(OmigaError::NotFound {
+            resource: format!("Session {}", session_id),
+        });
+    };
+
+    // Use SessionCodec for conversion (eliminates duplication)
+    let domain_session = SessionCodec::db_to_domain(session);
+
+    // Convert domain messages to command messages
+    let messages: Vec<Message> = domain_session
+        .messages
+        .into_iter()
+        .map(|m| match m {
+            DomainMessage::User { content } => Message::User { content },
+            DomainMessage::Assistant { content, tool_calls } => Message::Assistant {
+                content,
+                tool_calls: tool_calls.map(|tc| {
+                    tc.into_iter()
+                        .map(|t| ToolCall {
+                            id: t.id,
+                            name: t.name,
+                            arguments: t.arguments,
+                        })
+                        .collect()
+                }),
+            },
+            DomainMessage::Tool { tool_call_id, output } => Message::Tool {
+                tool_call_id,
+                output,
+            },
+        })
+        .collect();
+
+    Ok(SessionData {
+        id: domain_session.id,
+        name: domain_session.name,
+        messages,
+        project_path: domain_session.project_path,
+        created_at: domain_session.created_at.to_rfc3339(),
+        updated_at: domain_session.updated_at.to_rfc3339(),
+    })
+}
+
+/// Save a session (upsert)
+#[tauri::command]
+pub async fn save_session(
+    state: State<'_, AppState>,
+    session: SessionData,
+) -> CommandResult<()> {
+    let repo = state.repo.lock().await;
+
+    // Check if session exists
+    let existing = repo
+        .get_session(&session.id)
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to check session: {}", e)))?;
+
+    if existing.is_none() {
+        // Create new session
+        repo.create_session(&session.id, &session.name, &session.project_path)
+            .await
+            .map_err(|e| OmigaError::Persistence(format!("Failed to create session: {}", e)))?;
+    }
+
+    // Update timestamp
+    repo.touch_session(&session.id)
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to update session: {}", e)))?;
+
+    // Save all messages using SessionCodec (eliminates duplication)
+    for message in &session.messages {
+        let msg_id = uuid::Uuid::new_v4().to_string();
+
+        // Convert command Message to domain Message for codec
+        let domain_msg = match message {
+            Message::User { content } => DomainMessage::User { content: content.clone() },
+            Message::Assistant { content, tool_calls } => DomainMessage::Assistant {
+                content: content.clone(),
+                tool_calls: tool_calls.as_ref().map(|tc| {
+                    tc.iter()
+                        .map(|t| DomainToolCall {
+                            id: t.id.clone(),
+                            name: t.name.clone(),
+                            arguments: t.arguments.clone(),
+                        })
+                        .collect()
+                }),
+            },
+            Message::Tool { tool_call_id, output } => DomainMessage::Tool {
+                tool_call_id: tool_call_id.clone(),
+                output: output.clone(),
+            },
+        };
+
+        // Use SessionCodec for serialization (single source of truth)
+        let (id, session_id, role, content, tool_calls, tool_call_id) =
+            SessionCodec::message_to_record(&domain_msg, &msg_id, &session.id);
+
+        repo.save_message(
+            &id,
+            &session_id,
+            &role,
+            &content,
+            tool_calls.as_deref(),
+            tool_call_id.as_deref(),
+        )
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
+    }
+
+    Ok(())
+}
+
+/// Create a new session
+#[tauri::command]
+pub async fn create_session(
+    state: State<'_, AppState>,
+    name: String,
+    project_path: String,
+) -> CommandResult<SessionData> {
+    let repo = state.repo.lock().await;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    repo.create_session(&id, &name, &project_path)
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to create session: {}", e)))?;
+
+    Ok(SessionData {
+        id,
+        name,
+        messages: vec![],
+        project_path,
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+/// Delete a session
+#[tauri::command]
+pub async fn delete_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> CommandResult<()> {
+    let repo = state.repo.lock().await;
+
+    repo.delete_session(&session_id)
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to delete session: {}", e)))?;
+
+    Ok(())
+}
+
+/// Rename a session
+#[tauri::command]
+pub async fn rename_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    name: String,
+) -> CommandResult<()> {
+    let repo = state.repo.lock().await;
+
+    repo.rename_session(&session_id, &name)
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to rename session: {}", e)))?;
+
+    Ok(())
+}
+
+/// Update session working directory (project path)
+#[tauri::command]
+pub async fn update_session_project_path(
+    state: State<'_, AppState>,
+    session_id: String,
+    project_path: String,
+) -> CommandResult<()> {
+    let repo = state.repo.lock().await;
+
+    repo.update_session_project_path(&session_id, &project_path)
+        .await
+        .map_err(|e| {
+            OmigaError::Persistence(format!("Failed to update session project path: {}", e))
+        })?;
+
+    Ok(())
+}
+
+/// Save a single message to a session
+#[tauri::command]
+pub async fn save_message(
+    state: State<'_, AppState>,
+    session_id: String,
+    message: Message,
+) -> CommandResult<()> {
+    let repo = state.repo.lock().await;
+    let msg_id = uuid::Uuid::new_v4().to_string();
+
+    // Convert command Message to domain Message for codec
+    let domain_msg = match message {
+        Message::User { content } => DomainMessage::User { content },
+        Message::Assistant { content, tool_calls } => DomainMessage::Assistant {
+            content,
+            tool_calls: tool_calls.map(|tc| {
+                tc.into_iter()
+                    .map(|t| DomainToolCall {
+                        id: t.id,
+                        name: t.name,
+                        arguments: t.arguments,
+                    })
+                    .collect()
+            }),
+        },
+        Message::Tool { tool_call_id, output } => DomainMessage::Tool {
+            tool_call_id,
+            output,
+        },
+    };
+
+    // Use SessionCodec for serialization (single source of truth)
+    let (id, sid, role, content, tool_calls, tool_call_id) =
+        SessionCodec::message_to_record(&domain_msg, &msg_id, &session_id);
+
+    repo.save_message(
+        &id,
+        &sid,
+        &role,
+        &content,
+        tool_calls.as_deref(),
+        tool_call_id.as_deref(),
+    )
+    .await
+    .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
+
+    // Update session timestamp
+    repo.touch_session(&session_id)
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to update session: {}", e)))?;
+
+    Ok(())
+}
+
+/// Clear all messages from a session
+#[tauri::command]
+pub async fn clear_session_messages(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> CommandResult<()> {
+    let repo = state.repo.lock().await;
+
+    repo.clear_messages(&session_id)
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to clear messages: {}", e)))?;
+
+    Ok(())
+}
+
+/// Get or create settings value
+#[tauri::command]
+pub async fn get_setting(
+    state: State<'_, AppState>,
+    key: String,
+) -> CommandResult<Option<String>> {
+    let repo = state.repo.lock().await;
+
+    let value = repo
+        .get_setting(&key)
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to get setting: {}", e)))?;
+
+    Ok(value)
+}
+
+/// Set a setting value
+#[tauri::command]
+pub async fn set_setting(
+    state: State<'_, AppState>,
+    key: String,
+    value: String,
+) -> CommandResult<()> {
+    let repo = state.repo.lock().await;
+
+    repo.set_setting(&key, &value)
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to set setting: {}", e)))?;
+
+    Ok(())
+}
+
+/// Session summary (for listing)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub id: String,
+    pub name: String,
+    pub message_count: usize,
+    pub updated_at: String,
+}
+
+/// A chat message
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "role")]
+pub enum Message {
+    #[serde(rename = "user")]
+    User { content: String },
+    #[serde(rename = "assistant")]
+    Assistant { content: String, tool_calls: Option<Vec<ToolCall>> },
+    #[serde(rename = "tool")]
+    Tool { tool_call_id: String, output: String },
+}
+
+/// A tool call
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// Full session data
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionData {
+    pub id: String,
+    pub name: String,
+    pub messages: Vec<Message>,
+    pub project_path: String,
+    pub created_at: String,
+    pub updated_at: String,
+}

@@ -1,0 +1,66 @@
+//! Global application state — **single backend source of truth** for Omiga.
+//!
+//! Analogous to `src/state/AppStateStore.ts` + provider in Claude Code: persistence
+//! (`SessionRepository`) and chat/runtime (`ChatState`) live together so Tauri commands,
+//! logging, and future observability read one managed struct.
+
+use crate::domain::chat_state::ChatState;
+use crate::commands::CommandResult;
+use crate::domain::persistence::SessionRepository;
+use serde::Serialize;
+use std::sync::Arc;
+use std::time::Instant;
+use tauri::State;
+use tokio::sync::Mutex;
+
+/// Process-wide state (managed once in `lib.rs`).
+pub struct OmigaAppState {
+    pub repo: Arc<Mutex<SessionRepository>>,
+    pub chat: ChatState,
+    /// Process start time for uptime in snapshots.
+    pub started_at: Instant,
+}
+
+impl OmigaAppState {
+    pub fn new(repo: SessionRepository) -> Self {
+        Self {
+            repo: Arc::new(Mutex::new(repo)),
+            chat: ChatState::default(),
+            started_at: Instant::now(),
+        }
+    }
+}
+
+/// Serializable backend health snapshot for debugging / future UI “status” panels.
+#[derive(Debug, Serialize)]
+pub struct AppStateSnapshot {
+    pub uptime_ms: u64,
+    pub cached_sessions: usize,
+    pub active_rounds: usize,
+    pub pending_tool_calls: usize,
+    pub llm_configured: bool,
+    pub llm_provider: Option<String>,
+}
+
+/// Return current backend counters (global monitor hook).
+#[tauri::command]
+pub async fn get_app_state_snapshot(
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<AppStateSnapshot> {
+    let cached = state.chat.sessions.read().await.len();
+    let active_rounds = state.chat.active_rounds.lock().await.len();
+    let pending_tool_calls = state.chat.pending_tools.lock().await.len();
+    let llm = state.chat.llm_config.lock().await;
+    let llm_configured = llm.as_ref().map(|c| !c.api_key.is_empty()).unwrap_or(false);
+    let llm_provider = llm.as_ref().map(|c| format!("{:?}", c.provider));
+    drop(llm);
+
+    Ok(AppStateSnapshot {
+        uptime_ms: state.started_at.elapsed().as_millis() as u64,
+        cached_sessions: cached,
+        active_rounds,
+        pending_tool_calls,
+        llm_configured,
+        llm_provider,
+    })
+}

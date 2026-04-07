@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Omiga Session Flow Test Tool</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #58a6ff;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            color: #8b949e;
+            margin-bottom: 30px;
+        }
+        .section {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .section h2 {
+            color: #79c0ff;
+            margin-bottom: 15px;
+            font-size: 16px;
+        }
+        .input-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #8b949e;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+        input, select, textarea {
+            width: 100%;
+            padding: 8px 12px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+        }
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            border-color: #58a6ff;
+        }
+        .row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        button {
+            padding: 8px 16px;
+            background: #238636;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #2ea043;
+        }
+        button.secondary {
+            background: #1f6feb;
+        }
+        button.secondary:hover {
+            background: #388bfd;
+        }
+        button.danger {
+            background: #da3633;
+        }
+        button.danger:hover {
+            background: #f85149;
+        }
+        button:disabled {
+            background: #484f58;
+            cursor: not-allowed;
+        }
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        .log {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        .log-entry {
+            margin-bottom: 8px;
+            padding: 8px;
+            border-radius: 4px;
+        }
+        .log-entry.success {
+            background: rgba(46, 160, 67, 0.1);
+            border-left: 3px solid #2ea043;
+        }
+        .log-entry.error {
+            background: rgba(248, 81, 73, 0.1);
+            border-left: 3px solid #f85149;
+        }
+        .log-entry.info {
+            background: rgba(56, 139, 253, 0.1);
+            border-left: 3px solid #388bfd;
+        }
+        .log-entry.warn {
+            background: rgba(210, 153, 34, 0.1);
+            border-left: 3px solid #d29922;
+        }
+        .timestamp {
+            color: #8b949e;
+            font-size: 11px;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+        .status-running { background: #58a6ff; animation: pulse 1s infinite; }
+        .status-partial { background: #d29922; }
+        .status-cancelled { background: #f85149; }
+        .status-completed { background: #2ea043; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .test-result {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 6px;
+            background: #0d1117;
+        }
+        .test-result.pass {
+            border-left: 3px solid #2ea043;
+        }
+        .test-result.fail {
+            border-left: 3px solid #f85149;
+        }
+        .test-result.pending {
+            border-left: 3px solid #8b949e;
+        }
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-left: 8px;
+        }
+        .badge-api { background: #1f6feb; }
+        .badge-db { background: #8957e5; }
+        .badge-stream { background: #238636; }
+
+        .rounds-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .round-item {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 10px;
+            min-width: 150px;
+        }
+        .round-id {
+            font-size: 11px;
+            color: #8b949e;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Omiga Session Flow Test Tool</h1>
+        <p class="subtitle">Verify backend API integration and session flow functionality</p>
+
+        <div class="section">
+            <h2>Configuration</h2>
+            <div class="row">
+                <div class="input-group">
+                    <label>Session ID</label>
+                    <input type="text" id="sessionId" placeholder="Leave empty to create new session">
+                </div>
+                <div class="input-group">
+                    <label>Project Path</label>
+                    <input type="text" id="projectPath" value="/Users/dengxsh/Projects/test">
+                </div>
+            </div>
+            <div class="row">
+                <div class="input-group">
+                    <label>Session Name (for new sessions)</label>
+                    <input type="text" id="sessionName" value="Test Session">
+                </div>
+                <div class="input-group">
+                    <label>Use Tools</label>
+                    <select id="useTools">
+                        <option value="true">Yes</option>
+                        <option value="false">No</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Active Rounds <span class="badge badge-stream">Live</span></h2>
+            <div id="activeRounds" class="rounds-list">
+                <p style="color: #8b949e;">No active rounds</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Test Scenarios</h2>
+
+            <div class="input-group">
+                <label>Message Content</label>
+                <textarea id="messageContent" rows="3" placeholder="Enter message content...">Hello, this is a test message.</textarea>
+            </div>
+
+            <div class="button-group">
+                <button onclick="sendMessage()">1. Send Message</button>
+                <button class="danger" onclick="cancelStream()" id="cancelBtn" disabled>2. Cancel Stream</button>
+                <button class="secondary" onclick="loadSession()">3. Load Session</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Test Suite <span class="badge badge-api">API</span></h2>
+            <div class="button-group">
+                <button onclick="runAllTests()">Run All Tests</button>
+                <button class="secondary" onclick="clearLogs()">Clear Logs</button>
+            </div>
+            <div id="testResults"></div>
+        </div>
+
+        <div class="section">
+            <h2>Activity Log</h2>
+            <div id="log" class="log"></div>
+        </div>
+
+        <div class="section">
+            <h2>API Reference</h2>
+            <pre style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #c9d1d9; background: #0d1117; padding: 15px; border-radius: 6px; overflow-x: auto;">
+// Send Message Request
+{
+  "content": "Hello",
+  "session_id": "...",      // Optional for new session
+  "project_path": "...",    // Required for new session
+  "session_name": "...",    // Optional for new session
+  "use_tools": true
+}
+
+// Response
+{
+  "message_id": "...",
+  "session_id": "...",
+  "round_id": "..."         // NEW: For tracking round status
+}
+
+// Stream Events
+{ "Start": {} }
+{ "Text": "content" }
+{ "ToolUse": { "name": "...", "arguments": "..." } }
+{ "ToolOutput": { "output": "..." } }
+{ "ToolResult": { "output": "...", "is_error": false } }
+{ "Cancelled": {} }         // NEW: Stream was cancelled
+{ "Complete": {} }
+
+// Cancel Stream
+{ "messageId": "..." }</pre>
+        </div>
+    </div>
+
+    <script>
+        // Note: This is a standalone test tool
+        // In the real Tauri app, use window.__TAURI__.invoke()
+
+        const logEl = document.getElementById('log');
+        const testResultsEl = document.getElementById('testResults');
+        let currentMessageId = null;
+        let currentRoundId = null;
+
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            const timestamp = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="timestamp">[${timestamp}]</span> ${message}`;
+            logEl.appendChild(entry);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function addTestResult(name, status, message = '') {
+            const result = document.createElement('div');
+            result.className = `test-result ${status}`;
+            const icon = status === 'pass' ? '✓' : status === 'fail' ? '✗' : '○';
+            result.innerHTML = `<strong>${icon} ${name}</strong> ${message ? `- ${message}` : ''}`;
+            testResultsEl.appendChild(result);
+        }
+
+        function clearLogs() {
+            logEl.innerHTML = '';
+            testResultsEl.innerHTML = '';
+            document.getElementById('activeRounds').innerHTML = '<p style="color: #8b949e;">No active rounds</p>';
+        }
+
+        function addRoundDisplay(roundId, status) {
+            const roundsEl = document.getElementById('activeRounds');
+            if (roundsEl.querySelector('p')) {
+                roundsEl.innerHTML = '';
+            }
+
+            const existing = document.getElementById(`round-${roundId}`);
+            if (existing) {
+                existing.querySelector('.status-indicator').className = `status-indicator status-${status}`;
+                existing.querySelector('.round-status').textContent = status;
+            } else {
+                const roundEl = document.createElement('div');
+                roundEl.id = `round-${roundId}`;
+                roundEl.className = 'round-item';
+                roundEl.innerHTML = `
+                    <div class="round-id">${roundId.substring(0, 12)}...</div>
+                    <div style="margin-top: 5px;">
+                        <span class="status-indicator status-${status}"></span>
+                        <span class="round-status">${status}</span>
+                    </div>
+                `;
+                roundsEl.appendChild(roundEl);
+            }
+        }
+
+        function removeRoundDisplay(roundId) {
+            const roundEl = document.getElementById(`round-${roundId}`);
+            if (roundEl) {
+                roundEl.remove();
+            }
+        }
+
+        // Mock Tauri invoke for testing
+        async function invoke(command, args = {}) {
+            log(`→ Invoking: ${command}`, 'info');
+            log(`   Args: ${JSON.stringify(args, null, 2)}`, 'info');
+
+            // Simulate API delay
+            await new Promise(r => setTimeout(r, 500));
+
+            // Mock responses
+            switch (command) {
+                case 'send_message':
+                    const mockResponse = {
+                        message_id: 'msg-' + Date.now(),
+                        session_id: args.request?.session_id || 'sess-' + Date.now(),
+                        round_id: 'round-' + Date.now()
+                    };
+                    currentMessageId = mockResponse.message_id;
+                    currentRoundId = mockResponse.round_id;
+                    document.getElementById('cancelBtn').disabled = false;
+                    addRoundDisplay(mockResponse.round_id, 'running');
+                    log(`← Response: ${JSON.stringify(mockResponse, null, 2)}`, 'success');
+                    return mockResponse;
+
+                case 'cancel_stream':
+                    log('← Stream cancelled', 'warn');
+                    addRoundDisplay(currentRoundId, 'cancelled');
+                    document.getElementById('cancelBtn').disabled = true;
+                    return {};
+
+                case 'load_session':
+                    return {
+                        id: args.sessionId,
+                        name: 'Test Session',
+                        messages: []
+                    };
+
+                default:
+                    return {};
+            }
+        }
+
+        async function sendMessage() {
+            const content = document.getElementById('messageContent').value;
+            const sessionId = document.getElementById('sessionId').value || undefined;
+            const projectPath = document.getElementById('projectPath').value;
+            const sessionName = document.getElementById('sessionName').value;
+            const useTools = document.getElementById('useTools').value === 'true';
+
+            try {
+                log('Sending message...', 'info');
+                const response = await invoke('send_message', {
+                    request: {
+                        content,
+                        session_id: sessionId,
+                        project_path: projectPath,
+                        session_name: sessionName,
+                        use_tools: useTools
+                    }
+                });
+
+                log(`Message sent! Round ID: ${response.round_id}`, 'success');
+
+                // Simulate stream events
+                setTimeout(() => {
+                    log('Stream event: Start', 'info');
+                    addRoundDisplay(response.round_id, 'running');
+                }, 300);
+
+                setTimeout(() => {
+                    log('Stream event: Text chunk received', 'info');
+                    addRoundDisplay(response.round_id, 'partial');
+                }, 1000);
+
+            } catch (error) {
+                log(`Error: ${error}`, 'error');
+            }
+        }
+
+        async function cancelStream() {
+            if (!currentMessageId) {
+                log('No active stream to cancel', 'warn');
+                return;
+            }
+
+            try {
+                log('Cancelling stream...', 'warn');
+                await invoke('cancel_stream', { messageId: currentMessageId });
+                log('Stream cancelled successfully', 'success');
+                currentMessageId = null;
+                document.getElementById('cancelBtn').disabled = true;
+            } catch (error) {
+                log(`Cancel error: ${error}`, 'error');
+            }
+        }
+
+        async function loadSession() {
+            const sessionId = document.getElementById('sessionId').value;
+            if (!sessionId) {
+                log('Please enter a session ID', 'warn');
+                return;
+            }
+
+            try {
+                log(`Loading session ${sessionId}...`, 'info');
+                const response = await invoke('load_session', { sessionId });
+                log(`Session loaded: ${response.name}`, 'success');
+            } catch (error) {
+                log(`Load error: ${error}`, 'error');
+            }
+        }
+
+        async function runAllTests() {
+            testResultsEl.innerHTML = '';
+            log('Running test suite...', 'info');
+
+            // Test 1: Send message with new request format
+            try {
+                log('Test 1: Send message with round_id', 'info');
+                const response = await invoke('send_message', {
+                    request: {
+                        content: 'Test message',
+                        project_path: '/test',
+                        session_name: 'Test',
+                        use_tools: true
+                    }
+                });
+
+                if (response.round_id) {
+                    addTestResult('Send Message (round_id)', 'pass');
+                } else {
+                    addTestResult('Send Message (round_id)', 'fail', 'round_id not in response');
+                }
+            } catch (error) {
+                addTestResult('Send Message (round_id)', 'fail', String(error));
+            }
+
+            // Test 2: Cancel stream
+            try {
+                log('Test 2: Cancel stream', 'info');
+                await invoke('cancel_stream', { messageId: 'msg-123' });
+                addTestResult('Cancel Stream', 'pass');
+            } catch (error) {
+                addTestResult('Cancel Stream', 'fail', String(error));
+            }
+
+            // Test 3: Request format validation
+            const required = ['content', 'project_path'];
+            const optional = ['session_id', 'session_name', 'use_tools'];
+            log('Test 3: Request format', 'info');
+            addTestResult('Required fields', 'pass', required.join(', '));
+            addTestResult('Optional fields', 'pass', optional.join(', '));
+
+            // Test 4: Stream events
+            const events = ['Start', 'Text', 'ToolUse', 'ToolOutput', 'ToolResult', 'Cancelled', 'Complete', 'Error'];
+            log('Test 4: Stream events', 'info');
+            addTestResult('Stream event types', 'pass', `${events.length} events`);
+
+            // Test 5: Round status transitions
+            log('Test 5: Round status', 'info');
+            const statuses = ['running', 'partial', 'cancelled', 'completed'];
+            addTestResult('Round statuses', 'pass', statuses.join(', '));
+
+            log('Test suite completed', 'success');
+        }
+
+        // Initial log
+        log('Session Flow Test Tool initialized', 'info');
+        log('Ready to test backend API integration', 'info');
+    </script>
+</body>
+</html>

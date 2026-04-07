@@ -1,0 +1,253 @@
+//! WebFetch — HTTP GET a URL and return text for the model
+//!
+//! Aligns with `src/tools/WebFetchTool`: `url` + `prompt`. The upstream app runs a
+//! secondary model on the markdown; Omiga returns fetched text plus the prompt so
+//! the **main** model can answer in the next turn without a nested LLM call.
+
+use super::{ToolContext, ToolError, ToolSchema};
+use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::io::Cursor;
+use std::pin::Pin;
+use std::time::{Duration, Instant};
+
+/// Same ballpark as TS `MAX_HTTP_CONTENT_LENGTH`
+const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
+/// Same as TS `MAX_MARKDOWN_LENGTH`
+const MAX_TEXT_CHARS: usize = 100_000;
+
+pub const DESCRIPTION: &str = r#"Fetch public web content over HTTP(S).
+
+- Sends a GET request to the given URL (redirects followed, up to 10 hops).
+- Converts HTML pages to plain text; returns JSON and plain text as UTF-8 when possible.
+- The `prompt` field is included in the tool result so you can answer using the fetched text in your next message (this build does not run a separate summarization model inside the tool).
+- Will fail for authenticated or private pages; prefer specialized tools or MCP when available.
+- Read-only; does not write project files."#;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebFetchArgs {
+    /// Fully qualified http(s) URL
+    pub url: String,
+    /// What to extract or how to use the page — echoed in the result for follow-up reasoning
+    pub prompt: String,
+}
+
+pub struct WebFetchTool;
+
+#[async_trait]
+impl super::ToolImpl for WebFetchTool {
+    type Args = WebFetchArgs;
+
+    const DESCRIPTION: &'static str = DESCRIPTION;
+
+    async fn execute(
+        ctx: &ToolContext,
+        args: Self::Args,
+    ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+        let start = Instant::now();
+
+        let parsed = reqwest::Url::parse(&args.url).map_err(|e| ToolError::InvalidArguments {
+            message: format!("Invalid URL: {}", e),
+        })?;
+
+        match parsed.scheme() {
+            "http" | "https" => {}
+            other => {
+                return Err(ToolError::InvalidArguments {
+                    message: format!("Unsupported URL scheme: {}", other),
+                })
+            }
+        }
+
+        let timeout = Duration::from_secs(ctx.timeout_secs.clamp(5, 120));
+
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .user_agent(concat!("Omiga/", env!("CARGO_PKG_VERSION"), " WebFetch"))
+            // Avoid env HTTP(S)_PROXY hijacking localhost in tests and dev.
+            .no_proxy()
+            .build()
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("HTTP client: {}", e),
+            })?;
+
+        let send_fut = client.get(args.url.clone()).send();
+
+        let response = tokio::select! {
+            _ = ctx.cancel.cancelled() => {
+                return Err(ToolError::Cancelled);
+            }
+            res = send_fut => res.map_err(|e| ToolError::ExecutionFailed {
+                message: format!("HTTP error: {}", e),
+            })?,
+        };
+
+        let status = response.status();
+        let code = status.as_u16();
+        let code_text = status
+            .canonical_reason()
+            .unwrap_or("Unknown")
+            .to_string();
+
+        let final_url = response.url().to_string();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+
+        let content_length = response.content_length();
+
+        let body_bytes = tokio::select! {
+            _ = ctx.cancel.cancelled() => {
+                return Err(ToolError::Cancelled);
+            }
+            b = response.bytes() => b.map_err(|e| ToolError::ExecutionFailed {
+                message: format!("Read body: {}", e),
+            })?,
+        };
+
+        if body_bytes.len() as u64 > MAX_BODY_BYTES {
+            return Err(ToolError::ExecutionFailed {
+                message: format!(
+                    "Response body too large ({} bytes, max {} bytes)",
+                    body_bytes.len(),
+                    MAX_BODY_BYTES
+                ),
+            });
+        }
+
+        let ct_lower = content_type.to_ascii_lowercase();
+        let sniff_html = sniff_likely_html(&body_bytes);
+        let text = if ct_lower.contains("html") || sniff_html {
+            html2text::from_read(Cursor::new(body_bytes.as_ref()), 120).map_err(|e| {
+                ToolError::ExecutionFailed {
+                    message: format!("HTML conversion: {}", e),
+                }
+            })?
+        } else if ct_lower.contains("json") {
+            let s = String::from_utf8(body_bytes.to_vec()).map_err(|_| {
+                ToolError::ExecutionFailed {
+                    message: "Response body is not valid UTF-8".to_string(),
+                }
+            })?;
+            serde_json::from_str::<serde_json::Value>(&s)
+                .ok()
+                .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                .unwrap_or(s)
+        } else if ct_lower.starts_with("text/")
+            || ct_lower.contains("javascript")
+            || ct_lower.contains("xml")
+        {
+            String::from_utf8(body_bytes.to_vec()).map_err(|_| {
+                ToolError::ExecutionFailed {
+                    message: "Text response is not valid UTF-8".to_string(),
+                }
+            })?
+        } else {
+            return Err(ToolError::ExecutionFailed {
+                message: format!(
+                    "Unsupported content type for text extraction: {}. Try a URL that returns HTML, JSON, or plain text.",
+                    content_type
+                ),
+            });
+        };
+
+        let (truncated, truncated_note) = truncate_chars(&text, MAX_TEXT_CHARS);
+
+        let mut result = String::new();
+        result.push_str(&format!(
+            "HTTP {} {}\n",
+            code,
+            code_text
+        ));
+        result.push_str(&format!("Final URL: {}\n", final_url));
+        if final_url != args.url {
+            result.push_str(&format!("Requested URL: {}\n", args.url));
+        }
+        result.push_str(&format!("Content-Type: {}\n", content_type));
+        if let Some(len) = content_length {
+            result.push_str(&format!("Content-Length: {}\n", len));
+        }
+        result.push_str(&format!("Bytes (decoded text): {}\n", text.len()));
+        result.push_str(&format!("Duration: {}ms\n\n", start.elapsed().as_millis()));
+        result.push_str("--- fetched text ---\n");
+        result.push_str(&truncated);
+        if let Some(note) = truncated_note {
+            result.push_str(&note);
+        }
+        result.push_str("\n\n--- instruction ---\n");
+        result.push_str(&args.prompt);
+
+        Ok(WebFetchOutput { text: result }.into_stream())
+    }
+}
+
+/// When servers send `application/octet-stream` or omit Content-Type, still treat obvious HTML.
+fn sniff_likely_html(bytes: &[u8]) -> bool {
+    let take = bytes.len().min(512);
+    let slice = &bytes[..take];
+    let Ok(s) = std::str::from_utf8(slice) else {
+        return false;
+    };
+    let t = s.trim_start();
+    let l = t.to_ascii_lowercase();
+    l.starts_with("<!doctype html") || l.starts_with("<html")
+}
+
+fn truncate_chars(s: &str, max: usize) -> (String, Option<String>) {
+    if s.len() <= max {
+        return (s.to_string(), None);
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let note = format!(
+        "\n\n[Truncated to {} characters; full decoded text was {} characters]",
+        end,
+        s.len()
+    );
+    (s[..end].to_string(), Some(note))
+}
+
+#[derive(Debug, Clone)]
+struct WebFetchOutput {
+    text: String,
+}
+
+impl StreamOutput for WebFetchOutput {
+    fn into_stream(self) -> Pin<Box<dyn futures::Stream<Item = StreamOutputItem> + Send>> {
+        use futures::stream;
+        let items = vec![
+            StreamOutputItem::Start,
+            StreamOutputItem::Content(self.text),
+            StreamOutputItem::Complete,
+        ];
+        Box::pin(stream::iter(items))
+    }
+}
+
+pub fn schema() -> ToolSchema {
+    ToolSchema::new(
+        "web_fetch",
+        DESCRIPTION,
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Fully qualified http(s) URL to fetch"
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "What you want to know or extract from the page (included in the tool result for your follow-up reasoning)"
+                }
+            },
+            "required": ["url", "prompt"]
+        }),
+    )
+}

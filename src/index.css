@@ -1,0 +1,51 @@
+/* Omiga - Minimal CSS overrides on top of MUI CssBaseline */
+
+/* Lock document — no page-level scroll or overscroll (bounce / chain) */
+html {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  scroll-behavior: auto;
+}
+
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Code block styling for markdown */
+pre {
+  margin: 0;
+}
+
+code {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Monaco', 'Consolas', monospace;
+}
+
+/* Ensure proper sizing */
+* {
+  box-sizing: border-box;
+}
+
+/* Selection color */
+::selection {
+  background: rgba(99, 102, 241, 0.3);
+}
+
+/* Focus visible outline for accessibility */
+:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.5);
+  outline-offset: 2px;
+}
+
+/* Remove default button styles */
+button {
+  font-family: inherit;
+}
