@@ -6,7 +6,7 @@ use super::ToolSchema;
 pub fn schema() -> ToolSchema {
     ToolSchema::new(
         "skill",
-        r#"Load full skill text from disk (`~/.omiga/skills` or project `.omiga/skills`; `~/.claude/skills` only when enabled in Omiga Settings → Skills). Prefer calling `list_skills` first to pick a name. Pass optional `args` for `$ARGUMENTS`, `$0`, `$1`, and named `$foo` placeholders (see skill frontmatter `arguments`). Returns JSON metadata (inline vs fork notice) plus the full skill body for this session.
+        r#"Load full skill text from disk (`~/.omiga/skills` or project `.omiga/skills`). To use skills from Claude Code’s `~/.claude/skills`, import them in Omiga Settings → Skills (copies into an Omiga directory). Prefer calling `list_skills` first to pick a name. Pass optional `args` for `$ARGUMENTS`, `$0`, `$1`, and named `$foo` placeholders (see skill frontmatter `arguments`). Returns JSON metadata (inline vs fork notice) plus the full skill body for this session.
 
 Claude Code also supports MCP/bundled/plugin skills and forked sub-agent execution; Omiga implements **file-based skills** plus the same substitution rules for markdown skills."#,
         serde_json::json!({

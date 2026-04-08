@@ -6,7 +6,7 @@ use rmcp::model::{
     CallToolRequestParams, CallToolResult, ReadResourceRequestParams, ReadResourceResult,
 };
 use rmcp::model::Tool as McpTool;
-use rmcp::service::{Peer, RoleClient};
+use rmcp::service::{Peer, RoleClient, RunningService};
 use rmcp::transport::{
     ConfigureCommandExt, TokioChildProcess,
     streamable_http_client::{StreamableHttpClientTransportConfig, StreamableHttpClientWorker},
@@ -15,6 +15,95 @@ use serde_json::json;
 use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
+
+/// A live, reusable MCP connection.
+/// Keep this value alive (e.g. in a HashMap) to hold the background I/O pump open.
+/// Drop it to cancel the pump and (for stdio servers) kill the child process.
+pub struct McpLiveConnection {
+    /// Cloneable handle used to send requests; cheap to clone.
+    pub peer: Peer<RoleClient>,
+    /// Background service that drives the transport; must stay alive.
+    _running: RunningService<RoleClient, ()>,
+    /// Normalized-tool-name → original-server-tool-name map, built once on connect.
+    /// Avoids calling `tools/list` on every tool invocation.
+    pub tool_name_map: std::collections::HashMap<String, String>,
+}
+
+impl McpLiveConnection {
+    /// Returns true if the underlying transport has been cancelled or closed.
+    pub fn is_closed(&self) -> bool {
+        self._running.is_closed()
+    }
+}
+
+/// Establish a persistent connection to a named MCP server and eagerly fetch the tool list.
+/// Returns an [`McpLiveConnection`] whose lifetime controls the underlying process / HTTP session.
+/// The embedded `tool_name_map` lets callers resolve normalized → original tool names without
+/// a second round-trip.
+pub async fn connect_mcp_server(
+    project_root: &Path,
+    server_name: &str,
+    timeout: Duration,
+) -> Result<McpLiveConnection, String> {
+    use crate::domain::mcp_names::normalize_name_for_mcp;
+
+    let cfg = merged_mcp_servers(project_root)
+        .remove(server_name)
+        .ok_or_else(|| {
+            format!(
+                "MCP server \"{server_name}\" not found in merged Omiga MCP config (bundled defaults, ~/.omiga/mcp.json, <project>/.omiga/mcp.json)"
+            )
+        })?;
+
+    let running = create_running_service(project_root, cfg, timeout).await?;
+    let peer = running.peer().clone();
+
+    // Eagerly fetch tool list so every subsequent call can resolve names without a round-trip.
+    let tools = list_tools_via_peer(&peer, timeout).await.unwrap_or_default();
+    let tool_name_map: std::collections::HashMap<String, String> = tools
+        .into_iter()
+        .map(|t| (normalize_name_for_mcp(t.name.as_ref()), t.name.to_string()))
+        .collect();
+
+    Ok(McpLiveConnection { peer, _running: running, tool_name_map })
+}
+
+/// Call a tool using a pre-established peer (no new connection overhead).
+pub async fn call_tool_via_peer(
+    peer: &Peer<RoleClient>,
+    tool_name: &str,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    timeout: Duration,
+) -> Result<CallToolResult, String> {
+    let peer = peer.clone();
+    let tool_name = tool_name.to_string();
+    tokio::time::timeout(timeout, async move {
+        let mut params = CallToolRequestParams::new(tool_name);
+        if let Some(args) = arguments {
+            params = params.with_arguments(args);
+        }
+        peer.call_tool(params)
+            .await
+            .map_err(|e| format!("tools/call: {e}"))
+    })
+    .await
+    .map_err(|_| "MCP operation timed out".to_string())?
+}
+
+/// List tools using a pre-established peer.
+pub async fn list_tools_via_peer(
+    peer: &Peer<RoleClient>,
+    timeout: Duration,
+) -> Result<Vec<McpTool>, String> {
+    let peer = peer.clone();
+    tokio::time::timeout(timeout, async move {
+        peer.list_all_tools()
+            .await
+            .map_err(|e| format!("tools/list: {e}"))
+    })
+    .await
+    .map_err(|_| "MCP operation timed out".to_string())?
+}
 
 /// List resources from one named server (MCP `resources/list` with pagination via rmcp).
 pub async fn list_resources_for_server(
@@ -94,6 +183,7 @@ pub async fn list_tools_for_server(
 }
 
 /// Call a tool on a named server (MCP `tools/call`).
+/// Prefer [`call_tool_via_peer`] with a pooled connection to avoid per-call spawn overhead.
 pub async fn call_tool_on_server(
     project_root: &Path,
     server_name: &str,
@@ -121,22 +211,14 @@ pub async fn call_tool_on_server(
     .await
 }
 
-async fn with_mcp_peer<F, Fut, T>(
+/// Create a `RunningService` from a config (used by both the pool and one-shot helpers).
+async fn create_running_service(
     project_root: &Path,
     config: McpServerConfig,
     timeout: Duration,
-    work: F,
-) -> Result<T, String>
-where
-    F: FnOnce(Peer<RoleClient>) -> Fut,
-    Fut: std::future::Future<Output = Result<T, String>>,
-{
+) -> Result<RunningService<RoleClient, ()>, String> {
     match config {
-        McpServerConfig::Stdio {
-            command,
-            args,
-            env,
-        } => {
+        McpServerConfig::Stdio { command, args, env } => {
             let transport = TokioChildProcess::new(
                 Command::new(&command).configure(|cmd| {
                     cmd.args(&args);
@@ -149,17 +231,10 @@ where
             )
             .map_err(|e| format!("MCP stdio spawn: {e}"))?;
 
-            let mut running = ()
-                .serve(transport)
+            tokio::time::timeout(timeout, ().serve(transport))
                 .await
-                .map_err(|e| format!("MCP stdio handshake: {e}"))?;
-
-            let peer = running.peer().clone();
-            let out = tokio::time::timeout(timeout, work(peer))
-                .await
-                .map_err(|_| "MCP operation timed out".to_string())??;
-            let _ = running.close().await;
-            Ok(out)
+                .map_err(|_| "MCP stdio handshake timed out".to_string())?
+                .map_err(|e| format!("MCP stdio handshake: {e}"))
         }
         McpServerConfig::Url(url) => {
             let http = reqwest::Client::builder()
@@ -167,20 +242,34 @@ where
                 .build()
                 .map_err(|e| format!("reqwest: {e}"))?;
 
-            let worker =
-                StreamableHttpClientWorker::new(http, StreamableHttpClientTransportConfig::with_uri(url));
+            let worker = StreamableHttpClientWorker::new(
+                http,
+                StreamableHttpClientTransportConfig::with_uri(url),
+            );
 
-            let mut running = ()
-                .serve(worker)
+            tokio::time::timeout(timeout, ().serve(worker))
                 .await
-                .map_err(|e| format!("MCP HTTP handshake: {e}"))?;
-
-            let peer = running.peer().clone();
-            let out = tokio::time::timeout(timeout, work(peer))
-                .await
-                .map_err(|_| "MCP operation timed out".to_string())??;
-            let _ = running.close().await;
-            Ok(out)
+                .map_err(|_| "MCP HTTP handshake timed out".to_string())?
+                .map_err(|e| format!("MCP HTTP handshake: {e}"))
         }
     }
+}
+
+async fn with_mcp_peer<F, Fut, T>(
+    project_root: &Path,
+    config: McpServerConfig,
+    timeout: Duration,
+    work: F,
+) -> Result<T, String>
+where
+    F: FnOnce(Peer<RoleClient>) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let mut running = create_running_service(project_root, config, timeout).await?;
+    let peer = running.peer().clone();
+    let out = tokio::time::timeout(timeout, work(peer))
+        .await
+        .map_err(|_| "MCP operation timed out".to_string())??;
+    let _ = running.close().await;
+    Ok(out)
 }

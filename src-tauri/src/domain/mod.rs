@@ -19,4 +19,6 @@ pub mod skills;
 pub mod subagent_tool_filter;
 pub mod tools;
 pub mod tool_permission_rules;
-pub mod wiki;
+pub mod memory;
+pub mod pageindex;
+

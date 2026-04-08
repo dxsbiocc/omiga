@@ -1,10 +1,23 @@
 //! In-memory chat runtime state (LLM config, session cache, rounds, pending tools).
 //! Lives in `OmigaAppState` alongside the DB repo — backend analogue of chat runtime in AppStateStore.
 
+use crate::domain::mcp_client::McpLiveConnection;
 use crate::domain::session::{AgentTask, Session, TodoItem};
+use crate::domain::tools::ToolSchema;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
+
+/// Cached result of `discover_mcp_tool_schemas` for one project root.
+pub struct McpToolCache {
+    pub schemas: Vec<ToolSchema>,
+    pub cached_at: Instant,
+}
+
+/// TTL for MCP tool schema cache. MCP server tool lists rarely change during a session.
+pub const MCP_TOOL_CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Active chat state with optimized in-memory caching.
 /// Database remains the single source of truth for persistence.
@@ -18,6 +31,13 @@ pub struct ChatState {
     /// Active conversation rounds for cancellation tracking
     pub active_rounds: Arc<Mutex<HashMap<String, RoundCancellationState>>>,
     pub pending_tools: Arc<Mutex<HashMap<String, PendingToolCall>>>,
+    /// MCP tool schema cache keyed by project root. Avoids re-spawning MCP server
+    /// processes on every `send_message` call (primary cause of slow first response).
+    pub mcp_tool_cache: Arc<Mutex<HashMap<PathBuf, McpToolCache>>>,
+    /// Persistent MCP connections keyed by `"<project_root>/<server_name>"`.
+    /// Each entry keeps a live stdio process / HTTP session alive so tool calls
+    /// skip the spawn+handshake overhead (~0.5–3 s per server per call).
+    pub mcp_connections: Arc<Mutex<HashMap<String, McpLiveConnection>>>,
 }
 
 /// Runtime state for an active session. Chat transcript is persisted via messages;
@@ -60,6 +80,8 @@ impl Default for ChatState {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             active_rounds: Arc::new(Mutex::new(HashMap::new())),
             pending_tools: Arc::new(Mutex::new(HashMap::new())),
+            mcp_tool_cache: Arc::new(Mutex::new(HashMap::new())),
+            mcp_connections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

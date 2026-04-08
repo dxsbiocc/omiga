@@ -36,7 +36,7 @@ import { PermissionSettingsTab } from "./PermissionSettingsTab";
 import { NotebookSettingsTab } from "./NotebookSettingsTab";
 import { ClaudeCodeImportPanel } from "./ClaudeCodeImportPanel";
 import { IntegrationsCatalogPanel } from "./IntegrationsCatalogPanel";
-import { WikiSettingsTab } from "./WikiSettingsTab";
+import { UnifiedMemoryTab } from "./UnifiedMemoryTab";
 import { ThemeAppearancePanel } from "./ThemeAppearancePanel";
 
 interface SettingsProps {
@@ -71,9 +71,7 @@ const SETTINGS_SECTIONS: {
   },
   {
     header: "Knowledge",
-    items: [
-      { index: 8, label: "Wiki" },
-    ],
+    items: [{ index: 8, label: "Memory" }],
   },
 ];
 
@@ -81,7 +79,10 @@ const SETTINGS_NAV_FLAT = SETTINGS_SECTIONS.flatMap((s) => s.items);
 const SETTINGS_TAB_MAX = 8;
 
 function clampSettingsTab(i: number): number {
-  return Math.min(Math.max(0, Math.floor(Number.isFinite(i) ? i : 0)), SETTINGS_TAB_MAX);
+  return Math.min(
+    Math.max(0, Math.floor(Number.isFinite(i) ? i : 0)),
+    SETTINGS_TAB_MAX,
+  );
 }
 
 // Supported LLM providers with their display names and required fields
@@ -660,158 +661,225 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
               {SETTINGS_NAV_FLAT.find((n) => n.index === activeTab)?.label ??
                 "Settings"}
             </Typography>
-        {activeTab === 0 && (
-          <Box>
-            {/* Provider Selection */}
-            <FormControl fullWidth sx={{ mb: 3 }}>
-              <InputLabel id="provider-label">LLM Provider</InputLabel>
-              <Select
-                labelId="provider-label"
-                value={provider}
-                label="LLM Provider"
-                onChange={handleProviderChange}
-                disabled={isLoading}
-              >
-                {Object.entries(PROVIDERS).map(([key, config]) => (
-                  <MenuItem key={key} value={key}>
-                    {config.name}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+            {activeTab === 0 && (
+              <Box>
+                {/* Provider Selection */}
+                <FormControl fullWidth sx={{ mb: 3 }}>
+                  <InputLabel id="provider-label">LLM Provider</InputLabel>
+                  <Select
+                    labelId="provider-label"
+                    value={provider}
+                    label="LLM Provider"
+                    onChange={handleProviderChange}
+                    disabled={isLoading}
+                  >
+                    {Object.entries(PROVIDERS).map(([key, config]) => (
+                      <MenuItem key={key} value={key}>
+                        {config.name}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
 
-            {/* API Key */}
-            <TextField
-              fullWidth
-              type={showKey ? "text" : "password"}
-              label="API Key"
-              placeholder={currentProvider.placeholder}
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              disabled={isLoading}
-              InputProps={{
-                endAdornment: (
-                  <InputAdornment position="end">
-                    <IconButton
-                      onClick={() => setShowKey(!showKey)}
-                      edge="end"
-                      size="small"
-                    >
-                      {showKey ? <VisibilityOff /> : <Visibility />}
-                    </IconButton>
-                  </InputAdornment>
-                ),
-              }}
-              sx={{ mb: 2 }}
-            />
+                {/* API Key */}
+                <TextField
+                  fullWidth
+                  type={showKey ? "text" : "password"}
+                  label="API Key"
+                  placeholder={currentProvider.placeholder}
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  disabled={isLoading}
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton
+                          onClick={() => setShowKey(!showKey)}
+                          edge="end"
+                          size="small"
+                        >
+                          {showKey ? <VisibilityOff /> : <Visibility />}
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  }}
+                  sx={{ mb: 2 }}
+                />
 
-            {/* Secret Key (if required) */}
-            {currentProvider.requiresSecretKey && (
-              <TextField
-                fullWidth
-                type={showSecret ? "text" : "password"}
-                label="Secret Key"
-                placeholder="Enter Secret Key"
-                value={secretKey}
-                onChange={(e) => setSecretKey(e.target.value)}
-                disabled={isLoading}
-                InputProps={{
-                  endAdornment: (
-                    <InputAdornment position="end">
-                      <IconButton
-                        onClick={() => setShowSecret(!showSecret)}
-                        edge="end"
-                        size="small"
-                      >
-                        {showSecret ? <VisibilityOff /> : <Visibility />}
-                      </IconButton>
-                    </InputAdornment>
-                  ),
-                }}
-                sx={{ mb: 2 }}
-              />
-            )}
+                {/* Secret Key (if required) */}
+                {currentProvider.requiresSecretKey && (
+                  <TextField
+                    fullWidth
+                    type={showSecret ? "text" : "password"}
+                    label="Secret Key"
+                    placeholder="Enter Secret Key"
+                    value={secretKey}
+                    onChange={(e) => setSecretKey(e.target.value)}
+                    disabled={isLoading}
+                    InputProps={{
+                      endAdornment: (
+                        <InputAdornment position="end">
+                          <IconButton
+                            onClick={() => setShowSecret(!showSecret)}
+                            edge="end"
+                            size="small"
+                          >
+                            {showSecret ? <VisibilityOff /> : <Visibility />}
+                          </IconButton>
+                        </InputAdornment>
+                      ),
+                    }}
+                    sx={{ mb: 2 }}
+                  />
+                )}
 
-            {/* App ID (if required) */}
-            {currentProvider.requiresAppId && (
-              <TextField
-                fullWidth
-                label="App ID"
-                placeholder="Enter App ID"
-                value={appId}
-                onChange={(e) => setAppId(e.target.value)}
-                disabled={isLoading}
-                sx={{ mb: 2 }}
-              />
-            )}
+                {/* App ID (if required) */}
+                {currentProvider.requiresAppId && (
+                  <TextField
+                    fullWidth
+                    label="App ID"
+                    placeholder="Enter App ID"
+                    value={appId}
+                    onChange={(e) => setAppId(e.target.value)}
+                    disabled={isLoading}
+                    sx={{ mb: 2 }}
+                  />
+                )}
 
-            {/* Model — required; switching provider pre-fills the suggested default */}
-            <TextField
-              fullWidth
-              required
-              label="Model"
-              placeholder={
-                currentProvider.defaultModel
-                  ? `e.g. ${currentProvider.defaultModel}`
-                  : "Provider-specific model ID"
-              }
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              disabled={isLoading}
-              helperText={`Exact model name for ${currentProvider.name}. Switching provider fills a suggested default you can edit.`}
-              sx={{ mb: 2 }}
-            />
+                {/* Model — required; switching provider pre-fills the suggested default */}
+                <TextField
+                  fullWidth
+                  required
+                  label="Model"
+                  placeholder={
+                    currentProvider.defaultModel
+                      ? `e.g. ${currentProvider.defaultModel}`
+                      : "Provider-specific model ID"
+                  }
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  disabled={isLoading}
+                  helperText={`Exact model name for ${currentProvider.name}. Switching provider fills a suggested default you can edit.`}
+                  sx={{ mb: 2 }}
+                />
 
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ display: "block", mb: 2 }}
-            >
-              Your API key is stored locally and only sent to{" "}
-              {currentProvider.name}&apos;s API servers.
-            </Typography>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "block", mb: 2 }}
+                >
+                  Your API key is stored locally and only sent to{" "}
+                  {currentProvider.name}&apos;s API servers.
+                </Typography>
 
-            {/* Saved Config Indicator */}
-            {savedConfig && (
-              <Chip
-                icon={<CheckCircle fontSize="small" />}
-                label={`${PROVIDERS[savedConfig.provider]?.name || savedConfig.provider} configured`}
-                size="small"
-                color="success"
-                variant="outlined"
-                sx={{ mb: 2 }}
-              />
-            )}
-
-            {testResult && (
-              <Box sx={{ mb: 2 }}>
-                {testResult.available ? (
+                {/* Saved Config Indicator */}
+                {savedConfig && (
                   <Chip
                     icon={<CheckCircle fontSize="small" />}
-                    label={`Model OK - ${testResult.latencyMs}ms`}
+                    label={`${PROVIDERS[savedConfig.provider]?.name || savedConfig.provider} configured`}
                     size="small"
                     color="success"
-                  />
-                ) : (
-                  <Chip
-                    icon={<CheckCircle fontSize="small" />}
-                    label="Model unavailable"
-                    size="small"
-                    color="error"
                     variant="outlined"
+                    sx={{ mb: 2 }}
                   />
+                )}
+
+                {testResult && (
+                  <Box sx={{ mb: 2 }}>
+                    {testResult.available ? (
+                      <Chip
+                        icon={<CheckCircle fontSize="small" />}
+                        label={`Model OK - ${testResult.latencyMs}ms`}
+                        size="small"
+                        color="success"
+                      />
+                    ) : (
+                      <Chip
+                        icon={<CheckCircle fontSize="small" />}
+                        label="Model unavailable"
+                        size="small"
+                        color="error"
+                        variant="outlined"
+                      />
+                    )}
+                  </Box>
+                )}
+
+                {/* Help Link */}
+                {currentProvider.docsUrl && (
+                  <>
+                    <Divider sx={{ my: 2 }} />
+                    <Typography variant="body2" color="text.secondary">
+                      Don&apos;t have an API key?{" "}
+                      <Link
+                        href={currentProvider.docsUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        sx={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 0.5,
+                        }}
+                      >
+                        Get one from {currentProvider.name}
+                        <OpenInNew fontSize="inherit" />
+                      </Link>
+                    </Typography>
+                  </>
                 )}
               </Box>
             )}
 
-            {/* Help Link */}
-            {currentProvider.docsUrl && (
-              <>
-                <Divider sx={{ my: 2 }} />
-                <Typography variant="body2" color="text.secondary">
-                  Don&apos;t have an API key?{" "}
+            {activeTab === 1 && (
+              <Box>
+                <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 2 }}>
+                  Advanced Settings
+                </Typography>
+
+                {/* Base URL (for custom endpoints) */}
+                <TextField
+                  fullWidth
+                  label="Base URL (optional)"
+                  placeholder="https://api.example.com/v1"
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                  disabled={isLoading}
+                  helperText="Override the default API endpoint. For Azure or custom OpenAI-compatible services."
+                  sx={{ mb: 3 }}
+                />
+
+                <TextField
+                  fullWidth
+                  type={showBraveKey ? "text" : "password"}
+                  label="Brave Search API key (optional)"
+                  placeholder="BSA..."
+                  value={braveApiKey}
+                  onChange={(e) => setBraveApiKey(e.target.value)}
+                  disabled={isLoading}
+                  helperText={`Used by the built-in web_search tool (Brave API). If empty, Omiga tries $OMIGA_BRAVE_API_KEY / $BRAVE_API_KEY, then falls back to DuckDuckGo.`}
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton
+                          onClick={() => setShowBraveKey(!showBraveKey)}
+                          edge="end"
+                          size="small"
+                        >
+                          {showBraveKey ? <VisibilityOff /> : <Visibility />}
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  }}
+                  sx={{ mb: 2 }}
+                />
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "block", mb: 2 }}
+                >
+                  Get a key from{" "}
                   <Link
-                    href={currentProvider.docsUrl}
+                    href="https://brave.com/search/api/"
                     target="_blank"
                     rel="noopener noreferrer"
                     sx={{
@@ -820,183 +888,131 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
                       gap: 0.5,
                     }}
                   >
-                    Get one from {currentProvider.name}
+                    Brave Search API
                     <OpenInNew fontSize="inherit" />
                   </Link>
+                  . Stored locally.
                 </Typography>
-              </>
+
+                <Button
+                  variant="contained"
+                  onClick={() => void handleSaveAdvanced()}
+                  disabled={isLoading}
+                  sx={{ mb: 2 }}
+                >
+                  Save advanced settings
+                </Button>
+
+                <Divider sx={{ my: 2 }} />
+
+                <Typography variant="body2" color="text.secondary">
+                  Saving the model on the Model tab also saves the Brave key and
+                  base URL from this page. Use the button above if you only
+                  changed advanced options.
+                </Typography>
+              </Box>
             )}
-          </Box>
-        )}
 
-        {activeTab === 1 && (
-          <Box>
-            <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 2 }}>
-              Advanced Settings
-            </Typography>
+            {activeTab === 2 && (
+              <Box>
+                <PermissionSettingsTab projectPath={projectPath} />
+              </Box>
+            )}
 
-            {/* Base URL (for custom endpoints) */}
-            <TextField
-              fullWidth
-              label="Base URL (optional)"
-              placeholder="https://api.example.com/v1"
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              disabled={isLoading}
-              helperText="Override the default API endpoint. For Azure or custom OpenAI-compatible services."
-              sx={{ mb: 3 }}
-            />
+            {activeTab === 3 && (
+              <ThemeAppearancePanel
+                colorMode={colorMode}
+                onColorModeChange={setColorMode}
+                accentPreset={accentPreset}
+                onAccentPresetChange={setAccentPreset}
+              />
+            )}
 
-            <TextField
-              fullWidth
-              type={showBraveKey ? "text" : "password"}
-              label="Brave Search API key (optional)"
-              placeholder="BSA..."
-              value={braveApiKey}
-              onChange={(e) => setBraveApiKey(e.target.value)}
-              disabled={isLoading}
-              helperText={`Used by the built-in web_search tool (Brave API). If empty, Omiga tries $OMIGA_BRAVE_API_KEY / $BRAVE_API_KEY, then falls back to DuckDuckGo.`}
-              InputProps={{
-                endAdornment: (
-                  <InputAdornment position="end">
-                    <IconButton
-                      onClick={() => setShowBraveKey(!showBraveKey)}
-                      edge="end"
-                      size="small"
-                    >
-                      {showBraveKey ? <VisibilityOff /> : <Visibility />}
-                    </IconButton>
-                  </InputAdornment>
-                ),
-              }}
-              sx={{ mb: 2 }}
-            />
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
-              Get a key from{" "}
-              <Link
-                href="https://brave.com/search/api/"
-                target="_blank"
-                rel="noopener noreferrer"
-                sx={{ display: "inline-flex", alignItems: "center", gap: 0.5 }}
-              >
-                Brave Search API
-                <OpenInNew fontSize="inherit" />
-              </Link>
-              . Stored locally.
-            </Typography>
+            {activeTab === 4 && (
+              <Box>
+                <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
+                  In-app plugin management (install, enable, and configure
+                  extensions for Omiga) is planned. Until then, use the host
+                  environment and project tooling you already rely on alongside
+                  Omiga.
+                </Alert>
+                <Typography variant="body2" color="text.secondary">
+                  Plugin-related options will appear here in a future release.
+                </Typography>
+              </Box>
+            )}
 
-            <Button
-              variant="contained"
-              onClick={() => void handleSaveAdvanced()}
-              disabled={isLoading}
-              sx={{ mb: 2 }}
-            >
-              Save advanced settings
-            </Button>
+            {activeTab === 5 && (
+              <Box>
+                <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
+                  Omiga 仅从以下位置合并 MCP（同名以后者为准）：应用内置{" "}
+                  <Typography component="span" fontWeight={600}>
+                    bundled_mcp.json
+                  </Typography>
+                  {" → "}用户{" "}
+                  <Typography component="span" fontWeight={600}>
+                    ~/.omiga/mcp.json
+                  </Typography>
+                  {" → "}当前项目{" "}
+                  <Typography component="span" fontWeight={600}>
+                    .omiga/mcp.json
+                  </Typography>
+                  。不再读取 ~/.claude.json、~/.cursor 或项目 .mcp.json。
+                </Alert>
+                <Typography variant="body2" color="text.secondary">
+                  下方可将外部 JSON（如 Claude Code 导出）合并到当前项目的{" "}
+                  <Typography component="span" fontWeight={600}>
+                    .omiga/mcp.json
+                  </Typography>
+                  ；保存后新对话即可加载 MCP。
+                </Typography>
+                <ClaudeCodeImportPanel projectPath={projectPath} mode="mcp" />
+                <IntegrationsCatalogPanel
+                  projectPath={projectPath}
+                  mode="mcp"
+                />
+              </Box>
+            )}
 
-            <Divider sx={{ my: 2 }} />
+            {activeTab === 6 && (
+              <Box>
+                <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
+                  <Typography variant="body2" color="text.secondary">
+                    使用下方「从 Claude
+                    默认目录导入」或「从任意文件夹导入」将技能复制到 Omiga
+                    目录后，新对话即可使用。
+                  </Typography>
+                </Alert>
 
-            <Typography variant="body2" color="text.secondary">
-              Saving the model on the Model tab also saves the Brave key and base URL
-              from this page. Use the button above if you only changed advanced options.
-            </Typography>
-          </Box>
-        )}
+                <ClaudeCodeImportPanel
+                  projectPath={projectPath}
+                  mode="skills"
+                />
+                <IntegrationsCatalogPanel
+                  projectPath={projectPath}
+                  mode="skills"
+                />
+              </Box>
+            )}
 
-        {activeTab === 2 && (
-          <Box>
-            <PermissionSettingsTab projectPath={projectPath} />
-          </Box>
-        )}
+            {activeTab === 7 && (
+              <Box>
+                <NotebookSettingsTab />
+              </Box>
+            )}
 
-        {activeTab === 3 && (
-          <ThemeAppearancePanel
-            colorMode={colorMode}
-            onColorModeChange={setColorMode}
-            accentPreset={accentPreset}
-            onAccentPresetChange={setAccentPreset}
-          />
-        )}
+            {activeTab === 8 && (
+              <Box>
+                <UnifiedMemoryTab projectPath={projectPath} />
+              </Box>
+            )}
 
-        {activeTab === 4 && (
-          <Box>
-            <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
-              In-app plugin management (install, enable, and configure extensions
-              for Omiga) is planned. Until then, use the host environment and
-              project tooling you already rely on alongside Omiga.
-            </Alert>
-            <Typography variant="body2" color="text.secondary">
-              Plugin-related options will appear here in a future release.
-            </Typography>
-          </Box>
-        )}
-
-        {activeTab === 5 && (
-          <Box>
-            <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
-              Omiga 仅从以下位置合并 MCP（同名以后者为准）：应用内置{" "}
-              <Typography component="span" fontWeight={600}>
-                bundled_mcp.json
-              </Typography>
-              {" → "}用户{" "}
-              <Typography component="span" fontWeight={600}>
-                ~/.omiga/mcp.json
-              </Typography>
-              {" → "}当前项目{" "}
-              <Typography component="span" fontWeight={600}>
-                .omiga/mcp.json
-              </Typography>
-              。不再读取 ~/.claude.json、~/.cursor 或项目 .mcp.json。
-            </Alert>
-            <Typography variant="body2" color="text.secondary">
-              下方可将外部 JSON（如 Claude Code 导出）合并到当前项目的{" "}
-              <Typography component="span" fontWeight={600}>
-                .omiga/mcp.json
-              </Typography>
-              ；保存后新对话即可加载 MCP。
-            </Typography>
-            <ClaudeCodeImportPanel projectPath={projectPath} mode="mcp" />
-            <IntegrationsCatalogPanel projectPath={projectPath} mode="mcp" />
-          </Box>
-        )}
-
-        {activeTab === 6 && (
-          <Box>
-            <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
-              用户级：<Typography component="span" fontWeight={600}>~/.claude/skills</Typography>、
-              <Typography component="span" fontWeight={600}>~/.omiga/skills</Typography>
-              （同名以 Omiga 为准）；项目级{" "}
-              <Typography component="span" fontWeight={600}>
-                .omiga/skills
-              </Typography>
-              。
-            </Alert>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              导入仅写入 Omiga 目录；Claude 路径由运行时扫描。
-            </Typography>
-            <ClaudeCodeImportPanel projectPath={projectPath} mode="skills" />
-            <IntegrationsCatalogPanel projectPath={projectPath} mode="skills" />
-          </Box>
-        )}
-
-        {activeTab === 7 && (
-          <Box>
-            <NotebookSettingsTab />
-          </Box>
-        )}
-
-        {activeTab === 8 && (
-          <Box>
-            <WikiSettingsTab projectPath={projectPath} />
-          </Box>
-        )}
-
-        {/* Status Message */}
-        {message && isLlmTab && (
-          <Alert severity={message.type} sx={{ mt: 2, borderRadius: 2 }}>
-            {message.text}
-          </Alert>
-        )}
+            {/* Status Message */}
+            {message && isLlmTab && (
+              <Alert severity={message.type} sx={{ mt: 2, borderRadius: 2 }}>
+                {message.text}
+              </Alert>
+            )}
           </Box>
 
           {isLlmTab && (

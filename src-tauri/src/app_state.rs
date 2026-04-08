@@ -6,6 +6,7 @@
 
 use crate::domain::chat_state::ChatState;
 use crate::domain::integrations_catalog::IntegrationsCatalog;
+use crate::domain::skills::SkillCacheMap;
 use crate::commands::CommandResult;
 use crate::domain::persistence::SessionRepository;
 use serde::Serialize;
@@ -26,6 +27,9 @@ pub struct OmigaAppState {
     /// Warm cache for [`crate::commands::integrations_settings::get_integrations_catalog`]:
     /// keyed by resolved project root (see `resolve_project_root` there).
     pub integrations_catalog_cache: Arc<StdMutex<HashMap<PathBuf, IntegrationsCatalog>>>,
+    /// Process-level skill cache: keyed by resolved project root.
+    /// Invalidated automatically via directory mtime stamps — no explicit flush needed.
+    pub skill_cache: Arc<StdMutex<SkillCacheMap>>,
 }
 
 impl OmigaAppState {
@@ -35,6 +39,7 @@ impl OmigaAppState {
             chat: ChatState::default(),
             started_at: Instant::now(),
             integrations_catalog_cache: Arc::new(StdMutex::new(HashMap::new())),
+            skill_cache: Arc::new(StdMutex::new(SkillCacheMap::default())),
         }
     }
 }

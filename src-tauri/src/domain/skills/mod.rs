@@ -2,38 +2,20 @@
 //! + `SkillTool` inline execution path).
 //!
 //! Search order (later overrides earlier on same skill name):
-//! 1. `CLAUDE_CONFIG_DIR/skills` or `~/.claude/skills` — **only when** the app setting
-//!    `loadClaudeUserSkills` is enabled (default: off).
-//! 2. `~/.omiga/skills` — user-level Omiga path (overrides Claude on clash).
-//! 3. `<project>/.omiga/skills` — project-level.
-
-/// SQLite `settings` key: when truthy, include `~/.claude/skills` in discovery. Default **off**.
-pub const SETTING_KEY_LOAD_CLAUDE_USER_SKILLS: &str = "loadClaudeUserSkills";
-
-/// Parse stored value for [`SETTING_KEY_LOAD_CLAUDE_USER_SKILLS`]. Missing or invalid → `false`.
-pub fn parse_load_claude_user_skills_setting(value: Option<&str>) -> bool {
-    match value {
-        Some(s) => {
-            let t = s.trim().to_ascii_lowercase();
-            t == "true" || t == "1" || t == "yes"
-        }
-        None => false,
-    }
-}
+//! 1. `~/.omiga/skills` — user-level.
+//! 2. `<project>/.omiga/skills` — project-level.
+//!
+//! `~/.claude/skills` is **not** read at runtime. Use Settings → Skills → import buttons to copy
+//! skills into an Omiga directory.
 
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 const MAX_LISTING_DESC_CHARS: usize = 250;
-
-/// Max skills to show in the auto task-ranked system-prompt section.
-const TASK_SKILL_TOP_K: usize = 8;
-/// When no token matches, show this many skills (sorted by name) as a neutral fallback.
-const TASK_FALLBACK_K: usize = 4;
 
 static TASK_TOKEN_REGEXES: OnceLock<(Regex, Regex)> = OnceLock::new();
 
@@ -138,9 +120,9 @@ pub struct SkillInvokeOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SkillSource {
-    /// `~/.claude/skills` or `$CLAUDE_CONFIG_DIR/skills` (user-level; no copy, read in place).
+    /// Reserved for legacy UI / older catalog payloads — runtime discovery does not use `~/.claude/skills`.
     ClaudeUser,
-    /// `~/.omiga/skills` (user-level; overrides same-named skill from Claude path).
+    /// `~/.omiga/skills` (user-level).
     OmigaUser,
     /// `<project>/.omiga/skills` (project-level).
     OmigaProject,
@@ -355,17 +337,6 @@ async fn collect_skills_dir(base: &Path, map: &mut HashMap<String, SkillEntry>, 
     }
 }
 
-/// `CLAUDE_CONFIG_DIR` or `~/.claude` (Claude Code home).
-fn claude_config_home_dir() -> Option<PathBuf> {
-    std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
-}
-
-fn user_skills_dir_claude() -> Option<PathBuf> {
-    claude_config_home_dir().map(|d| d.join("skills"))
-}
-
 /// User-level Omiga skills: `~/.omiga/skills`.
 fn user_skills_dir_omiga() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".omiga").join("skills"))
@@ -374,21 +345,10 @@ fn user_skills_dir_omiga() -> Option<PathBuf> {
 /// Load all skills for a project root (absolute or relative cwd).
 ///
 /// Merge order (later overrides earlier):
-/// 1. `~/.claude/skills` — only if `include_claude_user_skills` is true (see
-///    [`SETTING_KEY_LOAD_CLAUDE_USER_SKILLS`]).
-/// 2. `~/.omiga/skills` — user-level Omiga path (wins over Claude on name clash).
-/// 3. `<project>/.omiga/skills` — project-level.
-pub async fn load_skills_for_project(
-    project_root: &Path,
-    include_claude_user_skills: bool,
-) -> Vec<SkillEntry> {
+/// 1. `~/.omiga/skills` — user-level.
+/// 2. `<project>/.omiga/skills` — project-level.
+pub async fn load_skills_for_project(project_root: &Path) -> Vec<SkillEntry> {
     let mut map: HashMap<String, SkillEntry> = HashMap::new();
-
-    if include_claude_user_skills {
-        if let Some(claude_user) = user_skills_dir_claude() {
-            collect_skills_dir(&claude_user, &mut map, SkillSource::ClaudeUser).await;
-        }
-    }
 
     if let Some(omiga_user) = user_skills_dir_omiga() {
         collect_skills_dir(&omiga_user, &mut map, SkillSource::OmigaUser).await;
@@ -400,6 +360,156 @@ pub async fn load_skills_for_project(
     let mut list: Vec<SkillEntry> = map.into_values().collect();
     list.sort_by(|a, b| a.name.cmp(&b.name));
     list
+}
+
+// ── Skill cache ──────────────────────────────────────────────────────────────────────────────────
+
+/// XOR of (dir-name-hash + mtime_secs) for every `SKILL.md` found across the search dirs.
+/// Zero means no skills exist. Computed with stat-only syscalls — no file content reads.
+type DirStamp = u64;
+
+pub struct SkillCacheSlot {
+    pub stamp: DirStamp,
+    /// `None` = stamp known but entries not yet loaded (set by `skills_any_exist`).
+    /// `Some(v)` = fully loaded; may be empty if no skills exist.
+    pub entries: Option<Vec<SkillEntry>>,
+}
+
+/// Process-level skill cache keyed by project root.
+pub type SkillCacheMap = HashMap<PathBuf, SkillCacheSlot>;
+
+fn skill_base_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::with_capacity(2);
+    if let Some(p) = user_skills_dir_omiga() {
+        dirs.push(p);
+    }
+    dirs.push(project_root.join(".omiga").join("skills"));
+    dirs
+}
+
+async fn compute_stamp(base_dirs: &[PathBuf]) -> DirStamp {
+    let mut stamp: u64 = 0;
+    for base in base_dirs {
+        let mut rd = match tokio::fs::read_dir(base).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        loop {
+            let entry = match rd.next_entry().await {
+                Ok(Some(e)) => e,
+                _ => break,
+            };
+            let skill_md = entry.path().join("SKILL.md");
+            let Ok(meta) = tokio::fs::metadata(&skill_md).await else { continue };
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let path_hash = entry
+                .file_name()
+                .to_string_lossy()
+                .bytes()
+                .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64));
+            stamp ^= mtime.wrapping_add(path_hash);
+        }
+    }
+    stamp
+}
+
+/// Load skills with a process-level mtime-stamp cache.
+///
+/// Hot path (stamp unchanged): only stat calls, no file reads.
+/// Cold path (stamp changed or first call): full disk scan, cache updated.
+pub async fn load_skills_cached(
+    project_root: &Path,
+    cache: &Arc<StdMutex<SkillCacheMap>>,
+) -> Vec<SkillEntry> {
+    let bases = skill_base_dirs(project_root);
+    let stamp = compute_stamp(&bases).await;
+    let key = project_root.to_path_buf();
+
+    {
+        let guard = cache.lock().expect("skill cache poisoned");
+        if let Some(slot) = guard.get(&key) {
+            // Only use the cached entries when they have been fully loaded (Some).
+            // A slot with entries=None was written by skills_any_exist and has no entry data.
+            if slot.stamp == stamp {
+                if let Some(ref v) = slot.entries {
+                    return v.clone();
+                }
+            }
+        }
+    }
+
+    let entries = load_skills_for_project(project_root).await;
+    {
+        let mut guard = cache.lock().expect("skill cache poisoned");
+        guard.insert(key, SkillCacheSlot { stamp, entries: Some(entries.clone()) });
+    }
+    entries
+}
+
+/// Check whether any skills exist, using the process cache for subsequent calls.
+///
+/// On a cache hit the check is free (zero I/O). On a miss the stamp is computed
+/// (stat-only) and stored; entry metadata is loaded lazily on the first `list_skills` call.
+pub async fn skills_any_exist(
+    project_root: &Path,
+    cache: &Arc<StdMutex<SkillCacheMap>>,
+) -> bool {
+    let key = project_root.to_path_buf();
+
+    {
+        let guard = cache.lock().expect("skill cache poisoned");
+        if let Some(slot) = guard.get(&key) {
+            return slot.stamp != 0;
+        }
+    }
+
+    let bases = skill_base_dirs(project_root);
+    let stamp = compute_stamp(&bases).await;
+    {
+        let mut guard = cache.lock().expect("skill cache poisoned");
+        // Use or_insert so a concurrent writer (same key, same stamp) wins — result is identical.
+        guard.entry(key).or_insert(SkillCacheSlot { stamp, entries: None });
+    }
+    stamp != 0
+}
+
+/// Try to load a single skill entry by direct path probe (O(1)) instead of scanning all dirs.
+///
+/// Returns `(entry, raw_skill_md_content)` so the caller can reuse the already-read file
+/// content without a second `read_to_string` call.  Returns `None` when the skill's frontmatter
+/// `name` differs from its directory name (caller should fall back to a full scan).
+async fn try_load_skill_direct(
+    project_root: &Path,
+    dir_name: &str,
+) -> Option<(SkillEntry, String)> {
+    async fn probe(skill_dir: &Path, dir_name: &str, source: SkillSource) -> Option<(SkillEntry, String)> {
+        let path = skill_dir.join("SKILL.md");
+        let raw = tokio::fs::read_to_string(&path).await.ok()?;
+        let (fm, body) = parse_frontmatter(&raw).ok()?;
+        let name = fm.name.filter(|s| !s.is_empty()).unwrap_or_else(|| dir_name.to_string());
+        let description = fm.description.filter(|s| !s.is_empty())
+            .unwrap_or_else(|| fallback_description(&body));
+        let entry = SkillEntry {
+            name,
+            description,
+            when_to_use: fm.when_to_use.filter(|s| !s.is_empty()),
+            skill_dir: skill_dir.to_path_buf(),
+            source,
+        };
+        Some((entry, raw))
+    }
+
+    let project_dir = project_root.join(".omiga").join("skills").join(dir_name);
+    if let Some(r) = probe(&project_dir, dir_name, SkillSource::OmigaProject).await { return Some(r); }
+    if let Some(base) = user_skills_dir_omiga() {
+        if let Some(r) = probe(&base.join(dir_name), dir_name, SkillSource::OmigaUser).await { return Some(r); }
+    }
+    None
 }
 
 /// Normalize skill name: trim and strip a leading `/` (TS `SkillTool.validateInput`).
@@ -430,67 +540,14 @@ pub fn resolve_skill_display_name(skills: &[SkillEntry], raw_skill_argument: &st
     resolve_skill_entry(skills, &n).map(|e| e.name.clone())
 }
 
-/// System prompt fragment: on-demand skills + pointer to task-ranked section below.
+/// System prompt fragment informing the model that skills are available on demand.
 #[must_use]
 pub fn format_skills_discovery_system_section() -> String {
     "## Skills (on-demand)\n\
-     The full catalog is **not** inlined here. A short **task-ranked** block is appended below when \
-     skills exist (keywords from the current user message or sub-agent task). Call `list_skills` for \
-     all names and short metadata (optional `query`). Use `skill` to load full `SKILL.md` when a \
-     skill fits the task.\n"
+     Skills are available but not inlined here. Call `list_skills` for names and metadata \
+     (supports an optional `query` to filter by keyword). Use `skill` to load the full \
+     `SKILL.md` for a chosen skill.\n"
         .to_string()
-}
-
-/// Per-turn task text → top skills by simple keyword overlap (name weighted higher than description).
-#[must_use]
-pub fn format_skills_task_relevance_section(
-    skills: &[SkillEntry],
-    task_text: &str,
-) -> Option<String> {
-    if skills.is_empty() {
-        return None;
-    }
-    let text = task_text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    let tokens = extract_task_tokens(text);
-    let mut scored: Vec<(i32, &SkillEntry)> = skills
-        .iter()
-        .map(|s| (skill_task_score(s, &tokens), s))
-        .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
-
-    let ranked: Vec<&SkillEntry> = if scored.first().map(|(s, _)| *s).unwrap_or(0) > 0 {
-        scored
-            .into_iter()
-            .take(TASK_SKILL_TOP_K)
-            .map(|(_, s)| s)
-            .collect()
-    } else {
-        let mut v: Vec<&SkillEntry> = skills.iter().collect();
-        v.sort_by(|a, b| a.name.cmp(&b.name));
-        v.into_iter().take(TASK_FALLBACK_K).collect()
-    };
-
-    let mut out = String::from(
-        "## Skills likely relevant to this task\n\
-         Auto-ranked from keyword overlap with the **current task text** (skill name matches weigh \
-         more than description). Prefer these when choosing `skill`; use `list_skills` for the full catalog.\n\n",
-    );
-    for sk in ranked {
-        let desc = truncate_listing(&sk.description);
-        match &sk.when_to_use {
-            Some(w) => {
-                let w = truncate_listing(w);
-                out.push_str(&format!("- `{}` — {} — {}\n", sk.name, desc, w));
-            }
-            None => {
-                out.push_str(&format!("- `{}` — {}\n", sk.name, desc));
-            }
-        }
-    }
-    Some(out)
 }
 
 /// JSON for `list_skills` tool: metadata only, no full SKILL.md body.
@@ -566,26 +623,64 @@ pub fn list_skills_metadata_json(
 }
 
 /// Full skill invocation — TS `SkillTool.call` inline path + fork notice when `context: fork`.
+///
+/// When `preloaded_skills` is provided the list is used directly (avoids a redundant disk scan).
+/// Otherwise skills are loaded from disk under `project_root` (Omiga skill dirs only).
 pub async fn invoke_skill_detailed(
     project_root: &Path,
     raw_skill_name: &str,
     args: &str,
-    include_claude_user_skills: bool,
+) -> Result<SkillInvokeOutput, String> {
+    invoke_skill_detailed_with_cache(project_root, raw_skill_name, args, None).await
+}
+
+/// Like [`invoke_skill_detailed`] but accepts an already-loaded skill list to avoid a redundant
+/// `load_skills_for_project` call when the caller already has the list.
+pub async fn invoke_skill_detailed_with_cache(
+    project_root: &Path,
+    raw_skill_name: &str,
+    args: &str,
+    preloaded_skills: Option<&[SkillEntry]>,
 ) -> Result<SkillInvokeOutput, String> {
     let normalized = normalize_skill_name(raw_skill_name);
     if normalized.is_empty() {
         return Err("Invalid skill format: empty name".to_string());
     }
 
-    let skills = load_skills_for_project(project_root, include_claude_user_skills).await;
-    let entry = resolve_skill_entry(&skills, &normalized)
-        .ok_or_else(|| format!("Unknown skill: {normalized}"))?;
+    // Resolve skill entry + raw SKILL.md content (three paths, cheapest first):
+    // 1. Preloaded list — no I/O; entry found, file read separately below.
+    // 2. Direct path probe — reads exactly one SKILL.md and returns entry + content together.
+    // 3. Full scan fallback — only when `name` in frontmatter differs from directory name.
+    let direct_entry;
+    let owned_full;
+    let direct_raw: String;
+    let (entry, raw_opt): (&SkillEntry, Option<&str>) = if let Some(s) = preloaded_skills {
+        let e = resolve_skill_entry(s, &normalized)
+            .ok_or_else(|| format!("Unknown skill: {normalized}"))?;
+        (e, None)
+    } else if let Some((e, r)) = try_load_skill_direct(project_root, &normalized).await {
+        direct_entry = e;
+        direct_raw = r;
+        (&direct_entry, Some(direct_raw.as_str()))
+    } else {
+        owned_full = load_skills_for_project(project_root).await;
+        let e = resolve_skill_entry(&owned_full, &normalized)
+            .ok_or_else(|| format!("Unknown skill: {normalized}"))?;
+        (e, None)
+    };
 
-    let path = entry.skill_dir.join("SKILL.md");
-    let raw = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|e| format!("read SKILL.md: {e}"))?;
-    let (fm, body) = parse_frontmatter(&raw)?;
+    // Use the already-read content from the direct probe; otherwise read from disk.
+    let owned_raw: String;
+    let raw: &str = if let Some(r) = raw_opt {
+        r
+    } else {
+        let path = entry.skill_dir.join("SKILL.md");
+        owned_raw = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("read SKILL.md: {e}"))?;
+        &owned_raw
+    };
+    let (fm, body) = parse_frontmatter(raw)?;
 
     if fm.disable_model_invocation {
         return Err(format!(
@@ -662,18 +757,19 @@ pub async fn invoke_skill_detailed(
     })
 }
 
-/// Resolve skill and return the formatted tool result string (what the model receives).
-pub async fn invoke_skill(
+/// Invoke a skill and return the formatted tool result string.
+/// Pass `preloaded_skills` to skip the internal directory scan when the caller already has the list.
+pub async fn invoke_skill_with_cache(
     project_root: &Path,
     raw_skill_name: &str,
     args: &str,
-    include_claude_user_skills: bool,
+    preloaded_skills: &[SkillEntry],
 ) -> Result<String, String> {
-    let out = invoke_skill_detailed(
+    let out = invoke_skill_detailed_with_cache(
         project_root,
         raw_skill_name,
         args,
-        include_claude_user_skills,
+        Some(preloaded_skills),
     )
     .await?;
     Ok(out.formatted_tool_result)
@@ -738,38 +834,13 @@ Line $ARGUMENTS
         tokio::fs::write(skill_dir.join("SKILL.md"), raw)
             .await
             .expect("write");
-        let out = invoke_skill_detailed(dir.path(), "/demo", "hello", false)
+        let out = invoke_skill_detailed(dir.path(), "/demo", "hello")
             .await
             .expect("invoke");
         assert_eq!(out.status, "inline");
         assert!(out.allowed_tools.contains(&"bash".to_string()));
         assert!(out.formatted_tool_result.contains("Launching skill: demo"));
         assert!(out.formatted_tool_result.contains("Line hello"));
-    }
-
-    #[test]
-    fn task_relevance_ranks_postgres_above_unrelated() {
-        let skills = vec![
-            SkillEntry {
-                name: "alpha-help".to_string(),
-                description: "generic".to_string(),
-                when_to_use: None,
-                skill_dir: PathBuf::from("/tmp/a"),
-                source: SkillSource::OmigaProject,
-            },
-            SkillEntry {
-                name: "postgres-patterns".to_string(),
-                description: "SQL tips".to_string(),
-                when_to_use: Some("database work".to_string()),
-                skill_dir: PathBuf::from("/tmp/b"),
-                source: SkillSource::OmigaProject,
-            },
-        ];
-        let sec =
-            format_skills_task_relevance_section(&skills, "optimize my postgres query").expect("sec");
-        let pg = sec.find("postgres-patterns").expect("postgres");
-        let al = sec.find("alpha-help").expect("alpha");
-        assert!(pg < al);
     }
 
     #[test]

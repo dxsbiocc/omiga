@@ -225,6 +225,13 @@ export function ClaudeCodeImportPanel({
   const showMcp = mode === "mcp" || mode === "both";
   const showSkills = mode === "skills" || mode === "both";
   const busyAny = busy != null;
+  const claudeSkillsFrom = defaults?.defaultUserSkillsDir ?? "~/.claude/skills";
+  const skillImportBtnSx = {
+    textTransform: "none" as const,
+    whiteSpace: "normal" as const,
+    lineHeight: 1.35,
+    py: 1.1,
+  };
 
   return (
     <Box sx={{ mt: 2 }}>
@@ -327,6 +334,7 @@ export function ClaudeCodeImportPanel({
                 >
                   {defaults?.defaultUserSkillsDir ?? "~/.claude/skills"}
                 </Typography>
+                （只读复制到 Omiga，不启用对 Claude 目录的运行时引用）。
               </Typography>
               <Box
                 sx={{
@@ -346,6 +354,7 @@ export function ClaudeCodeImportPanel({
                     variant="contained"
                     size="small"
                     color="primary"
+                    sx={skillImportBtnSx}
                     startIcon={
                       busy === "skillsClaudeUser" ? (
                         <CircularProgress size={16} color="inherit" />
@@ -358,13 +367,14 @@ export function ClaudeCodeImportPanel({
                       void runImportClaudeDefaultSkills("userOmiga")
                     }
                   >
-                    用户 ~/.omiga/skills
+                    从 {claudeSkillsFrom} 导入
                   </Button>
                   <Button
                     fullWidth
                     variant="contained"
                     size="small"
                     color="secondary"
+                    sx={skillImportBtnSx}
                     startIcon={
                       busy === "skillsClaudeProject" ? (
                         <CircularProgress size={16} color="inherit" />
@@ -377,7 +387,7 @@ export function ClaudeCodeImportPanel({
                       void runImportClaudeDefaultSkills("projectOmiga")
                     }
                   >
-                    项目 .omiga/skills
+                    从 {claudeSkillsFrom} 导入
                   </Button>
                 </Stack>
               </Box>
@@ -407,6 +417,7 @@ export function ClaudeCodeImportPanel({
                     variant="outlined"
                     size="small"
                     color="primary"
+                    sx={skillImportBtnSx}
                     startIcon={
                       busy === "skillsFolderUser" ? (
                         <CircularProgress size={16} />
@@ -417,13 +428,14 @@ export function ClaudeCodeImportPanel({
                     disabled={busyAny}
                     onClick={() => void runImportSkillsFromFolder("userOmiga")}
                   >
-                    用户 ~/.omiga/skills
+                    从所选文件夹导入到 ~/.omiga/skills
                   </Button>
                   <Button
                     fullWidth
                     variant="outlined"
                     size="small"
                     color="secondary"
+                    sx={skillImportBtnSx}
                     startIcon={
                       busy === "skillsFolderProject" ? (
                         <CircularProgress size={16} />
@@ -436,7 +448,7 @@ export function ClaudeCodeImportPanel({
                       void runImportSkillsFromFolder("projectOmiga")
                     }
                   >
-                    项目 .omiga/skills
+                    从所选文件夹导入到 项目 .omiga/skills
                   </Button>
                 </Stack>
               </Box>

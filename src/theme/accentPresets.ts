@@ -1,9 +1,86 @@
 import type { ThemeOptions } from "@mui/material/styles";
 import { darken, lighten } from "@mui/material/styles";
 
+// ── Seeded blend helpers: deterministic “random” mix per preset + mode ─────
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  let h = hex.trim().replace("#", "");
+  if (h.length === 3) {
+    h = h
+      .split("")
+      .map((c) => c + c)
+      .join("");
+  }
+  if (h.length !== 6) return null;
+  const n = parseInt(h, 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+function relativeLuminance(hex: string): number {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return 0;
+  const r = rgb.r / 255;
+  const g = rgb.g / 255;
+  const b = rgb.b / 255;
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function hexToRgbaString(hex: string, alpha: number): string {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return `rgba(0,0,0,${alpha})`;
+  return `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha})`;
+}
+
+/** Dark swatches on light gradients: lift toward paper so bands stay soft. */
+function lightenStopForGradientSwatch(hex: string): string {
+  const lum = relativeLuminance(hex);
+  if (lum < 0.2) return mixHex(hex, "#ffffff", 0.78);
+  if (lum < 0.38) return mixHex(hex, "#ffffff", 0.42);
+  return hex;
+}
+
+function shuffleInPlace<T>(arr: T[], rng: () => number): void {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [arr[i], arr[j]] = [arr[j]!, arr[i]!];
+  }
+}
+
+/** Linear RGB mix (0 = a, 1 = b). */
+function mixHex(a: string, b: string, t: number): string {
+  const A = hexToRgb(a);
+  const B = hexToRgb(b);
+  if (!A || !B) return a;
+  const u = Math.max(0, Math.min(1, t));
+  const r = Math.round(A.r + (B.r - A.r) * u);
+  const g = Math.round(A.g + (B.g - A.g) * u);
+  const bl = Math.round(A.b + (B.b - A.b) * u);
+  return `#${[r, g, bl].map((x) => x.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function hashSeed(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+/** Deterministic PRNG for stable colors across renders. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    let t = (a += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 /**
- * Optional accent palettes (brand-inspired swatches). Only overrides `palette`;
- * light/dark surfaces still come from `getTheme(mode)`.
+ * Optional accent palettes (brand-inspired swatches). Merges into `getTheme(mode)`:
+ * semantic colors from each preset plus `background` / `surface` from {@link getAccentAppChrome}.
  */
 export type AccentPresetId =
   | "asana"
@@ -94,6 +171,83 @@ export const ACCENT_PRESET_META: Record<
   },
 };
 
+/**
+ * Preset preview / app shell: linear gradient from swatches in a **seeded random order**
+ * (stable per preset + light/dark). Light uses washed stops; dark uses dark base + translucent swatches.
+ */
+export function getAccentSwatchGradient(
+  preset: AccentPresetId,
+  mode: "light" | "dark",
+): string {
+  const rng = mulberry32(hashSeed(`omiga:swatchGradient:${preset}:${mode}`));
+  const colors = [...ACCENT_PRESET_META[preset].swatches];
+  shuffleInPlace(colors, rng);
+  const angle = 105 + Math.floor(rng() * 75);
+
+  if (mode === "light") {
+    const diluted = colors.map(lightenStopForGradientSwatch);
+    if (diluted.length === 1) {
+      const c = diluted[0]!;
+      return `linear-gradient(${angle}deg, ${mixHex(c, "#ffffff", 0.4)} 0%, ${c} 100%)`;
+    }
+    const stops = diluted.map((c, i) => {
+      const pct = (i / (diluted.length - 1)) * 100;
+      return `${c} ${pct}%`;
+    });
+    return `linear-gradient(${angle}deg, ${stops.join(", ")})`;
+  }
+
+  const base = "#0a0c10";
+  const parts: string[] = [`${base} 0%`];
+  const n = colors.length;
+  colors.forEach((c, i) => {
+    const pct = 10 + ((i + 1) * 78) / Math.max(1, n + 1);
+    const a = 0.16 + rng() * 0.22;
+    parts.push(`${hexToRgbaString(c, a)} ${pct}%`);
+  });
+  parts.push(`${base} 100%`);
+  return `linear-gradient(${angle}deg, ${parts.join(", ")})`;
+}
+
+/** Light / dark / system mode tiles — swatches shuffled by seed per mode. */
+export function getColorModePickerGradient(
+  mode: "light" | "dark" | "system",
+): string {
+  const rng = mulberry32(hashSeed(`omiga:colorModeGradient:${mode}`));
+  const angle = 118 + Math.floor(rng() * 62);
+  if (mode === "light") {
+    const colors = ["#ffffff", "#fffbeb", "#fef3c7", "#fefce8", "#fff7ed"];
+    shuffleInPlace(colors, rng);
+    const stops = colors.map((c, i) => {
+      const pct = (i / (colors.length - 1)) * 100;
+      return `${c} ${pct}%`;
+    });
+    return `linear-gradient(${angle}deg, ${stops.join(", ")})`;
+  }
+  if (mode === "dark") {
+    const colors = ["#020617", "#1e293b", "#312e81", "#0f172a", "#1e1b4b"];
+    shuffleInPlace(colors, rng);
+    const base = "#020617";
+    const parts: string[] = [`${base} 0%`];
+    colors.forEach((c, i) => {
+      const pct = 12 + ((i + 1) * 72) / (colors.length + 1);
+      const rgb = hexToRgb(c);
+      if (!rgb) return;
+      const a = 0.32 + rng() * 0.28;
+      parts.push(`rgba(${rgb.r},${rgb.g},${rgb.b},${a}) ${pct}%`);
+    });
+    parts.push(`${base} 100%`);
+    return `linear-gradient(${angle}deg, ${parts.join(", ")})`;
+  }
+  const colors = ["#e0e7ff", "#334155", "#f1f5f9", "#c7d2fe", "#64748b", "#94a3b8"];
+  shuffleInPlace(colors, rng);
+  const stops = colors.map((c, i) => {
+    const pct = (i / (colors.length - 1)) * 100;
+    return `${c} ${pct}%`;
+  });
+  return `linear-gradient(${angle}deg, ${stops.join(", ")})`;
+}
+
 function tone(main: string): {
   main: string;
   light: string;
@@ -113,103 +267,86 @@ function tone(main: string): {
 }
 
 /**
- * Distinct gradient backdrops for the theme picker cards (light vs dark UI).
- * UI/UX: preview surfaces echo each preset’s palette without affecting app chrome.
+ * App chrome (page background + elevated surfaces) per accent preset, keyed by light/dark.
+ * Colors are deterministically blended from {@link ACCENT_PRESET_META} swatches (seeded “random”
+ * mix) so each preset + mode pair is stable across renders but visually distinct.
  */
-export const ACCENT_PICKER_SURFACES: Record<
-  AccentPresetId,
-  { gradientLight: string; gradientDark: string }
-> = {
-  asana: {
-    gradientLight:
-      "linear-gradient(135deg, #ccfbf1 0%, #e0f2fe 38%, #ede9fe 72%, #fffbeb 100%)",
-    gradientDark:
-      "linear-gradient(135deg, #0f172a 0%, rgba(26,175,208,0.22) 42%, rgba(106,103,206,0.2) 78%, #172554 100%)",
-  },
-  elastic: {
-    gradientLight:
-      "linear-gradient(118deg, #fce7f3 0%, #fef9c3 20%, #d9f99d 40%, #a5f3fc 62%, #bfdbfe 84%, #e0e7ff 100%)",
-    gradientDark:
-      "linear-gradient(118deg, #14101c 0%, rgba(215,104,157,0.2) 26%, rgba(243,211,55,0.1) 48%, rgba(95,164,220,0.22) 72%, rgba(61,122,168,0.22) 100%)",
-  },
-  your_name: {
-    gradientLight:
-      "linear-gradient(140deg, rgba(55,104,136,0.14) 0%, rgba(130,107,136,0.12) 38%, rgba(248,185,118,0.2) 72%, #fcddc9 100%)",
-    gradientDark:
-      "linear-gradient(140deg, #0f172a 0%, rgba(55,104,136,0.28) 42%, rgba(222,120,106,0.15) 78%, #1a1520 100%)",
-  },
-  magica_madoka: {
-    gradientLight:
-      "linear-gradient(125deg, #ffe4e6 0%, #fff9db 32%, #e0f2fe 64%, #e8e9f2 100%)",
-    gradientDark:
-      "linear-gradient(125deg, #1e1b2e 0%, rgba(255,182,187,0.18) 35%, rgba(149,213,238,0.2) 65%, rgba(88,88,114,0.35) 100%)",
-  },
-  water_color: {
-    gradientLight:
-      "linear-gradient(145deg, #e8ebe4 0%, #f5e6d3 35%, #d4c9bf 70%, #f0ede8 100%)",
-    gradientDark:
-      "linear-gradient(145deg, #0a0908 0%, rgba(129,148,122,0.25) 40%, rgba(222,170,110,0.12) 72%, rgba(131,47,14,0.22) 100%)",
-  },
-  wufoo: {
-    gradientLight:
-      "linear-gradient(130deg, #fce8e7 0%, #ede9fc 28%, #e0f7fa 55%, #fffbeb 82%, #ecfdf5 100%)",
-    gradientDark:
-      "linear-gradient(130deg, #1a1520 0%, rgba(230,103,96,0.2) 32%, rgba(140,136,205,0.22) 58%, rgba(105,197,228,0.15) 100%)",
-  },
-  socialbro: {
-    gradientLight:
-      "linear-gradient(118deg, #e0f7fa 0%, #fff4e6 30%, #e8f2ef 58%, #fce4ec 85%, #e1f5fe 100%)",
-    gradientDark:
-      "linear-gradient(118deg, #0f1724 0%, rgba(41,196,208,0.2) 35%, rgba(242,149,86,0.14) 55%, rgba(242,76,124,0.16) 100%)",
-  },
-  redox: {
-    gradientLight:
-      "linear-gradient(135deg, #f3e8ff 0%, #ffe4e6 28%, #fff7ed 55%, #ecfdf5 82%, #e0e7ef 100%)",
-    gradientDark:
-      "linear-gradient(135deg, #060d18 0%, rgba(133,76,158,0.28) 38%, rgba(229,80,90,0.18) 62%, rgba(1,178,135,0.15) 100%)",
-  },
-  emma: {
-    gradientLight:
-      "linear-gradient(132deg, #e8f7fc 0%, #fffbeb 35%, #ecfdf8 68%, #fce8e7 100%)",
-    gradientDark:
-      "linear-gradient(132deg, #0c1418 0%, rgba(92,195,232,0.22) 40%, rgba(255,219,0,0.1) 62%, rgba(121,206,184,0.14) 100%)",
-  },
-  dribbble: {
-    gradientLight:
-      "linear-gradient(120deg, #f4f4f4 0%, #fce7f3 22%, #f0fdf4 48%, #fff7ed 72%, #e0f7fa 100%)",
-    gradientDark:
-      "linear-gradient(120deg, #0f0f0f 0%, rgba(234,76,137,0.22) 35%, rgba(138,186,86,0.14) 58%, rgba(0,182,227,0.2) 100%)",
-  },
+export type AccentAppChrome = {
+  background: { default: string; paper: string };
+  surface: { main: string; light: string; dark: string };
 };
 
-/** Light / dark / system mode tiles — each with its own preview gradient */
-export const COLOR_MODE_PICKER_SURFACES: Record<
-  "light" | "dark" | "system",
-  { gradient: string }
-> = {
-  light: {
-    gradient:
-      "linear-gradient(165deg, #ffffff 0%, #fffbeb 40%, #fef3c7 100%)",
-  },
-  dark: {
-    gradient:
-      "linear-gradient(165deg, #020617 0%, #1e293b 45%, #312e81 100%)",
-  },
-  system: {
-    gradient:
-      "linear-gradient(125deg, #e0e7ff 0%, #334155 38%, #f1f5f9 62%, #c7d2fe 100%)",
-  },
-};
+/**
+ * Blend 3 randomly (seeded) picked swatches, then adapt for light (wash toward white) or dark
+ * (wash toward near-black). Paper is slightly elevated; surfaces use MUI lighten/darken.
+ */
+export function getAccentAppChrome(
+  preset: AccentPresetId,
+  mode: "light" | "dark",
+): AccentAppChrome {
+  const swatches = ACCENT_PRESET_META[preset].swatches;
+  const rng = mulberry32(hashSeed(`omiga:accent:${preset}:${mode}`));
+
+  const pick = () => swatches[Math.floor(rng() * swatches.length)]!;
+  const a = pick();
+  const b = pick();
+  const c = pick();
+  const t1 = 0.18 + rng() * 0.55;
+  const t2 = 0.12 + rng() * 0.48;
+  const blend = mixHex(mixHex(a, b, t1), c, t2);
+
+  if (mode === "light") {
+    const towardWhite = 0.74 + rng() * 0.16;
+    const defaultBg = mixHex(blend, "#ffffff", towardWhite);
+    const paperLift = 0.22 + rng() * 0.2;
+    const paperBg = mixHex(defaultBg, "#ffffff", paperLift);
+    return {
+      background: { default: defaultBg, paper: paperBg },
+      surface: {
+        main: darken(defaultBg, 0.045 + rng() * 0.055),
+        light: lighten(defaultBg, 0.02 + rng() * 0.04),
+        dark: darken(defaultBg, 0.09 + rng() * 0.07),
+      },
+    };
+  }
+
+  const towardBlack = 0.7 + rng() * 0.16;
+  const defaultBg = mixHex(blend, "#050508", towardBlack);
+  const paperBg = lighten(defaultBg, 0.1 + rng() * 0.09);
+  return {
+    background: { default: defaultBg, paper: paperBg },
+    surface: {
+      main: lighten(defaultBg, 0.05 + rng() * 0.05),
+      light: lighten(defaultBg, 0.1 + rng() * 0.08),
+      dark: darken(defaultBg, 0.04 + rng() * 0.05),
+    },
+  };
+}
+
+function mergeAccentChrome(
+  preset: AccentPresetId,
+  mode: "light" | "dark",
+  palette: NonNullable<ThemeOptions["palette"]>,
+): NonNullable<ThemeOptions["palette"]> {
+  const chrome = getAccentAppChrome(preset, mode);
+  return {
+    ...palette,
+    /** Required so deepmerge + createPalette consumers always see correct mode */
+    mode,
+    background: chrome.background,
+    surface: chrome.surface,
+  };
+}
 
 /** Deep-merge into `getTheme(mode)` via `createTheme(base, options)`. */
 export function getAccentPresetOptions(
   preset: AccentPresetId,
-  _mode: "light" | "dark",
+  mode: "light" | "dark",
 ): ThemeOptions {
   switch (preset) {
     case "asana":
       return {
-        palette: {
+        palette: mergeAccentChrome(preset, mode, {
           primary: {
             main: "#1aafd0",
             light: "#4dc4db",
@@ -246,11 +383,11 @@ export function getAccentPresetOptions(
             dark: "#1488a5",
             contrastText: "#ffffff",
           },
-        },
+        }),
       };
     case "elastic":
       return {
-        palette: {
+        palette: mergeAccentChrome(preset, mode, {
           primary: {
             main: "#5da4dc",
             light: "#85bce6",
@@ -287,33 +424,33 @@ export function getAccentPresetOptions(
             dark: "#356891",
             contrastText: "#ffffff",
           },
-        },
+        }),
       };
     case "your_name":
       return {
-        palette: {
+        palette: mergeAccentChrome(preset, mode, {
           primary: tone("#376888"),
           secondary: tone("#826b88"),
           error: tone("#de786a"),
           warning: tone("#f8b976"),
           success: tone("#5a8f82"),
           info: tone("#4a7a9e"),
-        },
+        }),
       };
     case "magica_madoka":
       return {
-        palette: {
+        palette: mergeAccentChrome(preset, mode, {
           primary: tone("#ffb6bb"),
           secondary: tone("#95d5ee"),
           warning: tone("#ffe691"),
           error: tone("#9e4446"),
           success: tone("#7ec4a8"),
           info: tone("#585872"),
-        },
+        }),
       };
     case "water_color":
       return {
-        palette: {
+        palette: mergeAccentChrome(preset, mode, {
           primary: tone("#81947a"),
           secondary: tone("#8e7967"),
           warning: tone("#deaa6e"),
@@ -321,62 +458,62 @@ export function getAccentPresetOptions(
           success: tone("#6b8f5e"),
           /** #0c0a08 — ink from palette */
           info: tone("#0c0a08"),
-        },
+        }),
       };
     case "wufoo":
       return {
-        palette: {
+        palette: mergeAccentChrome(preset, mode, {
           primary: tone("#e66760"),
           secondary: tone("#8c88cd"),
           info: tone("#69c5e4"),
           warning: tone("#ffdf8b"),
           success: tone("#61e064"),
           error: tone("#d94a42"),
-        },
+        }),
       };
     case "socialbro":
       return {
-        palette: {
+        palette: mergeAccentChrome(preset, mode, {
           primary: tone("#29c4d0"),
           secondary: tone("#f29556"),
           success: tone("#84afa2"),
           error: tone("#f24c7c"),
           info: tone("#00aaf2"),
           warning: tone("#f2b054"),
-        },
+        }),
       };
     case "redox":
       return {
-        palette: {
+        palette: mergeAccentChrome(preset, mode, {
           primary: tone("#854c9e"),
           secondary: tone("#e5505a"),
           warning: tone("#ff9f1c"),
           success: tone("#01b287"),
           error: tone("#c73e48"),
           info: tone("#0a2239"),
-        },
+        }),
       };
     case "emma":
       return {
-        palette: {
+        palette: mergeAccentChrome(preset, mode, {
           primary: tone("#314855"),
           secondary: tone("#5cc3e8"),
           warning: tone("#ffdb00"),
           success: tone("#79ceb8"),
           error: tone("#e95f5c"),
           info: tone("#4a9eb8"),
-        },
+        }),
       };
     case "dribbble":
       return {
-        palette: {
+        palette: mergeAccentChrome(preset, mode, {
           primary: tone("#ea4c89"),
           secondary: tone("#8aba56"),
           warning: tone("#ff8833"),
           info: tone("#00b6e3"),
           error: tone("#d63d6f"),
           success: tone("#6dad3f"),
-        },
+        }),
       };
     default:
       return {};

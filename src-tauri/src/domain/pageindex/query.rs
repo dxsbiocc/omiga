@@ -1,0 +1,455 @@
+//! Query engine for PageIndex.
+//!
+//! Implements semantic-like retrieval without vectors by:
+//! - Keyword matching with TF-IDF-like scoring
+//! - Heading-aware context expansion
+//! - Breadcrumb navigation for better context
+
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+use tracing::debug;
+
+use super::tree::{DocumentNode, DocumentTree, SectionNode};
+use crate::errors::AppError;
+
+/// Query result containing matched content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryResult {
+    /// Document ID
+    pub doc_id: String,
+    /// Document path
+    pub path: String,
+    /// Section ID (if matched a section)
+    pub section_id: Option<String>,
+    /// Title of the matched content
+    pub title: String,
+    /// Breadcrumb path (parent sections)
+    pub breadcrumb: Vec<String>,
+    /// Matched content excerpt
+    pub excerpt: String,
+    /// Full content of the section/document
+    pub content: String,
+    /// Relevance score (higher = more relevant)
+    pub score: f64,
+    /// Match type
+    pub match_type: MatchType,
+}
+
+/// Type of match.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MatchType {
+    /// Matched document title
+    Title,
+    /// Matched section heading
+    Heading,
+    /// Matched content body
+    Content,
+    /// Matched file path
+    Path,
+}
+
+/// Query engine for searching the document tree.
+pub struct QueryEngine {
+    /// Stop words to filter out
+    stop_words: Vec<String>,
+}
+
+impl QueryEngine {
+    /// Create a new query engine.
+    pub fn new() -> Self {
+        Self {
+            stop_words: DEFAULT_STOP_WORDS.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Search the document tree for relevant content.
+    pub async fn search(
+        &self,
+        tree: &DocumentTree,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<QueryResult>, AppError> {
+        debug!("Searching for: {}", query);
+
+        let keywords = self.extract_keywords(query);
+        if keywords.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut results: Vec<QueryResult> = Vec::new();
+
+        // Search all documents
+        for doc in tree.iter_documents() {
+            let doc_results = self.search_document(doc, &keywords);
+            results.extend(doc_results);
+        }
+
+        // Sort by score (descending)
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        // Deduplicate and limit
+        results = self.deduplicate_results(results);
+        results.truncate(limit);
+
+        debug!("Found {} results", results.len());
+        Ok(results)
+    }
+
+    /// Search within a single document.
+    fn search_document(&self, doc: &DocumentNode, keywords: &[String]) -> Vec<QueryResult> {
+        let mut results = Vec::new();
+        let keyword_set: Vec<&str> = keywords.iter().map(|s| s.as_str()).collect();
+
+        // Check document title
+        let title_score = self.score_text(&doc.title, &keyword_set);
+        if title_score > 0.0 {
+            results.push(QueryResult {
+                doc_id: doc.id.clone(),
+                path: doc.path.clone(),
+                section_id: None,
+                title: doc.title.clone(),
+                breadcrumb: vec![],
+                excerpt: self.create_excerpt(&doc.content, keywords, 300),
+                content: doc.summary(),
+                score: title_score * 2.0, // Boost title matches
+                match_type: MatchType::Title,
+            });
+        }
+
+        // Check document path
+        let path_score = self.score_text(&doc.path, &keyword_set);
+        if path_score > 0.0 {
+            results.push(QueryResult {
+                doc_id: doc.id.clone(),
+                path: doc.path.clone(),
+                section_id: None,
+                title: doc.title.clone(),
+                breadcrumb: vec![],
+                excerpt: self.create_excerpt(&doc.content, keywords, 300),
+                content: doc.summary(),
+                score: path_score * 1.5, // Boost path matches
+                match_type: MatchType::Path,
+            });
+        }
+
+        // Check document content
+        let content_score = self.score_text(&doc.content, &keyword_set);
+        if content_score > 0.0 && title_score == 0.0 && path_score == 0.0 {
+            results.push(QueryResult {
+                doc_id: doc.id.clone(),
+                path: doc.path.clone(),
+                section_id: None,
+                title: doc.title.clone(),
+                breadcrumb: vec![],
+                excerpt: self.create_excerpt(&doc.content, keywords, 300),
+                content: doc.summary(),
+                score: content_score,
+                match_type: MatchType::Content,
+            });
+        }
+
+        // Search sections
+        for section in &doc.sections {
+            let section_results = self.search_section(doc, section, &keyword_set, vec![]);
+            results.extend(section_results);
+        }
+
+        results
+    }
+
+    /// Search within a section recursively.
+    fn search_section(
+        &self,
+        doc: &DocumentNode,
+        section: &SectionNode,
+        keywords: &[&str],
+        parent_breadcrumb: Vec<String>,
+    ) -> Vec<QueryResult> {
+        let mut results = Vec::new();
+        let mut breadcrumb = parent_breadcrumb.clone();
+        breadcrumb.push(section.title.clone());
+
+        // Check section title
+        let title_score = self.score_text(&section.title, keywords);
+        if title_score > 0.0 {
+            results.push(QueryResult {
+                doc_id: doc.id.clone(),
+                path: doc.path.clone(),
+                section_id: Some(section.id.clone()),
+                title: section.title.clone(),
+                breadcrumb: breadcrumb.clone(),
+                excerpt: self.create_excerpt(&section.content, &keywords.iter().map(|s| s.to_string()).collect::<Vec<_>>(), 300),
+                content: section.full_text(),
+                score: title_score * 1.8, // Boost section title matches
+                match_type: MatchType::Heading,
+            });
+        }
+
+        // Check section content
+        let content_score = self.score_text(&section.content, keywords);
+        if content_score > 0.0 && title_score == 0.0 {
+            results.push(QueryResult {
+                doc_id: doc.id.clone(),
+                path: doc.path.clone(),
+                section_id: Some(section.id.clone()),
+                title: section.title.clone(),
+                breadcrumb: breadcrumb.clone(),
+                excerpt: self.create_excerpt(&section.content, &keywords.iter().map(|s| s.to_string()).collect::<Vec<_>>(), 300),
+                content: section.full_text(),
+                score: content_score * 0.9, // Slight penalty for body matches
+                match_type: MatchType::Content,
+            });
+        }
+
+        // Search child sections
+        for child in &section.children {
+            let child_results = self.search_section(doc, child, keywords, breadcrumb.clone());
+            results.extend(child_results);
+        }
+
+        results
+    }
+
+    /// Score how well text matches keywords.
+    fn score_text(&self, text: &str, keywords: &[&str]) -> f64 {
+        let text_lower = text.to_lowercase();
+        let words: Vec<&str> = text_lower.split_whitespace().collect();
+        let word_count = words.len().max(1);
+
+        let mut matched_keywords = 0;
+        let mut total_matches = 0;
+
+        for keyword in keywords {
+            let keyword_lower = keyword.to_lowercase();
+            if text_lower.contains(&keyword_lower) {
+                matched_keywords += 1;
+                // Count occurrences
+                let matches = text_lower.matches(&keyword_lower).count();
+                total_matches += matches;
+            }
+        }
+
+        if matched_keywords == 0 {
+            return 0.0;
+        }
+
+        // Score based on:
+        // - Ratio of matched keywords
+        // - Frequency of matches (TF-like)
+        // - Inverse document frequency would require global stats, skip for simplicity
+        let keyword_coverage = matched_keywords as f64 / keywords.len() as f64;
+        let frequency_score = (total_matches as f64 / word_count as f64).min(1.0);
+
+        keyword_coverage * 0.7 + frequency_score * 0.3
+    }
+
+    /// Extract keywords from a query string.
+    fn extract_keywords(&self, query: &str) -> Vec<String> {
+        query
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 3)
+            .map(|w| w.to_lowercase())
+            .filter(|w| !self.stop_words.contains(w))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .take(10)
+            .collect()
+    }
+
+    /// Create an excerpt around matched keywords.
+    fn create_excerpt(&self, content: &str, keywords: &[String], max_length: usize) -> String {
+        let content_lower = content.to_lowercase();
+        let mut best_pos = 0;
+        let mut best_score = 0;
+
+        // Find the best position (most keyword matches in window)
+        let window_size = max_length.min(content.len());
+        if window_size >= content.len() {
+            return content.to_string();
+        }
+
+        for pos in (0..content.len() - window_size).step_by(window_size / 4) {
+            let window = &content_lower[pos..pos + window_size];
+            let score = keywords
+                .iter()
+                .filter(|kw| window.contains(&kw.to_lowercase()))
+                .count();
+            if score > best_score {
+                best_score = score;
+                best_pos = pos;
+            }
+        }
+
+        // Extract the window
+        let start = best_pos;
+        let end = (start + window_size).min(content.len());
+
+        // Adjust to word boundaries
+        let adjusted_start = if start > 0 {
+            content[start..]
+                .find(|c: char| c.is_whitespace())
+                .map(|i| start + i)
+                .unwrap_or(start)
+        } else {
+            0
+        };
+
+        let adjusted_end = content[..end]
+            .rfind(|c: char| c.is_whitespace())
+            .unwrap_or(end);
+
+        let mut excerpt = content[adjusted_start..adjusted_end].to_string();
+
+        // Add ellipsis if truncated
+        if adjusted_start > 0 {
+            excerpt = format!("...{}", excerpt.trim_start());
+        }
+        if adjusted_end < content.len() {
+            excerpt = format!("{}...", excerpt.trim_end());
+        }
+
+        excerpt
+    }
+
+    /// Deduplicate results, keeping the highest scoring match for each document/section.
+    fn deduplicate_results(&self, results: Vec<QueryResult>) -> Vec<QueryResult> {
+        let mut seen: HashMap<String, QueryResult> = HashMap::new();
+
+        for result in results {
+            let key = if let Some(ref section_id) = result.section_id {
+                format!("{}:{}", result.doc_id, section_id)
+            } else {
+                result.doc_id.clone()
+            };
+
+            match seen.get_mut(&key) {
+                Some(existing) => {
+                    if result.score > existing.score {
+                        *existing = result;
+                    }
+                }
+                None => {
+                    seen.insert(key, result);
+                }
+            }
+        }
+
+        seen.into_values().collect()
+    }
+
+    /// Format query results as a context string for LLM prompting.
+    pub fn format_results_as_context(&self, results: &[QueryResult]) -> String {
+        if results.is_empty() {
+            return String::new();
+        }
+
+        let mut context = String::from("## Relevant Context from Project Memory\n\n");
+
+        for (i, result) in results.iter().enumerate() {
+            context.push_str(&format!("### {}. {}", i + 1, result.title));
+
+            if !result.breadcrumb.is_empty() {
+                context.push_str(&format!(
+                    " (in: {})",
+                    result.breadcrumb.join(" > ")
+                ));
+            }
+
+            context.push_str(&format!("\n*Source: `{}`*\n\n", result.path));
+            context.push_str(&result.excerpt);
+            context.push_str("\n\n---\n\n");
+        }
+
+        context
+    }
+}
+
+impl Default for QueryEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Default stop words for keyword extraction.
+const DEFAULT_STOP_WORDS: &[&str] = &[
+    "the", "be", "to", "of", "and", "a", "in", "that", "have", "i",
+    "it", "for", "not", "on", "with", "he", "as", "you", "do", "at",
+    "this", "but", "his", "by", "from", "they", "we", "say", "her", "she",
+    "or", "an", "will", "my", "one", "all", "would", "there", "their", "what",
+    "so", "up", "out", "if", "about", "who", "get", "which", "go", "me",
+    "when", "make", "can", "like", "time", "no", "just", "him", "know", "take",
+    "people", "into", "year", "your", "good", "some", "could", "them", "see", "other",
+    "than", "then", "now", "look", "only", "come", "its", "over", "think", "also",
+    "back", "after", "use", "two", "how", "our", "work", "first", "well", "way",
+    "even", "new", "want", "because", "any", "these", "give", "day", "most", "us",
+    "was", "were", "been", "has", "had", "did", "does", "doing", "done",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_keywords() {
+        let engine = QueryEngine::new();
+        let keywords = engine.extract_keywords("How does authentication work in Rust?");
+        
+        assert!(keywords.contains(&"authentication".to_string()));
+        assert!(keywords.contains(&"work".to_string()));
+        assert!(keywords.contains(&"rust".to_string()));
+        assert!(!keywords.contains(&"how".to_string())); // Stop word
+        assert!(!keywords.contains(&"does".to_string())); // Stop word
+        assert!(!keywords.contains(&"in".to_string())); // Stop word
+    }
+
+    #[test]
+    fn test_score_text() {
+        let engine = QueryEngine::new();
+        
+        let score1 = engine.score_text("Rust programming language", &["rust", "programming"]);
+        assert!(score1 > 0.0);
+        
+        let score2 = engine.score_text("Python programming", &["rust", "programming"]);
+        assert!(score2 > 0.0);
+        assert!(score2 < score1); // Should score lower since "rust" is missing
+        
+        let score3 = engine.score_text("completely unrelated", &["rust", "programming"]);
+        assert_eq!(score3, 0.0);
+    }
+
+    #[test]
+    fn test_create_excerpt() {
+        let engine = QueryEngine::new();
+        let content = "This is a long document about Rust programming. \
+                      Rust is a systems programming language. \
+                      It has many features like ownership and borrowing. \
+                      The language is designed for safety and performance.";
+        
+        let excerpt = engine.create_excerpt(content, &["rust".to_string(), "programming".to_string()], 100);
+        
+        assert!(excerpt.to_lowercase().contains("rust"));
+        assert!(excerpt.len() <= 150); // Allow some margin
+    }
+
+    #[test]
+    fn test_format_results_as_context() {
+        let engine = QueryEngine::new();
+        let results = vec![QueryResult {
+            doc_id: "doc1".to_string(),
+            path: "guide.md".to_string(),
+            section_id: None,
+            title: "Getting Started".to_string(),
+            breadcrumb: vec![],
+            excerpt: "Install Rust...".to_string(),
+            content: "Full content".to_string(),
+            score: 0.9,
+            match_type: MatchType::Title,
+        }];
+
+        let context = engine.format_results_as_context(&results);
+        assert!(context.contains("Relevant Context from Project Memory"));
+        assert!(context.contains("Getting Started"));
+        assert!(context.contains("guide.md"));
+    }
+}

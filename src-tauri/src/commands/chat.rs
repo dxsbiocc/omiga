@@ -14,7 +14,6 @@ use crate::domain::session::{AgentTask, Message, Session, TodoItem, ToolCall};
 use crate::domain::session_codec::SessionCodec;
 use crate::utils::large_output_instructions::get_large_output_instructions;
 use crate::domain::integrations_config;
-use crate::domain::persistence::SessionRepository;
 use crate::domain::skills;
 use crate::domain::subagent_tool_filter::{env_allow_nested_agent, SubagentFilterOptions};
 use crate::domain::tools::{all_tool_schemas, Tool, ToolContext, ToolSchema};
@@ -24,7 +23,7 @@ use crate::llm::{create_client, load_config_from_env, LlmClient, LlmConfig, LlmC
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{Mutex, RwLock};
 
@@ -67,26 +66,6 @@ struct AgentLlmRuntime {
 pub use crate::domain::chat_state::{
     ChatState, PendingToolCall, RoundCancellationState, SessionRuntimeState,
 };
-
-async fn load_claude_user_skills_enabled_from_repo(repo: &SessionRepository) -> bool {
-    match repo
-        .get_setting(skills::SETTING_KEY_LOAD_CLAUDE_USER_SKILLS)
-        .await
-    {
-        Ok(v) => skills::parse_load_claude_user_skills_setting(v.as_deref()),
-        Err(_) => false,
-    }
-}
-
-async fn load_claude_user_skills_enabled_from_agent_runtime(
-    agent_runtime: Option<&AgentLlmRuntime>,
-) -> bool {
-    let Some(ar) = agent_runtime else {
-        return false;
-    };
-    let repo = ar.repo.lock().await;
-    load_claude_user_skills_enabled_from_repo(&repo).await
-}
 
 /// Get or create LLM config from environment or state
 async fn get_llm_config(chat_state: &ChatState) -> Result<LlmConfig, OmigaError> {
@@ -334,6 +313,108 @@ async fn persist_session_tool_state(
     }
 }
 
+/// Index chat messages into implicit memory (PageIndex)
+/// 
+/// Emits events to notify frontend of indexing progress:
+/// - `chat-index-start`: When indexing begins
+/// - `chat-index-complete`: When indexing finishes successfully
+/// - `chat-index-error`: When indexing fails
+async fn index_chat_to_implicit_memory(
+    app: &AppHandle,
+    project_path: &str,
+    session_id: &str,
+    session_name: &str,
+    repo: &crate::domain::persistence::SessionRepository,
+) {
+    // Notify frontend that indexing has started
+    let _ = app.emit("chat-index-start", serde_json::json!({
+        "session_id": session_id,
+    }));
+
+    // Get session messages from database
+    let session_with_messages = match repo.get_session(session_id).await {
+        Ok(Some(s)) => s,
+        _ => {
+            tracing::debug!("Session {} not found for indexing", session_id);
+            let _ = app.emit("chat-index-error", serde_json::json!({
+                "session_id": session_id,
+                "error": "Session not found",
+            }));
+            return;
+        }
+    };
+
+    // Convert messages to chat indexer format
+    let messages: Vec<crate::domain::memory::ChatMessage> = session_with_messages
+        .messages
+        .into_iter()
+        .map(|msg| crate::domain::memory::ChatMessage {
+            id: msg.id,
+            session_id: msg.session_id,
+            role: match msg.role.as_str() {
+                "user" => crate::domain::memory::ChatRole::User,
+                "assistant" => crate::domain::memory::ChatRole::Assistant,
+                "tool" => crate::domain::memory::ChatRole::Tool,
+                _ => crate::domain::memory::ChatRole::User,
+            },
+            content: msg.content,
+            timestamp: chrono::DateTime::parse_from_rfc3339(&msg.created_at)
+                .map(|dt| dt.timestamp())
+                .unwrap_or_else(|_| chrono::Utc::now().timestamp()),
+            tool_calls: msg.tool_calls.and_then(|tc| serde_json::from_str(&tc).ok()),
+        })
+        .collect();
+
+    if messages.is_empty() {
+        let _ = app.emit("chat-index-complete", serde_json::json!({
+            "session_id": session_id,
+            "document_count": 0,
+        }));
+        return;
+    }
+
+    // Get memory directory path
+    let project_root = resolve_session_project_root(project_path);
+    let memory_dir = project_root.join(".omiga/memory/implicit");
+
+    // Initialize indexer
+    let mut indexer = crate::domain::memory::ChatIndexer::new(&memory_dir);
+    if let Err(e) = indexer.init().await {
+        tracing::warn!("Failed to init chat indexer: {}", e);
+        let _ = app.emit("chat-index-error", serde_json::json!({
+            "session_id": session_id,
+            "error": format!("Failed to init indexer: {}", e),
+        }));
+        return;
+    }
+    if let Err(e) = indexer.load().await {
+        tracing::warn!("Failed to load chat indexer: {}", e);
+        let _ = app.emit("chat-index-error", serde_json::json!({
+            "session_id": session_id,
+            "error": format!("Failed to load indexer: {}", e),
+        }));
+        return;
+    }
+
+    // Index the session
+    match indexer.index_session(session_id, session_name, &messages).await {
+        Ok(_) => {
+            tracing::info!("Indexed chat session {} into implicit memory", session_id);
+            let _ = app.emit("chat-index-complete", serde_json::json!({
+                "session_id": session_id,
+                "document_count": indexer.document_count(),
+            }));
+        }
+        Err(e) => {
+            tracing::warn!("Failed to index chat session: {}", e);
+            let _ = app.emit("chat-index-error", serde_json::json!({
+                "session_id": session_id,
+                "error": format!("Failed to index: {}", e),
+            }));
+        }
+    }
+}
+
 /// Send a message to Claude and get a streaming response
 #[tauri::command]
 pub async fn send_message(
@@ -448,12 +529,9 @@ pub async fn send_message(
     let project_root = resolve_session_project_root(&project_path);
     let mut llm_config = get_llm_config(&app_state.chat).await?;
     let integrations_cfg = integrations_config::load_integrations_config(&project_root);
-    let include_claude_user_skills =
-        load_claude_user_skills_enabled_from_repo(&repo).await;
-    let skill_entries =
-        skills::load_skills_for_project(&project_root, include_claude_user_skills).await;
-    let skill_entries =
-        integrations_config::filter_skill_entries(skill_entries, &integrations_cfg);
+    // Fast existence check — uses process cache; zero I/O on a warm cache hit.
+    let skills_exist =
+        skills::skills_any_exist(&project_root, &app_state.skill_cache).await;
 
     // Ported agent system prompt from `src/constants/prompts.ts` — injected when tools are enabled.
     let mut prompt_parts: Vec<String> = Vec::new();
@@ -469,20 +547,17 @@ pub async fn send_message(
             prompt_parts.push(t.to_string());
         }
     }
-    if !skill_entries.is_empty() {
+    if skills_exist {
+        // Discovery hint only — no metadata loaded here.
+        // The model uses list_skills (with optional query) to get ranked metadata on demand.
         prompt_parts.push(skills::format_skills_discovery_system_section());
-        if let Some(task_sec) =
-            skills::format_skills_task_relevance_section(&skill_entries, &request.content)
-        {
-            prompt_parts.push(task_sec);
-        }
     }
-    // Transparent wiki hook — inject relevant wiki pages when the project has a wiki.
-    // Cost: one index.md read + up to 3 page reads; returns None when wiki is absent.
-    if let Some(wiki_ctx) =
-        crate::domain::wiki::query_relevant_context(&request.content, &project_root).await
+    // Transparent memory hook — inject relevant context from unified memory system
+    // First try explicit memory (wiki), then fallback to implicit memory (pageindex)
+    if let Some(memory_ctx) =
+        crate::commands::memory::get_memory_context(&project_root, &request.content, 3).await
     {
-        prompt_parts.push(wiki_ctx);
+        prompt_parts.push(memory_ctx);
     }
     llm_config.system_prompt = if prompt_parts.is_empty() {
         None
@@ -574,7 +649,7 @@ pub async fn send_message(
                 &project_root,
             );
         crate::domain::tool_permission_rules::validate_permission_deny_entries(&deny_entries);
-        let all_schemas = all_tool_schemas(!skill_entries.is_empty());
+        let all_schemas = all_tool_schemas(skills_exist);
         let n_builtin_before = all_schemas.len();
         let mut built = crate::domain::tool_permission_rules::filter_tool_schemas_by_deny_rule_entries(
             all_schemas,
@@ -592,9 +667,44 @@ pub async fn send_message(
         built.sort_by(|a, b| a.name.cmp(&b.name));
         let base_names: HashSet<String> = built.iter().map(|t| t.name.clone()).collect();
         let mcp_timeout = std::time::Duration::from_secs(45);
-        let mcp_tools =
-            crate::domain::mcp_tool_pool::discover_mcp_tool_schemas(&project_root, mcp_timeout)
+        // Use cached MCP tool schemas when available (avoids re-spawning MCP server processes
+        // on every message — the primary cause of slow first-response latency).
+        let mcp_tools = {
+            use crate::domain::chat_state::{McpToolCache, MCP_TOOL_CACHE_TTL};
+            let cache = app_state.chat.mcp_tool_cache.lock().await;
+            if let Some(entry) = cache.get(&project_root) {
+                if entry.cached_at.elapsed() < MCP_TOOL_CACHE_TTL {
+                    tracing::debug!(target: "omiga::mcp", "MCP tool schemas served from cache");
+                    entry.schemas.clone()
+                } else {
+                    drop(cache);
+                    let schemas = crate::domain::mcp_tool_pool::discover_mcp_tool_schemas(
+                        &project_root,
+                        mcp_timeout,
+                    )
+                    .await;
+                    let mut cache = app_state.chat.mcp_tool_cache.lock().await;
+                    cache.insert(
+                        project_root.clone(),
+                        McpToolCache { schemas: schemas.clone(), cached_at: std::time::Instant::now() },
+                    );
+                    schemas
+                }
+            } else {
+                drop(cache);
+                let schemas = crate::domain::mcp_tool_pool::discover_mcp_tool_schemas(
+                    &project_root,
+                    mcp_timeout,
+                )
                 .await;
+                let mut cache = app_state.chat.mcp_tool_cache.lock().await;
+                cache.insert(
+                    project_root.clone(),
+                    McpToolCache { schemas: schemas.clone(), cached_at: std::time::Instant::now() },
+                );
+                schemas
+            }
+        };
         let n_mcp_before = mcp_tools.len();
         let mcp_after_deny = crate::domain::tool_permission_rules::filter_tool_schemas_by_deny_rule_entries(
             mcp_tools,
@@ -662,6 +772,7 @@ pub async fn send_message(
     let llm_config_for_spawn = llm_config_for_agent;
     let skill_task_context = request.content.clone();
     let brave_search_api_key = app_state.chat.brave_search_api_key.lock().await.clone();
+    let skill_cache_for_spawn = app_state.skill_cache.clone();
 
     tokio::spawn(async move {
         let _ = app_clone.emit(
@@ -779,6 +890,25 @@ pub async fn send_message(
 
         if pending_tool_calls.is_empty() {
             persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
+            
+            // Index chat to implicit memory
+            {
+                let project_path = {
+                    let sessions = sessions_clone.read().await;
+                    sessions.get(&session_id_clone)
+                        .map(|r| r.session.project_path.clone())
+                        .unwrap_or_else(|| ".".to_string())
+                };
+                let repo = repo_clone.lock().await;
+                let session_name = {
+                    let sessions = sessions_clone.read().await;
+                    sessions.get(&session_id_clone)
+                        .map(|r| r.session.name.clone())
+                        .unwrap_or_else(|| "Unnamed".to_string())
+                };
+                index_chat_to_implicit_memory(&app_clone, &project_path, &session_id_clone, &session_name, &repo).await;
+            }
+            
             let repo = repo_clone.lock().await;
             if let Err(e) = repo
                 .complete_round(&round_id_clone, Some(&last_assistant_id))
@@ -824,6 +954,7 @@ pub async fn send_message(
                 0,
                 Some(skill_task_context.as_str()),
                 brave_search_api_key.clone(),
+                skill_cache_for_spawn.clone(),
             )
             .await;
 
@@ -972,6 +1103,25 @@ pub async fn send_message(
 
             if pending_tool_calls.is_empty() {
                 persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
+                
+                // Index chat to implicit memory
+                {
+                    let project_path = {
+                        let sessions = sessions_clone.read().await;
+                        sessions.get(&session_id_clone)
+                            .map(|r| r.session.project_path.clone())
+                            .unwrap_or_else(|| ".".to_string())
+                    };
+                    let repo = repo_clone.lock().await;
+                    let session_name = {
+                        let sessions = sessions_clone.read().await;
+                        sessions.get(&session_id_clone)
+                            .map(|r| r.session.name.clone())
+                            .unwrap_or_else(|| "Unnamed".to_string())
+                    };
+                    index_chat_to_implicit_memory(&app_clone, &project_path, &session_id_clone, &session_name, &repo).await;
+                }
+                
                 let repo = repo_clone.lock().await;
                 if let Err(e) = repo
                     .complete_round(&round_id_clone, Some(&last_assistant_id))
@@ -1313,6 +1463,7 @@ async fn run_subagent_session(
     // Depth for [`execute_tool_calls`] inside this sub-session (main chat uses `0`; first sub-agent uses `1`).
     subagent_execute_depth: u8,
     brave_search_api_key: Option<String>,
+    skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
 ) -> Result<String, String> {
     if args.run_in_background == Some(true) {
         return Err(
@@ -1323,15 +1474,8 @@ async fn run_subagent_session(
     let subagent_skill_task_context = format!("{} {}", args.description.trim(), args.prompt.trim());
     let mut sub_cfg = runtime.llm_config.clone();
     sub_cfg.model = resolve_subagent_model(&runtime.llm_config, args.model.as_deref());
-    let integrations_cfg = integrations_config::load_integrations_config(&effective_root);
-    let include_claude_user_skills = {
-        let repo = runtime.repo.lock().await;
-        load_claude_user_skills_enabled_from_repo(&repo).await
-    };
-    let skill_entries =
-        skills::load_skills_for_project(&effective_root, include_claude_user_skills).await;
-    let skill_entries =
-        integrations_config::filter_skill_entries(skill_entries, &integrations_cfg);
+    // Fast existence check for subagent — uses shared process cache, zero I/O on warm hit.
+    let skills_exist = skills::skills_any_exist(&effective_root, &skill_cache).await;
     let mut prompt_parts: Vec<String> = Vec::new();
     prompt_parts.push(agent_prompt::build_system_prompt(
         &effective_root,
@@ -1352,15 +1496,18 @@ async fn run_subagent_session(
     } else {
         ""
     };
-    // wiki-agent subagent type: specialized prompt for wiki management tasks.
-    let is_wiki_agent = args
+    // memory-agent subagent type: specialized prompt for memory management tasks.
+    let is_memory_agent = args
         .subagent_type
         .as_deref()
-        .map(|t| t.eq_ignore_ascii_case("wiki-agent") || t.eq_ignore_ascii_case("wiki_agent"))
+        .map(|t| t.eq_ignore_ascii_case("memory-agent") 
+            || t.eq_ignore_ascii_case("memory_agent")
+            || t.eq_ignore_ascii_case("wiki-agent")
+            || t.eq_ignore_ascii_case("wiki_agent"))
         .unwrap_or(false);
 
-    if is_wiki_agent {
-        prompt_parts.push(crate::domain::wiki::wiki_agent_system_prompt(&effective_root));
+    if is_memory_agent {
+        prompt_parts.push(crate::domain::memory::memory_agent_system_prompt(&effective_root));
     } else {
         prompt_parts.push(format!(
             "## Sub-agent mode\nYou are an isolated sub-agent (Claude Code parity). \
@@ -1375,14 +1522,8 @@ async fn run_subagent_session(
             prompt_parts.push(t.to_string());
         }
     }
-    if !skill_entries.is_empty() {
+    if skills_exist {
         prompt_parts.push(skills::format_skills_discovery_system_section());
-        let task_blob = format!("{} {}", args.description.trim(), args.prompt.trim());
-        if let Some(task_sec) =
-            skills::format_skills_task_relevance_section(&skill_entries, &task_blob)
-        {
-            prompt_parts.push(task_sec);
-        }
     }
     sub_cfg.system_prompt = Some(prompt_parts.join("\n\n"));
     let client = create_client(sub_cfg).map_err(|e| e.to_string())?;
@@ -1392,7 +1533,7 @@ async fn run_subagent_session(
     };
     let tools = build_subagent_tool_schemas(
         &effective_root,
-        !skill_entries.is_empty(),
+        skills_exist,
         subagent_opts,
     )
     .await;
@@ -1446,6 +1587,7 @@ async fn run_subagent_session(
             subagent_execute_depth,
             Some(subagent_skill_task_context.as_str()),
             brave_search_api_key.clone(),
+            skill_cache.clone(),
         )
         .await;
         for (tool_use_id, output, _) in &results {
@@ -1460,7 +1602,21 @@ async fn run_subagent_session(
     ))
 }
 
-/// Execute tool calls and return results
+/// Returns true for tools that are safe to execute concurrently:
+/// - pure I/O (network fetch, file read, search) with no shared mutable state.
+/// - MCP tools (PubMed, bioRxiv, Tavily, …) are the primary parallelism target.
+fn is_parallelizable_tool(tool_name: &str) -> bool {
+    tool_name.starts_with("mcp__")
+        || matches!(
+            tool_name,
+            "web_search" | "WebSearch" | "web_fetch" | "WebFetch"
+            | "file_read" | "Read" | "glob" | "Glob" | "grep" | "Grep"
+        )
+}
+
+/// Execute tool calls and return results.
+/// Parallelizable tools (MCP, web_search, web_fetch, file_read, glob, grep) run concurrently;
+/// stateful tools (Agent, file_edit, file_write, bash, todo_write, …) run sequentially.
 #[async_recursion::async_recursion]
 async fn execute_tool_calls(
     tool_calls: &[(String, String, String)], // (id, name, arguments)
@@ -1476,29 +1632,206 @@ async fn execute_tool_calls(
     // Task text for `list_skills` ordering (main user message or sub-agent description+prompt).
     skill_task_context: Option<&str>,
     brave_search_api_key: Option<String>,
+    skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
 ) -> Vec<(String, String, bool)> {
+    use futures::future::join_all;
+
     // (tool_use_id, output, is_error)
     let mut results = Vec::new();
-    let include_claude_user_skills =
-        load_claude_user_skills_enabled_from_agent_runtime(agent_runtime).await;
     let deny_entries =
         crate::domain::tool_permission_rules::load_merged_permission_deny_rule_entries(project_root);
 
-    for (tool_use_id, tool_name, arguments) in tool_calls {
-        if let Some(hit) =
-            crate::domain::tool_permission_rules::matching_deny_entry(tool_name, &deny_entries)
-        {
-            tracing::debug!(
-                target: "omiga::permissions",
-                tool = %tool_name,
-                matched_rule = %hit.rule,
-                source = %hit.source.display(),
-                "tool call blocked at execute time by permissions.deny"
-            );
+    // Pre-compute permission + subagent-filter results for every call (fast, sequential).
+    // Calls that pass become futures; blocked calls become immediate error results.
+    enum CallPrep<'a> {
+        Blocked(String, String, bool), // (tool_use_id, error_msg, is_error=true)
+        Ready(&'a str), // tool_name only (indices carry id+args via tool_calls[idx])
+    }
+
+    let prepped: Vec<CallPrep<'_>> = tool_calls
+        .iter()
+        .map(|(tool_use_id, tool_name, _arguments)| {
+            if let Some(hit) = crate::domain::tool_permission_rules::matching_deny_entry(
+                tool_name,
+                &deny_entries,
+            ) {
+                let error_msg = format!(
+                    "Tool `{tool_name}` is denied by `permissions.deny` (rule `{}` from {}).",
+                    hit.rule,
+                    hit.source.display()
+                );
+                return CallPrep::Blocked(tool_use_id.clone(), error_msg, true);
+            }
+            if subagent_depth > 0 {
+                let c = crate::domain::tool_permission_rules::canonical_permission_tool_name(
+                    tool_name,
+                );
+                let parent_in_plan = false; // checked per-call below in execute_one_tool
+                let allow_nested = agent_runtime
+                    .map(|r| r.allow_nested_agent)
+                    .unwrap_or(false);
+                let sub_opts = SubagentFilterOptions {
+                    parent_in_plan_mode: parent_in_plan,
+                    allow_nested_agent: allow_nested,
+                };
+                if crate::domain::subagent_tool_filter::should_block_subagent_builtin_call(
+                    &c, sub_opts,
+                ) {
+                    let error_msg = format!(
+                        "Tool `{tool_name}` is not available to sub-agents (Claude Code `ALL_AGENT_DISALLOWED_TOOLS`)."
+                    );
+                    return CallPrep::Blocked(tool_use_id.clone(), error_msg, true);
+                }
+            }
+            CallPrep::Ready(tool_name)
+        })
+        .collect();
+
+    // Emit ToolResult for every pre-blocked call and record it in results at correct index.
+    // We need to maintain index alignment so we can merge parallel results back in order.
+    let mut ordered_results: Vec<Option<(String, String, bool)>> =
+        vec![None; tool_calls.len()];
+
+    let mut parallel_indices: Vec<usize> = Vec::new();
+    let mut sequential_indices: Vec<usize> = Vec::new();
+
+    for (idx, prep) in prepped.iter().enumerate() {
+        match prep {
+            CallPrep::Blocked(tool_use_id, error_msg, is_error) => {
+                let (_, tool_name, arguments) = &tool_calls[idx];
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: arguments.clone(),
+                        output: error_msg.clone(),
+                        is_error: *is_error,
+                    },
+                );
+                ordered_results[idx] =
+                    Some((tool_use_id.clone(), error_msg.clone(), *is_error));
+            }
+            CallPrep::Ready(tool_name) => {
+                if is_parallelizable_tool(tool_name) {
+                    parallel_indices.push(idx);
+                } else {
+                    sequential_indices.push(idx);
+                }
+            }
+        }
+    }
+
+    // --- Parallel batch: spawn all parallelizable futures at once ---
+    if !parallel_indices.is_empty() {
+        let parallel_futures: Vec<_> = parallel_indices
+            .iter()
+            .map(|&idx| {
+                let (tool_use_id, tool_name, arguments) = &tool_calls[idx];
+                execute_one_tool(
+                    tool_use_id.clone(),
+                    tool_name.clone(),
+                    arguments.clone(),
+                    app.clone(),
+                    message_id.to_string(),
+                    session_id.to_string(),
+                    tool_results_dir.to_path_buf(),
+                    project_root.to_path_buf(),
+                    session_todos.clone(),
+                    session_agent_tasks.clone(),
+                    None, // parallelizable tools don't need agent_runtime
+                    subagent_depth,
+                    skill_task_context.map(str::to_owned),
+                    brave_search_api_key.clone(),
+                    skill_cache.clone(),
+                )
+            })
+            .collect();
+
+        let parallel_results = join_all(parallel_futures).await;
+        for (&idx, res) in parallel_indices.iter().zip(parallel_results) {
+            ordered_results[idx] = Some(res);
+        }
+    }
+
+    // --- Sequential batch: stateful tools run one-by-one ---
+    for idx in sequential_indices {
+        let (tool_use_id, tool_name, arguments) = &tool_calls[idx];
+        let res = execute_one_tool(
+            tool_use_id.clone(),
+            tool_name.clone(),
+            arguments.clone(),
+            app.clone(),
+            message_id.to_string(),
+            session_id.to_string(),
+            tool_results_dir.to_path_buf(),
+            project_root.to_path_buf(),
+            session_todos.clone(),
+            session_agent_tasks.clone(),
+            agent_runtime,
+            subagent_depth,
+            skill_task_context.map(str::to_owned),
+            brave_search_api_key.clone(),
+            skill_cache.clone(),
+        )
+        .await;
+        ordered_results[idx] = Some(res);
+    }
+
+    results.extend(ordered_results.into_iter().flatten());
+    results
+}
+
+/// Execute a single tool call. Called from both the parallel and sequential paths.
+#[async_recursion::async_recursion]
+async fn execute_one_tool(
+    tool_use_id: String,
+    tool_name: String,
+    arguments: String,
+    app: AppHandle,
+    message_id: String,
+    session_id: String,
+    tool_results_dir: PathBuf,
+    project_root: PathBuf,
+    session_todos: Option<Arc<tokio::sync::Mutex<Vec<TodoItem>>>>,
+    session_agent_tasks: Option<Arc<tokio::sync::Mutex<Vec<AgentTask>>>>,
+    agent_runtime: Option<&AgentLlmRuntime>,
+    subagent_depth: u8,
+    skill_task_context: Option<String>,
+    brave_search_api_key: Option<String>,
+    skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+) -> (String, String, bool) {
+    let tool_use_id = &tool_use_id;
+    let tool_name = &tool_name;
+    let arguments = &arguments;
+    let message_id = &message_id;
+    let session_id = &session_id;
+    let tool_results_dir = tool_results_dir.as_path();
+    let project_root = project_root.as_path();
+    let skill_task_context = skill_task_context.as_deref();
+
+    // Subagent plan-mode re-check (fast, per-call)
+    if subagent_depth > 0 {
+        let c = crate::domain::tool_permission_rules::canonical_permission_tool_name(tool_name);
+        let parent_in_plan = if let Some(ar) = agent_runtime {
+            if let Some(ref pm) = ar.plan_mode_flag {
+                *pm.lock().await
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let allow_nested = agent_runtime
+            .map(|r| r.allow_nested_agent)
+            .unwrap_or(false);
+        let sub_opts = SubagentFilterOptions {
+            parent_in_plan_mode: parent_in_plan,
+            allow_nested_agent: allow_nested,
+        };
+        if crate::domain::subagent_tool_filter::should_block_subagent_builtin_call(&c, sub_opts) {
             let error_msg = format!(
-                "Tool `{tool_name}` is denied by `permissions.deny` (rule `{}` from {}).",
-                hit.rule,
-                hit.source.display()
+                "Tool `{tool_name}` is not available to sub-agents (Claude Code `ALL_AGENT_DISALLOWED_TOOLS`)."
             );
             let _ = app.emit(
                 &format!("chat-stream-{}", message_id),
@@ -1510,50 +1843,12 @@ async fn execute_tool_calls(
                     is_error: true,
                 },
             );
-            results.push((tool_use_id.clone(), error_msg, true));
-            continue;
+            return (tool_use_id.clone(), error_msg, true);
         }
+    }
 
-        // TS `filterToolsForAgent` / `ALL_AGENT_DISALLOWED_TOOLS` — block at execute time if the model still calls these.
-        if subagent_depth > 0 {
-            let c = crate::domain::tool_permission_rules::canonical_permission_tool_name(tool_name);
-            let parent_in_plan = if let Some(ar) = agent_runtime {
-                if let Some(ref pm) = ar.plan_mode_flag {
-                    *pm.lock().await
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            let sub_opts = SubagentFilterOptions {
-                parent_in_plan_mode: parent_in_plan,
-                allow_nested_agent: agent_runtime
-                    .map(|r| r.allow_nested_agent)
-                    .unwrap_or(false),
-            };
-            if crate::domain::subagent_tool_filter::should_block_subagent_builtin_call(&c, sub_opts)
-            {
-                let error_msg = format!(
-                    "Tool `{tool_name}` is not available to sub-agents (Claude Code `ALL_AGENT_DISALLOWED_TOOLS`)."
-                );
-                let _ = app.emit(
-                    &format!("chat-stream-{}", message_id),
-                    &StreamOutputItem::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        name: tool_name.clone(),
-                        input: arguments.clone(),
-                        output: error_msg.clone(),
-                        is_error: true,
-                    },
-                );
-                results.push((tool_use_id.clone(), error_msg, true));
-                continue;
-            }
-        }
-
-        // Parse and execute the tool
-        let result = if tool_name.eq_ignore_ascii_case("list_skills") {
+    // Parse and execute the tool
+    let result = if tool_name.eq_ignore_ascii_case("list_skills") {
             let args: ListSkillsArgs = if arguments.trim().is_empty() {
                 ListSkillsArgs::default()
             } else {
@@ -1561,7 +1856,7 @@ async fn execute_tool_calls(
             };
             let icfg = integrations_config::load_integrations_config(project_root);
             let mut all_skills =
-                skills::load_skills_for_project(project_root, include_claude_user_skills).await;
+                skills::load_skills_cached(project_root, &skill_cache).await;
             all_skills = integrations_config::filter_skill_entries(all_skills, &icfg);
             let json = skills::list_skills_metadata_json(
                 &all_skills,
@@ -1625,11 +1920,8 @@ async fn execute_tool_calls(
                         (tool_use_id.clone(), error_msg, true)
                     } else {
                         let icfg = integrations_config::load_integrations_config(project_root);
-                        let all_skills = skills::load_skills_for_project(
-                            project_root,
-                            include_claude_user_skills,
-                        )
-                        .await;
+                        let all_skills =
+                            skills::load_skills_cached(project_root, &skill_cache).await;
                         let blocked =
                             if let Some(ref display) =
                                 skills::resolve_skill_display_name(&all_skills, &args.skill)
@@ -1657,11 +1949,11 @@ async fn execute_tool_calls(
                             );
                             (tool_use_id.clone(), error_msg, true)
                         } else {
-                            match skills::invoke_skill(
+                            match skills::invoke_skill_with_cache(
                                 project_root,
                                 &args.skill,
                                 &args.args,
-                                include_claude_user_skills,
+                                &all_skills,
                             )
                             .await
                             {
@@ -1775,7 +2067,7 @@ async fn execute_tool_calls(
                 match serde_json::from_str::<crate::domain::tools::agent::AgentArgs>(arguments) {
                     Ok(agent_args) => {
                         match run_subagent_session(
-                            app,
+                            &app,
                             message_id,
                             session_id,
                             tool_results_dir,
@@ -1786,6 +2078,7 @@ async fn execute_tool_calls(
                             ar,
                             subagent_depth.saturating_add(1),
                             brave_search_api_key.clone(),
+                            skill_cache.clone(),
                         )
                         .await
                         {
@@ -1878,11 +2171,17 @@ async fn execute_tool_calls(
             }
         } else if tool_name.starts_with("mcp__") {
             let timeout = std::time::Duration::from_secs(120);
+            // Use the process-wide MCP connection pool (from Tauri app state) to avoid
+            // spawning a new process + handshaking on every tool call.
+            let mcp_pool = app
+                .try_state::<crate::app_state::OmigaAppState>()
+                .map(|s| s.chat.mcp_connections.clone());
             match crate::domain::mcp_tool_dispatch::execute_mcp_tool_call(
                 project_root,
                 tool_name,
                 arguments,
                 timeout,
+                mcp_pool,
             )
             .await
             {
@@ -2067,10 +2366,7 @@ async fn execute_tool_calls(
         }
         };
 
-        results.push(result);
-    }
-
-    results
+    result
 }
 
 /// Cancel an in-progress stream by message_id

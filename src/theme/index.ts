@@ -301,9 +301,11 @@ export { getPencilPalette, usePencilPalette, pencilLightPenPalette, pencilDarkPe
 export {
   ACCENT_PRESET_IDS,
   ACCENT_PRESET_META,
-  ACCENT_PICKER_SURFACES,
-  COLOR_MODE_PICKER_SURFACES,
+  getAccentAppChrome,
   getAccentPresetOptions,
+  getAccentSwatchGradient,
+  getColorModePickerGradient,
+  type AccentAppChrome,
   type AccentPresetId,
 } from "./accentPresets";
 

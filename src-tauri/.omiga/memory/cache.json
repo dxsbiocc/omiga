@@ -1,0 +1,582 @@
+{
+  "src/domain/tools/notebook_edit.rs": {
+    "hash": "1cf4d9de8db65e4d9fecb6de9fadc2987765c47c949f368da96978271f930ae9",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_1cf4d9de8db65e4d"
+  },
+  "src/errors.rs": {
+    "hash": "2b28c8cd187deaf87e9eda1c292984216b05bcc56d9d9786d175f14bee9eab16",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_2b28c8cd187deaf8"
+  },
+  "src/commands/shell.rs": {
+    "hash": "ab740996df410174a6fe2e49b6cc65c2b8a87e1c733df24e9520f1c1a1c82e24",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_ab740996df410174"
+  },
+  "src/domain/session/agent_task.rs": {
+    "hash": "69bdec465d1c3dc577a23068690d2ecf752a669b0f430be70bb7f5b840fa6f24",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_69bdec465d1c3dc5"
+  },
+  "src/domain/pageindex/storage.rs": {
+    "hash": "b74f548b26c9ea6327e49752ecea4458973e7b9541b288fc5f0803b047ed2de8",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_b74f548b26c9ea63"
+  },
+  "src/infrastructure/streaming_tests.rs": {
+    "hash": "c57b66406aaf9b98fdf3732b6ebca7e26bdeb912d4ffac44274f1486cd7baef4",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_c57b66406aaf9b98"
+  },
+  "src/domain/tools/task_update.rs": {
+    "hash": "029dd9f6a423590e2895ca9efd3a61f95239dc8daec540d3cf7fd7514eace04b",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_029dd9f6a423590e"
+  },
+  "bundled_mcp.json": {
+    "hash": "2a409be471eafb89e0dea5fa1ed0c594801196e225c09e6171732daa5dd94157",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_2a409be471eafb89"
+  },
+  "src/domain/tools/enter_plan_mode.rs": {
+    "hash": "985750fb051bed137c7598c19bd57e730f0ff6f0e6d63deffeb3728bd35f774a",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_985750fb051bed13"
+  },
+  "src/constants/plan_mode/enter_plan_mode_external.txt": {
+    "hash": "da6247581299df00293c939487513c190e840f591ce516f12abc5576dbaa74de",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_da6247581299df00"
+  },
+  "tests/README.md": {
+    "hash": "c132196f50dcfca263949c834cfb67f6792f0756d902b2f6bef67d3af2938c99",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_c132196f50dcfca2"
+  },
+  "src/domain/chat_state.rs": {
+    "hash": "f52ad9da6b715e20deedc923b4edbf69c7c9ef331c79d57a218a5897609ed17f",
+    "last_indexed": 1775616244,
+    "doc_id": "doc_f52ad9da6b715e20"
+  },
+  "src/domain/integrations_config.rs": {
+    "hash": "5d5caf280bb7083e8c6f5c3ec9edc9a637a6d7a6f4216daa60cbb03dc12bcab6",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_5d5caf280bb7083e"
+  },
+  "src/constants/plan_mode/exit_plan_mode_v2.txt": {
+    "hash": "9a76355a2730e9d3e96eef6683a5e7003c94f615b815e391454a1d38a660b2f0",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_9a76355a2730e9d3"
+  },
+  "src/domain/tools/task_get.rs": {
+    "hash": "3490e02bef7d73f630310d4c47884e40fc9df95be799f5599cc1751297a26b73",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_3490e02bef7d73f6"
+  },
+  "src/domain/pageindex/tree.rs": {
+    "hash": "0b0f9fe8ae3038aa1cf88f46352fdaf1f2214fdf588a3e79c30ef6dbb08cbbc7",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_0b0f9fe8ae3038aa"
+  },
+  "src/infrastructure/fs/mod.rs": {
+    "hash": "9e57274051cbb69003b7bee416554f5bc4db5d6b57e6c35cc813229f55af8ce3",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_9e57274051cbb690"
+  },
+  "src/domain/tools/task_output.rs": {
+    "hash": "91b635ad702ce88a7eaf9188f2d43bc135f23c70b77a24f0ab8cf313240aa3e1",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_91b635ad702ce88a"
+  },
+  "src/commands/search.rs": {
+    "hash": "08e776e4604798075c588db929e6c928199402c7038e1b6556b998cf04eebd80",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_08e776e460479807"
+  },
+  "tests/domain_tools/notebook_edit.rs": {
+    "hash": "a9200aa9c0f5af911adfc9dafbd2231667d822a0815922c19473f60b27c7f5fa",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_a9200aa9c0f5af91"
+  },
+  "src/domain/tools/tool_search.rs": {
+    "hash": "6b33211337daaf871a918be87fbcd233e8272e95414d97d5c5d953cd7f4797e5",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_6b33211337daaf87"
+  },
+  "src/commands/session.rs": {
+    "hash": "5f8acd70c759abbd5f53877875dbca44c9e51de596c51d23e729a4a85e859dc6",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_5f8acd70c759abbd"
+  },
+  "src/commands/git_workspace.rs": {
+    "hash": "291a280ecfbdb1cb9b4dcd09b083341ef17d1bf2868dc60a5192390af0aedd1e",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_291a280ecfbdb1cb"
+  },
+  "src/domain/tools/web_fetch.rs": {
+    "hash": "2c9d9b05a4ceff0e0fd02fb52bcb970ba62e5b753a8fc19581a4585e1b97cc36",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_2c9d9b05a4ceff0e"
+  },
+  "src/domain/pageindex/mod.rs": {
+    "hash": "4e5828f0435b2811d642df5fea7fea2eb5e73526197f1bbfefd82a6f570c3d0f",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_4e5828f0435b2811"
+  },
+  "src/app_state.rs": {
+    "hash": "12242ff7679acec7c0b94fcacddc417ba2c19a0cc85bcd8ef0ed50dc455b5ab6",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_12242ff7679acec7"
+  },
+  "src/constants/tool_limits.rs": {
+    "hash": "f83945eb61884b2ccc42ced7a1c638a15ac16fb9c83079102e582d21b2c694a6",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_f83945eb61884b2c"
+  },
+  "tauri.conf.json": {
+    "hash": "428b58ba18bc52745ea8ce588f6031028fc35de7627b918864ea05df17073052",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_428b58ba18bc5274"
+  },
+  "src/domain/tools/glob.rs": {
+    "hash": "89223a9b360a8632c9dbdca2ae5c3e2586bc571433c58d374928883898d343de",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_89223a9b360a8632"
+  },
+  "src/domain/tools/task_stop.rs": {
+    "hash": "a3b50fbfd2d3ec33013d61df503e44c5ea573b789e90a716043d3e5f76c20a9e",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_a3b50fbfd2d3ec33"
+  },
+  "src/llm/types.rs": {
+    "hash": "5d4cf169ed7307cb452780ea4b3742c7292b87baae3fdc230f6cd3a8f8401d5a",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_5d4cf169ed7307cb"
+  },
+  "src/domain/mcp_resource_output.rs": {
+    "hash": "6c5e403a1f401fe4ab9e5640db8513e9c128d226d486bbde2cd8ab4c21c29a95",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_6c5e403a1f401fe4"
+  },
+  "src/domain/integrations_catalog.rs": {
+    "hash": "b499bb83a7c9f7924b3045c9f66195bf7b66340f11f95a8d6ddaad9b2011d790",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_b499bb83a7c9f792"
+  },
+  "tests/domain_tools/grep.rs": {
+    "hash": "77527d70f9dd965429461dc0d3a3af0b0826e6a0ad6799a99a14ca3da9ac1131",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_77527d70f9dd9654"
+  },
+  "src/lib.rs": {
+    "hash": "eea3ab0ec5263b69eaa9e54fb3dcd35709ffef511d3c0a0cdc815cbc25c2c43d",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_eea3ab0ec5263b69"
+  },
+  "src/domain/background_shell.rs": {
+    "hash": "4e4cc4224c325ef213fb236d514c183192aac224b9c338013ad9de346c952a91",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_4e4cc4224c325ef2"
+  },
+  "gen/schemas/desktop-schema.json": {
+    "hash": "30537d50853f0a1fe2bdd975e28492c752698abd8eac4ae0a2bbca483952f1ba",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_30537d50853f0a1f"
+  },
+  "src/llm/anthropic.rs": {
+    "hash": "ba36bbd2d6b812e1bbb68301eae36f2bbb2d22e437c227d2aa3c8636d531ad3d",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_ba36bbd2d6b812e1"
+  },
+  "src/domain/tools/mod.rs": {
+    "hash": "f268534c3ff5fa3fb6c25ea9b714ede4115ccd8d2a49c2f740075237c7aea747",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_f268534c3ff5fa3f"
+  },
+  "src/errors_tests.rs": {
+    "hash": "8d5bc6b4a14ed1e1a3652b8a1527e56839178dee5105632b112c22ab20dee342",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_8d5bc6b4a14ed1e1"
+  },
+  "src/domain/tools/agent.rs": {
+    "hash": "f4f2309f43933826fa947e7fb8c2df23e09c0960eb3ffca1375a0a86f4380bfa",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_f4f2309f43933826"
+  },
+  "src/domain/tools/file_write.rs": {
+    "hash": "db7aa403ca27d9a6954e6c4d8529680def7b9369869e7ff92447689baaf4c465",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_db7aa403ca27d9a6"
+  },
+  "src/commands/notebook.rs": {
+    "hash": "e8025fedf0c888cc80b690ad1b8c895216f574b1ac5542156db576d656be4881",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_e8025fedf0c888cc"
+  },
+  "src/commands/permissions.rs": {
+    "hash": "844d4467005b5ef22bf3ef5d16a4cc6fc9608650f99663699314e29b22b5155b",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_844d4467005b5ef2"
+  },
+  "src/domain/skills/mod.rs": {
+    "hash": "35bf4b950262ede70a2b1fa39ff04f2b21f3e78de65e9c5e10d55e05774ae40d",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_35bf4b950262ede7"
+  },
+  "src/domain/tools/bash.rs": {
+    "hash": "4c7927fb6776b2f0b10602c6b3c1a9e93d9aab2e5791f6a76508cc489ac90aec",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_4c7927fb6776b2f0"
+  },
+  "src/domain/mcp_tool_pool.rs": {
+    "hash": "93737bbe3d84fb23f72344b5ac5cd60a8acd10baf3c935ce6ffa85ed6c28a694",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_93737bbe3d84fb23"
+  },
+  "tests/smoke.rs": {
+    "hash": "dbfee4cdc5f3e73b6151072740cff6cbf20ceacb1cdee1f7bc7c7c4285fe0ccb",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_dbfee4cdc5f3e73b"
+  },
+  "src/domain/tools/workflow.rs": {
+    "hash": "1c342955d082b1fb6918ec136531fc1e1e1bc45f279d414153f305aa56251b1c",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_1c342955d082b1fb"
+  },
+  "src/domain/pageindex/query.rs": {
+    "hash": "33fdb580d20a5f92ed9ea986026b0bdf4554ee8e98fb51371b38b0bc8e01243c",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_33fdb580d20a5f92"
+  },
+  "src/domain/tools/file_edit.rs": {
+    "hash": "3dcc911e18a5afc0109a396bd35f9f01d405bfd7738e8e30c6ef913153f86558",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_3dcc911e18a5afc0"
+  },
+  "src/domain/mcp_discovery.rs": {
+    "hash": "05b1c3a2fa8238472bf4985dc72c1769d14af0b7fb0808fb7351c0da5c9d2db6",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_05b1c3a2fa823847"
+  },
+  "src/domain/tools/exit_plan_mode.rs": {
+    "hash": "10ae775c56529e9a180bb6eb34bb99736b9ba24e1d4bcbbcd4dee0a87ac04fd6",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_10ae775c56529e9a"
+  },
+  "src/llm/config.rs": {
+    "hash": "66fe5fbeec3dd0ff882d7416523f7770598665493a823f7de5ebc37664aa4b8a",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_66fe5fbeec3dd0ff"
+  },
+  "src/domain/session_codec_tests.rs": {
+    "hash": "72d6ea819e353dae8da1864b5ebd2d6b830294f800fc9c02cba42e059d0a1723",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_72d6ea819e353dae"
+  },
+  "src/domain/tools/send_user_message.rs": {
+    "hash": "e04723ac680d2f79400870508ac065cadea59b9dffbb68831ffa81dc791a5c31",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_e04723ac680d2f79"
+  },
+  "src/domain/tools/skill_invoke.rs": {
+    "hash": "b4265c967f53c8b24ced77d2a8da09d523ae72219edf9cae067af60ddbe8aa2e",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_b4265c967f53c8b2"
+  },
+  "src/domain/mcp_names.rs": {
+    "hash": "059305b6078242e06e066412e40791ec0ad8e23d1461eba53effd4f91583394f",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_059305b6078242e0"
+  },
+  "src/domain/tools/task_create.rs": {
+    "hash": "e47ab24b65de51daf81d23d75172a858f27109bd43b9ca2c0d45ac81a6630e5b",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_e47ab24b65de51da"
+  },
+  "tests/domain_tools/todo_write.rs": {
+    "hash": "15efdd5edd23a830fd4d93dc9ed4de5d33dfb16347fa91d80ef9cd0e44d3e778",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_15efdd5edd23a830"
+  },
+  "src/domain/pageindex/parser.rs": {
+    "hash": "3399622bcf91b4afac77de4916f22150e4ac60ba09cd8a6559efe381f9f0ea3b",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_3399622bcf91b4af"
+  },
+  "gen/schemas/macOS-schema.json": {
+    "hash": "30537d50853f0a1fe2bdd975e28492c752698abd8eac4ae0a2bbca483952f1ba",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_30537d50853f0a1f"
+  },
+  "src/commands/claude_import.rs": {
+    "hash": "623fe66fcda350bdbe9b821efc5b0ef127665305f99de4597598833d5ffc94eb",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_623fe66fcda350bd"
+  },
+  "gen/schemas/acl-manifests.json": {
+    "hash": "db6c79b1c810e3840d0356c34bf7ea7d7d7b4def65c22139368ac78823799df4",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_db6c79b1c810e384"
+  },
+  "tests/domain_tools/web_search.rs": {
+    "hash": "d15dfdd8153b6b33eea091bd634530a6c30b85ee186dddb8f43097547b27a763",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_d15dfdd8153b6b33"
+  },
+  "src/domain/session/mod.rs": {
+    "hash": "8a268552665f590b92e9e02b221348f7cf2184efbcc3001e874f7f7658ea7f33",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_8a268552665f590b"
+  },
+  "src/domain/tools/read_mcp_resource.rs": {
+    "hash": "217c9bc5edf7f2dd5c0c438a4c9f61ff2a20c7925745ff0bcd911e88143e88e5",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_217c9bc5edf7f2dd"
+  },
+  "src/commands/fs.rs": {
+    "hash": "671f1f12989ee6bf4678157315dec12310e1b8da8bb3e3fb4ca442b41a89a65f",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_671f1f12989ee6bf"
+  },
+  "src/main.rs": {
+    "hash": "7399e7cdbddd7e371c48a9e3875f9d1c611968c69bc2fc08418b96bca9d17609",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_7399e7cdbddd7e37"
+  },
+  "src/infrastructure/mod.rs": {
+    "hash": "3fff24bd21b8150e2edd1f994c4b48c3e6901c7c744a0c0c18af1ef207c08687",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_3fff24bd21b8150e"
+  },
+  "src/domain/subagent_tool_filter.rs": {
+    "hash": "12ac48c95b4f2aa5ab363f4f11a1ddb76e7388dd0534524afd3555892d55b12a",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_12ac48c95b4f2aa5"
+  },
+  "src/domain/memory/explicit_importer.rs": {
+    "hash": "cae6d86bf666cc46b11fc4cf2f8f569242889415ef03a1bbcc61020112849e13",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_cae6d86bf666cc46"
+  },
+  "src/domain/tools/web_search.rs": {
+    "hash": "12ed167015b14f9b7393b4c5b83358a16f0b6c82fb19f8234db54e99af72151c",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_12ed167015b14f9b"
+  },
+  "src/infrastructure/streaming.rs": {
+    "hash": "c25a687f1a943eb22ddd54c4672016d1c0868751637b54d75be70d84bbc19a69",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_c25a687f1a943eb2"
+  },
+  "src/commands/integrations_settings.rs": {
+    "hash": "c12e6755417d868b855d199c5e29be9d1e2ce978ae8083e1d04e29c5f19c3862",
+    "last_indexed": 1775616244,
+    "doc_id": "doc_c12e6755417d868b"
+  },
+  "build.rs": {
+    "hash": "487059eaf8a947b80f20a9aacac038a5047b2ad69d2401b827376c67d6fe847f",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_487059eaf8a947b8"
+  },
+  "src/domain/tools/grep.rs": {
+    "hash": "b313753ef699ce3a66791889282ea399c46585efb87b186600b64bc27a2ca52c",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_b313753ef699ce3a"
+  },
+  "src/domain/persistence/mod.rs": {
+    "hash": "c974d55855d7d1802e2cc08126e081e06128a29e8a9ecdbc8e900eacbb426707",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_c974d55855d7d180"
+  },
+  "src/domain/memory/migration.rs": {
+    "hash": "05c5e2ebfa3314ca06ffc87d2c35e5ad87239fed52fb637acc50817f5b608f8e",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_05c5e2ebfa3314ca"
+  },
+  "src/domain/tool_permission_rules.rs": {
+    "hash": "e350913971e315d4f029c1e3e94ec502ce15f96d8afaa497b8067d095cc787ed",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_e350913971e315d4"
+  },
+  "src/api/sse.rs": {
+    "hash": "2bcca2437f31b23225c76862b112303a865ac94bad90a152261c5691879f7e81",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_2bcca2437f31b232"
+  },
+  "src/domain/mcp_config.rs": {
+    "hash": "57e8f624c57999999f51185a231ab68d29c6c9f07bfbe51eb094c6525047539f",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_57e8f624c5799999"
+  },
+  "src/domain/mod.rs": {
+    "hash": "c18078b8cf38ad776079028ac52a5ae1c20adcf46c22b1c9bda8185bedc76f91",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_c18078b8cf38ad77"
+  },
+  "src/llm/domestic.rs": {
+    "hash": "11e2cc6543595f97d045f9df2595ecd73d4e8744088e9b01b1b95e1cba2f88c8",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_11e2cc6543595f97"
+  },
+  "src/domain/tools/list_skills.rs": {
+    "hash": "2d51c947e52915a60547fe581513b87bd94233837ba385c9f82c5ecc0dc7ea13",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_2d51c947e52915a6"
+  },
+  "tests/domain_tools.rs": {
+    "hash": "799a129a8d40689d6faf99035adf14d54aa80cc9c3f041df8a03536a9deb0b84",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_799a129a8d40689d"
+  },
+  "src/domain/session_codec.rs": {
+    "hash": "87943460a4abcaa843410502fba4e126c529ff3022d852026f91af3ec0b59304",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_87943460a4abcaa8"
+  },
+  "src/commands/mod.rs": {
+    "hash": "92b5d77963ee2ec6485bd5578157c67646de714d25f063230cf23468ea681e36",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_92b5d77963ee2ec6"
+  },
+  "src/llm/mod.rs": {
+    "hash": "f51e82b936748648d25cf3ba81b47fc1fb46b7a2d8320e854a544bece3577eab",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_f51e82b936748648"
+  },
+  "tests/domain_tools/file_edit.rs": {
+    "hash": "06be4aec67d6f28bac3c37a4bf17279ba9332276d921eb36c8942a7fb042ab3a",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_06be4aec67d6f28b"
+  },
+  "src/constants/agent_prompt.rs": {
+    "hash": "2f242c6975abc57e7e7b362cf1f689f12bc061f3301988baf983ff77da253d06",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_2f242c6975abc57e"
+  },
+  "src/domain/tools/todo_write.rs": {
+    "hash": "363982798b3f5ff82542df56286e32d8f13484ecbd8e8d5c1248f72efb229ab9",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_363982798b3f5ff8"
+  },
+  "src/domain/auto_compact.rs": {
+    "hash": "91d5aa5eef2b1f89ba1b6bc7c7b2ce1ed28d4d8ec0b8da663dd763130eb2591f",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_91d5aa5eef2b1f89"
+  },
+  "src/domain/memory/config.rs": {
+    "hash": "9a3aebf8758b2ada5ba9db492d8d4d97963b9d3d54f516efef149171000a4ccd",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_9a3aebf8758b2ada"
+  },
+  "src/domain/tools/task_list.rs": {
+    "hash": "4d25e0cf3d4171439d0d219b1d75aac6ec0dd0993ff6523cd7f297a906ab3ce7",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_4d25e0cf3d417143"
+  },
+  "tests/domain_tools/web_fetch.rs": {
+    "hash": "83e18e6cc8011df889b248dabbd959dc5fd0ef0a16b0481fd85c59a3fb94de26",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_83e18e6cc8011df8"
+  },
+  "src/domain/mcp_client.rs": {
+    "hash": "280643c4bb96817e584176759be07922bf8e6b43604ce9f8e1952bd7c967d2a0",
+    "last_indexed": 1775616244,
+    "doc_id": "doc_280643c4bb96817e"
+  },
+  "src/constants/mod.rs": {
+    "hash": "d7d8a26604fa2c94eec1ea5c83e5b544b6605e1271013a95248cf423548d7dbe",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_d7d8a26604fa2c94"
+  },
+  "src/domain/tools/sleep.rs": {
+    "hash": "8f19ad46cd0f84430643b4531e587de836f90e71025f3163f381050071886666",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_8f19ad46cd0f8443"
+  },
+  "gen/schemas/capabilities.json": {
+    "hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_44136fa355b3678a"
+  },
+  "src/commands/tools.rs": {
+    "hash": "2fdee3de2813b09540625f26cd2eb9fff37f5a260c87102d8baf5c3f4cc956c9",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_2fdee3de2813b095"
+  },
+  "src/utils/mod.rs": {
+    "hash": "92a343e69c4b0e7d71d7fe371b5e82f0ec510504240c0608ae6741f322986b39",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_92a343e69c4b0e7d"
+  },
+  "src/domain/tools/ask_user_question.rs": {
+    "hash": "80f48041c1e1991ff6c05843a9716a3918b3768facff926ee44212a4c939a52a",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_80f48041c1e1991f"
+  },
+  "src/api/mod.rs": {
+    "hash": "cbe3702aae512ab1c4ac77ad0691fd181119a7c06957fa058aaae94c7d0dcf41",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_cbe3702aae512ab1"
+  },
+  "src/domain/mcp_tool_dispatch.rs": {
+    "hash": "b51529576aa5f14fbe1bc94e936e7fa9bf3e18aebf030120c74844b61bc38b14",
+    "last_indexed": 1775616244,
+    "doc_id": "doc_b51529576aa5f14f"
+  },
+  "src/commands/chat.rs": {
+    "hash": "02e3f7ca107fc632be5a156ef3c51fa510cd3b2ba74ad33a0d8c447de09df780",
+    "last_indexed": 1775616244,
+    "doc_id": "doc_02e3f7ca107fc632"
+  },
+  "src/infrastructure/git/mod.rs": {
+    "hash": "803e699dd2f6d01274fb3997b0cdd839c29303dd556427a6820192cb0b7997dc",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_803e699dd2f6d012"
+  },
+  "src/domain/memory/mod.rs": {
+    "hash": "e654113be16f93085c257e4dc21470c8fc3edf5773461771b05cb1c597dcb124",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_e654113be16f9308"
+  },
+  "src/constants/plan_mode_prompt.rs": {
+    "hash": "63ed518ba34136573fcd0152913e3666dfbaa59da0920a7d1172f317e97c96b4",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_63ed518ba3413657"
+  },
+  "src/commands/memory.rs": {
+    "hash": "14a82845ed3c5aad6069e24d11acbd8bd8a3be08ce9324efb4520ba0a9b4c3c1",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_14a82845ed3c5aad"
+  },
+  ".mcp.json": {
+    "hash": "7af2860e5a2da7edb1036c8361ce1fa47d2d1bf2a58d02a2a29fd5070c86b99c",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_7af2860e5a2da7ed"
+  },
+  "src/domain/tools/list_mcp_resources.rs": {
+    "hash": "4a6e818a6819ba613e9648c5290033161d32a170d8b9e76d4a069b0d7bc5c47a",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_4a6e818a6819ba61"
+  },
+  "src/utils/large_output_instructions.rs": {
+    "hash": "8d5a408e42dcd2723384c8c424cbcc65bb0caa35c6f1ec69a44a857f7376863d",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_8d5a408e42dcd272"
+  },
+  "src/llm/openai.rs": {
+    "hash": "19ebf165c3fe2d91b5c49ca0b8a3bca8d7fc8c71da82b097efa38975de549c2d",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_19ebf165c3fe2d91"
+  },
+  "Cargo.toml": {
+    "hash": "33729ca1f7547bf6e4ece6f1bbaf04e73bd4801f78e7b28076b88b9419f76a1d",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_33729ca1f7547bf6"
+  },
+  "src/domain/tools/file_read.rs": {
+    "hash": "78fecbc44526ff3febf4c87c584db8ed3dcc3401371e53806088f3022dde86ca",
+    "last_indexed": 1775575375,
+    "doc_id": "doc_78fecbc44526ff3f"
+  }
+}

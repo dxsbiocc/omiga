@@ -1,5 +1,5 @@
 import type { Theme } from "@mui/material/styles";
-import { alpha, darken } from "@mui/material/styles";
+import { alpha, darken, lighten } from "@mui/material/styles";
 
 /** Default font stack — unchanged across themes */
 const CHAT_FONT =
@@ -7,8 +7,12 @@ const CHAT_FONT =
 
 export type ChatTokenSet = {
   font: string;
-  /** User bubble gradient — follows primary + secondary */
+  /** User bubble gradient — translucent tinted primary → secondary */
   userGrad: string;
+  /** Text on user bubble (chosen for contrast on semi-transparent fill) */
+  userBubbleText: string;
+  /** Hairline edge so translucent bubble stays readable on any thread bg */
+  userBubbleBorder: string;
   agentBubbleBg: string;
   agentBubbleBorder: string;
   agentAvatarBg: string;
@@ -40,7 +44,18 @@ export function getChatTokens(theme: Theme): ChatTokenSet {
         ? "rgba(148, 163, 184, 0.12)"
         : "rgba(15, 23, 42, 0.08)";
 
-  const userGrad = `linear-gradient(315deg, ${p.primary.main} 0%, ${p.secondary.main} 100%)`;
+  // Lighter stops + higher transparency so the thread background shows through slightly
+  const userGrad = isDark
+    ? `linear-gradient(315deg, ${alpha(lighten(p.primary.main, 0.2), 0.38)} 0%, ${alpha(lighten(p.secondary.main, 0.16), 0.34)} 100%)`
+    : `linear-gradient(315deg, ${alpha(lighten(p.primary.main, 0.08), 0.32)} 0%, ${alpha(lighten(p.secondary.main, 0.06), 0.28)} 100%)`;
+
+  const userBubbleText = isDark
+    ? alpha(p.common.white, 0.94)
+    : alpha(p.text.primary, 0.92);
+
+  const userBubbleBorder = isDark
+    ? alpha(p.common.white, 0.12)
+    : alpha(p.primary.main, 0.22);
 
   const codeBg = isDark
     ? alpha(p.common.white, 0.06)
@@ -62,6 +77,8 @@ export function getChatTokens(theme: Theme): ChatTokenSet {
   return {
     font: CHAT_FONT,
     userGrad,
+    userBubbleText,
+    userBubbleBorder,
     agentBubbleBg: p.background.paper,
     agentBubbleBorder: divider,
     agentAvatarBg: alpha(p.primary.main, isDark ? 0.22 : 0.12),

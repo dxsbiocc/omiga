@@ -37,7 +37,11 @@ import {
   Tag,
   Square,
 } from "@mui/icons-material";
-import { useUiStore, useChatComposerStore, type AgentComposerMode } from "../../state";
+import {
+  useUiStore,
+  useChatComposerStore,
+  type AgentComposerMode,
+} from "../../state";
 
 export interface GitWorkspaceInfo {
   isGit: boolean;
@@ -211,7 +215,8 @@ export function ChatComposer({
             0 8px 24px ${alpha(accent, 0.08)},
             inset 0 1px 0 ${edge(0.08)}
           `,
-          transition: "box-shadow 0.22s ease, border-color 0.22s ease, transform 0.22s ease",
+          transition:
+            "box-shadow 0.22s ease, border-color 0.22s ease, transform 0.22s ease",
           "@media (prefers-reduced-motion: reduce)": {
             transition: "none",
           },
@@ -437,7 +442,8 @@ export function ChatComposer({
               maxWidth: 180,
               bgcolor: alpha(paper, isDark ? 0.45 : 0.88),
               boxShadow: `0 1px 2px ${edge(0.05)}, inset 0 1px 0 ${edge(0.06)}`,
-              transition: "border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease",
+              transition:
+                "border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease",
               "@media (prefers-reduced-motion: reduce)": {
                 transition: "none",
               },
@@ -485,7 +491,8 @@ export function ChatComposer({
                   color: "#fff",
                   bgcolor: "#ef4444",
                   boxShadow: `0 2px 8px ${alpha("#ef4444", 0.35)}`,
-                  transition: "background-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease",
+                  transition:
+                    "background-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease",
                   "@media (prefers-reduced-motion: reduce)": {
                     transition: "none",
                   },
@@ -583,13 +590,18 @@ export function ChatComposer({
                 needsWorkspacePath ? alpha("#FF9500", 0.35) : edge(0.1)
               }`,
               boxShadow: `inset 0 1px 0 ${edge(0.06)}`,
-              transition: "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease",
+              transition:
+                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease",
               "@media (prefers-reduced-motion: reduce)": {
                 transition: "none",
               },
               "&:hover": {
-                bgcolor: needsWorkspacePath ? alpha("#FF9500", 0.14) : alpha(accent, 0.06),
-                borderColor: needsWorkspacePath ? alpha("#FF9500", 0.5) : alpha(accent, 0.22),
+                bgcolor: needsWorkspacePath
+                  ? alpha("#FF9500", 0.14)
+                  : alpha(accent, 0.06),
+                borderColor: needsWorkspacePath
+                  ? alpha("#FF9500", 0.5)
+                  : alpha(accent, 0.22),
               },
             }}
           >
@@ -650,7 +662,11 @@ export function ChatComposer({
           alignItems="center"
           spacing={1}
           flexWrap="wrap"
-          sx={{ flexShrink: 0, justifyContent: "flex-end", ml: { xs: 0, sm: "auto" } }}
+          sx={{
+            flexShrink: 0,
+            justifyContent: "flex-end",
+            ml: { xs: 0, sm: "auto" },
+          }}
         >
           <FormControlLabel
             control={
@@ -666,7 +682,11 @@ export function ChatComposer({
               />
             }
             label={
-              <Typography variant="body2" fontWeight={600} color="text.secondary">
+              <Typography
+                variant="body2"
+                fontWeight={600}
+                color="text.secondary"
+              >
                 worktree
               </Typography>
             }
@@ -676,7 +696,7 @@ export function ChatComposer({
               py: 0.25,
               borderRadius: 2,
               border: `1px solid ${edge(0.1)}`,
-              bgcolor: isDark ? alpha(def, 0.65) : alpha("#f8fafc", 0.9),
+              bgcolor: alpha(def, isDark ? 0.65 : 0.9),
               transition: "background-color 0.2s ease, border-color 0.2s ease",
               "&:hover": {
                 bgcolor: alpha(accent, 0.04),
@@ -745,7 +765,10 @@ export function ChatComposer({
             </MenuItem>
             <MenuItem disabled>
               <ListItemText
-                primaryTypographyProps={{ variant: "caption", color: "text.secondary" }}
+                primaryTypographyProps={{
+                  variant: "caption",
+                  color: "text.secondary",
+                }}
                 primary="远程控制"
               />
             </MenuItem>

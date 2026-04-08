@@ -148,19 +148,34 @@ export function AgentSessionStatus({
             flexShrink: 0,
             bgcolor: alpha(accent, 0.12),
             color: accent,
-            ...(busy && {
-              "@keyframes statusIconPulse": {
-                "0%, 100%": { opacity: 1, transform: "scale(1)" },
-                "50%": { opacity: 0.82, transform: "scale(0.96)" },
-              },
-              animation: "statusIconPulse 2.2s ease-in-out infinite",
-              "@media (prefers-reduced-motion: reduce)": {
-                animation: "none",
-              },
-            }),
+            ...(busy &&
+              kind !== "waiting" && {
+                "@keyframes statusIconPulse": {
+                  "0%, 100%": { opacity: 1, transform: "scale(1)" },
+                  "50%": { opacity: 0.82, transform: "scale(0.96)" },
+                },
+                animation: "statusIconPulse 2.2s ease-in-out infinite",
+                "@media (prefers-reduced-motion: reduce)": {
+                  animation: "none",
+                },
+              }),
           }}
         >
-          <Icon sx={{ fontSize: 17 }} />
+          <Icon
+            sx={{
+              fontSize: 17,
+              ...(kind === "waiting" && {
+                "@keyframes statusIconSpin": {
+                  from: { transform: "rotate(0deg)" },
+                  to: { transform: "rotate(360deg)" },
+                },
+                animation: "statusIconSpin 1.05s linear infinite",
+                "@media (prefers-reduced-motion: reduce)": {
+                  animation: "none",
+                },
+              }),
+            }}
+          />
         </Box>
         <Box minWidth={0} sx={{ flex: 1 }}>
           <Typography

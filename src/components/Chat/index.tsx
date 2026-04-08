@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from "react";
+import type { CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -18,11 +19,10 @@ import {
   Button,
   Divider,
   Snackbar,
+  CircularProgress,
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import {
-  Person,
-  Memory as AgentCpuIcon,
   SmartToy,
   Construction,
   CheckCircle,
@@ -38,6 +38,7 @@ import {
   TravelExplore as TravelExploreIcon,
   MenuBook as MenuBookIcon,
   Assignment as AssignmentIcon,
+  Check as CheckIcon,
 } from "@mui/icons-material";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import {
@@ -132,8 +133,36 @@ interface BackgroundShellCompletePayload {
 }
 
 /** Avatar column + row gap; align with pencil-new.pen (36px avatar, ~10px gap). */
-const MESSAGE_OUTSIDE_GUTTER_PX = 46;
-const AVATAR_PX = 36;
+/** Chat bubble radius — smaller than pill-style so content stays inside the rounded rect */
+const BUBBLE_RADIUS_PX = 10;
+/** User message bubble max width (assistant uses full row width) */
+const USER_BUBBLE_MAX_CSS = "min(960px, 100%)";
+/** Markdown fenced code / blockquote — small px radius (avoid pill look on wide blocks) */
+const MD_BLOCK_RADIUS_PX = 1;
+/** Inline `code` longer than this: no fill (e.g. protein sequences) */
+const INLINE_CODE_LONG_LEN = 80;
+
+const PRISM_CODE_SEL = 'code[class*="language-"]';
+const PRISM_PRE_SEL = 'pre[class*="language-"]';
+
+/** Prism oneLight/oneDark set a fill on `code`/`pre`; we only want the outer chat box background. */
+function prismStyleTransparentCodeSurface(
+  style: Record<string, CSSProperties>,
+): Record<string, CSSProperties> {
+  return {
+    ...style,
+    [PRISM_CODE_SEL]: {
+      ...(style[PRISM_CODE_SEL] ?? {}),
+      background: "transparent",
+      backgroundColor: "transparent",
+    },
+    [PRISM_PRE_SEL]: {
+      ...(style[PRISM_PRE_SEL] ?? {}),
+      background: "transparent",
+      backgroundColor: "transparent",
+    },
+  };
+}
 
 function toolRowIcon(toolName: string) {
   const n = toolName.toLowerCase();
@@ -228,7 +257,8 @@ function humanizeToolStepTitle(name: string, args?: string): string {
     }
     return "执行 bash";
   }
-  if (n.includes("todo_write") || n.includes("todowrite")) return "更新任务清单";
+  if (n.includes("todo_write") || n.includes("todowrite"))
+    return "更新任务清单";
   if (n.includes("web_search")) return "网络搜索";
   if (n.includes("web_fetch") || n.includes("fetch")) return "获取网页";
   if (n.includes("glob")) return "搜索文件";
@@ -262,11 +292,16 @@ function executionStepSummary(name: string, args?: string): string {
     }
     if (n.includes("file_read") || n === "read_file") {
       const p = String(j.path ?? j.target_file ?? j.file_path ?? "");
-      if (p.trim()) return `Read file: ${p.split("/").filter(Boolean).slice(-3).join("/")}`;
+      if (p.trim())
+        return `Read file: ${p.split("/").filter(Boolean).slice(-3).join("/")}`;
     }
-    if (n.includes("file_write") || (n.includes("write") && n.includes("file"))) {
+    if (
+      n.includes("file_write") ||
+      (n.includes("write") && n.includes("file"))
+    ) {
       const p = String(j.path ?? j.file_path ?? "");
-      if (p.trim()) return `Write file: ${p.split("/").filter(Boolean).slice(-2).join("/")}`;
+      if (p.trim())
+        return `Write file: ${p.split("/").filter(Boolean).slice(-2).join("/")}`;
     }
     if (n.includes("grep")) {
       const pat = String(j.pattern ?? "");
@@ -533,13 +568,11 @@ function toolTitleFallbackFromInput(
       const cmd = j.command;
       if (typeof cmd === "string" && cmd.trim()) {
         const line = cmd.trim().split(/\r?\n/u)[0] ?? "";
-        if (line)
-          return line.length > 80 ? `${line.slice(0, 80)}…` : line;
+        if (line) return line.length > 80 ? `${line.slice(0, 80)}…` : line;
       }
     }
     const keys = Object.keys(j).filter((k) => k !== "description");
-    if (keys.length)
-      return `${toolName} · ${keys.slice(0, 2).join(", ")}`;
+    if (keys.length) return `${toolName} · ${keys.slice(0, 2).join(", ")}`;
   } catch {
     /* */
   }
@@ -604,6 +637,11 @@ export function Chat({ sessionId }: ChatProps) {
   const executionSteps = useActivityStore((s) => s.executionSteps);
   /** First text chunk of each “segment” (after Start or after tool_result). */
   const segmentStartRef = useRef(true);
+
+  /** Implicit memory indexing status for the last completed turn */
+  const [indexingStatus, setIndexingStatus] = useState<
+    "idle" | "indexing" | "completed" | "error"
+  >("idle");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -779,8 +817,7 @@ export function Chat({ sessionId }: ChatProps) {
             : summary;
           setMessages((prev) => {
             const idx = prev.findIndex(
-              (m) =>
-                m.role === "tool" && m.toolCall?.id === p.tool_use_id,
+              (m) => m.role === "tool" && m.toolCall?.id === p.tool_use_id,
             );
             if (idx < 0) {
               return prev;
@@ -903,9 +940,9 @@ export function Chat({ sessionId }: ChatProps) {
             break;
           }
           useActivityStore.getState().setStreaming(true, false);
-          useActivityStore.getState().setCurrentToolHint(
-            (toolData?.name ?? "tool").slice(0, 96),
-          );
+          useActivityStore
+            .getState()
+            .setCurrentToolHint((toolData?.name ?? "tool").slice(0, 96));
           const tuId = (toolData?.id ?? "").trim();
           setMessages((prev) => {
             if (tuId) {
@@ -969,15 +1006,13 @@ export function Chat({ sessionId }: ChatProps) {
           if (tuId) {
             const tn = toolData?.name ?? "tool";
             const rawArgs = toolData?.arguments;
-            useActivityStore.getState().onToolUseStart(
-              tuId,
-              humanizeToolStepTitle(tn, rawArgs),
-              {
+            useActivityStore
+              .getState()
+              .onToolUseStart(tuId, humanizeToolStepTitle(tn, rawArgs), {
                 summary: executionStepSummary(tn, rawArgs),
                 input: rawArgs,
                 toolName: tn,
-              },
-            );
+              });
           }
           break;
         }
@@ -1162,6 +1197,22 @@ export function Chat({ sessionId }: ChatProps) {
             return next;
           });
           setCurrentResponse("");
+
+          // Trigger implicit memory indexing status display
+          setIndexingStatus("indexing");
+          // Auto-hide after 3 seconds
+          setTimeout(() => {
+            setIndexingStatus((prev) =>
+              prev === "indexing" ? "completed" : prev,
+            );
+            // Clear completed status after another 2 seconds
+            setTimeout(() => {
+              setIndexingStatus((prev) =>
+                prev === "completed" ? "idle" : prev,
+              );
+            }, 2000);
+          }, 3000);
+
           if (isDev) {
             console.debug("[OmigaDev][AgentComplete]", {
               streamId,
@@ -1182,6 +1233,9 @@ export function Chat({ sessionId }: ChatProps) {
       showPathRequiredWarning();
       return;
     }
+
+    // Reset indexing status on new message
+    setIndexingStatus("idle");
 
     useActivityStore.getState().beginExecutionRun();
     useActivityStore.getState().setConnecting(true);
@@ -1213,7 +1267,10 @@ export function Chat({ sessionId }: ChatProps) {
         isFirstMessageInSession &&
         isPlaceholderSessionTitle(currentSession?.name)
       ) {
-        await renameSession(sessionId, titleFromFirstUserMessage(messageContent));
+        await renameSession(
+          sessionId,
+          titleFromFirstUserMessage(messageContent),
+        );
       }
 
       // Call backend with new request structure
@@ -1332,7 +1389,10 @@ export function Chat({ sessionId }: ChatProps) {
     tone: "default" | "agent" = "default",
   ) => {
     const isAgent = tone === "agent";
-    const prismStyle = theme.palette.mode === "dark" ? oneDark : oneLight;
+    const prismStyleRaw = theme.palette.mode === "dark" ? oneDark : oneLight;
+    const prismStyleFenced = prismStyleTransparentCodeSurface(
+      prismStyleRaw as Record<string, CSSProperties>,
+    );
     // Handle empty or undefined content
     if (!content || content.trim() === "") {
       return (
@@ -1350,6 +1410,11 @@ export function Chat({ sessionId }: ChatProps) {
       <Box
         sx={{
           fontFamily: CHAT.font,
+          minWidth: 0,
+          maxWidth: "100%",
+          overflowX: "hidden",
+          overflowWrap: "anywhere",
+          wordBreak: "break-word",
           ...(isAgent ? { "& :first-of-type": { mt: 0 } } : {}),
         }}
       >
@@ -1357,12 +1422,9 @@ export function Chat({ sessionId }: ChatProps) {
           remarkPlugins={[remarkGfm]}
           components={{
             code({
-              node,
               className,
               children,
-              ...props
             }: {
-              node?: unknown;
               className?: string;
               children?: React.ReactNode;
             }) {
@@ -1371,6 +1433,17 @@ export function Chat({ sessionId }: ChatProps) {
               const isInline = !className?.includes("language-");
 
               if (!isInline && language) {
+                const blockBody = String(children).replace(/\n$/, "");
+                const lang = language || "text";
+                const fencedScrollStyle = {
+                  margin: 0,
+                  borderRadius: 0,
+                  background: "transparent",
+                  whiteSpace: "pre" as const,
+                  wordBreak: "normal" as const,
+                  overflowWrap: "normal" as const,
+                  minWidth: "min-content",
+                };
                 if (isAgent) {
                   return (
                     <Box sx={{ my: 1.25 }}>
@@ -1383,32 +1456,35 @@ export function Chat({ sessionId }: ChatProps) {
                           display: "block",
                         }}
                       >
-                        {language}
+                        {lang}
                       </Typography>
                       <Box
                         sx={{
-                          borderRadius: "6px",
+                          borderRadius: `${MD_BLOCK_RADIUS_PX}px`,
                           border: `1px solid ${CHAT.agentBubbleBorder}`,
                           bgcolor: CHAT.codeBg,
-                          p: 1,
-                          overflow: "auto",
                           maxHeight: 320,
+                          maxWidth: "100%",
+                          overflow: "auto",
+                          [`& ${PRISM_PRE_SEL}, & ${PRISM_CODE_SEL}`]: {
+                            background: "transparent !important",
+                            backgroundColor: "transparent !important",
+                          },
                         }}
                       >
-                        <Typography
-                          component="pre"
-                          sx={{
-                            m: 0,
-                            fontFamily: "Menlo, Monaco, Consolas, monospace",
+                        <SyntaxHighlighter
+                          style={prismStyleFenced}
+                          language={lang}
+                          PreTag="div"
+                          customStyle={{
+                            ...fencedScrollStyle,
+                            padding: "8px 12px",
                             fontSize: 11,
                             lineHeight: 1.45,
-                            color: CHAT.textPrimary,
-                            whiteSpace: "pre-wrap",
-                            wordBreak: "break-word",
                           }}
                         >
-                          {String(children).replace(/\n$/, "")}
-                        </Typography>
+                          {blockBody}
+                        </SyntaxHighlighter>
                       </Box>
                     </Box>
                   );
@@ -1418,7 +1494,7 @@ export function Chat({ sessionId }: ChatProps) {
                     component="div"
                     sx={{
                       my: 1.5,
-                      borderRadius: 2,
+                      borderRadius: `${MD_BLOCK_RADIUS_PX}px`,
                       overflow: "hidden",
                       border: 1,
                       borderColor: alpha(theme.palette.divider, 0.5),
@@ -1434,43 +1510,75 @@ export function Chat({ sessionId }: ChatProps) {
                       }}
                     >
                       <Typography variant="caption" color="text.secondary">
-                        {language}
+                        {lang}
                       </Typography>
                     </Box>
-                    <SyntaxHighlighter
-                      style={prismStyle}
-                      language={language}
-                      PreTag="div"
-                      customStyle={{
-                        margin: 0,
-                        borderRadius: 0,
-                        fontSize: "0.8125rem",
-                        lineHeight: 1.6,
+                    <Box
+                      sx={{
+                        bgcolor: CHAT.codeBg,
+                        maxHeight: 360,
+                        maxWidth: "100%",
+                        overflow: "auto",
+                        [`& ${PRISM_PRE_SEL}, & ${PRISM_CODE_SEL}`]: {
+                          background: "transparent !important",
+                          backgroundColor: "transparent !important",
+                        },
                       }}
                     >
-                      {String(children).replace(/\n$/, "")}
-                    </SyntaxHighlighter>
+                      <SyntaxHighlighter
+                        style={prismStyleFenced}
+                        language={lang}
+                        PreTag="div"
+                        customStyle={{
+                          ...fencedScrollStyle,
+                          padding: "12px 16px",
+                          fontSize: "0.8125rem",
+                          lineHeight: 1.6,
+                        }}
+                      >
+                        {blockBody}
+                      </SyntaxHighlighter>
+                    </Box>
                   </Box>
                 );
               }
+              const inlineRaw = String(children);
+              const longInline = inlineRaw.length > INLINE_CODE_LONG_LEN;
               return (
-                <code
+                <Box
+                  component="code"
                   className={className}
-                  {...props}
-                  style={
-                    isAgent
+                  sx={{
+                    fontFamily: "Menlo, Monaco, Consolas, monospace",
+                    fontSize: isAgent ? 12 : "0.875em",
+                    lineHeight: 1.45,
+                    background: "transparent",
+                    ...(longInline
                       ? {
-                          fontFamily: "Menlo, Monaco, Consolas, monospace",
-                          fontSize: 12,
-                          background: CHAT.codeBg,
-                          padding: "1px 4px",
-                          borderRadius: 4,
+                          padding: 0,
+                          borderRadius: 0,
+                          boxDecorationBreak: "unset",
+                          WebkitBoxDecorationBreak: "unset",
+                          color: isAgent ? CHAT.textPrimary : "inherit",
                         }
-                      : undefined
-                  }
+                      : {
+                          padding: isAgent ? "2px 5px" : "0.1em 0.35em",
+                          borderRadius: `${MD_BLOCK_RADIUS_PX}px`,
+                          boxDecorationBreak: "clone",
+                          WebkitBoxDecorationBreak: "clone",
+                          color: isAgent ? CHAT.textPrimary : "inherit",
+                        }),
+                    display: "inline-block",
+                    maxWidth: "100%",
+                    verticalAlign: "baseline",
+                    boxSizing: "border-box",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-all",
+                    overflowWrap: "anywhere",
+                  }}
                 >
                   {children}
-                </code>
+                </Box>
               );
             },
             p({ children }) {
@@ -1482,10 +1590,70 @@ export function Chat({ sessionId }: ChatProps) {
                     lineHeight: isAgent ? 1.45 : 1.7,
                     fontSize: isAgent ? 13 : undefined,
                     color: isAgent ? CHAT.textPrimary : undefined,
+                    maxWidth: "100%",
+                    // 无空格超长串（如蛋白序列）也可在容器内折行
+                    overflowWrap: "anywhere",
+                    wordBreak: "break-word",
                   }}
                 >
                   {children}
                 </Typography>
+              );
+            },
+            a({ href, children }) {
+              return (
+                <Typography
+                  component="a"
+                  href={href ?? "#"}
+                  sx={{
+                    color: isAgent ? CHAT.accent : "primary.main",
+                    overflowWrap: "anywhere",
+                    wordBreak: "break-all",
+                  }}
+                >
+                  {children}
+                </Typography>
+              );
+            },
+            table({ children }) {
+              return (
+                <Box
+                  component="table"
+                  sx={{
+                    width: "100%",
+                    maxWidth: "100%",
+                    tableLayout: "fixed",
+                    borderCollapse: "collapse",
+                    my: 1,
+                    fontSize: isAgent ? 12 : undefined,
+                    "& th, & td": {
+                      border: `1px solid ${alpha(theme.palette.divider, 0.6)}`,
+                      px: 0.75,
+                      py: 0.5,
+                      wordBreak: "break-word",
+                      overflowWrap: "anywhere",
+                      verticalAlign: "top",
+                    },
+                  }}
+                >
+                  {children}
+                </Box>
+              );
+            },
+            img({ src, alt }) {
+              return (
+                <Box
+                  component="img"
+                  src={src}
+                  alt={alt ?? ""}
+                  sx={{
+                    display: "block",
+                    maxWidth: "100%",
+                    height: "auto",
+                    borderRadius: 1,
+                    my: 1,
+                  }}
+                />
               );
             },
             ul({ children }) {
@@ -1494,7 +1662,8 @@ export function Chat({ sessionId }: ChatProps) {
                   component="ul"
                   sx={{
                     my: 1,
-                    pl: 2,
+                    // 为默认 outside 序号/圆点留出左侧空间，避免被气泡 overflow 裁切
+                    pl: 3.5,
                     ...(isAgent
                       ? { color: CHAT.textPrimary, fontSize: 13 }
                       : {}),
@@ -1510,7 +1679,7 @@ export function Chat({ sessionId }: ChatProps) {
                   component="ol"
                   sx={{
                     my: 1,
-                    pl: 2,
+                    pl: 3.5,
                     ...(isAgent
                       ? { color: CHAT.textPrimary, fontSize: 13 }
                       : {}),
@@ -1522,10 +1691,22 @@ export function Chat({ sessionId }: ChatProps) {
             },
             li({ children }) {
               return (
-                <Box component="li" sx={{ my: 0.5 }}>
+                <Box
+                  component="li"
+                  sx={{
+                    display: "list-item",
+                    my: 0.5,
+                    maxWidth: "100%",
+                  }}
+                >
                   <Typography
                     variant="body1"
-                    sx={isAgent ? { fontSize: 13, lineHeight: 1.45 } : {}}
+                    sx={{
+                      maxWidth: "100%",
+                      overflowWrap: "anywhere",
+                      wordBreak: "break-word",
+                      ...(isAgent ? { fontSize: 13, lineHeight: 1.45 } : {}),
+                    }}
                   >
                     {children}
                   </Typography>
@@ -1598,7 +1779,7 @@ export function Chat({ sessionId }: ChatProps) {
                       ? "transparent"
                       : alpha(theme.palette.primary.main, 0.05),
                     py: 1,
-                    borderRadius: "0 8px 8px 0",
+                    borderRadius: `0 ${MD_BLOCK_RADIUS_PX}px ${MD_BLOCK_RADIUS_PX}px 0`,
                     ...(isAgent ? { color: CHAT.textMuted, fontSize: 13 } : {}),
                   }}
                 >
@@ -1764,7 +1945,9 @@ export function Chat({ sessionId }: ChatProps) {
           <Box
             sx={{
               flex: 1,
-              overflow: "auto",
+              minWidth: 0,
+              overflowY: "auto",
+              overflowX: "hidden",
               p: 3,
               display: "flex",
               flexDirection: "column",
@@ -1810,42 +1993,23 @@ export function Chat({ sessionId }: ChatProps) {
                   <Fade in key={id} timeout={300}>
                     <Box
                       sx={{
-                        display: "flex",
-                        flexDirection: "row",
-                        alignItems: "flex-start",
-                        gap: 1.25,
                         width: "100%",
+                        minWidth: 0,
                         maxWidth: "100%",
-                        pr: `${MESSAGE_OUTSIDE_GUTTER_PX}px`,
                       }}
                     >
                       <Box
                         sx={{
-                          width: AVATAR_PX,
-                          height: AVATAR_PX,
-                          borderRadius: "50%",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          flexShrink: 0,
-                          mt: 0.25,
-                          bgcolor: CHAT.agentAvatarBg,
-                          color: CHAT.toolIcon,
-                        }}
-                      >
-                        <AgentCpuIcon sx={{ fontSize: 18 }} />
-                      </Box>
-
-                      <Box
-                        sx={{
-                          flex: 1,
+                          width: "100%",
                           minWidth: 0,
-                          borderRadius: "18px",
+                          maxWidth: "100%",
+                          borderRadius: `${BUBBLE_RADIUS_PX}px`,
                           bgcolor: CHAT.agentBubbleBg,
                           border: `1px solid ${CHAT.agentBubbleBorder}`,
                           px: 1.75,
                           py: 1.25,
                           fontFamily: CHAT.font,
+                          overflow: "hidden",
                         }}
                       >
                         <Stack
@@ -1856,6 +2020,7 @@ export function Chat({ sessionId }: ChatProps) {
                           sx={{
                             cursor: "pointer",
                             userSelect: "none",
+                            minWidth: 0,
                           }}
                         >
                           <ExpandMore
@@ -1873,6 +2038,9 @@ export function Chat({ sessionId }: ChatProps) {
                               fontSize: 12,
                               color: CHAT.textMuted,
                               flex: 1,
+                              minWidth: 0,
+                              overflowWrap: "anywhere",
+                              wordBreak: "break-word",
                             }}
                           >
                             {summary}
@@ -2116,10 +2284,12 @@ export function Chat({ sessionId }: ChatProps) {
                                                   sx={{
                                                     borderRadius: "6px",
                                                     border: `1px solid ${CHAT.agentBubbleBorder}`,
-                                                    bgcolor: CHAT.codeBg,
+                                                    bgcolor: "transparent",
                                                     p: 1,
                                                     maxHeight: 200,
-                                                    overflow: "auto",
+                                                    maxWidth: "100%",
+                                                    overflowY: "auto",
+                                                    overflowX: "hidden",
                                                   }}
                                                 >
                                                   <Typography
@@ -2159,7 +2329,9 @@ export function Chat({ sessionId }: ChatProps) {
                                                     bgcolor: CHAT.outputBg,
                                                     p: 1,
                                                     maxHeight: 320,
-                                                    overflow: "auto",
+                                                    maxWidth: "100%",
+                                                    overflowY: "auto",
+                                                    overflowX: "hidden",
                                                   }}
                                                 >
                                                   <Typography
@@ -2256,61 +2428,27 @@ export function Chat({ sessionId }: ChatProps) {
                     <Box
                       sx={{
                         display: "flex",
-                        flexDirection:
-                          message.role === "user" ? "row-reverse" : "row",
-                        alignItems: "flex-start",
-                        gap: 1.25,
+                        justifyContent:
+                          message.role === "user" ? "flex-end" : "flex-start",
                         width: "100%",
+                        minWidth: 0,
                         maxWidth: "100%",
-                        pl:
-                          message.role === "user"
-                            ? `${MESSAGE_OUTSIDE_GUTTER_PX}px`
-                            : 0,
-                        pr:
-                          message.role === "user"
-                            ? 0
-                            : `${MESSAGE_OUTSIDE_GUTTER_PX}px`,
                       }}
                     >
-                      <Box
-                        sx={{
-                          width: AVATAR_PX,
-                          height: AVATAR_PX,
-                          borderRadius: "50%",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          flexShrink: 0,
-                          mt: 0.25,
-                          bgcolor:
-                            message.role === "user"
-                              ? alpha(theme.palette.primary.main, 0.12)
-                              : CHAT.agentAvatarBg,
-                          color:
-                            message.role === "user"
-                              ? "primary.main"
-                              : CHAT.accent,
-                        }}
-                      >
-                        {message.role === "user" ? (
-                          <Person sx={{ fontSize: 18 }} />
-                        ) : (
-                          <AgentCpuIcon sx={{ fontSize: 18 }} />
-                        )}
-                      </Box>
-
                       {message.role === "user" ? (
                         <Box
                           sx={{
-                            maxWidth: "min(720px, 100%)",
+                            minWidth: 0,
+                            width: "fit-content",
+                            maxWidth: USER_BUBBLE_MAX_CSS,
                             px: 1.75,
                             py: 1.25,
-                            borderRadius: "18px",
+                            borderRadius: `${BUBBLE_RADIUS_PX}px`,
+                            border: `1px solid ${CHAT.userBubbleBorder}`,
                             background: CHAT.userGrad,
-                            color: theme.palette.getContrastText(
-                              theme.palette.primary.main,
-                            ),
+                            color: CHAT.userBubbleText,
                             fontFamily: CHAT.font,
+                            overflow: "hidden",
                           }}
                         >
                           <Typography
@@ -2319,6 +2457,7 @@ export function Chat({ sessionId }: ChatProps) {
                               lineHeight: 1.45,
                               whiteSpace: "pre-wrap",
                               wordBreak: "break-word",
+                              overflowWrap: "anywhere",
                             }}
                           >
                             {message.content}
@@ -2327,15 +2466,16 @@ export function Chat({ sessionId }: ChatProps) {
                       ) : (
                         <Box
                           sx={{
-                            flex: 1,
+                            width: "100%",
                             minWidth: 0,
                             maxWidth: "100%",
                             px: 1.75,
                             py: 1.25,
-                            borderRadius: "18px",
+                            borderRadius: `${BUBBLE_RADIUS_PX}px`,
                             bgcolor: CHAT.agentBubbleBg,
                             border: `1px solid ${CHAT.agentBubbleBorder}`,
                             fontFamily: CHAT.font,
+                            overflow: "hidden",
                           }}
                         >
                           {renderMessageContent(message.content, "agent")}
@@ -2352,59 +2492,89 @@ export function Chat({ sessionId }: ChatProps) {
               <Fade in timeout={200}>
                 <Box
                   sx={{
-                    display: "flex",
-                    alignItems: "flex-start",
-                    gap: 1.25,
                     width: "100%",
-                    pr: `${MESSAGE_OUTSIDE_GUTTER_PX}px`,
+                    minWidth: 0,
+                    maxWidth: "100%",
+                    px: 1.75,
+                    py: 1.25,
+                    borderRadius: `${BUBBLE_RADIUS_PX}px`,
+                    bgcolor: CHAT.agentBubbleBg,
+                    border: `1px solid ${CHAT.agentBubbleBorder}`,
+                    fontFamily: CHAT.font,
+                    overflow: "hidden",
                   }}
                 >
+                  {renderMessageContent(currentResponse, "agent")}
                   <Box
+                    component="span"
                     sx={{
-                      width: AVATAR_PX,
-                      height: AVATAR_PX,
-                      borderRadius: "50%",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      bgcolor: CHAT.agentAvatarBg,
-                      color: CHAT.accent,
-                      flexShrink: 0,
-                      mt: 0.25,
+                      display: "inline-block",
+                      width: 8,
+                      height: 16,
+                      bgcolor: CHAT.accent,
+                      ml: 0.5,
+                      animation: "pulse 1s ease-in-out infinite",
+                      "@keyframes pulse": {
+                        "0%, 100%": { opacity: 1 },
+                        "50%": { opacity: 0.3 },
+                      },
                     }}
-                  >
-                    <AgentCpuIcon sx={{ fontSize: 18 }} />
-                  </Box>
-                  <Box
-                    sx={{
-                      flex: 1,
-                      minWidth: 0,
-                      maxWidth: "100%",
-                      px: 1.75,
-                      py: 1.25,
-                      borderRadius: "18px",
-                      bgcolor: CHAT.agentBubbleBg,
-                      border: `1px solid ${CHAT.agentBubbleBorder}`,
-                      fontFamily: CHAT.font,
-                    }}
-                  >
-                    {renderMessageContent(currentResponse, "agent")}
-                    <Box
-                      component="span"
+                  />
+                </Box>
+              </Fade>
+            )}
+
+            {/* Implicit Memory Indexing Status */}
+            {indexingStatus !== "idle" && !isStreaming && (
+              <Fade in timeout={300}>
+                <Box
+                  sx={{
+                    width: "100%",
+                    minWidth: 0,
+                    maxWidth: "100%",
+                    px: 1.5,
+                    py: 0.75,
+                    borderRadius: `${BUBBLE_RADIUS_PX}px`,
+                    bgcolor:
+                      indexingStatus === "error"
+                        ? alpha(theme.palette.error.main, 0.06)
+                        : alpha(theme.palette.success.main, 0.04),
+                    border: `1px solid ${
+                      indexingStatus === "error"
+                        ? alpha(theme.palette.error.main, 0.2)
+                        : alpha(theme.palette.success.main, 0.15)
+                    }`,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 1,
+                  }}
+                >
+                  {indexingStatus === "indexing" ? (
+                    <CircularProgress size={14} thickness={4} />
+                  ) : (
+                    <CheckIcon
                       sx={{
-                        display: "inline-block",
-                        width: 8,
-                        height: 16,
-                        bgcolor: CHAT.accent,
-                        ml: 0.5,
-                        animation: "pulse 1s ease-in-out infinite",
-                        "@keyframes pulse": {
-                          "0%, 100%": { opacity: 1 },
-                          "50%": { opacity: 0.3 },
-                        },
+                        fontSize: 16,
+                        color: "success.main",
                       }}
                     />
-                  </Box>
+                  )}
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color:
+                        indexingStatus === "error"
+                          ? "error.main"
+                          : "text.secondary",
+                      fontSize: "0.75rem",
+                    }}
+                  >
+                    {indexingStatus === "indexing"
+                      ? "正在更新隐性记忆索引..."
+                      : indexingStatus === "completed"
+                        ? "隐性记忆索引已更新"
+                        : "隐性记忆索引更新失败"}
+                  </Typography>
                 </Box>
               </Fade>
             )}
@@ -2444,7 +2614,7 @@ export function Chat({ sessionId }: ChatProps) {
             <Box
               sx={{
                 width: "100%",
-                maxWidth: "min(720px, 100%)",
+                maxWidth: USER_BUBBLE_MAX_CSS,
                 mx: "auto",
               }}
             >

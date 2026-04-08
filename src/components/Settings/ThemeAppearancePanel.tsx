@@ -5,6 +5,7 @@ import {
   Typography,
   alpha,
   useTheme,
+  type Theme,
 } from "@mui/material";
 import {
   DarkMode,
@@ -13,10 +14,10 @@ import {
 } from "@mui/icons-material";
 import type { ColorModePreference } from "../../state/themeStore";
 import {
-  ACCENT_PICKER_SURFACES,
   ACCENT_PRESET_IDS,
   ACCENT_PRESET_META,
-  COLOR_MODE_PICKER_SURFACES,
+  getAccentSwatchGradient,
+  getColorModePickerGradient,
   type AccentPresetId,
 } from "../../theme/accentPresets";
 
@@ -59,6 +60,27 @@ function glassPanelSx(isDark: boolean) {
   } as const;
 }
 
+/** Shared selected / idle / hover shadows for appearance mode tiles and accent preset rows */
+function themePickCardShadow(
+  theme: Theme,
+  isDark: boolean,
+  selected: boolean,
+  hover: boolean,
+): string {
+  const p = theme.palette.primary.main;
+  if (selected) {
+    return hover
+      ? `0 0 0 2px ${p}, 0 18px 40px ${alpha(p, 0.3)}`
+      : `0 0 0 2px ${p}, 0 12px 28px ${alpha(p, 0.22)}`;
+  }
+  return hover
+    ? `0 1px 0 ${alpha("#000", 0.08)}, 0 14px 36px ${alpha("#000", isDark ? 0.45 : 0.14)}`
+    : `0 1px 0 ${alpha("#000", 0.06)}, 0 8px 24px ${alpha("#000", isDark ? 0.35 : 0.08)}`;
+}
+
+const pickCardTransition =
+  "box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1), transform 0.2s cubic-bezier(0.4, 0, 0.2, 1)";
+
 export function ThemeAppearancePanel({
   colorMode,
   onColorModeChange,
@@ -88,7 +110,6 @@ export function ThemeAppearancePanel({
           {MODE_ORDER.map((mode) => {
             const selected = colorMode === mode;
             const Icon = MODE_ICONS[mode];
-            const surf = COLOR_MODE_PICKER_SURFACES[mode];
             return (
               <Grid item xs={12} sm={4} key={mode}>
                 <Box
@@ -107,22 +128,17 @@ export function ThemeAppearancePanel({
                     overflow: "hidden",
                     position: "relative",
                     minHeight: 112,
-                    background: surf.gradient,
-                    boxShadow: selected
-                      ? `0 0 0 2px ${theme.palette.primary.main}, 0 12px 28px ${alpha(theme.palette.primary.main, 0.22)}`
-                      : `0 1px 0 ${alpha("#000", 0.06)}, 0 8px 24px ${alpha("#000", isDark ? 0.35 : 0.08)}`,
-                    transform: selected ? "translateY(-1px)" : "translateZ(0)",
-                    transition:
-                      "box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1), transform 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+                    background: getColorModePickerGradient(mode),
+                    boxShadow: themePickCardShadow(theme, isDark, selected, false),
+                    transform: "translateZ(0)",
+                    transition: pickCardTransition,
                     "@media (prefers-reduced-motion: reduce)": {
                       transition: "none",
                       "&:hover": { transform: "none" },
                     },
                     "&:hover": {
                       transform: "translateY(-3px)",
-                      boxShadow: selected
-                        ? `0 0 0 2px ${theme.palette.primary.main}, 0 18px 40px ${alpha(theme.palette.primary.main, 0.3)}`
-                        : `0 1px 0 ${alpha("#000", 0.08)}, 0 14px 36px ${alpha("#000", isDark ? 0.45 : 0.14)}`,
+                      boxShadow: themePickCardShadow(theme, isDark, selected, true),
                     },
                     "&:active": {
                       transform: "translateY(-1px)",
@@ -191,8 +207,7 @@ export function ThemeAppearancePanel({
         <Stack spacing={1.75}>
           {ACCENT_PRESET_IDS.map((id) => {
             const meta = ACCENT_PRESET_META[id];
-            const surfaces = ACCENT_PICKER_SURFACES[id];
-            const bg = isDark ? surfaces.gradientDark : surfaces.gradientLight;
+            const bg = getAccentSwatchGradient(id, isDark ? "dark" : "light");
             const selected = accentPreset === id;
             return (
               <Box
@@ -212,21 +227,16 @@ export function ThemeAppearancePanel({
                   overflow: "hidden",
                   position: "relative",
                   background: bg,
-                  boxShadow: selected
-                    ? `0 0 0 2px ${theme.palette.primary.main}, 0 14px 32px ${alpha(theme.palette.primary.main, 0.2)}`
-                    : `0 1px 0 ${alpha("#000", 0.05)}, 0 10px 28px ${alpha("#000", isDark ? 0.4 : 0.07)}`,
-                  transform: selected ? "translateY(-1px)" : "translateZ(0)",
-                  transition:
-                    "box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1), transform 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+                  boxShadow: themePickCardShadow(theme, isDark, selected, false),
+                  transform: "translateZ(0)",
+                  transition: pickCardTransition,
                   "@media (prefers-reduced-motion: reduce)": {
                     transition: "none",
                     "&:hover": { transform: "none" },
                   },
                   "&:hover": {
                     transform: "translateY(-3px)",
-                    boxShadow: selected
-                      ? `0 0 0 2px ${theme.palette.primary.main}, 0 20px 44px ${alpha(theme.palette.primary.main, 0.28)}`
-                      : `0 1px 0 ${alpha("#000", 0.06)}, 0 16px 40px ${alpha("#000", isDark ? 0.48 : 0.12)}`,
+                    boxShadow: themePickCardShadow(theme, isDark, selected, true),
                   },
                   "&:active": {
                     transform: "translateY(-1px)",
@@ -246,6 +256,7 @@ export function ThemeAppearancePanel({
                     ...glassPanelSx(isDark),
                     p: 2,
                     gap: 2,
+                    pr: selected ? { xs: 9, sm: 10 } : 2,
                   }}
                 >
                   <Box
@@ -294,8 +305,10 @@ export function ThemeAppearancePanel({
                   {selected && (
                     <Box
                       sx={{
-                        alignSelf: { xs: "flex-start", sm: "flex-start" },
-                        flexShrink: 0,
+                        position: "absolute",
+                        top: 12,
+                        right: 12,
+                        zIndex: 1,
                         px: 1.25,
                         py: 0.35,
                         borderRadius: 10,

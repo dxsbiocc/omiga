@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import CssBaseline from "@mui/material/CssBaseline";
+import GlobalStyles from "@mui/material/GlobalStyles";
 import { ThemeProvider, createTheme } from "@mui/material/styles";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getTheme } from "../theme";
-import { getAccentPresetOptions } from "../theme/accentPresets";
+import {
+  getAccentPresetOptions,
+  getAccentSwatchGradient,
+} from "../theme/accentPresets";
 import { useColorModeStore } from "../state/themeStore";
 
 function useSystemPrefersDark(): boolean {
@@ -44,6 +49,11 @@ export function AppThemeProvider({ children }: { children: ReactNode }) {
     [resolvedMode, accentPreset],
   );
 
+  const accentShellGradient = useMemo(
+    () => getAccentSwatchGradient(accentPreset, resolvedMode),
+    [accentPreset, resolvedMode],
+  );
+
   useEffect(() => {
     document.documentElement.style.colorScheme = resolvedMode;
   }, [resolvedMode]);
@@ -56,5 +66,36 @@ export function AppThemeProvider({ children }: { children: ReactNode }) {
       });
   }, [resolvedMode]);
 
-  return <ThemeProvider theme={muiTheme}>{children}</ThemeProvider>;
+  return (
+    <ThemeProvider theme={muiTheme}>
+      {/*
+        CssBaseline must run before our shell GlobalStyles so body typography/color
+        and backgroundColor come from the same merged theme; gradient layers on top.
+      */}
+      <CssBaseline />
+      <GlobalStyles
+        styles={(theme) => ({
+          html: {
+            minHeight: "100%",
+            background: accentShellGradient,
+            backgroundAttachment: "fixed",
+            backgroundColor: theme.palette.background.default,
+          },
+          body: {
+            minHeight: "100%",
+            background: accentShellGradient,
+            backgroundAttachment: "fixed",
+            backgroundColor: theme.palette.background.default,
+          },
+          "#root": {
+            minHeight: "100%",
+            background: accentShellGradient,
+            backgroundAttachment: "fixed",
+            backgroundColor: theme.palette.background.default,
+          },
+        })}
+      />
+      {children}
+    </ThemeProvider>
+  );
 }

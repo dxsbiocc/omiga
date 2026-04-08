@@ -36,19 +36,9 @@ const CATALOG_TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Build catalog (MCP parallel + skills from disk). Used by the command and startup warm task.
 pub(crate) async fn build_integrations_catalog(
-    app_state: &OmigaAppState,
+    _app_state: &OmigaAppState,
     root: PathBuf,
 ) -> CommandResult<IntegrationsCatalog> {
-    let include_claude_user_skills = {
-        let repo = app_state.repo.lock().await;
-        match repo
-            .get_setting(skills::SETTING_KEY_LOAD_CLAUDE_USER_SKILLS)
-            .await
-        {
-            Ok(v) => skills::parse_load_claude_user_skills_setting(v.as_deref()),
-            Err(_) => false,
-        }
-    };
     let cfg = integrations_config::load_integrations_config(&root);
 
     let merged = merged_mcp_servers(&root);
@@ -112,7 +102,7 @@ pub(crate) async fn build_integrations_catalog(
     // Re-sort by config_key after parallel collection.
     mcp_servers.sort_by(|a, b| a.config_key.cmp(&b.config_key));
 
-    let skill_list = skills::load_skills_for_project(&root, include_claude_user_skills).await;
+    let skill_list = skills::load_skills_for_project(&root).await;
     let skills_out: Vec<SkillCatalogEntry> = skill_list
         .into_iter()
         .map(|e| {
@@ -199,6 +189,16 @@ pub fn save_integrations_state(
     integrations_config::save_integrations_config(&root, &config)
         .map_err(|e| crate::errors::AppError::Config(e))?;
     invalidate_integrations_catalog_cache(&app_state, &root);
+    // MCP enable/disable changes invalidate the tool schema cache and connection pool.
+    if let Ok(mut cache) = app_state.chat.mcp_tool_cache.try_lock() {
+        cache.remove(&root);
+    }
+    // Evict all pooled connections for this project so they are re-established with
+    // the updated enabled/disabled config on the next tool call.
+    if let Ok(mut pool) = app_state.chat.mcp_connections.try_lock() {
+        let prefix = format!("{}::", root.display());
+        pool.retain(|k, _| !k.starts_with(&prefix));
+    }
     Ok(())
 }
 

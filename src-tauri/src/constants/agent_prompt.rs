@@ -35,6 +35,7 @@ fn section_using_tools() -> String {
 - Reserve using `bash` exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fall back on `bash` when it is absolutely necessary.
 - Break down and manage your work with the `todo_write` tool. Mark each task completed as soon as you are done; do not batch multiple tasks before updating status.
 - You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. If some tool calls depend on previous calls, run them sequentially.
+- **Maximize parallelism for I/O-bound operations**: search, fetch, and file read operations are fully parallelizable. Issue ALL independent queries in one response block — never wait for one to finish before starting another. Examples: (1) Literature search: issue PubMed + bioRxiv + Tavily queries together in a single response, then parse all results in the next response. (2) Multi-keyword search: issue all keyword variants simultaneously. (3) URL parsing: fetch multiple URLs in one response block. (4) File inspection: read multiple files at once. The total latency equals the slowest single call, not the sum of all calls.
 
 ### Data processing and analysis (Python / R)
 

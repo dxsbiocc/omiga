@@ -11,12 +11,12 @@ pub mod integrations_settings;
 pub mod fs;
 pub mod notebook;
 pub mod git_workspace;
+pub mod memory;
 pub mod permissions;
 pub mod search;
 pub mod session;
 pub mod shell;
 pub mod tools;
-pub mod wiki;
 
 use crate::errors::AppError;
 

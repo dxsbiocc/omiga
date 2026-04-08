@@ -78,6 +78,7 @@ hmac = "0.12"
 sha1 = "0.10"  # For HMAC signing
 dirs = "5"
 serde_yaml = "0.9"
+pulldown-cmark = "0.9"
 shell-words = "1.1"
 toml = "0.8"
 tauri-plugin-dialog = "2.0.0-rc.8"

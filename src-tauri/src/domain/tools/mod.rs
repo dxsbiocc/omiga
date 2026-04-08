@@ -721,6 +721,7 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
             | "web_search"
             | "ToolSearch"
             | "tool_search"
+            | "list_skills"  // read-only metadata scan
     )
 }
 
