@@ -6,6 +6,7 @@
 
 use crate::domain::chat_state::ChatState;
 use crate::domain::integrations_catalog::IntegrationsCatalog;
+use crate::domain::integrations_config::IntegrationsConfig;
 use crate::domain::skills::SkillCacheMap;
 use crate::commands::CommandResult;
 use crate::domain::persistence::SessionRepository;
@@ -14,9 +15,17 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::State;
 use tokio::sync::Mutex;
+
+/// TTL for the integrations config cache. Short enough to pick up edits quickly.
+pub const INTEGRATIONS_CONFIG_CACHE_TTL: Duration = Duration::from_secs(30);
+
+pub struct IntegrationsConfigCacheSlot {
+    pub config: IntegrationsConfig,
+    pub cached_at: Instant,
+}
 
 /// Process-wide state (managed once in `lib.rs`).
 pub struct OmigaAppState {
@@ -30,6 +39,9 @@ pub struct OmigaAppState {
     /// Process-level skill cache: keyed by resolved project root.
     /// Invalidated automatically via directory mtime stamps — no explicit flush needed.
     pub skill_cache: Arc<StdMutex<SkillCacheMap>>,
+    /// Process-level integrations config cache: keyed by resolved project root.
+    /// Short TTL (30 s) to pick up config edits promptly.
+    pub integrations_config_cache: Arc<StdMutex<HashMap<PathBuf, IntegrationsConfigCacheSlot>>>,
 }
 
 impl OmigaAppState {
@@ -40,6 +52,7 @@ impl OmigaAppState {
             started_at: Instant::now(),
             integrations_catalog_cache: Arc::new(StdMutex::new(HashMap::new())),
             skill_cache: Arc::new(StdMutex::new(SkillCacheMap::default())),
+            integrations_config_cache: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 }

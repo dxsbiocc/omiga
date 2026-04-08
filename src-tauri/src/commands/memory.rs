@@ -465,41 +465,27 @@ pub async fn get_memory_context(
     query: &str,
     limit: usize,
 ) -> Option<String> {
-    let config = MemorySystem::load_config(project_path).await.unwrap_or_default();
-    let implicit_path = config.implicit_path(project_path);
-    let tree_path = implicit_path.join("tree.json");
-    
-    if !tree_path.exists() {
-        return None;
-    }
-    
     let index_config = IndexConfig::default();
-    let pageindex = PageIndex::new(project_path, index_config);
-    
+    let mut pageindex = PageIndex::new(project_path, index_config);
+
+    // load_tree returns Ok(None) when no index exists — no pre-check needed.
+    match pageindex.load_tree().await {
+        Ok(Some(tree)) => {
+            *pageindex.tree_mut() = tree;
+        }
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load memory index tree; skipping context injection");
+            return None;
+        }
+    }
+
     let results = pageindex.query(query, limit).await.ok()?;
     if results.is_empty() {
         return None;
     }
-    
-    Some(format_results_as_context(&results))
-}
 
-fn format_results_as_context(results: &[QueryResult]) -> String {
-    let mut context = String::from("## Relevant Context from Project Files\n\n");
-    
-    for (i, result) in results.iter().enumerate() {
-        context.push_str(&format!("### {}. {}", i + 1, result.title));
-        
-        if !result.breadcrumb.is_empty() {
-            context.push_str(&format!(" (in: {})", result.breadcrumb.join(" > ")));
-        }
-        
-        context.push_str(&format!("\n*Source: `{}`*\n\n", result.path));
-        context.push_str(&result.excerpt);
-        context.push_str("\n\n---\n\n");
-    }
-    
-    context
+    Some(crate::domain::pageindex::QueryEngine::new().format_results_as_context(&results))
 }
 
 // ---------------------------------------------------------------------------

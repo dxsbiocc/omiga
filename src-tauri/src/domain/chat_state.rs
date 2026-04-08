@@ -1,14 +1,23 @@
 //! In-memory chat runtime state (LLM config, session cache, rounds, pending tools).
 //! Lives in `OmigaAppState` alongside the DB repo — backend analogue of chat runtime in AppStateStore.
 
-use crate::domain::mcp_client::McpLiveConnection;
 use crate::domain::session::{AgentTask, Session, TodoItem};
 use crate::domain::tools::ToolSchema;
+use crate::domain::mcp_connection_manager::GlobalMcpManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
+
+/// Cached permission deny entries for one project root.
+pub struct PermissionDenyCache {
+    pub entries: Vec<crate::domain::tool_permission_rules::DenyRuleEntry>,
+    pub cached_at: Instant,
+}
+
+/// TTL for permission deny rules. Short enough to pick up config edits quickly.
+pub const PERMISSION_DENY_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Cached result of `discover_mcp_tool_schemas` for one project root.
 pub struct McpToolCache {
@@ -34,10 +43,22 @@ pub struct ChatState {
     /// MCP tool schema cache keyed by project root. Avoids re-spawning MCP server
     /// processes on every `send_message` call (primary cause of slow first response).
     pub mcp_tool_cache: Arc<Mutex<HashMap<PathBuf, McpToolCache>>>,
-    /// Persistent MCP connections keyed by `"<project_root>/<server_name>"`.
-    /// Each entry keeps a live stdio process / HTTP session alive so tool calls
-    /// skip the spawn+handshake overhead (~0.5–3 s per server per call).
-    pub mcp_connections: Arc<Mutex<HashMap<String, McpLiveConnection>>>,
+    /// Managed MCP connection pool with session boundaries and lifecycle management.
+    /// 
+    /// Features:
+    /// - Session tracking: connections are tagged with session ID, stdio connections
+    ///   are refreshed on session change to avoid zombie processes
+    /// - Idle cleanup: connections idle > 5 minutes are automatically closed
+    /// - Config reload: new sessions pick up configuration changes
+    /// - Health checking: stdio process liveness is monitored
+    pub mcp_manager: Arc<GlobalMcpManager>,
+    /// Legacy connection pool (deprecated, will be removed after migration)
+    /// Kept for backwards compatibility during migration
+    #[deprecated(since = "0.x", note = "Use mcp_manager instead")]
+    pub _mcp_connections_legacy: Arc<Mutex<HashMap<String, ()>>>,
+    /// Cached permission deny rules keyed by project root. Avoids re-reading 4 settings
+    /// files synchronously on every `send_message` call.
+    pub permission_deny_cache: Arc<Mutex<HashMap<PathBuf, PermissionDenyCache>>>,
 }
 
 /// Runtime state for an active session. Chat transcript is persisted via messages;
@@ -81,7 +102,9 @@ impl Default for ChatState {
             active_rounds: Arc::new(Mutex::new(HashMap::new())),
             pending_tools: Arc::new(Mutex::new(HashMap::new())),
             mcp_tool_cache: Arc::new(Mutex::new(HashMap::new())),
-            mcp_connections: Arc::new(Mutex::new(HashMap::new())),
+            mcp_manager: Arc::new(GlobalMcpManager::new()),
+            _mcp_connections_legacy: Arc::new(Mutex::new(HashMap::new())),
+            permission_deny_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

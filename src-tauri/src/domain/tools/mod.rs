@@ -60,6 +60,10 @@ pub enum ToolKind {
     AskUserQuestion,
     ListMcpResources,
     ReadMcpResource,
+    #[serde(rename = "ListSkills")]
+    ListSkills,
+    #[serde(rename = "Skill")]
+    SkillInvoke,
     #[serde(rename = "Agent")]
     Agent,
     #[serde(rename = "SendUserMessage")]
@@ -102,6 +106,8 @@ impl fmt::Display for ToolKind {
             ToolKind::AskUserQuestion => write!(f, "ask_user_question"),
             ToolKind::ListMcpResources => write!(f, "list_mcp_resources"),
             ToolKind::ReadMcpResource => write!(f, "read_mcp_resource"),
+            ToolKind::ListSkills => write!(f, "ListSkills"),
+            ToolKind::SkillInvoke => write!(f, "Skill"),
             ToolKind::Agent => write!(f, "Agent"),
             ToolKind::SendUserMessage => write!(f, "SendUserMessage"),
             ToolKind::ExitPlanMode => write!(f, "ExitPlanMode"),
@@ -136,6 +142,10 @@ pub enum Tool {
     AskUserQuestion(ask_user_question::AskUserQuestionArgs),
     ListMcpResources(list_mcp_resources::ListMcpResourcesArgs),
     ReadMcpResource(read_mcp_resource::ReadMcpResourceArgs),
+    #[serde(rename = "ListSkills")]
+    ListSkills(list_skills::ListSkillsArgs),
+    #[serde(rename = "Skill")]
+    SkillInvoke(skill_invoke::SkillInvokeArgs),
     Agent(agent::AgentArgs),
     SendUserMessage(send_user_message::SendUserMessageArgs),
     ExitPlanMode(exit_plan_mode::ExitPlanModeArgs),
@@ -169,6 +179,8 @@ impl Tool {
             Tool::AskUserQuestion(_) => ToolKind::AskUserQuestion,
             Tool::ListMcpResources(_) => ToolKind::ListMcpResources,
             Tool::ReadMcpResource(_) => ToolKind::ReadMcpResource,
+            Tool::ListSkills(_) => ToolKind::ListSkills,
+            Tool::SkillInvoke(_) => ToolKind::SkillInvoke,
             Tool::Agent(_) => ToolKind::Agent,
             Tool::SendUserMessage(_) => ToolKind::SendUserMessage,
             Tool::ExitPlanMode(_) => ToolKind::ExitPlanMode,
@@ -201,6 +213,8 @@ impl Tool {
             Tool::AskUserQuestion(_) => "AskUserQuestion",
             Tool::ListMcpResources(_) => "ListMcpResources",
             Tool::ReadMcpResource(_) => "ReadMcpResource",
+            Tool::ListSkills(_) => "ListSkills",
+            Tool::SkillInvoke(_) => "Skill",
             Tool::Agent(_) => "Agent",
             Tool::SendUserMessage(_) => "SendUserMessage",
             Tool::ExitPlanMode(_) => "ExitPlanMode",
@@ -233,6 +247,8 @@ impl Tool {
             Tool::AskUserQuestion(_) => ask_user_question::DESCRIPTION,
             Tool::ListMcpResources(_) => list_mcp_resources::DESCRIPTION,
             Tool::ReadMcpResource(_) => read_mcp_resource::DESCRIPTION,
+            Tool::ListSkills(_) => list_skills::DESCRIPTION,
+            Tool::SkillInvoke(_) => skill_invoke::DESCRIPTION,
             Tool::Agent(_) => agent::DESCRIPTION,
             Tool::SendUserMessage(_) => send_user_message::DESCRIPTION,
             Tool::ExitPlanMode(_) => exit_plan_mode::DESCRIPTION,
@@ -268,6 +284,16 @@ impl Tool {
             Tool::AskUserQuestion(args) => ask_user_question::AskUserQuestionTool::execute(ctx, args).await?,
             Tool::ListMcpResources(args) => list_mcp_resources::ListMcpResourcesTool::execute(ctx, args).await?,
             Tool::ReadMcpResource(args) => read_mcp_resource::ReadMcpResourceTool::execute(ctx, args).await?,
+            Tool::ListSkills(_) => {
+                return Err(ToolError::ExecutionFailed {
+                    message: "ListSkills execution not yet implemented".to_string(),
+                });
+            }
+            Tool::SkillInvoke(_) => {
+                return Err(ToolError::ExecutionFailed {
+                    message: "Skill invoke execution not yet implemented".to_string(),
+                });
+            }
             Tool::Agent(args) => agent::AgentTool::execute(ctx, args).await?,
             Tool::SendUserMessage(args) => send_user_message::SendUserMessageTool::execute(ctx, args).await?,
             Tool::ExitPlanMode(args) => exit_plan_mode::ExitPlanModeTool::execute(ctx, args).await?,
@@ -385,6 +411,20 @@ impl Tool {
                     })?;
                 Ok(Tool::ReadMcpResource(args))
             }
+            ToolKind::ListSkills => {
+                let args = serde_json::from_str(json)
+                    .map_err(|e| ToolError::InvalidArguments {
+                        message: format!("Invalid ListSkills arguments: {}", e),
+                    })?;
+                Ok(Tool::ListSkills(args))
+            }
+            ToolKind::SkillInvoke => {
+                let args = serde_json::from_str(json)
+                    .map_err(|e| ToolError::InvalidArguments {
+                        message: format!("Invalid SkillInvoke arguments: {}", e),
+                    })?;
+                Ok(Tool::SkillInvoke(args))
+            }
             ToolKind::Agent => {
                 let args = serde_json::from_str(json)
                     .map_err(|e| ToolError::InvalidArguments {
@@ -489,6 +529,8 @@ impl Tool {
             "ask_user_question" | "AskUserQuestion" => ToolKind::AskUserQuestion,
             "list_mcp_resources" | "ListMcpResourcesTool" => ToolKind::ListMcpResources,
             "read_mcp_resource" | "ReadMcpResourceTool" => ToolKind::ReadMcpResource,
+            "ListSkills" => ToolKind::ListSkills,
+            "Skill" => ToolKind::SkillInvoke,
             "Agent" | "Task" | "agent" => ToolKind::Agent,
             "SendUserMessage" | "Brief" | "send_user_message" => ToolKind::SendUserMessage,
             "ExitPlanMode" | "exit_plan_mode" => ToolKind::ExitPlanMode,

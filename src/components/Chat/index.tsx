@@ -2068,7 +2068,7 @@ export function Chat({ sessionId }: ChatProps) {
                               size="small"
                               icon={<CheckCircle fontSize="small" />}
                               label="Done"
-                              color="success"
+                              color="primary"
                               variant="outlined"
                               sx={{ height: 22, fontSize: 11 }}
                             />

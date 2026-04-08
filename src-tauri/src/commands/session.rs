@@ -305,6 +305,79 @@ pub async fn clear_session_messages(
     Ok(())
 }
 
+/// Refresh MCP connections for a new session or after /clear
+/// 
+/// This triggers session boundary detection in the MCP connection manager:
+/// - Stale connections (> 5 min idle) are closed
+/// - stdio connections from different sessions are reconnected (avoiding zombie processes)
+/// - Remote connections are health-checked
+/// - Configuration is reloaded to pick up changes
+#[tauri::command]
+pub async fn refresh_session_mcp_connections(
+    state: State<'_, AppState>,
+    session_id: String,
+    project_path: String,
+) -> CommandResult<McpRefreshResult> {
+    use std::path::PathBuf;
+
+    let project_root = PathBuf::from(project_path);
+    
+    // Get the manager for this project, which will trigger session refresh
+    let manager = state
+        .chat
+        .mcp_manager
+        .get_manager(project_root.clone(), session_id.clone())
+        .await;
+
+    // Refresh connections for the new session
+    manager.refresh_for_new_session(session_id.clone()).await;
+
+    // Get stats after refresh
+    let stats = manager.stats().await;
+
+    Ok(McpRefreshResult {
+        project_path: project_root.to_string_lossy().to_string(),
+        session_id,
+        connections_total: stats.total,
+        connections_stdio: stats.stdio,
+        connections_remote: stats.remote,
+        connections_idle_closed: stats.idle,
+    })
+}
+
+/// MCP refresh result statistics
+#[derive(Debug, Serialize, Deserialize)]
+pub struct McpRefreshResult {
+    pub project_path: String,
+    pub session_id: String,
+    pub connections_total: usize,
+    pub connections_stdio: usize,
+    pub connections_remote: usize,
+    pub connections_idle_closed: usize,
+}
+
+/// Get MCP connection statistics for all projects
+#[tauri::command]
+pub async fn get_mcp_connection_stats(
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<McpRefreshResult>> {
+    let all_stats = state.chat.mcp_manager.all_stats().await;
+
+    let results: Vec<McpRefreshResult> = all_stats
+        .into_iter()
+        .map(|(path, stats)| McpRefreshResult {
+            project_path: path.to_string_lossy().to_string(),
+            session_id: stats.current_session,
+            connections_total: stats.total,
+            connections_stdio: stats.stdio,
+            connections_remote: stats.remote,
+            connections_idle_closed: stats.idle,
+        })
+        .collect();
+
+    Ok(results)
+}
+
 /// Get or create settings value
 #[tauri::command]
 pub async fn get_setting(

@@ -1,32 +1,49 @@
 //! Dispatch `mcp__{server}__{tool}` invocations to MCP `tools/call` (Claude Code naming).
 //!
-//! Uses the process-wide [`McpLiveConnection`] pool stored in [`ChatState::mcp_connections`] to
-//! avoid spawning a new stdio process (or HTTP session) on every tool call.  On cache miss or
-//! closed connection the pool entry is transparently rebuilt.
+//! Uses the session-aware [`McpConnectionManager`] stored in [`ChatState::mcp_manager`] to
+//! avoid spawning a new stdio process (or HTTP session) on every tool call, while properly
+//! managing session boundaries and stdio process lifecycle to avoid zombie processes.
 
 use crate::domain::integrations_config;
 use crate::domain::mcp_client::{
-    call_tool_on_server, call_tool_via_peer, connect_mcp_server, McpLiveConnection,
+    call_tool_on_server, call_tool_via_peer, connect_mcp_server_legacy, McpLiveConnection,
 };
 use crate::domain::mcp_config::merged_mcp_servers;
 use crate::domain::mcp_names::{normalize_name_for_mcp, parse_mcp_tool_name};
+use crate::domain::mcp_connection_manager::GlobalMcpManager;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+/// Legacy connection pool type (for backwards compatibility)
+type LegacyConnectionPool = Arc<Mutex<HashMap<String, McpLiveConnection>>>;
+
 /// Run an MCP dynamic tool; returns JSON text for the model and whether the server marked an error.
 ///
-/// Pass the `connection_pool` from [`ChatState::mcp_connections`] to reuse live connections
-/// across calls (eliminates per-call spawn + handshake overhead).
-/// If `connection_pool` is `None` the function falls back to the legacy one-shot path.
+/// This function uses the session-aware connection manager which:
+/// - Reuses healthy connections across tool calls within the same session
+/// - Reconnects stdio processes on session boundaries (avoiding zombies)
+/// - Performs health checks on pooled connections
+/// - Falls back to one-shot on connection failure
+///
+/// # Arguments
+/// * `project_root` - Project root path
+/// * `full_tool_name` - Full tool name in format `mcp__{server}__{tool}`
+/// * `arguments_json` - JSON-encoded tool arguments
+/// * `timeout` - Tool execution timeout
+/// * `mcp_manager` - The global MCP connection manager (recommended)
+/// * `connection_pool` - Legacy connection pool (deprecated, use mcp_manager)
+/// * `session_id` - Current session ID for session boundary detection (required when using mcp_manager)
 pub async fn execute_mcp_tool_call(
     project_root: &Path,
     full_tool_name: &str,
     arguments_json: &str,
     timeout: Duration,
-    connection_pool: Option<Arc<Mutex<HashMap<String, McpLiveConnection>>>>,
+    mcp_manager: Option<Arc<GlobalMcpManager>>,
+    connection_pool: Option<LegacyConnectionPool>,
+    session_id: Option<String>,
 ) -> Result<(String, bool), String> {
     let (server_norm, tool_norm) = parse_mcp_tool_name(full_tool_name)
         .ok_or_else(|| format!("invalid MCP tool name: {full_tool_name}"))?;
@@ -56,7 +73,69 @@ pub async fn execute_mcp_tool_call(
         None => serde_json::Map::new(),
     };
 
-    // --- Pooled path ---
+    // --- Session-aware managed path (recommended) ---
+    if let (Some(manager), Some(session_id)) = (mcp_manager, session_id) {
+        let project_root_owned = project_root.to_path_buf();
+        
+        // Get or create manager for this project
+        let project_manager = manager
+            .get_manager(project_root_owned, session_id)
+            .await;
+
+        // Get connection (will auto-reconnect if needed based on session/health)
+        match project_manager.get_connection(&server_key, timeout).await {
+            Ok(conn) => {
+                let orig = conn
+                    .tool_name_map
+                    .get(&tool_norm)
+                    .cloned()
+                    .unwrap_or_else(|| tool_norm.clone());
+
+                let result = call_tool_via_peer(
+                    &conn.peer,
+                    &orig,
+                    Some(args_map.clone()),
+                    timeout,
+                )
+                .await;
+
+                match result {
+                    Ok(r) => {
+                        let is_err = r.is_error.unwrap_or(false);
+                        let text = serde_json::to_string_pretty(&r)
+                            .map_err(|e| e.to_string())?;
+                        return Ok((text, is_err));
+                    }
+                    Err(e) => {
+                        // Connection died mid-call, evict and retry with one-shot
+                        tracing::warn!(
+                            target: "omiga::mcp",
+                            server = %server_key,
+                            error = %e,
+                            "managed connection failed — evicting and retrying"
+                        );
+                        let _ = project_manager.reconnect_server(&server_key).await;
+                        return execute_one_shot(
+                            project_root, &server_key, &tool_norm, args_map, timeout,
+                        ).await;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "omiga::mcp",
+                    server = %server_key,
+                    error = %e,
+                    "managed connection failed — falling back to one-shot"
+                );
+                return execute_one_shot(
+                    project_root, &server_key, &tool_norm, args_map, timeout,
+                ).await;
+            }
+        }
+    }
+
+    // --- Legacy pooled path (deprecated) ---
     if let Some(pool) = connection_pool {
         let pool_key = format!("{}::{}", project_root.display(), server_key);
 
@@ -88,7 +167,7 @@ pub async fn execute_mcp_tool_call(
                 server = %server_key,
                 "MCP connection pool miss — connecting"
             );
-            match connect_mcp_server(project_root, &server_key, timeout).await {
+            match connect_mcp_server_legacy(project_root, &server_key, timeout).await {
                 Ok(conn) => {
                     let orig = conn
                         .tool_name_map

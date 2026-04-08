@@ -42,6 +42,7 @@ import {
   useChatComposerStore,
   type AgentComposerMode,
 } from "../../state";
+import { ProviderSwitcher } from "./ProviderSwitcher";
 
 export interface GitWorkspaceInfo {
   isGit: boolean;
@@ -785,6 +786,17 @@ export function ChatComposer({
               <ListItemText primary="远程" secondary="占位：后续对接远程环境" />
             </MenuItem>
           </Menu>
+
+          {/* Provider Switcher - Quick model selection */}
+          <ProviderSwitcher
+            onOpenSettings={() => {
+              // Dispatch event to open settings
+              const event = new CustomEvent("openSettings", {
+                detail: { tab: 0 },
+              });
+              window.dispatchEvent(event);
+            }}
+          />
         </Stack>
       </Stack>
     </Stack>

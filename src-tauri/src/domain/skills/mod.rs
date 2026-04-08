@@ -14,6 +14,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use tracing;
 
 const MAX_LISTING_DESC_CHARS: usize = 250;
 
@@ -137,6 +138,7 @@ pub struct SkillEntry {
     pub skill_dir: PathBuf,
     /// Where this skill was discovered from.
     pub source: SkillSource,
+    pub allowed_tools: Vec<String>,
 }
 
 fn skill_task_score(skill: &SkillEntry, tokens: &[String]) -> i32 {
@@ -302,12 +304,14 @@ async fn read_skill_entry(skill_dir: &Path, dir_name: &str, source: SkillSource)
         .description
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| fallback_description(&body));
+    let allowed_tools = yaml_string_or_list_to_strings(&fm.allowed_tools, true);
     Some(SkillEntry {
         name,
         description,
         when_to_use: fm.when_to_use.filter(|s| !s.is_empty()),
         skill_dir: skill_dir.to_path_buf(),
         source,
+        allowed_tools,
     })
 }
 
@@ -494,12 +498,14 @@ async fn try_load_skill_direct(
         let name = fm.name.filter(|s| !s.is_empty()).unwrap_or_else(|| dir_name.to_string());
         let description = fm.description.filter(|s| !s.is_empty())
             .unwrap_or_else(|| fallback_description(&body));
+        let allowed_tools = yaml_string_or_list_to_strings(&fm.allowed_tools, true);
         let entry = SkillEntry {
             name,
             description,
             when_to_use: fm.when_to_use.filter(|s| !s.is_empty()),
             skill_dir: skill_dir.to_path_buf(),
             source,
+            allowed_tools,
         };
         Some((entry, raw))
     }
@@ -642,10 +648,26 @@ pub async fn invoke_skill_detailed_with_cache(
     args: &str,
     preloaded_skills: Option<&[SkillEntry]>,
 ) -> Result<SkillInvokeOutput, String> {
+    // ========== Validation Phase (aligned with SkillTool.validateInput in TS) ==========
     let normalized = normalize_skill_name(raw_skill_name);
     if normalized.is_empty() {
-        return Err("Invalid skill format: empty name".to_string());
+        return Err("Error code 1: Invalid skill format: empty name".to_string());
     }
+
+    // Check for leading slash (accepted but stripped) - telemetry only
+    let had_leading_slash = raw_skill_name.trim().starts_with('/');
+    if had_leading_slash {
+        tracing::debug!(skill = %normalized, "Skill name had leading slash, stripped");
+    }
+
+    // Log skill invocation start (aligned with SkillTool telemetry)
+    let start_time = std::time::Instant::now();
+    tracing::info!(
+        skill = %normalized,
+        args_len = args.len(),
+        had_leading_slash,
+        "SkillTool invoking skill (start)"
+    );
 
     // Resolve skill entry + raw SKILL.md content (three paths, cheapest first):
     // 1. Preloaded list — no I/O; entry found, file read separately below.
@@ -656,7 +678,7 @@ pub async fn invoke_skill_detailed_with_cache(
     let direct_raw: String;
     let (entry, raw_opt): (&SkillEntry, Option<&str>) = if let Some(s) = preloaded_skills {
         let e = resolve_skill_entry(s, &normalized)
-            .ok_or_else(|| format!("Unknown skill: {normalized}"))?;
+            .ok_or_else(|| format!("Error code 2: Unknown skill: {normalized}"))?;
         (e, None)
     } else if let Some((e, r)) = try_load_skill_direct(project_root, &normalized).await {
         direct_entry = e;
@@ -665,7 +687,7 @@ pub async fn invoke_skill_detailed_with_cache(
     } else {
         owned_full = load_skills_for_project(project_root).await;
         let e = resolve_skill_entry(&owned_full, &normalized)
-            .ok_or_else(|| format!("Unknown skill: {normalized}"))?;
+            .ok_or_else(|| format!("Error code 2: Unknown skill: {normalized}"))?;
         (e, None)
     };
 
@@ -682,13 +704,15 @@ pub async fn invoke_skill_detailed_with_cache(
     };
     let (fm, body) = parse_frontmatter(raw)?;
 
+    // Check disable-model-invocation (Error code 4 in SkillTool)
     if fm.disable_model_invocation {
         return Err(format!(
-            "Skill {normalized} cannot be used with the skill tool due to disable-model-invocation"
+            "Error code 4: Skill {normalized} cannot be used with the skill tool due to disable-model-invocation"
         ));
     }
 
     let command_name = entry.name.clone();
+    let source = &entry.source;
     let allowed_tools = yaml_string_or_list_to_strings(&fm.allowed_tools, true);
     let arg_names = yaml_string_or_list_to_strings(&fm.arguments, false);
 
@@ -698,6 +722,15 @@ pub async fn invoke_skill_detailed_with_cache(
         .as_deref()
         .map(|c| c.eq_ignore_ascii_case("fork"))
         .unwrap_or(false);
+
+    tracing::info!(
+        skill = %command_name,
+        source = ?source,
+        is_fork,
+        has_allowed_tools = !allowed_tools.is_empty(),
+        has_model_override = fm.model.is_some(),
+        "Skill resolved, preparing execution"
+    );
 
     let mut md = format!("Base directory for this skill: {dir_str}\n\n{body}");
     md = md.replace("${CLAUDE_SKILL_DIR}", &dir_str);
@@ -745,6 +778,15 @@ pub async fn invoke_skill_detailed_with_cache(
         "inline"
     };
 
+    let duration_ms = start_time.elapsed().as_millis();
+    tracing::info!(
+        skill = %command_name,
+        status,
+        duration_ms,
+        result_len = body_for_model.len(),
+        "SkillTool skill invocation completed"
+    );
+
     Ok(SkillInvokeOutput {
         success: true,
         command_name: command_name.clone(),
@@ -773,6 +815,13 @@ pub async fn invoke_skill_with_cache(
     )
     .await?;
     Ok(out.formatted_tool_result)
+}
+
+/// Find a skill entry by name (exact match, case-insensitive).
+#[must_use]
+pub fn find_skill_entry<'a>(skills: &'a [SkillEntry], name: &str) -> Option<&'a SkillEntry> {
+    let normalized = name.trim().to_lowercase();
+    skills.iter().find(|e| e.name.trim().to_lowercase() == normalized)
 }
 
 #[cfg(test)]
@@ -852,6 +901,7 @@ Line $ARGUMENTS
                 when_to_use: None,
                 skill_dir: PathBuf::from("/tmp/a"),
                 source: SkillSource::OmigaProject,
+                allowed_tools: vec![],
             },
             SkillEntry {
                 name: "postgres-patterns".to_string(),
@@ -859,6 +909,7 @@ Line $ARGUMENTS
                 when_to_use: Some("database".to_string()),
                 skill_dir: PathBuf::from("/tmp/b"),
                 source: SkillSource::OmigaProject,
+                allowed_tools: vec![],
             },
         ];
         let json = list_skills_metadata_json(&skills, None, Some("postgres tuning"));

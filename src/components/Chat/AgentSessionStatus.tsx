@@ -4,10 +4,10 @@ import type { Theme } from "@mui/material/styles";
 import type { SvgIconComponent } from "@mui/icons-material";
 import {
   AutoAwesome,
+  Autorenew,
   Assignment,
   Build,
   CheckCircleOutline,
-  CloudSync,
   Construction,
   Description,
   EditNote,
@@ -64,10 +64,10 @@ function pickIconAndAccent(
     case "finished":
       return {
         Icon: CheckCircleOutline,
-        accent: theme.palette.success.main,
+        accent: theme.palette.primary.main,
       };
     case "waiting":
-      return { Icon: CloudSync, accent: theme.palette.info.main };
+      return { Icon: Autorenew, accent: theme.palette.primary.main };
     case "thinking":
       return { Icon: Psychology, accent: theme.palette.secondary.main };
     case "generating":
@@ -203,7 +203,7 @@ export function AgentSessionStatus({
             height: 8,
             borderRadius: "50%",
             flexShrink: 0,
-            bgcolor: busy ? accent : alpha(theme.palette.success.main, 0.45),
+            bgcolor: busy ? accent : alpha(accent, 0.45),
             boxShadow: busy
               ? `0 0 0 3px ${alpha(accent, 0.2)}`
               : `0 0 0 1px ${alpha(theme.palette.background.paper, 1)}`,

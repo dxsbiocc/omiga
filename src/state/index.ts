@@ -50,3 +50,12 @@ export {
   useNotebookViewerStore,
   type NotebookViewerState,
 } from "./notebookViewerStore";
+export {
+  useAgentStore,
+  type BackgroundAgentTask,
+  type BackgroundAgentStatus,
+  getAgentTypeDisplayName,
+  STATUS_COLORS,
+  STATUS_ICONS,
+  STATUS_LABELS,
+} from "./agentStore";

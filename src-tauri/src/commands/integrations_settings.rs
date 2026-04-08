@@ -195,7 +195,14 @@ pub fn save_integrations_state(
     }
     // Evict all pooled connections for this project so they are re-established with
     // the updated enabled/disabled config on the next tool call.
-    if let Ok(mut pool) = app_state.chat.mcp_connections.try_lock() {
+    // Using the new connection manager for proper lifecycle management.
+    let rt = tokio::runtime::Handle::current();
+    rt.block_on(async {
+        app_state.chat.mcp_manager.close_project_connections(&root).await;
+    });
+    // Legacy fallback (deprecated, will be removed)
+    #[allow(deprecated)]
+    if let Ok(mut pool) = app_state.chat._mcp_connections_legacy.try_lock() {
         let prefix = format!("{}::", root.display());
         pool.retain(|k, _| !k.starts_with(&prefix));
     }

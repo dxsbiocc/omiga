@@ -27,7 +27,6 @@ import {
   VisibilityOff,
   CheckCircle,
   OpenInNew,
-  PlayArrow,
   ArrowBack,
 } from "@mui/icons-material";
 import { useSessionStore } from "../../state/sessionStore";
@@ -38,6 +37,7 @@ import { ClaudeCodeImportPanel } from "./ClaudeCodeImportPanel";
 import { IntegrationsCatalogPanel } from "./IntegrationsCatalogPanel";
 import { UnifiedMemoryTab } from "./UnifiedMemoryTab";
 import { ThemeAppearancePanel } from "./ThemeAppearancePanel";
+import { ProviderManager } from "./ProviderManager";
 
 interface SettingsProps {
   open: boolean;
@@ -224,15 +224,6 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
     type: "success" | "error";
     text: string;
   } | null>(null);
-  const [isTesting, setIsTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{
-    available: boolean;
-    provider?: string;
-    model?: string;
-    latencyMs?: number;
-    error?: string;
-  } | null>(null);
-
   // Load saved config on mount
   useEffect(() => {
     loadSavedConfig();
@@ -480,57 +471,6 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
     }
   };
 
-  const handleTestModel = async () => {
-    if (!apiKey.trim()) {
-      setMessage({
-        type: "error",
-        text: "Please enter API key first",
-      });
-      return;
-    }
-
-    setIsTesting(true);
-    setTestResult(null);
-    setMessage(null);
-
-    try {
-      const result = await invoke<{
-        available: boolean;
-        provider?: string;
-        model?: string;
-        latency_ms?: number;
-        error?: string;
-      }>("test_model");
-
-      setTestResult({
-        available: result.available,
-        provider: result.provider,
-        model: result.model,
-        latencyMs: result.latency_ms,
-        error: result.error,
-      });
-
-      if (result.available) {
-        setMessage({
-          type: "success",
-          text: `Model available! Response time: ${result.latency_ms}ms`,
-        });
-      } else {
-        setMessage({
-          type: "error",
-          text: result.error || "Model test failed",
-        });
-      }
-    } catch (error) {
-      setMessage({
-        type: "error",
-        text: `Test failed: ${error}`,
-      });
-    } finally {
-      setIsTesting(false);
-    }
-  };
-
   const currentProvider = PROVIDERS[provider];
 
   if (!open) return null;
@@ -662,172 +602,13 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
                 "Settings"}
             </Typography>
             {activeTab === 0 && (
-              <Box>
-                {/* Provider Selection */}
-                <FormControl fullWidth sx={{ mb: 3 }}>
-                  <InputLabel id="provider-label">LLM Provider</InputLabel>
-                  <Select
-                    labelId="provider-label"
-                    value={provider}
-                    label="LLM Provider"
-                    onChange={handleProviderChange}
-                    disabled={isLoading}
-                  >
-                    {Object.entries(PROVIDERS).map(([key, config]) => (
-                      <MenuItem key={key} value={key}>
-                        {config.name}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-
-                {/* API Key */}
-                <TextField
-                  fullWidth
-                  type={showKey ? "text" : "password"}
-                  label="API Key"
-                  placeholder={currentProvider.placeholder}
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  disabled={isLoading}
-                  InputProps={{
-                    endAdornment: (
-                      <InputAdornment position="end">
-                        <IconButton
-                          onClick={() => setShowKey(!showKey)}
-                          edge="end"
-                          size="small"
-                        >
-                          {showKey ? <VisibilityOff /> : <Visibility />}
-                        </IconButton>
-                      </InputAdornment>
-                    ),
-                  }}
-                  sx={{ mb: 2 }}
-                />
-
-                {/* Secret Key (if required) */}
-                {currentProvider.requiresSecretKey && (
-                  <TextField
-                    fullWidth
-                    type={showSecret ? "text" : "password"}
-                    label="Secret Key"
-                    placeholder="Enter Secret Key"
-                    value={secretKey}
-                    onChange={(e) => setSecretKey(e.target.value)}
-                    disabled={isLoading}
-                    InputProps={{
-                      endAdornment: (
-                        <InputAdornment position="end">
-                          <IconButton
-                            onClick={() => setShowSecret(!showSecret)}
-                            edge="end"
-                            size="small"
-                          >
-                            {showSecret ? <VisibilityOff /> : <Visibility />}
-                          </IconButton>
-                        </InputAdornment>
-                      ),
-                    }}
-                    sx={{ mb: 2 }}
-                  />
-                )}
-
-                {/* App ID (if required) */}
-                {currentProvider.requiresAppId && (
-                  <TextField
-                    fullWidth
-                    label="App ID"
-                    placeholder="Enter App ID"
-                    value={appId}
-                    onChange={(e) => setAppId(e.target.value)}
-                    disabled={isLoading}
-                    sx={{ mb: 2 }}
-                  />
-                )}
-
-                {/* Model — required; switching provider pre-fills the suggested default */}
-                <TextField
-                  fullWidth
-                  required
-                  label="Model"
-                  placeholder={
-                    currentProvider.defaultModel
-                      ? `e.g. ${currentProvider.defaultModel}`
-                      : "Provider-specific model ID"
-                  }
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  disabled={isLoading}
-                  helperText={`Exact model name for ${currentProvider.name}. Switching provider fills a suggested default you can edit.`}
-                  sx={{ mb: 2 }}
-                />
-
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ display: "block", mb: 2 }}
-                >
-                  Your API key is stored locally and only sent to{" "}
-                  {currentProvider.name}&apos;s API servers.
-                </Typography>
-
-                {/* Saved Config Indicator */}
-                {savedConfig && (
-                  <Chip
-                    icon={<CheckCircle fontSize="small" />}
-                    label={`${PROVIDERS[savedConfig.provider]?.name || savedConfig.provider} configured`}
-                    size="small"
-                    color="success"
-                    variant="outlined"
-                    sx={{ mb: 2 }}
-                  />
-                )}
-
-                {testResult && (
-                  <Box sx={{ mb: 2 }}>
-                    {testResult.available ? (
-                      <Chip
-                        icon={<CheckCircle fontSize="small" />}
-                        label={`Model OK - ${testResult.latencyMs}ms`}
-                        size="small"
-                        color="success"
-                      />
-                    ) : (
-                      <Chip
-                        icon={<CheckCircle fontSize="small" />}
-                        label="Model unavailable"
-                        size="small"
-                        color="error"
-                        variant="outlined"
-                      />
-                    )}
-                  </Box>
-                )}
-
-                {/* Help Link */}
-                {currentProvider.docsUrl && (
-                  <>
-                    <Divider sx={{ my: 2 }} />
-                    <Typography variant="body2" color="text.secondary">
-                      Don&apos;t have an API key?{" "}
-                      <Link
-                        href={currentProvider.docsUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        sx={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: 0.5,
-                        }}
-                      >
-                        Get one from {currentProvider.name}
-                        <OpenInNew fontSize="inherit" />
-                      </Link>
-                    </Typography>
-                  </>
-                )}
-              </Box>
+              <ProviderManager
+                onActiveProviderChange={(provider, model) => {
+                  // Update local state for compatibility
+                  setProvider(provider);
+                  setModel(model);
+                }}
+              />
             )}
 
             {activeTab === 1 && (
@@ -1042,16 +823,6 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
                   Clear
                 </Button>
               )}
-              <Button
-                onClick={handleTestModel}
-                disabled={isLoading || !apiKey.trim() || isTesting}
-                variant="outlined"
-                startIcon={
-                  isTesting ? <CircularProgress size={16} /> : <PlayArrow />
-                }
-              >
-                {isTesting ? "Testing..." : "Test Model"}
-              </Button>
               <Button onClick={onClose} disabled={isLoading}>
                 Cancel
               </Button>

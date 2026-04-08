@@ -144,6 +144,11 @@ impl PageIndex {
         self.storage.load_tree().await
     }
 
+    /// Mutable access to the in-memory tree (allows callers to inject a loaded tree).
+    pub fn tree_mut(&mut self) -> &mut DocumentTree {
+        &mut self.tree
+    }
+
     /// Get statistics using a provided tree.
     pub fn stats_with_tree(&self, tree: &DocumentTree) -> IndexStats {
         IndexStats {

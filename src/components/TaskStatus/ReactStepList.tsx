@@ -6,6 +6,7 @@ import {
   ListItemText,
   Typography,
   CircularProgress,
+  useTheme,
 } from "@mui/material";
 import { CheckCircle, RadioButtonUnchecked } from "@mui/icons-material";
 import type { ExecutionStep } from "../../state/activityStore";
@@ -16,7 +17,6 @@ import {
 } from "../../utils/executionSurfaceLabel";
 
 const ACCENT = "#6366f1";
-const DONE = "#34C759";
 
 function stepLineLabel(step: ExecutionStep): string {
   if (step.id.startsWith("tool-")) {
@@ -40,6 +40,8 @@ export function ReactStepList({
   elapsedLabel,
   surfaceContext,
 }: ReactStepListProps) {
+  const theme = useTheme();
+  const doneColor = theme.palette.primary.main;
   if (steps.length === 0) return null;
 
   const current = getExecutionSurfacePrimaryLabel(steps, surfaceContext);
@@ -83,7 +85,7 @@ export function ReactStepList({
             <ListItem key={step.id} sx={{ py: 0.4, px: 0.5, alignItems: "flex-start" }}>
               <ListItemIcon sx={{ minWidth: 28, mt: 0.2 }}>
                 {isDone ? (
-                  <CheckCircle sx={{ fontSize: 16, color: DONE }} />
+                  <CheckCircle sx={{ fontSize: 16, color: doneColor }} />
                 ) : isRun ? (
                   <CircularProgress size={14} thickness={5} sx={{ color: ACCENT }} />
                 ) : (

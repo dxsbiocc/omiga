@@ -27,6 +27,7 @@ export type ChatTokenSet = {
   labelMuted: string;
   codeBg: string;
   outputBg: string;
+  /** Completed / "done" checkmarks in chat — theme primary */
   doneGreen: string;
 };
 
@@ -91,6 +92,6 @@ export function getChatTokens(theme: Theme): ChatTokenSet {
     labelMuted: p.text.disabled,
     codeBg,
     outputBg,
-    doneGreen: p.success.main,
+    doneGreen: p.primary.main,
   };
 }

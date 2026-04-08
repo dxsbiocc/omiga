@@ -16,6 +16,17 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
 
+use std::time::Instant;
+
+/// Connection type for lifecycle management
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpConnectionType {
+    /// Local stdio process (needs special lifecycle management)
+    Stdio,
+    /// Remote HTTP/SSE connection
+    Remote,
+}
+
 /// A live, reusable MCP connection.
 /// Keep this value alive (e.g. in a HashMap) to hold the background I/O pump open.
 /// Drop it to cancel the pump and (for stdio servers) kill the child process.
@@ -27,6 +38,17 @@ pub struct McpLiveConnection {
     /// Normalized-tool-name → original-server-tool-name map, built once on connect.
     /// Avoids calling `tools/list` on every tool invocation.
     pub tool_name_map: std::collections::HashMap<String, String>,
+    /// Connection type for lifecycle decisions
+    pub connection_type: McpConnectionType,
+    /// Last time this connection was used for a tool call
+    pub last_used: Instant,
+    /// Session ID that created this connection (for session boundary detection)
+    pub created_in_session: String,
+    /// For stdio connections: store the child process ID for health checks
+    #[cfg(unix)]
+    pub pid: Option<i32>,
+    #[cfg(windows)]
+    pub pid: Option<u32>,
 }
 
 impl McpLiveConnection {
@@ -34,18 +56,83 @@ impl McpLiveConnection {
     pub fn is_closed(&self) -> bool {
         self._running.is_closed()
     }
+
+    /// Update last_used timestamp
+    pub fn touch(&mut self) {
+        self.last_used = Instant::now();
+    }
+
+    /// Check if this connection was created in a different session
+    pub fn is_from_different_session(&self, current_session: &str) -> bool {
+        self.created_in_session != current_session
+    }
+
+    /// Check if this stdio process is still alive (platform-specific)
+    /// Note: Requires `libc` crate - simplified version always returns true for now
+    #[cfg(unix)]
+    pub fn is_process_alive(&self) -> bool {
+        // TODO: Implement using nix crate's kill function
+        // match self.pid {
+        //     None => false,
+        //     Some(_pid) => {
+        //         // Use nix::sys::signal::kill with signal 0 to check if process exists
+        //         // (doesn't actually send a signal)
+        //         matches!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None), Ok(()))
+        //     }
+        // }
+        true // Simplified: assume alive if connection struct exists
+    }
+
+    /// Check if this stdio process is still alive (Windows implementation)
+    #[cfg(windows)]
+    pub fn is_process_alive(&self) -> bool {
+        match self.pid {
+            None => false,
+            Some(pid) => {
+                use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+                use windows_sys::Win32::System::Threading::OpenProcess;
+                use windows_sys::Win32::System::Threading::PROCESS_QUERY_INFORMATION;
+                
+                unsafe {
+                    let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);
+                    if handle == INVALID_HANDLE_VALUE {
+                        return false;
+                    }
+                    CloseHandle(handle);
+                    true
+                }
+            }
+        }
+    }
+}
+
+/// Connection metadata returned when establishing a connection
+pub struct ConnectionMeta {
+    pub connection_type: McpConnectionType,
+    #[cfg(unix)]
+    pub pid: Option<i32>,
+    #[cfg(windows)]
+    pub pid: Option<u32>,
 }
 
 /// Establish a persistent connection to a named MCP server and eagerly fetch the tool list.
 /// Returns an [`McpLiveConnection`] whose lifetime controls the underlying process / HTTP session.
 /// The embedded `tool_name_map` lets callers resolve normalized → original tool names without
 /// a second round-trip.
+/// 
+/// # Arguments
+/// * `project_root` - Project root path for config resolution and working directory
+/// * `server_name` - Name of the MCP server to connect to
+/// * `timeout` - Connection and handshake timeout
+/// * `session_id` - Current session ID for session boundary tracking
 pub async fn connect_mcp_server(
     project_root: &Path,
     server_name: &str,
     timeout: Duration,
+    session_id: &str,
 ) -> Result<McpLiveConnection, String> {
     use crate::domain::mcp_names::normalize_name_for_mcp;
+    use crate::domain::mcp_config::McpServerConfig;
 
     let cfg = merged_mcp_servers(project_root)
         .remove(server_name)
@@ -54,6 +141,12 @@ pub async fn connect_mcp_server(
                 "MCP server \"{server_name}\" not found in merged Omiga MCP config (bundled defaults, ~/.omiga/mcp.json, <project>/.omiga/mcp.json)"
             )
         })?;
+
+    // Determine connection type before consuming cfg
+    let connection_type = match &cfg {
+        McpServerConfig::Stdio { .. } => McpConnectionType::Stdio,
+        McpServerConfig::Url(_) => McpConnectionType::Remote,
+    };
 
     let running = create_running_service(project_root, cfg, timeout).await?;
     let peer = running.peer().clone();
@@ -65,7 +158,30 @@ pub async fn connect_mcp_server(
         .map(|t| (normalize_name_for_mcp(t.name.as_ref()), t.name.to_string()))
         .collect();
 
-    Ok(McpLiveConnection { peer, _running: running, tool_name_map })
+    // TODO: Extract PID from running service for stdio connections
+    // This requires rmcp crate to expose the underlying child process
+    let pid = None;
+
+    Ok(McpLiveConnection { 
+        peer, 
+        _running: running, 
+        tool_name_map,
+        connection_type,
+        last_used: Instant::now(),
+        created_in_session: session_id.to_string(),
+        pid,
+    })
+}
+
+/// Legacy entry point without session tracking (for backwards compatibility)
+/// Prefer the new `connect_mcp_server` with session_id parameter
+pub async fn connect_mcp_server_legacy(
+    project_root: &Path,
+    server_name: &str,
+    timeout: Duration,
+) -> Result<McpLiveConnection, String> {
+    // Use a sentinel session ID for legacy calls
+    connect_mcp_server(project_root, server_name, timeout, "legacy").await
 }
 
 /// Call a tool using a pre-established peer (no new connection overhead).
