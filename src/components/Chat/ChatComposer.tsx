@@ -22,6 +22,7 @@ import {
   ListItemText,
   Divider,
   Typography,
+  Collapse,
   Select,
   FormControl,
   FormControlLabel,
@@ -52,6 +53,10 @@ import {
   Close,
   ArticleOutlined,
   InsertDriveFile,
+  Edit,
+  ArrowUpward,
+  DeleteOutline,
+  HourglassEmpty,
 } from "@mui/icons-material";
 import {
   useUiStore,
@@ -204,8 +209,18 @@ export interface ChatComposerProps {
   onFollowUpTaskIdChange?: (taskId: string | null) => void;
   /** When true, input stays enabled during main-session streaming (message queue + bg follow-up). */
   allowInputWhileStreaming?: boolean;
-  /** Preview of the FIFO queue (head and/or count) until each turn finishes and the next sends. */
-  queuedMessageHint?: string | null;
+  /** Main-session FIFO queue rows (while a turn is streaming). */
+  queuedMainMessages?: Array<{
+    id: string;
+    previewText: string;
+    /** Full merged text for tooltip */
+    fullText?: string;
+  }>;
+  /** Clear all messages waiting in the main-session FIFO queue (while streaming). */
+  onClearQueuedMessages?: () => void;
+  onRemoveQueuedAt?: (index: number) => void;
+  onMoveQueuedUp?: (index: number) => void;
+  onEditQueuedAt?: (index: number) => void;
   /** Cancel a pending/running background Agent task (Rust `cancel_background_agent_task`). */
   onCancelBackgroundTask?: (taskId: string) => void;
   /** Open sidechain transcript drawer (`load_background_agent_transcript`). */
@@ -228,7 +243,11 @@ export function ChatComposer({
   followUpTaskId = null,
   onFollowUpTaskIdChange,
   allowInputWhileStreaming = false,
-  queuedMessageHint = null,
+  queuedMainMessages = [],
+  onClearQueuedMessages,
+  onRemoveQueuedAt,
+  onMoveQueuedUp,
+  onEditQueuedAt,
   onCancelBackgroundTask,
   onOpenBackgroundTranscript,
 }: ChatComposerProps) {
@@ -287,6 +306,11 @@ export function ChatComposer({
   const [availableAgents, setAvailableAgents] = useState<AvailableAgentRow[]>(
     [],
   );
+  const [queuedPanelExpanded, setQueuedPanelExpanded] = useState(true);
+
+  useEffect(() => {
+    if (queuedMainMessages.length > 0) setQueuedPanelExpanded(true);
+  }, [queuedMainMessages.length]);
 
   useEffect(() => {
     let cancelled = false;
@@ -643,8 +667,9 @@ export function ChatComposer({
         ? "追加说明将进入该后台 Agent 的下一轮工具循环…"
         : "输入 / 选择 Agent；输入 @ 从当前工作目录选择…";
 
+  /** 允许排队时：连接中 / 流式中均可继续输入；否则与旧行为一致（等待响应或生成时禁用）。 */
   const inputDisabled =
-    !sessionId || isConnecting || (isStreaming && !allowInputWhileStreaming);
+    !sessionId || (!allowInputWhileStreaming && (isConnecting || isStreaming));
 
   const showSlashPopover =
     slashParse.active &&
@@ -672,18 +697,286 @@ export function ChatComposer({
 
   return (
     <Stack spacing={0.75}>
-      {queuedMessageHint ? (
-        <Typography
-          variant="caption"
+      {queuedMainMessages.length > 0 ? (
+        <Box
           sx={{
-            px: 0.5,
-            color: "warning.main",
-            fontWeight: 600,
-            lineHeight: 1.35,
+            position: "relative",
+            borderRadius: 3,
+            overflow: "hidden",
+            /* ui-ux-pro-max：与主输入框 Paper 同层级 — 半透明底、细边框、轻阴影 */
+            bgcolor: alpha(paper, isDark ? 0.55 : 0.88),
+            backdropFilter: "blur(10px)",
+            WebkitBackdropFilter: "blur(10px)",
+            border: `1px solid ${pen.borderSubtle}`,
+            boxShadow: `
+              0 1px 2px ${edge(0.06)},
+              0 6px 20px ${alpha(accent, 0.07)},
+              inset 0 1px 0 ${edge(0.08)}
+            `,
+            transition: "box-shadow 0.2s ease, border-color 0.2s ease",
+            "@media (prefers-reduced-motion: reduce)": {
+              transition: "none",
+            },
           }}
         >
-          队列（FIFO）· 上一条完成后依次发送：{queuedMessageHint}
-        </Typography>
+          {/* 主色强调条：队列锚点，与 File Manager 行选中态同系 */}
+          <Box
+            aria-hidden
+            sx={{
+              position: "absolute",
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: 3,
+              background: `linear-gradient(180deg, ${alpha(accent, 0.95)} 0%, ${alpha(accent, 0.35)} 100%)`,
+              borderRadius: "0 4px 4px 0",
+            }}
+          />
+          <Stack sx={{ pl: 1.25 }}>
+            <Stack
+              direction="row"
+              alignItems="center"
+              spacing={1}
+              onClick={() => setQueuedPanelExpanded((e) => !e)}
+              sx={{
+                px: 1.25,
+                py: 1,
+                cursor: "pointer",
+                userSelect: "none",
+                bgcolor: pen.toolbarSurface,
+                borderBottom: `1px solid ${pen.borderSubtle}`,
+                transition: "background-color 0.15s ease",
+                "&:hover": {
+                  bgcolor: isDark ? pen.rowHoverDir : pen.rowHover,
+                },
+              }}
+            >
+              <ExpandMore
+                sx={{
+                  fontSize: 22,
+                  color: pen.toolbarIconAccent,
+                  transform: queuedPanelExpanded
+                    ? "rotate(0deg)"
+                    : "rotate(-90deg)",
+                  transition: theme.transitions.create("transform", {
+                    duration: theme.transitions.duration.shorter,
+                  }),
+                }}
+              />
+              <HourglassEmpty
+                sx={{
+                  fontSize: 20,
+                  color: accent,
+                  opacity: 0.9,
+                }}
+              />
+              <Typography
+                variant="caption"
+                sx={{
+                  fontWeight: 700,
+                  letterSpacing: "0.02em",
+                  color: pen.textHeader,
+                  fontSize: "0.75rem",
+                }}
+              >
+                待发送队列
+              </Typography>
+              <Chip
+                size="small"
+                label={queuedMainMessages.length}
+                sx={{
+                  height: 22,
+                  minWidth: 28,
+                  fontSize: "0.7rem",
+                  fontWeight: 700,
+                  bgcolor: alpha(accent, isDark ? 0.18 : 0.12),
+                  color: accent,
+                  border: `1px solid ${alpha(accent, 0.28)}`,
+                  "& .MuiChip-label": { px: 0.75 },
+                }}
+              />
+              <Box sx={{ flex: 1, minWidth: 0 }} />
+              {onClearQueuedMessages && queuedMainMessages.length > 1 ? (
+                <Tooltip title="清空全部">
+                  <Button
+                    size="small"
+                    variant="text"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onClearQueuedMessages();
+                    }}
+                    sx={{
+                      minWidth: 0,
+                      px: 1,
+                      py: 0.35,
+                      fontSize: "0.7rem",
+                      fontWeight: 600,
+                      color: pen.toolbarIconAccent,
+                      borderRadius: 2,
+                      "&:hover": {
+                        bgcolor: pen.toolbarIconHoverBg,
+                      },
+                    }}
+                  >
+                    清空全部
+                  </Button>
+                </Tooltip>
+              ) : null}
+            </Stack>
+            <Collapse in={queuedPanelExpanded}>
+              <Stack
+                divider={
+                  <Divider
+                    flexItem
+                    sx={{ borderColor: pen.borderSubtle }}
+                  />
+                }
+              >
+                {queuedMainMessages.map((row, index) => (
+                  <Stack
+                    key={row.id}
+                    direction="row"
+                    alignItems="center"
+                    spacing={1.25}
+                    sx={{
+                      px: 1.25,
+                      py: 1,
+                      pr: 0.75,
+                      transition: "background-color 0.15s ease",
+                      "&:hover": { bgcolor: pen.rowHover },
+                    }}
+                  >
+                    {/* 序号：替代空心圆，层级更清晰 */}
+                    <Box
+                      sx={{
+                        width: 24,
+                        height: 24,
+                        borderRadius: "50%",
+                        flexShrink: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: "0.7rem",
+                        fontWeight: 800,
+                        color: accent,
+                        bgcolor: alpha(accent, isDark ? 0.14 : 0.1),
+                        border: `1px solid ${alpha(accent, 0.22)}`,
+                      }}
+                    >
+                      {index + 1}
+                    </Box>
+                    <Typography
+                      variant="body2"
+                      color="text.primary"
+                      title={row.fullText ?? row.previewText}
+                      sx={{
+                        flex: 1,
+                        minWidth: 0,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        fontSize: "0.8125rem",
+                        lineHeight: 1.45,
+                        fontWeight: 500,
+                      }}
+                    >
+                      {row.previewText}
+                    </Typography>
+                    {/* 操作区：成组工具条，与 composer 工具栏一致 */}
+                    <Stack
+                      direction="row"
+                      alignItems="center"
+                      spacing={0}
+                      sx={{
+                        flexShrink: 0,
+                        borderRadius: 2,
+                        bgcolor: alpha(ink, isDark ? 0.08 : 0.04),
+                        border: `1px solid ${pen.borderSubtle}`,
+                        p: 0.25,
+                      }}
+                    >
+                      {onEditQueuedAt ? (
+                        <Tooltip title="编辑并移回输入框">
+                          <IconButton
+                            size="small"
+                            aria-label="编辑排队消息"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onEditQueuedAt(index);
+                            }}
+                            sx={{
+                              p: 0.45,
+                              color: pen.toolbarIcon,
+                              borderRadius: 1.5,
+                              "&:hover": {
+                                bgcolor: pen.toolbarIconHoverBg,
+                                color: pen.toolbarIconAccent,
+                              },
+                            }}
+                          >
+                            <Edit sx={{ fontSize: 17 }} />
+                          </IconButton>
+                        </Tooltip>
+                      ) : null}
+                      {onMoveQueuedUp ? (
+                        <Tooltip title="上移">
+                          <span>
+                            <IconButton
+                              size="small"
+                              aria-label="上移"
+                              disabled={index === 0}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onMoveQueuedUp(index);
+                              }}
+                              sx={{
+                                p: 0.45,
+                                color: pen.toolbarIcon,
+                                borderRadius: 1.5,
+                                "&:hover": {
+                                  bgcolor: pen.toolbarIconHoverBg,
+                                  color: pen.toolbarIconAccent,
+                                },
+                                "&.Mui-disabled": {
+                                  opacity: 0.35,
+                                },
+                              }}
+                            >
+                              <ArrowUpward sx={{ fontSize: 17 }} />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
+                      ) : null}
+                      {onRemoveQueuedAt ? (
+                        <Tooltip title="从队列移除">
+                          <IconButton
+                            size="small"
+                            aria-label="从队列移除"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onRemoveQueuedAt(index);
+                            }}
+                            sx={{
+                              p: 0.45,
+                              color: pen.toolbarIcon,
+                              borderRadius: 1.5,
+                              "&:hover": {
+                                bgcolor: alpha(errorMain, isDark ? 0.16 : 0.1),
+                                color: errorMain,
+                              },
+                            }}
+                          >
+                            <DeleteOutline sx={{ fontSize: 17 }} />
+                          </IconButton>
+                        </Tooltip>
+                      ) : null}
+                    </Stack>
+                  </Stack>
+                ))}
+              </Stack>
+            </Collapse>
+          </Stack>
+        </Box>
       ) : null}
       {showBgRouting ? (
         <Stack

@@ -3,7 +3,7 @@
 //! This module eliminates duplication by centralizing all record <-> domain conversions.
 
 use super::persistence::{MessageRecord, SessionWithMessages};
-use super::session::{Message, Session, ToolCall};
+use super::session::{Message, MessageTokenUsage, Session, ToolCall};
 use crate::api::{ContentBlock, Message as ApiMessage, Role};
 
 /// Codec for session-related conversions
@@ -39,9 +39,14 @@ impl SessionCodec {
                 let tool_calls = record.tool_calls.and_then(|tc| {
                     serde_json::from_str::<Vec<ToolCall>>(&tc).ok()
                 });
+                let token_usage = record
+                    .token_usage_json
+                    .as_ref()
+                    .and_then(|j| serde_json::from_str::<MessageTokenUsage>(j).ok());
                 Message::Assistant {
                     content: record.content,
                     tool_calls,
+                    token_usage,
                 }
             }
             "tool" => Message::Tool {
@@ -55,12 +60,20 @@ impl SessionCodec {
     }
 
     /// Convert a domain Message to database-ready tuple
-    /// Returns: (id, session_id, role, content, tool_calls_json, tool_call_id)
+    /// Returns: (id, session_id, role, content, tool_calls_json, tool_call_id, token_usage_json)
     pub fn message_to_record(
         message: &Message,
         id: &str,
         session_id: &str,
-    ) -> (String, String, String, String, Option<String>, Option<String>) {
+    ) -> (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) {
         match message {
             Message::User { content } => (
                 id.to_string(),
@@ -69,11 +82,19 @@ impl SessionCodec {
                 content.clone(),
                 None,
                 None,
+                None,
             ),
-            Message::Assistant { content, tool_calls } => {
+            Message::Assistant {
+                content,
+                tool_calls,
+                token_usage,
+            } => {
                 let tool_calls_json = tool_calls.as_ref().map(|tc| {
                     serde_json::to_string(tc).unwrap_or_default()
                 });
+                let token_usage_json = token_usage
+                    .as_ref()
+                    .and_then(|u| serde_json::to_string(u).ok());
                 (
                     id.to_string(),
                     session_id.to_string(),
@@ -81,6 +102,7 @@ impl SessionCodec {
                     content.clone(),
                     tool_calls_json,
                     None,
+                    token_usage_json,
                 )
             }
             Message::Tool { tool_call_id, output } => (
@@ -90,6 +112,7 @@ impl SessionCodec {
                 output.clone(),
                 None,
                 Some(tool_call_id.clone()),
+                None,
             ),
         }
     }
@@ -103,7 +126,11 @@ impl SessionCodec {
                     role: Role::User,
                     content: vec![ContentBlock::text(content.clone())],
                 }),
-                Message::Assistant { content, tool_calls } => {
+                Message::Assistant {
+                    content,
+                    tool_calls,
+                    token_usage: _,
+                } => {
                     let mut blocks: Vec<ContentBlock> = vec![ContentBlock::text(content.clone())];
 
                     // Add tool use blocks if present
@@ -157,6 +184,7 @@ impl SessionCodec {
         Message::Assistant {
             content: content.to_string(),
             tool_calls,
+            token_usage: None,
         }
     }
 }
@@ -170,7 +198,7 @@ mod tests {
         let msg = Message::User {
             content: "Hello".to_string(),
         };
-        let (id, session_id, role, content, tool_calls, tool_call_id) =
+        let (id, session_id, role, content, tool_calls, tool_call_id, tok) =
             SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
 
         assert_eq!(id, "msg-1");
@@ -179,6 +207,7 @@ mod tests {
         assert_eq!(content, "Hello");
         assert!(tool_calls.is_none());
         assert!(tool_call_id.is_none());
+        assert!(tok.is_none());
     }
 
     #[test]
@@ -191,14 +220,16 @@ mod tests {
         let msg = Message::Assistant {
             content: "Let me read that file".to_string(),
             tool_calls: Some(tool_calls),
+            token_usage: None,
         };
 
-        let (_, _, role, content, tool_calls_json, _) =
+        let (_, _, role, content, tool_calls_json, _, tok) =
             SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
 
         assert_eq!(role, "assistant");
         assert_eq!(content, "Let me read that file");
         assert!(tool_calls_json.is_some());
+        assert!(tok.is_none());
 
         // Verify we can parse it back
         let parsed = SessionCodec::parse_tool_calls(&tool_calls_json.unwrap());
@@ -215,6 +246,7 @@ mod tests {
             content: "File contents".to_string(),
             tool_calls: None,
             tool_call_id: Some("call-1".to_string()),
+            token_usage_json: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
 

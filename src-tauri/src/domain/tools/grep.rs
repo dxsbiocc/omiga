@@ -1,4 +1,4 @@
-//! Grep tool — search file contents with regex
+//! Ripgrep tool (`ripgrep`) — search file contents with regex
 //!
 //! Aligned with the main repo’s `GrepTool` (ripgrep) in spirit:
 //! - Respects `.gitignore` / `.ignore` via the `ignore` crate (same engine as ripgrep).
@@ -21,7 +21,7 @@ use std::pin::Pin;
 /// Maximum number of results before truncation
 const MAX_RESULTS: usize = 1000;
 
-pub const DESCRIPTION: &str = r#"Search for patterns in files using regular expressions.
+pub const DESCRIPTION: &str = r#"Search for patterns in files using regular expressions (ripgrep semantics).
 
 Use for code references, TODOs, symbol lookup, etc.
 
@@ -337,7 +337,7 @@ fn search_file(path: &std::path::Path, regex: &Regex) -> Result<Vec<FileMatch>, 
 
 pub fn schema() -> ToolSchema {
     ToolSchema::new(
-        "grep",
+        "ripgrep",
         DESCRIPTION,
         serde_json::json!({
             "type": "object",

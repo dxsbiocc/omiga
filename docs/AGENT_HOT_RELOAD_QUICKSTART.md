@@ -11,7 +11,7 @@ description: 我的自定义 Agent
 model: haiku
 tools:
   - file_read
-  - grep
+  - ripgrep
 ---
 
 # 我的 Agent
@@ -58,7 +58,7 @@ description: 描述             # 必填：使用场景
 model: haiku                  # 可选：模型
  tools:                       # 可选：允许的工具
   - file_read
-  - grep
+  - ripgrep
 disallowed_tools:             # 可选：禁止的工具
   - bash
 permission_mode: default      # 可选：权限模式

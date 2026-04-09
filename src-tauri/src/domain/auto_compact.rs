@@ -307,43 +307,20 @@ pub async fn replace_session_messages(
     let mut last_user_id: Option<String> = None;
     for msg in messages {
         let id = uuid::Uuid::new_v4().to_string();
-        match msg {
-            Message::User { content } => {
-                repo.save_message(&id, session_id, "user", content, None, None)
-                    .await?;
-                last_user_id = Some(id);
-            }
-            Message::Assistant {
-                content,
-                tool_calls,
-            } => {
-                let tc = tool_calls
-                    .as_ref()
-                    .and_then(|t| serde_json::to_string(t).ok());
-                repo.save_message(
-                    &id,
-                    session_id,
-                    "assistant",
-                    content,
-                    tc.as_deref(),
-                    None,
-                )
-                .await?;
-            }
-            Message::Tool {
-                tool_call_id,
-                output,
-            } => {
-                repo.save_message(
-                    &id,
-                    session_id,
-                    "tool",
-                    output,
-                    None,
-                    Some(tool_call_id),
-                )
-                .await?;
-            }
+        let (row_id, sid, role, content, tool_calls, tool_call_id, token_usage_json) =
+            SessionCodec::message_to_record(msg, &id, session_id);
+        repo.save_message(
+            &row_id,
+            &sid,
+            &role,
+            &content,
+            tool_calls.as_deref(),
+            tool_call_id.as_deref(),
+            token_usage_json.as_deref(),
+        )
+        .await?;
+        if matches!(msg, Message::User { .. }) {
+            last_user_id = Some(id);
         }
     }
     Ok(last_user_id)
@@ -418,6 +395,7 @@ mod tests {
                     name: "bash".into(),
                     arguments: "{}".into(),
                 }]),
+                token_usage: None,
             },
             Message::Tool {
                 tool_call_id: "t1".into(),

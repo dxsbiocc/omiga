@@ -46,6 +46,7 @@ import {
   Assignment as AssignmentIcon,
   Check as CheckIcon,
   InsertDriveFile as InsertDriveFileIcon,
+  Summarize as SummarizeIcon,
 } from "@mui/icons-material";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import {
@@ -77,6 +78,7 @@ import {
 import { BackgroundAgentTranscriptDrawer } from "./BackgroundAgentTranscriptDrawer";
 import { AgentSessionStatus } from "./AgentSessionStatus";
 import { formatToolDisplayName } from "../../utils/executionSurfaceLabel";
+import { parseNextStepSuggestionsFromMarkdown } from "../../utils/parseAssistantNextSteps";
 
 interface ChatProps {
   sessionId: string;
@@ -140,6 +142,17 @@ interface Message {
   roundStatus?: "running" | "partial" | "cancelled" | "completed";
   /** 调度系统生成的任务执行计划 */
   schedulerPlan?: SchedulerPlan;
+  /** 本轮结束后由后端 LLM 生成的快捷追问（优先于本地启发式建议） */
+  followUpSuggestions?: Array<{ label: string; prompt: string }>;
+  /** 独立 LLM 生成的可选回合要点摘要（非每轮都输出） */
+  turnSummary?: string;
+  /** 主对话 LLM 回合结束后的 token 统计（供应商原始 prompt/completion 口径） */
+  tokenUsage?: {
+    input: number;
+    output: number;
+    total?: number;
+    provider?: string;
+  };
 }
 
 /** Build payload text: `@a @b` + optional body (matches composer chips + input). */
@@ -151,6 +164,7 @@ function mergeComposerPathsAndBody(paths: string[], body: string): string {
 
 /** One item in the main-session FIFO queue while a previous turn is still streaming. */
 interface QueuedMainSend {
+  id: string;
   body: string;
   composerAttachedPaths: string[];
   composerAgentType: string;
@@ -182,6 +196,9 @@ function chatMessageToStore(m: Message): StoreMessage {
     content: m.content,
     composerAgentType: m.composerAgentType,
     composerAttachedPaths: m.composerAttachedPaths,
+    followUpSuggestions: m.followUpSuggestions,
+    turnSummary: m.turnSummary,
+    tokenUsage: m.tokenUsage,
     prefaceBeforeTools: m.prefaceBeforeTools,
     toolCallsList: m.toolCallsList,
     toolCall: m.toolCall
@@ -207,6 +224,9 @@ interface StreamOutputItem {
     | "ask_user_pending"
     | "error"
     | "cancelled"
+    | "turn_summary"
+    | "follow_up_suggestions"
+    | "token_usage"
     | "complete";
   data?: unknown;
 }
@@ -274,7 +294,7 @@ function toolRowIcon(toolName: string) {
   if (n.includes("web_fetch") || n.includes("fetch")) return LinkIcon;
   if (n.includes("bash") || n.includes("shell")) return TerminalIcon;
   if (n.includes("glob") || n.includes("file")) return FolderOpen;
-  if (n.includes("grep")) return SearchIcon;
+  if (n.includes("ripgrep") || n.includes("grep")) return SearchIcon;
   if (n.includes("toolsearch")) return SearchIcon;
   if (n.includes("exitplan") || n.includes("enterplan")) return MenuBookIcon;
   if (
@@ -352,7 +372,7 @@ function humanizeToolStepTitle(name: string, args?: string): string {
   if (n.includes("web_search")) return "网络搜索";
   if (n.includes("web_fetch") || n.includes("fetch")) return "获取网页";
   if (n.includes("glob")) return "搜索文件";
-  if (n.includes("grep")) return "代码搜索";
+  if (n.includes("ripgrep") || n.includes("grep")) return "代码搜索";
   if (n.includes("notebook")) return "编辑 Notebook";
   if (n.includes("file_read") || n === "read_file") return "读取文件";
   if (n.includes("file_write") || n.includes("write")) return "写入文件";
@@ -393,7 +413,7 @@ function executionStepSummary(name: string, args?: string): string {
       if (p.trim())
         return `Write file: ${p.split("/").filter(Boolean).slice(-2).join("/")}`;
     }
-    if (n.includes("grep")) {
+    if (n.includes("ripgrep") || n.includes("grep")) {
       const pat = String(j.pattern ?? "");
       const path = String(j.path ?? "");
       if (pat || path) return `Search: ${pat || path}`.slice(0, 100);
@@ -960,29 +980,74 @@ export function Chat({ sessionId }: ChatProps) {
 
   /** FIFO: main-session messages enqueued while a turn is still streaming (flush one per stream end). */
   const queuedMainSendQueueRef = useRef<QueuedMainSend[]>([]);
-  const [queuedMessagePreview, setQueuedMessagePreview] = useState<
-    string | null
-  >(null);
+  /** Bumps when the in-memory queue mutates so the composer list re-renders. */
+  const [queueRevision, setQueueRevision] = useState(0);
+  const bumpQueueUi = useCallback(() => setQueueRevision((r) => r + 1), []);
   const handleSendRef = useRef<() => Promise<void>>(async () => {});
   const flushQueuedMainSendIfAnyRef = useRef<() => void>(() => {});
 
-  const refreshQueuedMessagePreview = () => {
-    const q = queuedMainSendQueueRef.current;
-    if (q.length === 0) {
-      setQueuedMessagePreview(null);
-      return;
-    }
-    const merged = mergeComposerPathsAndBody(
-      q[0].composerAttachedPaths,
-      q[0].body,
-    );
-    const head = merged.length > 56 ? `${merged.slice(0, 56)}…` : merged;
-    setQueuedMessagePreview(
-      q.length === 1
-        ? head
-        : `${q.length} 条排队（FIFO）· 下一条：${head}`,
-    );
-  };
+  const queuedMainMessagesForComposer = useMemo(() => {
+    void queueRevision;
+    return queuedMainSendQueueRef.current.map((item) => {
+      const merged = mergeComposerPathsAndBody(
+        item.composerAttachedPaths,
+        item.body,
+      );
+      const previewText =
+        merged.length > 200 ? `${merged.slice(0, 200)}…` : merged;
+      return { id: item.id, previewText, fullText: merged };
+    });
+  }, [queueRevision]);
+
+  const clearQueuedMainSends = useCallback(() => {
+    if (queuedMainSendQueueRef.current.length === 0) return;
+    queuedMainSendQueueRef.current = [];
+    bumpQueueUi();
+  }, [bumpQueueUi]);
+
+  const removeQueuedAt = useCallback(
+    (index: number) => {
+      const q = queuedMainSendQueueRef.current;
+      if (index < 0 || index >= q.length) return;
+      q.splice(index, 1);
+      bumpQueueUi();
+    },
+    [bumpQueueUi],
+  );
+
+  const moveQueuedUp = useCallback(
+    (index: number) => {
+      const q = queuedMainSendQueueRef.current;
+      if (index <= 0 || index >= q.length) return;
+      const t = q[index - 1];
+      q[index - 1] = q[index];
+      q[index] = t;
+      bumpQueueUi();
+    },
+    [bumpQueueUi],
+  );
+
+  const editQueuedAt = useCallback(
+    (index: number) => {
+      const q = queuedMainSendQueueRef.current;
+      const item = q[index];
+      if (!item) return;
+      q.splice(index, 1);
+      bumpQueueUi();
+      flushSync(() => {
+        setInput(item.body);
+        const st = useChatComposerStore.getState();
+        st.clearComposerAttachedPaths();
+        for (const p of item.composerAttachedPaths) {
+          st.addComposerAttachedPath(p);
+        }
+        st.setComposerAgentType(item.composerAgentType);
+        st.setPermissionMode(item.permissionMode);
+      });
+      queueMicrotask(() => inputRef.current?.focus());
+    },
+    [bumpQueueUi],
+  );
 
   /** Implicit memory indexing status for the last completed turn */
   const [indexingStatus, setIndexingStatus] = useState<
@@ -991,6 +1056,19 @@ export function Chat({ sessionId }: ChatProps) {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  /** Populated by `follow_up_suggestions` stream frame; consumed when attaching the final assistant row */
+  const pendingFollowUpSuggestionsRef = useRef<
+    Array<{ label: string; prompt: string }> | null
+  >(null);
+  /** Populated by `turn_summary` stream frame; consumed when attaching the final assistant row */
+  const pendingTurnSummaryRef = useRef<string | null>(null);
+  /** Populated by `token_usage` stream frame; consumed when attaching the final assistant row */
+  const pendingTokenUsageRef = useRef<{
+    input: number;
+    output: number;
+    total: number;
+    provider: string;
+  } | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
   const currentResponseRef = useRef(currentResponse);
   const currentRoundIdRef = useRef(currentRoundId);
@@ -1027,8 +1105,8 @@ export function Chat({ sessionId }: ChatProps) {
     useActivityStore.getState().clearBackgroundJobs();
     setAwaitingResumeAfterCancel(false);
     queuedMainSendQueueRef.current = [];
-    setQueuedMessagePreview(null);
-  }, [sessionId]);
+    bumpQueueUi();
+  }, [sessionId, bumpQueueUi]);
 
   const refreshBackgroundTasks = useCallback(async () => {
     if (!sessionId) {
@@ -1152,10 +1230,10 @@ export function Chat({ sessionId }: ChatProps) {
     });
   };
 
-  // Scroll to bottom when messages change
+  // Scroll to bottom when messages change (include isStreaming so the thread settles after a turn completes)
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
-  }, [messages, currentResponse, isConnecting, waitingFirstChunk]);
+  }, [messages, currentResponse, isConnecting, waitingFirstChunk, isStreaming]);
 
   const messageRenderItems = useMemo(
     () => groupMessagesForRender(messages),
@@ -1183,6 +1261,55 @@ export function Chat({ sessionId }: ChatProps) {
   const [askUserSelections, setAskUserSelections] = useState<Record<string, string>>(
     {},
   );
+
+  const composerSuggestionBundle = useMemo(() => {
+    const last = messages[messages.length - 1];
+    if (
+      last?.role === "assistant" &&
+      last.followUpSuggestions &&
+      last.followUpSuggestions.length > 0
+    ) {
+      return {
+        rows: last.followUpSuggestions.map((s) => ({
+          label: s.label,
+          text: s.prompt,
+        })),
+        source: "llm" as const,
+      };
+    }
+    if (last?.role === "assistant" && last.content) {
+      const fromMd = parseNextStepSuggestionsFromMarkdown(last.content);
+      if (fromMd.length > 0) {
+        return { rows: fromMd, source: "markdown" as const };
+      }
+    }
+    return { rows: [], source: "none" as const };
+  }, [messages]);
+  const composerSuggestions = composerSuggestionBundle.rows;
+  const suggestionSource = composerSuggestionBundle.source;
+  const stickyTurnSummary = useMemo(() => {
+    const last = messages[messages.length - 1];
+    if (last?.role === "assistant" && last.turnSummary?.trim()) {
+      return last.turnSummary.trim();
+    }
+    return null;
+  }, [messages]);
+  const showNextStepSuggestions =
+    Boolean(sessionId) &&
+    !isStreaming &&
+    !isConnecting &&
+    !waitingFirstChunk &&
+    !pendingAskUser &&
+    !awaitingResumeAfterCancel &&
+    composerSuggestions.length > 0;
+  const showTurnSummaryCard =
+    Boolean(sessionId) &&
+    Boolean(stickyTurnSummary) &&
+    !isStreaming &&
+    !isConnecting &&
+    !waitingFirstChunk &&
+    !pendingAskUser &&
+    !awaitingResumeAfterCancel;
 
   useEffect(() => {
     setPendingAskUser(null);
@@ -1223,6 +1350,9 @@ export function Chat({ sessionId }: ChatProps) {
             content: msg.content ?? "",
             composerAgentType: msg.composerAgentType,
             composerAttachedPaths: msg.composerAttachedPaths,
+            followUpSuggestions: msg.followUpSuggestions,
+            turnSummary: msg.turnSummary,
+            tokenUsage: msg.tokenUsage,
             prefaceBeforeTools: msg.prefaceBeforeTools,
             toolCallsList: msg.toolCallsList,
             timestamp: Date.now() - (storeMessages.length - index) * 1000,
@@ -1365,6 +1495,9 @@ export function Chat({ sessionId }: ChatProps) {
 
       switch (payload.type) {
         case "Start": {
+          pendingFollowUpSuggestionsRef.current = null;
+          pendingTurnSummaryRef.current = null;
+          pendingTokenUsageRef.current = null;
           isStreamingRef.current = true;
           setIsStreaming(true);
           useActivityStore.getState().setConnecting(false);
@@ -1626,6 +1759,7 @@ export function Chat({ sessionId }: ChatProps) {
           setIsStreaming(false);
           setPendingAskUser(null);
           setAskUserSelections({});
+          pendingTokenUsageRef.current = null;
           useActivityStore.getState().finalizeExecutionRun();
           useActivityStore.getState().clearTransient();
           setCurrentResponse("");
@@ -1655,6 +1789,7 @@ export function Chat({ sessionId }: ChatProps) {
           setIsStreaming(false);
           setPendingAskUser(null);
           setAskUserSelections({});
+          pendingTokenUsageRef.current = null;
           useActivityStore.getState().finalizeExecutionRun();
           useActivityStore.getState().clearTransient();
           // Mark round as cancelled - use ref to get latest round ID
@@ -1687,6 +1822,57 @@ export function Chat({ sessionId }: ChatProps) {
           flushQueuedMainSendIfAnyRef.current();
           break;
         }
+        case "turn_summary": {
+          const raw = payload.data;
+          let text: string | null = null;
+          if (raw != null && typeof raw === "object" && "text" in raw) {
+            const v = (raw as { text?: unknown }).text;
+            if (typeof v === "string" && v.trim().length > 0) {
+              text = v.trim();
+            }
+          }
+          pendingTurnSummaryRef.current = text;
+          break;
+        }
+        case "follow_up_suggestions": {
+          const raw = payload.data;
+          const rows = Array.isArray(raw)
+            ? (raw as Array<{ label?: unknown; prompt?: unknown }>)
+            : [];
+          pendingFollowUpSuggestionsRef.current = rows
+            .map((r) => ({
+              label: typeof r.label === "string" ? r.label.trim() : "",
+              prompt: typeof r.prompt === "string" ? r.prompt.trim() : "",
+            }))
+            .filter((r) => r.label.length > 0 && r.prompt.length > 0)
+            .slice(0, 5);
+          break;
+        }
+        case "token_usage": {
+          const raw = payload.data as
+            | {
+                prompt_tokens?: unknown;
+                completion_tokens?: unknown;
+                total_tokens?: unknown;
+                provider?: unknown;
+              }
+            | undefined;
+          const pi = raw?.prompt_tokens;
+          const co = raw?.completion_tokens;
+          const tot = raw?.total_tokens;
+          const prov = raw?.provider;
+          if (typeof pi === "number" && typeof co === "number") {
+            pendingTokenUsageRef.current = {
+              input: pi,
+              output: co,
+              total: typeof tot === "number" ? tot : pi + co,
+              provider: typeof prov === "string" ? prov : "",
+            };
+          } else {
+            pendingTokenUsageRef.current = null;
+          }
+          break;
+        }
         case "complete": {
           setAwaitingResumeAfterCancel(false);
           isStreamingRef.current = false;
@@ -1700,6 +1886,12 @@ export function Chat({ sessionId }: ChatProps) {
           }
           // Use ref to get the latest accumulated response
           const finalResponse = currentResponseRef.current;
+          const followUps = pendingFollowUpSuggestionsRef.current;
+          pendingFollowUpSuggestionsRef.current = null;
+          const turnSum = pendingTurnSummaryRef.current;
+          pendingTurnSummaryRef.current = null;
+          const tok = pendingTokenUsageRef.current;
+          pendingTokenUsageRef.current = null;
           setMessages((prev) => {
             let next = prev;
             if (finalResponse) {
@@ -1708,6 +1900,22 @@ export function Chat({ sessionId }: ChatProps) {
                 role: "assistant",
                 content: finalResponse,
                 timestamp: Date.now(),
+                ...(followUps && followUps.length > 0
+                  ? { followUpSuggestions: followUps }
+                  : {}),
+                ...(turnSum ? { turnSummary: turnSum } : {}),
+                ...(tok
+                  ? {
+                      tokenUsage: {
+                        input: tok.input,
+                        output: tok.output,
+                        total: tok.total,
+                        ...(tok.provider
+                          ? { provider: tok.provider }
+                          : {}),
+                      },
+                    }
+                  : {}),
               };
               next = [...prev, assistantMsg];
             }
@@ -1748,7 +1956,7 @@ export function Chat({ sessionId }: ChatProps) {
   };
 
   const handleSend = async () => {
-    if (!sessionId || isConnecting) return;
+    if (!sessionId) return;
     setAwaitingResumeAfterCancel(false);
     const {
       composerAgentType,
@@ -1817,15 +2025,19 @@ export function Chat({ sessionId }: ChatProps) {
       return;
     }
 
-    // FIFO enqueue while the agent is still streaming; one item flushed per stream end.
-    if (isStreamingRef.current) {
+    // FIFO enqueue while a turn is in flight (连接中/流式中); one item flushed per stream end.
+    if (isConnecting || isStreamingRef.current) {
       queuedMainSendQueueRef.current.push({
+        id:
+          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `q-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
         body: trimmed,
         composerAttachedPaths: [...composerAttachedPaths],
         composerAgentType,
         permissionMode,
       });
-      refreshQueuedMessagePreview();
+      bumpQueueUi();
       setInput("");
       useChatComposerStore.getState().clearComposerAttachedPaths();
       return;
@@ -2001,6 +2213,10 @@ export function Chat({ sessionId }: ChatProps) {
         timestamp: Date.now(),
       };
       setMessages((prev) => [...prev, errorMsg]);
+      queueMicrotask(() => {
+        isStreamingRef.current = false;
+        flushQueuedMainSendIfAnyRef.current();
+      });
     }
   };
 
@@ -2010,7 +2226,7 @@ export function Chat({ sessionId }: ChatProps) {
     if (q.length === 0) return;
     const next = q.shift();
     if (!next) return;
-    refreshQueuedMessagePreview();
+    bumpQueueUi();
     flushSync(() => {
       setInput(next.body);
       const st = useChatComposerStore.getState();
@@ -3553,11 +3769,13 @@ export function Chat({ sessionId }: ChatProps) {
                       ) : (
                         <Box
                           sx={{
+                            position: "relative",
                             width: "100%",
                             minWidth: 0,
                             maxWidth: "100%",
                             px: 1.75,
                             py: 1.25,
+                            pb: message.tokenUsage ? 2.25 : 1.25,
                             borderRadius: `${BUBBLE_RADIUS_PX}px`,
                             bgcolor: CHAT.agentBubbleBg,
                             border: `1px solid ${CHAT.agentBubbleBorder}`,
@@ -3566,6 +3784,36 @@ export function Chat({ sessionId }: ChatProps) {
                           }}
                         >
                           {renderMessageContent(message.content, "agent")}
+                          {message.tokenUsage ? (
+                            <Typography
+                              component="div"
+                              sx={{
+                                position: "absolute",
+                                right: 10,
+                                bottom: 6,
+                                fontSize: 10,
+                                lineHeight: 1.2,
+                                color: alpha(CHAT.toolIcon, 0.85),
+                                userSelect: "none",
+                                pointerEvents: "none",
+                                textAlign: "right",
+                                maxWidth: "calc(100% - 20px)",
+                              }}
+                            >
+                              输入 {message.tokenUsage.input.toLocaleString()}{" "}
+                              · 输出{" "}
+                              {message.tokenUsage.output.toLocaleString()}
+                              {message.tokenUsage.total != null &&
+                              message.tokenUsage.total !==
+                                message.tokenUsage.input +
+                                  message.tokenUsage.output
+                                ? ` · Σ ${message.tokenUsage.total.toLocaleString()}`
+                                : ""}
+                              {message.tokenUsage.provider
+                                ? ` · ${message.tokenUsage.provider}`
+                                : ""}
+                            </Typography>
+                          ) : null}
                         </Box>
                       )}
                     </Box>
@@ -3680,6 +3928,152 @@ export function Chat({ sessionId }: ChatProps) {
               </Fade>
             )}
 
+            {showTurnSummaryCard && stickyTurnSummary && (
+              <Fade in timeout={200}>
+                <Box
+                  sx={{
+                    width: "100%",
+                    maxWidth: "100%",
+                    pt: 0.5,
+                    px: 0.25,
+                  }}
+                >
+                  <Stack
+                    direction="row"
+                    alignItems="flex-start"
+                    gap={1}
+                    sx={{
+                      width: "100%",
+                      p: 1.25,
+                      borderRadius: `${BUBBLE_RADIUS_PX}px`,
+                      bgcolor: alpha(theme.palette.primary.main, 0.06),
+                      border: `1px solid ${alpha(theme.palette.primary.main, 0.12)}`,
+                    }}
+                  >
+                    <SummarizeIcon
+                      sx={{
+                        fontSize: 18,
+                        color: "primary.main",
+                        mt: 0.15,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <Box sx={{ minWidth: 0, flex: 1 }}>
+                      <Stack direction="row" alignItems="center" gap={0.75} sx={{ mb: 0.5 }}>
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            color: "text.secondary",
+                            fontWeight: 700,
+                            letterSpacing: 0.02,
+                          }}
+                        >
+                          本轮要点
+                        </Typography>
+                        <Chip
+                          label="独立 LLM"
+                          size="small"
+                          sx={{
+                            height: 20,
+                            fontSize: "0.65rem",
+                            fontWeight: 600,
+                            "& .MuiChip-label": { px: 0.75 },
+                          }}
+                        />
+                      </Stack>
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          color: "text.primary",
+                          lineHeight: 1.55,
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {stickyTurnSummary}
+                      </Typography>
+                    </Box>
+                  </Stack>
+                </Box>
+              </Fade>
+            )}
+
+            {showNextStepSuggestions && (
+              <Fade in timeout={200}>
+                <Box
+                  sx={{
+                    width: "100%",
+                    maxWidth: "100%",
+                    pt: 0.5,
+                  }}
+                >
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      display: "block",
+                      mb: 0.25,
+                      color: "text.secondary",
+                      fontWeight: 600,
+                      letterSpacing: 0.02,
+                    }}
+                  >
+                    下一步建议
+                  </Typography>
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      display: "block",
+                      mb: 1,
+                      color: "text.disabled",
+                      fontWeight: 500,
+                    }}
+                  >
+                    {suggestionSource === "llm"
+                      ? "由独立模型根据上文生成，点击填入输入框"
+                      : suggestionSource === "markdown"
+                        ? "由助手正文「下一步建议」小节解析，点击填入输入框"
+                        : ""}
+                  </Typography>
+                  <Stack
+                    direction="row"
+                    useFlexGap
+                    flexWrap="wrap"
+                    gap={1}
+                    sx={{ width: "100%" }}
+                  >
+                    {composerSuggestions.map((s, idx) => (
+                      <Tooltip
+                        key={`${idx}-${s.label}`}
+                        title={s.text}
+                        placement="top"
+                        enterDelay={400}
+                      >
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          color="primary"
+                          onClick={() => {
+                            setInput(s.text);
+                            queueMicrotask(() => inputRef.current?.focus());
+                          }}
+                          sx={{
+                            textTransform: "none",
+                            borderRadius: `${BUBBLE_RADIUS_PX}px`,
+                            maxWidth: "100%",
+                            fontSize: 12,
+                            fontWeight: 600,
+                            py: 0.5,
+                          }}
+                        >
+                          {s.label}
+                        </Button>
+                      </Tooltip>
+                    ))}
+                  </Stack>
+                </Box>
+              </Fade>
+            )}
+
             <div ref={messagesEndRef} />
           </Box>
 
@@ -3739,7 +4133,11 @@ export function Chat({ sessionId }: ChatProps) {
                 followUpTaskId={followUpTaskId}
                 onFollowUpTaskIdChange={setFollowUpTaskId}
                 allowInputWhileStreaming
-                queuedMessageHint={queuedMessagePreview}
+                queuedMainMessages={queuedMainMessagesForComposer}
+                onClearQueuedMessages={clearQueuedMainSends}
+                onRemoveQueuedAt={removeQueuedAt}
+                onMoveQueuedUp={moveQueuedUp}
+                onEditQueuedAt={editQueuedAt}
                 onCancelBackgroundTask={handleCancelBackgroundTask}
                 onOpenBackgroundTranscript={handleOpenBackgroundTranscript}
               />

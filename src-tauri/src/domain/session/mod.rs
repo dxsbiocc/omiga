@@ -53,6 +53,7 @@ impl Session {
         self.messages.push(Message::Assistant {
             content: content.into(),
             tool_calls,
+            token_usage: None,
         });
         self.updated_at = chrono::Utc::now();
     }
@@ -75,7 +76,11 @@ impl Session {
                     role: crate::api::Role::User,
                     content: vec![crate::api::ContentBlock::text(content.clone())],
                 },
-                Message::Assistant { content, .. } => crate::api::Message {
+                Message::Assistant {
+                    content,
+                    token_usage: _,
+                    ..
+                } => crate::api::Message {
                     role: crate::api::Role::Assistant,
                     content: vec![crate::api::ContentBlock::text(content.clone())],
                 },
@@ -88,6 +93,18 @@ impl Session {
     }
 }
 
+/// Token usage persisted on assistant rows (matches UI `tokenUsage`: input/output/total/provider).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageTokenUsage {
+    pub input: u32,
+    pub output: u32,
+    #[serde(default)]
+    pub total: Option<u32>,
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
 /// A chat message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
@@ -96,6 +113,8 @@ pub enum Message {
     Assistant {
         content: String,
         tool_calls: Option<Vec<ToolCall>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_usage: Option<MessageTokenUsage>,
     },
     Tool {
         tool_call_id: String,
@@ -141,7 +160,11 @@ pub fn to_anthropic_messages(
                 "role": "user",
                 "content": content
             }),
-            Message::Assistant { content, tool_calls } => {
+            Message::Assistant {
+                content,
+                tool_calls,
+                token_usage: _,
+            } => {
                 let mut msg = serde_json::json!({
                     "role": "assistant",
                     "content": content

@@ -16,7 +16,7 @@
 | `TaskOutputTool` | `task_output` | |
 | `BashTool` | `bash` | |
 | `GlobTool` | `glob` | TS 在 embedded search 模式下可能省略 Glob/Grep；Omiga **始终**注册 |
-| `GrepTool` | `grep` | 同上 |
+| `GrepTool` | `ripgrep` | 同上（对外名称；实现为 ripgrep 语义） |
 | `ExitPlanModeV2Tool` | `exit_plan_mode` | |
 | `FileReadTool` | `file_read` | |
 | `FileEditTool` | `file_edit` | |

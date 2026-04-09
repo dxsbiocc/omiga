@@ -5,6 +5,7 @@
 pub mod background;
 pub mod builtins;
 pub mod constants;
+pub mod output_formatter;
 pub mod definition;
 pub mod hot_reload;
 pub mod integration;

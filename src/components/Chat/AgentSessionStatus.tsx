@@ -4,7 +4,6 @@ import {
   IconButton,
   LinearProgress,
   Stack,
-  Tooltip,
   Typography,
   useTheme,
 } from "@mui/material";
@@ -58,7 +57,7 @@ function pickToolIcon(toolName: string | null | undefined): SvgIconComponent {
   if (n.includes("web_fetch") || (n.includes("fetch") && n.includes("web")))
     return TravelExplore;
   if (n.includes("bash") || n.includes("shell")) return Terminal;
-  if (n.includes("grep")) return Construction;
+  if (n.includes("ripgrep") || n.includes("grep")) return Construction;
   if (n.includes("glob")) return FolderOpen;
   if (n.includes("file_read") || n === "read_file" || n.includes("read_file"))
     return Description;
@@ -225,75 +224,77 @@ export function AgentSessionStatus({
             {displayLabel}
           </Typography>
         </Box>
-        <Stack direction="row" alignItems="center" spacing={0.25} sx={{ flexShrink: 0 }}>
+        <Box
+          sx={{
+            width: 28,
+            height: 28,
+            flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
           {showResume && onResume ? (
-            <Tooltip title="断点继续">
-              <IconButton
-                size="small"
-                color="warning"
-                aria-label="断点继续"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onResume();
-                }}
-                sx={{ p: 0.35 }}
-              >
-                <Replay sx={{ fontSize: 18 }} />
-              </IconButton>
-            </Tooltip>
+            <IconButton
+              size="small"
+              color="warning"
+              aria-label="断点继续"
+              onClick={(e) => {
+                e.stopPropagation();
+                onResume();
+              }}
+              sx={{ p: 0.35 }}
+            >
+              <Replay sx={{ fontSize: 18 }} />
+            </IconButton>
+          ) : canCancel && onCancel && hover ? (
+            <IconButton
+              size="small"
+              aria-label="取消任务"
+              onClick={(e) => {
+                e.stopPropagation();
+                onCancel();
+              }}
+              sx={{ p: 0.35, color: "text.secondary" }}
+            >
+              <Stop sx={{ fontSize: 18 }} />
+            </IconButton>
           ) : (
-            <>
-              {canCancel && onCancel && hover && (
-                <Tooltip title="取消任务">
-                  <IconButton
-                    size="small"
-                    aria-label="取消任务"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onCancel();
-                    }}
-                    sx={{ p: 0.35, color: "text.secondary" }}
-                  >
-                    <Stop sx={{ fontSize: 18 }} />
-                  </IconButton>
-                </Tooltip>
-              )}
-              <Box
-                aria-hidden
-                sx={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: "50%",
-                  flexShrink: 0,
-                  bgcolor: busy ? accent : alpha(accent, 0.45),
-                  boxShadow: busy
-                    ? `0 0 0 3px ${alpha(accent, 0.2)}`
-                    : `0 0 0 1px ${alpha(theme.palette.background.paper, 1)}`,
-                  ...(busy && {
-                    "@keyframes statusDot": {
-                      "0%": {
-                        transform: "scale(1)",
-                        boxShadow: `0 0 0 0 ${alpha(accent, 0.35)}`,
-                      },
-                      "60%": {
-                        transform: "scale(1.05)",
-                        boxShadow: `0 0 0 6px ${alpha(accent, 0)}`,
-                      },
-                      "100%": {
-                        transform: "scale(1)",
-                        boxShadow: `0 0 0 0 ${alpha(accent, 0)}`,
-                      },
+            <Box
+              aria-hidden
+              sx={{
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                flexShrink: 0,
+                bgcolor: busy ? accent : alpha(accent, 0.45),
+                boxShadow: busy
+                  ? `0 0 0 3px ${alpha(accent, 0.2)}`
+                  : `0 0 0 1px ${alpha(theme.palette.background.paper, 1)}`,
+                ...(busy && {
+                  "@keyframes statusDot": {
+                    "0%": {
+                      transform: "scale(1)",
+                      boxShadow: `0 0 0 0 ${alpha(accent, 0.35)}`,
                     },
-                    animation: "statusDot 1.8s ease-out infinite",
-                    "@media (prefers-reduced-motion: reduce)": {
-                      animation: "none",
+                    "60%": {
+                      transform: "scale(1.05)",
+                      boxShadow: `0 0 0 6px ${alpha(accent, 0)}`,
                     },
-                  }),
-                }}
-              />
-            </>
+                    "100%": {
+                      transform: "scale(1)",
+                      boxShadow: `0 0 0 0 ${alpha(accent, 0)}`,
+                    },
+                  },
+                  animation: "statusDot 1.8s ease-out infinite",
+                  "@media (prefers-reduced-motion: reduce)": {
+                    animation: "none",
+                  },
+                }),
+              }}
+            />
           )}
-        </Stack>
+        </Box>
       </Stack>
       {busy && (
         <LinearProgress

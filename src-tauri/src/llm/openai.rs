@@ -2,7 +2,9 @@
 //!
 //! Supports OpenAI, Azure OpenAI, and any OpenAI-compatible endpoint (Ollama, vLLM, etc.)
 
-use super::{LlmClient, LlmConfig, LlmMessage, LlmStreamChunk, LlmRole, LlmContent};
+use super::{
+    LlmClient, LlmConfig, LlmContent, LlmMessage, LlmProvider, LlmRole, LlmStreamChunk, TokenUsage,
+};
 use crate::domain::tools::ToolSchema;
 use crate::errors::ApiError;
 use async_trait::async_trait;
@@ -15,6 +17,21 @@ use reqwest::Client;
 pub struct OpenAiCompatibleClient {
     client: Client,
     config: LlmConfig,
+}
+
+/// Moonshot returns 403 when the user selects a **Kimi For Coding** model or coding-only endpoint,
+/// which is restricted to approved clients (Kimi CLI, Claude Code, etc.). Omiga uses the generic API.
+fn enrich_openai_compatible_http_error(status: u16, body: &str) -> String {
+    if status == 403 && body.contains("Kimi For Coding") {
+        return format!(
+            "{}\n\n\
+            [Omiga] \"Kimi For Coding\" models are limited to specific tools (Kimi CLI, Claude Code, Roo Code, …). \
+            In Settings → Model, use a **general** Kimi id such as `kimi-k2-0905-preview` or `kimi-k2.5`, \
+            and the default `https://api.moonshot.ai/v1/chat/completions` base (not the coding-only API).",
+            body
+        );
+    }
+    body.to_string()
 }
 
 impl OpenAiCompatibleClient {
@@ -352,6 +369,11 @@ impl LlmClient for OpenAiCompatibleClient {
             body["tool_choice"] = serde_json::json!("auto");
         }
 
+        // OpenAI: include usage in the last stream chunks. Moonshot/Kimi rejects unknown fields with errors.
+        if !matches!(self.config.provider, LlmProvider::Moonshot) {
+            body["stream_options"] = serde_json::json!({ "include_usage": true });
+        }
+
         // Add extra query params if any
         if let Some(extra_query) = &self.config.extra_query {
             for (key, value) in extra_query {
@@ -371,7 +393,8 @@ impl LlmClient for OpenAiCompatibleClient {
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
-            return Err(ApiError::Http { status, message: text });
+            let message = enrich_openai_compatible_http_error(status, &text);
+            return Err(ApiError::Http { status, message });
         }
 
         let stream = response
@@ -428,6 +451,18 @@ fn parse_sse_events(text: &str) -> Vec<Result<LlmStreamChunk, ApiError>> {
 
         match serde_json::from_str::<OpenAiStreamResponse>(data) {
             Ok(response) => {
+                if let Some(u) = response.usage {
+                    let mut tu = TokenUsage::default();
+                    tu.prompt_tokens = u.prompt_tokens.unwrap_or(0);
+                    tu.completion_tokens = u.completion_tokens.unwrap_or(0);
+                    tu.total_tokens = u.total_tokens.unwrap_or(
+                        tu.prompt_tokens
+                            .saturating_add(tu.completion_tokens),
+                    );
+                    if tu.prompt_tokens > 0 || tu.completion_tokens > 0 {
+                        results.push(Ok(LlmStreamChunk::Usage(tu)));
+                    }
+                }
                 if let Some(choice) = response.choices.first() {
                     if let Some(delta) = &choice.delta {
                         if let Some(content) = &delta.content {
@@ -504,7 +539,17 @@ struct OpenAiStreamResponse {
     object: String,
     created: i64,
     model: String,
+    #[serde(default)]
     choices: Vec<OpenAiChoice>,
+    #[serde(default)]
+    usage: Option<OpenAiUsageChunk>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiUsageChunk {
+    prompt_tokens: Option<u32>,
+    completion_tokens: Option<u32>,
+    total_tokens: Option<u32>,
 }
 
 #[allow(dead_code)]

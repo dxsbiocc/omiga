@@ -50,6 +50,8 @@ pub enum ToolKind {
     FileEdit,
     FileRead,
     FileWrite,
+    /// Content search (ripgrep semantics; API name `ripgrep`, see `grep` module).
+    #[serde(rename = "ripgrep", alias = "grep")]
     Grep,
     Glob,
     WebFetch,
@@ -96,7 +98,7 @@ impl fmt::Display for ToolKind {
             ToolKind::FileEdit => write!(f, "file_edit"),
             ToolKind::FileRead => write!(f, "file_read"),
             ToolKind::FileWrite => write!(f, "file_write"),
-            ToolKind::Grep => write!(f, "grep"),
+            ToolKind::Grep => write!(f, "ripgrep"),
             ToolKind::Glob => write!(f, "glob"),
             ToolKind::WebFetch => write!(f, "web_fetch"),
             ToolKind::WebSearch => write!(f, "web_search"),
@@ -203,7 +205,7 @@ impl Tool {
             Tool::FileEdit(_) => "FileEdit",
             Tool::FileRead(_) => "FileRead",
             Tool::FileWrite(_) => "FileWrite",
-            Tool::Grep(_) => "Grep",
+            Tool::Grep(_) => "Ripgrep",
             Tool::Glob(_) => "Glob",
             Tool::WebFetch(_) => "WebFetch",
             Tool::WebSearch(_) => "WebSearch",
@@ -344,7 +346,7 @@ impl Tool {
             ToolKind::Grep => {
                 let args = serde_json::from_str(json)
                     .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid grep arguments: {}", e),
+                        message: format!("Invalid ripgrep arguments: {}", e),
                     })?;
                 Ok(Tool::Grep(args))
             }
@@ -519,7 +521,7 @@ impl Tool {
             "file_edit" => ToolKind::FileEdit,
             "file_read" => ToolKind::FileRead,
             "file_write" => ToolKind::FileWrite,
-            "grep" => ToolKind::Grep,
+            "ripgrep" | "Ripgrep" | "grep" | "Grep" => ToolKind::Grep,
             "glob" => ToolKind::Glob,
             "web_fetch" => ToolKind::WebFetch,
             "web_search" => ToolKind::WebSearch,
@@ -757,6 +759,7 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
     matches!(
         name,
         "file_read"
+            | "ripgrep"
             | "grep"
             | "glob"
             | "web_fetch"
@@ -820,5 +823,15 @@ mod tool_enum_tests {
         )
         .unwrap();
         assert!(matches!(t, Tool::TaskCreate(_)));
+
+        let t = Tool::from_json_str(
+            "ripgrep",
+            r#"{"pattern":"fn main"}"#,
+        )
+        .unwrap();
+        assert!(matches!(t, Tool::Grep(_)));
+
+        let t = Tool::from_json_str("grep", r#"{"pattern":"x"}"#).unwrap();
+        assert!(matches!(t, Tool::Grep(_)));
     }
 }

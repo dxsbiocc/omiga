@@ -126,7 +126,9 @@ impl LlmProvider {
                 Some("https://open.bigmodel.cn/api/paas/v4/chat/completions".to_string())
             }
             LlmProvider::Moonshot => {
-                Some("https://api.moonshot.cn/v1/chat/completions".to_string())
+                // International console (platform.moonshot.ai) uses api.moonshot.ai.
+                // Mainland keys: set `base_url` to `https://api.moonshot.cn/v1/chat/completions` in Settings.
+                Some("https://api.moonshot.ai/v1/chat/completions".to_string())
             }
             LlmProvider::Custom => Some("http://localhost:8080/v1/chat/completions".to_string()),
         }
@@ -143,7 +145,8 @@ impl LlmProvider {
             LlmProvider::Alibaba => "qwen-max".to_string(),
             LlmProvider::Deepseek => "deepseek-chat".to_string(),
             LlmProvider::Zhipu => "glm-4".to_string(),
-            LlmProvider::Moonshot => "moonshot-v1-8k".to_string(),
+            // Kimi K2 — current OpenAI-compatible id (older moonshot-v1-* may 404 on newer keys)
+            LlmProvider::Moonshot => "kimi-k2-0905-preview".to_string(),
             LlmProvider::Custom => "default".to_string(),
         }
     }
@@ -289,10 +292,27 @@ impl LlmConfig {
 
     /// Get API endpoint URL
     pub fn api_url(&self) -> String {
-        self.base_url
+        let raw = self
+            .base_url
             .clone()
             .or_else(|| self.provider.default_base_url())
-            .unwrap_or_else(|| "http://localhost:8080".to_string())
+            .unwrap_or_else(|| "http://localhost:8080".to_string());
+        Self::normalize_moonshot_chat_url(&self.provider, raw)
+    }
+
+    /// If the user pastes only the API base (`.../v1`), Moonshot returns HTTP 404.
+    fn normalize_moonshot_chat_url(provider: &LlmProvider, url: String) -> String {
+        if !matches!(provider, LlmProvider::Moonshot) {
+            return url.trim().to_string();
+        }
+        let t = url.trim().trim_end_matches('/');
+        if t.contains("chat/completions") {
+            return t.to_string();
+        }
+        if t.ends_with("/v1") {
+            return format!("{}/chat/completions", t);
+        }
+        t.to_string()
     }
 
     /// Check if tools are supported
@@ -417,7 +437,14 @@ pub fn create_client(config: LlmConfig) -> Result<Box<dyn LlmClient>, ApiError> 
 }
 
 /// Load configuration from all sources (config file + env vars)
-/// Priority: env vars > config file > defaults
+///
+/// Priority for **provider / model**: **user config file** (`omiga.yaml` `default_provider` and its
+/// model) wins over `LLM_PROVIDER` / `LLM_MODEL` / inferred provider from env. Settings and the
+/// in-app provider switcher persist to that file (or memory); env must not override the user's
+/// explicit model choice.
+///
+/// Env may still supply `LLM_API_KEY` when merging (non-empty key) and fill optional fields only
+/// when the file leaves them unset (e.g. `base_url`, `temperature`).
 pub fn load_config() -> Result<LlmConfig, ApiError> {
     // First, try to load from config file
     let file_config = if let Ok(config_file) = load_config_file() {
@@ -429,26 +456,20 @@ pub fn load_config() -> Result<LlmConfig, ApiError> {
     // Load from environment variables
     let env_config = load_config_from_env();
 
-    // Merge: env vars override file config
+    // Merge: file (user settings) is authoritative for provider/model; env supplements keys / gaps
     match (file_config, env_config) {
         (Some(file), Ok(env)) => {
-            // Environment variables take precedence
             let mut merged = file;
             if !env.api_key.is_empty() {
                 merged.api_key = env.api_key;
             }
-            if env.base_url.is_some() {
-                merged.base_url = env.base_url;
+            if merged.base_url.is_none() {
+                merged.base_url = env.base_url.clone();
             }
-            if env.provider != LlmProvider::Anthropic || std::env::var("LLM_PROVIDER").is_ok() {
-                merged.provider = env.provider;
-            }
-            if env.model != LlmProvider::Anthropic.default_model() || std::env::var("LLM_MODEL").is_ok() {
-                merged.model = env.model;
-            }
-            if env.temperature.is_some() {
+            if merged.temperature.is_none() {
                 merged.temperature = env.temperature;
             }
+            // Do not override merged.provider / merged.model — user chose them in Settings or yaml.
             Ok(merged)
         }
         (Some(file), Err(_)) => Ok(file),

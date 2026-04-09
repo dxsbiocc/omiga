@@ -21,7 +21,7 @@ export function toolCategoryLabel(toolName: string): string {
   if (n.includes("todo_write") || n.includes("todowrite")) return "更新清单";
   if (n.includes("bash") || n.includes("shell")) return "运行命令";
   if (n.includes("glob")) return "搜索文件";
-  if (n.includes("grep")) return "代码搜索";
+  if (n.includes("ripgrep") || n.includes("grep")) return "代码搜索";
   if (n.includes("notebook")) return "编辑笔记";
   if (n.includes("file_read") || n === "read_file") return "读取文件";
   if (n.includes("file_write") || n.includes("write")) return "写入文件";

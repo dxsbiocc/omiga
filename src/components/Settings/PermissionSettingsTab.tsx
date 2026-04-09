@@ -60,6 +60,7 @@ const PRESET_ICONS: Record<string, ComponentType<SvgIconProps>> = {
   Read: ArticleIcon,
   Write: EditNoteIcon,
   Edit: EditIcon,
+  Ripgrep: SearchIcon,
   Grep: SearchIcon,
   Glob: FolderOpenIcon,
   WebFetch: LanguageIcon,

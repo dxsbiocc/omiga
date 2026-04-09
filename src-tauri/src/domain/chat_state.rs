@@ -38,6 +38,9 @@ pub struct AskUserWaiter {
 pub struct ChatState {
     /// LLM API configuration (includes provider, api_key, model, etc.)
     pub llm_config: Mutex<Option<crate::llm::LlmConfig>>,
+    /// `omiga.yaml` `providers` map key for the entry currently driving [`Self::llm_config`].
+    /// Used so Settings only marks one row as "In use" when multiple entries share the same provider+model.
+    pub active_provider_entry_name: Mutex<Option<String>>,
     /// User-configured Brave Search API key (Settings); overrides env when set.
     pub brave_search_api_key: Mutex<Option<String>>,
     /// In-memory session cache for O(1) lookup by session_id
@@ -100,6 +103,7 @@ impl Default for ChatState {
     fn default() -> Self {
         Self {
             llm_config: Mutex::new(None),
+            active_provider_entry_name: Mutex::new(None),
             brave_search_api_key: Mutex::new(None),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             active_rounds: Arc::new(Mutex::new(HashMap::new())),

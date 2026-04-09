@@ -111,6 +111,8 @@ pub enum StreamChunk {
     ToolStart { id: String, name: String },
     ToolJson(String),
     BlockStop,
+    /// Final usage for this Anthropic stream (emitted before [`Stop`])
+    Usage(crate::llm::TokenUsage),
     Stop,
     Ping,
 }
@@ -129,7 +131,11 @@ enum StreamEvent {
     #[serde(rename = "content_block_stop")]
     ContentBlockStop { index: usize },
     #[serde(rename = "message_delta")]
-    MessageDelta { delta: MessageDelta },
+    MessageDelta {
+        delta: MessageDeltaBody,
+        #[serde(default)]
+        usage: Option<AnthropicUsageFields>,
+    },
     #[serde(rename = "message_stop")]
     MessageStop,
     #[serde(rename = "ping")]
@@ -145,6 +151,16 @@ struct MessageStart {
     role: Role,
     content: Vec<ContentBlock>,
     model: String,
+    #[serde(default)]
+    usage: Option<AnthropicUsageFields>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct AnthropicUsageFields {
+    #[serde(default)]
+    input_tokens: Option<u32>,
+    #[serde(default)]
+    output_tokens: Option<u32>,
 }
 
 #[allow(dead_code)]
@@ -168,7 +184,7 @@ enum ContentDelta {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
-struct MessageDelta {
+struct MessageDeltaBody {
     stop_reason: Option<String>,
     stop_sequence: Option<String>,
 }
@@ -236,7 +252,7 @@ impl ClaudeClient {
 
         // Create streaming channel
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamChunk, ApiError>>(100);
-        
+
         // Spawn task to parse SSE and send chunks
         tokio::spawn(parse_sse_stream(response, tx));
 
@@ -265,6 +281,7 @@ async fn parse_sse_stream(
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    let mut usage_acc = crate::llm::TokenUsage::default();
 
     while let Some(chunk) = stream.next().await {
         match chunk {
@@ -279,7 +296,9 @@ async fn parse_sse_stream(
                             let event = buffer[..pos].to_string();
                             buffer = buffer[pos + 2..].to_string();
 
-                            if let Err(_) = process_sse_event(&event, &tx).await {
+                            if let Err(_) =
+                                process_sse_event(&event, &tx, &mut usage_acc).await
+                            {
                                 return; // Channel closed
                             }
                         }
@@ -303,7 +322,7 @@ async fn parse_sse_stream(
 
     // Process any remaining data in buffer
     if !buffer.is_empty() {
-        let _ = process_sse_event(&buffer, &tx).await;
+        let _ = process_sse_event(&buffer, &tx, &mut usage_acc).await;
     }
 
     // Send stop signal
@@ -314,6 +333,7 @@ async fn parse_sse_stream(
 async fn process_sse_event(
     event: &str,
     tx: &tokio::sync::mpsc::Sender<Result<StreamChunk, ApiError>>,
+    usage_acc: &mut crate::llm::TokenUsage,
 ) -> Result<(), ()> {
     // Parse SSE format (data: {...})
     let mut data = None;
@@ -337,8 +357,15 @@ async fn process_sse_event(
     match serde_json::from_str::<StreamEvent>(data) {
         Ok(event) => {
             match event {
-                StreamEvent::MessageStart { .. } => {
-                    // Start of message - no action needed
+                StreamEvent::MessageStart { message } => {
+                    if let Some(u) = message.usage {
+                        if let Some(i) = u.input_tokens {
+                            usage_acc.prompt_tokens = i;
+                        }
+                        if let Some(o) = u.output_tokens {
+                            usage_acc.completion_tokens = o;
+                        }
+                    }
                     Ok(())
                 }
                 StreamEvent::ContentBlockStart { content_block, .. } => {
@@ -373,14 +400,27 @@ async fn process_sse_event(
                         .await
                         .map_err(|_| ())
                 }
-                StreamEvent::MessageDelta { .. } => {
-                    // Message metadata - could be used for stop_reason
+                StreamEvent::MessageDelta { usage, .. } => {
+                    if let Some(u) = usage {
+                        if let Some(i) = u.input_tokens {
+                            usage_acc.prompt_tokens = i;
+                        }
+                        if let Some(o) = u.output_tokens {
+                            usage_acc.completion_tokens = o;
+                        }
+                    }
                     Ok(())
                 }
                 StreamEvent::MessageStop => {
-                    tx.send(Ok(StreamChunk::Stop))
-                        .await
-                        .map_err(|_| ())
+                    usage_acc.total_tokens = usage_acc
+                        .prompt_tokens
+                        .saturating_add(usage_acc.completion_tokens);
+                    if usage_acc.prompt_tokens > 0 || usage_acc.completion_tokens > 0 {
+                        let _ = tx
+                            .send(Ok(StreamChunk::Usage(usage_acc.clone())))
+                            .await;
+                    }
+                    tx.send(Ok(StreamChunk::Stop)).await.map_err(|_| ())
                 }
                 StreamEvent::Ping => {
                     tx.send(Ok(StreamChunk::Ping))

@@ -7,6 +7,8 @@ pub mod chat_input_target;
 pub mod background_shell;
 pub mod chat_state;
 pub mod coordinator;
+pub mod follow_up_suggestions;
+pub mod post_turn_settings;
 pub mod integrations_catalog;
 pub mod integrations_config;
 pub mod mcp;

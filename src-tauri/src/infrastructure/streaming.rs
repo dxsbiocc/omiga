@@ -75,9 +75,30 @@ pub enum StreamOutputItem {
     /// Stream was cancelled by user
     #[serde(rename = "cancelled")]
     Cancelled,
+    /// Optional short recap after the turn (independent LLM; omitted when model skips)
+    #[serde(rename = "turn_summary")]
+    TurnSummary { text: Option<String> },
+    /// Suggested follow-up prompts for the composer (independent LLM; emitted before [`Complete`] when generation succeeds)
+    #[serde(rename = "follow_up_suggestions")]
+    FollowUpSuggestions(Vec<FollowUpSuggestion>),
+    /// Aggregated LLM token usage for this user turn (main agent only; excludes post-turn summary / follow-up LLM calls)
+    #[serde(rename = "token_usage")]
+    TokenUsage {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        total_tokens: u32,
+        provider: String,
+    },
     /// Stream completed successfully
     #[serde(rename = "complete")]
     Complete,
+}
+
+/// One quick-reply row: short UI label + full text to place in the composer
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FollowUpSuggestion {
+    pub label: String,
+    pub prompt: String,
 }
 
 /// A grep match result

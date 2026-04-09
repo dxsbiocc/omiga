@@ -131,6 +131,17 @@ export interface Message {
   };
   roundId?: string;
   roundStatus?: RoundStatus;
+  /** 后端在回合结束时生成的快捷追问（仅存本地快照） */
+  followUpSuggestions?: Array<{ label: string; prompt: string }>;
+  /** 回合结束后由独立 LLM 生成的可选要点摘要（仅存本地快照） */
+  turnSummary?: string;
+  /** 主对话 token 统计（prompt / completion，来自供应商 API） */
+  tokenUsage?: {
+    input: number;
+    output: number;
+    total?: number;
+    provider?: string;
+  };
 }
 
 /** Strip trailing `[stderr]` (and preceding newlines) from merged shell / task output before persistence. */
@@ -148,8 +159,10 @@ function stripTrailingStderrMarker(
 }
 
 function sanitizeMessageForPersistence(m: Message): Message {
+  const ts = m.turnSummary?.trim();
   return {
     ...m,
+    ...(ts ? { turnSummary: ts } : { turnSummary: undefined }),
     content: stripTrailingStderrMarker(m.content) ?? "",
     prefaceBeforeTools: stripTrailingStderrMarker(m.prefaceBeforeTools),
     toolCallsList: m.toolCallsList?.map((tc) => ({
@@ -186,6 +199,13 @@ interface SessionData {
       arguments: string;
     }>;
     tool_call_id?: string;
+    /** Persisted on assistant rows — matches Rust `MessageTokenUsage` */
+    token_usage?: {
+      input: number;
+      output: number;
+      total?: number;
+      provider?: string;
+    };
   }>;
   project_path: string;
   created_at: string;
@@ -419,12 +439,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           };
         }
 
+        const tokenUsage: Message["tokenUsage"] =
+          m.role === "assistant" && m.token_usage
+            ? {
+                input: m.token_usage.input,
+                output: m.token_usage.output,
+                total: m.token_usage.total,
+                provider: m.token_usage.provider,
+              }
+            : undefined;
+
         return sanitizeMessageForPersistence({
           id: `${sessionId}-msg-${index}`,
           role: m.role,
           content,
           toolCallsList,
           toolCall,
+          ...(tokenUsage ? { tokenUsage } : {}),
         });
       });
 

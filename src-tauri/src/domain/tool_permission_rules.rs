@@ -41,7 +41,7 @@ pub fn canonical_permission_tool_name(name: &str) -> String {
         "file_edit" | "Edit" | "FileEditTool" | "FileEdit" | "MultiEdit" | "str_replace_based_edit_tool" => {
             "file_edit".to_string()
         }
-        "grep" | "Grep" => "grep".to_string(),
+        "ripgrep" | "Ripgrep" | "grep" | "Grep" => "ripgrep".to_string(),
         "glob" | "Glob" => "glob".to_string(),
         "web_fetch" | "WebFetch" => "web_fetch".to_string(),
         "web_search" | "WebSearch" => "web_search".to_string(),

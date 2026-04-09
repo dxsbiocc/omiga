@@ -38,12 +38,15 @@ import {
   RadioButtonUnchecked,
 } from "@mui/icons-material";
 
+import { notifyProviderChanged } from "../../utils/providerEvents";
+
 // Supported LLM providers with their display names and default models
 type ProviderInfo = {
   name: string;
   defaultModel: string;
   placeholder: string;
   docsUrl: string;
+  modelHelper?: string;
 };
 
 const PROVIDER_INFO: Record<string, ProviderInfo> = {
@@ -97,9 +100,11 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
   },
   moonshot: {
     name: "Moonshot (Kimi/月之暗面)",
-    defaultModel: "moonshot-v1-8k",
+    defaultModel: "kimi-k2-0905-preview",
     placeholder: "sk-...",
-    docsUrl: "https://platform.moonshot.cn/console/api-keys",
+    docsUrl: "https://platform.moonshot.ai/docs/overview",
+    modelHelper:
+      "Do not use “Kimi For Coding” / coding-only model ids or the coding API base — they only work in Kimi CLI, Claude Code, Roo Code, etc. Use general models: kimi-k2-0905-preview, kimi-k2.5, or moonshot-v1-8k.",
   },
   custom: {
     name: "Custom (OpenAI-compatible)",
@@ -116,7 +121,8 @@ interface ProviderConfigEntry {
   apiKeyPreview: string;
   baseUrl: string | null;
   enabled: boolean;
-  isActive: boolean;
+  isSessionActive: boolean;
+  isDefault: boolean;
 }
 
 interface ProviderManagerProps {
@@ -179,7 +185,7 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
       setProviders((prev) =>
         prev.map((p) => ({
           ...p,
-          isActive: p.name === name,
+          isSessionActive: p.name === name,
         }))
       );
 
@@ -190,6 +196,7 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
       if (onActiveProviderChange && result.model) {
         onActiveProviderChange(result.provider, result.model);
       }
+      notifyProviderChanged();
     } catch (err) {
       setError(`Failed to switch: ${err}`);
     } finally {
@@ -210,12 +217,13 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
     setDialogOpen(true);
   };
 
-  // Open edit dialog
+  // Open edit dialog — API key field is empty on purpose: full key is never sent to the UI.
+  // Saving with a blank field sends `${KEEP_EXISTING}` so the file-backed key is preserved.
   const handleEdit = (provider: ProviderConfigEntry) => {
     setEditingProvider(provider);
     setFormName(provider.name);
     setFormProviderType(provider.providerType);
-    setFormApiKey(""); // Don't show existing key
+    setFormApiKey("");
     setFormModel(provider.model);
     setFormBaseUrl(provider.baseUrl || "");
     setFormSetAsDefault(false);
@@ -272,6 +280,7 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
       });
 
       await loadProviders();
+      notifyProviderChanged();
       setDialogOpen(false);
       setDialogError(null);
       setSuccess(`Saved ${formName}`);
@@ -335,7 +344,7 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
                 sx={{
                   borderBottom: 1,
                   borderColor: "divider",
-                  bgcolor: provider.isActive ? "action.selected" : "inherit",
+                  bgcolor: provider.isSessionActive ? "action.selected" : "inherit",
                   "&:hover": { bgcolor: "action.hover" },
                 }}
               >
@@ -343,14 +352,17 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
                   primary={
                     <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                       <Typography fontWeight={600}>{provider.name}</Typography>
-                      {provider.isActive && (
+                      {provider.isSessionActive && (
                         <Chip
                           icon={<CheckCircle />}
-                          label="Active"
+                          label="In use"
                           size="small"
                           color="success"
                           variant="outlined"
                         />
+                      )}
+                      {provider.isDefault && (
+                        <Chip label="Default" size="small" variant="outlined" sx={{ ml: 0.5 }} />
                       )}
                     </Box>
                   }
@@ -367,15 +379,21 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
                 />
                 <ListItemSecondaryAction>
                   <Box sx={{ display: "flex", gap: 0.5 }}>
-                    <Tooltip title={provider.isActive ? "Already Active" : "Switch to this provider"}>
+                    <Tooltip
+                      title={
+                        provider.isSessionActive
+                          ? "Current session uses this provider"
+                          : "Use for this session only (does not change default)"
+                      }
+                    >
                       <span>
                         <IconButton
                           size="small"
                           onClick={() => handleSwitchProvider(provider.name)}
-                          disabled={provider.isActive || loading}
-                          color={provider.isActive ? "success" : "default"}
+                          disabled={provider.isSessionActive || loading}
+                          color={provider.isSessionActive ? "success" : "default"}
                         >
-                          {provider.isActive ? (
+                          {provider.isSessionActive ? (
                             <RadioButtonChecked fontSize="small" />
                           ) : (
                             <RadioButtonUnchecked fontSize="small" />
@@ -392,7 +410,7 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
                       <IconButton
                         size="small"
                         onClick={() => handleDelete(provider.name)}
-                        disabled={loading || provider.isActive}
+                        disabled={loading || provider.isSessionActive}
                       >
                         <Delete fontSize="small" />
                       </IconButton>
@@ -463,13 +481,22 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
               </Select>
             </FormControl>
 
-            {/* API Key */}
+            {/* API Key — when editing, field is empty: key is not gone; see helperText below */}
             <TextField
-              label={editingProvider ? "API Key (leave blank to keep existing)" : "API Key *"}
+              label={editingProvider ? "API Key" : "API Key *"}
               type={showApiKey ? "text" : "password"}
               value={formApiKey}
               onChange={(e) => setFormApiKey(e.target.value)}
-              placeholder={PROVIDER_INFO[formProviderType]?.placeholder}
+              placeholder={
+                editingProvider
+                  ? "Leave blank to keep your saved key"
+                  : PROVIDER_INFO[formProviderType]?.placeholder
+              }
+              helperText={
+                editingProvider
+                  ? `The full key is not shown for security. It is still saved. Preview: ${editingProvider.apiKeyPreview || "••••"}. Leave blank and save to keep it, or paste a new key to replace.`
+                  : undefined
+              }
               fullWidth
               InputProps={{
                 endAdornment: (
@@ -482,13 +509,17 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
               }}
             />
 
-            {/* Model */}
             <TextField
               label="Model *"
               value={formModel}
               onChange={(e) => setFormModel(e.target.value)}
               placeholder={PROVIDER_INFO[formProviderType]?.defaultModel}
-              helperText={`Exact model ID for ${PROVIDER_INFO[formProviderType]?.name || formProviderType}`}
+              helperText={
+                (PROVIDER_INFO[formProviderType]?.modelHelper
+                  ? `${PROVIDER_INFO[formProviderType].modelHelper} `
+                  : "") +
+                `Exact model ID for ${PROVIDER_INFO[formProviderType]?.name || formProviderType}.`
+              }
               fullWidth
             />
 

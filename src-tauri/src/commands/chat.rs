@@ -16,7 +16,7 @@ use crate::domain::chat_state::{
     AskUserWaiter, McpToolCache, MCP_TOOL_CACHE_TTL, PermissionDenyCache, PERMISSION_DENY_CACHE_TTL,
 };
 use crate::domain::tools::ask_user_question;
-use crate::domain::session::{AgentTask, Message, Session, TodoItem, ToolCall};
+use crate::domain::session::{AgentTask, Message, MessageTokenUsage, Session, TodoItem, ToolCall};
 use crate::domain::session_codec::SessionCodec;
 use crate::utils::large_output_instructions::get_large_output_instructions;
 use crate::domain::integrations_config;
@@ -95,15 +95,29 @@ async fn get_llm_config(chat_state: &ChatState) -> Result<LlmConfig, OmigaError>
     }
     drop(stored);
 
-    // Try to load from environment
-    match load_config_from_env() {
+    // Prefer merged config: `omiga.yaml` default_provider + env overrides (`LLM_PROVIDER`, keys, …).
+    // Using only `load_config_from_env()` ignored the file and caused UI (yaml default → "Kimi") to
+    // disagree with runtime (env → e.g. deepseek) and token_usage labels.
+    match crate::llm::load_config() {
         Ok(config) => {
-            // Store for future use
             let mut stored = chat_state.llm_config.lock().await;
             *stored = Some(config.clone());
+            drop(stored);
+            if let Ok(cf) = crate::llm::config::load_config_file() {
+                *chat_state.active_provider_entry_name.lock().await = cf.default_provider;
+            }
             Ok(config)
         }
-        Err(_e) => Err(OmigaError::Chat(ChatError::ApiKeyMissing)),
+        Err(_) => match load_config_from_env() {
+            Ok(config) => {
+                let mut stored = chat_state.llm_config.lock().await;
+                *stored = Some(config.clone());
+                drop(stored);
+                *chat_state.active_provider_entry_name.lock().await = None;
+                Ok(config)
+            }
+            Err(_e) => Err(OmigaError::Chat(ChatError::ApiKeyMissing)),
+        },
     }
 }
 
@@ -278,7 +292,10 @@ fn fold_tool_stream_item_for_model(
         | StreamOutputItem::Thinking(_)
         | StreamOutputItem::ToolUse { .. }
         | StreamOutputItem::ToolResult { .. }
-        | StreamOutputItem::AskUserPending { .. } => {}
+        | StreamOutputItem::AskUserPending { .. }
+        | StreamOutputItem::TurnSummary { .. }
+        | StreamOutputItem::FollowUpSuggestions(_)
+        | StreamOutputItem::TokenUsage { .. } => {}
     }
 }
 
@@ -288,7 +305,7 @@ fn apply_empty_structured_tool_placeholder(output: &mut String, tool_name: &str,
         return;
     }
     match tool_name {
-        "grep" => output.push_str("No matches found"),
+        "ripgrep" | "grep" => output.push_str("No matches found"),
         "glob" => output.push_str("No files found"),
         _ => {}
     }
@@ -597,7 +614,7 @@ pub async fn send_message(
             // Save user message to database
             let msg_id = uuid::Uuid::new_v4().to_string();
             let _now = chrono::Utc::now().to_rfc3339();
-            repo.save_message(&msg_id, &session.id, "user", &request.content, None, None)
+            repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None)
                 .await
                 .map_err(|e| {
                     OmigaError::Chat(ChatError::StreamError(format!("Failed to save message: {}", e)))
@@ -661,7 +678,7 @@ pub async fn send_message(
 
         // Save user message
         let msg_id = uuid::Uuid::new_v4().to_string();
-        repo.save_message(&msg_id, &session.id, "user", &request.content, None, None)
+        repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None)
             .await
             .map_err(|e| {
                 OmigaError::Chat(ChatError::StreamError(format!("Failed to save message: {}", e)))
@@ -1021,6 +1038,9 @@ pub async fn send_message(
     let skill_task_context = request.content.clone();
     let brave_search_api_key = app_state.chat.brave_search_api_key.lock().await.clone();
     let skill_cache_for_spawn = app_state.skill_cache.clone();
+    // 回合开始前预判：短确认类输入可跳过回合结束后的 Output Formatter，加快到 Complete。
+    let preflight_skip_turn_summary =
+        crate::domain::agents::output_formatter::preflight_skip_turn_summary(&request.content);
 
     tokio::spawn(async move {
         let _ = app_clone.emit(
@@ -1056,8 +1076,10 @@ pub async fn send_message(
             allow_nested_agent: env_allow_nested_agent(),
         };
 
+        let mut turn_token_usage: Option<crate::llm::TokenUsage> = None;
+
         // Stream the response with cancellation support
-        let (mut pending_tool_calls, assistant_text, was_cancelled) = match stream_llm_response_with_cancel(
+        let (mut pending_tool_calls, assistant_text, was_cancelled, usage_first) = match stream_llm_response_with_cancel(
             client.as_ref(),
             &app_clone,
             &message_id_clone,
@@ -1085,6 +1107,7 @@ pub async fn send_message(
                 return;
             }
         };
+        merge_turn_token_usage(&mut turn_token_usage, usage_first);
 
         {
             let mut active_rounds = active_rounds_clone.lock().await;
@@ -1104,6 +1127,8 @@ pub async fn send_message(
             return;
         }
 
+        let mut final_reply_for_follow_up = assistant_text.clone();
+
         // First assistant turn: persist with tool_calls JSON for reload
         let assistant_msg_id = uuid::Uuid::new_v4().to_string();
         let tool_calls_json = tool_calls_json_opt(&pending_tool_calls);
@@ -1116,6 +1141,7 @@ pub async fn send_message(
                     "assistant",
                     &assistant_text,
                     tool_calls_json.as_deref(),
+                    None,
                     None,
                 )
                 .await
@@ -1157,20 +1183,38 @@ pub async fn send_message(
                 index_chat_to_implicit_memory(&app_clone, &project_path, &session_id_clone, &session_name, &repo).await;
             }
             
-            let repo = repo_clone.lock().await;
-            if let Err(e) = repo
-                .complete_round(&round_id_clone, Some(&last_assistant_id))
-                .await
             {
-                tracing::warn!("Failed to complete round: {}", e);
-            }
-            let _ = app_clone.emit(
-                &format!("chat-stream-{}", message_id_clone),
-                &StreamOutputItem::Complete,
-            );
+                let repo = repo_clone.lock().await;
+                if let Err(e) = repo
+                    .complete_round(&round_id_clone, Some(&last_assistant_id))
+                    .await
+                {
+                    tracing::warn!("Failed to complete round: {}", e);
+                }
+            } // repo guard dropped before emit_post_turn_meta_then_complete to avoid deadlock
+            persist_and_emit_turn_token_usage(
+                &app_clone,
+                &repo_clone,
+                &last_assistant_id,
+                &message_id_clone,
+                &turn_token_usage,
+                &llm_config_for_spawn.provider.to_string(),
+            )
+            .await;
+            emit_post_turn_meta_then_complete(
+                &app_clone,
+                &message_id_clone,
+                client.as_ref(),
+                &final_reply_for_follow_up,
+                preflight_skip_turn_summary,
+                &final_reply_for_follow_up,
+            )
+            .await;
             return;
         }
 
+        let mut send_user_message_called = false;
+        let mut send_user_message_text: Option<String> = None;
         for _round_idx in 0..MAX_TOOL_ROUNDS {
             let (project_root, todos_for_tools, agent_tasks_for_tools) = {
                 let sessions = sessions_clone.read().await;
@@ -1188,6 +1232,19 @@ pub async fn send_message(
                     .map(|r| r.agent_tasks.clone());
                 (project_root, todos, agent_tasks)
             };
+
+            // SendUserMessage 调用：标记已直接交付内容，并提取 message 供 suggestions 使用
+            if let Some((_, _, args)) = pending_tool_calls
+                .iter()
+                .find(|(_, name, _)| name == "SendUserMessage")
+            {
+                send_user_message_called = true;
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
+                    if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
+                        send_user_message_text = Some(msg.to_string());
+                    }
+                }
+            }
 
             let tool_results = execute_tool_calls(
                 &pending_tool_calls,
@@ -1218,6 +1275,7 @@ pub async fn send_message(
                             output,
                             None,
                             Some(tool_use_id),
+                            None,
                         )
                         .await
                     {
@@ -1278,7 +1336,7 @@ pub async fn send_message(
 
             let updated_llm_messages: Vec<LlmMessage> = api_messages_to_llm(&updated_messages);
 
-            let (next_tools, next_text, follow_cancelled) = match stream_llm_response_with_cancel(
+            let (next_tools, next_text, follow_cancelled, usage_next) = match stream_llm_response_with_cancel(
                 client.as_ref(),
                 &app_clone,
                 &message_id_clone,
@@ -1305,6 +1363,9 @@ pub async fn send_message(
                     return;
                 }
             };
+            merge_turn_token_usage(&mut turn_token_usage, usage_next);
+
+            final_reply_for_follow_up = next_text.clone();
 
             if follow_cancelled {
                 persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
@@ -1330,6 +1391,7 @@ pub async fn send_message(
                         "assistant",
                         &next_text,
                         next_tc_json.as_deref(),
+                        None,
                         None,
                     )
                     .await
@@ -1370,17 +1432,36 @@ pub async fn send_message(
                     index_chat_to_implicit_memory(&app_clone, &project_path, &session_id_clone, &session_name, &repo).await;
                 }
                 
-                let repo = repo_clone.lock().await;
-                if let Err(e) = repo
-                    .complete_round(&round_id_clone, Some(&last_assistant_id))
-                    .await
                 {
-                    tracing::warn!("Failed to complete round: {}", e);
-                }
-                let _ = app_clone.emit(
-                    &format!("chat-stream-{}", message_id_clone),
-                    &StreamOutputItem::Complete,
-                );
+                    let repo = repo_clone.lock().await;
+                    if let Err(e) = repo
+                        .complete_round(&round_id_clone, Some(&last_assistant_id))
+                        .await
+                    {
+                        tracing::warn!("Failed to complete round: {}", e);
+                    }
+                } // repo guard dropped before emit_post_turn_meta_then_complete to avoid deadlock
+                let suggestions_text = send_user_message_text
+                    .as_deref()
+                    .unwrap_or(&final_reply_for_follow_up);
+                persist_and_emit_turn_token_usage(
+                    &app_clone,
+                    &repo_clone,
+                    &last_assistant_id,
+                    &message_id_clone,
+                    &turn_token_usage,
+                    &llm_config_for_spawn.provider.to_string(),
+                )
+                .await;
+                emit_post_turn_meta_then_complete(
+                    &app_clone,
+                    &message_id_clone,
+                    client.as_ref(),
+                    &final_reply_for_follow_up,
+                    preflight_skip_turn_summary || send_user_message_called,
+                    suggestions_text,
+                )
+                .await;
                 return;
             }
         }
@@ -1394,14 +1475,33 @@ pub async fn send_message(
                 MAX_TOOL_ROUNDS
             )),
         );
-        let repo = repo_clone.lock().await;
-        let _ = repo
-            .complete_round(&round_id_clone, Some(&last_assistant_id))
-            .await;
-        let _ = app_clone.emit(
-            &format!("chat-stream-{}", message_id_clone),
-            &StreamOutputItem::Complete,
-        );
+        {
+            let repo = repo_clone.lock().await;
+            let _ = repo
+                .complete_round(&round_id_clone, Some(&last_assistant_id))
+                .await;
+        } // repo guard dropped before emit_post_turn_meta_then_complete to avoid deadlock
+        let suggestions_text = send_user_message_text
+            .as_deref()
+            .unwrap_or(&final_reply_for_follow_up);
+        persist_and_emit_turn_token_usage(
+            &app_clone,
+            &repo_clone,
+            &last_assistant_id,
+            &message_id_clone,
+            &turn_token_usage,
+            &llm_config_for_spawn.provider.to_string(),
+        )
+        .await;
+        emit_post_turn_meta_then_complete(
+            &app_clone,
+            &message_id_clone,
+            client.as_ref(),
+            &final_reply_for_follow_up,
+            preflight_skip_turn_summary || send_user_message_called,
+            suggestions_text,
+        )
+        .await;
     });
 
     // 如果是 Plan mode，生成初始 todo items
@@ -1462,8 +1562,22 @@ async fn finalize_pending_tool_by_id(
     true
 }
 
+/// Merge per-request usage into a running total for one user turn (multi tool-round).
+fn merge_turn_token_usage(
+    acc: &mut Option<crate::llm::TokenUsage>,
+    stream: Option<crate::llm::TokenUsage>,
+) {
+    let Some(s) = stream else {
+        return;
+    };
+    let t = acc.get_or_insert(crate::llm::TokenUsage::default());
+    t.prompt_tokens = t.prompt_tokens.saturating_add(s.prompt_tokens);
+    t.completion_tokens = t.completion_tokens.saturating_add(s.completion_tokens);
+    t.total_tokens = t.prompt_tokens.saturating_add(t.completion_tokens);
+}
+
 /// Stream LLM response and collect tool calls with cancellation support
-/// Returns: (tool_calls, assistant_text, was_cancelled)
+/// Returns: (tool_calls, assistant_text, was_cancelled, usage_this_request)
 async fn stream_llm_response_with_cancel(
     client: &dyn LlmClient,
     app: &AppHandle,
@@ -1474,7 +1588,7 @@ async fn stream_llm_response_with_cancel(
     pending_tools: &Arc<Mutex<HashMap<String, PendingToolCall>>>,
     cancel_flag: &Arc<RwLock<bool>>,
     repo: Arc<Mutex<crate::domain::persistence::SessionRepository>>,
-) -> Result<(Vec<(String, String, String)>, String, bool), OmigaError> {
+) -> Result<(Vec<(String, String, String)>, String, bool, Option<crate::llm::TokenUsage>), OmigaError> {
     use futures::StreamExt;
 
     let stream = client
@@ -1487,6 +1601,7 @@ async fn stream_llm_response_with_cancel(
     let mut completed_tool_calls: Vec<(String, String, String)> = Vec::new();
     let mut current_tool_id: Option<String> = None;
     let mut was_cancelled = false;
+    let mut usage_this_request: Option<crate::llm::TokenUsage> = None;
 
     // Mark round as partial after receiving first chunk
     let mut marked_partial = false;
@@ -1572,6 +1687,9 @@ async fn stream_llm_response_with_cancel(
                             .await;
                         }
                     }
+                    LlmStreamChunk::Usage(u) => {
+                        usage_this_request = Some(u);
+                    }
                     LlmStreamChunk::Stop { stop_reason: _ } => break,
                     _ => {}
                 }
@@ -1600,7 +1718,132 @@ async fn stream_llm_response_with_cancel(
         }
     }
 
-    Ok((completed_tool_calls, assistant_text, was_cancelled))
+    Ok((completed_tool_calls, assistant_text, was_cancelled, usage_this_request))
+}
+
+/// Persist aggregated main-agent token usage on the final assistant DB row for this turn, then emit for live UI.
+async fn persist_and_emit_turn_token_usage(
+    app: &AppHandle,
+    repo: &Arc<Mutex<crate::domain::persistence::SessionRepository>>,
+    last_assistant_message_id: &str,
+    stream_message_id: &str,
+    usage: &Option<crate::llm::TokenUsage>,
+    provider: &str,
+) {
+    let Some(u) = usage else {
+        return;
+    };
+    if u.prompt_tokens == 0 && u.completion_tokens == 0 {
+        return;
+    }
+    let total = if u.total_tokens > 0 {
+        u.total_tokens
+    } else {
+        u.prompt_tokens.saturating_add(u.completion_tokens)
+    };
+    let payload = MessageTokenUsage {
+        input: u.prompt_tokens,
+        output: u.completion_tokens,
+        total: Some(total),
+        provider: Some(provider.to_string()),
+    };
+    let json = match serde_json::to_string(&payload) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!(target: "omiga::chat", "token usage json: {}", e);
+            None
+        }
+    };
+    if let Some(ref j) = json {
+        let r = repo.lock().await;
+        if let Err(e) = r
+            .update_message_token_usage(last_assistant_message_id, Some(j.as_str()))
+            .await
+        {
+            tracing::warn!("Failed to persist token usage on message: {}", e);
+        }
+    }
+    let _ = app.emit(
+        &format!("chat-stream-{}", stream_message_id),
+        &StreamOutputItem::TokenUsage {
+            prompt_tokens: u.prompt_tokens,
+            completion_tokens: u.completion_tokens,
+            total_tokens: total,
+            provider: provider.to_string(),
+        },
+    );
+}
+
+/// After the visible assistant reply is finalized: optional recap (independent LLM), then follow-up chips (independent LLM), then [`StreamOutputItem::Complete`].
+///
+/// - `skip_summary`：跳过摘要 LLM 调用（preflight 判定为无需摘要，或本轮已通过 SendUserMessage 直接交付内容）。
+/// - `suggestions_reply`：生成 follow-up suggestions 所用的文本；当本轮使用了 SendUserMessage 时传其 message 内容，
+///   而非 LLM 的空壳收尾文本；其余情况与 `final_reply` 相同。
+async fn emit_post_turn_meta_then_complete(
+    app: &AppHandle,
+    message_id: &str,
+    client: &dyn LlmClient,
+    final_reply: &str,
+    skip_summary: bool,
+    suggestions_reply: &str,
+) {
+    let (summary_enabled, follow_enabled) = match app.try_state::<OmigaAppState>() {
+        Some(state) => {
+            let repo = state.repo.lock().await;
+            crate::domain::post_turn_settings::load_post_turn_meta_flags(&*repo)
+                .await
+                .unwrap_or((true, true))
+        }
+        None => (true, true),
+    };
+
+    let (summary_res, follow_res) = tokio::join!(
+        async {
+            if skip_summary {
+                return Ok(None);
+            }
+            crate::domain::agents::output_formatter::run_turn_summary_pass(
+                client,
+                final_reply,
+                summary_enabled,
+            )
+            .await
+        },
+        crate::domain::follow_up_suggestions::generate_follow_up_suggestions(
+            client,
+            suggestions_reply,
+            follow_enabled,
+        ),
+    );
+
+    let summary_text = match summary_res {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(target: "omiga::post_turn", "post-turn summary: {}", e);
+            None
+        }
+    };
+    let _ = app.emit(
+        &format!("chat-stream-{}", message_id),
+        &StreamOutputItem::TurnSummary {
+            text: summary_text,
+        },
+    );
+
+    match follow_res {
+        Ok(items) if !items.is_empty() => {
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::FollowUpSuggestions(items),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(target: "omiga::follow_up", "follow-up suggestions: {}", e),
+    }
+    let _ = app.emit(
+        &format!("chat-stream-{}", message_id),
+        &StreamOutputItem::Complete,
+    );
 }
 
 fn is_agent_tool_name(name: &str) -> bool {
@@ -1818,7 +2061,7 @@ async fn run_skill_forked(
         let api_msgs = SessionCodec::to_api_messages(&transcript);
         let llm_messages = api_messages_to_llm(&api_msgs);
 
-        let (tool_calls, assistant_text, cancelled) = stream_llm_response_with_cancel(
+        let (tool_calls, assistant_text, cancelled, _) = stream_llm_response_with_cancel(
             client.as_ref(),
             app,
             message_id,
@@ -1840,6 +2083,7 @@ async fn run_skill_forked(
         transcript.push(Message::Assistant {
             content: assistant_text.clone(),
             tool_calls: tc.clone(),
+            token_usage: None,
         });
 
         if tool_calls.is_empty() {
@@ -2039,7 +2283,7 @@ async fn run_subagent_session_foreground_inner(
         }
         let api_msgs = SessionCodec::to_api_messages(&transcript);
         let llm_messages = api_messages_to_llm(&api_msgs);
-        let (tool_calls, assistant_text, cancelled) = stream_llm_response_with_cancel(
+        let (tool_calls, assistant_text, cancelled, _) = stream_llm_response_with_cancel(
             client.as_ref(),
             app,
             message_id,
@@ -2062,6 +2306,7 @@ async fn run_subagent_session_foreground_inner(
         let asst = Message::Assistant {
             content: assistant_text.clone(),
             tool_calls: tc.clone(),
+            token_usage: None,
         };
         if let Some(tid) = background_task_id {
             persist_background_transcript_message(&runtime.repo, tid, session_id, &asst).await;
@@ -2415,7 +2660,7 @@ fn is_parallelizable_tool(tool_name: &str) -> bool {
         || matches!(
             tool_name,
             "web_search" | "WebSearch" | "web_fetch" | "WebFetch"
-            | "file_read" | "Read" | "glob" | "Glob" | "grep" | "Grep"
+            | "file_read" | "Read" | "glob" | "Glob" | "ripgrep" | "Ripgrep" | "grep" | "Grep"
         )
 }
 
@@ -2675,7 +2920,7 @@ async fn execute_ask_user_question_interactive(
 }
 
 /// Execute tool calls and return results.
-/// Parallelizable tools (MCP, web_search, web_fetch, file_read, glob, grep) run concurrently;
+/// Parallelizable tools (MCP, web_search, web_fetch, file_read, glob, ripgrep) run concurrently;
 /// stateful tools (Agent, file_edit, file_write, bash, todo_write, …) run sequentially.
 #[async_recursion::async_recursion]
 async fn execute_tool_calls(
@@ -3878,6 +4123,101 @@ pub async fn set_llm_config(
 
     let mut config_guard = state.chat.llm_config.lock().await;
     *config_guard = Some(config);
+    *state.chat.active_provider_entry_name.lock().await = None;
+    Ok(())
+}
+
+/// Persist the Settings panel LLM choice to `omiga.yaml` as `default_provider` and refresh runtime memory.
+/// (Dialog `quick_switch_provider` does not call this — it only updates the current session.)
+#[tauri::command]
+pub async fn save_llm_settings_to_config(
+    state: State<'_, OmigaAppState>,
+    provider: String,
+    api_key: String,
+    secret_key: Option<String>,
+    app_id: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+) -> CommandResult<()> {
+    let provider_enum = provider
+        .parse::<LlmProvider>()
+        .map_err(|e| OmigaError::Config(format!("Invalid provider: {}", e)))?;
+
+    let model_str = model
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| provider_enum.default_model().to_string());
+
+    let sk_opt = secret_key.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    });
+    let aid_opt = app_id.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    });
+    let bu_opt = base_url.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    });
+
+    let mut config_file = crate::llm::config::load_config_file().unwrap_or_default();
+    if config_file.providers.is_none() {
+        config_file.providers = Some(HashMap::new());
+    }
+    let providers = config_file.providers.as_mut().unwrap();
+
+    let entry_key = match config_file.default_provider.clone() {
+        Some(ref k) if providers.contains_key(k) => k.clone(),
+        _ => "default".to_string(),
+    };
+
+    let provider_cfg = crate::llm::config::ProviderConfig {
+        provider_type: provider,
+        api_key: Some(api_key.clone()),
+        secret_key: sk_opt.clone(),
+        app_id: aid_opt.clone(),
+        base_url: bu_opt.clone(),
+        model: Some(model_str.clone()),
+        enabled: true,
+        ..Default::default()
+    };
+    providers.insert(entry_key.clone(), provider_cfg);
+    config_file.default_provider = Some(entry_key);
+
+    let config_path = crate::llm::config::find_config_file()
+        .or_else(|| dirs::config_dir().map(|d| d.join("omiga").join("omiga.yaml")))
+        .ok_or_else(|| OmigaError::Config("Could not determine config file path".to_string()))?;
+
+    if let Some(parent) = config_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    crate::llm::config::save_config_file(&config_file, &config_path)
+        .map_err(|e| OmigaError::Config(format!("Failed to save config: {}", e)))?;
+
+    let mut config = LlmConfig::new(provider_enum, api_key);
+    config.model = model_str;
+    config.secret_key = sk_opt;
+    config.app_id = aid_opt;
+    config.base_url = bu_opt;
+
+    let mut config_guard = state.chat.llm_config.lock().await;
+    *config_guard = Some(config);
+    *state.chat.active_provider_entry_name.lock().await = config_file.default_provider.clone();
     Ok(())
 }
 
@@ -3992,6 +4332,8 @@ pub async fn get_api_key_status(
             // Store for future use
             let mut stored = state.chat.llm_config.lock().await;
             *stored = Some(config.clone());
+            drop(stored);
+            *state.chat.active_provider_entry_name.lock().await = None;
             Ok(ApiKeyStatus {
                 configured: true,
                 source: Some("environment".to_string()),
@@ -4299,7 +4641,10 @@ pub struct ProviderConfigEntry {
     pub api_key_preview: String,
     pub base_url: Option<String>,
     pub enabled: bool,
-    pub is_active: bool,
+    /// Matches in-memory runtime config (current chat session / quick switch).
+    pub is_session_active: bool,
+    /// `default` in `omiga.yaml` — the default used on startup and after Settings save.
+    pub is_default: bool,
 }
 
 /// List all configured providers from the config file
@@ -4307,10 +4652,12 @@ pub struct ProviderConfigEntry {
 pub async fn list_provider_configs(
     state: State<'_, OmigaAppState>,
 ) -> CommandResult<Vec<ProviderConfigEntry>> {
-    // Get current active provider
+    // Runtime LLM config (quick-switch / last resolved load) — used to mark which row matches reality
     let current_config = state.chat.llm_config.lock().await;
-    let _active_provider = current_config.as_ref().map(|c| format!("{:?}", c.provider));
+    let runtime = current_config.clone();
     drop(current_config);
+
+    let active_entry = state.chat.active_provider_entry_name.lock().await.clone();
 
     // Try to load from config file
     let config_file = match crate::llm::config::load_config_file() {
@@ -4339,6 +4686,20 @@ pub async fn list_provider_configs(
                 })
                 .unwrap_or_default();
 
+            // Prefer the explicit saved config name so two entries with the same provider+model
+            // cannot both show "In use".
+            let matches_runtime = match active_entry.as_deref() {
+                Some(active) => name == active,
+                None => runtime.as_ref().map_or(false, |c| {
+                    let Ok(pt) = config.provider_type.parse::<LlmProvider>() else {
+                        return false;
+                    };
+                    let entry_model = config.model.as_deref().unwrap_or("").trim();
+                    let run_model = c.model.trim();
+                    pt == c.provider && entry_model == run_model
+                }),
+            };
+
             ProviderConfigEntry {
                 name: name.clone(),
                 provider_type: config.provider_type.clone(),
@@ -4346,7 +4707,8 @@ pub async fn list_provider_configs(
                 api_key_preview,
                 base_url: config.base_url.clone(),
                 enabled: config.enabled,
-                is_active: name == &default_provider,
+                is_session_active: matches_runtime,
+                is_default: name == &default_provider,
             }
         })
         .collect();
@@ -4418,17 +4780,11 @@ pub async fn switch_provider(
         config.timeout_secs = timeout;
     }
 
-    // Update active config in state
+    // Update active config in state (session only — does not change `default` in omiga.yaml)
     let mut config_guard = state.chat.llm_config.lock().await;
     *config_guard = Some(config.clone());
     drop(config_guard);
-
-    // Save back to file with updated default provider
-    if let Some(path) = crate::llm::config::find_config_file() {
-        let mut updated_config = config_file;
-        updated_config.default_provider = Some(provider_name.clone());
-        let _ = crate::llm::config::save_config_file(&updated_config, &path);
-    }
+    *state.chat.active_provider_entry_name.lock().await = Some(provider_name);
 
     Ok(LlmConfigResponse {
         provider: format!("{:?}", provider_enum),
@@ -4521,6 +4877,7 @@ pub async fn save_provider_config(
         let new_config = LlmConfig::new(provider_enum, providers.get(&name).unwrap().api_key.clone().unwrap_or_default())
             .with_model(providers.get(&name).unwrap().model.clone().unwrap_or_default());
         *config_guard = Some(new_config);
+        *state.chat.active_provider_entry_name.lock().await = Some(name.clone());
     }
 
     // Save to config file - use standard location if not found
@@ -4543,7 +4900,10 @@ pub async fn save_provider_config(
 
 /// Delete a provider configuration
 #[tauri::command]
-pub async fn delete_provider_config(name: String) -> CommandResult<()> {
+pub async fn delete_provider_config(
+    state: State<'_, OmigaAppState>,
+    name: String,
+) -> CommandResult<()> {
     // Load existing config
     let mut config_file = crate::llm::config::load_config_file()
         .map_err(|e| OmigaError::Config(format!("Failed to load config: {}", e)))?;
@@ -4563,6 +4923,14 @@ pub async fn delete_provider_config(name: String) -> CommandResult<()> {
     // If we removed the default, pick a new one
     if config_file.default_provider.as_ref() == Some(&name) {
         config_file.default_provider = providers.keys().next().cloned();
+    }
+
+    // Clear "in use" tracking if we deleted that row (or follow the new default key).
+    {
+        let mut active = state.chat.active_provider_entry_name.lock().await;
+        if active.as_deref() == Some(name.as_str()) {
+            *active = config_file.default_provider.clone();
+        }
     }
 
     // Save back to file
@@ -4626,6 +4994,8 @@ pub async fn quick_switch_provider(
     // Update state
     let mut config_guard = state.chat.llm_config.lock().await;
     *config_guard = Some(config.clone());
+    drop(config_guard);
+    *state.chat.active_provider_entry_name.lock().await = Some(provider_name);
 
     Ok(LlmConfigResponse {
         provider: format!("{:?}", provider_enum),

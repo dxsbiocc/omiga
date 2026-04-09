@@ -26,7 +26,7 @@ model: haiku
 tools:
   - file_read
   - file_edit
-  - grep
+  - ripgrep
 disallowed_tools:
   - bash
 permission_mode: acceptEdits
@@ -230,7 +230,7 @@ description: 专业的代码审查助手，检查代码质量和最佳实践
 model: haiku
 tools:
   - file_read
-  - grep
+  - ripgrep
   - glob
 disallowed_tools:
   - file_edit

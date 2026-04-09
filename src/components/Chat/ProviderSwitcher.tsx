@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  OMIGA_PROVIDER_CHANGED_EVENT,
+  notifyProviderChanged,
+} from "../../utils/providerEvents";
 import type { SxProps, Theme } from "@mui/material/styles";
 import {
   Box,
@@ -29,7 +33,10 @@ interface ProviderConfigEntry {
   apiKeyPreview: string;
   baseUrl: string | null;
   enabled: boolean;
-  isActive: boolean;
+  /** Current chat session (quick switch / runtime). */
+  isSessionActive: boolean;
+  /** Saved default in omiga.yaml — used on startup. */
+  isDefault: boolean;
 }
 
 interface ProviderSwitcherProps {
@@ -71,10 +78,12 @@ export function ProviderSwitcher({
       const configs = await invoke<ProviderConfigEntry[]>("list_provider_configs");
       if (configs && configs.length > 0) {
         setProviders(configs);
-        const active = configs.find((p) => p.isActive);
-        if (active) {
-          setActiveProvider(active);
-        }
+        const active = configs.find((p) => p.isSessionActive);
+        // Always sync: avoids stale "DeepSeek" chip after switching elsewhere (e.g. Settings).
+        setActiveProvider(active ?? null);
+      } else {
+        setProviders([]);
+        setActiveProvider(null);
       }
     } catch (err) {
       console.error("Failed to load providers:", err);
@@ -88,6 +97,14 @@ export function ProviderSwitcher({
     return () => clearInterval(interval);
   }, [loadProviders]);
 
+  useEffect(() => {
+    const onChanged = () => {
+      void loadProviders();
+    };
+    window.addEventListener(OMIGA_PROVIDER_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(OMIGA_PROVIDER_CHANGED_EVENT, onChanged);
+  }, [loadProviders]);
+
   const handleClick = (event: React.MouseEvent<HTMLElement>) => {
     setAnchorEl(event.currentTarget);
     // Refresh list when opening
@@ -99,7 +116,7 @@ export function ProviderSwitcher({
   };
 
   const handleSwitch = async (provider: ProviderConfigEntry) => {
-    if (provider.isActive) {
+    if (provider.isSessionActive) {
       handleClose();
       return;
     }
@@ -118,10 +135,11 @@ export function ProviderSwitcher({
       setProviders((prev) =>
         prev.map((p) => ({
           ...p,
-          isActive: p.name === provider.name,
+          isSessionActive: p.name === provider.name,
         }))
       );
       setActiveProvider(provider);
+      notifyProviderChanged();
       setSuccess(`Switched to ${provider.name} (${result.provider})`);
       setTimeout(() => setSuccess(null), 3000);
     } catch (err: any) {
@@ -134,7 +152,8 @@ export function ProviderSwitcher({
   };
 
   const getProviderDisplay = (provider: ProviderConfigEntry) => {
-    const typeName = PROVIDER_DISPLAY_NAMES[provider.providerType] || provider.providerType;
+    const key = provider.providerType.toLowerCase();
+    const typeName = PROVIDER_DISPLAY_NAMES[key] || provider.providerType;
     return {
       /** 配置名称（菜单主行） */
       configName: provider.name,
@@ -250,7 +269,7 @@ export function ProviderSwitcher({
             Switch Model Provider
           </Typography>
           <Typography variant="caption" color="text.secondary">
-            Choose an active configuration
+            Current session only — default in Settings / omiga.yaml unchanged
           </Typography>
         </Box>
 
@@ -263,7 +282,7 @@ export function ProviderSwitcher({
               key={provider.name}
               onClick={() => handleSwitch(provider)}
               disabled={isSwitching}
-              selected={provider.isActive}
+              selected={provider.isSessionActive}
               sx={{
                 py: 1.5,
                 borderBottom: 1,
@@ -274,7 +293,7 @@ export function ProviderSwitcher({
               <ListItemIcon>
                 {isSwitching ? (
                   <CircularProgress size={16} />
-                ) : provider.isActive ? (
+                ) : provider.isSessionActive ? (
                   <RadioButtonChecked color="success" fontSize="small" />
                 ) : (
                   <RadioButtonUnchecked fontSize="small" />
@@ -282,15 +301,23 @@ export function ProviderSwitcher({
               </ListItemIcon>
               <ListItemText
                 primary={
-                  <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                    <Typography fontWeight={provider.isActive ? 600 : 400}>
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                    <Typography fontWeight={provider.isSessionActive ? 600 : 400}>
                       {display.configName}
                     </Typography>
-                    {provider.isActive && (
+                    {provider.isSessionActive && (
                       <Chip
                         size="small"
                         color="success"
-                        label="Active"
+                        label="In use"
+                        sx={{ height: 18, fontSize: "0.65rem" }}
+                      />
+                    )}
+                    {provider.isDefault && (
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        label="Default"
                         sx={{ height: 18, fontSize: "0.65rem" }}
                       />
                     )}

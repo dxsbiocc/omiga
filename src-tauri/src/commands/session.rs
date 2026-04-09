@@ -2,7 +2,9 @@
 
 use super::CommandResult;
 use crate::app_state::OmigaAppState;
-use crate::domain::session::{Message as DomainMessage, ToolCall as DomainToolCall};
+use crate::domain::session::{
+    Message as DomainMessage, MessageTokenUsage, ToolCall as DomainToolCall,
+};
 use crate::domain::session_codec::SessionCodec;
 use crate::errors::OmigaError;
 use serde::{Deserialize, Serialize};
@@ -62,7 +64,11 @@ pub async fn load_session(
         .into_iter()
         .map(|m| match m {
             DomainMessage::User { content } => Message::User { content },
-            DomainMessage::Assistant { content, tool_calls } => Message::Assistant {
+            DomainMessage::Assistant {
+                content,
+                tool_calls,
+                token_usage,
+            } => Message::Assistant {
                 content,
                 tool_calls: tool_calls.map(|tc| {
                     tc.into_iter()
@@ -73,6 +79,7 @@ pub async fn load_session(
                         })
                         .collect()
                 }),
+                token_usage,
             },
             DomainMessage::Tool { tool_call_id, output } => Message::Tool {
                 tool_call_id,
@@ -124,7 +131,11 @@ pub async fn save_session(
         // Convert command Message to domain Message for codec
         let domain_msg = match message {
             Message::User { content } => DomainMessage::User { content: content.clone() },
-            Message::Assistant { content, tool_calls } => DomainMessage::Assistant {
+            Message::Assistant {
+                content,
+                tool_calls,
+                token_usage,
+            } => DomainMessage::Assistant {
                 content: content.clone(),
                 tool_calls: tool_calls.as_ref().map(|tc| {
                     tc.iter()
@@ -135,6 +146,7 @@ pub async fn save_session(
                         })
                         .collect()
                 }),
+                token_usage: token_usage.clone(),
             },
             Message::Tool { tool_call_id, output } => DomainMessage::Tool {
                 tool_call_id: tool_call_id.clone(),
@@ -143,7 +155,7 @@ pub async fn save_session(
         };
 
         // Use SessionCodec for serialization (single source of truth)
-        let (id, session_id, role, content, tool_calls, tool_call_id) =
+        let (id, session_id, role, content, tool_calls, tool_call_id, token_usage_json) =
             SessionCodec::message_to_record(&domain_msg, &msg_id, &session.id);
 
         repo.save_message(
@@ -153,6 +165,7 @@ pub async fn save_session(
             &content,
             tool_calls.as_deref(),
             tool_call_id.as_deref(),
+            token_usage_json.as_deref(),
         )
         .await
         .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
@@ -249,7 +262,11 @@ pub async fn save_message(
     // Convert command Message to domain Message for codec
     let domain_msg = match message {
         Message::User { content } => DomainMessage::User { content },
-        Message::Assistant { content, tool_calls } => DomainMessage::Assistant {
+        Message::Assistant {
+            content,
+            tool_calls,
+            token_usage,
+        } => DomainMessage::Assistant {
             content,
             tool_calls: tool_calls.map(|tc| {
                 tc.into_iter()
@@ -260,6 +277,7 @@ pub async fn save_message(
                     })
                     .collect()
             }),
+            token_usage,
         },
         Message::Tool { tool_call_id, output } => DomainMessage::Tool {
             tool_call_id,
@@ -268,7 +286,7 @@ pub async fn save_message(
     };
 
     // Use SessionCodec for serialization (single source of truth)
-    let (id, sid, role, content, tool_calls, tool_call_id) =
+    let (id, sid, role, content, tool_calls, tool_call_id, token_usage_json) =
         SessionCodec::message_to_record(&domain_msg, &msg_id, &session_id);
 
     repo.save_message(
@@ -278,6 +296,7 @@ pub async fn save_message(
         &content,
         tool_calls.as_deref(),
         tool_call_id.as_deref(),
+        token_usage_json.as_deref(),
     )
     .await
     .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
@@ -426,7 +445,12 @@ pub enum Message {
     #[serde(rename = "user")]
     User { content: String },
     #[serde(rename = "assistant")]
-    Assistant { content: String, tool_calls: Option<Vec<ToolCall>> },
+    Assistant {
+        content: String,
+        tool_calls: Option<Vec<ToolCall>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_usage: Option<MessageTokenUsage>,
+    },
     #[serde(rename = "tool")]
     Tool { tool_call_id: String, output: String },
 }

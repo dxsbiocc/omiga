@@ -13,7 +13,11 @@ export const PERMISSION_PRESETS: PermissionPreset[] = [
   { rule: "Read", label: "读取文件", aliases: ["Read", "file_read", "FileRead"] },
   { rule: "Write", label: "写入文件", aliases: ["Write", "file_write", "FileWrite"] },
   { rule: "Edit", label: "编辑文件", aliases: ["Edit", "file_edit", "FileEdit"] },
-  { rule: "Grep", label: "Grep 搜索", aliases: ["grep", "Grep"] },
+  {
+    rule: "Ripgrep",
+    label: "Ripgrep 搜索",
+    aliases: ["ripgrep", "Ripgrep", "grep", "Grep"],
+  },
   { rule: "Glob", label: "Glob 文件匹配", aliases: ["glob", "Glob"] },
   { rule: "WebFetch", label: "网页抓取", aliases: ["web_fetch", "WebFetch"] },
   { rule: "WebSearch", label: "网络搜索", aliases: ["web_search", "WebSearch"] },

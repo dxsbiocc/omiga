@@ -90,6 +90,7 @@ impl LlmClient for AnthropicClient {
                 StreamChunk::ToolStart { id, name } => LlmStreamChunk::ToolStart { id, name },
                 StreamChunk::ToolJson(json) => LlmStreamChunk::ToolArguments(json),
                 StreamChunk::BlockStop => LlmStreamChunk::BlockStop,
+                StreamChunk::Usage(u) => LlmStreamChunk::Usage(u),
                 StreamChunk::Stop => LlmStreamChunk::Stop { stop_reason: None },
                 StreamChunk::Ping => LlmStreamChunk::Ping,
             })

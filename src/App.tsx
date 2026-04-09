@@ -82,34 +82,45 @@ export default function App() {
     }
   }, []);
 
-  // LLM config is only kept in Rust memory; localStorage is the durable copy from Settings.
-  // Without this, restart clears the backend and chat fails until the user opens Settings
-  // (that panel is not mounted on the default layout, so loadSavedConfig never ran).
+  // If omiga.yaml did not load at startup, migrate legacy localStorage into Rust once.
   useEffect(() => {
-    const raw = localStorage.getItem("omiga_llm_config");
-    if (!raw?.trim()) return;
-    let parsed: {
-      provider: string;
-      apiKey: string;
-      secretKey?: string;
-      appId?: string;
-      model?: string;
-      baseUrl?: string;
-    };
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return;
-    }
-    if (!parsed.provider || !parsed.apiKey?.trim()) return;
-    void invoke("set_llm_config", {
-      provider: parsed.provider,
-      apiKey: parsed.apiKey.trim(),
-      secretKey: parsed.secretKey,
-      appId: parsed.appId,
-      model: parsed.model?.trim() || undefined,
-      baseUrl: parsed.baseUrl,
-    }).catch(() => {});
+    void (async () => {
+      try {
+        const st = await invoke<{ provider?: string; apiKeyPreview?: string } | null>(
+          "get_llm_config_state",
+          {},
+        );
+        if (st?.provider?.trim() && st.apiKeyPreview?.trim()) {
+          return;
+        }
+      } catch {
+        /* fall through */
+      }
+      const raw = localStorage.getItem("omiga_llm_config");
+      if (!raw?.trim()) return;
+      let parsed: {
+        provider: string;
+        apiKey: string;
+        secretKey?: string;
+        appId?: string;
+        model?: string;
+        baseUrl?: string;
+      };
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return;
+      }
+      if (!parsed.provider || !parsed.apiKey?.trim()) return;
+      void invoke("set_llm_config", {
+        provider: parsed.provider,
+        apiKey: parsed.apiKey.trim(),
+        secretKey: parsed.secretKey,
+        appId: parsed.appId,
+        model: parsed.model?.trim() || undefined,
+        baseUrl: parsed.baseUrl,
+      }).catch(() => {});
+    })();
   }, []);
 
   useEffect(() => {

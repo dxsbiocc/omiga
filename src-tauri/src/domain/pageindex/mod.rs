@@ -57,7 +57,7 @@ pub use tree::{DocumentNode, DocumentTree, NodeType, SectionNode};
 /// Configuration for the PageIndex system.
 /// 
 /// NOTE: PageIndex now indexes CHAT CONTENT (implicit memory) rather than project code.
-/// Project code should be accessed via tools (grep, glob, file_read) in real-time.
+/// Project code should be accessed via tools (ripgrep, glob, file_read) in real-time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexConfig {
     /// Maximum content size to index (in bytes). Default: 10MB

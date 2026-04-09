@@ -4,7 +4,7 @@ description: 示例代码审查 Agent，展示热重载功能
 model: haiku
 tools:
   - file_read
-  - grep
+  - ripgrep
   - glob
 disallowed_tools:
   - file_edit

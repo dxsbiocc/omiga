@@ -66,6 +66,11 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    // Migration: assistant token usage JSON (reload in UI)
+    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN token_usage_json TEXT")
+        .execute(pool)
+        .await;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS settings (
@@ -380,7 +385,7 @@ impl SessionRepository {
         // Get all messages for this session
         let messages = sqlx::query_as::<_, MessageRecord>(
             r#"
-            SELECT id, session_id, role, content, tool_calls, tool_call_id, created_at
+            SELECT id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, created_at
             FROM messages
             WHERE session_id = ?
             ORDER BY created_at ASC
@@ -487,13 +492,14 @@ impl SessionRepository {
         content: &str,
         tool_calls: Option<&str>,
         tool_call_id: Option<&str>,
+        token_usage_json: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(
             r#"
-            INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#
         )
         .bind(id)
@@ -502,10 +508,25 @@ impl SessionRepository {
         .bind(content)
         .bind(tool_calls)
         .bind(tool_call_id)
+        .bind(token_usage_json)
         .bind(&now)
         .execute(&self.pool)
         .await?;
 
+        Ok(())
+    }
+
+    /// Update token usage on an existing assistant message row (after turn completes).
+    pub async fn update_message_token_usage(
+        &self,
+        id: &str,
+        token_usage_json: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE messages SET token_usage_json = ? WHERE id = ?")
+            .bind(token_usage_json)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -970,6 +991,7 @@ pub struct MessageRecord {
     pub content: String,
     pub tool_calls: Option<String>,
     pub tool_call_id: Option<String>,
+    pub token_usage_json: Option<String>,
     pub created_at: String,
 }
 

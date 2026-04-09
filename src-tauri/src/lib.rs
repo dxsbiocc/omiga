@@ -61,6 +61,26 @@ pub fn run() {
 
                 app_handle.manage(app_state);
 
+                // Load `omiga.yaml` default provider into memory so the first message uses the
+                // saved default; dialog `quick_switch_provider` overrides only for this session.
+                {
+                    let state = app_handle.state::<OmigaAppState>();
+                    let mut g = state.chat.llm_config.lock().await;
+                    if g.is_none() {
+                        match crate::llm::load_config() {
+                            Ok(cfg) if !cfg.api_key.is_empty() => {
+                                *g = Some(cfg);
+                                if let Ok(cf) = crate::llm::config::load_config_file() {
+                                    *state.chat.active_provider_entry_name.lock().await =
+                                        cf.default_provider;
+                                }
+                                tracing::info!(target: "omiga::llm", "Loaded default LLM from config file");
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
                 tracing::info!("Database initialized successfully");
 
                 // Warm integrations catalog (MCP tools/list + skills scan) in the background so
@@ -90,6 +110,7 @@ pub fn run() {
             commands::chat::set_api_key,
             commands::chat::get_api_key_status,
             commands::chat::set_llm_config,
+            commands::chat::save_llm_settings_to_config,
             commands::chat::get_llm_config_state,
             commands::chat::set_brave_search_api_key,
             commands::chat::get_brave_search_api_key_state,

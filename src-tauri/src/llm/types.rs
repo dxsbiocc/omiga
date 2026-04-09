@@ -193,6 +193,8 @@ pub enum LlmStreamChunk {
     ToolArguments(String),
     /// Content block completed
     BlockStop,
+    /// Provider-reported token usage (may appear once or multiple times per stream; last wins per request)
+    Usage(TokenUsage),
     /// Message completed
     Stop { stop_reason: Option<String> },
     /// Keep-alive ping
