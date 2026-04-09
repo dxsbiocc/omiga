@@ -71,6 +71,11 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await;
 
+    // Migration: Moonshot/Kimi thinking replay text for assistant rows
+    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN reasoning_content TEXT")
+        .execute(pool)
+        .await;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS settings (
@@ -385,7 +390,7 @@ impl SessionRepository {
         // Get all messages for this session
         let messages = sqlx::query_as::<_, MessageRecord>(
             r#"
-            SELECT id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, created_at
+            SELECT id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, created_at
             FROM messages
             WHERE session_id = ?
             ORDER BY created_at ASC
@@ -493,13 +498,14 @@ impl SessionRepository {
         tool_calls: Option<&str>,
         tool_call_id: Option<&str>,
         token_usage_json: Option<&str>,
+        reasoning_content: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(
             r#"
-            INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#
         )
         .bind(id)
@@ -509,6 +515,7 @@ impl SessionRepository {
         .bind(tool_calls)
         .bind(tool_call_id)
         .bind(token_usage_json)
+        .bind(reasoning_content)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -992,6 +999,7 @@ pub struct MessageRecord {
     pub tool_calls: Option<String>,
     pub tool_call_id: Option<String>,
     pub token_usage_json: Option<String>,
+    pub reasoning_content: Option<String>,
     pub created_at: String,
 }
 

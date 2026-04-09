@@ -263,6 +263,10 @@ pub struct LlmConfig {
     /// Extra query parameters (for some providers)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_query: Option<HashMap<String, String>>,
+    /// Moonshot/Custom only: request body always includes `thinking: true|false` (default false).
+    /// DeepSeek and other providers leave this unset. When true, tool-call replays need `reasoning_content`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
 }
 
 fn default_timeout() -> u64 {
@@ -287,6 +291,7 @@ impl LlmConfig {
             timeout_secs: 120,
             extra_headers: None,
             extra_query: None,
+            thinking: None,
         }
     }
 
@@ -390,6 +395,7 @@ impl Default for LlmConfig {
             timeout_secs: 120,
             extra_headers: None,
             extra_query: None,
+            thinking: None,
         }
     }
 }
@@ -563,6 +569,7 @@ pub fn load_config_from_env() -> Result<LlmConfig, ApiError> {
         timeout_secs,
         extra_headers: None,
         extra_query: None,
+        thinking: None,
     })
 }
 

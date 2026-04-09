@@ -62,6 +62,9 @@ impl ClaudeConfig {
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    /// Moonshot/Kimi: required on replay when `thinking` is enabled and the turn has tool calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

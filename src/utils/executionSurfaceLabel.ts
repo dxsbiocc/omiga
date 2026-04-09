@@ -79,22 +79,24 @@ export function getExecutionSurfaceView(
   const run = steps.find((s) => s.status === "running");
   if (run) {
     if (run.id === "connect") {
-      return { label: "等待响应", kind: "waiting", toolName: null };
-    }
-    if (run.id === "think") {
+      // Stream is live but the connect row was not cleared (e.g. `Start` event not handled).
+      // Do not keep showing「等待响应」— fall through to streaming / step logic below.
+      if (!(ctx.isStreaming && !ctx.isConnecting)) {
+        return { label: "等待响应", kind: "waiting", toolName: null };
+      }
+    } else if (run.id === "think") {
       return { label: "推理中", kind: "thinking", toolName: null };
-    }
-    if (run.id === "reply" || run.id.startsWith("reply-")) {
+    } else if (run.id === "reply" || run.id.startsWith("reply-")) {
       return { label: "解析输出", kind: "generating", toolName: null };
-    }
-    if (run.id.startsWith("tool-")) {
+    } else if (run.id.startsWith("tool-")) {
       const tn = run.toolName?.trim() ?? null;
       const label = tn
         ? formatToolDisplayName(tn)
         : run.title || "调用工具";
       return { label, kind: "tool", toolName: tn };
+    } else {
+      return { label: run.title, kind: "generating", toolName: null };
     }
-    return { label: run.title, kind: "generating", toolName: null };
   }
 
   if (ctx.isStreaming && ctx.waitingFirstChunk) {

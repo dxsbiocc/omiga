@@ -114,6 +114,9 @@ pub struct LlmMessage {
     /// Tool calls (for assistant messages with tool use)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Moonshot/Kimi thinking replay (paired with tool calls when `thinking` is on)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl LlmMessage {
@@ -124,6 +127,7 @@ impl LlmMessage {
             content: vec![LlmContent::text(text)],
             name: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -134,6 +138,7 @@ impl LlmMessage {
             content: vec![LlmContent::text(text)],
             name: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -144,6 +149,7 @@ impl LlmMessage {
             content: vec![LlmContent::text(text)],
             name: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -154,6 +160,7 @@ impl LlmMessage {
             content: vec![LlmContent::tool_result(tool_use_id, content)],
             name: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -187,6 +194,8 @@ pub struct FunctionCall {
 pub enum LlmStreamChunk {
     /// Text delta
     Text(String),
+    /// Moonshot/Kimi `reasoning_content` delta when thinking is enabled
+    ReasoningContent(String),
     /// Tool use started
     ToolStart { id: String, name: String },
     /// Tool arguments (JSON delta for streaming)
@@ -320,6 +329,7 @@ impl From<crate::api::Message> for LlmMessage {
             content,
             name: None,
             tool_calls: None,
+            reasoning_content: msg.reasoning_content.clone(),
         }
     }
 }
@@ -327,6 +337,7 @@ impl From<crate::api::Message> for LlmMessage {
 /// Convert from LLM Message to domain Message (lossy - only text content)
 impl From<LlmMessage> for crate::api::Message {
     fn from(msg: LlmMessage) -> Self {
+        let reasoning_content = msg.reasoning_content.clone();
         let content: Vec<crate::api::ContentBlock> = msg
             .content
             .into_iter()
@@ -353,6 +364,7 @@ impl From<LlmMessage> for crate::api::Message {
                 LlmRole::Tool => crate::api::Role::User, // Tool results go as user
             },
             content,
+            reasoning_content,
         }
     }
 }

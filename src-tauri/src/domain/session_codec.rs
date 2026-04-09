@@ -47,6 +47,7 @@ impl SessionCodec {
                     content: record.content,
                     tool_calls,
                     token_usage,
+                    reasoning_content: record.reasoning_content,
                 }
             }
             "tool" => Message::Tool {
@@ -60,7 +61,7 @@ impl SessionCodec {
     }
 
     /// Convert a domain Message to database-ready tuple
-    /// Returns: (id, session_id, role, content, tool_calls_json, tool_call_id, token_usage_json)
+    /// Returns: (id, session_id, role, content, tool_calls_json, tool_call_id, token_usage_json, reasoning_content)
     pub fn message_to_record(
         message: &Message,
         id: &str,
@@ -70,6 +71,7 @@ impl SessionCodec {
         String,
         String,
         String,
+        Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
@@ -83,11 +85,13 @@ impl SessionCodec {
                 None,
                 None,
                 None,
+                None,
             ),
             Message::Assistant {
                 content,
                 tool_calls,
                 token_usage,
+                reasoning_content,
             } => {
                 let tool_calls_json = tool_calls.as_ref().map(|tc| {
                     serde_json::to_string(tc).unwrap_or_default()
@@ -95,6 +99,10 @@ impl SessionCodec {
                 let token_usage_json = token_usage
                     .as_ref()
                     .and_then(|u| serde_json::to_string(u).ok());
+                let reasoning = reasoning_content
+                    .as_ref()
+                    .filter(|s| !s.is_empty())
+                    .cloned();
                 (
                     id.to_string(),
                     session_id.to_string(),
@@ -103,6 +111,7 @@ impl SessionCodec {
                     tool_calls_json,
                     None,
                     token_usage_json,
+                    reasoning,
                 )
             }
             Message::Tool { tool_call_id, output } => (
@@ -112,6 +121,7 @@ impl SessionCodec {
                 output.clone(),
                 None,
                 Some(tool_call_id.clone()),
+                None,
                 None,
             ),
         }
@@ -125,11 +135,13 @@ impl SessionCodec {
                 Message::User { content } => Some(ApiMessage {
                     role: Role::User,
                     content: vec![ContentBlock::text(content.clone())],
+                    reasoning_content: None,
                 }),
                 Message::Assistant {
                     content,
                     tool_calls,
                     token_usage: _,
+                    reasoning_content,
                 } => {
                     let mut blocks: Vec<ContentBlock> = vec![ContentBlock::text(content.clone())];
 
@@ -147,6 +159,7 @@ impl SessionCodec {
                     Some(ApiMessage {
                         role: Role::Assistant,
                         content: blocks,
+                        reasoning_content: reasoning_content.clone(),
                     })
                 }
                 Message::Tool { tool_call_id, output } => Some(ApiMessage {
@@ -156,6 +169,7 @@ impl SessionCodec {
                         content: output.clone(),
                         is_error: None,
                     }],
+                    reasoning_content: None,
                 }),
             })
             .collect()
@@ -185,6 +199,7 @@ impl SessionCodec {
             content: content.to_string(),
             tool_calls,
             token_usage: None,
+            reasoning_content: None,
         }
     }
 }

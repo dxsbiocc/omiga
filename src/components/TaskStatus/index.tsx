@@ -7,7 +7,6 @@ import {
   Fade,
   Tabs,
   Tab,
-  Divider,
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import {
@@ -167,7 +166,6 @@ export function TaskStatus() {
   const isPlanMode = composerAgentType === "Plan";
   const isAutoMode = composerAgentType === "auto";
   const isExploreMode = composerAgentType === "Explore";
-  const isReActMode = !isPlanMode && hasExecution;
 
   const surfaceContext = useMemo(
     () => ({
@@ -350,7 +348,7 @@ export function TaskStatus() {
                 >
                   已完成
                 </Typography>
-                <PlanTodoList items={taskStatus.completed.map(id => todoItems.find(i => i.id === id)!).filter(Boolean)} />
+                <PlanTodoList items={taskStatus.completed} />
               </Box>
             )}
 
@@ -371,7 +369,7 @@ export function TaskStatus() {
                 >
                   出错
                 </Typography>
-                <PlanTodoList items={taskStatus.error.map(id => todoItems.find(i => i.id === id)!).filter(Boolean)} />
+                <PlanTodoList items={taskStatus.error} />
               </Box>
             )}
           </Box>

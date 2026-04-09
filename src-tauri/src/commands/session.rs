@@ -68,6 +68,7 @@ pub async fn load_session(
                 content,
                 tool_calls,
                 token_usage,
+                reasoning_content,
             } => Message::Assistant {
                 content,
                 tool_calls: tool_calls.map(|tc| {
@@ -80,6 +81,7 @@ pub async fn load_session(
                         .collect()
                 }),
                 token_usage,
+                reasoning_content,
             },
             DomainMessage::Tool { tool_call_id, output } => Message::Tool {
                 tool_call_id,
@@ -135,6 +137,7 @@ pub async fn save_session(
                 content,
                 tool_calls,
                 token_usage,
+                reasoning_content,
             } => DomainMessage::Assistant {
                 content: content.clone(),
                 tool_calls: tool_calls.as_ref().map(|tc| {
@@ -147,6 +150,7 @@ pub async fn save_session(
                         .collect()
                 }),
                 token_usage: token_usage.clone(),
+                reasoning_content: reasoning_content.clone(),
             },
             Message::Tool { tool_call_id, output } => DomainMessage::Tool {
                 tool_call_id: tool_call_id.clone(),
@@ -155,8 +159,16 @@ pub async fn save_session(
         };
 
         // Use SessionCodec for serialization (single source of truth)
-        let (id, session_id, role, content, tool_calls, tool_call_id, token_usage_json) =
-            SessionCodec::message_to_record(&domain_msg, &msg_id, &session.id);
+        let (
+            id,
+            session_id,
+            role,
+            content,
+            tool_calls,
+            tool_call_id,
+            token_usage_json,
+            reasoning_content,
+        ) = SessionCodec::message_to_record(&domain_msg, &msg_id, &session.id);
 
         repo.save_message(
             &id,
@@ -166,6 +178,7 @@ pub async fn save_session(
             tool_calls.as_deref(),
             tool_call_id.as_deref(),
             token_usage_json.as_deref(),
+            reasoning_content.as_deref(),
         )
         .await
         .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
@@ -266,6 +279,7 @@ pub async fn save_message(
             content,
             tool_calls,
             token_usage,
+            reasoning_content,
         } => DomainMessage::Assistant {
             content,
             tool_calls: tool_calls.map(|tc| {
@@ -278,6 +292,7 @@ pub async fn save_message(
                     .collect()
             }),
             token_usage,
+            reasoning_content,
         },
         Message::Tool { tool_call_id, output } => DomainMessage::Tool {
             tool_call_id,
@@ -286,8 +301,16 @@ pub async fn save_message(
     };
 
     // Use SessionCodec for serialization (single source of truth)
-    let (id, sid, role, content, tool_calls, tool_call_id, token_usage_json) =
-        SessionCodec::message_to_record(&domain_msg, &msg_id, &session_id);
+    let (
+        id,
+        sid,
+        role,
+        content,
+        tool_calls,
+        tool_call_id,
+        token_usage_json,
+        reasoning_content,
+    ) = SessionCodec::message_to_record(&domain_msg, &msg_id, &session_id);
 
     repo.save_message(
         &id,
@@ -297,6 +320,7 @@ pub async fn save_message(
         tool_calls.as_deref(),
         tool_call_id.as_deref(),
         token_usage_json.as_deref(),
+        reasoning_content.as_deref(),
     )
     .await
     .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
@@ -450,6 +474,8 @@ pub enum Message {
         tool_calls: Option<Vec<ToolCall>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token_usage: Option<MessageTokenUsage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
     },
     #[serde(rename = "tool")]
     Tool { tool_call_id: String, output: String },

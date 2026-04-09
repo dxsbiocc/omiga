@@ -71,6 +71,7 @@ impl LlmClient for AnthropicClient {
                         _ => None,
                     })
                     .collect(),
+                reasoning_content: msg.reasoning_content.clone(),
             })
             .collect();
 

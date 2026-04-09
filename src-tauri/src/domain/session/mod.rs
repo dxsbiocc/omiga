@@ -41,7 +41,7 @@ impl Session {
 
     /// Add an assistant message (no tool calls)
     pub fn add_assistant_message(&mut self, content: impl Into<String>) {
-        self.add_assistant_message_with_tools(content, None);
+        self.add_assistant_message_with_tools(content, None, None);
     }
 
     /// Add an assistant message, optionally with tool calls (matches API / DB shape)
@@ -49,11 +49,13 @@ impl Session {
         &mut self,
         content: impl Into<String>,
         tool_calls: Option<Vec<ToolCall>>,
+        reasoning_content: Option<String>,
     ) {
         self.messages.push(Message::Assistant {
             content: content.into(),
             tool_calls,
             token_usage: None,
+            reasoning_content,
         });
         self.updated_at = chrono::Utc::now();
     }
@@ -75,18 +77,22 @@ impl Session {
                 Message::User { content } => crate::api::Message {
                     role: crate::api::Role::User,
                     content: vec![crate::api::ContentBlock::text(content.clone())],
+                    reasoning_content: None,
                 },
                 Message::Assistant {
                     content,
+                    reasoning_content,
                     token_usage: _,
                     ..
                 } => crate::api::Message {
                     role: crate::api::Role::Assistant,
                     content: vec![crate::api::ContentBlock::text(content.clone())],
+                    reasoning_content: reasoning_content.clone(),
                 },
                 Message::Tool { output, .. } => crate::api::Message {
                     role: crate::api::Role::User,
                     content: vec![crate::api::ContentBlock::text(output.clone())],
+                    reasoning_content: None,
                 },
             })
             .collect()
@@ -115,6 +121,9 @@ pub enum Message {
         tool_calls: Option<Vec<ToolCall>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token_usage: Option<MessageTokenUsage>,
+        /// Moonshot/Kimi thinking replay
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
     },
     Tool {
         tool_call_id: String,
@@ -164,6 +173,7 @@ pub fn to_anthropic_messages(
                 content,
                 tool_calls,
                 token_usage: _,
+                reasoning_content: _,
             } => {
                 let mut msg = serde_json::json!({
                     "role": "assistant",

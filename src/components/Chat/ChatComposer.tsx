@@ -4,11 +4,11 @@ import {
   useMemo,
   useRef,
   useCallback,
+  createElement,
   type Ref,
   type MutableRefObject,
   type KeyboardEvent,
 } from "react";
-import { FileIcon, FolderIcon } from "react-material-icon-theme";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Box,
@@ -38,15 +38,8 @@ import {
 } from "@mui/material";
 import {
   Add,
-  Code,
   ExpandMore,
   Mic,
-  Computer,
-  PanTool,
-  WarningAmber,
-  FolderOpen,
-  Hub,
-  Tag,
   Square,
   SmartToy,
   ForumOutlined,
@@ -58,13 +51,26 @@ import {
   DeleteOutline,
   HourglassEmpty,
 } from "@mui/icons-material";
+import type { LucideIcon } from "lucide-react";
+import {
+  Hand,
+  Code as LucideCode,
+  AlertTriangle,
+  ChevronDown,
+  FolderOpen as LucideFolderOpen,
+  Laptop,
+  Globe2,
+  GitBranch,
+  File as LucideFile,
+  Folder as LucideFolder,
+  Plus,
+} from "lucide-react";
 import {
   useUiStore,
   useChatComposerStore,
   type PermissionMode,
 } from "../../state";
 import { usePencilPalette } from "../../theme";
-import { materialIconFileExtension } from "../../utils/materialIconTheme";
 import { ProviderSwitcher } from "./ProviderSwitcher";
 import type { BackgroundAgentTask } from "./backgroundAgentTypes";
 import {
@@ -86,26 +92,28 @@ function shortRepoLabel(path: string): string {
   return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
 }
 
-const PERMISSION_META: Record<
-  PermissionMode,
-  { label: string; hint: string; icon: React.ReactNode }
-> = {
-  ask: {
-    label: "每次询问",
-    hint: "修改或敏感操作前询问确认。",
-    icon: <PanTool fontSize="small" />,
-  },
-  auto: {
-    label: "自动处理",
-    hint: "自动接受合理的文件编辑。",
-    icon: <Code fontSize="small" />,
-  },
-  bypass: {
-    label: "跳过权限",
-    hint: "尽量减少权限提示（谨慎使用）。",
-    icon: <WarningAmber fontSize="small" />,
-  },
+/** Lucide：`stroke="currentColor"`，父级 `color` / `sx` 即可改色 */
+const PERMISSION_ICON: Record<PermissionMode, LucideIcon> = {
+  ask: Hand,
+  auto: LucideCode,
+  bypass: AlertTriangle,
 };
+
+const PERMISSION_META: Record<PermissionMode, { label: string; hint: string }> =
+  {
+    ask: {
+      label: "每次询问",
+      hint: "修改或敏感操作前询问确认。",
+    },
+    auto: {
+      label: "自动处理",
+      hint: "自动接受合理的文件编辑。",
+    },
+    bypass: {
+      label: "跳过权限",
+      hint: "尽量减少权限提示（谨慎使用）。",
+    },
+  };
 
 type AvailableAgentRow = { agentType: string; description: string };
 
@@ -130,9 +138,8 @@ function ComposerFilePickerRowIcon({
 }) {
   const pen = usePencilPalette();
   const theme = useTheme();
-  const light = theme.palette.mode === "dark";
+  const iconColor = theme.palette.text.secondary;
   const name = filePickerBasename(path);
-  const size = 18;
   return (
     <Box
       sx={{
@@ -145,24 +152,16 @@ function ComposerFilePickerRowIcon({
         bgcolor: pen.iconChipBg,
         flexShrink: 0,
         border: `1px solid ${pen.borderSubtle}`,
+        color: iconColor,
+        lineHeight: 0,
+        "& svg": { display: "block" },
       }}
+      title={name}
     >
       {isFile ? (
-        <FileIcon
-          fileName={name}
-          fileExtension={materialIconFileExtension(name)}
-          size={size}
-          light={light}
-        />
+        <LucideFile size={18} strokeWidth={2} />
       ) : (
-        <FolderIcon
-          folderName={name}
-          isOpen={false}
-          isRoot={false}
-          size={size}
-          light={light}
-          theme="specific"
-        />
+        <LucideFolder size={18} strokeWidth={2} />
       )}
     </Box>
   );
@@ -262,6 +261,12 @@ export function ChatComposer({
   const errorMain = theme.palette.error.main;
   const errorDark = theme.palette.error.dark;
   const isDark = theme.palette.mode === "dark";
+  /** 工具条 / 底栏主标签：统一字号、字重、行高（与分支 Select 一致 13px / 600） */
+  const composerLabelText = {
+    fontSize: 13,
+    fontWeight: 600,
+    lineHeight: 1.25,
+  } as const;
   /** Divider 下工具栏：与 IconButton 一致，避免 32 / 36 混用 */
   const COMPOSER_TOOLBAR_CONTROL_PX = 36;
   /** 首行 Agent / 附件 Chip 统一高度 */
@@ -826,10 +831,7 @@ export function ChatComposer({
             <Collapse in={queuedPanelExpanded}>
               <Stack
                 divider={
-                  <Divider
-                    flexItem
-                    sx={{ borderColor: pen.borderSubtle }}
-                  />
+                  <Divider flexItem sx={{ borderColor: pen.borderSubtle }} />
                 }
               >
                 {queuedMainMessages.map((row, index) => (
@@ -1543,10 +1545,10 @@ export function ChatComposer({
                   transition: "none",
                 },
                 "&:hover": {
-                  bgcolor: alpha(accent, 0.1),
+                  bgcolor: alpha(accent, 0.16),
                   color: accent,
-                  borderColor: alpha(accent, 0.22),
-                  boxShadow: `0 2px 8px ${alpha(accent, 0.12)}`,
+                  borderColor: alpha(accent, 0.32),
+                  boxShadow: `0 2px 10px ${alpha(accent, 0.18)}`,
                   transform: "translateY(-1px)",
                 },
                 "&:hover .MuiSvgIcon-root": {
@@ -1583,37 +1585,70 @@ export function ChatComposer({
           <Button
             size="small"
             variant="text"
+            color="inherit"
             onClick={(e) => setPermissionAnchor(e.currentTarget)}
-            startIcon={PERMISSION_META[permissionMode].icon}
-            endIcon={<ExpandMore sx={{ fontSize: 18 }} />}
+            startIcon={
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  color: accent,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                {createElement(PERMISSION_ICON[permissionMode], {
+                  size: 18,
+                  strokeWidth: 2,
+                  color: accent,
+                })}
+              </Box>
+            }
+            endIcon={
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  color: accent,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                <ChevronDown size={18} strokeWidth={2} color={accent} />
+              </Box>
+            }
             sx={{
               textTransform: "none",
-              color: mut,
-              fontWeight: 600,
+              color: ink,
+              ...composerLabelText,
               borderRadius: 2.5,
               px: 1,
               minHeight: "var(--composer-toolbar-h)",
               height: "var(--composer-toolbar-h)",
               maxWidth: 200,
-              border: `1px solid ${edge(0.1)}`,
-              bgcolor: alpha(paper, isDark ? 0.35 : 0.65),
-              boxShadow: `inset 0 1px 0 ${edge(0.06)}`,
+              border: "1px solid transparent",
+              bgcolor: "transparent",
+              boxShadow: "none",
               transition:
                 "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease",
               "@media (prefers-reduced-motion: reduce)": {
                 transition: "none",
               },
-              "& .MuiButton-startIcon, & .MuiButton-endIcon": {
-                color: mut,
-              },
               "&:hover": {
-                bgcolor: alpha(accent, 0.07),
-                borderColor: alpha(accent, 0.2),
-                boxShadow: `0 1px 4px ${alpha(accent, 0.08)}`,
+                bgcolor: alpha(accent, 0.14),
+                borderColor: alpha(accent, 0.3),
+                boxShadow: "none",
               },
             }}
           >
-            <Typography variant="body2" noWrap component="span">
+            <Typography
+              variant="body2"
+              noWrap
+              component="span"
+              sx={{ ...composerLabelText, color: "inherit" }}
+            >
               {PERMISSION_META[permissionMode].label}
             </Typography>
           </Button>
@@ -1631,9 +1666,13 @@ export function ChatComposer({
               >
                 <Typography
                   variant="subtitle2"
-                  fontWeight={600}
                   component="span"
-                  sx={{ display: "inline-block", cursor: "default" }}
+                  sx={{
+                    display: "inline-block",
+                    cursor: "default",
+                    ...composerLabelText,
+                    color: ink,
+                  }}
                 >
                   权限模式
                 </Typography>
@@ -1653,8 +1692,25 @@ export function ChatComposer({
                     setPermissionAnchor(null);
                   }}
                 >
-                  <ListItemIcon>{PERMISSION_META[key].icon}</ListItemIcon>
-                  <ListItemText primary={PERMISSION_META[key].label} />
+                  <ListItemIcon
+                    sx={{
+                      minWidth: 40,
+                      lineHeight: 0,
+                      "& svg": { display: "block" },
+                    }}
+                  >
+                    {createElement(PERMISSION_ICON[key], {
+                      size: 20,
+                      strokeWidth: 2,
+                      color: accent,
+                    })}
+                  </ListItemIcon>
+                  <ListItemText
+                    primary={PERMISSION_META[key].label}
+                    primaryTypographyProps={{
+                      sx: { ...composerLabelText, color: ink },
+                    }}
+                  />
                 </MenuItem>
               </Tooltip>
             ))}
@@ -1681,7 +1737,7 @@ export function ChatComposer({
                 borderRadius: 2.5,
                 borderColor: edge(0.14),
                 color: ink,
-                fontWeight: 600,
+                ...composerLabelText,
                 bgcolor: alpha(paper, isDark ? 0.45 : 0.88),
                 boxShadow: `0 1px 2px ${edge(0.05)}, inset 0 1px 0 ${edge(0.06)}`,
                 transition:
@@ -1690,9 +1746,9 @@ export function ChatComposer({
                   transition: "none",
                 },
                 "&:hover": {
-                  borderColor: alpha(accent, 0.4),
-                  bgcolor: alpha(paper, isDark ? 0.55 : 1),
-                  boxShadow: `0 2px 10px ${alpha(accent, 0.12)}, 0 0 0 1px ${alpha(accent, 0.15)}`,
+                  borderColor: alpha(accent, 0.5),
+                  bgcolor: isDark ? alpha(paper, 0.48) : alpha(accent, 0.12),
+                  boxShadow: `0 2px 12px ${alpha(accent, 0.2)}, 0 0 0 1px ${alpha(accent, 0.22)}`,
                   transform: "translateY(-1px)",
                 },
                 "& .MuiChip-root": {
@@ -1799,19 +1855,31 @@ export function ChatComposer({
           <Button
             size="small"
             variant="text"
+            color="inherit"
             startIcon={
-              <FolderOpen
+              <Box
+                component="span"
                 sx={{
-                  fontSize: 18,
-                  color: needsWorkspacePath ? warningMain : mut,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: needsWorkspacePath ? warningMain : accent,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
                 }}
-              />
+              >
+                <LucideFolderOpen
+                  size={18}
+                  strokeWidth={2}
+                  color={needsWorkspacePath ? warningMain : accent}
+                />
+              </Box>
             }
             onClick={onPickWorkspace}
             sx={{
               textTransform: "none",
               color: needsWorkspacePath ? warningMain : ink,
-              fontWeight: 600,
+              ...composerLabelText,
               maxWidth: { xs: "100%", sm: 240 },
               borderRadius: 2.5,
               px: 1,
@@ -1819,38 +1887,49 @@ export function ChatComposer({
               minHeight: "var(--composer-footer-h)",
               height: "var(--composer-footer-h)",
               bgcolor: needsWorkspacePath
-                ? alpha(warningMain, 0.12)
-                : isDark
-                  ? alpha(def, 0.75)
-                  : alpha("#f1f5f9", 0.9),
-              border: `1px solid ${
-                needsWorkspacePath ? alpha(warningMain, 0.4) : edge(0.1)
-              }`,
-              boxShadow: `inset 0 1px 0 ${edge(0.06)}`,
+                ? alpha(warningMain, 0.1)
+                : "transparent",
+              border: needsWorkspacePath
+                ? `1px solid ${alpha(warningMain, 0.35)}`
+                : "1px solid transparent",
+              boxShadow: "none",
               transition:
                 "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease",
               "@media (prefers-reduced-motion: reduce)": {
                 transition: "none",
               },
-              "& .MuiButton-startIcon": { color: "inherit" },
               "&:hover": {
                 bgcolor: needsWorkspacePath
-                  ? alpha(warningMain, 0.18)
-                  : alpha(accent, 0.06),
+                  ? alpha(warningMain, 0.22)
+                  : alpha(accent, 0.12),
                 borderColor: needsWorkspacePath
                   ? alpha(warningMain, 0.55)
-                  : alpha(accent, 0.22),
+                  : alpha(accent, 0.28),
               },
             }}
           >
-            <Typography variant="body2" noWrap component="span">
+            <Typography
+              variant="body2"
+              noWrap
+              component="span"
+              sx={{ ...composerLabelText, color: "inherit" }}
+            >
               {pathLabel}
             </Typography>
           </Button>
 
           {gitInfo?.isGit && !needsWorkspacePath && (
             <Stack direction="row" alignItems="center" spacing={0.5}>
-              <Tag sx={{ fontSize: 18, color: mut }} />
+              <Box
+                sx={{
+                  display: "inline-flex",
+                  color: mut,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                <GitBranch size={18} strokeWidth={2} />
+              </Box>
               <FormControl size="small" sx={{ minWidth: 148 }}>
                 <Select
                   value={branchValue || gitInfo.currentBranch}
@@ -1862,12 +1941,13 @@ export function ChatComposer({
                   sx={{
                     minHeight: "var(--composer-footer-h)",
                     height: "var(--composer-footer-h)",
-                    bgcolor: alpha(paper, isDark ? 0.5 : 0.95),
+                    bgcolor: "transparent",
+                    color: ink,
                     borderRadius: 2,
-                    fontSize: 13,
-                    fontWeight: 600,
-                    boxShadow: `0 1px 2px ${edge(0.05)}`,
+                    ...composerLabelText,
+                    boxShadow: "none",
                     transition: "box-shadow 0.2s ease, border-color 0.2s ease",
+                    "& .MuiSelect-icon": { color: mut },
                     "& .MuiSelect-select": {
                       display: "flex",
                       alignItems: "center",
@@ -1879,7 +1959,7 @@ export function ChatComposer({
                       borderColor: edge(0.14),
                     },
                     "&:hover .MuiOutlinedInput-notchedOutline": {
-                      borderColor: alpha(accent, 0.35),
+                      borderColor: alpha(accent, 0.48),
                     },
                     "&.Mui-focused .MuiOutlinedInput-notchedOutline": {
                       borderColor: alpha(accent, 0.55),
@@ -1898,7 +1978,14 @@ export function ChatComposer({
           )}
 
           {!gitInfo?.isGit && !needsWorkspacePath && workspacePath && (
-            <Typography variant="caption" color="text.secondary">
+            <Typography
+              variant="body2"
+              sx={{
+                ...composerLabelText,
+                fontWeight: 500,
+                color: mut,
+              }}
+            >
               非 Git 仓库
             </Typography>
           )}
@@ -1923,75 +2010,105 @@ export function ChatComposer({
                 onChange={(_, v) => setUseWorktree(v)}
                 sx={{
                   py: 0,
-                  color: alpha(accent, 0.55),
+                  color: mut,
                   "&.Mui-checked": { color: accent },
+                  "& .MuiSvgIcon-root": { fontSize: 20 },
                 }}
               />
             }
             label={
               <Typography
                 variant="body2"
-                fontWeight={600}
-                color="text.secondary"
+                sx={{ ...composerLabelText, color: ink }}
               >
                 worktree
               </Typography>
             }
             sx={{
               mr: 0,
-              px: 0.75,
+              px: 0.5,
               py: 0,
               minHeight: "var(--composer-footer-h)",
               height: "var(--composer-footer-h)",
               borderRadius: 2,
-              border: `1px solid ${edge(0.1)}`,
-              bgcolor: alpha(def, isDark ? 0.65 : 0.9),
+              border: "1px solid transparent",
+              bgcolor: "transparent",
               transition: "background-color 0.2s ease, border-color 0.2s ease",
-              "& .MuiFormControlLabel-label": { color: mut },
+              "& .MuiFormControlLabel-label": {
+                ...composerLabelText,
+                color: ink,
+              },
               "&:hover": {
-                bgcolor: alpha(accent, 0.04),
-                borderColor: alpha(accent, 0.18),
+                bgcolor: alpha(accent, 0.12),
+                borderColor: alpha(accent, 0.22),
               },
             }}
           />
 
           <Button
             size="small"
-            variant="outlined"
+            variant="text"
             color="inherit"
             startIcon={
-              environment === "local" ? (
-                <Computer sx={{ fontSize: 18 }} />
-              ) : (
-                <Hub sx={{ fontSize: 18 }} />
-              )
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  color: accent,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                {environment === "local" ? (
+                  <Laptop size={18} strokeWidth={2} color={accent} />
+                ) : (
+                  <Globe2 size={18} strokeWidth={2} color={accent} />
+                )}
+              </Box>
             }
-            endIcon={<ExpandMore sx={{ fontSize: 18 }} />}
+            endIcon={
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  color: accent,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                <ChevronDown size={18} strokeWidth={2} color={accent} />
+              </Box>
+            }
             onClick={(e) => setEnvAnchor(e.currentTarget)}
             sx={{
               textTransform: "none",
-              fontWeight: 600,
+              color: ink,
+              ...composerLabelText,
               borderRadius: 2.5,
               minHeight: "var(--composer-footer-h)",
               height: "var(--composer-footer-h)",
               px: 1,
               py: 0,
-              borderColor: edge(0.14),
-              color: ink,
-              bgcolor: alpha(paper, isDark ? 0.45 : 0.95),
-              boxShadow: `0 1px 2px ${edge(0.05)}, inset 0 1px 0 ${edge(0.06)}`,
-              transition: "border-color 0.2s ease, box-shadow 0.2s ease",
-              "& .MuiButton-startIcon, & .MuiButton-endIcon": {
-                color: mut,
-              },
+              border: "1px solid transparent",
+              bgcolor: "transparent",
+              boxShadow: "none",
+              transition:
+                "border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease",
               "&:hover": {
-                borderColor: alpha(accent, 0.35),
-                bgcolor: alpha(paper, isDark ? 0.55 : 1),
-                boxShadow: `0 2px 8px ${alpha(accent, 0.1)}`,
+                borderColor: alpha(accent, 0.32),
+                bgcolor: alpha(accent, 0.12),
+                boxShadow: "none",
               },
             }}
           >
-            {environment === "local" ? "本地" : "远程"}
+            <Typography
+              component="span"
+              sx={{ ...composerLabelText, color: "inherit" }}
+            >
+              {environment === "local" ? "本地" : "远程"}
+            </Typography>
           </Button>
           <Menu
             anchorEl={envAnchor}
@@ -2006,17 +2123,41 @@ export function ChatComposer({
                 setEnvAnchor(null);
               }}
             >
-              <ListItemIcon>
-                <Computer fontSize="small" />
+              <ListItemIcon
+                sx={{
+                  minWidth: 40,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                <Laptop size={20} strokeWidth={2} color={accent} />
               </ListItemIcon>
-              <ListItemText primary="本地" secondary="在本机运行工具与终端" />
+              <ListItemText
+                primary="本地"
+                secondary="在本机运行工具与终端"
+                primaryTypographyProps={{
+                  sx: { ...composerLabelText, color: ink },
+                }}
+              />
             </MenuItem>
             <Divider />
             <MenuItem disabled>
-              <ListItemIcon>
-                <Add fontSize="small" />
+              <ListItemIcon
+                sx={{
+                  minWidth: 40,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                <Plus size={20} strokeWidth={2} color={accent} />
               </ListItemIcon>
-              <ListItemText primary="添加 SSH 连接" secondary="即将推出" />
+              <ListItemText
+                primary="添加 SSH 连接"
+                secondary="即将推出"
+                primaryTypographyProps={{
+                  sx: { ...composerLabelText, color: mut },
+                }}
+              />
             </MenuItem>
             <MenuItem disabled>
               <ListItemText
@@ -2034,10 +2175,22 @@ export function ChatComposer({
                 setEnvAnchor(null);
               }}
             >
-              <ListItemIcon>
-                <Hub fontSize="small" />
+              <ListItemIcon
+                sx={{
+                  minWidth: 40,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                <Globe2 size={20} strokeWidth={2} color={accent} />
               </ListItemIcon>
-              <ListItemText primary="远程" secondary="占位：后续对接远程环境" />
+              <ListItemText
+                primary="远程"
+                secondary="占位：后续对接远程环境"
+                primaryTypographyProps={{
+                  sx: { ...composerLabelText, color: ink },
+                }}
+              />
             </MenuItem>
           </Menu>
         </Stack>

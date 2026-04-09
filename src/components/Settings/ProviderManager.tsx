@@ -26,6 +26,8 @@ import {
   Select,
   MenuItem,
   InputAdornment,
+  FormControlLabel,
+  Switch,
 } from "@mui/material";
 import {
   CheckCircle,
@@ -120,6 +122,8 @@ interface ProviderConfigEntry {
   model: string;
   apiKeyPreview: string;
   baseUrl: string | null;
+  /** Moonshot / Custom：是否启用 `thinking` + `reasoning_content` */
+  thinking?: boolean | null;
   enabled: boolean;
   isSessionActive: boolean;
   isDefault: boolean;
@@ -147,8 +151,12 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
   const [formApiKey, setFormApiKey] = useState("");
   const [formModel, setFormModel] = useState("");
   const [formBaseUrl, setFormBaseUrl] = useState("");
+  const [formThinking, setFormThinking] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [formSetAsDefault, setFormSetAsDefault] = useState(true);
+
+  const providerSupportsThinking = (providerType: string) =>
+    providerType === "moonshot" || providerType === "custom";
 
   // Load providers on mount
   const loadProviders = useCallback(async () => {
@@ -212,6 +220,7 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
     setFormApiKey("");
     setFormModel(PROVIDER_INFO["deepseek"].defaultModel);
     setFormBaseUrl("");
+    setFormThinking(false);
     setFormSetAsDefault(true);
     setDialogError(null);
     setDialogOpen(true);
@@ -226,6 +235,7 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
     setFormApiKey("");
     setFormModel(provider.model);
     setFormBaseUrl(provider.baseUrl || "");
+    setFormThinking(provider.thinking === true);
     setFormSetAsDefault(false);
     setDialogError(null);
     setDialogOpen(true);
@@ -270,6 +280,8 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
       // Use placeholder if editing and key not changed
       const apiKeyToSave = formApiKey.trim() || (editingProvider ? "${KEEP_EXISTING}" : "");
 
+      // Tauri maps camelCase keys to Rust snake_case. Pass explicit booleans for Moonshot/Custom so
+      // `thinking` is never omitted when false (Some(false) in Rust).
       await invoke("save_provider_config", {
         name: formName.trim(),
         providerType: formProviderType,
@@ -277,6 +289,7 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
         model: formModel.trim(),
         baseUrl: formBaseUrl.trim() || undefined,
         setAsDefault: formSetAsDefault,
+        thinking: providerSupportsThinking(formProviderType) ? formThinking : null,
       });
 
       await loadProviders();
@@ -463,9 +476,12 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
                 value={formProviderType}
                 label="Provider"
                 onChange={(e) => {
-                  setFormProviderType(e.target.value);
-                  // Auto-fill default model
-                  setFormModel(PROVIDER_INFO[e.target.value]?.defaultModel || "");
+                  const v = e.target.value;
+                  setFormProviderType(v);
+                  setFormModel(PROVIDER_INFO[v]?.defaultModel || "");
+                  if (!providerSupportsThinking(v)) {
+                    setFormThinking(false);
+                  }
                 }}
               >
                 <MenuItem value="deepseek">DeepSeek</MenuItem>
@@ -532,6 +548,58 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
               helperText="Only needed for Azure or custom endpoints"
               fullWidth
             />
+
+            {providerSupportsThinking(formProviderType) && (
+              <>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "block", fontWeight: 600 }}
+                >
+                  Thinking（本配置专用）
+                </Typography>
+                <Typography
+                  variant="caption"
+                  color="text.disabled"
+                  sx={{ display: "block", mb: 0.5, lineHeight: 1.5 }}
+                >
+                  仅对模型 ID 含{" "}
+                  <Typography component="span" fontFamily="monospace" fontSize="0.7rem">
+                    kimi-k2.5
+                  </Typography>{" "}
+                  的 Kimi 请求生效：接口要求 thinking 为对象 type 为 enabled/disabled（不能传布尔）。流式字段{" "}
+                  <Typography component="span" fontFamily="monospace" fontSize="0.7rem">
+                    reasoning_content
+                  </Typography>
+                  。自定义 Base 需为 Moonshot 域名时才会附带。
+                </Typography>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={formThinking}
+                      onChange={(_, v) => setFormThinking(v)}
+                      disabled={loading}
+                      color="primary"
+                    />
+                  }
+                  label={
+                    <Box>
+                      <Typography variant="body2" fontWeight={600}>
+                        启用 Thinking
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        关闭时请求传 thinking: false（仅 Moonshot / 自定义；DeepSeek 无此项）
+                      </Typography>
+                    </Box>
+                  }
+                  sx={{
+                    alignItems: "flex-start",
+                    ml: 0,
+                    "& .MuiFormControlLabel-label": { mt: 0.25 },
+                  }}
+                />
+              </>
+            )}
 
             {/* Set as default */}
             {!editingProvider && (

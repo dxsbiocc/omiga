@@ -82,6 +82,10 @@ pub struct ProviderConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query_params: Option<HashMap<String, String>>,
 
+    /// Moonshot/Custom only: persisted `thinking` flag (request always sends true/false; default false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
+
     /// Whether this provider is enabled
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -177,6 +181,12 @@ impl LlmConfigFile {
                     .map(|(k, v)| (k.clone(), expand_env_vars(v)))
                     .collect(),
             );
+        }
+        if let Some(thinking) = provider_config.thinking {
+            config.thinking = Some(thinking);
+        }
+        if matches!(provider, LlmProvider::Moonshot | LlmProvider::Custom) && config.thinking.is_none() {
+            config.thinking = Some(false);
         }
 
         // Apply global settings (provider settings take precedence)
@@ -412,6 +422,9 @@ fn format_provider_yaml(name: &str, cfg: &ProviderConfig) -> String {
     }
     if !cfg.enabled {
         lines.push("    enabled: false".to_string());
+    }
+    if let Some(t) = cfg.thinking {
+        lines.push(format!("    thinking: {}", t));
     }
 
     lines.join("\n")

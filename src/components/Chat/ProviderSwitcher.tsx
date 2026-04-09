@@ -32,6 +32,7 @@ interface ProviderConfigEntry {
   model: string;
   apiKeyPreview: string;
   baseUrl: string | null;
+  thinking?: boolean | null;
   enabled: boolean;
   /** Current chat session (quick switch / runtime). */
   isSessionActive: boolean;

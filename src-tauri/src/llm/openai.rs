@@ -34,6 +34,48 @@ fn enrich_openai_compatible_http_error(status: u16, body: &str) -> String {
     body.to_string()
 }
 
+/// Kimi OpenAPI (`KimiK25ChatRequest`): `thinking` must be an object `{"type":"enabled"|"disabled"}`,
+/// not a boolean — otherwise: "expected type object ... bool is not acceptable".
+/// See <https://platform.moonshot.ai/docs/api/chat> (kimi-k2.5 only; other Moonshot models omit `thinking`).
+fn kimi_thinking_request_value(enabled: bool) -> serde_json::Value {
+    serde_json::json!({
+        "type": if enabled { "enabled" } else { "disabled" }
+    })
+}
+
+/// Only `kimi-k2.5` (and id variants containing that substring) document the `thinking` object field.
+fn moonshot_model_accepts_thinking_object(model: &str) -> bool {
+    model.to_lowercase().contains("kimi-k2.5")
+}
+
+fn base_url_looks_like_moonshot(base: Option<&str>) -> bool {
+    base.map(|u| {
+        let u = u.to_lowercase();
+        u.contains("moonshot") || u.contains("kimi.moonshot")
+    })
+    .unwrap_or(false)
+}
+
+/// Attach Kimi `thinking` body when the model + endpoint support it; otherwise omit the field.
+fn maybe_attach_kimi_thinking_body(body: &mut serde_json::Value, config: &LlmConfig) {
+    let enabled = config.thinking.unwrap_or(false);
+    match config.provider {
+        LlmProvider::Moonshot => {
+            if moonshot_model_accepts_thinking_object(&config.model) {
+                body["thinking"] = kimi_thinking_request_value(enabled);
+            }
+        }
+        LlmProvider::Custom => {
+            if base_url_looks_like_moonshot(config.base_url.as_deref())
+                && moonshot_model_accepts_thinking_object(&config.model)
+            {
+                body["thinking"] = kimi_thinking_request_value(enabled);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl OpenAiCompatibleClient {
     pub fn new(config: LlmConfig) -> Self {
         let client = Client::builder()
@@ -42,6 +84,22 @@ impl OpenAiCompatibleClient {
             .unwrap_or_else(|_| Client::new());
 
         Self { client, config }
+    }
+
+    /// Moonshot/Kimi: when `thinking` is enabled, replay must include `reasoning_content` for
+    /// assistant turns that contain tool calls (empty string if missing).
+    fn assistant_reasoning_for_api(
+        config: &LlmConfig,
+        has_tool_calls: bool,
+        stored: Option<String>,
+    ) -> Option<String> {
+        if config.thinking != Some(true) {
+            return stored.filter(|s| !s.is_empty());
+        }
+        if has_tool_calls {
+            return Some(stored.unwrap_or_default());
+        }
+        stored.filter(|s| !s.is_empty())
     }
 
     /// Build request headers
@@ -102,6 +160,7 @@ impl OpenAiCompatibleClient {
                         name: None,
                         tool_calls: None,
                         tool_call_id: None,
+                        reasoning_content: None,
                     });
                 }
                 LlmRole::User => {
@@ -123,6 +182,7 @@ impl OpenAiCompatibleClient {
                                     name: None,
                                     tool_calls: None,
                                     tool_call_id: Some(tool_use_id),
+                                    reasoning_content: None,
                                 });
                             }
                         }
@@ -145,6 +205,7 @@ impl OpenAiCompatibleClient {
                             name: None,
                             tool_calls: None,
                             tool_call_id: None,
+                            reasoning_content: None,
                         });
                     }
                 }
@@ -184,16 +245,23 @@ impl OpenAiCompatibleClient {
                     } else {
                         serde_json::Value::String(text_parts.join("\n"))
                     };
+                    let has_tool_calls = !tool_calls_vec.is_empty();
+                    let reasoning_content = Self::assistant_reasoning_for_api(
+                        &self.config,
+                        has_tool_calls,
+                        msg.reasoning_content.clone(),
+                    );
                     out.push(OpenAiMessage {
                         role: "assistant".to_string(),
                         content,
                         name: None,
-                        tool_calls: if tool_calls_vec.is_empty() {
-                            None
-                        } else {
+                        tool_calls: if has_tool_calls {
                             Some(tool_calls_vec)
+                        } else {
+                            None
                         },
                         tool_call_id: None,
+                        reasoning_content,
                     });
                 }
                 LlmRole::Tool => {
@@ -209,6 +277,7 @@ impl OpenAiCompatibleClient {
                             name: None,
                             tool_calls: None,
                             tool_call_id: Some(tool_use_id.clone()),
+                            reasoning_content: None,
                         });
                     }
                 }
@@ -381,6 +450,8 @@ impl LlmClient for OpenAiCompatibleClient {
             }
         }
 
+        maybe_attach_kimi_thinking_body(&mut body, &self.config);
+
         let response = self
             .client
             .post(&url)
@@ -465,6 +536,9 @@ fn parse_sse_events(text: &str) -> Vec<Result<LlmStreamChunk, ApiError>> {
                 }
                 if let Some(choice) = response.choices.first() {
                     if let Some(delta) = &choice.delta {
+                        if let Some(rc) = &delta.reasoning_content {
+                            results.push(Ok(LlmStreamChunk::ReasoningContent(rc.clone())));
+                        }
                         if let Some(content) = &delta.content {
                             results.push(Ok(LlmStreamChunk::Text(content.clone())));
                         }
@@ -515,6 +589,8 @@ struct OpenAiMessage {
     tool_calls: Option<Vec<OpenAiToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -565,6 +641,8 @@ struct OpenAiChoice {
 struct OpenAiDelta {
     role: Option<String>,
     content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<OpenAiToolCallDelta>>,
 }
 

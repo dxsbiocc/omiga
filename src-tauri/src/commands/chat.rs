@@ -190,6 +190,7 @@ fn api_messages_to_llm(messages: &[crate::api::Message]) -> Vec<LlmMessage> {
                 .collect(),
             name: None,
             tool_calls: None,
+            reasoning_content: msg.reasoning_content.clone(),
         })
         .collect()
 }
@@ -614,7 +615,7 @@ pub async fn send_message(
             // Save user message to database
             let msg_id = uuid::Uuid::new_v4().to_string();
             let _now = chrono::Utc::now().to_rfc3339();
-            repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None)
+            repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None, None)
                 .await
                 .map_err(|e| {
                     OmigaError::Chat(ChatError::StreamError(format!("Failed to save message: {}", e)))
@@ -678,7 +679,7 @@ pub async fn send_message(
 
         // Save user message
         let msg_id = uuid::Uuid::new_v4().to_string();
-        repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None)
+        repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None, None)
             .await
             .map_err(|e| {
                 OmigaError::Chat(ChatError::StreamError(format!("Failed to save message: {}", e)))
@@ -1022,6 +1023,7 @@ pub async fn send_message(
             }).collect(),
             name: None,
             tool_calls: None,
+            reasoning_content: msg.reasoning_content.clone(),
         })
         .collect();
 
@@ -1079,7 +1081,7 @@ pub async fn send_message(
         let mut turn_token_usage: Option<crate::llm::TokenUsage> = None;
 
         // Stream the response with cancellation support
-        let (mut pending_tool_calls, assistant_text, was_cancelled, usage_first) = match stream_llm_response_with_cancel(
+        let (mut pending_tool_calls, assistant_text, assistant_reasoning, was_cancelled, usage_first) = match stream_llm_response_with_cancel(
             client.as_ref(),
             &app_clone,
             &message_id_clone,
@@ -1132,6 +1134,7 @@ pub async fn send_message(
         // First assistant turn: persist with tool_calls JSON for reload
         let assistant_msg_id = uuid::Uuid::new_v4().to_string();
         let tool_calls_json = tool_calls_json_opt(&pending_tool_calls);
+        let reasoning_save = (!assistant_reasoning.is_empty()).then_some(assistant_reasoning.as_str());
         {
             let repo = repo_clone.lock().await;
             if let Err(e) = repo
@@ -1143,6 +1146,7 @@ pub async fn send_message(
                     tool_calls_json.as_deref(),
                     None,
                     None,
+                    reasoning_save,
                 )
                 .await
             {
@@ -1154,9 +1158,10 @@ pub async fn send_message(
             let mut sessions = sessions_clone.write().await;
             if let Some(runtime) = sessions.get_mut(&session_id_clone) {
                 let tc = completed_to_tool_calls(&pending_tool_calls);
+                let rc = (!assistant_reasoning.is_empty()).then(|| assistant_reasoning.clone());
                 runtime
                     .session
-                    .add_assistant_message_with_tools(&assistant_text, tc);
+                    .add_assistant_message_with_tools(&assistant_text, tc, rc);
             }
         }
 
@@ -1276,6 +1281,7 @@ pub async fn send_message(
                             None,
                             Some(tool_use_id),
                             None,
+                            None,
                         )
                         .await
                     {
@@ -1336,7 +1342,7 @@ pub async fn send_message(
 
             let updated_llm_messages: Vec<LlmMessage> = api_messages_to_llm(&updated_messages);
 
-            let (next_tools, next_text, follow_cancelled, usage_next) = match stream_llm_response_with_cancel(
+            let (next_tools, next_text, next_reasoning, follow_cancelled, usage_next) = match stream_llm_response_with_cancel(
                 client.as_ref(),
                 &app_clone,
                 &message_id_clone,
@@ -1382,6 +1388,7 @@ pub async fn send_message(
 
             let next_assistant_id = uuid::Uuid::new_v4().to_string();
             let next_tc_json = tool_calls_json_opt(&next_tools);
+            let next_reasoning_save = (!next_reasoning.is_empty()).then_some(next_reasoning.as_str());
             {
                 let repo = repo_clone.lock().await;
                 if let Err(e) = repo
@@ -1393,6 +1400,7 @@ pub async fn send_message(
                         next_tc_json.as_deref(),
                         None,
                         None,
+                        next_reasoning_save,
                     )
                     .await
                 {
@@ -1404,7 +1412,8 @@ pub async fn send_message(
                 let mut sessions = sessions_clone.write().await;
                 if let Some(runtime) = sessions.get_mut(&session_id_clone) {
                     let tc = completed_to_tool_calls(&next_tools);
-                    runtime.session.add_assistant_message_with_tools(&next_text, tc);
+                    let rc = (!next_reasoning.is_empty()).then(|| next_reasoning.clone());
+                    runtime.session.add_assistant_message_with_tools(&next_text, tc, rc);
                 }
             }
 
@@ -1577,7 +1586,7 @@ fn merge_turn_token_usage(
 }
 
 /// Stream LLM response and collect tool calls with cancellation support
-/// Returns: (tool_calls, assistant_text, was_cancelled, usage_this_request)
+/// Returns: (tool_calls, assistant_text, reasoning_content, was_cancelled, usage_this_request)
 async fn stream_llm_response_with_cancel(
     client: &dyn LlmClient,
     app: &AppHandle,
@@ -1588,7 +1597,7 @@ async fn stream_llm_response_with_cancel(
     pending_tools: &Arc<Mutex<HashMap<String, PendingToolCall>>>,
     cancel_flag: &Arc<RwLock<bool>>,
     repo: Arc<Mutex<crate::domain::persistence::SessionRepository>>,
-) -> Result<(Vec<(String, String, String)>, String, bool, Option<crate::llm::TokenUsage>), OmigaError> {
+) -> Result<(Vec<(String, String, String)>, String, String, bool, Option<crate::llm::TokenUsage>), OmigaError> {
     use futures::StreamExt;
 
     let stream = client
@@ -1598,6 +1607,7 @@ async fn stream_llm_response_with_cancel(
 
     let mut stream = stream;
     let mut assistant_text = String::new();
+    let mut reasoning_content = String::new();
     let mut completed_tool_calls: Vec<(String, String, String)> = Vec::new();
     let mut current_tool_id: Option<String> = None;
     let mut was_cancelled = false;
@@ -1630,6 +1640,13 @@ async fn stream_llm_response_with_cancel(
                         let _ = app.emit(
                             &format!("chat-stream-{}", message_id),
                             &StreamOutputItem::Text(text),
+                        );
+                    }
+                    LlmStreamChunk::ReasoningContent(text) => {
+                        reasoning_content.push_str(&text);
+                        let _ = app.emit(
+                            &format!("chat-stream-{}", message_id),
+                            &StreamOutputItem::Thinking(text),
                         );
                     }
                     LlmStreamChunk::ToolStart { id, name } => {
@@ -1718,7 +1735,13 @@ async fn stream_llm_response_with_cancel(
         }
     }
 
-    Ok((completed_tool_calls, assistant_text, was_cancelled, usage_this_request))
+    Ok((
+        completed_tool_calls,
+        assistant_text,
+        reasoning_content,
+        was_cancelled,
+        usage_this_request,
+    ))
 }
 
 /// Persist aggregated main-agent token usage on the final assistant DB row for this turn, then emit for live UI.
@@ -2061,7 +2084,7 @@ async fn run_skill_forked(
         let api_msgs = SessionCodec::to_api_messages(&transcript);
         let llm_messages = api_messages_to_llm(&api_msgs);
 
-        let (tool_calls, assistant_text, cancelled, _) = stream_llm_response_with_cancel(
+        let (tool_calls, assistant_text, reasoning_text, cancelled, _) = stream_llm_response_with_cancel(
             client.as_ref(),
             app,
             message_id,
@@ -2084,6 +2107,7 @@ async fn run_skill_forked(
             content: assistant_text.clone(),
             tool_calls: tc.clone(),
             token_usage: None,
+            reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text.clone()),
         });
 
         if tool_calls.is_empty() {
@@ -2283,7 +2307,7 @@ async fn run_subagent_session_foreground_inner(
         }
         let api_msgs = SessionCodec::to_api_messages(&transcript);
         let llm_messages = api_messages_to_llm(&api_msgs);
-        let (tool_calls, assistant_text, cancelled, _) = stream_llm_response_with_cancel(
+        let (tool_calls, assistant_text, reasoning_text, cancelled, _) = stream_llm_response_with_cancel(
             client.as_ref(),
             app,
             message_id,
@@ -2307,6 +2331,7 @@ async fn run_subagent_session_foreground_inner(
             content: assistant_text.clone(),
             tool_calls: tc.clone(),
             token_usage: None,
+            reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text.clone()),
         };
         if let Some(tid) = background_task_id {
             persist_background_transcript_message(&runtime.repo, tid, session_id, &asst).await;
@@ -4101,6 +4126,7 @@ pub async fn set_llm_config(
     app_id: Option<String>,
     model: Option<String>,
     base_url: Option<String>,
+    thinking: Option<bool>,
 ) -> CommandResult<()> {
     let provider_enum = provider.parse::<LlmProvider>()
         .map_err(|e| OmigaError::Config(format!("Invalid provider: {}", e)))?;
@@ -4120,6 +4146,16 @@ pub async fn set_llm_config(
     if let Some(url) = base_url {
         config.base_url = Some(url);
     }
+    // Moonshot/Custom: always keep an explicit bool in memory (default false) so runtime matches API.
+    // DeepSeek and others do not use `thinking`.
+    match provider_enum {
+        crate::llm::LlmProvider::Moonshot | crate::llm::LlmProvider::Custom => {
+            config.thinking = Some(thinking.unwrap_or(false));
+        }
+        _ => {
+            config.thinking = None;
+        }
+    }
 
     let mut config_guard = state.chat.llm_config.lock().await;
     *config_guard = Some(config);
@@ -4138,6 +4174,7 @@ pub async fn save_llm_settings_to_config(
     app_id: Option<String>,
     model: Option<String>,
     base_url: Option<String>,
+    thinking: Option<bool>,
 ) -> CommandResult<()> {
     let provider_enum = provider
         .parse::<LlmProvider>()
@@ -4185,6 +4222,14 @@ pub async fn save_llm_settings_to_config(
         _ => "default".to_string(),
     };
 
+    let prev_thinking = providers.get(&entry_key).and_then(|p| p.thinking);
+    let thinking_resolved = match provider_enum {
+        crate::llm::LlmProvider::Moonshot | crate::llm::LlmProvider::Custom => {
+            thinking.or(prev_thinking).or(Some(false))
+        }
+        _ => None,
+    };
+
     let provider_cfg = crate::llm::config::ProviderConfig {
         provider_type: provider,
         api_key: Some(api_key.clone()),
@@ -4192,6 +4237,7 @@ pub async fn save_llm_settings_to_config(
         app_id: aid_opt.clone(),
         base_url: bu_opt.clone(),
         model: Some(model_str.clone()),
+        thinking: thinking_resolved,
         enabled: true,
         ..Default::default()
     };
@@ -4214,6 +4260,7 @@ pub async fn save_llm_settings_to_config(
     config.secret_key = sk_opt;
     config.app_id = aid_opt;
     config.base_url = bu_opt;
+    config.thinking = thinking_resolved;
 
     let mut config_guard = state.chat.llm_config.lock().await;
     *config_guard = Some(config);
@@ -4236,6 +4283,7 @@ pub async fn get_llm_config_state(
         },
         model: Some(config.model.clone()),
         base_url: config.base_url.clone(),
+        thinking: config.thinking,
     }))
 }
 
@@ -4247,6 +4295,7 @@ pub struct LlmConfigResponse {
     pub api_key_preview: String,
     pub model: Option<String>,
     pub base_url: Option<String>,
+    pub thinking: Option<bool>,
 }
 
 /// Brave Search API key status for Settings UI (never returns full secret).
@@ -4640,6 +4689,9 @@ pub struct ProviderConfigEntry {
     pub model: String,
     pub api_key_preview: String,
     pub base_url: Option<String>,
+    /// Moonshot / Custom only: request `thinking: true` and stream `reasoning_content`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
     pub enabled: bool,
     /// Matches in-memory runtime config (current chat session / quick switch).
     pub is_session_active: bool,
@@ -4706,6 +4758,7 @@ pub async fn list_provider_configs(
                 model: config.model.clone().unwrap_or_default(),
                 api_key_preview,
                 base_url: config.base_url.clone(),
+                thinking: config.thinking,
                 enabled: config.enabled,
                 is_session_active: matches_runtime,
                 is_default: name == &default_provider,
@@ -4779,6 +4832,14 @@ pub async fn switch_provider(
     if let Some(timeout) = provider_config.timeout {
         config.timeout_secs = timeout;
     }
+    match provider_enum {
+        LlmProvider::Moonshot | LlmProvider::Custom => {
+            config.thinking = Some(provider_config.thinking.unwrap_or(false));
+        }
+        _ => {
+            config.thinking = None;
+        }
+    }
 
     // Update active config in state (session only — does not change `default` in omiga.yaml)
     let mut config_guard = state.chat.llm_config.lock().await;
@@ -4795,10 +4856,12 @@ pub async fn switch_provider(
         },
         model: Some(config.model),
         base_url: config.base_url,
+        thinking: config.thinking,
     })
 }
 
-/// Save a provider configuration to the multi-provider config file
+/// Save a provider configuration to the multi-provider config file.
+/// `thinking`: when set, applies to Moonshot/Custom only; other provider types clear stored thinking.
 #[tauri::command]
 pub async fn save_provider_config(
     state: State<'_, OmigaAppState>,
@@ -4810,6 +4873,7 @@ pub async fn save_provider_config(
     app_id: Option<String>,
     base_url: Option<String>,
     set_as_default: Option<bool>,
+    thinking: Option<bool>,
 ) -> CommandResult<()> {
     // Validate required fields
     if name.trim().is_empty() {
@@ -4854,6 +4918,17 @@ pub async fn save_provider_config(
         api_key
     };
 
+    let existing_thinking = providers.get(&name).and_then(|p| p.thinking);
+    let thinking_for_entry = match provider_enum {
+        crate::llm::LlmProvider::Moonshot | crate::llm::LlmProvider::Custom => match thinking {
+            Some(t) => Some(t),
+            // New row: default false; existing row: keep file value when TS omits the field.
+            None => existing_thinking.or(Some(false)),
+        },
+        // DeepSeek et al.: no thinking mode — never persist.
+        _ => None,
+    };
+
     // Create or update provider config
     let provider_config = crate::llm::config::ProviderConfig {
         provider_type: provider_type.clone(),
@@ -4863,6 +4938,7 @@ pub async fn save_provider_config(
         base_url,
         model: Some(model),
         enabled: true,
+        thinking: thinking_for_entry,
         ..Default::default()
     };
 
@@ -4873,9 +4949,20 @@ pub async fn save_provider_config(
         config_file.default_provider = Some(name.clone());
 
         // Also update the active config in state
+        let saved = providers.get(&name).unwrap();
+        let mut new_config = LlmConfig::new(
+            provider_enum,
+            saved.api_key.clone().unwrap_or_default(),
+        )
+        .with_model(saved.model.clone().unwrap_or_default());
+        if let Some(url) = &saved.base_url {
+            new_config.base_url = Some(expand_env_vars(url));
+        }
+        new_config.thinking = match provider_enum {
+            LlmProvider::Moonshot | LlmProvider::Custom => Some(saved.thinking.unwrap_or(false)),
+            _ => None,
+        };
         let mut config_guard = state.chat.llm_config.lock().await;
-        let new_config = LlmConfig::new(provider_enum, providers.get(&name).unwrap().api_key.clone().unwrap_or_default())
-            .with_model(providers.get(&name).unwrap().model.clone().unwrap_or_default());
         *config_guard = Some(new_config);
         *state.chat.active_provider_entry_name.lock().await = Some(name.clone());
     }
@@ -4990,6 +5077,14 @@ pub async fn quick_switch_provider(
     if let Some(url) = &provider_config.base_url {
         config.base_url = Some(expand_env_vars(url));
     }
+    match provider_enum {
+        LlmProvider::Moonshot | LlmProvider::Custom => {
+            config.thinking = Some(provider_config.thinking.unwrap_or(false));
+        }
+        _ => {
+            config.thinking = None;
+        }
+    }
 
     // Update state
     let mut config_guard = state.chat.llm_config.lock().await;
@@ -5006,6 +5101,7 @@ pub async fn quick_switch_provider(
         },
         model: Some(config.model),
         base_url: config.base_url,
+        thinking: config.thinking,
     })
 }
 

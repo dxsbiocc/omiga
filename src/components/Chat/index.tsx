@@ -19,6 +19,11 @@ import {
   Alert,
   Button,
   Divider,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  TextField,
   Snackbar,
   CircularProgress,
   FormControl,
@@ -47,6 +52,10 @@ import {
   Check as CheckIcon,
   InsertDriveFile as InsertDriveFileIcon,
   Summarize as SummarizeIcon,
+  Replay as ReplayIcon,
+  Edit as EditIcon,
+  ContentCopy as ContentCopyIcon,
+  InfoOutlined as InfoOutlinedIcon,
 } from "@mui/icons-material";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import {
@@ -153,6 +162,8 @@ interface Message {
     total?: number;
     provider?: string;
   };
+  /** Plan mode 初始 todos（与后端 round 对齐，仅存本地） */
+  initialTodos?: InitialTodoItem[];
 }
 
 /** Build payload text: `@a @b` + optional body (matches composer chips + input). */
@@ -182,6 +193,31 @@ function stripLeadingPathPrefixFromMerged(
   if (full.startsWith(prefix)) return full.slice(prefix.length);
   if (full === pathLine) return "";
   return full;
+}
+
+/** `@a @b` + body 与 `composerAttachedPaths` 是否仍一致 */
+function pathsStillMatchMergedContent(
+  paths: string[],
+  content: string,
+): boolean {
+  if (paths.length === 0) return true;
+  const pathLine = paths.map((p) => `@${p}`).join(" ");
+  const prefix = `${pathLine}\n\n`;
+  return content.startsWith(prefix) || content.trim() === pathLine;
+}
+
+function formatUserMessageTimestamp(ts: number | undefined): string {
+  try {
+    return new Date(ts ?? Date.now()).toLocaleString(undefined, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return "";
+  }
 }
 
 /** Shown as a user line + sent to the model to continue after the user cancelled a stream. */
@@ -219,6 +255,7 @@ interface StreamOutputItem {
   type:
     | "Start"
     | "text"
+    | "thinking"
     | "tool_use"
     | "tool_result"
     | "ask_user_pending"
@@ -714,21 +751,23 @@ function getNestedToolPanelOpen(
 function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
   const theme = useTheme();
   const [expanded, setExpanded] = useState(false);
-  
+
   // 获取并行执行组
   const getParallelGroups = () => {
     const groups: string[][] = [];
     const completed = new Set<string>();
-    const remaining = plan.subtasks.map(t => t.id);
-    
+    const remaining = plan.subtasks.map((t) => t.id);
+
     while (remaining.length > 0) {
       const currentGroup: string[] = [];
       const stillRemaining: string[] = [];
-      
+
       for (const taskId of remaining) {
-        const task = plan.subtasks.find(t => t.id === taskId);
+        const task = plan.subtasks.find((t) => t.id === taskId);
         if (task) {
-          const depsSatisfied = task.dependencies.every(dep => completed.has(dep));
+          const depsSatisfied = task.dependencies.every((dep) =>
+            completed.has(dep),
+          );
           if (depsSatisfied) {
             currentGroup.push(taskId);
           } else {
@@ -736,22 +775,22 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
           }
         }
       }
-      
+
       if (currentGroup.length === 0 && stillRemaining.length > 0) {
         currentGroup.push(stillRemaining.shift()!);
       }
-      
-      currentGroup.forEach(id => completed.add(id));
+
+      currentGroup.forEach((id) => completed.add(id));
       groups.push(currentGroup);
       remaining.length = 0;
       remaining.push(...stillRemaining);
     }
-    
+
     return groups;
   };
-  
+
   const groups = getParallelGroups();
-  
+
   // Agent 颜色映射
   const getAgentColor = (agentType: string) => {
     const colors: Record<string, string> = {
@@ -762,7 +801,7 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
     };
     return colors[agentType] || theme.palette.grey[500];
   };
-  
+
   return (
     <Box
       sx={{
@@ -789,7 +828,10 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
       >
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
           <SmartToy sx={{ fontSize: 14, color: "primary.main" }} />
-          <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>
+          <Typography
+            variant="caption"
+            sx={{ fontWeight: 600, color: "primary.main" }}
+          >
             智能调度计划
           </Typography>
           <Chip
@@ -812,14 +854,17 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
           }}
         />
       </Box>
-      
+
       {/* 展开内容 */}
       <Collapse in={expanded}>
         <Box sx={{ px: 1.5, pb: 1.5 }}>
-          <Typography variant="caption" sx={{ color: "text.secondary", mb: 1, display: "block" }}>
+          <Typography
+            variant="caption"
+            sx={{ color: "text.secondary", mb: 1, display: "block" }}
+          >
             预估执行时间: ~{Math.round(plan.estimatedDurationSecs / 60)} 分钟
           </Typography>
-          
+
           {groups.map((group, groupIdx) => (
             <Box key={groupIdx} sx={{ mb: 1 }}>
               {groups.length > 1 && (
@@ -835,13 +880,21 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
                   阶段 {groupIdx + 1}
                 </Typography>
               )}
-              <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5, mt: 0.5 }}>
+              <Box
+                sx={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 0.5,
+                  mt: 0.5,
+                }}
+              >
                 {group.map((taskId, idx) => {
-                  const task = plan.subtasks.find(t => t.id === taskId);
+                  const task = plan.subtasks.find((t) => t.id === taskId);
                   if (!task) return null;
-                  
-                  const globalIndex = plan.subtasks.findIndex(t => t.id === taskId) + 1;
-                  
+
+                  const globalIndex =
+                    plan.subtasks.findIndex((t) => t.id === taskId) + 1;
+
                   return (
                     <Box
                       key={task.id}
@@ -875,11 +928,17 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
                         {globalIndex}
                       </Typography>
                       <Box sx={{ flex: 1, minWidth: 0 }}>
-                        <Typography variant="caption" sx={{ display: "block", fontWeight: 500 }}>
+                        <Typography
+                          variant="caption"
+                          sx={{ display: "block", fontWeight: 500 }}
+                        >
                           {task.description}
                         </Typography>
                         {task.dependencies.length > 0 && (
-                          <Typography variant="caption" sx={{ fontSize: 10, color: "text.secondary" }}>
+                          <Typography
+                            variant="caption"
+                            sx={{ fontSize: 10, color: "text.secondary" }}
+                          >
                             依赖: {task.dependencies.join(", ")}
                           </Typography>
                         )}
@@ -943,6 +1002,14 @@ export function Chat({ sessionId }: ChatProps) {
   );
   /** When set, `send_message` uses `inputTarget: bg:<id>` (main transcript unchanged). */
   const [followUpTaskId, setFollowUpTaskId] = useState<string | null>(null);
+  /** 就地编辑用户气泡：id + 草稿全文（与 `message.content` 同形） */
+  const [userMessageEdit, setUserMessageEdit] = useState<{
+    id: string;
+    draft: string;
+  } | null>(null);
+  /** 重试前确认：将截断该条之后的所有消息并重新 send_message */
+  const [retryConfirmForMessage, setRetryConfirmForMessage] =
+    useState<Message | null>(null);
   /** Sidechain transcript drawer (`load_background_agent_transcript`). */
   const [bgTranscriptTaskId, setBgTranscriptTaskId] = useState<string | null>(
     null,
@@ -952,6 +1019,8 @@ export function Chat({ sessionId }: ChatProps) {
   const [pathRequiredToast, setPathRequiredToast] = useState<string | null>(
     null,
   );
+  /** 用户气泡「复制」成功提示 */
+  const [copySuccessToast, setCopySuccessToast] = useState(false);
   const showPathRequiredWarning = () => {
     setPathToastKey((k) => k + 1);
     setPathRequiredToast("请先选择工作目录后再发送消息。");
@@ -985,6 +1054,12 @@ export function Chat({ sessionId }: ChatProps) {
   const bumpQueueUi = useCallback(() => setQueueRevision((r) => r + 1), []);
   const handleSendRef = useRef<() => Promise<void>>(async () => {});
   const flushQueuedMainSendIfAnyRef = useRef<() => void>(() => {});
+  /**
+   * Set immediately before `handleSend` when draining the main-session FIFO queue.
+   * - Avoids stale React `input` in the `handleSend` closure right after `flushSync`.
+   * - Forces main-session `send_message` (never `inputTarget: bg:`) — the queue is main-only.
+   */
+  const mainQueueFlushPayloadRef = useRef<QueuedMainSend | null>(null);
 
   const queuedMainMessagesForComposer = useMemo(() => {
     void queueRevision;
@@ -1057,9 +1132,10 @@ export function Chat({ sessionId }: ChatProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   /** Populated by `follow_up_suggestions` stream frame; consumed when attaching the final assistant row */
-  const pendingFollowUpSuggestionsRef = useRef<
-    Array<{ label: string; prompt: string }> | null
-  >(null);
+  const pendingFollowUpSuggestionsRef = useRef<Array<{
+    label: string;
+    prompt: string;
+  }> | null>(null);
   /** Populated by `turn_summary` stream frame; consumed when attaching the final assistant row */
   const pendingTurnSummaryRef = useRef<string | null>(null);
   /** Populated by `token_usage` stream frame; consumed when attaching the final assistant row */
@@ -1258,9 +1334,9 @@ export function Chat({ sessionId }: ChatProps) {
     messageId: string;
     questions: AskUserQuestionItem[];
   } | null>(null);
-  const [askUserSelections, setAskUserSelections] = useState<Record<string, string>>(
-    {},
-  );
+  const [askUserSelections, setAskUserSelections] = useState<
+    Record<string, string>
+  >({});
 
   const composerSuggestionBundle = useMemo(() => {
     const last = messages[messages.length - 1];
@@ -1493,18 +1569,37 @@ export function Chat({ sessionId }: ChatProps) {
     const unlisten = await listen<StreamOutputItem>(eventName, (event) => {
       const payload = event.payload;
 
+      /**
+       * If `Start` was never applied (serde/wire mismatch, or first chunk races),
+       * `isConnecting` stays true and the status strip stays on「等待响应」forever.
+       * Bootstrap the same state as `case "Start"` on the first real stream event.
+       */
+      const ensureChatStreamStarted = (clearAssistantDraft: boolean) => {
+        const act = useActivityStore.getState();
+        const needBootstrap =
+          act.isConnecting ||
+          act.executionSteps.some(
+            (s) => s.id === "connect" && s.status === "running",
+          );
+        if (!needBootstrap) return;
+
+        pendingFollowUpSuggestionsRef.current = null;
+        pendingTurnSummaryRef.current = null;
+        pendingTokenUsageRef.current = null;
+        isStreamingRef.current = true;
+        setIsStreaming(true);
+        act.setConnecting(false);
+        act.setStreaming(true, true);
+        segmentStartRef.current = true;
+        act.onStreamStart();
+        if (clearAssistantDraft) {
+          setCurrentResponse("");
+        }
+      };
+
       switch (payload.type) {
         case "Start": {
-          pendingFollowUpSuggestionsRef.current = null;
-          pendingTurnSummaryRef.current = null;
-          pendingTokenUsageRef.current = null;
-          isStreamingRef.current = true;
-          setIsStreaming(true);
-          useActivityStore.getState().setConnecting(false);
-          useActivityStore.getState().setStreaming(true, true);
-          segmentStartRef.current = true;
-          useActivityStore.getState().onStreamStart();
-          setCurrentResponse("");
+          ensureChatStreamStarted(true);
           if (isDev) {
             console.debug("[OmigaDev][AgentStream]", {
               streamId,
@@ -1514,6 +1609,7 @@ export function Chat({ sessionId }: ChatProps) {
           break;
         }
         case "text": {
+          ensureChatStreamStarted(false);
           const text = typeof payload.data === "string" ? payload.data : "";
           if (text) {
             if (segmentStartRef.current) {
@@ -1531,7 +1627,19 @@ export function Chat({ sessionId }: ChatProps) {
           }
           break;
         }
+        case "thinking": {
+          ensureChatStreamStarted(false);
+          const piece = typeof payload.data === "string" ? payload.data : "";
+          if (isDev && piece) {
+            console.debug("[OmigaDev][AgentThinking]", {
+              streamId,
+              len: piece.length,
+            });
+          }
+          break;
+        }
         case "tool_use": {
+          ensureChatStreamStarted(false);
           const toolData = payload.data as
             | { id?: string; name?: string; arguments?: string }
             | undefined;
@@ -1910,9 +2018,7 @@ export function Chat({ sessionId }: ChatProps) {
                         input: tok.input,
                         output: tok.output,
                         total: tok.total,
-                        ...(tok.provider
-                          ? { provider: tok.provider }
-                          : {}),
+                        ...(tok.provider ? { provider: tok.provider } : {}),
                       },
                     }
                   : {}),
@@ -1958,22 +2064,56 @@ export function Chat({ sessionId }: ChatProps) {
   const handleSend = async () => {
     if (!sessionId) return;
     setAwaitingResumeAfterCancel(false);
+
+    const flushPayload = mainQueueFlushPayloadRef.current;
+    if (flushPayload) {
+      mainQueueFlushPayloadRef.current = null;
+    }
+    const restoreFlushToQueue = (p: QueuedMainSend) => {
+      queuedMainSendQueueRef.current.unshift(p);
+      bumpQueueUi();
+    };
+
     const {
-      composerAgentType,
-      permissionMode,
-      composerAttachedPaths,
+      composerAgentType: storeAgent,
+      permissionMode: storePerm,
+      composerAttachedPaths: storePaths,
     } = useChatComposerStore.getState();
-    if (!input.trim() && composerAttachedPaths.length === 0) return;
+
+    const composerAgentType = flushPayload
+      ? flushPayload.composerAgentType
+      : storeAgent;
+    const permissionMode = flushPayload
+      ? flushPayload.permissionMode
+      : storePerm;
+    const composerAttachedPaths = flushPayload
+      ? [...flushPayload.composerAttachedPaths]
+      : storePaths;
+
+    /** Prefer ref payload after queue flush — `input` in closure can still be stale even after `flushSync`. */
+    const trimmed = flushPayload ? flushPayload.body.trim() : input.trim();
+
+    if (!trimmed && composerAttachedPaths.length === 0) {
+      if (flushPayload) restoreFlushToQueue(flushPayload);
+      return;
+    }
     /** Composer is still in bare `/…` or `@…` picker mode — do not send as message */
-    const trimmed = input.trim();
-    if (trimmed && /^\/[^\s]*$/u.test(trimmed)) return;
-    if (trimmed && /^@[^\s]*$/u.test(trimmed)) return;
+    if (trimmed && /^\/[^\s]*$/u.test(trimmed)) {
+      if (flushPayload) restoreFlushToQueue(flushPayload);
+      return;
+    }
+    if (trimmed && /^@[^\s]*$/u.test(trimmed)) {
+      if (flushPayload) restoreFlushToQueue(flushPayload);
+      return;
+    }
     if (needsWorkspacePath) {
+      if (flushPayload) restoreFlushToQueue(flushPayload);
       showPathRequiredWarning();
       return;
     }
 
-    const isFollowUp = Boolean(followUpTaskId);
+    /** Queued main sends must stay on the main transcript; ignore teammate routing for this send. */
+    const isFollowUp = Boolean(followUpTaskId) && !flushPayload;
 
     if (isFollowUp) {
       const messageContent = mergeComposerPathsAndBody(
@@ -2029,7 +2169,8 @@ export function Chat({ sessionId }: ChatProps) {
     if (isConnecting || isStreamingRef.current) {
       queuedMainSendQueueRef.current.push({
         id:
-          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          typeof crypto !== "undefined" &&
+          typeof crypto.randomUUID === "function"
             ? crypto.randomUUID()
             : `q-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
         body: trimmed,
@@ -2063,9 +2204,7 @@ export function Chat({ sessionId }: ChatProps) {
         ? composerAgentType
         : undefined;
     const bubbleAttachedPaths =
-      composerAttachedPaths.length > 0
-        ? [...composerAttachedPaths]
-        : undefined;
+      composerAttachedPaths.length > 0 ? [...composerAttachedPaths] : undefined;
 
     const userMessage: Message = {
       id: `user-${Date.now()}`,
@@ -2075,7 +2214,7 @@ export function Chat({ sessionId }: ChatProps) {
       composerAgentType: bubbleComposerAgent,
       composerAttachedPaths: bubbleAttachedPaths,
     };
-    
+
     // 存储用户消息以便后续更新 schedulerPlan
     const userMessageId = userMessage.id;
 
@@ -2127,9 +2266,12 @@ export function Chat({ sessionId }: ChatProps) {
 
       // Track round_id for status updates
       setCurrentRoundId(response.round_id);
-      
+
       // 如果有调度计划，更新用户消息
-      if (response.scheduler_plan && response.scheduler_plan.subtasks.length > 1) {
+      if (
+        response.scheduler_plan &&
+        response.scheduler_plan.subtasks.length > 1
+      ) {
         setMessages((prev) =>
           prev.map((msg) =>
             msg.id === userMessageId
@@ -2138,7 +2280,7 @@ export function Chat({ sessionId }: ChatProps) {
           ),
         );
       }
-      
+
       // 如果有初始 todos（Plan mode），添加到消息中
       if (response.initial_todos && response.initial_todos.length > 0) {
         setMessages((prev) =>
@@ -2221,12 +2363,269 @@ export function Chat({ sessionId }: ChatProps) {
   };
 
   handleSendRef.current = handleSend;
+
+  const openEditUserMessage = useCallback((message: Message) => {
+    if (message.role !== "user") return;
+    setUserMessageEdit({ id: message.id, draft: message.content });
+  }, []);
+
+  const saveUserMessageEdit = useCallback(() => {
+    if (!userMessageEdit) return;
+    const { id, draft } = userMessageEdit;
+    const trimmed = draft.trim();
+    if (!trimmed) return;
+
+    setMessages((prev) => {
+      const idx = prev.findIndex((m) => m.id === id);
+      if (idx < 0) return prev;
+      const row = prev[idx];
+      if (row.role !== "user") return prev;
+      const paths = row.composerAttachedPaths ?? [];
+      const keepPaths = pathsStillMatchMergedContent(paths, trimmed)
+        ? paths
+        : undefined;
+      const attached =
+        keepPaths && keepPaths.length > 0 ? keepPaths : undefined;
+      const updated: Message = {
+        ...row,
+        content: trimmed,
+        composerAttachedPaths: attached,
+        timestamp: Date.now(),
+        schedulerPlan: undefined,
+        initialTodos: undefined,
+      };
+      const next = [...prev.slice(0, idx), updated];
+      replaceStoreMessagesSnapshot(next.map(chatMessageToStore));
+      return next;
+    });
+    setUserMessageEdit(null);
+  }, [userMessageEdit, replaceStoreMessagesSnapshot]);
+
+  const copyUserMessageText = useCallback(async (message: Message) => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopySuccessToast(true);
+    } catch (e) {
+      console.error("[Chat] clipboard copy failed", e);
+      setBgToast("复制失败，请检查剪贴板权限");
+    }
+  }, []);
+
+  const retryUserMessage = useCallback(
+    async (message: Message) => {
+      if (!sessionId || message.role !== "user") return;
+      if (needsWorkspacePath) {
+        showPathRequiredWarning();
+        return;
+      }
+      if (followUpTaskId) {
+        setBgToast("请在主会话中重试（当前为后台跟进模式）");
+        return;
+      }
+      if (isConnecting || isStreamingRef.current) {
+        setBgToast("请等待当前回复结束后再重试");
+        return;
+      }
+
+      const idx = messages.findIndex((m) => m.id === message.id);
+      if (idx < 0) return;
+
+      const messageContent = message.content.trim();
+      if (!messageContent) {
+        setBgToast("消息为空，无法重试");
+        return;
+      }
+
+      const truncated = messages
+        .slice(0, idx + 1)
+        .map((m, i) =>
+          i === idx && m.role === "user"
+            ? { ...m, schedulerPlan: undefined, initialTodos: undefined }
+            : m,
+        );
+
+      setMessages(truncated);
+      replaceStoreMessagesSnapshot(truncated.map(chatMessageToStore));
+      setCurrentResponse("");
+      setAwaitingResumeAfterCancel(false);
+
+      setIndexingStatus("idle");
+      useActivityStore.getState().beginExecutionRun();
+      useActivityStore.getState().setConnecting(true);
+      useActivityStore.getState().setStreaming(false, false);
+
+      const composeAgent = message.composerAgentType ?? "general-purpose";
+      flushSync(() => {
+        useChatComposerStore.getState().setComposerAgentType(composeAgent);
+      });
+      const { permissionMode } = useChatComposerStore.getState();
+
+      const userMessageId = message.id;
+
+      try {
+        const response = await invoke<{
+          message_id: string;
+          session_id: string;
+          round_id: string;
+          scheduler_plan?: SchedulerPlan;
+          initial_todos?: InitialTodoItem[];
+        }>("send_message", {
+          request: {
+            content: messageContent,
+            session_id: sessionId,
+            project_path: currentSession?.projectPath,
+            session_name: currentSession?.name,
+            use_tools: true,
+            composerAgentType: composeAgent,
+            permissionMode,
+          },
+        });
+
+        useChatComposerStore.getState().setComposerAgentType("general-purpose");
+
+        setCurrentRoundId(response.round_id);
+
+        if (
+          response.scheduler_plan &&
+          response.scheduler_plan.subtasks.length > 1
+        ) {
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === userMessageId
+                ? { ...msg, schedulerPlan: response.scheduler_plan }
+                : msg,
+            ),
+          );
+        }
+
+        if (response.initial_todos && response.initial_todos.length > 0) {
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === userMessageId
+                ? { ...msg, initialTodos: response.initial_todos }
+                : msg,
+            ),
+          );
+        }
+
+        setCurrentStreamId(response.message_id);
+        await setupStreamListener(response.message_id);
+      } catch (error: unknown) {
+        console.error("Failed to retry message:", error);
+        useActivityStore.getState().clearTransient();
+        useActivityStore.getState().resetExecutionState();
+
+        let errorMessage = "Unknown error";
+        if (typeof error === "string") {
+          errorMessage = error;
+        } else if (error && typeof error === "object") {
+          const err = error as Record<string, unknown>;
+          if (
+            err.type === "Chat" &&
+            err.details &&
+            typeof err.details === "object"
+          ) {
+            const details = err.details as Record<string, unknown>;
+            if (details.kind === "ApiKeyMissing") {
+              errorMessage =
+                "API key not configured. Please set your LLM API key in settings.";
+            } else if (typeof details.message === "string") {
+              errorMessage = details.message;
+            } else if (typeof details.kind === "string") {
+              errorMessage = details.kind;
+            }
+          } else if (err.type === "Config" && typeof err.details === "string") {
+            errorMessage = err.details;
+          } else if (
+            err.type === "Api" &&
+            err.details &&
+            typeof err.details === "object"
+          ) {
+            const details = err.details as Record<string, unknown>;
+            errorMessage =
+              typeof details.message === "string"
+                ? details.message
+                : typeof details.kind === "string"
+                  ? details.kind
+                  : String(err.details);
+          } else if (typeof err.message === "string") {
+            errorMessage = err.message;
+          } else {
+            errorMessage = JSON.stringify(error);
+          }
+        } else {
+          errorMessage = String(error);
+        }
+
+        const errorMsg: Message = {
+          id: `error-${Date.now()}`,
+          role: "assistant",
+          content: `Failed to send message: ${errorMessage}`,
+          timestamp: Date.now(),
+        };
+        setMessages((prev) => [...prev, errorMsg]);
+        queueMicrotask(() => {
+          isStreamingRef.current = false;
+          flushQueuedMainSendIfAnyRef.current();
+        });
+      }
+    },
+    [
+      sessionId,
+      messages,
+      needsWorkspacePath,
+      followUpTaskId,
+      isConnecting,
+      currentSession,
+      replaceStoreMessagesSnapshot,
+    ],
+  );
+
+  const requestRetryUserMessage = useCallback(
+    (message: Message) => {
+      if (!sessionId || message.role !== "user") return;
+      if (needsWorkspacePath) {
+        showPathRequiredWarning();
+        return;
+      }
+      if (followUpTaskId) {
+        setBgToast("请在主会话中重试（当前为后台跟进模式）");
+        return;
+      }
+      if (isConnecting || isStreamingRef.current) {
+        setBgToast("请等待当前回复结束后再重试");
+        return;
+      }
+      const idx = messages.findIndex((m) => m.id === message.id);
+      if (idx < 0) return;
+      if (!message.content.trim()) {
+        setBgToast("消息为空，无法重试");
+        return;
+      }
+      setRetryConfirmForMessage(message);
+    },
+    [
+      sessionId,
+      needsWorkspacePath,
+      followUpTaskId,
+      isConnecting,
+      messages,
+    ],
+  );
+
+  const confirmRetryUserMessage = useCallback(() => {
+    const m = retryConfirmForMessage;
+    setRetryConfirmForMessage(null);
+    if (m) void retryUserMessage(m);
+  }, [retryConfirmForMessage, retryUserMessage]);
+
   flushQueuedMainSendIfAnyRef.current = () => {
     const q = queuedMainSendQueueRef.current;
     if (q.length === 0) return;
     const next = q.shift();
     if (!next) return;
     bumpQueueUi();
+    mainQueueFlushPayloadRef.current = next;
     flushSync(() => {
       setInput(next.body);
       const st = useChatComposerStore.getState();
@@ -2939,6 +3338,7 @@ export function Chat({ sessionId }: ChatProps) {
               p: 3,
               display: "flex",
               flexDirection: "column",
+              /* 统一：仅由 gap 控制气泡之间的间距（用户消息不再额外 pb 撑高） */
               gap: 2,
             }}
           >
@@ -2965,7 +3365,7 @@ export function Chat({ sessionId }: ChatProps) {
               </Box>
             )}
 
-            {messageRenderItems.map((item) => {
+            {messageRenderItems.map((item, itemIndex) => {
               if (item.kind === "react_fold") {
                 const { id, fold } = item;
                 const toolMsgs = fold.filter(
@@ -3124,8 +3524,8 @@ export function Chat({ sessionId }: ChatProps) {
                               );
                               const showAskUserPanel = Boolean(
                                 pendingAskUser &&
-                                  tc.id &&
-                                  pendingAskUser.toolUseId === tc.id,
+                                tc.id &&
+                                pendingAskUser.toolUseId === tc.id,
                               );
                               const nestedOpen =
                                 getNestedToolPanelOpen(
@@ -3402,9 +3802,7 @@ export function Chat({ sessionId }: ChatProps) {
                                                           ] ?? ""
                                                         )
                                                           .split(",")
-                                                          .map((s) =>
-                                                            s.trim(),
-                                                          )
+                                                          .map((s) => s.trim())
                                                           .filter(Boolean);
                                                         const checked =
                                                           cur.includes(
@@ -3461,12 +3859,11 @@ export function Chat({ sessionId }: ChatProps) {
                                                                         );
                                                                       return {
                                                                         ...prev,
-                                                                        [qt]:
-                                                                          Array.from(
-                                                                            set,
-                                                                          ).join(
-                                                                            ", ",
-                                                                          ),
+                                                                        [qt]: Array.from(
+                                                                          set,
+                                                                        ).join(
+                                                                          ", ",
+                                                                        ),
                                                                       };
                                                                     },
                                                                   );
@@ -3519,42 +3916,40 @@ export function Chat({ sessionId }: ChatProps) {
                                                         )
                                                       }
                                                     >
-                                                      {q.options.map(
-                                                        (opt) => (
-                                                          <FormControlLabel
-                                                            key={opt.label}
-                                                            value={opt.label}
-                                                            control={
-                                                              <Radio size="small" />
-                                                            }
-                                                            label={
-                                                              <Box>
-                                                                <Typography
-                                                                  variant="caption"
-                                                                  sx={{
-                                                                    fontWeight: 600,
-                                                                  }}
-                                                                >
-                                                                  {opt.label}
-                                                                </Typography>
-                                                                <Typography
-                                                                  variant="caption"
-                                                                  sx={{
-                                                                    display:
-                                                                      "block",
-                                                                    color:
-                                                                      "text.secondary",
-                                                                  }}
-                                                                >
-                                                                  {
-                                                                    opt.description
-                                                                  }
-                                                                </Typography>
-                                                              </Box>
-                                                            }
-                                                          />
-                                                        ),
-                                                      )}
+                                                      {q.options.map((opt) => (
+                                                        <FormControlLabel
+                                                          key={opt.label}
+                                                          value={opt.label}
+                                                          control={
+                                                            <Radio size="small" />
+                                                          }
+                                                          label={
+                                                            <Box>
+                                                              <Typography
+                                                                variant="caption"
+                                                                sx={{
+                                                                  fontWeight: 600,
+                                                                }}
+                                                              >
+                                                                {opt.label}
+                                                              </Typography>
+                                                              <Typography
+                                                                variant="caption"
+                                                                sx={{
+                                                                  display:
+                                                                    "block",
+                                                                  color:
+                                                                    "text.secondary",
+                                                                }}
+                                                              >
+                                                                {
+                                                                  opt.description
+                                                                }
+                                                              </Typography>
+                                                            </Box>
+                                                          }
+                                                        />
+                                                      ))}
                                                     </RadioGroup>
                                                   )}
                                                 </FormControl>
@@ -3575,16 +3970,16 @@ export function Chat({ sessionId }: ChatProps) {
                                         {!hasInput &&
                                           !hasOutput &&
                                           !showAskUserPanel && (
-                                          <Typography
-                                            sx={{
-                                              fontSize: 12,
-                                              color: CHAT.textMuted,
-                                              fontStyle: "italic",
-                                            }}
-                                          >
-                                            No command or output yet.
-                                          </Typography>
-                                        )}
+                                            <Typography
+                                              sx={{
+                                                fontSize: 12,
+                                                color: CHAT.textMuted,
+                                                fontStyle: "italic",
+                                              }}
+                                            >
+                                              No command or output yet.
+                                            </Typography>
+                                          )}
                                       </Box>
                                     </Collapse>
                                   </Box>
@@ -3623,6 +4018,11 @@ export function Chat({ sessionId }: ChatProps) {
 
               const message = item.message;
               const dividerBefore = item.dividerBefore === true;
+              const nextItem = messageRenderItems[itemIndex + 1];
+              const nextRowIsUser =
+                nextItem?.kind === "row" && nextItem.message.role === "user";
+              const userRowPb =
+                message.role === "user" ? (nextRowIsUser ? 1 : 2) : null;
               const userAttachPaths = message.composerAttachedPaths ?? [];
               const userBubbleDisplayText =
                 message.role === "user" && userAttachPaths.length > 0
@@ -3631,6 +4031,8 @@ export function Chat({ sessionId }: ChatProps) {
                       userAttachPaths,
                     )
                   : message.content;
+              const isEditingUser =
+                message.role === "user" && userMessageEdit?.id === message.id;
               return (
                 <Fade in key={message.id} timeout={300}>
                   <Box
@@ -3660,111 +4062,393 @@ export function Chat({ sessionId }: ChatProps) {
                         width: "100%",
                         minWidth: 0,
                         maxWidth: "100%",
+                        pt: 1,
+                        pb: userRowPb !== null ? userRowPb : 2,
                       }}
                     >
                       {message.role === "user" ? (
                         <Box
+                          className="user-msg-wrap"
                           sx={{
-                            minWidth: 0,
-                            width: "fit-content",
-                            maxWidth: USER_BUBBLE_MAX_CSS,
-                            px: 1.75,
-                            py: 1.25,
-                            borderRadius: `${BUBBLE_RADIUS_PX}px`,
-                            border: `1px solid ${CHAT.userBubbleBorder}`,
-                            background: CHAT.userGrad,
-                            color: CHAT.userBubbleText,
-                            fontFamily: CHAT.font,
-                            overflow: "hidden",
+                            position: "relative",
                             display: "flex",
-                            flexDirection: "row",
-                            flexWrap: "wrap",
-                            alignItems: "center",
-                            alignContent: "center",
-                            gap: 0.25,
+                            flexDirection: "column",
+                            alignItems: isEditingUser ? "stretch" : "flex-end",
+                            minWidth: 0,
+                            width: "100%",
+                            maxWidth: "100%",
+                            alignSelf: "stretch",
+                            pb: 1,
+                            "&:hover .user-msg-hover-actions": {
+                              opacity: 1,
+                              pointerEvents: "auto",
+                            },
                           }}
                         >
-                          {message.composerAgentType ? (
-                            <Chip
-                              size="small"
-                              variant="outlined"
-                              icon={
-                                <SmartToy sx={{ fontSize: 14, opacity: 0.9 }} />
-                              }
-                              label={`/${message.composerAgentType}`}
+                          <Box
+                            sx={{
+                              position: "relative",
+                              display: "flex",
+                              flexDirection: "column",
+                              alignItems: isEditingUser
+                                ? "stretch"
+                                : "flex-end",
+                              width: "100%",
+                              minWidth: 0,
+                            }}
+                          >
+                            <Box
                               sx={{
-                                flexShrink: 0,
-                                maxWidth: "min(100%, 220px)",
-                                height: 22,
-                                fontSize: 11,
-                                fontWeight: 600,
-                                bgcolor: CHAT.userChipBg,
-                                borderColor: CHAT.userChipBorder,
-                                color: CHAT.userBubbleText,
-                                boxShadow: `0 1px 2px ${alpha(CHAT.userBubbleText, 0.12)}`,
-                                "& .MuiChip-icon": {
-                                  color: CHAT.accent,
-                                  marginLeft: "6px",
-                                },
-                                "& .MuiChip-label": {
-                                  px: 0.5,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                },
-                              }}
-                            />
-                          ) : null}
-                          {userAttachPaths.map((p) => (
-                            <Tooltip key={p} title={p} placement="top">
-                              <Chip
-                                size="small"
-                                variant="outlined"
-                                icon={
-                                  <InsertDriveFileIcon
-                                    sx={{ fontSize: 14, opacity: 0.9 }}
-                                  />
-                                }
-                                label={`@${p}`}
-                                sx={{
-                                  flexShrink: 0,
-                                  maxWidth: "min(100%, 220px)",
-                                  height: 22,
-                                  fontSize: 11,
-                                  fontWeight: 600,
-                                  bgcolor: CHAT.userChipBg,
-                                  borderColor: CHAT.userChipBorder,
-                                  color: CHAT.userBubbleText,
-                                  boxShadow: `0 1px 2px ${alpha(CHAT.userBubbleText, 0.12)}`,
-                                  "& .MuiChip-icon": {
-                                    color: CHAT.accent,
-                                    marginLeft: "6px",
-                                  },
-                                  "& .MuiChip-label": {
-                                    px: 0.5,
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                  },
-                                }}
-                              />
-                            </Tooltip>
-                          ))}
-                          {userBubbleDisplayText ? (
-                            <Typography
-                              component="span"
-                              sx={{
-                                fontSize: 13,
-                                lineHeight: 1.45,
-                                whiteSpace: "pre-wrap",
-                                wordBreak: "break-word",
-                                overflowWrap: "anywhere",
-                                flex: "1 1 0",
                                 minWidth: 0,
-                                textAlign: "left",
+                                width: isEditingUser ? "100%" : "fit-content",
+                                maxWidth: isEditingUser
+                                  ? "100%"
+                                  : USER_BUBBLE_MAX_CSS,
+                                px: isEditingUser ? 2 : 1.75,
+                                py: isEditingUser ? 2 : 1.25,
+                                borderRadius: `${BUBBLE_RADIUS_PX}px`,
+                                border: `1px solid ${
+                                  isEditingUser
+                                    ? CHAT.agentBubbleBorder
+                                    : CHAT.userBubbleBorder
+                                }`,
+                                background: isEditingUser
+                                  ? theme.palette.background.paper
+                                  : CHAT.userGrad,
+                                color: isEditingUser
+                                  ? CHAT.textPrimary
+                                  : CHAT.userBubbleText,
+                                fontFamily: CHAT.font,
+                                overflow: "hidden",
+                                display: "flex",
+                                flexDirection: isEditingUser ? "column" : "row",
+                                flexWrap: isEditingUser ? "nowrap" : "wrap",
+                                alignItems: isEditingUser
+                                  ? "stretch"
+                                  : "center",
+                                alignContent: isEditingUser
+                                  ? "stretch"
+                                  : "center",
+                                gap: 0.25,
+                                boxShadow: isEditingUser
+                                  ? theme.palette.mode === "dark"
+                                    ? `0 1px 4px ${alpha(theme.palette.common.black, 0.45)}`
+                                    : `0 1px 3px ${alpha(theme.palette.common.black, 0.08)}`
+                                  : undefined,
                               }}
                             >
-                              {userBubbleDisplayText}
-                            </Typography>
-                          ) : null}
+                              {message.composerAgentType ||
+                              userAttachPaths.length > 0 ? (
+                                <Box
+                                  sx={{
+                                    display: "flex",
+                                    flexDirection: "row",
+                                    flexWrap: "wrap",
+                                    alignItems: "center",
+                                    alignContent: "center",
+                                    gap: 0.25,
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {message.composerAgentType ? (
+                                    <Chip
+                                      size="small"
+                                      variant="outlined"
+                                      icon={
+                                        <SmartToy
+                                          sx={{ fontSize: 14, opacity: 0.9 }}
+                                        />
+                                      }
+                                      label={`/${message.composerAgentType}`}
+                                      sx={{
+                                        flexShrink: 0,
+                                        maxWidth: "min(100%, 220px)",
+                                        height: 22,
+                                        fontSize: 11,
+                                        fontWeight: 600,
+                                        bgcolor: CHAT.userChipBg,
+                                        borderColor: CHAT.userChipBorder,
+                                        color: CHAT.userBubbleText,
+                                        boxShadow: `0 1px 2px ${alpha(CHAT.userBubbleText, 0.12)}`,
+                                        "& .MuiChip-icon": {
+                                          color: CHAT.accent,
+                                          marginLeft: "6px",
+                                        },
+                                        "& .MuiChip-label": {
+                                          px: 0.5,
+                                          overflow: "hidden",
+                                          textOverflow: "ellipsis",
+                                        },
+                                      }}
+                                    />
+                                  ) : null}
+                                  {userAttachPaths.map((p) => (
+                                    <Tooltip key={p} title={p} placement="top">
+                                      <Chip
+                                        size="small"
+                                        variant="outlined"
+                                        icon={
+                                          <InsertDriveFileIcon
+                                            sx={{ fontSize: 14, opacity: 0.9 }}
+                                          />
+                                        }
+                                        label={`@${p}`}
+                                        sx={{
+                                          flexShrink: 0,
+                                          maxWidth: "min(100%, 220px)",
+                                          height: 22,
+                                          fontSize: 11,
+                                          fontWeight: 600,
+                                          bgcolor: CHAT.userChipBg,
+                                          borderColor: CHAT.userChipBorder,
+                                          color: CHAT.userBubbleText,
+                                          boxShadow: `0 1px 2px ${alpha(CHAT.userBubbleText, 0.12)}`,
+                                          "& .MuiChip-icon": {
+                                            color: CHAT.accent,
+                                            marginLeft: "6px",
+                                          },
+                                          "& .MuiChip-label": {
+                                            px: 0.5,
+                                            overflow: "hidden",
+                                            textOverflow: "ellipsis",
+                                          },
+                                        }}
+                                      />
+                                    </Tooltip>
+                                  ))}
+                                </Box>
+                              ) : null}
+                              {isEditingUser ? (
+                                <>
+                                  <TextField
+                                    autoFocus
+                                    multiline
+                                    fullWidth
+                                    minRows={4}
+                                    maxRows={24}
+                                    value={userMessageEdit?.draft ?? ""}
+                                    onChange={(e) =>
+                                      setUserMessageEdit((cur) =>
+                                        cur
+                                          ? { ...cur, draft: e.target.value }
+                                          : null,
+                                      )
+                                    }
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Escape") {
+                                        e.preventDefault();
+                                        setUserMessageEdit(null);
+                                      }
+                                      if (
+                                        (e.metaKey || e.ctrlKey) &&
+                                        e.key === "Enter"
+                                      ) {
+                                        e.preventDefault();
+                                        saveUserMessageEdit();
+                                      }
+                                    }}
+                                    variant="outlined"
+                                    placeholder="编辑消息内容…"
+                                    sx={{
+                                      flex: "1 1 auto",
+                                      minWidth: 0,
+                                      width: "100%",
+                                      mt: 0.25,
+                                      "& .MuiOutlinedInput-root": {
+                                        fontSize: 13,
+                                        lineHeight: 1.45,
+                                        bgcolor: CHAT.codeBg,
+                                        color: CHAT.textPrimary,
+                                        alignItems: "flex-start",
+                                        borderRadius: `${BUBBLE_RADIUS_PX}px`,
+                                      },
+                                      "& .MuiOutlinedInput-notchedOutline": {
+                                        borderColor: alpha(
+                                          CHAT.agentBubbleBorder,
+                                          0.9,
+                                        ),
+                                      },
+                                      "& .MuiInputBase-input": {
+                                        whiteSpace: "pre-wrap",
+                                        wordBreak: "break-word",
+                                        overflowWrap: "anywhere",
+                                        px: 1,
+                                      },
+                                    }}
+                                  />
+                                  <Stack
+                                    direction="row"
+                                    alignItems="flex-start"
+                                    spacing={1}
+                                    sx={{ mt: 1.5 }}
+                                  >
+                                    <InfoOutlinedIcon
+                                      sx={{
+                                        fontSize: 18,
+                                        color: CHAT.textMuted,
+                                        flexShrink: 0,
+                                        mt: 0.15,
+                                      }}
+                                    />
+                                    <Typography
+                                      variant="caption"
+                                      sx={{
+                                        color: CHAT.textMuted,
+                                        lineHeight: 1.45,
+                                      }}
+                                    >
+                                      保存后将更新本条消息。可按 Esc
+                                      取消，或使用 Ctrl/⌘ + Enter 保存。
+                                    </Typography>
+                                  </Stack>
+                                  <Stack
+                                    direction="row"
+                                    justifyContent="flex-end"
+                                    spacing={1}
+                                    sx={{ mt: 1, flexShrink: 0 }}
+                                  >
+                                    <Button
+                                      size="small"
+                                      variant="outlined"
+                                      color="inherit"
+                                      onClick={() => setUserMessageEdit(null)}
+                                    >
+                                      取消
+                                    </Button>
+                                    <Button
+                                      size="small"
+                                      variant="contained"
+                                      onClick={() => saveUserMessageEdit()}
+                                    >
+                                      保存
+                                    </Button>
+                                  </Stack>
+                                </>
+                              ) : userBubbleDisplayText ? (
+                                <Typography
+                                  component="span"
+                                  sx={{
+                                    fontSize: 13,
+                                    lineHeight: 1.45,
+                                    whiteSpace: "pre-wrap",
+                                    wordBreak: "break-word",
+                                    overflowWrap: "anywhere",
+                                    flex: "1 1 0",
+                                    minWidth: 0,
+                                    textAlign: "left",
+                                  }}
+                                >
+                                  {userBubbleDisplayText}
+                                </Typography>
+                              ) : null}
+                            </Box>
+                            <Stack
+                              className="user-msg-hover-actions"
+                              direction="row"
+                              alignItems="center"
+                              justifyContent="flex-end"
+                              flexWrap="nowrap"
+                              sx={{
+                                position: "absolute",
+                                left: 0,
+                                right: 0,
+                                top: "100%",
+                                mt: 0.5,
+                                width: "100%",
+                                maxWidth: "100%",
+                                boxSizing: "border-box",
+                                px: 0.25,
+                                py: 0,
+                                gap: 0.5,
+                                opacity: isEditingUser ? 1 : 0,
+                                pointerEvents: isEditingUser ? "auto" : "none",
+                                transition: "opacity 0.15s ease",
+                                zIndex: 2,
+                                minWidth: 0,
+                                overflowX: "auto",
+                                overflowY: "hidden",
+                                scrollbarWidth: "thin",
+                              }}
+                            >
+                              <Typography
+                                component="span"
+                                sx={{
+                                  fontSize: 11,
+                                  lineHeight: 1.2,
+                                  color: CHAT.textMuted,
+                                  whiteSpace: "nowrap",
+                                  flexShrink: 0,
+                                  userSelect: "none",
+                                }}
+                              >
+                                {formatUserMessageTimestamp(message.timestamp)}
+                              </Typography>
+                              {!isEditingUser ? (
+                                <Tooltip title="重试">
+                                  <IconButton
+                                    size="small"
+                                    aria-label="重试"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      requestRetryUserMessage(message);
+                                    }}
+                                    sx={{
+                                      p: 0.35,
+                                      color: CHAT.toolIcon,
+                                      "&:hover": {
+                                        color: CHAT.accent,
+                                        bgcolor: alpha(CHAT.accent, 0.1),
+                                      },
+                                    }}
+                                  >
+                                    <ReplayIcon sx={{ fontSize: 17 }} />
+                                  </IconButton>
+                                </Tooltip>
+                              ) : null}
+                              {!isEditingUser ? (
+                                <Tooltip title="编辑">
+                                  <IconButton
+                                    size="small"
+                                    aria-label="编辑"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openEditUserMessage(message);
+                                    }}
+                                    sx={{
+                                      p: 0.35,
+                                      color: CHAT.toolIcon,
+                                      "&:hover": {
+                                        color: CHAT.accent,
+                                        bgcolor: alpha(CHAT.accent, 0.1),
+                                      },
+                                    }}
+                                  >
+                                    <EditIcon sx={{ fontSize: 17 }} />
+                                  </IconButton>
+                                </Tooltip>
+                              ) : null}
+                              <Tooltip title="复制">
+                                <IconButton
+                                  size="small"
+                                  aria-label="复制"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void copyUserMessageText(message);
+                                  }}
+                                  sx={{
+                                    p: 0.35,
+                                    color: CHAT.toolIcon,
+                                    "&:hover": {
+                                      color: CHAT.accent,
+                                      bgcolor: alpha(CHAT.accent, 0.1),
+                                    },
+                                  }}
+                                >
+                                  <ContentCopyIcon sx={{ fontSize: 17 }} />
+                                </IconButton>
+                              </Tooltip>
+                            </Stack>
+                          </Box>
                         </Box>
                       ) : (
                         <Box
@@ -3800,9 +4484,8 @@ export function Chat({ sessionId }: ChatProps) {
                                 maxWidth: "calc(100% - 20px)",
                               }}
                             >
-                              输入 {message.tokenUsage.input.toLocaleString()}{" "}
-                              · 输出{" "}
-                              {message.tokenUsage.output.toLocaleString()}
+                              输入 {message.tokenUsage.input.toLocaleString()} ·
+                              输出 {message.tokenUsage.output.toLocaleString()}
                               {message.tokenUsage.total != null &&
                               message.tokenUsage.total !==
                                 message.tokenUsage.input +
@@ -3817,20 +4500,21 @@ export function Chat({ sessionId }: ChatProps) {
                         </Box>
                       )}
                     </Box>
-                    
+
                     {/* 调度计划显示 */}
-                    {message.schedulerPlan && message.schedulerPlan.subtasks.length > 1 && (
-                      <Box
-                        sx={{
-                          width: "100%",
-                          maxWidth: USER_BUBBLE_MAX_CSS,
-                          alignSelf: "flex-end",
-                          mt: 0.5,
-                        }}
-                      >
-                        <SchedulerPlanDisplay plan={message.schedulerPlan} />
-                      </Box>
-                    )}
+                    {message.schedulerPlan &&
+                      message.schedulerPlan.subtasks.length > 1 && (
+                        <Box
+                          sx={{
+                            width: "100%",
+                            maxWidth: USER_BUBBLE_MAX_CSS,
+                            alignSelf: "flex-end",
+                            mt: 0.5,
+                          }}
+                        >
+                          <SchedulerPlanDisplay plan={message.schedulerPlan} />
+                        </Box>
+                      )}
                   </Box>
                 </Fade>
               );
@@ -3959,7 +4643,12 @@ export function Chat({ sessionId }: ChatProps) {
                       }}
                     />
                     <Box sx={{ minWidth: 0, flex: 1 }}>
-                      <Stack direction="row" alignItems="center" gap={0.75} sx={{ mb: 0.5 }}>
+                      <Stack
+                        direction="row"
+                        alignItems="center"
+                        gap={0.75}
+                        sx={{ mb: 0.5 }}
+                      >
                         <Typography
                           variant="caption"
                           sx={{
@@ -4145,6 +4834,52 @@ export function Chat({ sessionId }: ChatProps) {
           </Box>
         </Box>
       )}
+
+      <Dialog
+        open={retryConfirmForMessage !== null}
+        onClose={() => setRetryConfirmForMessage(null)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>确认重试</DialogTitle>
+        <DialogContent>
+          <Alert severity="warning" sx={{ mb: 0 }}>
+            将删除此条消息之后的所有会话内容，并基于当前消息重新运行计划与回复。此操作不可撤销。
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRetryConfirmForMessage(null)}>
+            取消
+          </Button>
+          <Button
+            variant="contained"
+            color="warning"
+            onClick={confirmRetryUserMessage}
+          >
+            确认重试
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Snackbar
+        open={copySuccessToast}
+        autoHideDuration={3000}
+        onClose={(_, reason) => {
+          if (reason === "clickaway") return;
+          setCopySuccessToast(false);
+        }}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+        sx={{ zIndex: (t) => t.zIndex.snackbar + 1 }}
+      >
+        <Alert
+          onClose={() => setCopySuccessToast(false)}
+          severity="success"
+          variant="filled"
+          sx={{ width: "100%", maxWidth: 560 }}
+        >
+          已复制到剪贴板
+        </Alert>
+      </Snackbar>
 
       <Snackbar
         open={Boolean(bgToast)}
