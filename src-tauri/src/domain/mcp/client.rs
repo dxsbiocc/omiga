@@ -1,6 +1,6 @@
 //! Connect to MCP servers via **rmcp** (stdio or streamable HTTP) and run `resources/*` calls.
 
-use crate::domain::mcp_config::{McpServerConfig, merged_mcp_servers};
+use crate::domain::mcp::config::{McpServerConfig, merged_mcp_servers};
 use rmcp::ServiceExt;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ReadResourceRequestParams, ReadResourceResult,
@@ -67,20 +67,24 @@ impl McpLiveConnection {
         self.created_in_session != current_session
     }
 
-    /// Check if this stdio process is still alive (platform-specific)
-    /// Note: Requires `libc` crate - simplified version always returns true for now
+    /// Check if this stdio process is still alive (platform-specific).
+    /// Uses `kill(pid, 0)` which checks process existence without sending any signal.
     #[cfg(unix)]
     pub fn is_process_alive(&self) -> bool {
-        // TODO: Implement using nix crate's kill function
-        // match self.pid {
-        //     None => false,
-        //     Some(_pid) => {
-        //         // Use nix::sys::signal::kill with signal 0 to check if process exists
-        //         // (doesn't actually send a signal)
-        //         matches!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None), Ok(()))
-        //     }
-        // }
-        true // Simplified: assume alive if connection struct exists
+        match self.pid {
+            None => {
+                // PID not available (rmcp doesn't expose child PID after handshake).
+                // Assume alive and let the is_closed() check catch dead transports.
+                true
+            }
+            Some(pid) => {
+                // Signal 0 checks process existence without sending a real signal.
+                matches!(
+                    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+                    Ok(())
+                )
+            }
+        }
     }
 
     /// Check if this stdio process is still alive (Windows implementation)
@@ -131,8 +135,8 @@ pub async fn connect_mcp_server(
     timeout: Duration,
     session_id: &str,
 ) -> Result<McpLiveConnection, String> {
-    use crate::domain::mcp_names::normalize_name_for_mcp;
-    use crate::domain::mcp_config::McpServerConfig;
+    use crate::domain::mcp::names::normalize_name_for_mcp;
+    use crate::domain::mcp::config::McpServerConfig;
 
     let cfg = merged_mcp_servers(project_root)
         .remove(server_name)
@@ -158,8 +162,9 @@ pub async fn connect_mcp_server(
         .map(|t| (normalize_name_for_mcp(t.name.as_ref()), t.name.to_string()))
         .collect();
 
-    // TODO: Extract PID from running service for stdio connections
-    // This requires rmcp crate to expose the underlying child process
+    // rmcp 1.x does not expose the child process after `serve()` completes the handshake,
+    // so the PID is unavailable. `is_process_alive()` falls back to `is_closed()` when
+    // `pid` is None, which is sufficient for health-check purposes.
     let pid = None;
 
     Ok(McpLiveConnection { 

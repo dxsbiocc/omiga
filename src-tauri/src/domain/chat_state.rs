@@ -3,12 +3,12 @@
 
 use crate::domain::session::{AgentTask, Session, TodoItem};
 use crate::domain::tools::ToolSchema;
-use crate::domain::mcp_connection_manager::GlobalMcpManager;
+use crate::domain::mcp::connection_manager::GlobalMcpManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, oneshot};
 
 /// Cached permission deny entries for one project root.
 pub struct PermissionDenyCache {
@@ -28,6 +28,11 @@ pub struct McpToolCache {
 /// TTL for MCP tool schema cache. MCP server tool lists rarely change during a session.
 pub const MCP_TOOL_CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 
+/// Resolver for a blocked `ask_user_question` tool call (chat path only).
+pub struct AskUserWaiter {
+    pub tx: oneshot::Sender<Result<serde_json::Value, String>>,
+}
+
 /// Active chat state with optimized in-memory caching.
 /// Database remains the single source of truth for persistence.
 pub struct ChatState {
@@ -40,6 +45,8 @@ pub struct ChatState {
     /// Active conversation rounds for cancellation tracking
     pub active_rounds: Arc<Mutex<HashMap<String, RoundCancellationState>>>,
     pub pending_tools: Arc<Mutex<HashMap<String, PendingToolCall>>>,
+    /// Key: `session_id\\x1fmessage_id\\x1ftool_use_id` — blocked until user submits or cancels.
+    pub ask_user_waiters: Arc<Mutex<HashMap<String, AskUserWaiter>>>,
     /// MCP tool schema cache keyed by project root. Avoids re-spawning MCP server
     /// processes on every `send_message` call (primary cause of slow first response).
     pub mcp_tool_cache: Arc<Mutex<HashMap<PathBuf, McpToolCache>>>,
@@ -52,10 +59,6 @@ pub struct ChatState {
     /// - Config reload: new sessions pick up configuration changes
     /// - Health checking: stdio process liveness is monitored
     pub mcp_manager: Arc<GlobalMcpManager>,
-    /// Legacy connection pool (deprecated, will be removed after migration)
-    /// Kept for backwards compatibility during migration
-    #[deprecated(since = "0.x", note = "Use mcp_manager instead")]
-    pub _mcp_connections_legacy: Arc<Mutex<HashMap<String, ()>>>,
     /// Cached permission deny rules keyed by project root. Avoids re-reading 4 settings
     /// files synchronously on every `send_message` call.
     pub permission_deny_cache: Arc<Mutex<HashMap<PathBuf, PermissionDenyCache>>>,
@@ -101,9 +104,9 @@ impl Default for ChatState {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             active_rounds: Arc::new(Mutex::new(HashMap::new())),
             pending_tools: Arc::new(Mutex::new(HashMap::new())),
+            ask_user_waiters: Arc::new(Mutex::new(HashMap::new())),
             mcp_tool_cache: Arc::new(Mutex::new(HashMap::new())),
             mcp_manager: Arc::new(GlobalMcpManager::new()),
-            _mcp_connections_legacy: Arc::new(Mutex::new(HashMap::new())),
             permission_deny_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }

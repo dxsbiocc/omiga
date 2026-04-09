@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// 子任务
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SubTask {
     /// 子任务 ID
     pub id: String,
@@ -60,6 +61,7 @@ impl SubTask {
 
 /// 任务执行计划
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskPlan {
     /// 计划 ID
     pub plan_id: String,
@@ -110,6 +112,10 @@ impl TaskPlan {
             return self.execution_order.iter().map(|id| vec![id.clone()]).collect();
         }
 
+        // Build lookup map once to avoid O(n²) linear scans inside the while loop.
+        let task_map: std::collections::HashMap<&str, &SubTask> =
+            self.subtasks.iter().map(|t| (t.id.as_str(), t)).collect();
+
         let mut groups: Vec<Vec<String>> = Vec::new();
         let mut completed: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut remaining: Vec<String> = self.execution_order.clone();
@@ -119,10 +125,9 @@ impl TaskPlan {
             let mut still_remaining: Vec<String> = Vec::new();
 
             for task_id in remaining {
-                if let Some(task) = self.subtasks.iter().find(|t| t.id == task_id) {
+                if let Some(task) = task_map.get(task_id.as_str()) {
                     // 检查依赖是否都已满足
                     let deps_satisfied = task.dependencies.iter().all(|dep| completed.contains(dep));
-                    
                     if deps_satisfied {
                         current_group.push(task_id);
                     } else {
@@ -149,17 +154,21 @@ impl TaskPlan {
 
     /// 估算总执行时间
     pub fn estimate_total_duration(&self) -> u64 {
-        let groups = self.get_parallel_groups();
-        groups.iter().map(|group| {
+        let task_map: std::collections::HashMap<&str, &SubTask> =
+            self.subtasks.iter().map(|t| (t.id.as_str(), t)).collect();
+        self.get_parallel_groups().iter().map(|group| {
             group.iter().map(|id| {
-                self.subtasks.iter()
-                    .find(|t| &t.id == id)
-                    .map(|t| t.estimated_secs)
-                    .unwrap_or(60)
+                task_map.get(id.as_str()).map(|t| t.estimated_secs).unwrap_or(60)
             }).max().unwrap_or(60)
         }).sum()
     }
 }
+
+/// Minimum heuristic score required to decompose a task into subtasks.
+/// Score is accumulated from keyword matches (2–4 pts each), length bonuses,
+/// and content-generation detection (+3 pts), so a threshold of 5 requires
+/// roughly two distinct indicator matches.
+const DECOMPOSITION_SCORE_THRESHOLD: i32 = 5;
 
 /// 任务规划器
 pub struct TaskPlanner {
@@ -193,6 +202,20 @@ impl TaskPlanner {
             ("实现", 2),
             ("创建", 2),
             ("构建", 2),
+            // 内容生成任务指标
+            ("plan", 3),
+            ("itinerary", 4),
+            ("travel", 3),
+            ("guide", 3),
+            ("write", 3),
+            ("draft", 3),
+            ("设计", 3),
+            ("计划", 3),
+            ("旅行", 4),
+            ("行程", 3),
+            ("编写", 3),
+            ("起草", 3),
+            ("攻略", 4),
         ];
 
         let mut score = 0;
@@ -211,8 +234,30 @@ impl TaskPlanner {
         if request.len() > 500 {
             score += 3;
         }
+        
+        // 内容生成类任务的特殊检测
+        if self.is_content_generation_task(&lower) {
+            score += 3;
+        }
 
-        score >= 5 // 阈值
+        score >= DECOMPOSITION_SCORE_THRESHOLD
+    }
+
+    /// 判断是否为内容生成类任务
+    fn is_content_generation_task(&self, text: &str) -> bool {
+        let travel_keywords = ["travel", "itinerary", "trip", "vacation", "tour", "visit",
+            "旅行", "旅游", "行程", "度假", "游玩", "攻略"];
+        let doc_keywords = ["write", "draft", "create", "generate", "compose",
+            "写", "编写", "撰写", "起草", "创作"];
+        let plan_keywords = ["plan", "schedule", "arrange", "design",
+            "计划", "规划", "安排", "设计"];
+        
+        let has_travel = travel_keywords.iter().any(|k| text.contains(k));
+        let has_doc = doc_keywords.iter().any(|k| text.contains(k));
+        let has_plan = plan_keywords.iter().any(|k| text.contains(k));
+        
+        // 如果同时包含计划和旅行相关词汇，或者是明确的文档编写任务
+        (has_plan && has_travel) || (has_doc && has_plan)
     }
 
     /// 分解任务
@@ -221,8 +266,10 @@ impl TaskPlanner {
         plan.allow_parallel = request.allow_parallel;
         plan.global_context = format!("Project root: {}", request.project_root);
 
-        // 基于规则的任务分解
-        let subtasks = self.rule_based_decomposition(&request.user_request);
+        // 基于规则的任务分解（预计算 is_content_generation 避免重复调用）
+        let lower = request.user_request.to_lowercase();
+        let is_content = self.is_content_generation_task(&lower);
+        let subtasks = self.rule_based_decomposition_inner(&request.user_request, is_content);
         
         // 为每个子任务选择 Agent
         for subtask in subtasks {
@@ -244,8 +291,8 @@ impl TaskPlanner {
         Ok(plan)
     }
 
-    /// 基于规则的分解
-    fn rule_based_decomposition(&self, request: &str) -> Vec<SubTask> {
+    /// 基于规则的分解（接受预计算的 is_content 标志避免重复 is_content_generation_task 调用）
+    fn rule_based_decomposition_inner(&self, request: &str, is_content: bool) -> Vec<SubTask> {
         let mut subtasks = Vec::new();
         let lower = request.to_lowercase();
 
@@ -338,6 +385,38 @@ impl TaskPlanner {
                 SubTask::new("verify", "Verify the refactoring is correct")
                     .with_agent("verification")
                     .with_dependencies(vec!["refactor".to_string()])
+            );
+        }
+        // 模式 5: 内容生成类任务（旅行计划、文档编写等）
+        else if is_content {
+            // 收集需求
+            subtasks.push(
+                SubTask::new("gather-requirements", "收集需求并确定关键要素")
+                    .with_agent("Plan")
+                    .with_context("明确用户的核心需求、约束条件和期望输出格式")
+                    .critical()
+            );
+            // 研究和信息收集
+            subtasks.push(
+                SubTask::new("research", "研究和收集必要信息")
+                    .with_agent("Explore")
+                    .with_dependencies(vec!["gather-requirements".to_string()])
+                    .with_context("搜索相关信息、数据、案例，为内容生成做准备")
+            );
+            // 生成主要内容
+            subtasks.push(
+                SubTask::new("generate-content", "生成完整详细的主要内容")
+                    .with_agent("general-purpose")
+                    .with_dependencies(vec!["research".to_string()])
+                    .with_context("生成完整、详细、有实用价值的内容，不要只是概述。必须包含具体的细节、数据、建议")
+                    .critical()
+            );
+            // 验证和完善
+            subtasks.push(
+                SubTask::new("verify-complete", "验证内容完整性并补充细节")
+                    .with_agent("verification")
+                    .with_dependencies(vec!["generate-content".to_string()])
+                    .with_context("检查内容是否完整、实用，补充缺失的细节和具体信息")
             );
         }
 

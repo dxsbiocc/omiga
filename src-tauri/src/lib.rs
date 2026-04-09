@@ -80,6 +80,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::chat::send_message,
+            commands::chat::list_available_agents,
+            commands::chat::list_session_background_tasks,
+            commands::chat::load_background_agent_transcript,
+            commands::chat::cancel_background_agent_task,
+            commands::chat::submit_ask_user_answer,
             commands::chat::cancel_stream,
             commands::chat::cancel_session_rounds,
             commands::chat::set_api_key,
@@ -94,6 +99,7 @@ pub fn run() {
             commands::chat::save_provider_config,
             commands::chat::delete_provider_config,
             commands::chat::quick_switch_provider,
+            commands::chat::run_agent_schedule,
             commands::permissions::get_omiga_permission_denies,
             commands::permissions::save_omiga_permission_denies,
             app_state::get_app_state_snapshot,
@@ -112,6 +118,7 @@ pub fn run() {
             commands::session::get_setting,
             commands::session::set_setting,
             commands::fs::read_file,
+            commands::fs::read_file_bytes_fast,
             commands::fs::write_file,
             commands::fs::read_image_base64,
             commands::fs::list_directory,

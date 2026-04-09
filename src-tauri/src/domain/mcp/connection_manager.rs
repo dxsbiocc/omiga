@@ -6,8 +6,8 @@
 //! 3. Cleans up idle connections to free resources
 //! 4. Handles configuration hot-reloading
 
-use crate::domain::mcp_client::{McpConnectionType, McpLiveConnection, connect_mcp_server};
-use crate::domain::mcp_config::merged_mcp_servers;
+use crate::domain::mcp::client::{McpConnectionType, McpLiveConnection, connect_mcp_server};
+use crate::domain::mcp::config::merged_mcp_servers;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

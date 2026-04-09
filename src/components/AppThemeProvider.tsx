@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import CssBaseline from "@mui/material/CssBaseline";
 import GlobalStyles from "@mui/material/GlobalStyles";
-import { ThemeProvider, createTheme } from "@mui/material/styles";
+import { ThemeProvider, createTheme, alpha } from "@mui/material/styles";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getTheme } from "../theme";
 import {
@@ -74,26 +74,33 @@ export function AppThemeProvider({ children }: { children: ReactNode }) {
       */}
       <CssBaseline />
       <GlobalStyles
-        styles={(theme) => ({
-          html: {
-            minHeight: "100%",
-            background: accentShellGradient,
-            backgroundAttachment: "fixed",
-            backgroundColor: theme.palette.background.default,
-          },
-          body: {
-            minHeight: "100%",
-            background: accentShellGradient,
-            backgroundAttachment: "fixed",
-            backgroundColor: theme.palette.background.default,
-          },
-          "#root": {
-            minHeight: "100%",
-            background: accentShellGradient,
-            backgroundAttachment: "fixed",
-            backgroundColor: theme.palette.background.default,
-          },
-        })}
+        styles={(theme) => {
+          const isDark = theme.palette.mode === "dark";
+          /** Frosted veil over the accent gradient (html); body stays transparent so blur samples the gradient */
+          const frostedVeil = alpha(
+            isDark ? theme.palette.common.black : theme.palette.common.white,
+            isDark ? 0.2 : 0.32,
+          );
+          return {
+            html: {
+              minHeight: "100%",
+              background: accentShellGradient,
+              backgroundAttachment: "fixed",
+              backgroundColor: theme.palette.background.default,
+            },
+            body: {
+              minHeight: "100%",
+              background: "none",
+              backgroundColor: "transparent",
+            },
+            "#root": {
+              minHeight: "100%",
+              background: frostedVeil,
+              backdropFilter: "blur(22px) saturate(165%)",
+              WebkitBackdropFilter: "blur(22px) saturate(165%)",
+            },
+          };
+        }}
       />
       {children}
     </ThemeProvider>

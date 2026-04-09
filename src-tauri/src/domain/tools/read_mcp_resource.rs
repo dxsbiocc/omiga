@@ -7,10 +7,9 @@
 use super::{ToolContext, ToolError, ToolSchema};
 use crate::constants::tool_limits::DEFAULT_MAX_RESULT_SIZE_CHARS;
 use crate::domain::integrations_config;
-use crate::domain::mcp_client::read_resource_for_server;
-use crate::domain::mcp_config::merged_mcp_servers;
-use crate::domain::mcp_discovery;
-use crate::domain::mcp_resource_output::read_resource_result_to_ts_json;
+use crate::domain::mcp::client::read_resource_for_server;
+use crate::domain::mcp::config::merged_mcp_servers;
+use crate::domain::mcp::resource_output::read_resource_result_to_ts_json;
 use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
 use async_trait::async_trait;
 use serde_json::json;
@@ -111,7 +110,7 @@ impl super::ToolImpl for ReadMcpResourceTool {
 
         let merged = merged_mcp_servers(&ctx.project_root);
         if !merged.contains_key(server) {
-            let hint = if mcp_discovery::collect_mcp_server_names(&ctx.project_root).is_empty() {
+            let hint = if crate::domain::mcp::discovery::collect_mcp_server_names(&ctx.project_root).is_empty() {
                 "No MCP servers listed in Omiga MCP config (~/.omiga/mcp.json or project .omiga/mcp.json).".to_string()
             } else {
                 let mut names: Vec<String> = merged.keys().cloned().collect();

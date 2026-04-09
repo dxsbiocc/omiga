@@ -6,6 +6,40 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Serialize;
 use std::path::PathBuf;
 
+/// Read file as raw bytes - fastest way to get content for Monaco
+#[tauri::command]
+pub async fn read_file_bytes_fast(path: String) -> CommandResult<Vec<u8>> {
+    let path_buf = PathBuf::from(&path);
+    let canonical = path_buf.canonicalize().map_err(|e| {
+        AppError::Fs(FsError::IoError {
+            message: format!("{}: {}", path, e),
+        })
+    })?;
+
+    if !canonical.is_file() {
+        return Err(AppError::Fs(FsError::InvalidPath { path: path.clone() }));
+    }
+
+    let meta = tokio::fs::metadata(&canonical)
+        .await
+        .map_err(|e: std::io::Error| AppError::Fs(FsError::from(e)))?;
+
+    const MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MB limit
+    if meta.len() > MAX_BYTES {
+        return Err(AppError::Fs(FsError::FileTooLarge {
+            path: path.clone(),
+            size: meta.len(),
+            max: MAX_BYTES,
+        }));
+    }
+
+    let bytes = tokio::fs::read(&canonical)
+        .await
+        .map_err(|e| AppError::Fs(FsError::from(e)))?;
+    
+    Ok(bytes)
+}
+
 /// Read a file with optional line-based pagination (`offset` / `limit` lines).
 #[tauri::command]
 pub async fn read_file(

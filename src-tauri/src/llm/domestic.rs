@@ -435,83 +435,91 @@ impl XunfeiClient {
     pub fn new(config: LlmConfig) -> Self {
         Self { config }
     }
-
-    /// Generate authorization URL for WebSocket
-    fn generate_ws_url(&self) -> Result<String, ApiError> {
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        
-        let api_key = &self.config.api_key;
-        let secret_key = self
-            .config
-            .secret_key
-            .as_ref()
-            .ok_or_else(|| ApiError::Config {
-                message: "Xunfei requires secret_key".to_string(),
-            })?;
-        let _app_id = self
-            .config
-            .app_id
-            .as_ref()
-            .ok_or_else(|| ApiError::Config {
-                message: "Xunfei requires app_id".to_string(),
-            })?;
-
-        let host = "spark-api.xf-yun.com";
-        let path = "/v3.5/chat";
-        let date = chrono::Utc::now().to_rfc2822();
-
-        let signature_origin = format!("host: {}\ndate: {}\nGET {} HTTP/1.1", host, date, path);
-
-        type HmacSha256 = Hmac<Sha256>;
-        let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())
-            .map_err(|e| ApiError::Config { message: e.to_string() })?;
-        mac.update(signature_origin.as_bytes());
-        let signature = STANDARD.encode(mac.finalize().into_bytes());
-
-        let authorization_origin = format!("api_key=\"{}\", algorithm=\"hmac-sha256\", headers=\"host date\", signature=\"{}\"", api_key, signature);
-        let authorization = STANDARD.encode(authorization_origin.as_bytes());
-
-        let url = format!(
-            "wss://{}{}?authorization={}&date={}&host={}",
-            host, path, authorization, date, host
-        );
-
-        Ok(url)
-    }
 }
 
 #[async_trait]
 impl LlmClient for XunfeiClient {
+    /// 使用讯飞星火新版 HTTP API（OpenAI 兼容）。
+    ///
+    /// 鉴权规则：
+    /// - 若配置了 `secret_key`，则 Bearer token 为 `{api_key}:{secret_key}`（旧控制台凭据）
+    /// - 否则直接使用 `api_key` 作为 APIPassword（新控制台，推荐）
+    ///
+    /// 接口地址：<https://spark-api-open.xf-yun.com/v1/chat/completions>
     async fn send_message_streaming(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolSchema>,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolSchema>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError> {
-        // Xunfei uses WebSocket - for now return a simple message
-        // Full WebSocket implementation would require additional dependencies
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<LlmStreamChunk, ApiError>>(10);
-        
-        let app_id = self.config.app_id.clone().unwrap_or_default();
-        
-        tokio::spawn(async move {
-            let _ = tx.send(Ok(LlmStreamChunk::Text(
-                format!("[Xunfei Spark WebSocket not yet fully implemented. App ID: {}]", app_id)
-            ))).await;
-            let _ = tx.send(Ok(LlmStreamChunk::Stop { stop_reason: None })).await;
-        });
+        let bearer = match &self.config.secret_key {
+            Some(sk) if !sk.is_empty() => format!("{}:{}", self.config.api_key, sk),
+            _ => self.config.api_key.clone(),
+        };
 
-        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-        Ok(Box::pin(stream))
+        let mut cfg = self.config.clone();
+        cfg.api_key = bearer;
+        if cfg.base_url.is_none() {
+            cfg.base_url =
+                Some("https://spark-api-open.xf-yun.com/v1/chat/completions".to_string());
+        }
+
+        let client = super::openai::OpenAiCompatibleClient::new(cfg);
+        client.send_message_streaming(messages, tools).await
     }
 
     async fn health_check(&self) -> Result<bool, ApiError> {
-        // Check if we can generate auth URL
-        match self.generate_ws_url() {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false),
+        // 优先验证鉴权参数是否完整
+        if self.config.api_key.is_empty() {
+            return Ok(false);
         }
+        Ok(true)
+    }
+
+    fn config(&self) -> &LlmConfig {
+        &self.config
+    }
+}
+
+// ============================================================================
+// Google Gemini
+// ============================================================================
+
+/// Google Gemini 客户端。
+///
+/// 使用 Google 提供的 OpenAI 兼容端点：
+/// `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`
+///
+/// 鉴权：`Authorization: Bearer {GEMINI_API_KEY}`
+pub struct GoogleClient {
+    inner: super::openai::OpenAiCompatibleClient,
+    config: LlmConfig,
+}
+
+impl GoogleClient {
+    pub fn new(mut config: LlmConfig) -> Self {
+        if config.base_url.is_none() {
+            config.base_url = Some(
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+                    .to_string(),
+            );
+        }
+        let inner = super::openai::OpenAiCompatibleClient::new(config.clone());
+        Self { inner, config }
+    }
+}
+
+#[async_trait]
+impl LlmClient for GoogleClient {
+    async fn send_message_streaming(
+        &self,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolSchema>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError> {
+        self.inner.send_message_streaming(messages, tools).await
+    }
+
+    async fn health_check(&self) -> Result<bool, ApiError> {
+        self.inner.health_check().await
     }
 
     fn config(&self) -> &LlmConfig {

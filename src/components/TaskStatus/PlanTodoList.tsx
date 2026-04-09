@@ -10,6 +10,7 @@ import {
   CheckBoxOutlineBlank,
   ErrorOutline,
   RadioButtonUnchecked,
+  CheckCircle,
 } from "@mui/icons-material";
 import { alpha } from "@mui/material/styles";
 
@@ -21,16 +22,21 @@ export interface PlanTodoItem {
 
 interface PlanTodoListProps {
   items: PlanTodoItem[];
+  compact?: boolean;
 }
 
 /**
- * Plan 模式：仅展示待办标题与状态，无展开/折叠、无长文本。
+ * Plan 模式：待办列表组件
+ * - completed: 带删除线的完成项
+ * - running: 高亮当前执行项
+ * - pending: 待办项
+ * - error: 错误项
  */
-export function PlanTodoList({ items }: PlanTodoListProps) {
+export function PlanTodoList({ items, compact = false }: PlanTodoListProps) {
   if (items.length === 0) {
     return (
       <Typography variant="body2" color="text.secondary" sx={{ fontSize: 12, py: 0.5 }}>
-        暂无计划项。发送消息后，模型可通过待办工具更新清单。
+        暂无计划项
       </Typography>
     );
   }
@@ -41,29 +47,52 @@ export function PlanTodoList({ items }: PlanTodoListProps) {
         const isDone = item.status === "completed";
         const isRun = item.status === "running";
         const isErr = item.status === "error";
+        
         return (
           <ListItem
             key={item.id}
             sx={{
               alignItems: "flex-start",
-              py: 0.75,
-              px: 0.5,
+              py: compact ? 0.5 : 0.75,
+              px: compact ? 0 : 0.5,
               borderRadius: 1,
               bgcolor: isRun ? alpha("#6366f1", 0.06) : "transparent",
+              opacity: isDone ? 0.7 : 1,
             }}
           >
-            <ListItemIcon sx={{ minWidth: 32, mt: 0.15 }}>
+            <ListItemIcon sx={{ minWidth: compact ? 24 : 28, mt: compact ? 0.1 : 0.15 }}>
               {isDone ? (
-                <CheckBox sx={{ fontSize: 20, color: "success.main" }} />
+                <CheckCircle 
+                  sx={{ 
+                    fontSize: compact ? 16 : 18, 
+                    color: "success.main",
+                  }} 
+                />
               ) : isErr ? (
-                <ErrorOutline sx={{ fontSize: 20, color: "error.main" }} />
+                <ErrorOutline 
+                  sx={{ 
+                    fontSize: compact ? 16 : 18, 
+                    color: "error.main" 
+                  }} 
+                />
               ) : isRun ? (
                 <CheckBoxOutlineBlank
-                  sx={{ fontSize: 20, color: "primary.main" }}
+                  sx={{ 
+                    fontSize: compact ? 16 : 18, 
+                    color: "primary.main",
+                    animation: "pulse 2s ease-in-out infinite",
+                    "@keyframes pulse": {
+                      "0%, 100%": { opacity: 1 },
+                      "50%": { opacity: 0.6 },
+                    },
+                  }}
                 />
               ) : (
                 <RadioButtonUnchecked
-                  sx={{ fontSize: 20, color: alpha("#000", 0.25) }}
+                  sx={{ 
+                    fontSize: compact ? 16 : 18, 
+                    color: alpha("#000", 0.2) 
+                  }}
                 />
               )}
             </ListItemIcon>
@@ -72,10 +101,14 @@ export function PlanTodoList({ items }: PlanTodoListProps) {
                 <Typography
                   variant="body2"
                   sx={{
-                    fontSize: 12.5,
+                    fontSize: compact ? 11 : 12,
                     lineHeight: 1.4,
-                    fontWeight: isRun ? 600 : 400,
-                    color: isDone ? "text.secondary" : "text.primary",
+                    fontWeight: isRun ? 600 : isDone ? 400 : 500,
+                    color: isErr 
+                      ? "error.main" 
+                      : isDone 
+                        ? "text.disabled" 
+                        : "text.primary",
                     textDecoration: isDone ? "line-through" : "none",
                   }}
                 >
@@ -87,5 +120,45 @@ export function PlanTodoList({ items }: PlanTodoListProps) {
         );
       })}
     </List>
+  );
+}
+
+/** 简洁版待办列表 - 仅显示已完成项目 */
+export function CompletedTodoList({ items }: { items: PlanTodoItem[] }) {
+  const completed = items.filter(i => i.status === "completed");
+  
+  if (completed.length === 0) return null;
+  
+  return (
+    <PlanTodoList items={completed} compact />
+  );
+}
+
+/** 分组待办列表 - 按状态分组显示 */
+interface GroupedTodoListProps {
+  items: PlanTodoItem[];
+}
+
+export function GroupedTodoList({ items }: GroupedTodoListProps) {
+  const running = items.filter(i => i.status === "running");
+  const pending = items.filter(i => i.status === "pending");
+  const completed = items.filter(i => i.status === "completed");
+  const error = items.filter(i => i.status === "error");
+
+  return (
+    <>
+      {running.length > 0 && (
+        <PlanTodoList items={running} />
+      )}
+      {pending.length > 0 && (
+        <PlanTodoList items={pending} />
+      )}
+      {completed.length > 0 && (
+        <PlanTodoList items={completed} compact />
+      )}
+      {error.length > 0 && (
+        <PlanTodoList items={error} />
+      )}
+    </>
   );
 }

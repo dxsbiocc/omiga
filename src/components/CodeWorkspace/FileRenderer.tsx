@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { CsvViewer } from "./CsvViewer";
 import { CodeViewer, extToLanguage } from "./CodeViewer";
 import { ImageViewer } from "./ImageViewer";
@@ -29,24 +30,44 @@ interface FileRendererProps {
 }
 
 export function FileRenderer({ fileName, filePath, content, onChange }: FileRendererProps) {
-  const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
+  const ext = useMemo(() => fileName.split(".").pop()?.toLowerCase() ?? "", [fileName]);
+  
+  // Determine viewer type - stable across renders
+  const viewerType = useMemo(() => {
+    if (IMAGE_EXTS.has(ext)) return "image";
+    if (ext === "pdf") return "pdf";
+    if (ext === "csv" || ext === "tsv") return "csv";
+    if (ext === "ipynb") return "ipynb";
+    return "code";
+  }, [ext]);
 
-  if (IMAGE_EXTS.has(ext)) {
-    return <ImageViewer filePath={filePath} />;
+  // Memoize language to prevent unnecessary re-renders
+  const language = useMemo(() => 
+    CODE_EXTS.has(ext) ? extToLanguage(ext) : "plaintext", 
+    [ext]
+  );
+
+  // For empty filePath (file closed), just show empty code viewer
+  // This keeps the Monaco instance alive for fast file switching
+  if (!filePath) {
+    return <CodeViewer content="" language="plaintext" onChange={onChange} />;
   }
 
-  if (ext === "pdf") {
-    return <PdfViewer filePath={filePath} />;
+  // Use key based on filePath to ensure clean state when switching files
+  // but keep editor instance alive for code files
+  switch (viewerType) {
+    case "image":
+      return <ImageViewer key={filePath} filePath={filePath} />;
+    case "pdf":
+      return <PdfViewer key={filePath} filePath={filePath} />;
+    case "csv":
+      return <CsvViewer key={filePath} content={content} onChange={onChange} />;
+    case "ipynb":
+      return <IpynbViewer key={filePath} filePath={filePath} content={content} onChange={onChange} />;
+    case "code":
+    default:
+      // Don't use filePath as key for code viewer to keep editor instance alive
+      // The CodeViewer uses theme as key to prevent re-mount on dark/light toggle
+      return <CodeViewer content={content} language={language} onChange={onChange} />;
   }
-
-  if (ext === "csv" || ext === "tsv") {
-    return <CsvViewer content={content} onChange={onChange} />;
-  }
-
-  if (ext === "ipynb") {
-    return <IpynbViewer filePath={filePath} content={content} onChange={onChange} />;
-  }
-
-  const language = CODE_EXTS.has(ext) ? extToLanguage(ext) : "plaintext";
-  return <CodeViewer content={content} language={language} onChange={onChange} />;
 }

@@ -93,10 +93,30 @@ export function isUnsetWorkspacePath(projectPath: string | undefined): boolean {
 
 export type RoundStatus = "running" | "partial" | "cancelled" | "completed";
 
+export interface SchedulerPlan {
+  planId: string;
+  subtasks: Array<{
+    id: string;
+    description: string;
+    agentType: string;
+    dependencies: string[];
+    critical: boolean;
+    estimatedSecs: number;
+  }>;
+  selectedAgents: string[];
+  estimatedDurationSecs: number;
+}
+
 export interface Message {
   id: string;
   role: "user" | "assistant" | "tool";
   content: string;
+  /** Composer 选择的 Agent（非 general-purpose）；用于聊天气泡展示，重载会话时若后端未存则可能缺失 */
+  composerAgentType?: string;
+  /** @ 选择的相对路径，仅本地会话快照 */
+  composerAttachedPaths?: string[];
+  /** 调度系统生成的任务执行计划 */
+  schedulerPlan?: SchedulerPlan;
   /** Full tool_calls from DB on assistant rows — used to rebuild trace when tool rows are missing or unnamed */
   toolCallsList?: Array<{ id: string; name: string; arguments: string }>;
   /** Assistant thinking merged into the ReAct fold (optional round-trip for local snapshot) */
@@ -178,12 +198,16 @@ interface SendMessageRequest {
   project_path?: string;
   session_name?: string;
   use_tools: boolean;
+  /** `leader` (default) | `bg:<task_id>` to queue follow-up for a background Agent task */
+  inputTarget?: string;
 }
 
 interface MessageResponse {
   message_id: string;
   session_id: string;
   round_id: string;
+  /** Present when `inputTarget` routed away from the main session */
+  input_kind?: string;
 }
 
 interface SessionState {
@@ -530,10 +554,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       request,
     });
 
-    // Track the new round
-    const { activeRounds } = get();
-    activeRounds.set(response.round_id, "running");
-    set({ activeRounds });
+    // Main-session rounds only (not queued follow-ups to background agents)
+    if (response.input_kind !== "background_followup_queued") {
+      const { activeRounds } = get();
+      activeRounds.set(response.round_id, "running");
+      set({ activeRounds });
+    }
 
     return response;
   },

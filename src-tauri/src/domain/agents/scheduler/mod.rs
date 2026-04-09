@@ -80,7 +80,8 @@ impl SchedulingRequest {
 /// 调度结果
 #[derive(Debug, Clone, Serialize)]
 pub struct SchedulingResult {
-    /// 执行计划
+    /// 执行计划（扁平化序列化）
+    #[serde(flatten)]
     pub plan: TaskPlan,
     /// 选中的 Agent 列表
     pub selected_agents: Vec<String>,
@@ -97,7 +98,6 @@ pub struct AgentScheduler {
     selector: AgentSelector,
     planner: TaskPlanner,
     orchestrator: AgentOrchestrator,
-    strategy: StrategyConfig,
 }
 
 impl AgentScheduler {
@@ -106,21 +106,11 @@ impl AgentScheduler {
             selector: AgentSelector::new(),
             planner: TaskPlanner::new(),
             orchestrator: AgentOrchestrator::new(),
-            strategy: StrategyConfig::default(),
         }
     }
 
     /// 执行完整调度流程
     pub async fn schedule(&self, request: SchedulingRequest) -> Result<SchedulingResult, String> {
-        // 使用配置的策略（如果请求是 Auto）
-        let _effective_strategy = if request.strategy == SchedulingStrategy::Auto {
-            self.strategy.default_strategy
-        } else {
-            request.strategy
-        };
-        
-        // 注意：_effective_strategy 可用于后续策略特定的逻辑
-
         // 1. 分析请求，确定是否需要分解
         let needs_decomposition = request.auto_decompose 
             && self.planner.should_decompose(&request.user_request);
@@ -171,7 +161,7 @@ impl AgentScheduler {
         }
     }
 
-    /// 执行任务计划
+    /// 执行任务计划（mock 模式，向后兼容）
     pub async fn execute_plan(
         &self,
         plan: &TaskPlan,
@@ -179,6 +169,24 @@ impl AgentScheduler {
         app: &tauri::AppHandle,
     ) -> Result<OrchestrationResult, String> {
         self.orchestrator.execute(plan, request, app).await
+    }
+
+    /// 执行任务计划（真实 Agent 模式）
+    ///
+    /// 与 `execute_plan` 不同，此方法通过 `spawn_background_agent` 真正驱动 LLM 子 Agent。
+    /// `runtime` 由调用方（`chat.rs` 的 `send_message` 流程）提供；`session_id` 用于
+    /// 工具结果目录和后台任务归属。
+    pub(crate) async fn execute_plan_with_runtime(
+        &self,
+        plan: &TaskPlan,
+        request: &SchedulingRequest,
+        app: &tauri::AppHandle,
+        runtime: &crate::commands::chat::AgentLlmRuntime,
+        session_id: &str,
+    ) -> Result<OrchestrationResult, String> {
+        self.orchestrator
+            .execute_with_runtime(plan, request, app, runtime, session_id)
+            .await
     }
 
     fn estimate_duration(&self, plan: &TaskPlan, agents: &[String]) -> u64 {

@@ -6,7 +6,8 @@
 //! - Settings/preferences
 //! - Session-scoped tool state (`todo_write`, V2 tasks)
 
-use crate::domain::session::{AgentTask, TodoItem};
+use crate::domain::agents::background::{BackgroundAgentStatus, BackgroundAgentTask};
+use crate::domain::session::{AgentTask, Message, TodoItem};
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 use std::path::Path;
 
@@ -212,7 +213,120 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    // Background Agent tasks (Rust authority + survive restart; memory cache in BackgroundAgentManager)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS background_agent_tasks (
+            task_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            agent_type TEXT NOT NULL,
+            description TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            completed_at INTEGER,
+            result_summary TEXT,
+            error_message TEXT,
+            output_path TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_background_agent_tasks_session
+        ON background_agent_tasks(session_id)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Sidechain transcript for background Agent tasks (teammate view; not main session messages)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS background_agent_messages (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (task_id) REFERENCES background_agent_tasks(task_id) ON DELETE CASCADE,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_background_agent_messages_task_seq
+        ON background_agent_messages(task_id, seq)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
+}
+
+fn background_agent_status_db(s: &BackgroundAgentStatus) -> &'static str {
+    match s {
+        BackgroundAgentStatus::Pending => "pending",
+        BackgroundAgentStatus::Running => "running",
+        BackgroundAgentStatus::Completed => "completed",
+        BackgroundAgentStatus::Failed => "failed",
+        BackgroundAgentStatus::Cancelled => "cancelled",
+    }
+}
+
+fn background_agent_status_from_db(s: &str) -> BackgroundAgentStatus {
+    match s {
+        "running" => BackgroundAgentStatus::Running,
+        "completed" => BackgroundAgentStatus::Completed,
+        "failed" => BackgroundAgentStatus::Failed,
+        "cancelled" => BackgroundAgentStatus::Cancelled,
+        _ => BackgroundAgentStatus::Pending,
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct BackgroundAgentTaskRow {
+    task_id: String,
+    session_id: String,
+    message_id: String,
+    agent_type: String,
+    description: String,
+    status: String,
+    created_at: i64,
+    started_at: Option<i64>,
+    completed_at: Option<i64>,
+    result_summary: Option<String>,
+    error_message: Option<String>,
+    output_path: Option<String>,
+}
+
+fn row_to_background_task(row: BackgroundAgentTaskRow) -> BackgroundAgentTask {
+    BackgroundAgentTask {
+        task_id: row.task_id,
+        agent_type: row.agent_type,
+        description: row.description,
+        status: background_agent_status_from_db(&row.status),
+        created_at: row.created_at as u64,
+        started_at: row.started_at.map(|u| u as u64),
+        completed_at: row.completed_at.map(|u| u as u64),
+        result_summary: row.result_summary,
+        error_message: row.error_message,
+        output_path: row.output_path,
+        session_id: row.session_id,
+        message_id: row.message_id,
+    }
 }
 
 /// Session repository
@@ -613,6 +727,163 @@ impl SessionRepository {
         let todos: Vec<TodoItem> = serde_json::from_str(&todos_s).unwrap_or_default();
         let tasks: Vec<AgentTask> = serde_json::from_str(&tasks_s).unwrap_or_default();
         Ok((todos, tasks))
+    }
+
+    /// Upsert one background agent task row (authoritative store; memory cache may overlay).
+    pub async fn upsert_background_agent_task(
+        &self,
+        task: &BackgroundAgentTask,
+    ) -> Result<(), sqlx::Error> {
+        let status = background_agent_status_db(&task.status);
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            r#"
+            INSERT INTO background_agent_tasks (
+                task_id, session_id, message_id, agent_type, description, status,
+                created_at, started_at, completed_at, result_summary, error_message, output_path, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                message_id = excluded.message_id,
+                agent_type = excluded.agent_type,
+                description = excluded.description,
+                status = excluded.status,
+                started_at = excluded.started_at,
+                completed_at = excluded.completed_at,
+                result_summary = excluded.result_summary,
+                error_message = excluded.error_message,
+                output_path = excluded.output_path,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&task.task_id)
+        .bind(&task.session_id)
+        .bind(&task.message_id)
+        .bind(&task.agent_type)
+        .bind(&task.description)
+        .bind(status)
+        .bind(task.created_at as i64)
+        .bind(task.started_at.map(|u| u as i64))
+        .bind(task.completed_at.map(|u| u as i64))
+        .bind(task.result_summary.as_deref())
+        .bind(task.error_message.as_deref())
+        .bind(task.output_path.as_deref())
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// List background agent tasks for a session (newest first by `created_at`).
+    pub async fn list_background_agent_tasks_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<BackgroundAgentTask>, sqlx::Error> {
+        let rows = sqlx::query_as::<_, BackgroundAgentTaskRow>(
+            r#"
+            SELECT task_id, session_id, message_id, agent_type, description, status,
+                   created_at, started_at, completed_at, result_summary, error_message, output_path
+            FROM background_agent_tasks
+            WHERE session_id = ?
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(row_to_background_task).collect())
+    }
+
+    /// Single background agent task by id (for cancel / reconcile after restart).
+    pub async fn get_background_agent_task_by_id(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<BackgroundAgentTask>, sqlx::Error> {
+        let row = sqlx::query_as::<_, BackgroundAgentTaskRow>(
+            r#"
+            SELECT task_id, session_id, message_id, agent_type, description, status,
+                   created_at, started_at, completed_at, result_summary, error_message, output_path
+            FROM background_agent_tasks
+            WHERE task_id = ?
+            "#,
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(row_to_background_task))
+    }
+
+    /// Append one message to a background task sidechain transcript (ordered by `seq`).
+    pub async fn append_background_agent_message(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        message: &Message,
+    ) -> Result<(), sqlx::Error> {
+        let payload_json =
+            serde_json::to_string(message).unwrap_or_else(|_| "{}".to_string());
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let mut tx = self.pool.begin().await?;
+        let max_seq: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), 0) FROM background_agent_messages WHERE task_id = ?",
+        )
+        .bind(task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let next_seq = max_seq + 1;
+
+        sqlx::query(
+            r#"
+            INSERT INTO background_agent_messages (id, task_id, session_id, seq, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&id)
+        .bind(task_id)
+        .bind(session_id)
+        .bind(next_seq)
+        .bind(&payload_json)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Load sidechain transcript for one background task (chronological).
+    pub async fn list_background_agent_messages_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<Message>, sqlx::Error> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT payload_json FROM background_agent_messages WHERE task_id = ? ORDER BY seq ASC",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for payload_json in rows {
+            match serde_json::from_str::<Message>(&payload_json) {
+                Ok(m) => out.push(m),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "omiga::persistence",
+                        "skip bad background_agent_messages row for {}: {}",
+                        task_id,
+                        e
+                    );
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Persist session tool state (best-effort JSON).

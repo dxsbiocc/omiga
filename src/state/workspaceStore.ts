@@ -51,6 +51,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   saveError: null,
 
   openFile: async (path: string) => {
+    const { filePath, savedContent } = get();
+    
+    // If already open, just activate without reloading
+    if (filePath === path && savedContent !== "") {
+      return;
+    }
+    
     const name = path.split(/[/\\]/).pop() ?? path;
     const ext = (name.split(".").pop() ?? "").toLowerCase();
 
@@ -75,23 +82,46 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       error: null,
       filePath: path,
       fileName: name,
+      savedContent: "",
+      content: "",
+      totalLines: 0,
       isDirty: false,
       saveError: null,
     });
+    
     try {
-      const res = await invoke<FileReadResponse>("read_file", {
+      // Use chunked reading for faster initial display of large files
+      // First chunk: read first 500 lines to display quickly
+      const firstChunk = await invoke<FileReadResponse>("read_file", {
         path,
-        offset: null,
-        limit: null,
+        offset: 0,
+        limit: 500,
       });
+      
+      // Show first chunk immediately
       set({
-        savedContent: res.content,
-        content: res.content,
-        totalLines: res.total_lines,
+        savedContent: firstChunk.content,
+        content: firstChunk.content,
+        totalLines: firstChunk.total_lines,
         isLoading: false,
         error: null,
         isDirty: false,
       });
+      
+      // If there's more content, load the rest in background
+      if (firstChunk.has_more) {
+        const remaining = await invoke<FileReadResponse>("read_file", {
+          path,
+          offset: 500,
+          limit: 10000, // Large enough to get rest
+        });
+        const fullContent = firstChunk.content + "\n" + remaining.content;
+        set({
+          savedContent: fullContent,
+          content: fullContent,
+          totalLines: remaining.total_lines,
+        });
+      }
     } catch (e) {
       set({
         error: String(e),

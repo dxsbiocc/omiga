@@ -5,12 +5,12 @@
 //! managing session boundaries and stdio process lifecycle to avoid zombie processes.
 
 use crate::domain::integrations_config;
-use crate::domain::mcp_client::{
+use crate::domain::mcp::client::{
     call_tool_on_server, call_tool_via_peer, connect_mcp_server_legacy, McpLiveConnection,
 };
-use crate::domain::mcp_config::merged_mcp_servers;
-use crate::domain::mcp_names::{normalize_name_for_mcp, parse_mcp_tool_name};
-use crate::domain::mcp_connection_manager::GlobalMcpManager;
+use crate::domain::mcp::config::merged_mcp_servers;
+use crate::domain::mcp::names::{normalize_name_for_mcp, parse_mcp_tool_name};
+use crate::domain::mcp::connection_manager::GlobalMcpManager;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -231,7 +231,7 @@ async fn execute_one_shot(
     args_map: serde_json::Map<String, serde_json::Value>,
     timeout: Duration,
 ) -> Result<(String, bool), String> {
-    use crate::domain::mcp_client::list_tools_for_server;
+    use crate::domain::mcp::client::list_tools_for_server;
 
     let tools = list_tools_for_server(project_root, server_key, timeout).await?;
     let orig_name = tools

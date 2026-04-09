@@ -146,14 +146,93 @@ impl MemorySystem {
         stats
     }
 
-    /// Query both explicit and implicit memory
-    pub async fn query(&self, query: &str, _limit: usize) -> UnifiedQueryResult {
-        // TODO: Implement unified query that searches both types
+    /// Query both explicit and implicit memory.
+    ///
+    /// - **Explicit (Wiki)**：扫描 wiki 目录下所有 `.md` 文件，按关键词匹配返回标题 + 摘要。
+    /// - **Implicit (PageIndex)**：从磁盘加载 `tree.json`，用 `QueryEngine` 做 TF-IDF 检索。
+    pub async fn query(&self, query: &str, limit: usize) -> UnifiedQueryResult {
+        let limit = limit.max(1);
+        let mut explicit_results = Vec::new();
+        let mut implicit_results = Vec::new();
+
+        // ── Explicit: 搜索 wiki ────────────────────────────────────────────
+        let wiki_path = self.wiki_path();
+        if wiki_path.exists() {
+            if let Ok(mut entries) = fs::read_dir(&wiki_path).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let path = entry.path();
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    if ext != "md" {
+                        continue;
+                    }
+                    let Ok(content) = fs::read_to_string(&path).await else {
+                        continue;
+                    };
+                    if !content.to_lowercase().contains(&query.to_lowercase()) {
+                        continue;
+                    }
+
+                    // 提取标题（第一个 # 行 或文件名）
+                    let title = content
+                        .lines()
+                        .find(|l| l.starts_with("# "))
+                        .map(|l| l.trim_start_matches('#').trim().to_string())
+                        .unwrap_or_else(|| {
+                            path.file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("Untitled")
+                                .to_string()
+                        });
+
+                    let excerpt = extract_excerpt(&content, query, 300);
+                    explicit_results.push(ExplicitResult {
+                        title,
+                        path: path.to_string_lossy().to_string(),
+                        excerpt,
+                    });
+
+                    if explicit_results.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // ── Implicit: 搜索 PageIndex ──────────────────────────────────────
+        let implicit_path = self.implicit_path();
+        let storage = crate::domain::pageindex::IndexStorage::new(&implicit_path);
+        match storage.load_tree().await {
+            Ok(Some(tree)) => {
+                let engine = crate::domain::pageindex::QueryEngine::new();
+                match engine.search(&tree, query, limit).await {
+                    Ok(results) => {
+                        for r in results {
+                            implicit_results.push(ImplicitResult {
+                                title: r.title,
+                                path: r.path,
+                                breadcrumb: r.breadcrumb,
+                                excerpt: r.excerpt,
+                                score: r.score,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        warn!("PageIndex search error: {}", e);
+                    }
+                }
+            }
+            Ok(None) => {} // 尚未建立索引
+            Err(e) => {
+                warn!("Failed to load PageIndex tree: {}", e);
+            }
+        }
+
+        let total_matches = explicit_results.len() + implicit_results.len();
         UnifiedQueryResult {
             query: query.to_string(),
-            explicit_results: vec![],
-            implicit_results: vec![],
-            total_matches: 0,
+            explicit_results,
+            implicit_results,
+            total_matches,
         }
     }
 }
@@ -209,6 +288,39 @@ pub async fn init_memory_system(project_root: impl AsRef<Path>) -> Result<Memory
     memory.init().await.map_err(|e| crate::errors::AppError::Unknown(e.to_string()))?;
     
     Ok(memory)
+}
+
+/// 在文本中找到最密集的关键词窗口，返回摘要（带省略号）。
+fn extract_excerpt(content: &str, query: &str, max_len: usize) -> String {
+    let query_lower = query.to_lowercase();
+    let content_lower = content.to_lowercase();
+
+    // 找到第一个匹配位置作为锚点
+    let anchor = content_lower.find(&query_lower).unwrap_or(0);
+
+    // 窗口从锚点前 60 字符开始
+    let start = anchor.saturating_sub(60);
+    // 对齐到行首（避免从行中间截断）
+    let start = content[..start]
+        .rfind('\n')
+        .map(|p| p + 1)
+        .unwrap_or(start);
+
+    let end = (start + max_len).min(content.len());
+    // 对齐到行尾
+    let end = content[end..]
+        .find('\n')
+        .map(|p| end + p)
+        .unwrap_or(end);
+
+    let slice = content[start..end].trim().to_string();
+
+    match (start > 0, end < content.len()) {
+        (true, true)  => format!("…{}…", slice),
+        (true, false) => format!("…{}", slice),
+        (false, true) => format!("{}…", slice),
+        _             => slice,
+    }
 }
 
 // Explicit memory importer

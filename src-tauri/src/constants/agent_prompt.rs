@@ -24,7 +24,7 @@ fn section_using_tools() -> String {
 - For Jupyter notebooks (`.ipynb`), use `notebook_edit` to change cells — do not use `file_edit` on raw JSON.
 - Use `web_fetch` to retrieve URL contents and `web_search` for web search when needed.
 - Use `sleep` when you need to pause without occupying a shell (prefer over `bash sleep`).
-- Use `ask_user_question` for multiple-choice clarification when appropriate (plain-text follow-up may be needed if the interactive picker is unavailable).
+- Use `ask_user_question` for multiple-choice clarification when appropriate; the Omiga chat UI shows the picker and blocks until the user submits answers.
 - MCP resource tools (`list_mcp_resources`, `read_mcp_resource`) are only useful when MCP is connected; if they error, use other tools or ask the user.
 - `Agent` spawns an isolated sub-agent (tool pool matches Claude Code `ALL_AGENT_DISALLOWED_TOOLS`: no nested Agent, TaskOutput, plan-mode tools, AskUserQuestion, or TaskStop inside the sub-agent). MCP tools remain available.
 - Use `SendUserMessage` when instructions require an explicit user-facing message handoff (optional attachments); ordinary replies can stay in normal assistant text.
@@ -177,6 +177,21 @@ You have been invoked in the following environment:
 }
 
 /// Full default system prompt for tool-using agent turns (aligned with Claude Code external prompt).
+/// Extra section when coordinator mode is active (`OMIGA_COORDINATOR_MODE` / `CLAUDE_CODE_COORDINATOR_MODE`).
+/// Only the tools in [`crate::domain::coordinator::COORDINATOR_ALLOWED_TOOL_NAMES`] are registered for that session.
+pub fn coordinator_mode_addendum() -> &'static str {
+    r#"## Coordinator mode (multi-agent orchestration)
+
+You are in **coordinator mode**. Your job is to **plan, delegate, and synthesize** — not to run shells or edit files directly in this session.
+
+- Use **`Agent`** to spawn isolated sub-agents with clear prompts (explore code, implement changes, run analyses). Prefer small, well-scoped delegations.
+- Use **`TaskStop`** to cancel a background task when the user asks to stop work or when a job is obsolete.
+- Use **`TaskOutput`** to read or wait for output from a background task when you need its results.
+- Use **`SendUserMessage`** when you must deliver a distinct user-visible message (optionally with attachments); routine status can stay in normal assistant text.
+
+You do not have `bash`, `file_read`, `grep`, MCP tools, or other direct execution tools here — delegate execution to sub-agents via **`Agent`**."#
+}
+
 pub fn build_system_prompt(project_root: &Path, model_id: &str) -> String {
     let is_git = git::is_repo(project_root);
     [
@@ -208,6 +223,15 @@ mod tests {
             Some("August 2025")
         );
         assert_eq!(knowledge_cutoff("gpt-4o"), None);
+    }
+
+    #[test]
+    fn coordinator_addendum_mentions_tools() {
+        let s = coordinator_mode_addendum();
+        assert!(s.contains("Agent"));
+        assert!(s.contains("TaskStop"));
+        assert!(s.contains("TaskOutput"));
+        assert!(s.contains("SendUserMessage"));
     }
 
     #[test]

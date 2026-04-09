@@ -5,9 +5,8 @@
 
 use super::{ToolContext, ToolError, ToolSchema};
 use crate::domain::integrations_config;
-use crate::domain::mcp_client::list_resources_for_server;
-use crate::domain::mcp_config::merged_mcp_servers;
-use crate::domain::mcp_discovery;
+use crate::domain::mcp::client::list_resources_for_server;
+use crate::domain::mcp::config::merged_mcp_servers;
 use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
 use async_trait::async_trait;
 use futures::future::join_all;
@@ -102,7 +101,7 @@ impl super::ToolImpl for ListMcpResourcesTool {
             }
         }
 
-        let mut servers = mcp_discovery::collect_mcp_server_names(&ctx.project_root);
+        let mut servers = crate::domain::mcp::discovery::collect_mcp_server_names(&ctx.project_root);
         if let Some(name) = filter {
             servers.retain(|s| s == name);
         }

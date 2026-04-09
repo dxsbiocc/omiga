@@ -44,7 +44,7 @@ export {
 } from "./constants";
 export {
   useChatComposerStore,
-  type AgentComposerMode,
+  type PermissionMode,
 } from "./chatComposerStore";
 export {
   useNotebookViewerStore,

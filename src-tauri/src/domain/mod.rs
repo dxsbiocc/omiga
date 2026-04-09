@@ -1,19 +1,15 @@
 //! Domain layer - Core business logic
 
 pub mod agents;
+pub mod agent_runtime;
 pub mod auto_compact;
+pub mod chat_input_target;
 pub mod background_shell;
 pub mod chat_state;
+pub mod coordinator;
 pub mod integrations_catalog;
 pub mod integrations_config;
-pub mod mcp_client;
-pub mod mcp_config;
-pub mod mcp_connection_manager;
-pub mod mcp_discovery;
-pub mod mcp_names;
-pub mod mcp_resource_output;
-pub mod mcp_tool_dispatch;
-pub mod mcp_tool_pool;
+pub mod mcp;
 pub mod persistence;
 pub mod session;
 pub mod session_codec;
@@ -24,4 +20,7 @@ pub mod tool_permission_rules;
 pub mod memory;
 pub mod pageindex;
 pub mod permissions;
+
+#[cfg(test)]
+mod persistence_tests;
 

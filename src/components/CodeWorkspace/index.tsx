@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useTransition } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Box,
@@ -59,6 +59,9 @@ export function CodeWorkspace() {
   const [renderOut, setRenderOut] = useState<DocRenderResult | null>(null);
   const [renderErr, setRenderErr] = useState<string | null>(null);
   const [renderLoading, setRenderLoading] = useState(false);
+  
+  // Use transition for closing file to avoid blocking UI during Monaco cleanup
+  const [isClosing, startClosing] = useTransition();
 
   const fileExt = fileName ? (fileName.split(".").pop() ?? "").toLowerCase() : "";
   const languageLabel = fileExt ? extToLabel(fileExt) : "Plain Text";
@@ -157,22 +160,25 @@ export function CodeWorkspace() {
           </Typography>
           {filePath && (
             <Tooltip title="关闭文件">
-              <IconButton
-                size="small"
-                aria-label="关闭文件"
-                onClick={() => clearFile()}
-                sx={{
-                  flexShrink: 0,
-                  ml: 0.25,
-                  color: "text.secondary",
-                  "&:hover": {
-                    color: "text.primary",
-                    bgcolor: alpha(theme.palette.error.main, 0.08),
-                  },
-                }}
-              >
-                <CloseRoundedIcon sx={{ fontSize: 18 }} />
-              </IconButton>
+              <span>
+                <IconButton
+                  size="small"
+                  aria-label="关闭文件"
+                  disabled={isClosing}
+                  onClick={() => startClosing(() => clearFile())}
+                  sx={{
+                    flexShrink: 0,
+                    ml: 0.25,
+                    color: "text.secondary",
+                    "&:hover": {
+                      color: "text.primary",
+                      bgcolor: alpha(theme.palette.error.main, 0.08),
+                    },
+                  }}
+                >
+                  <CloseRoundedIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+              </span>
             </Tooltip>
           )}
           {!filePath && (
@@ -293,26 +299,38 @@ export function CodeWorkspace() {
               {error}
             </Typography>
           </Stack>
-        ) : !filePath ? (
-          <Stack
-            alignItems="center"
-            justifyContent="center"
-            sx={{ flex: 1, px: 2, py: 3 }}
-          >
-            <Typography variant="body2" color="text.secondary" textAlign="center">
-              未打开文件
-              <br />
-              请从右侧「工具目录」点击文件查看源码
-            </Typography>
-          </Stack>
         ) : (
           <>
-            <FileRenderer
-              fileName={fileName!}
-              filePath={filePath!}
-              content={content}
-              onChange={setContent}
-            />
+            {/* Always render FileRenderer but hide when no file to avoid Monaco re-mount penalty */}
+            <Box
+              sx={{
+                flex: 1,
+                minHeight: 0,
+                display: filePath ? "flex" : "none",
+                flexDirection: "column",
+                overflow: "hidden",
+              }}
+            >
+              <FileRenderer
+                fileName={fileName ?? ""}
+                filePath={filePath ?? ""}
+                content={content}
+                onChange={setContent}
+              />
+            </Box>
+            {!filePath && (
+              <Stack
+                alignItems="center"
+                justifyContent="center"
+                sx={{ flex: 1, px: 2, py: 3 }}
+              >
+                <Typography variant="body2" color="text.secondary" textAlign="center">
+                  未打开文件
+                  <br />
+                  请从右侧「工具目录」点击文件查看源码
+                </Typography>
+              </Stack>
+            )}
             {isRenderableDoc && (renderOut || renderErr || renderLoading) && (
               <Box
                 sx={{

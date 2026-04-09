@@ -110,6 +110,16 @@ impl AgentSelector {
             keywords.push("general-purpose".to_string());
         }
 
+        // 内容生成类任务（需要详细输出）
+        if self.matches_any(&lower, &[
+            "travel", "itinerary", "plan", "guide", "recommendation",
+            "旅行", "行程", "攻略", "推荐", "计划",
+            "write", "document", "draft", "create content",
+            "写", "文档", "起草", "内容"
+        ]) {
+            keywords.push("content-generation".to_string());
+        }
+
         keywords
     }
 
@@ -119,7 +129,7 @@ impl AgentSelector {
         let desc_lower = description.to_lowercase();
 
         // Explore Agent 匹配
-        if keywords.contains(&"explore".to_string()) 
+        if keywords.iter().any(|k| k == "explore")
             || self.is_explore_task(&desc_lower) {
             let score = self.calculate_explore_score(&desc_lower);
             matches.push(AgentMatch {
@@ -131,7 +141,7 @@ impl AgentSelector {
         }
 
         // Plan Agent 匹配
-        if keywords.contains(&"plan".to_string()) 
+        if keywords.iter().any(|k| k == "plan")
             || self.is_plan_task(&desc_lower) {
             let score = self.calculate_plan_score(&desc_lower);
             matches.push(AgentMatch {
@@ -143,7 +153,7 @@ impl AgentSelector {
         }
 
         // Verification Agent 匹配
-        if keywords.contains(&"verification".to_string()) 
+        if keywords.iter().any(|k| k == "verification")
             || self.is_verification_task(&desc_lower) {
             let score = self.calculate_verification_score(&desc_lower);
             matches.push(AgentMatch {

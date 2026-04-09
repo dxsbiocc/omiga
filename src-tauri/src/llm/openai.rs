@@ -59,6 +59,9 @@ impl OpenAiCompatibleClient {
     /// empty content). Assistant turns with `tool_use` blocks must become `tool_calls`, or the
     /// model never sees prior tool output and will re-invoke tools in a loop.
     fn convert_messages(&self, messages: Vec<LlmMessage>) -> Vec<OpenAiMessage> {
+        // Pre-validate: ensure tool_calls/tool message pairing is correct
+        let messages = Self::validate_message_history(messages);
+        
         let mut out = Vec::new();
 
         for msg in messages {
@@ -196,6 +199,108 @@ impl OpenAiCompatibleClient {
         }
 
         out
+    }
+
+    /// Validate message history to ensure OpenAI compatibility:
+    /// - Assistant messages with tool_calls must be followed by corresponding tool messages
+    /// - Remove orphaned tool messages that don't have a matching assistant tool_call
+    fn validate_message_history(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
+        use std::collections::HashSet;
+        
+        // Collect all expected tool_call_ids from assistant messages
+        let mut expected_tool_ids: HashSet<String> = HashSet::new();
+        for msg in &messages {
+            if let LlmRole::Assistant = msg.role {
+                for content in &msg.content {
+                    if let LlmContent::ToolUse { id, .. } = content {
+                        expected_tool_ids.insert(id.clone());
+                    }
+                }
+            }
+        }
+        
+        // Filter messages: remove orphaned tool results and extra tool results
+        let mut result = Vec::new();
+        let mut pending_tool_ids: HashSet<String> = HashSet::new();
+        
+        for msg in messages {
+            match msg.role {
+                LlmRole::Assistant => {
+                    // Check if this assistant has tool_calls
+                    let has_tool_calls = msg.content.iter().any(|c| matches!(c, LlmContent::ToolUse { .. }));
+                    if has_tool_calls {
+                        // Add tool_call_ids to pending set
+                        for content in &msg.content {
+                            if let LlmContent::ToolUse { id, .. } = content {
+                                pending_tool_ids.insert(id.clone());
+                            }
+                        }
+                    }
+                    result.push(msg);
+                }
+                LlmRole::Tool => {
+                    // Only keep tool results that match a pending tool_call_id
+                    if let Some(LlmContent::ToolResult { tool_use_id, .. }) = msg.content.first() {
+                        if pending_tool_ids.contains(tool_use_id) {
+                            pending_tool_ids.remove(tool_use_id);
+                            result.push(msg);
+                        }
+                        // Else: orphaned tool message, skip it
+                    }
+                }
+                LlmRole::User => {
+                    // Check if this user message contains tool results (LlmContent::ToolResult)
+                    let is_tool_result_msg = msg.content.iter().all(|c| matches!(c, LlmContent::ToolResult { .. }));
+                    if is_tool_result_msg {
+                        // This is a tool result message in User role - convert to Tool role logic
+                        let mut keep = false;
+                        for content in &msg.content {
+                            if let LlmContent::ToolResult { tool_use_id, .. } = content {
+                                if pending_tool_ids.contains(tool_use_id) {
+                                    pending_tool_ids.remove(tool_use_id);
+                                    keep = true;
+                                }
+                            }
+                        }
+                        if keep {
+                            result.push(msg);
+                        }
+                        // Else: all tool results orphaned, skip
+                    } else {
+                        result.push(msg);
+                    }
+                }
+                _ => {
+                    result.push(msg);
+                }
+            }
+        }
+        
+        // If there are still pending tool_ids, we have assistant messages without tool results
+        // This is also an error condition - remove those assistant tool_calls
+        if !pending_tool_ids.is_empty() {
+            tracing::warn!(
+                target: "omiga::openai",
+                pending_tool_ids = ?pending_tool_ids,
+                "Assistant tool_calls without matching tool results, removing tool_calls"
+            );
+            
+            // Remove tool_calls from assistant messages that don't have matching tool results
+            result = result.into_iter().map(|mut msg| {
+                if let LlmRole::Assistant = msg.role {
+                    msg.content.retain(|c| {
+                        if let LlmContent::ToolUse { id, .. } = c {
+                            !pending_tool_ids.contains(id)
+                        } else {
+                            true
+                        }
+                    });
+                }
+                msg
+            }).collect();
+        }
+        
+        result
     }
 
     /// Convert ToolSchema to OpenAI tool format

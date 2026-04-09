@@ -1,8 +1,8 @@
 //! Ask the user multiple-choice questions — aligned with `AskUserQuestionTool` (TypeScript).
 //!
-//! Omiga does not yet run the permission / Ink dialog pipeline. Execution succeeds with a
-//! structured JSON result: `answers` is empty and `_omiga` explains that the assistant should
-//! follow up in plain text or read the user's next message.
+//! Interactive UI is wired from the chat path (`commands::chat::execute_ask_user_question_interactive`):
+//! the tool blocks until the user submits answers in the Omiga chat UI. The standalone
+//! `execute_tool` IPC path still uses immediate stub output when no UI is attached.
 
 use super::{ToolContext, ToolError, ToolSchema};
 use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
@@ -21,7 +21,7 @@ pub const DESCRIPTION: &str = r#"Ask the user multiple-choice questions to gathe
 
 Provide 1–4 questions; each question has 2–4 options with short labels and longer descriptions. Optional `preview` on an option helps compare concrete artifacts (markdown or HTML fragment per product guidance).
 
-Users can always pick an "Other" path in Claude Code; Omiga may not show the full interactive picker yet — if `answers` is empty, ask the user in plain text or use their next message.
+In the Omiga app, the chat UI shows these questions and waits for your selections before the agent continues.
 
 Plan mode: use this for clarifications before planning. Do not use it for plan approval — use the dedicated exit-plan tool when available."#;
 
@@ -127,6 +127,11 @@ fn validate(args: &AskUserQuestionArgs) -> Result<(), ToolError> {
     }
 
     Ok(())
+}
+
+/// Exposed for the chat interactive path (same rules as [`validate`]).
+pub(crate) fn validate_ask_user_question_args(args: &AskUserQuestionArgs) -> Result<(), ToolError> {
+    validate(args)
 }
 
 #[async_trait]

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import type { SxProps, Theme } from "@mui/material/styles";
 import {
   Box,
   Button,
@@ -33,6 +34,8 @@ interface ProviderConfigEntry {
 
 interface ProviderSwitcherProps {
   onOpenSettings?: () => void;
+  /** Merged into the trigger button for layout/theming (e.g. composer toolbar). */
+  triggerSx?: SxProps<Theme>;
 }
 
 // Provider type to display name mapping
@@ -49,7 +52,10 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   custom: "Custom",
 };
 
-export function ProviderSwitcher({ onOpenSettings }: ProviderSwitcherProps) {
+export function ProviderSwitcher({
+  onOpenSettings,
+  triggerSx,
+}: ProviderSwitcherProps) {
   const [providers, setProviders] = useState<ProviderConfigEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [switching, setSwitching] = useState<string | null>(null);
@@ -130,8 +136,12 @@ export function ProviderSwitcher({ onOpenSettings }: ProviderSwitcherProps) {
   const getProviderDisplay = (provider: ProviderConfigEntry) => {
     const typeName = PROVIDER_DISPLAY_NAMES[provider.providerType] || provider.providerType;
     return {
-      label: provider.name,
-      sublabel: `${typeName} · ${provider.model}`,
+      /** 配置名称（菜单主行） */
+      configName: provider.name,
+      /** 供应商 / 品牌（Chip） */
+      supplierLabel: typeName,
+      /** 模型名（Chip 右侧，不重复供应商文案） */
+      modelName: provider.model,
     };
   };
 
@@ -144,11 +154,14 @@ export function ProviderSwitcher({ onOpenSettings }: ProviderSwitcherProps) {
           variant="outlined"
           startIcon={<Settings />}
           onClick={onOpenSettings}
-          sx={{
-            borderRadius: 2,
-            textTransform: "none",
-            fontSize: "0.75rem",
-          }}
+          sx={[
+            {
+              borderRadius: 2,
+              textTransform: "none",
+              fontSize: "0.75rem",
+            },
+            ...(Array.isArray(triggerSx) ? triggerSx : triggerSx ? [triggerSx] : []),
+          ]}
         >
           Setup Models
         </Button>
@@ -157,27 +170,33 @@ export function ProviderSwitcher({ onOpenSettings }: ProviderSwitcherProps) {
   }
 
   const display = activeProvider ? getProviderDisplay(activeProvider) : null;
+  const triggerTooltip = activeProvider
+    ? `${activeProvider.name} · ${activeProvider.model}`
+    : "Click to switch model provider";
 
   return (
     <Box>
-      <Tooltip title="Click to switch model provider">
+      <Tooltip title={triggerTooltip}>
         <Button
           size="small"
           variant="outlined"
           onClick={handleClick}
           endIcon={loading ? <CircularProgress size={12} /> : null}
-          sx={{
-            borderRadius: 2,
-            textTransform: "none",
-            fontSize: "0.75rem",
-            px: 1.5,
-            py: 0.5,
-            borderColor: "divider",
-            bgcolor: "background.paper",
-            "&:hover": {
-              bgcolor: "action.hover",
+          sx={[
+            {
+              borderRadius: 2,
+              textTransform: "none",
+              fontSize: "0.75rem",
+              px: 1.5,
+              py: 0.5,
+              borderColor: "divider",
+              bgcolor: "background.paper",
+              "&:hover": {
+                bgcolor: "action.hover",
+              },
             },
-          }}
+            ...(Array.isArray(triggerSx) ? triggerSx : triggerSx ? [triggerSx] : []),
+          ]}
         >
           {display ? (
             <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
@@ -185,15 +204,20 @@ export function ProviderSwitcher({ onOpenSettings }: ProviderSwitcherProps) {
                 size="small"
                 color="success"
                 variant="outlined"
-                label={display.label}
+                label={display.supplierLabel}
                 sx={{
                   height: 20,
                   fontSize: "0.7rem",
                   "& .MuiChip-label": { px: 0.5 },
                 }}
               />
-              <Typography variant="caption" color="text.secondary" noWrap sx={{ maxWidth: 100 }}>
-                {display.sublabel}
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                noWrap
+                sx={{ maxWidth: 180 }}
+              >
+                {display.modelName}
               </Typography>
             </Box>
           ) : (
@@ -260,7 +284,7 @@ export function ProviderSwitcher({ onOpenSettings }: ProviderSwitcherProps) {
                 primary={
                   <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                     <Typography fontWeight={provider.isActive ? 600 : 400}>
-                      {display.label}
+                      {display.configName}
                     </Typography>
                     {provider.isActive && (
                       <Chip
@@ -272,7 +296,7 @@ export function ProviderSwitcher({ onOpenSettings }: ProviderSwitcherProps) {
                     )}
                   </Box>
                 }
-                secondary={display.sublabel}
+                secondary={display.modelName}
               />
             </MenuItem>
           );

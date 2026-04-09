@@ -10,13 +10,19 @@ use crate::constants::tool_limits::{
     large_output_persist_failed_message, large_tool_output_files_enabled, truncate_utf8_prefix,
     DEFAULT_MAX_RESULT_SIZE_CHARS, PREVIEW_SIZE_BYTES, TOOL_DISPLAY_MAX_INPUT_CHARS,
 };
-use crate::domain::chat_state::{McpToolCache, MCP_TOOL_CACHE_TTL, PermissionDenyCache, PERMISSION_DENY_CACHE_TTL};
+use crate::domain::agent_runtime::ChatInputTarget;
+use crate::domain::coordinator;
+use crate::domain::chat_state::{
+    AskUserWaiter, McpToolCache, MCP_TOOL_CACHE_TTL, PermissionDenyCache, PERMISSION_DENY_CACHE_TTL,
+};
+use crate::domain::tools::ask_user_question;
 use crate::domain::session::{AgentTask, Message, Session, TodoItem, ToolCall};
 use crate::domain::session_codec::SessionCodec;
 use crate::utils::large_output_instructions::get_large_output_instructions;
 use crate::domain::integrations_config;
 use crate::domain::skills;
 use crate::domain::subagent_tool_filter::{env_allow_nested_agent, SubagentFilterOptions};
+use crate::domain::agents::scheduler::{AgentSelector, AgentScheduler, SchedulingRequest, SchedulingStrategy};
 use crate::domain::tools::{all_tool_schemas, Tool, ToolContext, ToolSchema};
 use crate::errors::{ApiError, ChatError, OmigaError};
 use crate::infrastructure::streaming::StreamOutputItem;
@@ -62,7 +68,7 @@ const MAX_SUBAGENT_EXECUTE_DEPTH: u8 = 8;
 
 /// LLM + stream state needed for the `Agent` tool to run an isolated sub-session (same API key as main chat).
 #[derive(Clone)]
-struct AgentLlmRuntime {
+pub(crate) struct AgentLlmRuntime {
     llm_config: LlmConfig,
     round_id: String,
     cancel_flag: Arc<RwLock<bool>>,
@@ -101,7 +107,7 @@ async fn get_llm_config(chat_state: &ChatState) -> Result<LlmConfig, OmigaError>
     }
 }
 
-fn tool_results_dir_for_session(app: &AppHandle, session_id: &str) -> std::path::PathBuf {
+pub(crate) fn tool_results_dir_for_session(app: &AppHandle, session_id: &str) -> std::path::PathBuf {
     app.path()
         .app_data_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -271,7 +277,8 @@ fn fold_tool_stream_item_for_model(
         | StreamOutputItem::Cancelled
         | StreamOutputItem::Thinking(_)
         | StreamOutputItem::ToolUse { .. }
-        | StreamOutputItem::ToolResult { .. } => {}
+        | StreamOutputItem::ToolResult { .. }
+        | StreamOutputItem::AskUserPending { .. } => {}
     }
 }
 
@@ -426,6 +433,119 @@ async fn index_chat_to_implicit_memory(
     }
 }
 
+/// One built-in or custom agent entry for the composer picker.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableAgentInfo {
+    pub agent_type: String,
+    pub description: String,
+}
+
+#[tauri::command]
+pub fn list_available_agents() -> Vec<AvailableAgentInfo> {
+    let router = crate::domain::agents::get_agent_router();
+    let mut out: Vec<AvailableAgentInfo> = router
+        .list_agents_with_description()
+        .into_iter()
+        .map(|(t, d)| AvailableAgentInfo {
+            agent_type: t.to_string(),
+            description: d.to_string(),
+        })
+        .collect();
+    out.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
+    
+    // 在列表开头添加"自动"选项（调度模式）
+    out.insert(0, AvailableAgentInfo {
+        agent_type: "auto".to_string(),
+        description: "智能调度 - 根据任务自动选择最合适的 Agent".to_string(),
+    });
+    
+    out
+}
+
+fn composer_permission_addendum(raw: &str) -> Option<String> {
+    match raw.trim() {
+        "ask" => Some(
+            "### Composer permission mode\nThe user chose **ask**: prefer confirming before applying edits or running destructive tools."
+                .to_string(),
+        ),
+        "auto" => Some(
+            "### Composer permission mode\nThe user chose **auto**: accept reasonable file edits without repeated confirmation when aligned with the task."
+                .to_string(),
+        ),
+        "bypass" => Some(
+            "### Composer permission mode\nThe user chose **bypass**: minimize permission prompts; still follow safety-critical constraints."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+/// 格式化调度计划为 system prompt 的一部分
+fn format_scheduler_plan(result: &crate::domain::agents::scheduler::SchedulingResult) -> String {
+    let is_content_generation = result.plan.subtasks.iter().any(|t| {
+        t.id == "generate-content" || t.id == "gather-requirements"
+    });
+    
+    let mut plan_text = if is_content_generation {
+        String::from("## 内容生成任务执行计划\n\n")
+    } else {
+        String::from("## 任务执行计划\n\n")
+    };
+    
+    plan_text.push_str(&format!("此任务已自动分解为 **{}** 个子任务，将按以下顺序执行：\n\n", 
+        result.plan.subtasks.len()));
+    
+    // 获取并行执行组
+    let groups = result.plan.get_parallel_groups();
+    let mut task_idx = 1;
+    
+    for (group_idx, group) in groups.iter().enumerate() {
+        if groups.len() > 1 {
+            plan_text.push_str(&format!("### 阶段 {}\n", group_idx + 1));
+        }
+        
+        for task_id in group {
+            if let Some(task) = result.plan.subtasks.iter().find(|t| &t.id == task_id) {
+                plan_text.push_str(&format!(
+                    "{}. **{}** - 使用 `{}` Agent\n",
+                    task_idx,
+                    task.description,
+                    task.agent_type
+                ));
+                if !task.context.is_empty() {
+                    plan_text.push_str(&format!("   - 要求: {}\n", task.context));
+                }
+                if !task.dependencies.is_empty() {
+                    plan_text.push_str(&format!("   - 依赖: {}\n", task.dependencies.join(", ")));
+                }
+                if task.critical {
+                    plan_text.push_str("   - ⚠️ 关键任务\n");
+                }
+                task_idx += 1;
+            }
+        }
+        plan_text.push('\n');
+    }
+    
+    plan_text.push_str(&format!("\n预估执行时间: ~{} 分钟\n", result.estimated_duration_secs / 60));
+    
+    // 对于内容生成任务，添加重要提示
+    if is_content_generation {
+        plan_text.push_str("\n### ⚠️ 重要提示\n");
+        plan_text.push_str("这是一个**内容生成任务**。你必须：\n");
+        plan_text.push_str("1. **生成完整、详细的内容**，不要只是概述或框架\n");
+        plan_text.push_str("2. **包含具体的细节**：名称、地址、时间、价格、建议等\n");
+        plan_text.push_str("3. **确保内容实用可读**，用户可以直接使用\n");
+        plan_text.push_str("4. **按步骤执行**，先收集需求，再研究，最后生成完整内容\n");
+        plan_text.push_str("\n现在开始执行第一个子任务。\n");
+    } else {
+        plan_text.push_str("\n你可以直接开始执行第一个子任务，或要求我调整计划。");
+    }
+    
+    plan_text
+}
+
 /// Send a message to Claude and get a streaming response
 #[tauri::command]
 pub async fn send_message(
@@ -433,6 +553,34 @@ pub async fn send_message(
     app_state: State<'_, OmigaAppState>,
     request: SendMessageRequest,
 ) -> CommandResult<MessageResponse> {
+    let input_target = match ChatInputTarget::parse(request.input_target.as_deref()) {
+        Ok(t) => t,
+        Err(msg) => {
+            return Err(OmigaError::Chat(ChatError::StreamError(msg.to_string())));
+        }
+    };
+
+    if let ChatInputTarget::BackgroundAgentFollowup { task_id } = input_target {
+        let session_id = request.session_id.clone().ok_or_else(|| {
+            OmigaError::Chat(ChatError::StreamError(
+                "session_id is required when using input_target bg:<task_id>".to_string(),
+            ))
+        })?;
+        let manager = crate::domain::agents::background::get_background_agent_manager();
+        manager
+            .enqueue_followup(&task_id, &session_id, request.content.clone())
+            .await
+            .map_err(|e| OmigaError::Chat(ChatError::StreamError(e.to_string())))?;
+        return Ok(MessageResponse {
+            message_id: uuid::Uuid::new_v4().to_string(),
+            session_id,
+            round_id: uuid::Uuid::new_v4().to_string(),
+            input_kind: Some("background_followup_queued".to_string()),
+            scheduler_plan: None,
+            initial_todos: None,
+        });
+    }
+
     // Get or create session (database is single source of truth)
     let repo = app_state.repo.lock().await;
 
@@ -538,6 +686,48 @@ pub async fn send_message(
     };
 
     let project_root = resolve_session_project_root(&project_path);
+    
+    // 检测是否为 Plan mode
+    let is_plan_mode = request.composer_agent_type.as_deref() == Some("Plan");
+    
+    // ===== 智能调度系统集成 =====
+    // 检测是否使用自动调度模式（用户选择 auto 或未指定特定 Agent）
+    let use_scheduler = request.composer_agent_type.as_deref().map(|t| {
+        t == "auto" || t == "general-purpose" || t.is_empty()
+    }).unwrap_or(true);
+    
+    // 如果是自动模式，检测任务复杂度并可能进行任务分解
+    let scheduler_result: Option<crate::domain::agents::scheduler::SchedulingResult> = if use_scheduler && request.use_tools {
+        let scheduler = AgentScheduler::new();
+        let scheduling_req = SchedulingRequest::new(&request.content)
+            .with_project_root(project_root.to_string_lossy().as_ref())
+            .with_strategy(SchedulingStrategy::Auto)
+            .with_auto_decompose(true);
+        
+        match scheduler.schedule(scheduling_req).await {
+            Ok(result) => {
+                // 如果任务被分解为多个子任务，记录日志
+                if result.selected_agents.len() > 1 {
+                    tracing::info!(
+                        target: "omiga::scheduler",
+                        task_count = result.plan.subtasks.len(),
+                        agents = ?result.selected_agents,
+                        "Complex task decomposed into subtasks"
+                    );
+                    Some(result)
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::warn!(target: "omiga::scheduler", "Scheduling failed: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    
     let mut llm_config = get_llm_config(&app_state.chat).await?;
     let integrations_cfg = {
         let hit = app_state.integrations_config_cache
@@ -568,6 +758,9 @@ pub async fn send_message(
             &project_root,
             &llm_config.model,
         ));
+        if coordinator::is_coordinator_mode() {
+            prompt_parts.push(agent_prompt::coordinator_mode_addendum().to_string());
+        }
     }
     if let Some(ref u) = llm_config.system_prompt {
         let t = u.trim();
@@ -580,6 +773,29 @@ pub async fn send_message(
     }
     if let Some(ctx) = memory_ctx {
         prompt_parts.push(ctx);
+    }
+    
+    // 如果有调度计划（任务分解），添加到 system prompt
+    if let Some(ref schedule_result) = scheduler_result {
+        let plan_description = format_scheduler_plan(schedule_result);
+        prompt_parts.push(plan_description);
+    }
+    
+    if request.use_tools {
+        if let Some(ref at) = request.composer_agent_type {
+            let t = at.trim();
+            if !t.is_empty() && t != "general-purpose" {
+                let router = crate::domain::agents::get_agent_router();
+                let agent = router.select_agent(Some(t));
+                let tool_ctx = ToolContext::new(project_root.clone());
+                prompt_parts.push(agent.system_prompt(&tool_ctx));
+            }
+        }
+        if let Some(ref pm) = request.permission_mode {
+            if let Some(line) = composer_permission_addendum(pm) {
+                prompt_parts.push(line);
+            }
+        }
     }
     llm_config.system_prompt = if prompt_parts.is_empty() {
         None
@@ -715,7 +931,7 @@ pub async fn send_message(
                     schemas
                 }
                 None => {
-                    let schemas = crate::domain::mcp_tool_pool::discover_mcp_tool_schemas(
+                    let schemas = crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(
                         &project_root,
                         mcp_timeout,
                     )
@@ -748,7 +964,18 @@ pub async fn send_message(
             mcp_filtered,
             &integrations_cfg,
         );
-        built.into_iter().chain(mcp_filtered).collect()
+        let mut combined: Vec<ToolSchema> = built.into_iter().chain(mcp_filtered).collect();
+        if coordinator::is_coordinator_mode() {
+            let before = combined.len();
+            combined = coordinator::filter_coordinator_tool_schemas(combined);
+            tracing::info!(
+                target: "omiga::coordinator",
+                before,
+                after = combined.len(),
+                "coordinator mode: tool list restricted to orchestration tools"
+            );
+        }
+        combined
     } else {
         vec![]
     };
@@ -1177,10 +1404,28 @@ pub async fn send_message(
         );
     });
 
+    // 如果是 Plan mode，生成初始 todo items
+    let initial_todos = if is_plan_mode {
+        scheduler_result.as_ref().map(|result| {
+            result.plan.subtasks.iter().enumerate().map(|(idx, subtask)| {
+                InitialTodoItem {
+                    id: format!("plan-todo-{}", idx),
+                    content: subtask.description.clone(),
+                    status: if idx == 0 { "in_progress".to_string() } else { "pending".to_string() },
+                }
+            }).collect()
+        })
+    } else {
+        None
+    };
+
     Ok(MessageResponse {
         message_id,
         session_id,
         round_id,
+        input_kind: None,
+        scheduler_plan: scheduler_result,
+        initial_todos,
     })
 }
 
@@ -1454,7 +1699,7 @@ async fn build_subagent_tool_schemas(
     let base_names: HashSet<String> = built.iter().map(|t| t.name.clone()).collect();
     let mcp_timeout = std::time::Duration::from_secs(45);
     let mcp_tools =
-        crate::domain::mcp_tool_pool::discover_mcp_tool_schemas(project_root, mcp_timeout).await;
+        crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(project_root, mcp_timeout).await;
     let mcp_after_deny = crate::domain::tool_permission_rules::filter_tool_schemas_by_deny_rule_entries(
         mcp_tools,
         &deny_entries,
@@ -1632,6 +1877,231 @@ async fn run_skill_forked(
     ))
 }
 
+/// Shared foreground ReAct loop for `Agent` tool (main-thread and background worker).
+async fn run_subagent_session_foreground_inner(
+    app: &AppHandle,
+    message_id: &str,
+    session_id: &str,
+    tool_results_dir: &Path,
+    effective_root: &Path,
+    session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
+    session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
+    args: &crate::domain::tools::agent::AgentArgs,
+    runtime: &AgentLlmRuntime,
+    subagent_execute_depth: u8,
+    brave_search_api_key: Option<String>,
+    skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+    agent_def: &dyn crate::domain::agents::AgentDefinition,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    background_task_id: Option<&str>,
+) -> Result<String, String> {
+    let subagent_skill_task_context = format!("{} {}", args.description.trim(), args.prompt.trim());
+
+    let parent_in_plan = if let Some(ref pm) = runtime.plan_mode_flag {
+        *pm.lock().await
+    } else {
+        false
+    };
+
+    let agent_model_config = agent_def.model();
+    let resolved_agent_model = if args.model.as_deref().map(|m| !m.is_empty()).unwrap_or(false) {
+        resolve_subagent_model(&runtime.llm_config, args.model.as_deref())
+    } else if agent_model_config.map(|m| m != "inherit").unwrap_or(false) {
+        resolve_subagent_model(&runtime.llm_config, agent_model_config)
+    } else {
+        runtime.llm_config.model.clone()
+    };
+
+    let mut sub_cfg = runtime.llm_config.clone();
+    sub_cfg.model = resolved_agent_model;
+
+    let skills_exist = skills::skills_any_exist(effective_root, &skill_cache).await;
+
+    let mut prompt_parts: Vec<String> = Vec::new();
+    prompt_parts.push(agent_prompt::build_system_prompt(
+        effective_root,
+        &sub_cfg.model,
+    ));
+
+    let is_memory_agent = args
+        .subagent_type
+        .as_deref()
+        .map(|t| {
+            t.eq_ignore_ascii_case("memory-agent")
+                || t.eq_ignore_ascii_case("memory_agent")
+                || t.eq_ignore_ascii_case("wiki-agent")
+                || t.eq_ignore_ascii_case("wiki_agent")
+        })
+        .unwrap_or(false);
+
+    if is_memory_agent {
+        prompt_parts.push(crate::domain::memory::memory_agent_system_prompt(effective_root));
+    } else {
+        let tool_ctx = ToolContext::new(effective_root);
+        let agent_specific_prompt = agent_def.system_prompt(&tool_ctx);
+
+        let nested_agent_note = if runtime.allow_nested_agent {
+            " Nested `Agent` is allowed."
+        } else {
+            ""
+        };
+        let exit_plan_note = if parent_in_plan {
+            " `ExitPlanMode` is available while the parent session is in plan mode."
+        } else {
+            ""
+        };
+
+        let disallowed = agent_def
+            .disallowed_tools()
+            .map(|v| v.join(", "))
+            .unwrap_or_else(|| "none".to_string());
+
+        let subagent_mode_prompt = format!(
+            "## Sub-agent mode ({})\nYou are an isolated sub-agent running as '{}'. \
+             Use tools as needed. Disallowed tools: {}. \
+             {}{}",
+            agent_def.agent_type(),
+            agent_def.agent_type(),
+            disallowed,
+            exit_plan_note,
+            nested_agent_note
+        );
+
+        prompt_parts.push(agent_specific_prompt);
+        prompt_parts.push(subagent_mode_prompt);
+    }
+
+    if let Some(ref u) = sub_cfg.system_prompt {
+        let t = u.trim();
+        if !t.is_empty() {
+            prompt_parts.push(t.to_string());
+        }
+    }
+    if skills_exist && !agent_def.omit_claude_md() {
+        prompt_parts.push(skills::format_skills_discovery_system_section());
+    }
+    sub_cfg.system_prompt = Some(prompt_parts.join("\n\n"));
+    let client = create_client(sub_cfg).map_err(|e| e.to_string())?;
+    let subagent_opts = SubagentFilterOptions {
+        parent_in_plan_mode: parent_in_plan,
+        allow_nested_agent: runtime.allow_nested_agent,
+    };
+    let mut tools = build_subagent_tool_schemas(
+        effective_root,
+        skills_exist,
+        subagent_opts,
+    )
+    .await;
+
+    if let Some(ref allowed) = agent_def.allowed_tools() {
+        let allowed_set: std::collections::HashSet<_> = allowed.iter().cloned().collect();
+        tools.retain(|t| allowed_set.contains(&t.name));
+    }
+    if let Some(ref disallowed) = agent_def.disallowed_tools() {
+        let disallowed_set: std::collections::HashSet<_> = disallowed.iter().cloned().collect();
+        tools.retain(|t| !disallowed_set.contains(&t.name));
+    }
+    let user_text = format!(
+        "## Sub-agent task: {}\n\n{}",
+        args.description.trim(),
+        args.prompt.trim()
+    );
+    let initial_user = Message::User { content: user_text };
+    let mut transcript: Vec<Message> = vec![initial_user.clone()];
+    if let Some(tid) = background_task_id {
+        persist_background_transcript_message(&runtime.repo, tid, session_id, &initial_user).await;
+    }
+
+    for _round_idx in 0..MAX_SUBAGENT_TOOL_ROUNDS {
+        if let Some(token) = cancel_token {
+            if token.is_cancelled() {
+                if let Some(tid) = background_task_id {
+                    persist_background_cancel_notice(&runtime.repo, tid, session_id).await;
+                }
+                return Err("Sub-agent cancelled.".to_string());
+            }
+        }
+        if let Some(tid) = background_task_id {
+            let followups = crate::domain::agents::background::get_background_agent_manager()
+                .drain_followups_for_task(tid)
+                .await;
+            for text in followups {
+                let m = Message::User { content: text };
+                persist_background_transcript_message(&runtime.repo, tid, session_id, &m).await;
+                transcript.push(m);
+            }
+        }
+        if *runtime.cancel_flag.read().await {
+            if let Some(tid) = background_task_id {
+                persist_background_cancel_notice(&runtime.repo, tid, session_id).await;
+            }
+            return Err("Sub-agent cancelled.".to_string());
+        }
+        let api_msgs = SessionCodec::to_api_messages(&transcript);
+        let llm_messages = api_messages_to_llm(&api_msgs);
+        let (tool_calls, assistant_text, cancelled) = stream_llm_response_with_cancel(
+            client.as_ref(),
+            app,
+            message_id,
+            &runtime.round_id,
+            &llm_messages,
+            &tools,
+            &runtime.pending_tools,
+            &runtime.cancel_flag,
+            runtime.repo.clone(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        if cancelled {
+            if let Some(tid) = background_task_id {
+                persist_background_cancel_notice(&runtime.repo, tid, session_id).await;
+            }
+            return Err("Sub-agent cancelled.".to_string());
+        }
+        let tc = completed_to_tool_calls(&tool_calls);
+        let asst = Message::Assistant {
+            content: assistant_text.clone(),
+            tool_calls: tc.clone(),
+        };
+        if let Some(tid) = background_task_id {
+            persist_background_transcript_message(&runtime.repo, tid, session_id, &asst).await;
+        }
+        transcript.push(asst);
+        if tool_calls.is_empty() {
+            return Ok(assistant_text);
+        }
+        let results = execute_tool_calls(
+            &tool_calls,
+            app,
+            message_id,
+            session_id,
+            tool_results_dir,
+            effective_root,
+            session_todos.clone(),
+            session_agent_tasks.clone(),
+            Some(runtime),
+            subagent_execute_depth,
+            Some(subagent_skill_task_context.as_str()),
+            brave_search_api_key.clone(),
+            skill_cache.clone(),
+        )
+        .await;
+        for (tool_use_id, output, _) in &results {
+            let tm = Message::Tool {
+                tool_call_id: tool_use_id.clone(),
+                output: output.clone(),
+            };
+            if let Some(tid) = background_task_id {
+                persist_background_transcript_message(&runtime.repo, tid, session_id, &tm).await;
+            }
+            transcript.push(tm);
+        }
+    }
+    Err(format!(
+        "Sub-agent exceeded maximum tool rounds ({MAX_SUBAGENT_TOOL_ROUNDS})."
+    ))
+}
+
 /// Isolated sub-agent loop (same API key / stream channel as parent round).
 async fn run_subagent_session(
     app: &AppHandle,
@@ -1648,9 +2118,23 @@ async fn run_subagent_session(
     brave_search_api_key: Option<String>,
     skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
 ) -> Result<String, String> {
-    // ===== Agent 路由系统集成 =====
+    // ===== Agent 路由系统集成（含自动调度）=====
     let router = crate::domain::agents::get_agent_router();
-    let agent_def = router.select_agent(args.subagent_type.as_deref());
+    
+    // 如果用户没有指定 subagent_type，使用调度器自动选择
+    let selected_agent_type = args.subagent_type.as_deref().map(|s| s.to_string()).unwrap_or_else(|| {
+        let selector = AgentSelector::new();
+        let agent_type = selector.select(&args.prompt, project_root.to_str().unwrap_or("."));
+        tracing::info!(
+            target: "omiga::scheduler",
+            prompt_preview = %args.prompt.chars().take(50).collect::<String>(),
+            selected_agent = %agent_type,
+            "Auto-selected agent via scheduler"
+        );
+        agent_type
+    });
+    
+    let agent_def = router.select_agent(Some(&selected_agent_type));
     
     let effective_root = resolve_agent_cwd(project_root, args.cwd.as_deref());
     
@@ -1675,191 +2159,71 @@ async fn run_subagent_session(
             agent_def,
         ).await;
     }
-    
-    // 继续前台执行...
-    let subagent_skill_task_context = format!("{} {}", args.description.trim(), args.prompt.trim());
-    
-    // 确定父会话是否在计划模式
-    let parent_in_plan = if let Some(ref pm) = runtime.plan_mode_flag {
-        *pm.lock().await
-    } else {
-        false
-    };
-    
-    // 解析模型：args.model > Agent 配置 > 继承父模型
-    let agent_model_config = agent_def.model();
-    let resolved_agent_model = if args.model.as_deref().map(|m| !m.is_empty()).unwrap_or(false) {
-        // 优先使用用户指定的模型
-        resolve_subagent_model(&runtime.llm_config, args.model.as_deref())
-    } else if agent_model_config.map(|m| m != "inherit").unwrap_or(false) {
-        // 使用 Agent 配置的模型（如果不是 "inherit"）
-        resolve_subagent_model(&runtime.llm_config, agent_model_config)
-    } else {
-        // 继承父会话模型
-        runtime.llm_config.model.clone()
-    };
-    
-    let mut sub_cfg = runtime.llm_config.clone();
-    sub_cfg.model = resolved_agent_model;
-    
-    // Fast existence check for subagent — uses shared process cache, zero I/O on warm hit.
-    let skills_exist = skills::skills_any_exist(&effective_root, &skill_cache).await;
-    
-    // 构建系统提示词
-    let mut prompt_parts: Vec<String> = Vec::new();
-    prompt_parts.push(agent_prompt::build_system_prompt(
-        &effective_root,
-        &sub_cfg.model,
-    ));
-    
-    // memory-agent subagent type: specialized prompt for memory management tasks.
-    let is_memory_agent = args
-        .subagent_type
-        .as_deref()
-        .map(|t| t.eq_ignore_ascii_case("memory-agent") 
-            || t.eq_ignore_ascii_case("memory_agent")
-            || t.eq_ignore_ascii_case("wiki-agent")
-            || t.eq_ignore_ascii_case("wiki_agent"))
-        .unwrap_or(false);
 
-    if is_memory_agent {
-        prompt_parts.push(crate::domain::memory::memory_agent_system_prompt(&effective_root));
-    } else {
-        // 使用 Agent 特定的系统提示词
-        let tool_ctx = ToolContext::new(&effective_root);
-        let agent_specific_prompt = agent_def.system_prompt(&tool_ctx);
-        
-        let nested_agent_note = if runtime.allow_nested_agent {
-            " Nested `Agent` is allowed."
-        } else {
-            ""
-        };
-        let exit_plan_note = if parent_in_plan {
-            " `ExitPlanMode` is available while the parent session is in plan mode."
-        } else {
-            ""
-        };
-        
-        // 构建子 Agent 模式说明
-        let disallowed = agent_def.disallowed_tools()
-            .map(|v| v.join(", "))
-            .unwrap_or_else(|| "none".to_string());
-        
-        let subagent_mode_prompt = format!(
-            "## Sub-agent mode ({})\nYou are an isolated sub-agent running as '{}'. \
-             Use tools as needed. Disallowed tools: {}. \
-             {}{}",
-            agent_def.agent_type(),
-            agent_def.agent_type(),
-            disallowed,
-            exit_plan_note,
-            nested_agent_note
-        );
-        
-        prompt_parts.push(agent_specific_prompt);
-        prompt_parts.push(subagent_mode_prompt);
-    }
-    
-    if let Some(ref u) = sub_cfg.system_prompt {
-        let t = u.trim();
-        if !t.is_empty() {
-            prompt_parts.push(t.to_string());
-        }
-    }
-    if skills_exist && !agent_def.omit_claude_md() {
-        prompt_parts.push(skills::format_skills_discovery_system_section());
-    }
-    sub_cfg.system_prompt = Some(prompt_parts.join("\n\n"));
-    let client = create_client(sub_cfg).map_err(|e| e.to_string())?;
-    let subagent_opts = SubagentFilterOptions {
-        parent_in_plan_mode: parent_in_plan,
-        allow_nested_agent: runtime.allow_nested_agent,
-    };
-    let mut tools = build_subagent_tool_schemas(
+    run_subagent_session_foreground_inner(
+        app,
+        message_id,
+        session_id,
+        tool_results_dir,
         &effective_root,
-        skills_exist,
-        subagent_opts,
+        session_todos,
+        session_agent_tasks,
+        args,
+        runtime,
+        subagent_execute_depth,
+        brave_search_api_key,
+        skill_cache,
+        agent_def,
+        None,
+        None,
     )
-    .await;
-    
-    // 应用 Agent 特定的工具限制
-    if let Some(ref allowed) = agent_def.allowed_tools() {
-        // 如果指定了允许的工具列表，只保留这些工具
-        let allowed_set: std::collections::HashSet<_> = allowed.iter().cloned().collect();
-        tools.retain(|t| allowed_set.contains(&t.name));
-    }
-    if let Some(ref disallowed) = agent_def.disallowed_tools() {
-        // 移除禁止的工具
-        let disallowed_set: std::collections::HashSet<_> = disallowed.iter().cloned().collect();
-        tools.retain(|t| !disallowed_set.contains(&t.name));
-    }
-    let user_text = format!(
-        "## Sub-agent task: {}\n\n{}",
-        args.description.trim(),
-        args.prompt.trim()
-    );
-    let mut transcript: Vec<Message> = vec![Message::User { content: user_text }];
+    .await
+}
 
-    for _round_idx in 0..MAX_SUBAGENT_TOOL_ROUNDS {
-        if *runtime.cancel_flag.read().await {
-            return Err("Sub-agent cancelled.".to_string());
-        }
-        let api_msgs = SessionCodec::to_api_messages(&transcript);
-        let llm_messages = api_messages_to_llm(&api_msgs);
-        let (tool_calls, assistant_text, cancelled) = stream_llm_response_with_cancel(
-            client.as_ref(),
-            app,
-            message_id,
-            &runtime.round_id,
-            &llm_messages,
-            &tools,
-            &runtime.pending_tools,
-            &runtime.cancel_flag,
-            runtime.repo.clone(),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        if cancelled {
-            return Err("Sub-agent cancelled.".to_string());
-        }
-        let tc = completed_to_tool_calls(&tool_calls);
-        transcript.push(Message::Assistant {
-            content: assistant_text.clone(),
-            tool_calls: tc.clone(),
-        });
-        if tool_calls.is_empty() {
-            return Ok(assistant_text);
-        }
-        let results = execute_tool_calls(
-            &tool_calls,
-            app,
-            message_id,
-            session_id,
-            tool_results_dir,
-            &effective_root,
-            session_todos.clone(),
-            session_agent_tasks.clone(),
-            Some(runtime),
-            subagent_execute_depth,
-            Some(subagent_skill_task_context.as_str()),
-            brave_search_api_key.clone(),
-            skill_cache.clone(),
-        )
-        .await;
-        for (tool_use_id, output, _) in &results {
-            transcript.push(Message::Tool {
-                tool_call_id: tool_use_id.clone(),
-                output: output.clone(),
-            });
-        }
+/// Write-through snapshot of a background task to SQLite (best-effort).
+async fn persist_background_agent_task_snapshot(
+    repo: &Arc<Mutex<crate::domain::persistence::SessionRepository>>,
+    task: &crate::domain::agents::background::BackgroundAgentTask,
+) {
+    let guard = repo.lock().await;
+    if let Err(e) = guard.upsert_background_agent_task(task).await {
+        tracing::warn!(target: "omiga::bg_agent", "persist background task failed: {}", e);
     }
-    Err(format!(
-        "Sub-agent exceeded maximum tool rounds ({MAX_SUBAGENT_TOOL_ROUNDS})."
-    ))
+}
+
+/// Sidechain transcript row for a background worker (SQLite `background_agent_messages`).
+async fn persist_background_transcript_message(
+    repo: &Arc<Mutex<crate::domain::persistence::SessionRepository>>,
+    task_id: &str,
+    session_id: &str,
+    message: &Message,
+) {
+    let guard = repo.lock().await;
+    if let Err(e) = guard
+        .append_background_agent_message(task_id, session_id, message)
+        .await
+    {
+        tracing::warn!(target: "omiga::bg_agent", "persist bg transcript message failed: {}", e);
+    }
+}
+
+/// User-visible line in the sidechain when the background worker stops due to cancellation.
+const BG_SIDECHAIN_CANCEL_NOTICE: &str =
+    "[系统] 后台任务已取消（用户或系统终止了运行）。";
+
+async fn persist_background_cancel_notice(
+    repo: &Arc<Mutex<crate::domain::persistence::SessionRepository>>,
+    task_id: &str,
+    session_id: &str,
+) {
+    let m = Message::User {
+        content: BG_SIDECHAIN_CANCEL_NOTICE.to_string(),
+    };
+    persist_background_transcript_message(repo, task_id, session_id, &m).await;
 }
 
 /// 启动后台 Agent 任务
-async fn spawn_background_agent(
+pub(crate) async fn spawn_background_agent(
     app: &AppHandle,
     message_id: &str,
     session_id: &str,
@@ -1886,12 +2250,20 @@ async fn spawn_background_agent(
             message_id.to_string(),
         )
         .await;
+
+    let bg_repo = runtime.repo.clone();
+    if let Some(task) = manager.get_task(&task_id).await {
+        persist_background_agent_task_snapshot(&bg_repo, &task).await;
+    }
     
     // 获取输出文件路径
     let output_path = crate::domain::agents::background::get_background_agent_output_path(app, session_id, &task_id)?;
     
     // 更新任务状态为运行中
     manager.update_task_status(&task_id, BackgroundAgentStatus::Running).await;
+    if let Some(task) = manager.get_task(&task_id).await {
+        persist_background_agent_task_snapshot(&bg_repo, &task).await;
+    }
     
     // 发送更新事件
     if let Some(task) = manager.get_task(&task_id).await {
@@ -1906,6 +2278,7 @@ async fn spawn_background_agent(
     let effective_root_clone = effective_root.to_path_buf();
     let args_clone = args.clone();
     let runtime_clone = runtime.clone();
+    let bg_repo_spawn = bg_repo.clone();
     let brave_search_api_key_clone = brave_search_api_key.clone();
     let skill_cache_clone = skill_cache.clone();
     let task_id_clone = task_id.clone();
@@ -1945,6 +2318,7 @@ async fn spawn_background_agent(
             brave_search_api_key_clone,
             skill_cache_clone,
             cancel_token,
+            &task_id_clone,
         ).await;
         
         let manager = crate::domain::agents::background::get_background_agent_manager();
@@ -1973,6 +2347,10 @@ async fn spawn_background_agent(
                 let _ = manager.set_task_error(&task_id_clone, e).await;
             }
         }
+
+        if let Some(task) = manager.get_task(&task_id_clone).await {
+            persist_background_agent_task_snapshot(&bg_repo_spawn, &task).await;
+        }
         
         // 发送完成事件
         if let Some(task) = manager.get_task(&task_id_clone).await {
@@ -1990,26 +2368,43 @@ async fn spawn_background_agent(
     ))
 }
 
-/// 内部子 Agent 执行函数（用于后台任务）
+/// 后台 Worker：与前台共享同一套子 Agent ReAct 循环（含取消与跟进队列）。
 async fn run_subagent_session_internal(
-    _app: &AppHandle,
-    _message_id: &str,
-    _session_id: &str,
-    _tool_results_dir: &std::path::Path,
-    _effective_root: &std::path::Path,
-    _session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
-    _session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
-    _args: &crate::domain::tools::agent::AgentArgs,
-    _runtime: &AgentLlmRuntime,
-    _subagent_execute_depth: u8,
-    _brave_search_api_key: Option<String>,
-    _skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
-    _cancel_token: tokio_util::sync::CancellationToken,
+    app: &AppHandle,
+    message_id: &str,
+    session_id: &str,
+    tool_results_dir: &std::path::Path,
+    effective_root: &std::path::Path,
+    session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
+    session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
+    args: &crate::domain::tools::agent::AgentArgs,
+    runtime: &AgentLlmRuntime,
+    subagent_execute_depth: u8,
+    brave_search_api_key: Option<String>,
+    skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+    cancel_token: tokio_util::sync::CancellationToken,
+    background_task_id: &str,
 ) -> Result<String, String> {
-    // 简化版：直接调用现有的执行逻辑，但使用传入的 cancel_token
-    // 实际实现需要重构现有代码以支持外部 cancel_token
-    // 这里作为占位符，返回成功
-    Ok("Background agent execution placeholder".to_string())
+    let router = crate::domain::agents::get_agent_router();
+    let agent_def = router.select_agent(args.subagent_type.as_deref());
+    run_subagent_session_foreground_inner(
+        app,
+        message_id,
+        session_id,
+        tool_results_dir,
+        effective_root,
+        session_todos,
+        session_agent_tasks,
+        args,
+        runtime,
+        subagent_execute_depth,
+        brave_search_api_key,
+        skill_cache,
+        agent_def,
+        Some(&cancel_token),
+        Some(background_task_id),
+    )
+    .await
 }
 
 /// Returns true for tools that are safe to execute concurrently:
@@ -2022,6 +2417,261 @@ fn is_parallelizable_tool(tool_name: &str) -> bool {
             "web_search" | "WebSearch" | "web_fetch" | "WebFetch"
             | "file_read" | "Read" | "glob" | "Glob" | "grep" | "Grep"
         )
+}
+
+fn matches_ask_user_question_name(name: &str) -> bool {
+    let n = name.trim();
+    n.eq_ignore_ascii_case("ask_user_question")
+        || n.eq_ignore_ascii_case("AskUserQuestion")
+}
+
+fn ask_user_waiter_key(session_id: &str, message_id: &str, tool_use_id: &str) -> String {
+    format!("{}\x1f{}\x1f{}", session_id, message_id, tool_use_id)
+}
+
+async fn cancel_ask_user_waiters_for_message(
+    waiters: &Arc<Mutex<HashMap<String, AskUserWaiter>>>,
+    session_id: &str,
+    message_id: &str,
+) {
+    let prefix = format!("{}\x1f{}\x1f", session_id, message_id);
+    let mut map = waiters.lock().await;
+    let keys: Vec<String> = map
+        .keys()
+        .filter(|k| k.starts_with(&prefix))
+        .cloned()
+        .collect();
+    for k in keys {
+        if let Some(w) = map.remove(&k) {
+            let _ = w.tx.send(Err("User cancelled before answering.".to_string()));
+        }
+    }
+}
+
+fn build_ask_user_success_output(
+    questions: &[ask_user_question::QuestionItem],
+    answers: &serde_json::Value,
+) -> Result<String, String> {
+    let obj = answers
+        .as_object()
+        .ok_or_else(|| "answers must be a JSON object".to_string())?;
+    for q in questions {
+        let qt = q.question.trim();
+        if !obj.contains_key(qt) {
+            return Err(format!("Missing answer for question: {}", q.question));
+        }
+    }
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "questions".to_string(),
+        serde_json::to_value(questions).map_err(|e| e.to_string())?,
+    );
+    body.insert(
+        "answers".to_string(),
+        serde_json::Value::Object(obj.clone()),
+    );
+    body.insert(
+        "_omiga".to_string(),
+        serde_json::json!("User answered via Omiga chat UI."),
+    );
+    serde_json::to_string_pretty(&serde_json::Value::Object(body)).map_err(|e| e.to_string())
+}
+
+/// Chat path: block until the user submits answers in the Omiga UI (or cancel).
+async fn execute_ask_user_question_interactive(
+    tool_use_id: String,
+    tool_name: String,
+    arguments: String,
+    app: AppHandle,
+    message_id: String,
+    session_id: String,
+    tool_results_dir: &Path,
+    waiters: Arc<Mutex<HashMap<String, AskUserWaiter>>>,
+    cancel_flag: Option<Arc<RwLock<bool>>>,
+) -> (String, String, bool) {
+    let args: ask_user_question::AskUserQuestionArgs = match serde_json::from_str(&arguments) {
+        Err(e) => {
+            let error_msg = format!("Failed to parse ask_user_question arguments: {}", e);
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            return (tool_use_id, error_msg, true);
+        }
+        Ok(a) => a,
+    };
+    if let Err(e) = ask_user_question::validate_ask_user_question_args(&args) {
+        let error_msg = format!("Invalid ask_user_question arguments: {}", e);
+        let _ = app.emit(
+            &format!("chat-stream-{}", message_id),
+            &StreamOutputItem::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                name: tool_name.clone(),
+                input: arguments.clone(),
+                output: error_msg.clone(),
+                is_error: true,
+            },
+        );
+        return (tool_use_id, error_msg, true);
+    }
+
+    let key = ask_user_waiter_key(&session_id, &message_id, &tool_use_id);
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<Result<serde_json::Value, String>>();
+    {
+        let mut map = waiters.lock().await;
+        map.insert(key.clone(), AskUserWaiter { tx });
+    }
+
+    let questions_value = match serde_json::to_value(&args.questions) {
+        Ok(v) => v,
+        Err(e) => {
+            let mut map = waiters.lock().await;
+            map.remove(&key);
+            let error_msg = format!("Failed to serialize questions: {}", e);
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            return (tool_use_id, error_msg, true);
+        }
+    };
+
+    let _ = app.emit(
+        &format!("chat-stream-{}", message_id),
+        &StreamOutputItem::AskUserPending {
+            session_id: session_id.clone(),
+            message_id: message_id.clone(),
+            tool_use_id: tool_use_id.clone(),
+            questions: questions_value,
+        },
+    );
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(120));
+    interval.tick().await;
+    let outcome = loop {
+        tokio::select! {
+            res = &mut rx => {
+                break res;
+            }
+            _ = interval.tick() => {
+                if let Some(ref f) = cancel_flag {
+                    if *f.read().await {
+                        let mut map = waiters.lock().await;
+                        if let Some(w) = map.remove(&key) {
+                            let _ = w.tx.send(Err(
+                                "User cancelled before answering.".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    {
+        let mut map = waiters.lock().await;
+        map.remove(&key);
+    }
+
+    let answers_val = match outcome {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: e.clone(),
+                    is_error: true,
+                },
+            );
+            return (tool_use_id, e, true);
+        }
+        Err(_) => {
+            let err = "Ask user channel closed unexpectedly.".to_string();
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: err.clone(),
+                    is_error: true,
+                },
+            );
+            return (tool_use_id, err, true);
+        }
+    };
+
+    let output_text = match build_ask_user_success_output(&args.questions, &answers_val) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: e.clone(),
+                    is_error: true,
+                },
+            );
+            return (tool_use_id, e, true);
+        }
+    };
+
+    let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
+        let prefix = truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
+        format!(
+            "{}\n\n[Output truncated... {} total characters]",
+            prefix,
+            output_text.len()
+        )
+    } else {
+        output_text.clone()
+    };
+    let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+        let prefix = truncate_utf8_prefix(&arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+        format!(
+            "{}\n\n[Input truncated... {} total characters]",
+            prefix,
+            arguments.len()
+        )
+    } else {
+        arguments.clone()
+    };
+
+    let _ = app.emit(
+        &format!("chat-stream-{}", message_id),
+        &StreamOutputItem::ToolResult {
+            tool_use_id: tool_use_id.clone(),
+            name: tool_name.clone(),
+            input: display_input,
+            output: display_output,
+            is_error: false,
+        },
+    );
+
+    let model_output = process_tool_output_for_model(
+        output_text.clone(),
+        &tool_use_id,
+        tool_results_dir,
+    )
+    .await;
+    (tool_use_id, model_output, false)
 }
 
 /// Execute tool calls and return results.
@@ -2045,6 +2695,8 @@ async fn execute_tool_calls(
     skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
 ) -> Vec<(String, String, bool)> {
     use futures::future::join_all;
+
+    let cancel_flag = agent_runtime.map(|r| r.cancel_flag.clone());
 
     // (tool_use_id, output, is_error)
     let mut results = Vec::new();
@@ -2154,6 +2806,7 @@ async fn execute_tool_calls(
                     skill_task_context.map(str::to_owned),
                     brave_search_api_key.clone(),
                     skill_cache.clone(),
+                    cancel_flag.clone(),
                 )
             })
             .collect();
@@ -2183,6 +2836,7 @@ async fn execute_tool_calls(
             skill_task_context.map(str::to_owned),
             brave_search_api_key.clone(),
             skill_cache.clone(),
+            cancel_flag.clone(),
         )
         .await;
         ordered_results[idx] = Some(res);
@@ -2210,6 +2864,7 @@ async fn execute_one_tool(
     skill_task_context: Option<String>,
     brave_search_api_key: Option<String>,
     skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+    cancel_flag: Option<Arc<RwLock<bool>>>,
 ) -> (String, String, bool) {
     let tool_use_id = &tool_use_id;
     let tool_name = &tool_name;
@@ -2842,10 +3497,10 @@ async fn execute_one_tool(
             // Note: This is a placeholder - the legacy pool is no longer used
             // as all connections go through the new manager
             let mcp_pool_legacy: Option<
-                std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, crate::domain::mcp_client::McpLiveConnection>>>
+                std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, crate::domain::mcp::client::McpLiveConnection>>>
             > = None;
 
-            match crate::domain::mcp_tool_dispatch::execute_mcp_tool_call(
+            match crate::domain::mcp::tool_dispatch::execute_mcp_tool_call(
                 project_root,
                 tool_name,
                 arguments,
@@ -2911,6 +3566,22 @@ async fn execute_one_tool(
                 }
             }
         } else {
+            if matches_ask_user_question_name(tool_name) {
+                if let Some(state) = app.try_state::<OmigaAppState>() {
+                    return execute_ask_user_question_interactive(
+                        tool_use_id.to_string(),
+                        tool_name.to_string(),
+                        arguments.to_string(),
+                        app.clone(),
+                        message_id.to_string(),
+                        session_id.to_string(),
+                        tool_results_dir,
+                        state.chat.ask_user_waiters.clone(),
+                        cancel_flag.clone(),
+                    )
+                    .await;
+                }
+            }
             let ctx = ToolContext::new(project_root.to_path_buf())
                 .with_todos(session_todos.clone())
                 .with_agent_tasks(session_agent_tasks.clone())
@@ -3040,12 +3711,57 @@ async fn execute_one_tool(
     result
 }
 
+/// Submit answers for a blocked `ask_user_question` tool call (chat UI).
+#[tauri::command]
+pub async fn submit_ask_user_answer(
+    app_state: State<'_, OmigaAppState>,
+    session_id: String,
+    message_id: String,
+    tool_use_id: String,
+    answers: serde_json::Value,
+) -> CommandResult<()> {
+    let key = ask_user_waiter_key(&session_id, &message_id, &tool_use_id);
+    let mut map = app_state.chat.ask_user_waiters.lock().await;
+    let Some(waiter) = map.remove(&key) else {
+        return Err(OmigaError::Chat(ChatError::StreamError(
+            "No pending ask_user_question for this tool call (already answered or expired)."
+                .to_string(),
+        )));
+    };
+    drop(map);
+    let _ = waiter.tx.send(Ok(answers));
+    Ok(())
+}
+
 /// Cancel an in-progress stream by message_id
 #[tauri::command]
 pub async fn cancel_stream(
     app_state: State<'_, OmigaAppState>,
     message_id: String,
 ) -> CommandResult<()> {
+    let session_for_waiters = {
+        let ar = app_state.chat.active_rounds.lock().await;
+        ar.get(&message_id).map(|r| r.session_id.clone())
+    };
+    if let Some(ref sid) = session_for_waiters {
+        cancel_ask_user_waiters_for_message(
+            &app_state.chat.ask_user_waiters,
+            sid,
+            &message_id,
+        )
+        .await;
+    } else {
+        let repo = app_state.repo.lock().await;
+        if let Ok(Some(round)) = repo.get_round_by_message_id(&message_id).await {
+            cancel_ask_user_waiters_for_message(
+                &app_state.chat.ask_user_waiters,
+                &round.session_id,
+                &message_id,
+            )
+            .await;
+        }
+    }
+
     // Look up the round by message_id
     let repo = app_state.repo.lock().await;
 
@@ -3303,12 +4019,29 @@ pub struct ApiKeyStatus {
     pub message: Option<String>,
 }
 
+/// 初始 Todo 项（用于 Plan mode）
+#[derive(Debug, Clone, Serialize)]
+pub struct InitialTodoItem {
+    pub id: String,
+    pub content: String,
+    pub status: String, // "pending" | "in_progress" | "completed"
+}
+
 /// Response from send_message
 #[derive(Debug, Serialize)]
 pub struct MessageResponse {
     pub message_id: String,
     pub session_id: String,
     pub round_id: String,
+    /// `leader` (default) | `background_followup_queued` when text was routed to a bg task queue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_kind: Option<String>,
+    /// 调度系统生成的任务执行计划（如果有）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduler_plan: Option<crate::domain::agents::scheduler::SchedulingResult>,
+    /// Plan mode 下的初始 todo 列表
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_todos: Option<Vec<InitialTodoItem>>,
 }
 
 /// Test if the LLM model is available and responding
@@ -3406,6 +4139,154 @@ pub struct SendMessageRequest {
     pub session_name: Option<String>,
     #[serde(default)]
     pub use_tools: bool,
+    /// Optional routing: omit / `leader` = main session; `bg:<task_id>` = queue follow-up for that background Agent task.
+    #[serde(default, rename = "inputTarget")]
+    pub input_target: Option<String>,
+    /// Specialist agent id from [`list_available_agents`] (e.g. Explore, Plan). Omit or `general-purpose` for default.
+    #[serde(default, rename = "composerAgentType")]
+    pub composer_agent_type: Option<String>,
+    /// `ask` | `auto` | `bypass` — user-facing permission stance for this turn.
+    #[serde(default, rename = "permissionMode")]
+    pub permission_mode: Option<String>,
+}
+
+/// Background Agent tasks for one session (Claude Code–style teammate follow-ups).
+/// Merges SQLite rows with in-memory manager so live tasks overlay DB after restart.
+#[tauri::command]
+pub async fn list_session_background_tasks(
+    app_state: State<'_, OmigaAppState>,
+    session_id: String,
+) -> CommandResult<Vec<crate::domain::agents::background::BackgroundAgentTask>> {
+    let mgr = crate::domain::agents::background::get_background_agent_manager();
+    let from_mem = mgr.get_session_tasks(&session_id).await;
+
+    let mut from_db = {
+        let repo = app_state.repo.lock().await;
+        repo.list_background_agent_tasks_for_session(&session_id)
+            .await
+            .map_err(|e| OmigaError::Persistence(e.to_string()))?
+    };
+
+    for t in from_mem {
+        if let Some(existing) = from_db.iter_mut().find(|x| x.task_id == t.task_id) {
+            *existing = t;
+        } else {
+            from_db.push(t);
+        }
+    }
+    from_db.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(from_db)
+}
+
+/// Load persisted sidechain transcript for one background Agent task (teammate view).
+#[tauri::command]
+pub async fn load_background_agent_transcript(
+    app_state: State<'_, OmigaAppState>,
+    session_id: String,
+    task_id: String,
+) -> CommandResult<Vec<Message>> {
+    let repo = app_state.repo.lock().await;
+    let task = repo
+        .get_background_agent_task_by_id(&task_id)
+        .await
+        .map_err(|e| OmigaError::Persistence(e.to_string()))?;
+    let Some(task) = task else {
+        return Err(OmigaError::NotFound {
+            resource: format!("background task {}", task_id),
+        });
+    };
+    if task.session_id != session_id {
+        return Err(OmigaError::Chat(ChatError::StreamError(
+            "background task does not belong to this session".to_string(),
+        )));
+    }
+    repo.list_background_agent_messages_for_task(&task_id)
+        .await
+        .map_err(|e| OmigaError::Persistence(e.to_string()))
+}
+
+/// Cancel a background Agent task: cancellation token + memory state, write-through to SQLite,
+/// and DB-only reconcile when the worker is gone (e.g. after app restart) but the row is still pending/running.
+#[tauri::command]
+pub async fn cancel_background_agent_task(
+    app: tauri::AppHandle,
+    app_state: State<'_, OmigaAppState>,
+    session_id: String,
+    task_id: String,
+) -> CommandResult<crate::domain::agents::background::BackgroundAgentTask> {
+    use crate::domain::agents::background::{
+        emit_background_agent_complete, emit_background_agent_update,
+        get_background_agent_manager, BackgroundAgentStatus,
+    };
+
+    let mgr = get_background_agent_manager();
+
+    if let Some(existing) = mgr.get_task(&task_id).await {
+        if existing.session_id != session_id {
+            return Err(OmigaError::Chat(ChatError::StreamError(
+                "background task does not belong to this session".to_string(),
+            )));
+        }
+    }
+
+    if let Some(task) = mgr.cancel_task(&task_id).await {
+        persist_background_agent_task_snapshot(&app_state.repo, &task).await;
+        if let Err(e) = emit_background_agent_update(&app, &task) {
+            tracing::warn!(target: "omiga::bg_agent", "emit background-agent-update failed: {}", e);
+        }
+        if let Err(e) = emit_background_agent_complete(&app, &task) {
+            tracing::warn!(target: "omiga::bg_agent", "emit background-agent-complete failed: {}", e);
+        }
+        return Ok(task);
+    }
+
+    let repo = app_state.repo.lock().await;
+    let row = repo
+        .get_background_agent_task_by_id(&task_id)
+        .await
+        .map_err(|e| OmigaError::Persistence(e.to_string()))?;
+
+    let Some(mut task) = row else {
+        return Err(OmigaError::NotFound {
+            resource: format!("background task {}", task_id),
+        });
+    };
+
+    if task.session_id != session_id {
+        return Err(OmigaError::Chat(ChatError::StreamError(
+            "background task does not belong to this session".to_string(),
+        )));
+    }
+
+    match task.status {
+        BackgroundAgentStatus::Completed
+        | BackgroundAgentStatus::Failed
+        | BackgroundAgentStatus::Cancelled => {
+            drop(repo);
+            return Ok(task);
+        }
+        BackgroundAgentStatus::Pending | BackgroundAgentStatus::Running => {
+            task.status = BackgroundAgentStatus::Cancelled;
+            task.completed_at = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            );
+            repo
+                .upsert_background_agent_task(&task)
+                .await
+                .map_err(|e| OmigaError::Persistence(e.to_string()))?;
+            drop(repo);
+            if let Err(e) = emit_background_agent_update(&app, &task) {
+                tracing::warn!(target: "omiga::bg_agent", "emit background-agent-update failed: {}", e);
+            }
+            if let Err(e) = emit_background_agent_complete(&app, &task) {
+                tracing::warn!(target: "omiga::bg_agent", "emit background-agent-complete failed: {}", e);
+            }
+            Ok(task)
+        }
+    }
 }
 
 /// Provider configuration entry for multi-provider management
@@ -3756,6 +4637,101 @@ pub async fn quick_switch_provider(
         model: Some(config.model),
         base_url: config.base_url,
     })
+}
+
+// ─── Agent Scheduler ────────────────────────────────────────────────────────
+
+/// Request body for `run_agent_schedule`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunAgentScheduleRequest {
+    /// Free-form user request used for task decomposition.
+    pub user_request: String,
+    /// Working directory (project root) for all subtasks.
+    pub project_root: String,
+    /// Session id for tool-results dir and background-task attribution.
+    pub session_id: String,
+    /// Max agents to spawn in parallel (default 5).
+    #[serde(default)]
+    pub max_agents: Option<usize>,
+    /// Whether to let the planner decompose the request (default true).
+    #[serde(default = "default_auto_decompose")]
+    pub auto_decompose: bool,
+}
+
+fn default_auto_decompose() -> bool { true }
+
+/// Run the agent scheduler: decompose `user_request`, then execute subtasks in
+/// parallel using real LLM sub-agents backed by `spawn_background_agent`.
+///
+/// The caller must have an active LLM session (API key configured). Returns the
+/// full `OrchestrationResult` when all subtasks finish.
+#[tauri::command]
+pub async fn run_agent_schedule(
+    app: tauri::AppHandle,
+    app_state: State<'_, OmigaAppState>,
+    request: RunAgentScheduleRequest,
+) -> CommandResult<crate::domain::agents::scheduler::OrchestrationResult> {
+    use crate::domain::agents::scheduler::{AgentScheduler, SchedulingRequest};
+    use crate::errors::{ChatError, OmigaError};
+
+    // Build LLM config from app state.
+    let llm_config = {
+        let guard = app_state.chat.llm_config.lock().await;
+        guard.clone().ok_or_else(|| OmigaError::Chat(ChatError::ApiKeyMissing))?
+    };
+    if llm_config.api_key.is_empty() {
+        return Err(OmigaError::Chat(ChatError::ApiKeyMissing));
+    }
+
+    // Build a minimal AgentLlmRuntime for the scheduler.
+    let runtime = AgentLlmRuntime {
+        llm_config,
+        round_id: uuid::Uuid::new_v4().to_string(),
+        cancel_flag: std::sync::Arc::new(tokio::sync::RwLock::new(false)),
+        pending_tools: app_state.chat.pending_tools.clone(),
+        repo: app_state.repo.clone(),
+        plan_mode_flag: None,
+        allow_nested_agent: false,
+    };
+
+    let max_agents = request.max_agents.unwrap_or(5);
+    let sched_req = SchedulingRequest::new(request.user_request.clone())
+        .with_project_root(request.project_root.clone())
+        .with_parallel(true)
+        .with_max_agents(max_agents)
+        .with_auto_decompose(request.auto_decompose);
+
+    let scheduler = AgentScheduler::new();
+
+    // Step 1: build the execution plan.
+    let sched_result = scheduler
+        .schedule(sched_req)
+        .await
+        .map_err(|e| OmigaError::Chat(ChatError::StreamError(e)))?;
+
+    tracing::info!(
+        target: "omiga::scheduler",
+        plan_id = %sched_result.plan.plan_id,
+        subtasks = sched_result.plan.subtasks.len(),
+        agents = ?sched_result.selected_agents,
+        "Agent schedule plan built"
+    );
+
+    // Step 2: execute with real agents.
+    let orch_result = scheduler
+        .execute_plan_with_runtime(
+            &sched_result.plan,
+            &SchedulingRequest::new(request.user_request)
+                .with_project_root(request.project_root),
+            &app,
+            &runtime,
+            &request.session_id,
+        )
+        .await
+        .map_err(|e| OmigaError::Chat(ChatError::StreamError(e)))?;
+
+    Ok(orch_result)
 }
 
 /// Helper to expand environment variables

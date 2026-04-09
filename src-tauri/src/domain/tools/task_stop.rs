@@ -1,12 +1,14 @@
 //! Stop a background task — aligned with `TaskStopTool` (aliases: `KillShell`).
 
 use super::{ToolContext, ToolError, ToolSchema};
+use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
 
 pub const DESCRIPTION: &str = r#"Stop a running background task by `task_id` (legacy: `shell_id`).
 
-**Note:** Omiga does not yet expose a unified background task registry from the Tauri shell; use session UI or cancel stream where available."#;
+Cancels the background agent task and returns its final status. Has no effect if the task is already completed, failed, or cancelled."#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskStopArgs {
@@ -40,12 +42,61 @@ impl super::ToolImpl for TaskStopTool {
             });
         };
 
-        Err(ToolError::ExecutionFailed {
-            message: format!(
-                "Background task stop is not wired in Omiga (task_id={}). Use chat cancel or the terminal panel if available.",
-                id
-            ),
-        })
+        let manager = crate::domain::agents::background::get_background_agent_manager();
+
+        // If already finished, just return its current status without modifying it.
+        if let Some(existing) = manager.get_task(id).await {
+            use crate::domain::agents::background::BackgroundAgentStatus;
+            match existing.status {
+                BackgroundAgentStatus::Completed
+                | BackgroundAgentStatus::Failed
+                | BackgroundAgentStatus::Cancelled => {
+                    let text = serde_json::to_string_pretty(&serde_json::json!({
+                        "task_id": id,
+                        "agent_type": existing.agent_type,
+                        "description": existing.description,
+                        "status": format!("{:?}", existing.status),
+                        "note": "Task was already finished; no action taken."
+                    }))
+                    .unwrap_or_default();
+                    return Ok(TextOutput(text).into_stream());
+                }
+                _ => {}
+            }
+        } else {
+            return Err(ToolError::ExecutionFailed {
+                message: format!("Background task '{}' not found.", id),
+            });
+        }
+
+        match manager.cancel_task(id).await {
+            Some(task) => {
+                let text = serde_json::to_string_pretty(&serde_json::json!({
+                    "task_id": id,
+                    "agent_type": task.agent_type,
+                    "description": task.description,
+                    "status": "Cancelled",
+                }))
+                .unwrap_or_default();
+                Ok(TextOutput(text).into_stream())
+            }
+            None => Err(ToolError::ExecutionFailed {
+                message: format!("Failed to cancel task '{}'.", id),
+            }),
+        }
+    }
+}
+
+struct TextOutput(String);
+
+impl StreamOutput for TextOutput {
+    fn into_stream(self) -> Pin<Box<dyn futures::Stream<Item = StreamOutputItem> + Send>> {
+        use futures::stream;
+        Box::pin(stream::iter(vec![
+            StreamOutputItem::Start,
+            StreamOutputItem::Content(self.0),
+            StreamOutputItem::Complete,
+        ]))
     }
 }
 

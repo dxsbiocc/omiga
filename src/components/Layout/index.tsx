@@ -15,7 +15,7 @@ export function Layout({ children }: LayoutProps) {
         height: "100vh",
         width: "100vw",
         overflow: "hidden",
-        bgcolor: "background.default",
+        bgcolor: "transparent",
       }}
     >
       <Box

@@ -34,6 +34,14 @@ pub enum StreamOutputItem {
         output: String,
         is_error: bool,
     },
+    /// `ask_user_question` is waiting for the user to submit choices in the chat UI.
+    #[serde(rename = "ask_user_pending")]
+    AskUserPending {
+        session_id: String,
+        message_id: String,
+        tool_use_id: String,
+        questions: serde_json::Value,
+    },
     /// Stdout line from bash
     #[serde(rename = "stdout")]
     Stdout(String),

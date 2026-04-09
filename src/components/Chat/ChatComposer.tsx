@@ -1,4 +1,14 @@
-import { useEffect, useState, useMemo } from "react";
+import {
+  useEffect,
+  useState,
+  useMemo,
+  useRef,
+  useCallback,
+  type Ref,
+  type MutableRefObject,
+  type KeyboardEvent,
+} from "react";
+import { FileIcon, FolderIcon } from "react-material-icon-theme";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Box,
@@ -17,6 +27,11 @@ import {
   FormControlLabel,
   Checkbox,
   Paper,
+  Chip,
+  Popover,
+  List,
+  ListItemButton,
+  CircularProgress,
   alpha,
   useTheme,
 } from "@mui/material";
@@ -27,22 +42,30 @@ import {
   Mic,
   Computer,
   PanTool,
-  Assignment,
   WarningAmber,
-  Extension,
-  Settings as SettingsIcon,
   FolderOpen,
   Hub,
-  AttachFile,
   Tag,
   Square,
+  SmartToy,
+  ForumOutlined,
+  Close,
+  ArticleOutlined,
+  InsertDriveFile,
 } from "@mui/icons-material";
 import {
   useUiStore,
   useChatComposerStore,
-  type AgentComposerMode,
+  type PermissionMode,
 } from "../../state";
+import { usePencilPalette } from "../../theme";
+import { materialIconFileExtension } from "../../utils/materialIconTheme";
 import { ProviderSwitcher } from "./ProviderSwitcher";
+import type { BackgroundAgentTask } from "./backgroundAgentTypes";
+import {
+  canSendFollowUpToTask,
+  shortBgTaskLabel,
+} from "./backgroundAgentTypes";
 
 export interface GitWorkspaceInfo {
   isGit: boolean;
@@ -58,31 +81,107 @@ function shortRepoLabel(path: string): string {
   return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
 }
 
-const MODE_META: Record<
-  AgentComposerMode,
+const PERMISSION_META: Record<
+  PermissionMode,
   { label: string; hint: string; icon: React.ReactNode }
 > = {
   ask: {
-    label: "询问权限",
-    hint: "修改前始终询问。",
+    label: "每次询问",
+    hint: "修改或敏感操作前询问确认。",
     icon: <PanTool fontSize="small" />,
   },
   auto: {
-    label: "自动接受编辑",
-    hint: "自动接受所有文件编辑。",
+    label: "自动处理",
+    hint: "自动接受合理的文件编辑。",
     icon: <Code fontSize="small" />,
   },
-  plan: {
-    label: "计划模式",
-    hint: "先制定计划再修改。",
-    icon: <Assignment fontSize="small" />,
-  },
   bypass: {
-    label: "绕过权限",
-    hint: "接受所有权限（谨慎使用）。",
+    label: "跳过权限",
+    hint: "尽量减少权限提示（谨慎使用）。",
     icon: <WarningAmber fontSize="small" />,
   },
 };
+
+type AvailableAgentRow = { agentType: string; description: string };
+
+function normalizeFsPath(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
+/** 文件选择列表：取路径最后一段作为与 FileTree 一致的图标名 */
+function filePickerBasename(p: string): string {
+  const n = normalizeFsPath(p);
+  const parts = n.split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? n;
+}
+
+/** 与文件管理器列表相同的扩展名图标 + 圆角底（ui-ux-pro-max：一致视觉、清晰层级） */
+function ComposerFilePickerRowIcon({
+  path,
+  isFile,
+}: {
+  path: string;
+  isFile: boolean;
+}) {
+  const pen = usePencilPalette();
+  const theme = useTheme();
+  const light = theme.palette.mode === "dark";
+  const name = filePickerBasename(path);
+  const size = 18;
+  return (
+    <Box
+      sx={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 28,
+        height: 28,
+        borderRadius: "8px",
+        bgcolor: pen.iconChipBg,
+        flexShrink: 0,
+        border: `1px solid ${pen.borderSubtle}`,
+      }}
+    >
+      {isFile ? (
+        <FileIcon
+          fileName={name}
+          fileExtension={materialIconFileExtension(name)}
+          size={size}
+          light={light}
+        />
+      ) : (
+        <FolderIcon
+          folderName={name}
+          isOpen={false}
+          isRoot={false}
+          size={size}
+          light={light}
+          theme="specific"
+        />
+      )}
+    </Box>
+  );
+}
+
+function formatBytesShort(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n < 1024) return `${Math.round(n)} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Matches `glob_files` / `GlobMatch` from Tauri */
+interface GlobMatchRow {
+  path: string;
+  is_file: boolean;
+  size: number;
+}
+
+function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
+  if (ref == null) return;
+  if (typeof ref === "function") ref(value);
+  else (ref as MutableRefObject<T | null>).current = value;
+}
 
 export interface ChatComposerProps {
   sessionId: string | null;
@@ -96,8 +195,21 @@ export interface ChatComposerProps {
   inputRef: React.Ref<HTMLTextAreaElement>;
   isStreaming: boolean;
   isConnecting: boolean;
-  /** Stop streaming (shown in toolbar when generating; Enter 仍可发送新消息需先停止) */
+  /** Stop streaming (toolbar while generating; main session can queue the next message instead). */
   onCancel?: () => void;
+  /** Background Agent tasks for this session (teammate follow-up routing). */
+  backgroundTasks?: BackgroundAgentTask[];
+  /** When set, sends use `inputTarget: bg:<taskId>` instead of the main session. */
+  followUpTaskId?: string | null;
+  onFollowUpTaskIdChange?: (taskId: string | null) => void;
+  /** When true, input stays enabled during main-session streaming (message queue + bg follow-up). */
+  allowInputWhileStreaming?: boolean;
+  /** Preview of the FIFO queue (head and/or count) until each turn finishes and the next sends. */
+  queuedMessageHint?: string | null;
+  /** Cancel a pending/running background Agent task (Rust `cancel_background_agent_task`). */
+  onCancelBackgroundTask?: (taskId: string) => void;
+  /** Open sidechain transcript drawer (`load_background_agent_transcript`). */
+  onOpenBackgroundTranscript?: (taskId: string) => void;
 }
 
 export function ChatComposer({
@@ -112,14 +224,36 @@ export function ChatComposer({
   isStreaming,
   isConnecting,
   onCancel,
+  backgroundTasks = [],
+  followUpTaskId = null,
+  onFollowUpTaskIdChange,
+  allowInputWhileStreaming = false,
+  queuedMessageHint = null,
+  onCancelBackgroundTask,
+  onOpenBackgroundTranscript,
 }: ChatComposerProps) {
   const theme = useTheme();
+  const pen = usePencilPalette();
   const accent = theme.palette.primary.main;
   const paper = theme.palette.background.paper;
   const def = theme.palette.background.default;
   const ink = theme.palette.text.primary;
   const mut = theme.palette.text.secondary;
+  const warningMain = theme.palette.warning.main;
+  const errorMain = theme.palette.error.main;
+  const errorDark = theme.palette.error.dark;
   const isDark = theme.palette.mode === "dark";
+  /** Divider 下工具栏：与 IconButton 一致，避免 32 / 36 混用 */
+  const COMPOSER_TOOLBAR_CONTROL_PX = 36;
+  /** 首行 Agent / 附件 Chip 统一高度 */
+  const COMPOSER_INLINE_CHIP_PX = 28;
+  /** 与 `--composer-fs` / `--composer-lh` 一致，用于首行与 Chip 垂直对齐 */
+  const COMPOSER_FS_PX = 15;
+  const COMPOSER_LH = 1.55;
+  const COMPOSER_LINE_BOX_PX = COMPOSER_FS_PX * COMPOSER_LH;
+  /** 使 textarea 首行与 28px Chip 垂直居中对齐（flex-start 时补偿行高差） */
+  const COMPOSER_TEXTAREA_PAD_TOP_WITH_CHIPS =
+    (COMPOSER_INLINE_CHIP_PX - COMPOSER_LINE_BOX_PX) / 2;
   /** Hairline border / shadow tint — theme-aware */
   const edge = (a: number) =>
     alpha(isDark ? theme.palette.common.white : theme.palette.common.black, a);
@@ -129,8 +263,13 @@ export function ChatComposer({
   const setSettingsTabIndex = useUiStore((s) => s.setSettingsTabIndex);
   const setRightPanelMode = useUiStore((s) => s.setRightPanelMode);
   const {
-    agentMode,
-    setAgentMode,
+    permissionMode,
+    setPermissionMode,
+    composerAgentType,
+    setComposerAgentType,
+    composerAttachedPaths,
+    addComposerAttachedPath,
+    popComposerAttachedPath,
     useWorktree,
     setUseWorktree,
     environment,
@@ -140,25 +279,28 @@ export function ChatComposer({
   } = useChatComposerStore();
 
   const [plusAnchor, setPlusAnchor] = useState<null | HTMLElement>(null);
-  const [modeAnchor, setModeAnchor] = useState<null | HTMLElement>(null);
-  const [modelAnchor, setModelAnchor] = useState<null | HTMLElement>(null);
+  const [permissionAnchor, setPermissionAnchor] = useState<null | HTMLElement>(
+    null,
+  );
   const [envAnchor, setEnvAnchor] = useState<null | HTMLElement>(null);
   const [gitInfo, setGitInfo] = useState<GitWorkspaceInfo | null>(null);
-  const [modelLabel, setModelLabel] = useState<string>("模型");
+  const [availableAgents, setAvailableAgents] = useState<AvailableAgentRow[]>(
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
-    invoke<{ model?: string } | null>("get_llm_config_state", {})
-      .then((cfg) => {
-        if (cancelled || !cfg?.model) return;
-        const m = cfg.model;
-        setModelLabel(m.length > 24 ? `${m.slice(0, 22)}…` : m);
+    invoke<AvailableAgentRow[]>("list_available_agents")
+      .then((rows) => {
+        if (!cancelled) setAvailableAgents(rows);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) setAvailableAgents([]);
+      });
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, []);
 
   useEffect(() => {
     if (!workspacePath || needsWorkspacePath) {
@@ -185,6 +327,308 @@ export function ChatComposer({
     return saved ?? gitInfo.currentBranch;
   }, [gitInfo, rootKey, selectedBranchByRoot]);
 
+  const selectedAgentDescription = useMemo(() => {
+    const row = availableAgents.find((a) => a.agentType === composerAgentType);
+    return row?.description ?? "";
+  }, [availableAgents, composerAgentType]);
+
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  /** `/`：选择 Agent（整段输入仅为 `/` 或 `/query`） */
+  const slashParse = useMemo(() => {
+    const t = input;
+    if (!/^\/[^\s]*$/u.test(t)) return { active: false as const, query: "" };
+    return { active: true as const, query: t.slice(1) };
+  }, [input]);
+
+  /** `@`：仅工作区根目录下一层文件/文件夹（整段输入仅为 `@` 或 `@query`） */
+  const fileParse = useMemo(() => {
+    const t = input;
+    if (!/^@[^\s]*$/u.test(t)) return { active: false as const, query: "" };
+    return { active: true as const, query: t.slice(1) };
+  }, [input]);
+
+  const filteredAtAgents = useMemo(() => {
+    if (!slashParse.active) return [];
+    const q = slashParse.query.toLowerCase();
+    return availableAgents.filter((a) => {
+      const id = a.agentType.toLowerCase();
+      return !q || id.startsWith(q) || id.includes(q);
+    });
+  }, [availableAgents, slashParse]);
+
+  const slashFilterKey = useMemo(
+    () => filteredAtAgents.map((a) => a.agentType).join("\u0001"),
+    [filteredAtAgents],
+  );
+
+  const [slashHighlightIndex, setSlashHighlightIndex] = useState(0);
+  const slashHighlightIndexRef = useRef(0);
+  const slashListRef = useRef<HTMLUListElement>(null);
+  /** User clicked outside the / picker; hide until input changes or textarea refocuses. */
+  const [slashPickerDismissed, setSlashPickerDismissed] = useState(false);
+
+  const [fileGlobMatches, setFileGlobMatches] = useState<GlobMatchRow[]>([]);
+  const [fileGlobLoading, setFileGlobLoading] = useState(false);
+  const [fileHighlightIndex, setFileHighlightIndex] = useState(0);
+  const fileHighlightIndexRef = useRef(0);
+  const fileListRef = useRef<HTMLUListElement>(null);
+  const [filePickerDismissed, setFilePickerDismissed] = useState(false);
+
+  useEffect(() => {
+    setSlashPickerDismissed(false);
+    setFilePickerDismissed(false);
+  }, [input]);
+
+  useEffect(() => {
+    slashHighlightIndexRef.current = 0;
+    setSlashHighlightIndex(0);
+  }, [slashFilterKey]);
+
+  useEffect(() => {
+    if (!fileParse.active || needsWorkspacePath || !workspacePath.trim()) {
+      setFileGlobMatches([]);
+      return;
+    }
+    let cancelled = false;
+    setFileGlobLoading(true);
+    invoke<{
+      entries: Array<{
+        name: string;
+        path: string;
+        is_directory: boolean;
+        size?: number | null;
+      }>;
+    }>("list_directory", { path: workspacePath })
+      .then((res) => {
+        if (cancelled) return;
+        const list: GlobMatchRow[] = (res.entries ?? []).map((e) => ({
+          path: e.name,
+          is_file: !e.is_directory,
+          size: typeof e.size === "number" ? e.size : 0,
+        }));
+        list.sort((a, b) => {
+          if (a.is_file !== b.is_file) return a.is_file ? 1 : -1;
+          return normalizeFsPath(a.path).localeCompare(normalizeFsPath(b.path));
+        });
+        setFileGlobMatches(list);
+      })
+      .catch(() => {
+        if (!cancelled) setFileGlobMatches([]);
+      })
+      .finally(() => {
+        if (!cancelled) setFileGlobLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fileParse.active, needsWorkspacePath, workspacePath]);
+
+  const filteredFilePaths = useMemo(() => {
+    if (!fileParse.active) return [];
+    const q = fileParse.query.toLowerCase().trim();
+    let rows = fileGlobMatches;
+    if (q) {
+      rows = rows.filter((m) => {
+        const name = normalizeFsPath(m.path).toLowerCase();
+        return name.includes(q) || name.startsWith(q);
+      });
+    }
+    return rows.slice(0, 200);
+  }, [fileParse, fileGlobMatches]);
+
+  const fileFilterKey = useMemo(
+    () =>
+      filteredFilePaths
+        .map((m) => `${m.is_file ? "f" : "d"}:${m.path}`)
+        .join("\u0001"),
+    [filteredFilePaths],
+  );
+
+  useEffect(() => {
+    fileHighlightIndexRef.current = 0;
+    setFileHighlightIndex(0);
+  }, [fileFilterKey]);
+
+  useEffect(() => {
+    if (!slashParse.active || filteredAtAgents.length === 0) return;
+    const el = slashListRef.current?.querySelector(
+      `[data-slash-index="${slashHighlightIndex}"]`,
+    );
+    el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [
+    slashHighlightIndex,
+    slashParse.active,
+    filteredAtAgents.length,
+    slashFilterKey,
+  ]);
+
+  useEffect(() => {
+    if (!fileParse.active || filteredFilePaths.length === 0) return;
+    const el = fileListRef.current?.querySelector(
+      `[data-file-index="${fileHighlightIndex}"]`,
+    );
+    el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [
+    fileHighlightIndex,
+    fileParse.active,
+    filteredFilePaths.length,
+    fileFilterKey,
+  ]);
+
+  const pickAtAgent = useCallback(
+    (agentType: string) => {
+      setComposerAgentType(agentType);
+      onInputChange("");
+    },
+    [setComposerAgentType, onInputChange],
+  );
+
+  const pickFilePath = useCallback(
+    (relPath: string) => {
+      const safe = normalizeFsPath(relPath).replace(/^\//u, "");
+      if (!safe) return;
+      addComposerAttachedPath(safe);
+      onInputChange("");
+    },
+    [addComposerAttachedPath, onInputChange],
+  );
+
+  const mergedTextareaRef = useCallback(
+    (el: HTMLTextAreaElement | null) => {
+      textareaRef.current = el;
+      assignRef(inputRef, el);
+    },
+    [inputRef],
+  );
+
+  const handleComposerKeyDown = useCallback(
+    (e: KeyboardEvent<HTMLTextAreaElement>) => {
+      const ne = e.nativeEvent;
+      if (ne.isComposing || ne.keyCode === 229) {
+        onKeyDown(e);
+        return;
+      }
+      /* 输入框无内容时退格：先移除末尾附件 Chip，再清除 Agent */
+      if (
+        (e.key === "Backspace" || e.key === "Delete") &&
+        input.trim() === ""
+      ) {
+        if (composerAttachedPaths.length > 0) {
+          e.preventDefault();
+          popComposerAttachedPath();
+          return;
+        }
+        if (composerAgentType !== "auto") {
+          e.preventDefault();
+          setComposerAgentType("auto");
+          return;
+        }
+      }
+      if (fileParse.active) {
+        if (e.key === "Escape") {
+          onInputChange("");
+          e.preventDefault();
+          return;
+        }
+        if (filteredFilePaths.length > 0 && !fileGlobLoading) {
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setFileHighlightIndex((i) => {
+              const next = (i + 1) % filteredFilePaths.length;
+              fileHighlightIndexRef.current = next;
+              return next;
+            });
+            return;
+          }
+          if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setFileHighlightIndex((i) => {
+              const next =
+                (i - 1 + filteredFilePaths.length) % filteredFilePaths.length;
+              fileHighlightIndexRef.current = next;
+              return next;
+            });
+            return;
+          }
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            const idx = fileHighlightIndexRef.current;
+            const row = filteredFilePaths[idx] ?? filteredFilePaths[0];
+            if (row) pickFilePath(row.path);
+            return;
+          }
+          if (e.key === "Tab" && !e.shiftKey) {
+            e.preventDefault();
+            const idx = fileHighlightIndexRef.current;
+            const row = filteredFilePaths[idx] ?? filteredFilePaths[0];
+            if (row) pickFilePath(row.path);
+            return;
+          }
+        }
+      }
+      if (slashParse.active) {
+        if (e.key === "Escape") {
+          onInputChange("");
+          e.preventDefault();
+          return;
+        }
+        if (filteredAtAgents.length > 0) {
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setSlashHighlightIndex((i) => {
+              const next = (i + 1) % filteredAtAgents.length;
+              slashHighlightIndexRef.current = next;
+              return next;
+            });
+            return;
+          }
+          if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setSlashHighlightIndex((i) => {
+              const next =
+                (i - 1 + filteredAtAgents.length) % filteredAtAgents.length;
+              slashHighlightIndexRef.current = next;
+              return next;
+            });
+            return;
+          }
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            const idx = slashHighlightIndexRef.current;
+            const pick = filteredAtAgents[idx] ?? filteredAtAgents[0];
+            if (pick) pickAtAgent(pick.agentType);
+            return;
+          }
+          if (e.key === "Tab" && !e.shiftKey) {
+            e.preventDefault();
+            const idx = slashHighlightIndexRef.current;
+            const pick = filteredAtAgents[idx] ?? filteredAtAgents[0];
+            if (pick) pickAtAgent(pick.agentType);
+            return;
+          }
+        }
+      }
+      onKeyDown(e);
+    },
+    [
+      slashParse.active,
+      fileParse.active,
+      composerAgentType,
+      composerAttachedPaths,
+      filteredAtAgents,
+      filteredFilePaths,
+      fileGlobLoading,
+      input,
+      onInputChange,
+      onKeyDown,
+      pickAtAgent,
+      pickFilePath,
+      popComposerAttachedPath,
+      setComposerAgentType,
+    ],
+  );
+
   const pathLabel = needsWorkspacePath
     ? "选择工作目录"
     : gitInfo?.displayPath
@@ -195,12 +639,132 @@ export function ChatComposer({
     ? "Select a session"
     : needsWorkspacePath
       ? "请先选择工作目录后再发送消息…"
-      : "输入消息，或描述你想在代码库中完成的任务…";
+      : followUpTaskId
+        ? "追加说明将进入该后台 Agent 的下一轮工具循环…"
+        : "输入 / 选择 Agent；输入 @ 从当前工作目录选择…";
 
-  const inputDisabled = !sessionId || isStreaming || isConnecting;
+  const inputDisabled =
+    !sessionId || isConnecting || (isStreaming && !allowInputWhileStreaming);
+
+  const showSlashPopover =
+    slashParse.active &&
+    !slashPickerDismissed &&
+    !inputDisabled &&
+    availableAgents.length > 0;
+
+  const showFilePopover =
+    fileParse.active &&
+    !filePickerDismissed &&
+    !inputDisabled &&
+    !needsWorkspacePath &&
+    Boolean(workspacePath.trim());
+
+  const showComposerAgentChip =
+    composerAgentType !== "general-purpose" && composerAgentType !== "auto";
+  const hasInlineComposerChips =
+    showComposerAgentChip || composerAttachedPaths.length > 0;
+
+  const showBgRouting =
+    Boolean(sessionId) &&
+    !needsWorkspacePath &&
+    backgroundTasks.length > 0 &&
+    typeof onFollowUpTaskIdChange === "function";
 
   return (
     <Stack spacing={0.75}>
+      {queuedMessageHint ? (
+        <Typography
+          variant="caption"
+          sx={{
+            px: 0.5,
+            color: "warning.main",
+            fontWeight: 600,
+            lineHeight: 1.35,
+          }}
+        >
+          队列（FIFO）· 上一条完成后依次发送：{queuedMessageHint}
+        </Typography>
+      ) : null}
+      {showBgRouting ? (
+        <Stack
+          direction="row"
+          alignItems="center"
+          spacing={0.75}
+          flexWrap="wrap"
+          useFlexGap
+        >
+          <Typography variant="caption" color="text.secondary" sx={{ mr: 0.5 }}>
+            发送到
+          </Typography>
+          <Chip
+            size="small"
+            icon={<ForumOutlined sx={{ fontSize: 16 }} />}
+            label="主会话"
+            color={followUpTaskId ? "default" : "primary"}
+            variant={followUpTaskId ? "outlined" : "filled"}
+            onClick={() => onFollowUpTaskIdChange?.(null)}
+            sx={{ fontWeight: followUpTaskId ? 400 : 600 }}
+          />
+          {backgroundTasks.map((t) => {
+            const ok = canSendFollowUpToTask(t.status);
+            const selected = followUpTaskId === t.task_id;
+            return (
+              <Stack
+                key={t.task_id}
+                direction="row"
+                alignItems="center"
+                spacing={0.25}
+              >
+                <Tooltip
+                  title={`${t.agent_type} · ${t.description.slice(0, 200)}${t.description.length > 200 ? "…" : ""}`}
+                >
+                  <span>
+                    <Chip
+                      size="small"
+                      icon={<SmartToy sx={{ fontSize: 16 }} />}
+                      label={`${t.agent_type}: ${shortBgTaskLabel(t, 28)}`}
+                      color={selected ? "secondary" : "default"}
+                      variant={selected ? "filled" : "outlined"}
+                      disabled={!ok}
+                      onClick={() => ok && onFollowUpTaskIdChange?.(t.task_id)}
+                    />
+                  </span>
+                </Tooltip>
+                {onOpenBackgroundTranscript ? (
+                  <Tooltip title="队友记录">
+                    <IconButton
+                      size="small"
+                      aria-label="Background teammate transcript"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenBackgroundTranscript(t.task_id);
+                      }}
+                      sx={{ p: 0.25 }}
+                    >
+                      <ArticleOutlined sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  </Tooltip>
+                ) : null}
+                {ok && onCancelBackgroundTask ? (
+                  <Tooltip title="取消后台任务">
+                    <IconButton
+                      size="small"
+                      aria-label="Cancel background task"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onCancelBackgroundTask(t.task_id);
+                      }}
+                      sx={{ p: 0.25 }}
+                    >
+                      <Close sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  </Tooltip>
+                ) : null}
+              </Stack>
+            );
+          })}
+        </Stack>
+      ) : null}
       <Paper
         elevation={0}
         sx={{
@@ -232,43 +796,421 @@ export function ChatComposer({
         }}
       >
         <Box
-          component="textarea"
-          ref={inputRef}
-          value={input}
-          onChange={(e) => onInputChange(e.target.value)}
-          onKeyDown={onKeyDown}
-          disabled={inputDisabled}
-          placeholder={placeholder}
-          rows={2}
-          aria-label="消息输入"
           sx={{
-            width: "100%",
-            boxSizing: "border-box",
-            border: "none",
-            resize: "none",
-            minHeight: 56,
-            maxHeight: 280,
+            position: "relative",
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "flex-start",
+            gap: 0.75,
             px: 1.75,
             py: 1.15,
-            fontSize: 15,
-            fontFamily: "inherit",
-            lineHeight: 1.55,
-            letterSpacing: "-0.01em",
-            color: ink,
-            bgcolor: "transparent",
-            outline: "none",
-            caretColor: accent,
-            transition: "color 0.15s ease",
-            "&::placeholder": {
-              color: alpha(mut, 0.65),
-              opacity: 1,
-            },
-            "&:disabled": {
-              color: alpha(ink, 0.38),
-              cursor: "not-allowed",
-            },
+            /* 与下方 textarea 首行一致，用于 Agent Chip 与光标垂直对齐 */
+            "--composer-fs": `${COMPOSER_FS_PX}px`,
+            "--composer-lh": COMPOSER_LH,
+            "--composer-chip-h": `${COMPOSER_INLINE_CHIP_PX}px`,
           }}
-        />
+        >
+          {showComposerAgentChip ? (
+            <Tooltip
+              placement="top"
+              enterDelay={250}
+              title={
+                selectedAgentDescription ? (
+                  <Box sx={{ maxWidth: 320 }}>
+                    <Typography
+                      variant="caption"
+                      component="div"
+                      fontWeight={700}
+                      display="block"
+                      sx={{ mb: 0.5 }}
+                    >
+                      /{composerAgentType}
+                    </Typography>
+                    <Typography
+                      variant="caption"
+                      component="div"
+                      sx={{ opacity: 0.92, lineHeight: 1.45 }}
+                    >
+                      {selectedAgentDescription}
+                    </Typography>
+                  </Box>
+                ) : (
+                  `/${composerAgentType}`
+                )
+              }
+            >
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  alignSelf: "flex-start",
+                  flexShrink: 0,
+                  height: "var(--composer-chip-h)",
+                  fontSize: "var(--composer-fs)",
+                  lineHeight: "var(--composer-lh)",
+                }}
+              >
+                <Chip
+                  size="small"
+                  variant="outlined"
+                  icon={<SmartToy sx={{ fontSize: 16, color: accent }} />}
+                  label={`/${composerAgentType}`}
+                  sx={{
+                    flexShrink: 0,
+                    height: "var(--composer-chip-h)",
+                    maxHeight: "var(--composer-chip-h)",
+                    fontWeight: 700,
+                    bgcolor: alpha(accent, isDark ? 0.16 : 0.1),
+                    borderColor: alpha(accent, 0.58),
+                    color: ink,
+                    maxWidth: { xs: 140, sm: 220 },
+                    boxShadow: `0 1px 2px ${edge(0.12)}`,
+                    "& .MuiChip-label": {
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    },
+                    "& .MuiChip-icon": {
+                      marginTop: 0,
+                      marginBottom: 0,
+                    },
+                  }}
+                />
+              </Box>
+            </Tooltip>
+          ) : null}
+          {composerAttachedPaths.length > 0 ? (
+            <Box
+              sx={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                alignContent: "flex-start",
+                alignSelf: "flex-start",
+                gap: 0.25,
+                maxWidth: { xs: "100%", sm: 420 },
+                minHeight: "var(--composer-chip-h)",
+              }}
+            >
+              {composerAttachedPaths.map((p) => (
+                <Tooltip key={p} title={p} placement="top">
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    icon={
+                      <InsertDriveFile sx={{ fontSize: 16, color: accent }} />
+                    }
+                    label={`@${p}`}
+                    sx={{
+                      flexShrink: 0,
+                      height: "var(--composer-chip-h)",
+                      maxHeight: "var(--composer-chip-h)",
+                      maxWidth: 200,
+                      fontWeight: 600,
+                      bgcolor: alpha(accent, isDark ? 0.16 : 0.1),
+                      borderColor: alpha(accent, 0.58),
+                      color: ink,
+                      boxShadow: `0 1px 2px ${edge(0.12)}`,
+                      "& .MuiChip-label": {
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      },
+                      "& .MuiChip-icon": {
+                        marginTop: 0,
+                        marginBottom: 0,
+                      },
+                    }}
+                  />
+                </Tooltip>
+              ))}
+            </Box>
+          ) : null}
+          <Box
+            component="textarea"
+            ref={mergedTextareaRef}
+            value={input}
+            onChange={(e) => onInputChange(e.target.value)}
+            onFocus={() => {
+              if (slashParse.active) setSlashPickerDismissed(false);
+              if (fileParse.active) setFilePickerDismissed(false);
+            }}
+            onKeyDown={handleComposerKeyDown}
+            disabled={inputDisabled}
+            placeholder={placeholder}
+            rows={2}
+            aria-label="消息输入"
+            aria-autocomplete="list"
+            aria-expanded={
+              (showSlashPopover && filteredAtAgents.length > 0) ||
+              (showFilePopover &&
+                (fileGlobLoading || filteredFilePaths.length > 0))
+            }
+            sx={{
+              flex: 1,
+              minWidth: 0,
+              width: 0,
+              boxSizing: "border-box",
+              border: "none",
+              resize: "none",
+              minHeight: 56,
+              maxHeight: 280,
+              px: 0,
+              py: 0,
+              paddingTop: hasInlineComposerChips
+                ? `${COMPOSER_TEXTAREA_PAD_TOP_WITH_CHIPS}px`
+                : 0,
+              fontSize: "var(--composer-fs)",
+              fontFamily: "inherit",
+              lineHeight: "var(--composer-lh)",
+              letterSpacing: "-0.01em",
+              color: ink,
+              bgcolor: "transparent",
+              outline: "none",
+              caretColor: accent,
+              transition: "color 0.15s ease",
+              "&::placeholder": {
+                color: alpha(mut, 0.65),
+                opacity: 1,
+              },
+              "&:disabled": {
+                color: alpha(ink, 0.38),
+                cursor: "not-allowed",
+              },
+            }}
+          />
+          <Popover
+            open={showSlashPopover}
+            anchorEl={textareaRef.current}
+            anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
+            transformOrigin={{ vertical: "top", horizontal: "left" }}
+            disableAutoFocus
+            disableEnforceFocus
+            onClose={(_, reason) => {
+              if (reason === "backdropClick") {
+                setSlashPickerDismissed(true);
+              }
+            }}
+            slotProps={{
+              paper: {
+                sx: {
+                  mt: 0.5,
+                  maxHeight: 280,
+                  width: 320,
+                  borderRadius: 2,
+                  overflow: "hidden",
+                },
+              },
+            }}
+          >
+            <List
+              ref={slashListRef}
+              dense
+              sx={{ py: 0, maxHeight: 260, overflow: "auto" }}
+            >
+              {filteredAtAgents.length === 0 ? (
+                <ListItemButton disabled>
+                  <ListItemText
+                    primary="无匹配 Agent"
+                    secondary="继续输入或按 Esc 取消"
+                  />
+                </ListItemButton>
+              ) : (
+                filteredAtAgents.map((a, i) => (
+                  <Tooltip
+                    key={a.agentType}
+                    title={a.description}
+                    placement="right"
+                    enterDelay={200}
+                  >
+                    <ListItemButton
+                      data-slash-index={i}
+                      selected={i === slashHighlightIndex}
+                      onClick={() => pickAtAgent(a.agentType)}
+                    >
+                      <ListItemIcon sx={{ minWidth: 36 }}>
+                        <SmartToy fontSize="small" />
+                      </ListItemIcon>
+                      <ListItemText primary={`/${a.agentType}`} />
+                    </ListItemButton>
+                  </Tooltip>
+                ))
+              )}
+            </List>
+          </Popover>
+          <Popover
+            open={showFilePopover}
+            anchorEl={textareaRef.current}
+            anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
+            transformOrigin={{ vertical: "top", horizontal: "left" }}
+            disableAutoFocus
+            disableEnforceFocus
+            onClose={(_, reason) => {
+              if (reason === "backdropClick") {
+                setFilePickerDismissed(true);
+              }
+            }}
+            slotProps={{
+              paper: {
+                sx: {
+                  mt: 0.75,
+                  maxHeight: 300,
+                  width: 380,
+                  borderRadius: 2.5,
+                  overflow: "hidden",
+                  bgcolor: alpha(paper, isDark ? 0.98 : 1),
+                  border: `1px solid ${pen.borderSubtle}`,
+                  boxShadow: `
+                    0 4px 6px -1px ${edge(0.08)},
+                    0 12px 28px -4px ${alpha(accent, 0.12)}
+                  `,
+                  backdropFilter: "blur(12px)",
+                  WebkitBackdropFilter: "blur(12px)",
+                },
+              },
+            }}
+          >
+            <Box
+              sx={{
+                px: 1,
+                py: 0.65,
+                borderBottom: `1px solid ${pen.borderSubtle}`,
+                bgcolor: alpha(def, isDark ? 0.5 : 0.65),
+              }}
+            >
+              <Typography
+                variant="caption"
+                sx={{
+                  fontWeight: 700,
+                  letterSpacing: "0.04em",
+                  textTransform: "uppercase",
+                  color: pen.textHeader,
+                  fontSize: 10,
+                }}
+              >
+                工作区文件
+              </Typography>
+              <Typography
+                variant="caption"
+                component="div"
+                sx={{
+                  mt: 0.15,
+                  color: pen.textPath,
+                  fontSize: 11,
+                  lineHeight: 1.35,
+                }}
+              >
+                根目录下一层 · 与侧栏文件列表相同图标
+              </Typography>
+            </Box>
+            <List
+              ref={fileListRef}
+              dense
+              sx={{
+                py: 0,
+                px: 0,
+                maxHeight: 240,
+                overflow: "auto",
+                "& .MuiListItemButton-root": {
+                  minHeight: 32,
+                  py: 0.25,
+                  px: 0.75,
+                  borderRadius: 1.25,
+                  mb: 0,
+                  transition: "background-color 0.15s ease",
+                  "@media (prefers-reduced-motion: reduce)": {
+                    transition: "none",
+                  },
+                },
+                "& .MuiListItemButton-root:hover": {
+                  bgcolor: pen.rowHover,
+                },
+                "& .MuiListItemButton-root.Mui-selected": {
+                  bgcolor: pen.rowSelected,
+                },
+                "& .MuiListItemButton-root.Mui-selected:hover": {
+                  bgcolor: pen.rowSelected,
+                },
+              }}
+            >
+              {fileGlobLoading ? (
+                <ListItemButton
+                  disabled
+                  sx={{ flexDirection: "column", py: 1.25 }}
+                >
+                  <CircularProgress
+                    size={22}
+                    sx={{ color: pen.loadingSpinner, mb: 0.75 }}
+                  />
+                  <ListItemText
+                    primary="正在加载当前目录…"
+                    secondary="仅显示工作区根目录下的文件与文件夹"
+                    primaryTypographyProps={{
+                      sx: { fontWeight: 600, color: pen.textFilename },
+                    }}
+                    secondaryTypographyProps={{
+                      sx: { color: pen.textPath, fontSize: 11 },
+                    }}
+                  />
+                </ListItemButton>
+              ) : filteredFilePaths.length === 0 ? (
+                <ListItemButton disabled sx={{ py: 1.5, px: 1 }}>
+                  <ListItemText
+                    primary="当前目录下无匹配项"
+                    secondary="继续输入或按 Esc 取消"
+                    primaryTypographyProps={{
+                      sx: { fontWeight: 600, color: pen.textFilename },
+                    }}
+                    secondaryTypographyProps={{
+                      sx: { color: pen.textPath, fontSize: 12 },
+                    }}
+                  />
+                </ListItemButton>
+              ) : (
+                filteredFilePaths.map((row, i) => (
+                  <ListItemButton
+                    key={`${row.is_file ? "f" : "d"}:${row.path}`}
+                    data-file-index={i}
+                    selected={i === fileHighlightIndex}
+                    onClick={() => pickFilePath(row.path)}
+                  >
+                    <ListItemIcon sx={{ minWidth: 34, mr: 0.25, py: 0 }}>
+                      <ComposerFilePickerRowIcon
+                        path={row.path}
+                        isFile={row.is_file}
+                      />
+                    </ListItemIcon>
+                    <ListItemText
+                      primary={normalizeFsPath(row.path)}
+                      secondary={
+                        row.is_file ? formatBytesShort(row.size) : "文件夹"
+                      }
+                      sx={{ my: 0.5 }}
+                      primaryTypographyProps={{
+                        sx: {
+                          fontFamily:
+                            "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                          fontSize: 12,
+                          fontWeight: 500,
+                          color: pen.textFilename,
+                          wordBreak: "break-all",
+                          lineHeight: 1.35,
+                        },
+                      }}
+                      secondaryTypographyProps={{
+                        sx: {
+                          fontSize: 11,
+                          color: row.is_file ? pen.textSize : pen.textPath,
+                          mt: 0.1,
+                          lineHeight: 1.25,
+                        },
+                      }}
+                    />
+                  </ListItemButton>
+                ))
+              )}
+            </List>
+          </Popover>
+        </Box>
         <Divider sx={{ borderColor: edge(0.08) }} />
         <Stack
           direction="row"
@@ -279,6 +1221,7 @@ export function ChatComposer({
             py: 0.5,
             flexWrap: "wrap",
             gap: 0.5,
+            "--composer-toolbar-h": `${COMPOSER_TOOLBAR_CONTROL_PX}px`,
             background: isDark
               ? `linear-gradient(165deg, ${alpha(paper, 0.48)} 0%, ${alpha(def, 0.94)} 48%, ${alpha(def, 0.72)} 100%)`
               : `linear-gradient(165deg, ${alpha(paper, 0.72)} 0%, ${alpha(def, 0.97)} 48%, ${alpha(paper, 0.65)} 100%)`,
@@ -286,14 +1229,17 @@ export function ChatComposer({
             boxShadow: `inset 0 1px 0 ${edge(0.06)}`,
           }}
         >
-          <Tooltip title="添加附件、连接器与插件">
+          <Tooltip title="更多功能即将推出">
             <IconButton
               size="small"
+              aria-label="更多"
+              aria-haspopup="menu"
+              aria-expanded={Boolean(plusAnchor)}
               onClick={(e) => setPlusAnchor(e.currentTarget)}
               sx={{
                 color: mut,
-                width: 36,
-                height: 36,
+                width: "var(--composer-toolbar-h)",
+                height: "var(--composer-toolbar-h)",
                 borderRadius: 2,
                 bgcolor: alpha(paper, isDark ? 0.25 : 0.72),
                 border: `1px solid ${edge(0.12)}`,
@@ -310,6 +1256,12 @@ export function ChatComposer({
                   boxShadow: `0 2px 8px ${alpha(accent, 0.12)}`,
                   transform: "translateY(-1px)",
                 },
+                "&:hover .MuiSvgIcon-root": {
+                  color: accent,
+                },
+                "& .MuiSvgIcon-root": {
+                  color: mut,
+                },
                 "&:focus-visible": {
                   outline: `2px solid ${alpha(accent, 0.45)}`,
                   outlineOffset: 2,
@@ -323,54 +1275,23 @@ export function ChatComposer({
             anchorEl={plusAnchor}
             open={Boolean(plusAnchor)}
             onClose={() => setPlusAnchor(null)}
-            slotProps={{ paper: { sx: { minWidth: 240, borderRadius: 2 } } }}
+            slotProps={{ paper: { sx: { minWidth: 220, borderRadius: 2 } } }}
           >
             <MenuItem disabled>
-              <ListItemIcon>
-                <AttachFile fontSize="small" />
-              </ListItemIcon>
-              <ListItemText primary="添加文件或图片" secondary="即将推出" />
-            </MenuItem>
-            <MenuItem disabled>
-              <ListItemIcon>
-                <Hub fontSize="small" />
-              </ListItemIcon>
-              <ListItemText primary="连接器（MCP）" secondary="在设置中管理" />
-            </MenuItem>
-            <MenuItem
-              onClick={() => {
-                setPlusAnchor(null);
-                setSettingsTabIndex(0);
-                setSettingsOpen(true);
-                setRightPanelMode("settings");
-              }}
-            >
-              <ListItemIcon>
-                <Extension fontSize="small" />
-              </ListItemIcon>
-              <ListItemText primary="插件与 MCP 服务" secondary="打开设置" />
-            </MenuItem>
-            <Divider />
-            <MenuItem
-              onClick={() => {
-                setPlusAnchor(null);
-                setSettingsTabIndex(0);
-                setSettingsOpen(true);
-                setRightPanelMode("settings");
-              }}
-            >
-              <ListItemIcon>
-                <SettingsIcon fontSize="small" />
-              </ListItemIcon>
-              <ListItemText primary="管理连接器与工具" />
+              <ListItemText
+                primary="敬请期待"
+                secondary="附件等功能将陆续开放"
+              />
             </MenuItem>
           </Menu>
+
+          <Box sx={{ flex: 1, minWidth: 8 }} />
 
           <Button
             size="small"
             variant="text"
-            onClick={(e) => setModeAnchor(e.currentTarget)}
-            startIcon={MODE_META[agentMode].icon}
+            onClick={(e) => setPermissionAnchor(e.currentTarget)}
+            startIcon={PERMISSION_META[permissionMode].icon}
             endIcon={<ExpandMore sx={{ fontSize: 18 }} />}
             sx={{
               textTransform: "none",
@@ -378,7 +1299,8 @@ export function ChatComposer({
               fontWeight: 600,
               borderRadius: 2.5,
               px: 1,
-              minHeight: 32,
+              minHeight: "var(--composer-toolbar-h)",
+              height: "var(--composer-toolbar-h)",
               maxWidth: 200,
               border: `1px solid ${edge(0.1)}`,
               bgcolor: alpha(paper, isDark ? 0.35 : 0.65),
@@ -388,6 +1310,9 @@ export function ChatComposer({
               "@media (prefers-reduced-motion: reduce)": {
                 transition: "none",
               },
+              "& .MuiButton-startIcon, & .MuiButton-endIcon": {
+                color: mut,
+              },
               "&:hover": {
                 bgcolor: alpha(accent, 0.07),
                 borderColor: alpha(accent, 0.2),
@@ -396,141 +1321,150 @@ export function ChatComposer({
             }}
           >
             <Typography variant="body2" noWrap component="span">
-              {MODE_META[agentMode].label}
+              {PERMISSION_META[permissionMode].label}
             </Typography>
           </Button>
           <Menu
-            anchorEl={modeAnchor}
-            open={Boolean(modeAnchor)}
-            onClose={() => setModeAnchor(null)}
-            slotProps={{ paper: { sx: { minWidth: 280, borderRadius: 2 } } }}
+            anchorEl={permissionAnchor}
+            open={Boolean(permissionAnchor)}
+            onClose={() => setPermissionAnchor(null)}
+            slotProps={{ paper: { sx: { minWidth: 260, borderRadius: 2 } } }}
           >
-            {(Object.keys(MODE_META) as AgentComposerMode[]).map((key) => (
-              <MenuItem
-                key={key}
-                selected={agentMode === key}
-                onClick={() => {
-                  setAgentMode(key);
-                  setModeAnchor(null);
-                }}
+            <Box sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider" }}>
+              <Tooltip
+                title="工具与编辑的确认策略"
+                placement="top"
+                enterDelay={200}
               >
-                <ListItemIcon>{MODE_META[key].icon}</ListItemIcon>
-                <ListItemText
-                  primary={MODE_META[key].label}
-                  secondary={MODE_META[key].hint}
-                  secondaryTypographyProps={{ variant: "caption" }}
-                />
-              </MenuItem>
+                <Typography
+                  variant="subtitle2"
+                  fontWeight={600}
+                  component="span"
+                  sx={{ display: "inline-block", cursor: "default" }}
+                >
+                  权限模式
+                </Typography>
+              </Tooltip>
+            </Box>
+            {(Object.keys(PERMISSION_META) as PermissionMode[]).map((key) => (
+              <Tooltip
+                key={key}
+                title={PERMISSION_META[key].hint}
+                placement="left"
+                enterDelay={200}
+              >
+                <MenuItem
+                  selected={permissionMode === key}
+                  onClick={() => {
+                    setPermissionMode(key);
+                    setPermissionAnchor(null);
+                  }}
+                >
+                  <ListItemIcon>{PERMISSION_META[key].icon}</ListItemIcon>
+                  <ListItemText primary={PERMISSION_META[key].label} />
+                </MenuItem>
+              </Tooltip>
             ))}
           </Menu>
 
-          <Box sx={{ flex: 1, minWidth: 8 }} />
-
-          <Button
-            size="small"
-            variant="outlined"
-            color="inherit"
-            onClick={(e) => setModelAnchor(e.currentTarget)}
-            endIcon={<ExpandMore sx={{ fontSize: 18 }} />}
-            sx={{
-              textTransform: "none",
-              fontWeight: 600,
-              borderRadius: 2.5,
-              minHeight: 32,
-              px: 1,
-              borderColor: edge(0.14),
-              color: ink,
-              maxWidth: 180,
-              bgcolor: alpha(paper, isDark ? 0.45 : 0.88),
-              boxShadow: `0 1px 2px ${edge(0.05)}, inset 0 1px 0 ${edge(0.06)}`,
-              transition:
-                "border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease",
-              "@media (prefers-reduced-motion: reduce)": {
-                transition: "none",
-              },
-              "&:hover": {
-                borderColor: alpha(accent, 0.4),
-                bgcolor: alpha(paper, isDark ? 0.55 : 1),
-                boxShadow: `0 2px 10px ${alpha(accent, 0.12)}, 0 0 0 1px ${alpha(accent, 0.15)}`,
-                transform: "translateY(-1px)",
-              },
-            }}
+          <Stack
+            direction="row"
+            alignItems="center"
+            spacing={0.75}
+            sx={{ flexShrink: 0 }}
           >
-            <Typography variant="body2" noWrap component="span">
-              {modelLabel}
-            </Typography>
-          </Button>
-          <Menu
-            anchorEl={modelAnchor}
-            open={Boolean(modelAnchor)}
-            onClose={() => setModelAnchor(null)}
-          >
-            <MenuItem
-              onClick={() => {
-                setModelAnchor(null);
+            <ProviderSwitcher
+              onOpenSettings={() => {
                 setSettingsTabIndex(0);
                 setSettingsOpen(true);
                 setRightPanelMode("settings");
               }}
-            >
-              <ListItemIcon>
-                <SettingsIcon fontSize="small" />
-              </ListItemIcon>
-              <ListItemText primary="在设置中配置模型" />
-            </MenuItem>
-          </Menu>
-
-          {isStreaming && onCancel ? (
-            <Tooltip title="停止生成">
-              <IconButton
-                size="small"
-                onClick={onCancel}
-                sx={{
-                  width: 36,
-                  height: 36,
-                  borderRadius: 2,
-                  color: "#fff",
-                  bgcolor: "#ef4444",
-                  boxShadow: `0 2px 8px ${alpha("#ef4444", 0.35)}`,
-                  transition:
-                    "background-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease",
-                  "@media (prefers-reduced-motion: reduce)": {
-                    transition: "none",
-                  },
-                  "&:hover": {
-                    bgcolor: "#dc2626",
-                    boxShadow: `0 4px 14px ${alpha("#ef4444", 0.45)}`,
-                    transform: "translateY(-1px)",
-                  },
-                  "&:focus-visible": {
-                    outline: `2px solid ${alpha("#ef4444", 0.6)}`,
-                    outlineOffset: 2,
-                  },
-                }}
-              >
-                <Square fontSize="small" />
-              </IconButton>
-            </Tooltip>
-          ) : (
-            <Tooltip title="语音输入即将推出">
-              <span>
+              triggerSx={{
+                minHeight: "var(--composer-toolbar-h)",
+                height: "var(--composer-toolbar-h)",
+                maxWidth: { xs: 200, sm: 260 },
+                px: 1,
+                py: 0,
+                borderRadius: 2.5,
+                borderColor: edge(0.14),
+                color: ink,
+                fontWeight: 600,
+                bgcolor: alpha(paper, isDark ? 0.45 : 0.88),
+                boxShadow: `0 1px 2px ${edge(0.05)}, inset 0 1px 0 ${edge(0.06)}`,
+                transition:
+                  "border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease, background-color 0.2s ease",
+                "@media (prefers-reduced-motion: reduce)": {
+                  transition: "none",
+                },
+                "&:hover": {
+                  borderColor: alpha(accent, 0.4),
+                  bgcolor: alpha(paper, isDark ? 0.55 : 1),
+                  boxShadow: `0 2px 10px ${alpha(accent, 0.12)}, 0 0 0 1px ${alpha(accent, 0.15)}`,
+                  transform: "translateY(-1px)",
+                },
+                "& .MuiChip-root": {
+                  maxWidth: 100,
+                },
+              }}
+            />
+            {isStreaming && onCancel ? (
+              <Tooltip title="停止生成">
                 <IconButton
                   size="small"
-                  disabled
+                  onClick={onCancel}
                   sx={{
-                    color: "text.disabled",
-                    width: 36,
-                    height: 36,
+                    width: "var(--composer-toolbar-h)",
+                    height: "var(--composer-toolbar-h)",
                     borderRadius: 2,
-                    border: `1px dashed ${edge(0.18)}`,
-                    bgcolor: alpha(paper, isDark ? 0.2 : 0.4),
+                    color: theme.palette.error.contrastText,
+                    bgcolor: errorMain,
+                    boxShadow: `0 2px 8px ${alpha(errorMain, 0.35)}`,
+                    transition:
+                      "background-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease",
+                    "@media (prefers-reduced-motion: reduce)": {
+                      transition: "none",
+                    },
+                    "& .MuiSvgIcon-root": {
+                      color: theme.palette.error.contrastText,
+                    },
+                    "&:hover": {
+                      bgcolor: errorDark,
+                      boxShadow: `0 4px 14px ${alpha(errorMain, 0.45)}`,
+                      transform: "translateY(-1px)",
+                    },
+                    "&:focus-visible": {
+                      outline: `2px solid ${alpha(errorMain, 0.65)}`,
+                      outlineOffset: 2,
+                    },
                   }}
                 >
-                  <Mic fontSize="small" />
+                  <Square fontSize="small" />
                 </IconButton>
-              </span>
-            </Tooltip>
-          )}
+              </Tooltip>
+            ) : (
+              <Tooltip title="语音输入即将推出">
+                <span>
+                  <IconButton
+                    size="small"
+                    disabled
+                    sx={{
+                      color: theme.palette.action.disabled,
+                      width: "var(--composer-toolbar-h)",
+                      height: "var(--composer-toolbar-h)",
+                      borderRadius: 2,
+                      border: `1px dashed ${edge(0.18)}`,
+                      bgcolor: alpha(paper, isDark ? 0.2 : 0.4),
+                      "& .MuiSvgIcon-root": {
+                        color: theme.palette.action.disabled,
+                      },
+                    }}
+                  >
+                    <Mic fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            )}
+          </Stack>
         </Stack>
       </Paper>
 
@@ -545,6 +1479,7 @@ export function ChatComposer({
         sx={{
           px: 1.25,
           py: 0.65,
+          "--composer-footer-h": `${COMPOSER_TOOLBAR_CONTROL_PX}px`,
           borderRadius: 2.5,
           bgcolor: alpha(paper, isDark ? 0.35 : 0.72),
           backdropFilter: "blur(10px)",
@@ -571,24 +1506,32 @@ export function ChatComposer({
           <Button
             size="small"
             variant="text"
-            startIcon={<FolderOpen sx={{ fontSize: 18 }} />}
+            startIcon={
+              <FolderOpen
+                sx={{
+                  fontSize: 18,
+                  color: needsWorkspacePath ? warningMain : mut,
+                }}
+              />
+            }
             onClick={onPickWorkspace}
             sx={{
               textTransform: "none",
-              color: needsWorkspacePath ? "#FF9500" : ink,
+              color: needsWorkspacePath ? warningMain : ink,
               fontWeight: 600,
               maxWidth: { xs: "100%", sm: 240 },
               borderRadius: 2.5,
               px: 1,
-              py: 0.35,
-              minHeight: 32,
+              py: 0,
+              minHeight: "var(--composer-footer-h)",
+              height: "var(--composer-footer-h)",
               bgcolor: needsWorkspacePath
-                ? alpha("#FF9500", 0.1)
+                ? alpha(warningMain, 0.12)
                 : isDark
                   ? alpha(def, 0.75)
                   : alpha("#f1f5f9", 0.9),
               border: `1px solid ${
-                needsWorkspacePath ? alpha("#FF9500", 0.35) : edge(0.1)
+                needsWorkspacePath ? alpha(warningMain, 0.4) : edge(0.1)
               }`,
               boxShadow: `inset 0 1px 0 ${edge(0.06)}`,
               transition:
@@ -596,12 +1539,13 @@ export function ChatComposer({
               "@media (prefers-reduced-motion: reduce)": {
                 transition: "none",
               },
+              "& .MuiButton-startIcon": { color: "inherit" },
               "&:hover": {
                 bgcolor: needsWorkspacePath
-                  ? alpha("#FF9500", 0.14)
+                  ? alpha(warningMain, 0.18)
                   : alpha(accent, 0.06),
                 borderColor: needsWorkspacePath
-                  ? alpha("#FF9500", 0.5)
+                  ? alpha(warningMain, 0.55)
                   : alpha(accent, 0.22),
               },
             }}
@@ -613,7 +1557,7 @@ export function ChatComposer({
 
           {gitInfo?.isGit && !needsWorkspacePath && (
             <Stack direction="row" alignItems="center" spacing={0.5}>
-              <Tag sx={{ fontSize: 18, color: "text.secondary" }} />
+              <Tag sx={{ fontSize: 18, color: mut }} />
               <FormControl size="small" sx={{ minWidth: 148 }}>
                 <Select
                   value={branchValue || gitInfo.currentBranch}
@@ -623,12 +1567,21 @@ export function ChatComposer({
                     setBranchForRoot(rootKey, b);
                   }}
                   sx={{
+                    minHeight: "var(--composer-footer-h)",
+                    height: "var(--composer-footer-h)",
                     bgcolor: alpha(paper, isDark ? 0.5 : 0.95),
                     borderRadius: 2,
                     fontSize: 13,
                     fontWeight: 600,
                     boxShadow: `0 1px 2px ${edge(0.05)}`,
                     transition: "box-shadow 0.2s ease, border-color 0.2s ease",
+                    "& .MuiSelect-select": {
+                      display: "flex",
+                      alignItems: "center",
+                      py: 0,
+                      minHeight: "var(--composer-footer-h)",
+                      boxSizing: "border-box",
+                    },
                     "& .MuiOutlinedInput-notchedOutline": {
                       borderColor: edge(0.14),
                     },
@@ -694,11 +1647,14 @@ export function ChatComposer({
             sx={{
               mr: 0,
               px: 0.75,
-              py: 0.25,
+              py: 0,
+              minHeight: "var(--composer-footer-h)",
+              height: "var(--composer-footer-h)",
               borderRadius: 2,
               border: `1px solid ${edge(0.1)}`,
               bgcolor: alpha(def, isDark ? 0.65 : 0.9),
               transition: "background-color 0.2s ease, border-color 0.2s ease",
+              "& .MuiFormControlLabel-label": { color: mut },
               "&:hover": {
                 bgcolor: alpha(accent, 0.04),
                 borderColor: alpha(accent, 0.18),
@@ -712,9 +1668,9 @@ export function ChatComposer({
             color="inherit"
             startIcon={
               environment === "local" ? (
-                <Computer fontSize="small" />
+                <Computer sx={{ fontSize: 18 }} />
               ) : (
-                <Hub fontSize="small" />
+                <Hub sx={{ fontSize: 18 }} />
               )
             }
             endIcon={<ExpandMore sx={{ fontSize: 18 }} />}
@@ -723,13 +1679,18 @@ export function ChatComposer({
               textTransform: "none",
               fontWeight: 600,
               borderRadius: 2.5,
-              minHeight: 32,
+              minHeight: "var(--composer-footer-h)",
+              height: "var(--composer-footer-h)",
               px: 1,
+              py: 0,
               borderColor: edge(0.14),
               color: ink,
               bgcolor: alpha(paper, isDark ? 0.45 : 0.95),
               boxShadow: `0 1px 2px ${edge(0.05)}, inset 0 1px 0 ${edge(0.06)}`,
               transition: "border-color 0.2s ease, box-shadow 0.2s ease",
+              "& .MuiButton-startIcon, & .MuiButton-endIcon": {
+                color: mut,
+              },
               "&:hover": {
                 borderColor: alpha(accent, 0.35),
                 bgcolor: alpha(paper, isDark ? 0.55 : 1),
@@ -786,17 +1747,6 @@ export function ChatComposer({
               <ListItemText primary="远程" secondary="占位：后续对接远程环境" />
             </MenuItem>
           </Menu>
-
-          {/* Provider Switcher - Quick model selection */}
-          <ProviderSwitcher
-            onOpenSettings={() => {
-              // Dispatch event to open settings
-              const event = new CustomEvent("openSettings", {
-                detail: { tab: 0 },
-              });
-              window.dispatchEvent(event);
-            }}
-          />
         </Stack>
       </Stack>
     </Stack>

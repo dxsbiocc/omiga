@@ -6,9 +6,9 @@ use crate::domain::integrations_catalog::{
     IntegrationsCatalog, McpServerCatalogEntry, McpToolCatalogEntry, SkillCatalogEntry,
 };
 use crate::domain::integrations_config::{self, IntegrationsConfig};
-use crate::domain::mcp_client::list_tools_for_server;
-use crate::domain::mcp_config::merged_mcp_servers;
-use crate::domain::mcp_names::{build_mcp_tool_name, normalize_name_for_mcp};
+use crate::domain::mcp::client::list_tools_for_server;
+use crate::domain::mcp::config::merged_mcp_servers;
+use crate::domain::mcp::names::{build_mcp_tool_name, normalize_name_for_mcp};
 use crate::domain::skills::{self, SkillSource};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -200,12 +200,6 @@ pub fn save_integrations_state(
     rt.block_on(async {
         app_state.chat.mcp_manager.close_project_connections(&root).await;
     });
-    // Legacy fallback (deprecated, will be removed)
-    #[allow(deprecated)]
-    if let Ok(mut pool) = app_state.chat._mcp_connections_legacy.try_lock() {
-        let prefix = format!("{}::", root.display());
-        pool.retain(|k, _| !k.starts_with(&prefix));
-    }
     Ok(())
 }
 

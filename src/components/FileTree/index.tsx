@@ -307,9 +307,17 @@ export function FileTree() {
     void loadDirectory(projectPath);
   }, [sessionId, projectPath, loadDirectory]);
 
-  const handleOpenFile = (path: string) => {
-    void openFile(path);
-  };
+  const [pendingOpen, setPendingOpen] = useState<string | null>(null);
+  
+  const handleOpenFile = useCallback(async (path: string) => {
+    if (pendingOpen) return; // Prevent double-clicks
+    setPendingOpen(path);
+    try {
+      await openFile(path);
+    } finally {
+      setPendingOpen(null);
+    }
+  }, [openFile, pendingOpen]);
 
   const fileList = Array.isArray(files) ? files : [];
 
@@ -945,11 +953,12 @@ export function FileTree() {
                         selected={isSel}
                         onClick={() => {
                           if (node.isDirectory) void loadDirectory(node.path);
-                          else handleOpenFile(node.path);
+                          else if (!pendingOpen) void handleOpenFile(node.path);
                         }}
                         sx={{
-                          cursor: "pointer",
+                          cursor: pendingOpen ? "wait" : "pointer",
                           transition: "background-color 0.12s ease",
+                          opacity: pendingOpen === node.path ? 0.6 : 1,
                           "&.Mui-selected": {
                             bgcolor: `${pen.rowSelected} !important`,
                           },

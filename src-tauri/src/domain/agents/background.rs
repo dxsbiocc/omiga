@@ -3,6 +3,14 @@
 //! 支持在后台异步执行 Agent 任务，不阻塞主会话。
 
 use serde::{Deserialize, Serialize};
+
+#[inline]
+fn unix_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -58,6 +66,9 @@ pub struct BackgroundAgentTask {
 pub struct BackgroundAgentManager {
     tasks: Arc<RwLock<HashMap<String, BackgroundAgentTask>>>,
     cancel_tokens: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    /// Follow-up user lines queued via `send_message` with `input_target: bg:<task_id>`.
+    /// Drained at the start of each sub-agent tool round while the task is running.
+    pending_followups: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
 
 impl BackgroundAgentManager {
@@ -66,7 +77,44 @@ impl BackgroundAgentManager {
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
+            pending_followups: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Queue user text for a background task. Task must exist and belong to `session_id`.
+    pub async fn enqueue_followup(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        content: String,
+    ) -> Result<(), &'static str> {
+        let tasks = self.tasks.read().await;
+        let Some(task) = tasks.get(task_id) else {
+            return Err("background task not found");
+        };
+        if task.session_id != session_id {
+            return Err("session mismatch for background task");
+        }
+        if !matches!(
+            task.status,
+            BackgroundAgentStatus::Pending | BackgroundAgentStatus::Running
+        ) {
+            return Err("background task is not accepting follow-ups");
+        }
+        drop(tasks);
+
+        let mut pending = self.pending_followups.write().await;
+        pending
+            .entry(task_id.to_string())
+            .or_default()
+            .push(content);
+        Ok(())
+    }
+
+    /// Drain all queued follow-ups for a task (FIFO).
+    pub async fn drain_followups_for_task(&self, task_id: &str) -> Vec<String> {
+        let mut pending = self.pending_followups.write().await;
+        pending.remove(task_id).unwrap_or_default()
     }
 
     /// 注册新任务
@@ -83,10 +131,7 @@ impl BackgroundAgentManager {
             agent_type,
             description,
             status: BackgroundAgentStatus::Pending,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            created_at: unix_timestamp_secs(),
             started_at: None,
             completed_at: None,
             result_summary: None,
@@ -112,20 +157,10 @@ impl BackgroundAgentManager {
             task.status = status.clone();
             match status {
                 BackgroundAgentStatus::Running => {
-                    task.started_at = Some(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs(),
-                    );
+                    task.started_at = Some(unix_timestamp_secs());
                 }
                 BackgroundAgentStatus::Completed | BackgroundAgentStatus::Failed | BackgroundAgentStatus::Cancelled => {
-                    task.completed_at = Some(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs(),
-                    );
+                    task.completed_at = Some(unix_timestamp_secs());
                 }
                 _ => {}
             }
@@ -147,12 +182,7 @@ impl BackgroundAgentManager {
             task.result_summary = Some(result_summary);
             task.output_path = Some(output_path);
             task.status = BackgroundAgentStatus::Completed;
-            task.completed_at = Some(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-            );
+            task.completed_at = Some(unix_timestamp_secs());
             Some(task.clone())
         } else {
             None
@@ -169,12 +199,7 @@ impl BackgroundAgentManager {
         if let Some(task) = tasks.get_mut(task_id) {
             task.error_message = Some(error_message);
             task.status = BackgroundAgentStatus::Failed;
-            task.completed_at = Some(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-            );
+            task.completed_at = Some(unix_timestamp_secs());
             Some(task.clone())
         } else {
             None
@@ -210,15 +235,15 @@ impl BackgroundAgentManager {
             token.cancel();
         }
 
+        {
+            let mut pending = self.pending_followups.write().await;
+            pending.remove(task_id);
+        }
+
         let mut tasks = self.tasks.write().await;
         if let Some(task) = tasks.get_mut(task_id) {
             task.status = BackgroundAgentStatus::Cancelled;
-            task.completed_at = Some(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-            );
+            task.completed_at = Some(unix_timestamp_secs());
             Some(task.clone())
         } else {
             None
@@ -237,28 +262,29 @@ impl BackgroundAgentManager {
 
     /// 清理已完成/失败的旧任务
     pub async fn cleanup_old_tasks(&self, max_age_secs: u64) -> usize {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = unix_timestamp_secs();
 
         let mut tasks = self.tasks.write().await;
         let to_remove: Vec<String> = tasks
             .iter()
             .filter(|(_, task)| {
-                if let Some(completed_at) = task.completed_at {
-                    now - completed_at > max_age_secs
-                } else {
-                    false
-                }
+                task.completed_at.map(|t| now.saturating_sub(t) > max_age_secs).unwrap_or(false)
             })
             .map(|(id, _)| id.clone())
             .collect();
 
         let count = to_remove.len();
-        for id in to_remove {
-            tasks.remove(&id);
-            self.cancel_tokens.lock().unwrap().remove(&id);
+        for id in &to_remove {
+            tasks.remove(id);
+        }
+        // Release the async write lock before acquiring the sync Mutex to avoid
+        // holding two locks simultaneously (inverted order vs cancel_task).
+        drop(tasks);
+        {
+            let mut tokens = self.cancel_tokens.lock().unwrap();
+            for id in to_remove {
+                tokens.remove(&id);
+            }
         }
 
         count

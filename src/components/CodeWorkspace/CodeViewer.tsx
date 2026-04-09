@@ -1,4 +1,4 @@
-import { useRef, useCallback } from "react";
+import { useRef, useCallback, useEffect, memo } from "react";
 import Editor, { type OnMount, type OnChange } from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
 import { Box, CircularProgress, Typography } from "@mui/material";
@@ -91,13 +91,33 @@ interface CodeViewerProps {
   onChange?: (value: string) => void;
 }
 
-export function CodeViewer({ content, language, onChange }: CodeViewerProps) {
+// Memoized to prevent re-render when parent updates
+export const CodeViewer = memo(function CodeViewer({ content, language, onChange }: CodeViewerProps) {
   const theme = useTheme();
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+  const isFirstMount = useRef(true);
+
+  // Update content when it changes (for file switching and background loading)
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    
+    const currentValue = editor.getValue();
+    if (currentValue !== content) {
+      // Preserve cursor position if it's an update (not initial load)
+      const position = isFirstMount.current ? null : editor.getPosition();
+      editor.setValue(content);
+      if (position && !isFirstMount.current) {
+        editor.setPosition(position);
+      }
+    }
+    isFirstMount.current = false;
+  }, [content]);
 
   const handleMount: OnMount = useCallback(
     (editor) => {
       editorRef.current = editor;
+      isFirstMount.current = false;
 
       // JSON: auto-format once on open (runs in the JSON worker thread)
       if (language === "json") {
@@ -122,10 +142,12 @@ export function CodeViewer({ content, language, onChange }: CodeViewerProps) {
       <Editor
         height="100%"
         language={language}
-        value={content}
+        defaultValue={content}
         theme={theme.palette.mode === "dark" ? "vs-dark" : "vs"}
         onMount={handleMount}
         onChange={handleChange}
+        // Use stable key to prevent re-mounting editor instance
+        key={`editor-${theme.palette.mode}`}
         loading={
           <Box
             sx={{
@@ -160,4 +182,4 @@ export function CodeViewer({ content, language, onChange }: CodeViewerProps) {
       />
     </Box>
   );
-}
+});

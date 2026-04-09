@@ -1,8 +1,8 @@
 //! Discover MCP `tools/list` entries and expose them as [`ToolSchema`] for the LLM (TS `assembleToolPool`).
 
-use crate::domain::mcp_client::list_tools_for_server;
-use crate::domain::mcp_config::merged_mcp_servers;
-use crate::domain::mcp_names::build_mcp_tool_name;
+use crate::domain::mcp::client::list_tools_for_server;
+use crate::domain::mcp::config::merged_mcp_servers;
+use crate::domain::mcp::names::build_mcp_tool_name;
 use crate::domain::tools::ToolSchema;
 use futures::future::join_all;
 use serde_json::json;

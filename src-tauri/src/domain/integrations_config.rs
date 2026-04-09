@@ -1,6 +1,6 @@
 //! Per-project enable/disable for MCP servers and skills (`.omiga/integrations.json`).
 
-use crate::domain::mcp_names::{mcp_info_from_string, normalize_name_for_mcp};
+use crate::domain::mcp::names::{mcp_info_from_string, normalize_name_for_mcp};
 use crate::domain::skills::SkillEntry;
 use crate::domain::tools::ToolSchema;
 use serde::{Deserialize, Serialize};

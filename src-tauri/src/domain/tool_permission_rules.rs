@@ -4,7 +4,7 @@
 //! Only **blanket** denies (no `ruleContent`) affect tool-list filtering; rules with
 //! `Tool(content)` are ignored for whole-tool matching, matching TS `toolMatchesRule`.
 
-use crate::domain::mcp_names::mcp_info_from_string;
+use crate::domain::mcp::names::mcp_info_from_string;
 use crate::domain::tools::ToolSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

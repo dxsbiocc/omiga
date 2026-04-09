@@ -30,7 +30,7 @@ fn user_omiga_mcp_path() -> Option<std::path::PathBuf> {
 }
 
 /// All configured server names from bundled defaults, `~/.omiga/mcp.json`, and `<project>/.omiga/mcp.json`
-/// (same merge order as [`crate::domain::mcp_config::merged_mcp_servers`]).
+/// (same merge order as [`crate::domain::mcp::config::merged_mcp_servers`]).
 pub fn collect_mcp_server_names(project_root: &Path) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 

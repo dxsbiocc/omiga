@@ -184,10 +184,12 @@ fn rule_matches(rule_value: &PermissionRuleValue, skill_name: &str) -> bool {
         return true;
     }
 
-    // Check prefix match (e.g., "review:*" matches "review-pr", "review-something")
-    if let Some(prefix) = rule_skill.strip_suffix("*") {
-        return normalized_skill.starts_with(prefix)
-            || (prefix.ends_with('-') && normalized_skill.starts_with(prefix.trim_end_matches('-')));
+    // Check prefix match (e.g., "review:*" matches "review", "review-pr", "review-security").
+    // The `:*` suffix is a namespace wildcard: strip the trailing `*` and any `:` separator,
+    // then match any skill whose name starts with that prefix.
+    if let Some(with_colon) = rule_skill.strip_suffix("*") {
+        let prefix = with_colon.trim_end_matches(':');
+        return normalized_skill == prefix || normalized_skill.starts_with(&format!("{prefix}-"));
     }
 
     false
@@ -329,13 +331,87 @@ pub fn check_permissions(
 // ============================================================================
 
 use crate::domain::integrations_config;
+use dirs;
 
-/// Build permission context from integrations config
+/// Raw structure of a `permissions.json` file.
+///
+/// Format:
+/// ```json
+/// {
+///   "allow": ["skill-name", "prefix:*"],
+///   "ask":   ["risky-skill"],
+///   "deny":  ["dangerous-skill"]
+/// }
+/// ```
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PermissionsFile {
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    ask: Vec<String>,
+    #[serde(default)]
+    deny: Vec<String>,
+}
+
+/// Load a `permissions.json` file and merge rules into `ctx`.
+/// Missing or malformed file is silently ignored.
+fn load_permissions_file(
+    path: &std::path::Path,
+    source: PermissionRuleSource,
+    ctx: &mut PermissionContext,
+) {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let pf: PermissionsFile = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    for skill in pf.allow {
+        ctx.add_rule(PermissionRule {
+            source: source.clone(),
+            behavior: PermissionBehavior::Allow,
+            rule_value: PermissionRuleValue { skill_name: skill, rule_content: None },
+        });
+    }
+    for skill in pf.ask {
+        ctx.add_rule(PermissionRule {
+            source: source.clone(),
+            behavior: PermissionBehavior::Ask,
+            rule_value: PermissionRuleValue { skill_name: skill, rule_content: None },
+        });
+    }
+    for skill in pf.deny {
+        ctx.add_rule(PermissionRule {
+            source: source.clone(),
+            behavior: PermissionBehavior::Deny,
+            rule_value: PermissionRuleValue { skill_name: skill, rule_content: None },
+        });
+    }
+}
+
+/// Build permission context from integrations config and optional permissions files.
+///
+/// Merge order (later sources override earlier):
+/// 1. User settings `~/.omiga/permissions.json`
+/// 2. Project settings `<project>/.omiga/permissions.json`
+/// 3. Integrations config (disabled skills → deny rules)
 pub fn build_permission_context(project_root: &std::path::Path) -> PermissionContext {
     let config = integrations_config::load_integrations_config(project_root);
     let mut ctx = PermissionContext::new();
 
-    // Load deny rules from disabled skills
+    // 1. User-level permissions: ~/.omiga/permissions.json
+    if let Some(home) = dirs::home_dir() {
+        let user_perms = home.join(".omiga").join("permissions.json");
+        load_permissions_file(&user_perms, PermissionRuleSource::UserSettings, &mut ctx);
+    }
+
+    // 2. Project-level permissions: <project>/.omiga/permissions.json
+    let project_perms = project_root.join(".omiga").join("permissions.json");
+    load_permissions_file(&project_perms, PermissionRuleSource::ProjectSettings, &mut ctx);
+
+    // 3. Deny rules from disabled skills in integrations config
     for disabled_skill in &config.disabled_skills {
         ctx.add_rule(PermissionRule {
             source: PermissionRuleSource::ProjectSettings,
@@ -346,9 +422,6 @@ pub fn build_permission_context(project_root: &std::path::Path) -> PermissionCon
             },
         });
     }
-
-    // TODO: Load allow/ask rules from a more detailed permissions file
-    // e.g., ~/.omiga/permissions.json or .omiga/permissions.json
 
     ctx
 }
@@ -463,5 +536,51 @@ mod tests {
         let ctx = PermissionContext::new();
         let result = check_permissions("safe-skill", None, None, &ctx);
         assert!(result.is_allow());
+    }
+
+    #[test]
+    fn test_load_permissions_file_allow_ask_deny() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("permissions.json");
+        std::fs::write(
+            &path,
+            r#"{"allow":["safe-skill"],"ask":["maybe-skill"],"deny":["bad-skill"]}"#,
+        )
+        .unwrap();
+
+        let mut ctx = PermissionContext::new();
+        load_permissions_file(&path, PermissionRuleSource::ProjectSettings, &mut ctx);
+
+        assert!(check_permissions("safe-skill", None, Some(&[]), &ctx).is_allow());
+        assert!(check_permissions("maybe-skill", None, Some(&["bash".to_string()]), &ctx).is_ask());
+        assert!(check_permissions("bad-skill", None, None, &ctx).is_deny());
+    }
+
+    #[test]
+    fn test_load_permissions_file_missing_is_noop() {
+        let mut ctx = PermissionContext::new();
+        load_permissions_file(
+            std::path::Path::new("/nonexistent/permissions.json"),
+            PermissionRuleSource::UserSettings,
+            &mut ctx,
+        );
+        // Empty context: auto-allow for no restricted tools
+        let result = check_permissions("any-skill", None, None, &ctx);
+        assert!(result.is_allow());
+    }
+
+    #[test]
+    fn test_build_permission_context_project_deny() {
+        let dir = tempfile::tempdir().unwrap();
+        let omiga_dir = dir.path().join(".omiga");
+        std::fs::create_dir_all(&omiga_dir).unwrap();
+        std::fs::write(
+            omiga_dir.join("permissions.json"),
+            r#"{"deny":["blocked-skill"]}"#,
+        )
+        .unwrap();
+
+        let ctx = build_permission_context(dir.path());
+        assert!(check_permissions("blocked-skill", None, None, &ctx).is_deny());
     }
 }

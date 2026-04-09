@@ -13,6 +13,10 @@ export type ChatTokenSet = {
   userBubbleText: string;
   /** Hairline edge so translucent bubble stays readable on any thread bg */
   userBubbleBorder: string;
+  /** User bubble chips (Agent / @file) — opaque-ish plate so they don’t vanish on `userGrad` */
+  userChipBg: string;
+  /** Distinct edge against both gradient and chip fill */
+  userChipBorder: string;
   agentBubbleBg: string;
   agentBubbleBorder: string;
   agentAvatarBg: string;
@@ -58,6 +62,14 @@ export function getChatTokens(theme: Theme): ChatTokenSet {
     ? alpha(p.common.white, 0.12)
     : alpha(p.primary.main, 0.22);
 
+  /** Frosted plate: lifts chips off the translucent user gradient */
+  const userChipBg = isDark
+    ? alpha(p.common.white, 0.16)
+    : alpha(p.common.white, 0.88);
+  const userChipBorder = isDark
+    ? alpha(lighten(p.primary.main, 0.15), 0.62)
+    : alpha(darken(p.primary.main, 0.12), 0.45);
+
   const codeBg = isDark
     ? alpha(p.common.white, 0.06)
     : alpha(p.primary.main, 0.07);
@@ -80,6 +92,8 @@ export function getChatTokens(theme: Theme): ChatTokenSet {
     userGrad,
     userBubbleText,
     userBubbleBorder,
+    userChipBg,
+    userChipBorder,
     agentBubbleBg: p.background.paper,
     agentBubbleBorder: divider,
     agentAvatarBg: alpha(p.primary.main, isDark ? 0.22 : 0.12),

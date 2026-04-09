@@ -50,7 +50,7 @@ export function ResizeHandle({ direction, onResize, sx }: ResizeHandleProps) {
       window.addEventListener("pointerup", up);
       window.addEventListener("pointercancel", up);
     },
-    [direction, onResize]
+    [direction, onResize],
   );
 
   const isH = direction === "horizontal";

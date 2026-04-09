@@ -1,4 +1,13 @@
-import { Box, LinearProgress, Stack, Typography, useTheme } from "@mui/material";
+import { useState } from "react";
+import {
+  Box,
+  IconButton,
+  LinearProgress,
+  Stack,
+  Tooltip,
+  Typography,
+  useTheme,
+} from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import type { Theme } from "@mui/material/styles";
 import type { SvgIconComponent } from "@mui/icons-material";
@@ -17,6 +26,8 @@ import {
   Search as SearchIcon,
   Terminal,
   TravelExplore,
+  Replay,
+  Stop,
 } from "@mui/icons-material";
 import type { ExecutionStep } from "../../state/activityStore";
 import {
@@ -32,6 +43,12 @@ export interface AgentSessionStatusProps {
   waitingFirstChunk: boolean;
   /** Raw tool name from stream when step row not yet committed */
   toolHintFallback: string | null;
+  /** Main chat turn: show cancel on hover while the agent is busy */
+  canCancel?: boolean;
+  onCancel?: () => void;
+  /** After user cancelled a stream: show resume control */
+  showResume?: boolean;
+  onResume?: () => void;
 }
 
 function pickToolIcon(toolName: string | null | undefined): SvgIconComponent {
@@ -90,26 +107,37 @@ export function AgentSessionStatus({
   isStreaming,
   waitingFirstChunk,
   toolHintFallback,
+  canCancel = false,
+  onCancel,
+  showResume = false,
+  onResume,
 }: AgentSessionStatusProps) {
   const theme = useTheme();
+  const [hover, setHover] = useState(false);
   const ctx: ExecutionSurfaceContext = {
     isConnecting,
     isStreaming,
     waitingFirstChunk,
     toolHintFallback,
   };
-  const { label: primary, kind, toolName } = getExecutionSurfaceView(
-    executionSteps,
-    ctx,
-  );
-  const { Icon, accent } = pickIconAndAccent(kind, toolName, theme);
-  const busy = kind !== "idle" && kind !== "finished";
+  const {
+    label: surfaceLabel,
+    kind,
+    toolName,
+  } = getExecutionSurfaceView(executionSteps, ctx);
+  const displayLabel = showResume ? "已中断 · 可继续" : surfaceLabel;
+  const { Icon, accent } = showResume
+    ? { Icon: Replay, accent: theme.palette.warning.main }
+    : pickIconAndAccent(kind, toolName, theme);
+  const busy = !showResume && kind !== "idle" && kind !== "finished";
 
   return (
     <Box
       role="status"
-      aria-label={primary}
-      title={primary}
+      aria-label={displayLabel}
+      title={displayLabel}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       sx={{
         position: "relative",
         minWidth: 0,
@@ -149,6 +177,7 @@ export function AgentSessionStatus({
             bgcolor: alpha(accent, 0.12),
             color: accent,
             ...(busy &&
+              !showResume &&
               kind !== "waiting" && {
                 "@keyframes statusIconPulse": {
                   "0%, 100%": { opacity: 1, transform: "scale(1)" },
@@ -164,7 +193,7 @@ export function AgentSessionStatus({
           <Icon
             sx={{
               fontSize: 17,
-              ...(kind === "waiting" && {
+              ...(!showResume && kind === "waiting" && {
                 "@keyframes statusIconSpin": {
                   from: { transform: "rotate(0deg)" },
                   to: { transform: "rotate(360deg)" },
@@ -188,47 +217,83 @@ export function AgentSessionStatus({
               fontSize: "0.72rem",
               lineHeight: 1.25,
               fontFamily:
-                kind === "tool"
+                !showResume && kind === "tool"
                   ? "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
                   : undefined,
             }}
           >
-            {primary}
+            {displayLabel}
           </Typography>
         </Box>
-        <Box
-          aria-hidden
-          sx={{
-            width: 8,
-            height: 8,
-            borderRadius: "50%",
-            flexShrink: 0,
-            bgcolor: busy ? accent : alpha(accent, 0.45),
-            boxShadow: busy
-              ? `0 0 0 3px ${alpha(accent, 0.2)}`
-              : `0 0 0 1px ${alpha(theme.palette.background.paper, 1)}`,
-            ...(busy && {
-              "@keyframes statusDot": {
-                "0%": {
-                  transform: "scale(1)",
-                  boxShadow: `0 0 0 0 ${alpha(accent, 0.35)}`,
-                },
-                "60%": {
-                  transform: "scale(1.05)",
-                  boxShadow: `0 0 0 6px ${alpha(accent, 0)}`,
-                },
-                "100%": {
-                  transform: "scale(1)",
-                  boxShadow: `0 0 0 0 ${alpha(accent, 0)}`,
-                },
-              },
-              animation: "statusDot 1.8s ease-out infinite",
-              "@media (prefers-reduced-motion: reduce)": {
-                animation: "none",
-              },
-            }),
-          }}
-        />
+        <Stack direction="row" alignItems="center" spacing={0.25} sx={{ flexShrink: 0 }}>
+          {showResume && onResume ? (
+            <Tooltip title="断点继续">
+              <IconButton
+                size="small"
+                color="warning"
+                aria-label="断点继续"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onResume();
+                }}
+                sx={{ p: 0.35 }}
+              >
+                <Replay sx={{ fontSize: 18 }} />
+              </IconButton>
+            </Tooltip>
+          ) : (
+            <>
+              {canCancel && onCancel && hover && (
+                <Tooltip title="取消任务">
+                  <IconButton
+                    size="small"
+                    aria-label="取消任务"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCancel();
+                    }}
+                    sx={{ p: 0.35, color: "text.secondary" }}
+                  >
+                    <Stop sx={{ fontSize: 18 }} />
+                  </IconButton>
+                </Tooltip>
+              )}
+              <Box
+                aria-hidden
+                sx={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  flexShrink: 0,
+                  bgcolor: busy ? accent : alpha(accent, 0.45),
+                  boxShadow: busy
+                    ? `0 0 0 3px ${alpha(accent, 0.2)}`
+                    : `0 0 0 1px ${alpha(theme.palette.background.paper, 1)}`,
+                  ...(busy && {
+                    "@keyframes statusDot": {
+                      "0%": {
+                        transform: "scale(1)",
+                        boxShadow: `0 0 0 0 ${alpha(accent, 0.35)}`,
+                      },
+                      "60%": {
+                        transform: "scale(1.05)",
+                        boxShadow: `0 0 0 6px ${alpha(accent, 0)}`,
+                      },
+                      "100%": {
+                        transform: "scale(1)",
+                        boxShadow: `0 0 0 0 ${alpha(accent, 0)}`,
+                      },
+                    },
+                    animation: "statusDot 1.8s ease-out infinite",
+                    "@media (prefers-reduced-motion: reduce)": {
+                      animation: "none",
+                    },
+                  }),
+                }}
+              />
+            </>
+          )}
+        </Stack>
       </Stack>
       {busy && (
         <LinearProgress
