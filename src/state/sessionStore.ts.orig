@@ -183,31 +183,36 @@ function sanitizeMessageForPersistence(m: Message): Message {
 interface SessionSummary {
   id: string;
   name: string;
-  project_path: string;
   message_count: number;
   updated_at: string;
-}
-
-interface RawMessage {
-  role: "user" | "assistant" | "tool";
-  /** SQLite `messages.id` when present */
-  id?: string;
-  content?: string;
-  output?: string;
-  tool_calls?: Array<{ id: string; name: string; arguments: string }>;
-  tool_call_id?: string;
-  token_usage?: { input: number; output: number; total?: number; provider?: string };
 }
 
 interface SessionData {
   id: string;
   name: string;
-  messages: RawMessage[];
+  messages: Array<{
+    role: "user" | "assistant" | "tool";
+    /** SQLite `messages.id` when present */
+    id?: string;
+    content?: string; // User and Assistant have content
+    output?: string; // Tool messages have output instead of content
+    tool_calls?: Array<{
+      id: string;
+      name: string;
+      arguments: string;
+    }>;
+    tool_call_id?: string;
+    /** Persisted on assistant rows — matches Rust `MessageTokenUsage` */
+    token_usage?: {
+      input: number;
+      output: number;
+      total?: number;
+      provider?: string;
+    };
+  }>;
   project_path: string;
   created_at: string;
   updated_at: string;
-  provider_changed: boolean;
-  has_more_messages: boolean;
 }
 
 interface SendMessageRequest {
@@ -237,13 +242,6 @@ interface SessionState {
   currentSession: Session | null;
   messages: Message[];
   isLoading: boolean;
-  /** True while a session switch is in-flight (loadSession pending).
-   *  Chat uses this to overlay a loading indicator instead of going blank. */
-  isSwitchingSession: boolean;
-  /** True when the current session has older messages not yet loaded (pagination). */
-  hasMoreMessages: boolean;
-  /** True while `loadMoreMessages` is fetching older messages. */
-  isLoadingMoreMessages: boolean;
   storeMessages: Message[];
   activeRounds: Map<string, RoundStatus>;
   /** Sessions created with placeholder path — show “pick folder” until set */
@@ -256,8 +254,6 @@ interface SessionState {
   ) => Promise<void>;
   loadSessions: () => Promise<void>;
   loadSession: (sessionId: string) => Promise<void>;
-  /** Prepend older messages for the current session (scroll-to-top pagination). */
-  loadMoreMessages: () => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   renameSession: (sessionId: string, name: string) => Promise<void>;
   setCurrentSession: (sessionId: string | null) => Promise<void>;
@@ -270,74 +266,12 @@ interface SessionState {
   updateRoundStatus: (roundId: string, status: RoundStatus) => void;
 }
 
-/** Convert raw DB message rows to store Messages. Extracted so both loadSession
- *  and loadMoreMessages can share the same conversion logic. */
-function convertRawMessages(rawMessages: RawMessage[], sessionId: string): Message[] {
-  // Build tool_call_id → {name, arguments} map from assistant rows in O(N).
-  const toolMetaById = new Map<string, { name: string; arguments: string }>();
-  for (const m of rawMessages) {
-    if (m.role !== "assistant" || !m.tool_calls?.length) continue;
-    for (const tc of m.tool_calls) {
-      toolMetaById.set(tc.id, { name: tc.name, arguments: tc.arguments });
-    }
-  }
-
-  return rawMessages.map((m, index) => {
-    const content =
-      m.role === "tool" && m.output != null ? m.output : m.content || "";
-
-    let toolCallsList: Message["toolCallsList"];
-    let toolCall: Message["toolCall"];
-
-    if (m.tool_calls?.length) {
-      toolCallsList = m.tool_calls.map((tc) => ({
-        id: tc.id,
-        name: tc.name,
-        arguments: tc.arguments,
-      }));
-      const tc = m.tool_calls[0];
-      toolCall = { id: tc.id, name: tc.name, arguments: tc.arguments };
-    } else if (m.role === "tool") {
-      const tid = (m.tool_call_id ?? "").trim();
-      const meta = tid ? toolMetaById.get(tid) : undefined;
-      toolCall = {
-        id: tid || `tool-row-${index}`,
-        name: meta?.name ?? "tool",
-        arguments: meta?.arguments ?? "",
-        output: m.output ?? content,
-      };
-    }
-
-    const tokenUsage: Message["tokenUsage"] =
-      m.role === "assistant" && m.token_usage
-        ? {
-            input: m.token_usage.input,
-            output: m.token_usage.output,
-            total: m.token_usage.total,
-            provider: m.token_usage.provider,
-          }
-        : undefined;
-
-    return sanitizeMessageForPersistence({
-      id: m.id ?? `${sessionId}-msg-${index}`,
-      role: m.role,
-      content,
-      toolCallsList,
-      toolCall,
-      ...(tokenUsage ? { tokenUsage } : {}),
-    });
-  });
-}
-
 export const useSessionStore = create<SessionState>((set, get) => ({
   sessions: [],
   currentSession: null,
   messages: [],
   storeMessages: [],
   isLoading: false,
-  isSwitchingSession: false,
-  hasMoreMessages: false,
-  isLoadingMoreMessages: false,
   activeRounds: new Map(),
   pendingProjectPathSessions: readPendingProjectPathIds(),
 
@@ -428,8 +362,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const sessions: Session[] = sessionsData.map((s) => ({
         id: s.id,
         name: s.name,
-        projectPath: s.project_path || ".",
-        workingDirectory: s.project_path || ".",
+        projectPath: ".",
+        workingDirectory: ".",
         createdAt: s.updated_at,
         updatedAt: s.updated_at,
         messageCount: s.message_count,
@@ -443,11 +377,31 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   loadSession: async (sessionId: string) => {
-    const perfStart = performance.now();
+    // Do not toggle global `isLoading` here — it hides the entire SessionList skeleton
+    // and feels like a blank UI while switching chats.
     dbg("loadSession:start", { sessionId });
     try {
-      const sessionData = await invoke<SessionData>("load_session", { sessionId });
-      const messages = convertRawMessages(sessionData.messages ?? [], sessionId);
+      const sessionData = await invoke<SessionData>("load_session", {
+        sessionId,
+      });
+
+      const rawMessages = sessionData.messages ?? [];
+
+      /** Map tool_use_id -> name/arguments from assistant rows so persisted `tool` rows can show real tool names after reload */
+      const toolMetaById = new Map<
+        string,
+        { name: string; arguments: string }
+      >();
+      for (const m of rawMessages) {
+        if (m.role !== "assistant" || !m.tool_calls?.length) continue;
+        for (const tc of m.tool_calls) {
+          toolMetaById.set(tc.id, {
+            name: tc.name,
+            arguments: tc.arguments,
+          });
+        }
+      }
+
       const session: Session = {
         id: sessionData.id,
         name: sessionData.name,
@@ -455,63 +409,93 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         workingDirectory: sessionData.project_path,
         createdAt: sessionData.created_at,
         updatedAt: sessionData.updated_at,
-        messageCount: messages.length,
+        messageCount: rawMessages.length,
       };
+
+      // Convert messages - handle different field names for different roles
+      const messages: Message[] = rawMessages.map((m, index) => {
+        // Tool messages have `output` field instead of `content`
+        const content =
+          m.role === "tool" && m.output !== undefined && m.output !== null
+            ? m.output
+            : m.content || "";
+
+        let toolCallsList: Message["toolCallsList"] = undefined;
+        let toolCall = undefined;
+
+        if (m.tool_calls && m.tool_calls.length > 0) {
+          toolCallsList = m.tool_calls.map((tc) => ({
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments,
+          }));
+          const tc = m.tool_calls[0];
+          toolCall = {
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments,
+          };
+        } else if (m.role === "tool") {
+          const tid = (m.tool_call_id ?? "").trim();
+          const meta = tid ? toolMetaById.get(tid) : undefined;
+          toolCall = {
+            id: tid || `tool-row-${index}`,
+            name: meta?.name ?? "tool",
+            arguments: meta?.arguments ?? "",
+            output: m.output ?? content,
+          };
+        }
+
+        const tokenUsage: Message["tokenUsage"] =
+          m.role === "assistant" && m.token_usage
+            ? {
+                input: m.token_usage.input,
+                output: m.token_usage.output,
+                total: m.token_usage.total,
+                provider: m.token_usage.provider,
+              }
+            : undefined;
+
+        return sanitizeMessageForPersistence({
+          id: m.id ?? `${sessionId}-msg-${index}`,
+          role: m.role,
+          content,
+          toolCallsList,
+          toolCall,
+          ...(tokenUsage ? { tokenUsage } : {}),
+        });
+      });
 
       set((state) => {
         const exists = state.sessions.some((s) => s.id === session.id);
         const sessions = exists
-          ? state.sessions.map((s) => (s.id === session.id ? { ...s, ...session } : s))
+          ? state.sessions.map((s) =>
+              s.id === session.id ? { ...s, ...session } : s,
+            )
           : [session, ...state.sessions];
         return {
           currentSession: session,
           messages,
           storeMessages: messages,
           isLoading: false,
-          hasMoreMessages: sessionData.has_more_messages,
           sessions,
         };
       });
-
-      // Only fire the provider-changed event when the backend actually switched providers.
-      if (sessionData.provider_changed) notifyProviderChanged();
-
-      const duration = Math.round(performance.now() - perfStart);
-      dbg("loadSession:ok", { sessionId, messageCount: messages.length, duration });
+      dbg("loadSession:ok", { sessionId, messageCount: messages.length });
+      notifyProviderChanged();
     } catch (error) {
       console.error("[OmigaDebug] loadSession failed", error);
       const fallback = get().sessions.find((s) => s.id === sessionId) ?? null;
-      dbg("loadSession:error", { sessionId, fallbackName: fallback?.name ?? null });
-      set({ isLoading: false, currentSession: fallback, messages: [], storeMessages: [], hasMoreMessages: false });
-    }
-  },
-
-  loadMoreMessages: async () => {
-    const { currentSession, messages, hasMoreMessages, isLoadingMoreMessages } = get();
-    if (!currentSession || !hasMoreMessages || isLoadingMoreMessages) return;
-    const oldestId = messages[0]?.id;
-    if (!oldestId) return;
-    set({ isLoadingMoreMessages: true });
-    try {
-      const raw = await invoke<RawMessage[]>("load_more_messages", {
-        sessionId: currentSession.id,
-        beforeId: oldestId,
+      dbg("loadSession:error", {
+        sessionId,
+        fallbackName: fallback?.name ?? null,
       });
-      if (!raw.length) {
-        set({ hasMoreMessages: false, isLoadingMoreMessages: false });
-        return;
-      }
-      const older = convertRawMessages(raw, currentSession.id);
-      set((state) => ({
-        messages: [...older, ...state.messages],
-        storeMessages: [...older, ...state.storeMessages],
-        // If backend returned fewer than page size, we're at the beginning
-        hasMoreMessages: raw.length >= 100,
-        isLoadingMoreMessages: false,
-      }));
-    } catch (e) {
-      console.error("[OmigaDebug] loadMoreMessages failed", e);
-      set({ isLoadingMoreMessages: false });
+      set({
+        isLoading: false,
+        currentSession: fallback,
+        messages: [],
+        storeMessages: [],
+      });
     }
   },
 
@@ -559,32 +543,28 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   setCurrentSession: async (sessionId) => {
-    const perfLabel = `[OmigaPerf] switch-${sessionId?.slice(0, 8) || 'null'}`;
-    console.time(perfLabel);
     dbg("setCurrentSession", { sessionId });
     if (!sessionId) {
-      set({ currentSession: null, messages: [], storeMessages: [], isSwitchingSession: false });
+      set({ currentSession: null, messages: [], storeMessages: [] });
       return;
     }
     const session = get().sessions.find((s) => s.id === sessionId);
     const now = new Date().toISOString();
     const placeholder: Session = {
       id: sessionId,
-      name: session?.name || "Loading…",
-      projectPath: session?.projectPath || ".",
-      workingDirectory: session?.workingDirectory || ".",
-      createdAt: session?.createdAt || now,
-      updatedAt: session?.updatedAt || now,
+      name: "Loading…",
+      projectPath: ".",
+      workingDirectory: ".",
+      createdAt: now,
+      updatedAt: now,
     };
-    // Keep previous messages visible (avoid blank flash); Chat overlays a loading indicator.
-    // Messages are replaced atomically when loadSession resolves.
-    set({ currentSession: placeholder, isSwitchingSession: true });
-    try {
-      await get().loadSession(sessionId);
-    } finally {
-      set({ isSwitchingSession: false });
-    }
-    console.timeEnd(perfLabel);
+    // Clear stale messages immediately so Chat never shows the previous session's history
+    set({
+      currentSession: session ?? placeholder,
+      messages: [],
+      storeMessages: [],
+    });
+    await get().loadSession(sessionId);
     dbg("setCurrentSession:done", { sessionId });
   },
 
@@ -593,12 +573,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       ...message,
       id: message.id ?? `msg-${Date.now()}`,
     });
-    // Build one array and share the reference — avoids the two O(N) spreads that
-    // were here before, which penalized every streaming token in long sessions.
-    set((state) => {
-      const messages = [...state.messages, newMessage];
-      return { messages, storeMessages: messages };
-    });
+    set((state) => ({
+      messages: [...state.messages, newMessage],
+      storeMessages: [...state.storeMessages, newMessage],
+    }));
   },
 
   replaceStoreMessagesSnapshot: (messages) => {

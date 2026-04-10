@@ -253,21 +253,27 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
-  const filteredSessions = sessions.filter((s) => {
+  // Single-pass: compute isPlaceholder + filter in one useMemo so
+  // shouldShowNewSessionPlaceholder is never called twice per session per render.
+  const filteredSessions = useMemo(() => {
+    const currentId = currentSession?.id;
+    const msgCount = storeMessages.length;
     const q = searchQuery.toLowerCase().trim();
-    if (!q) return true;
-    const listLabel = shouldShowNewSessionPlaceholder(s, {
-      isCurrentSession: currentSession?.id === s.id,
-      storeMessageCount:
-        currentSession?.id === s.id ? storeMessages.length : undefined,
-    })
-      ? UNUSED_SESSION_LABEL
-      : s.name;
-    return (
-      s.name.toLowerCase().includes(q) ||
-      listLabel.toLowerCase().includes(q)
-    );
-  });
+    const result: Array<{ session: typeof sessions[number]; isPlaceholder: boolean }> = [];
+    for (const s of sessions) {
+      const isCurrent = s.id === currentId;
+      const isPlaceholder = shouldShowNewSessionPlaceholder(s, {
+        isCurrentSession: isCurrent,
+        storeMessageCount: isCurrent ? msgCount : undefined,
+      });
+      if (q) {
+        const label = (isPlaceholder ? UNUSED_SESSION_LABEL : s.name).toLowerCase();
+        if (!s.name.toLowerCase().includes(q) && !label.includes(q)) continue;
+      }
+      result.push({ session: s, isPlaceholder });
+    }
+    return result;
+  }, [sessions, currentSession?.id, storeMessages.length, searchQuery]);
 
   const navTextSx = useMemo(
     () => ({
@@ -430,15 +436,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
               <Typography variant="body2">{t("noSessions")}</Typography>
             </Box>
           ) : (
-            filteredSessions.map((session) => {
-              const isPlaceholder = shouldShowNewSessionPlaceholder(session, {
-                isCurrentSession: currentSession?.id === session.id,
-                storeMessageCount:
-                  currentSession?.id === session.id
-                    ? storeMessages.length
-                    : undefined,
-              });
-              return (
+            filteredSessions.map(({ session, isPlaceholder }) => (
               <Box
                 key={session.id}
                 onClick={() => handleSelectSession(session.id)}
@@ -499,8 +497,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                   </IconButton>
                 </Stack>
               </Box>
-            );
-            })
+            ))
           )}
         </Stack>
       </Box>

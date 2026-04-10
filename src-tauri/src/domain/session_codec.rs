@@ -213,7 +213,7 @@ mod tests {
         let msg = Message::User {
             content: "Hello".to_string(),
         };
-        let (id, session_id, role, content, tool_calls, tool_call_id, tok) =
+        let (id, session_id, role, content, tool_calls, tool_call_id, tok, reasoning) =
             SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
 
         assert_eq!(id, "msg-1");
@@ -223,6 +223,7 @@ mod tests {
         assert!(tool_calls.is_none());
         assert!(tool_call_id.is_none());
         assert!(tok.is_none());
+        assert!(reasoning.is_none());
     }
 
     #[test]
@@ -236,15 +237,17 @@ mod tests {
             content: "Let me read that file".to_string(),
             tool_calls: Some(tool_calls),
             token_usage: None,
+            reasoning_content: None,
         };
 
-        let (_, _, role, content, tool_calls_json, _, tok) =
+        let (_, _, role, content, tool_calls_json, _, tok, reasoning) =
             SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
 
         assert_eq!(role, "assistant");
         assert_eq!(content, "Let me read that file");
         assert!(tool_calls_json.is_some());
         assert!(tok.is_none());
+        assert!(reasoning.is_none());
 
         // Verify we can parse it back
         let parsed = SessionCodec::parse_tool_calls(&tool_calls_json.unwrap());
@@ -262,6 +265,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: Some("call-1".to_string()),
             token_usage_json: None,
+            reasoning_content: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
 

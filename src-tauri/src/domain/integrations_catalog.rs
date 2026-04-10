@@ -33,6 +33,8 @@ pub struct SkillCatalogEntry {
     pub directory_name: String,
     /// Absolute path to `SKILL.md` (for Settings preview).
     pub skill_md_path: String,
+    /// From YAML frontmatter `tags` (search / display).
+    pub tags: Vec<String>,
     /// Skill lives under `~/.omiga/skills` or `<project>/.omiga/skills` — safe to delete that folder.
     pub can_uninstall_omiga_copy: bool,
 }

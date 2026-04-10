@@ -25,6 +25,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // Initialize tracing/logging
             tracing_subscriber::fmt()
@@ -140,6 +141,7 @@ pub fn run() {
             commands::tools::execute_tool,
             commands::session::list_sessions,
             commands::session::load_session,
+            commands::session::load_more_messages,
             commands::session::save_session,
             commands::session::create_session,
             commands::session::delete_session,
@@ -185,6 +187,10 @@ pub fn run() {
             commands::memory::memory_get_unified_status,
             commands::memory::memory_import_to_wiki,
             commands::memory::memory_get_import_extensions,
+            commands::test_notification,
+            commands::get_notification_permission_status,
+            commands::request_notification_permission,
+            commands::send_notification,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

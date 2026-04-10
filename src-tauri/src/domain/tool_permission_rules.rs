@@ -68,6 +68,10 @@ pub fn canonical_permission_tool_name(name: &str) -> String {
         "TaskUpdate" | "task_update" => "task_update".to_string(),
         "workflow" | "Workflow" => "workflow".to_string(),
         "list_skills" | "ListSkillsTool" | "ListSkills" => "list_skills".to_string(),
+        "skills_list" => "skills_list".to_string(),
+        "skill_view" => "skill_view".to_string(),
+        "skill_manage" => "skill_manage".to_string(),
+        "skill_config" => "skill_config".to_string(),
         "skill" | "Skill" | "SkillTool" => "skill".to_string(),
         _ => n,
     }

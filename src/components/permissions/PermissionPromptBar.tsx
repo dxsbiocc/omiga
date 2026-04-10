@@ -31,6 +31,147 @@ import {
   type RiskLevel,
 } from "../../state/permissionStore";
 
+type AnyArgs = Record<string, unknown> | undefined;
+
+function firstString(v: unknown): string | null {
+  if (typeof v === "string" && v.trim()) return v;
+  return null;
+}
+
+function getPrimaryPath(args: AnyArgs): string | null {
+  if (!args) return null;
+  // Common shapes across tools
+  const direct =
+    firstString(args.path) ??
+    firstString(args.filePath) ??
+    firstString(args.file_path) ??
+    firstString(args.targetPath) ??
+    firstString(args.target_path);
+  if (direct) return direct;
+
+  const paths = args.paths;
+  if (Array.isArray(paths)) {
+    for (const p of paths) {
+      const s = firstString(p);
+      if (s) return s;
+    }
+  }
+  return null;
+}
+
+function inferIntent(toolNameRaw: string, args: AnyArgs): { title: string; detail?: string } {
+  const toolName = (toolNameRaw || "").trim();
+  const path = getPrimaryPath(args);
+
+  // Built-in Omiga tools (Rust names)
+  if (toolName === "file_read" || toolName === "Read" || toolName === "fileRead") {
+    return {
+      title: "读取文件",
+      detail: path ? path : undefined,
+    };
+  }
+  if (toolName === "file_edit" || toolName === "Edit") {
+    return {
+      title: "修改文件",
+      detail: path ? path : undefined,
+    };
+  }
+  if (toolName === "file_write" || toolName === "Write") {
+    return {
+      title: "写入文件",
+      detail: path ? path : undefined,
+    };
+  }
+  if (toolName === "glob" || toolName === "Glob") {
+    return { title: "查找文件/目录" };
+  }
+  if (toolName === "grep" || toolName === "Grep" || toolName === "ripgrep" || toolName === "Ripgrep") {
+    return { title: "搜索内容" };
+  }
+  if (toolName === "web_fetch" || toolName === "WebFetch") {
+    return { title: "访问网页" };
+  }
+  if (toolName === "web_search" || toolName === "WebSearch") {
+    return { title: "联网搜索" };
+  }
+  if (toolName === "bash" || toolName === "Bash") {
+    const cmd = firstString(args?.command) ?? firstString(args?.cmd) ?? "";
+    const cmdTrim = cmd.trim();
+    const lower = cmdTrim.toLowerCase();
+
+    // Helper to check if command contains a destructive operation
+    // Uses word boundaries to reduce false positives and bypasses
+    const hasCommand = (target: string): boolean => {
+      // Match at start, after pipe, after semicolon, after &&, after ||, after backtick, in $()
+      const patterns = [
+        `^${target}\\s`, // at start
+        `\\|\\s*${target}\\s`, // after pipe
+        `;\\s*${target}\\s`, // after semicolon
+        `&&\\s*${target}\\s`, // after &&
+        `\\|\\|\\s*${target}\\s`, // after ||
+        `\\\`${target}\\s`, // in backticks
+        `\\$\\(\\s*${target}\\s`, // in $()
+      ];
+      return patterns.some(p => new RegExp(p, "i").test(lower));
+    };
+
+    // Check for deletion operations (high risk)
+    if (
+      hasCommand("rm") ||
+      /(^|[;|&]|\$\(|`)\s*find\s+.*-delete/.test(lower) ||
+      /(^|[;|&]|\$\(|`)\s*find\s+.*-exec\s+rm/.test(lower)
+    ) {
+      return { title: "删除文件/目录", detail: cmdTrim || undefined };
+    }
+
+    // Check for move/rename operations
+    if (hasCommand("mv") || /(^|[;|&]|\$\(|`)\s*rename\s/.test(lower)) {
+      return { title: "移动/重命名文件", detail: cmdTrim || undefined };
+    }
+
+    // Check for copy operations
+    if (hasCommand("cp") || hasCommand("scp") || hasCommand("rsync")) {
+      return { title: "复制文件", detail: cmdTrim || undefined };
+    }
+
+    // Check for network operations
+    if (
+      hasCommand("curl") ||
+      hasCommand("wget") ||
+      hasCommand("fetch") ||
+      hasCommand("ftp") ||
+      hasCommand("ssh") ||
+      hasCommand("nc") ||
+      /(^|[;|&]|\$\(|`)\s*nc\s/.test(lower)
+    ) {
+      return { title: "网络/远程操作", detail: cmdTrim || undefined };
+    }
+
+    // Check for package installation
+    if (
+      hasCommand("npm") ||
+      hasCommand("yarn") ||
+      hasCommand("pnpm") ||
+      hasCommand("pip") ||
+      hasCommand("apt") ||
+      hasCommand("brew") ||
+      /(^|[;|&]|\$\(|`)\s*(apt-get|yum|dnf|pacman|apk)\s/.test(lower)
+    ) {
+      return { title: "安装/包管理操作", detail: cmdTrim || undefined };
+    }
+
+    return { title: "执行命令", detail: cmdTrim || undefined };
+  }
+
+  // MCP tools (prefix-based)
+  if (toolName.startsWith("mcp__")) {
+    return { title: "调用外部工具（MCP）", detail: toolName };
+  }
+
+  // Fallback
+  return { title: "执行敏感操作", detail: toolName || undefined };
+}
+
 const getRiskColor = (level: RiskLevel) => {
   switch (level) {
     case "safe":
@@ -115,6 +256,10 @@ export const PermissionPromptBar: React.FC = () => {
     pendingRequest.risk_level === "high" ||
     pendingRequest.risk_level === "critical";
   const isCritical = pendingRequest.risk_level === "critical";
+  const intent = inferIntent(
+    pendingRequest.tool_name,
+    pendingRequest.arguments as AnyArgs,
+  );
 
   const handleApprove = async () => {
     setProcessing(true);
@@ -160,12 +305,12 @@ export const PermissionPromptBar: React.FC = () => {
           alignItems="center"
           gap={1}
           flexWrap="wrap"
-          justifyContent="space-between"
+          justifyContent="flex-start"
         >
           <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
             {getRiskIcon(pendingRequest.risk_level)}
             <Typography variant="subtitle2" fontWeight={700}>
-              权限确认
+              {intent.title}
             </Typography>
             <Chip
               label={getRiskLabel(pendingRequest.risk_level)}
@@ -182,35 +327,8 @@ export const PermissionPromptBar: React.FC = () => {
                 fontSize: "0.85rem",
               }}
             >
-              {pendingRequest.tool_name}
+              {intent.detail ?? pendingRequest.tool_name}
             </Box>
-          </Stack>
-          <Stack direction="row" spacing={1}>
-            <Button
-              size="small"
-              onClick={handleDeny}
-              color="inherit"
-              variant="outlined"
-              disabled={processing}
-            >
-              拒绝
-            </Button>
-            <Button
-              size="small"
-              onClick={handleApprove}
-              color={isDangerous ? "error" : "primary"}
-              variant="contained"
-              disabled={processing}
-              startIcon={
-                processing ? <CircularProgress size={14} color="inherit" /> : null
-              }
-            >
-              {processing
-                ? "处理中…"
-                : isCritical
-                  ? "我已了解风险，确认允许"
-                  : "允许"}
-            </Button>
           </Stack>
         </Stack>
 
@@ -352,6 +470,30 @@ export const PermissionPromptBar: React.FC = () => {
             </RadioGroup>
           </FormControl>
         )}
+
+        <Stack direction="row" justifyContent="flex-end" spacing={1}>
+          <Button
+            size="small"
+            onClick={handleDeny}
+            color="inherit"
+            variant="outlined"
+            disabled={processing}
+          >
+            拒绝
+          </Button>
+          <Button
+            size="small"
+            onClick={handleApprove}
+            color={isDangerous ? "error" : "primary"}
+            variant="contained"
+            disabled={processing}
+            startIcon={
+              processing ? <CircularProgress size={14} color="inherit" /> : null
+            }
+          >
+            {processing ? "处理中…" : isCritical ? "运行（高风险）" : "运行"}
+          </Button>
+        </Stack>
       </Stack>
     </Box>
   );

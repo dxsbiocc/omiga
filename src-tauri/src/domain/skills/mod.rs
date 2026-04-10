@@ -1,6 +1,10 @@
 //! Skills — load `skill-name/SKILL.md` from disk (parity with `src/skills/loadSkillsDir.ts`
 //! + `SkillTool` inline execution path).
 //!
+//! Layouts supported under each skills root:
+//! - **Flat:** `<root>/<skill-name>/SKILL.md`
+//! - **One-level category (Hermes-style):** `<root>/<category>/<skill-name>/SKILL.md` when `<category>/` has no `SKILL.md`.
+//!
 //! Search order (later overrides earlier on same skill name):
 //! 1. `~/.omiga/skills` — user-level.
 //! 2. `<project>/.omiga/skills` — project-level.
@@ -11,10 +15,22 @@
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tracing;
+
+pub mod fuzzy_match;
+pub mod skill_config;
+pub mod skill_guard;
+pub mod skill_manage;
+pub mod skill_view;
+
+pub use skill_manage::execute_skill_manage;
+pub use skill_view::execute_skill_view;
+pub use skill_config::{
+    set_config_var, list_skill_config_vars, project_config_path, user_config_path,
+};
 
 const MAX_LISTING_DESC_CHARS: usize = 250;
 
@@ -71,6 +87,116 @@ enum YamlStringOrList {
     One(String),
 }
 
+// ── Metadata structs (Feature 2: config vars + Feature 3: conditions) ──────
+
+/// Raw config var entry from `metadata.omiga.config[]`.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawConfigVar {
+    key: Option<String>,
+    description: Option<String>,
+    default: Option<String>,
+    prompt: Option<String>,
+}
+
+/// Conditions / toolset requirements from `metadata.omiga.*`.
+#[derive(Debug, Deserialize, Default, Clone, Serialize)]
+pub struct SkillConditions {
+    /// Skill only activates when ALL of these toolsets are available.
+    #[serde(default)]
+    pub requires_toolsets: Vec<String>,
+    /// Skill activates as a fallback when any of these toolsets is unavailable.
+    #[serde(default)]
+    pub fallback_for_toolsets: Vec<String>,
+    /// Skill only activates when ALL of these tools are available.
+    #[serde(default)]
+    pub requires_tools: Vec<String>,
+    /// Skill activates as a fallback when any of these tools is unavailable.
+    #[serde(default)]
+    pub fallback_for_tools: Vec<String>,
+}
+
+impl SkillConditions {
+    pub fn is_empty(&self) -> bool {
+        self.requires_toolsets.is_empty()
+            && self.fallback_for_toolsets.is_empty()
+            && self.requires_tools.is_empty()
+            && self.fallback_for_tools.is_empty()
+    }
+}
+
+/// `metadata.omiga` (or `metadata.hermes` for cross-compatibility) block.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct SkillMetadataNamespace {
+    #[serde(default)]
+    config: Vec<RawConfigVar>,
+    #[serde(default)]
+    requires_toolsets: Vec<String>,
+    #[serde(default)]
+    fallback_for_toolsets: Vec<String>,
+    #[serde(default)]
+    requires_tools: Vec<String>,
+    #[serde(default)]
+    fallback_for_tools: Vec<String>,
+}
+
+/// Top-level `metadata:` block in SKILL.md frontmatter.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct SkillMetadata {
+    /// Primary namespace for Omiga-specific declarations.
+    #[serde(default)]
+    omiga: SkillMetadataNamespace,
+    /// Secondary namespace for Hermes cross-compatibility.
+    #[serde(default)]
+    hermes: SkillMetadataNamespace,
+}
+
+impl SkillMetadata {
+    /// Merged config vars (omiga takes precedence; hermes fills gaps).
+    fn config_vars(&self) -> Vec<skill_config::ConfigVar> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for ns in [&self.omiga, &self.hermes] {
+            for raw in &ns.config {
+                let Some(key) = raw.key.as_ref().filter(|k| !k.trim().is_empty()) else {
+                    continue;
+                };
+                let key = key.trim().to_string();
+                if seen.contains(&key) {
+                    continue;
+                }
+                let Some(desc) = raw.description.as_ref().filter(|d| !d.trim().is_empty()) else {
+                    continue;
+                };
+                seen.insert(key.clone());
+                result.push(skill_config::ConfigVar {
+                    key,
+                    description: desc.trim().to_string(),
+                    default: raw.default.clone(),
+                    prompt: raw.prompt.clone(),
+                });
+            }
+        }
+        result
+    }
+
+    /// Merged conditions (omiga takes precedence; hermes supplements).
+    fn conditions(&self) -> SkillConditions {
+        fn merge_vecs(a: &[String], b: &[String]) -> Vec<String> {
+            let mut seen = std::collections::HashSet::new();
+            a.iter().chain(b.iter())
+                .filter(|s| seen.insert(s.to_lowercase()))
+                .cloned()
+                .collect()
+        }
+        SkillConditions {
+            requires_toolsets: merge_vecs(&self.omiga.requires_toolsets, &self.hermes.requires_toolsets),
+            fallback_for_toolsets: merge_vecs(&self.omiga.fallback_for_toolsets, &self.hermes.fallback_for_toolsets),
+            requires_tools: merge_vecs(&self.omiga.requires_tools, &self.hermes.requires_tools),
+            fallback_for_tools: merge_vecs(&self.omiga.fallback_for_tools, &self.hermes.fallback_for_tools),
+        }
+    }
+}
+
 fn default_user_invocable() -> bool {
     true
 }
@@ -94,8 +220,14 @@ struct SkillFrontmatter {
     user_invocable: bool,
     /// Declared argument names for `$foo` substitution (`arguments` in TS frontmatter).
     arguments: Option<YamlStringOrList>,
+    /// Search / filter tags: YAML list, single string, or comma-separated (e.g. `pdb, structure`).
+    #[serde(default)]
+    tags: Option<YamlStringOrList>,
     agent: Option<String>,
     effort: Option<String>,
+    /// Extended metadata block: config var declarations + conditional activation.
+    #[serde(default)]
+    metadata: Option<SkillMetadata>,
 }
 
 /// Result of invoking the `skill` tool (TS inline / fork metadata + body for the model).
@@ -135,17 +267,68 @@ pub struct SkillEntry {
     pub name: String,
     pub description: String,
     pub when_to_use: Option<String>,
+    /// Declared in frontmatter `tags` for search and UI (deduped, order preserved).
+    pub tags: Vec<String>,
     pub skill_dir: PathBuf,
     /// Where this skill was discovered from.
     pub source: SkillSource,
     pub allowed_tools: Vec<String>,
+    /// Conditional activation metadata (Feature 3).
+    pub conditions: SkillConditions,
+    /// Config vars declared in frontmatter (Feature 2).
+    pub config_vars: Vec<skill_config::ConfigVar>,
+}
+
+/// Returns `true` when the skill's requirements are satisfied by the given available tool names.
+///
+/// - `requires_tools`: all must be in `available_tools`.
+/// - `requires_toolsets`: same check (toolset name treated as a tool identifier).
+/// - `fallback_for_*`: skill is a fallback; matches when the listed tool/toolset is absent.
+///   In that context, the caller should pass only the *missing* tools to this function.
+pub fn skill_matches_conditions(skill: &SkillEntry, available_tools: &[&str]) -> bool {
+    if skill.conditions.is_empty() {
+        return true; // No restrictions — always usable.
+    }
+    let has = |name: &str| available_tools.iter().any(|t| t.eq_ignore_ascii_case(name));
+
+    // requires_tools: all must be present.
+    if !skill.conditions.requires_tools.is_empty() {
+        if !skill.conditions.requires_tools.iter().all(|t| has(t)) {
+            return false;
+        }
+    }
+    // requires_toolsets: all must be present.
+    if !skill.conditions.requires_toolsets.is_empty() {
+        if !skill.conditions.requires_toolsets.iter().all(|t| has(t)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn parse_skill_tags(v: &Option<YamlStringOrList>) -> Vec<String> {
+    let raw = yaml_string_or_list_to_strings(v, true);
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for s in raw {
+        let t = s.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let key = t.to_lowercase();
+        if seen.insert(key) {
+            out.push(t.to_string());
+        }
+    }
+    out
 }
 
 fn skill_task_score(skill: &SkillEntry, tokens: &[String]) -> i32 {
     let name = skill.name.to_lowercase();
     let desc = skill.description.to_lowercase();
     let w = skill.when_to_use.as_deref().unwrap_or("").to_lowercase();
-    let blob = format!("{name} {desc} {w}");
+    let tags = skill.tags.join(" ").to_lowercase();
+    let blob = format!("{name} {desc} {w} {tags}");
     let mut score = 0i32;
     for t in tokens {
         if t.is_empty() {
@@ -305,16 +488,27 @@ async fn read_skill_entry(skill_dir: &Path, dir_name: &str, source: SkillSource)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| fallback_description(&body));
     let allowed_tools = yaml_string_or_list_to_strings(&fm.allowed_tools, true);
+    let tags = parse_skill_tags(&fm.tags);
+    let (conditions, config_vars) = if let Some(meta) = &fm.metadata {
+        (meta.conditions(), meta.config_vars())
+    } else {
+        (SkillConditions::default(), vec![])
+    };
     Some(SkillEntry {
         name,
         description,
         when_to_use: fm.when_to_use.filter(|s| !s.is_empty()),
+        tags,
         skill_dir: skill_dir.to_path_buf(),
         source,
         allowed_tools,
+        conditions,
+        config_vars,
     })
 }
 
+/// One-level **category** folders (Hermes-style): `<base>/<category>/<skill-name>/SKILL.md`.
+/// Top-level `<base>/<skill-name>/SKILL.md` remains supported.
 async fn collect_skills_dir(base: &Path, map: &mut HashMap<String, SkillEntry>, source: SkillSource) {
     let mut rd = match tokio::fs::read_dir(base).await {
         Ok(r) => r,
@@ -335,8 +529,35 @@ async fn collect_skills_dir(base: &Path, map: &mut HashMap<String, SkillEntry>, 
             continue;
         }
         let dir_name = entry.file_name().to_string_lossy().to_string();
-        if let Some(sk) = read_skill_entry(&path, &dir_name, source.clone()).await {
-            map.insert(sk.name.clone(), sk);
+        let skill_md = path.join("SKILL.md");
+        if tokio::fs::metadata(&skill_md).await.is_ok() {
+            if let Some(sk) = read_skill_entry(&path, &dir_name, source.clone()).await {
+                map.insert(sk.name.clone(), sk);
+            }
+        } else {
+            // Category folder: scan immediate children for `*/SKILL.md`.
+            let mut sub = match tokio::fs::read_dir(&path).await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            loop {
+                let se = match sub.next_entry().await {
+                    Ok(Some(e)) => e,
+                    Ok(None) => break,
+                    Err(_) => break,
+                };
+                let sub_path = se.path();
+                let Ok(sub_meta) = tokio::fs::metadata(&sub_path).await else {
+                    continue;
+                };
+                if !sub_meta.is_dir() {
+                    continue;
+                }
+                let leaf = se.file_name().to_string_lossy().to_string();
+                if let Some(sk) = read_skill_entry(&sub_path, &leaf, source.clone()).await {
+                    map.insert(sk.name.clone(), sk);
+                }
+            }
         }
     }
 }
@@ -382,6 +603,12 @@ pub struct SkillCacheSlot {
 /// Process-level skill cache keyed by project root.
 pub type SkillCacheMap = HashMap<PathBuf, SkillCacheSlot>;
 
+/// Drop cached skill entries for `project_root` so the next `load_skills_cached` rescans disk.
+pub fn invalidate_skill_cache(project_root: &Path, cache: &Arc<StdMutex<SkillCacheMap>>) {
+    let mut guard = cache.lock().expect("skill cache poisoned");
+    guard.remove(&project_root.to_path_buf());
+}
+
 fn skill_base_dirs(project_root: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::with_capacity(2);
     if let Some(p) = user_skills_dir_omiga() {
@@ -391,33 +618,81 @@ fn skill_base_dirs(project_root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+fn xor_stamp_component(mtime_secs: u64, label: &str, stamp: &mut u64) {
+    let path_hash = label
+        .bytes()
+        .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64));
+    *stamp ^= mtime_secs.wrapping_add(path_hash);
+}
+
+async fn stamp_skill_md(skill_md: &Path, label: &str, stamp: &mut u64) {
+    let Ok(meta) = tokio::fs::metadata(skill_md).await else {
+        return;
+    };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    xor_stamp_component(mtime, label, stamp);
+}
+
+/// Includes flat `dir/SKILL.md` and one-level nested `category/dir/SKILL.md`.
+async fn compute_stamp_for_skills_root(base: &Path, stamp: &mut u64) {
+    let mut rd = match tokio::fs::read_dir(base).await {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    loop {
+        let entry = match rd.next_entry().await {
+            Ok(Some(e)) => e,
+            _ => break,
+        };
+        let path = entry.path();
+        let Ok(meta) = tokio::fs::metadata(&path).await else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let top = entry.file_name().to_string_lossy().to_string();
+        let skill_md = path.join("SKILL.md");
+        if tokio::fs::metadata(&skill_md).await.is_ok() {
+            stamp_skill_md(&skill_md, &top, stamp).await;
+        } else {
+            let mut sub = match tokio::fs::read_dir(&path).await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            loop {
+                let se = match sub.next_entry().await {
+                    Ok(Some(e)) => e,
+                    Ok(None) => break,
+                    Err(_) => break,
+                };
+                let sub_path = se.path();
+                let Ok(sm) = tokio::fs::metadata(&sub_path).await else {
+                    continue;
+                };
+                if !sm.is_dir() {
+                    continue;
+                }
+                let leaf = se.file_name().to_string_lossy().to_string();
+                let nested = sub_path.join("SKILL.md");
+                if tokio::fs::metadata(&nested).await.is_ok() {
+                    let label = format!("{top}/{leaf}");
+                    stamp_skill_md(&nested, &label, stamp).await;
+                }
+            }
+        }
+    }
+}
+
 async fn compute_stamp(base_dirs: &[PathBuf]) -> DirStamp {
     let mut stamp: u64 = 0;
     for base in base_dirs {
-        let mut rd = match tokio::fs::read_dir(base).await {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        loop {
-            let entry = match rd.next_entry().await {
-                Ok(Some(e)) => e,
-                _ => break,
-            };
-            let skill_md = entry.path().join("SKILL.md");
-            let Ok(meta) = tokio::fs::metadata(&skill_md).await else { continue };
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let path_hash = entry
-                .file_name()
-                .to_string_lossy()
-                .bytes()
-                .fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64));
-            stamp ^= mtime.wrapping_add(path_hash);
-        }
+        compute_stamp_for_skills_root(base, &mut stamp).await;
     }
     stamp
 }
@@ -499,13 +774,22 @@ async fn try_load_skill_direct(
         let description = fm.description.filter(|s| !s.is_empty())
             .unwrap_or_else(|| fallback_description(&body));
         let allowed_tools = yaml_string_or_list_to_strings(&fm.allowed_tools, true);
+        let tags = parse_skill_tags(&fm.tags);
+        let (conditions, config_vars) = if let Some(meta) = &fm.metadata {
+            (meta.conditions(), meta.config_vars())
+        } else {
+            (SkillConditions::default(), vec![])
+        };
         let entry = SkillEntry {
             name,
             description,
             when_to_use: fm.when_to_use.filter(|s| !s.is_empty()),
+            tags,
             skill_dir: skill_dir.to_path_buf(),
             source,
             allowed_tools,
+            conditions,
+            config_vars,
         };
         Some((entry, raw))
     }
@@ -546,21 +830,22 @@ pub fn resolve_skill_display_name(skills: &[SkillEntry], raw_skill_argument: &st
     resolve_skill_entry(skills, &n).map(|e| e.name.clone())
 }
 
-/// System prompt fragment informing the model that skills are available on demand.
+/// Short system-prompt note: no skill list is inlined — models discover via `list_skills` / `skills_list`
+/// (which uses the in-process cache after first load).
 #[must_use]
 pub fn format_skills_discovery_system_section() -> String {
     "## Skills (on-demand)\n\
-     Skills are available but not inlined here. Call `list_skills` for names and metadata \
-     (supports an optional `query` to filter by keyword). Use `skill` to load the full \
-     `SKILL.md` for a chosen skill.\n"
+     Skill metadata is **not** inlined here. Call `list_skills` or `skills_list` when you need names and \
+     fields (`description`, `when_to_use`, `tags`, `source`); optional `query` filters. The tool uses the \
+     same cached scan as the rest of the app after the first load. Use `skill_view` / `skill` as appropriate.\n"
         .to_string()
 }
 
 /// JSON for `list_skills` tool: metadata only, no full SKILL.md body.
 ///
-/// When `query` is set, filters by substring. When `task_rank_context` is set, matching entries are
-/// ordered by the same keyword overlap score as the system-prompt task section (higher first), then
-/// by name. With no `query` and no task context, order follows the loaded skill list.
+/// When `query` is set, filters by substring. When `task_rank_context` is set, entries are ordered by
+/// keyword overlap with that text (higher first), then by name. With no `query` and no task context,
+/// order follows the loaded skill list.
 #[must_use]
 pub fn list_skills_metadata_json(
     skills: &[SkillEntry],
@@ -573,7 +858,12 @@ pub fn list_skills_metadata_json(
         description: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         when_to_use: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
         source: SkillSource,
+        /// Conditional activation fields — omitted from JSON when empty.
+        #[serde(skip_serializing_if = "SkillConditions::is_empty")]
+        conditions: SkillConditions,
     }
 
     let q = query
@@ -588,9 +878,12 @@ pub fn list_skills_metadata_json(
                 let name = e.name.to_lowercase();
                 let desc = e.description.to_lowercase();
                 let w = e.when_to_use.as_deref().unwrap_or("").to_lowercase();
+                let tags_joined = e.tags.join(" ").to_lowercase();
                 name.contains(qq.as_str())
                     || desc.contains(qq.as_str())
                     || w.contains(qq.as_str())
+                    || tags_joined.contains(qq.as_str())
+                    || e.tags.iter().any(|t| t.eq_ignore_ascii_case(qq))
             } else {
                 true
             }
@@ -616,7 +909,9 @@ pub fn list_skills_metadata_json(
                 .when_to_use
                 .as_ref()
                 .map(|w| truncate_listing(w)),
+            tags: e.tags.clone(),
             source: e.source.clone(),
+            conditions: e.conditions.clone(),
         })
         .collect();
 
@@ -736,6 +1031,15 @@ pub async fn invoke_skill_detailed_with_cache(
     md = md.replace("${CLAUDE_SKILL_DIR}", &dir_str);
     md = md.replace("${OMIGA_SKILL_DIR}", &dir_str);
     md = substitute_arguments(md, args, true, &arg_names);
+
+    // Inject config values if the skill declares any.
+    let config_vars_fm = fm.metadata.as_ref().map(|m| m.config_vars()).unwrap_or_default();
+    if !config_vars_fm.is_empty() {
+        let resolved = skill_config::resolve_config_vars(&config_vars_fm, project_root);
+        if let Some(block) = skill_config::format_config_injection(&resolved) {
+            md = format!("{block}\n\n{md}");
+        }
+    }
 
     let mut body_for_model = String::new();
     body_for_model.push_str(&format!("Launching skill: {command_name}\n\n"));
@@ -899,22 +1203,104 @@ Line $ARGUMENTS
                 name: "alpha-help".to_string(),
                 description: "generic".to_string(),
                 when_to_use: None,
+                tags: vec![],
                 skill_dir: PathBuf::from("/tmp/a"),
                 source: SkillSource::OmigaProject,
                 allowed_tools: vec![],
+                conditions: SkillConditions::default(),
+                config_vars: vec![],
             },
             SkillEntry {
                 name: "postgres-patterns".to_string(),
                 description: "SQL tips".to_string(),
                 when_to_use: Some("database".to_string()),
+                tags: vec!["sql".to_string(), "postgres".to_string()],
                 skill_dir: PathBuf::from("/tmp/b"),
                 source: SkillSource::OmigaProject,
                 allowed_tools: vec![],
+                conditions: SkillConditions::default(),
+                config_vars: vec![],
             },
         ];
         let json = list_skills_metadata_json(&skills, None, Some("postgres tuning"));
         let pg = json.find("postgres-patterns").expect("postgres in json");
         let al = json.find("alpha-help").expect("alpha in json");
         assert!(pg < al);
+        assert!(
+            json.contains("\"tags\"") && json.contains("postgres"),
+            "expected tags in JSON: {json}"
+        );
+    }
+
+    #[test]
+    fn list_skills_query_matches_tags() {
+        let skills = vec![SkillEntry {
+            name: "t".to_string(),
+            description: "d".to_string(),
+            when_to_use: None,
+            tags: vec!["alphafold".to_string()],
+            skill_dir: PathBuf::from("/tmp/t"),
+            source: SkillSource::OmigaProject,
+            allowed_tools: vec![],
+            conditions: SkillConditions::default(),
+            config_vars: vec![],
+        }];
+        let json = list_skills_metadata_json(&skills, Some("alphafold"), None);
+        assert!(json.contains("\"count\": 1"), "{json}");
+        let empty = list_skills_metadata_json(&skills, Some("nomatch-xyz"), None);
+        assert!(empty.contains("\"count\": 0"), "{empty}");
+    }
+
+    #[tokio::test]
+    async fn load_skills_includes_tags_from_frontmatter() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill_dir = dir.path().join(".omiga").join("skills").join("tagged");
+        tokio::fs::create_dir_all(&skill_dir)
+            .await
+            .expect("mkdir");
+        let raw = r#"---
+name: tagged
+description: Has tags
+tags:
+  - pdb
+  - alphafold
+---
+body
+"#;
+        tokio::fs::write(skill_dir.join("SKILL.md"), raw)
+            .await
+            .expect("write");
+        let skills = load_skills_for_project(dir.path()).await;
+        let sk = skills.iter().find(|s| s.name == "tagged").expect("tagged skill");
+        assert_eq!(sk.tags, vec!["pdb", "alphafold"]);
+    }
+
+    #[tokio::test]
+    async fn load_skills_includes_category_nested_skill() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cat = dir
+            .path()
+            .join(".omiga")
+            .join("skills")
+            .join("gstack");
+        let skill_dir = cat.join("nested-demo");
+        tokio::fs::create_dir_all(&skill_dir)
+            .await
+            .expect("mkdir");
+        let raw = r#"---
+name: nested-demo
+description: From category folder
+---
+ok
+"#;
+        tokio::fs::write(skill_dir.join("SKILL.md"), raw)
+            .await
+            .expect("write");
+        let skills = load_skills_for_project(dir.path()).await;
+        let names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.iter().any(|n| *n == "nested-demo"),
+            "expected nested-demo, got {names:?}"
+        );
     }
 }

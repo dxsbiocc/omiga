@@ -8,19 +8,57 @@
 
 use crate::domain::agents::background::{BackgroundAgentStatus, BackgroundAgentTask};
 use crate::domain::session::{AgentTask, Message, TodoItem};
-use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
+    Row, SqlitePool,
+};
 use std::path::Path;
+use std::time::Duration;
 
-/// Initialize the database
+/// Initialize the database.
+///
+/// Connection-level pragmas applied to **every** connection in the pool:
+///
+/// | Pragma | Value | Rationale |
+/// |--------|-------|-----------|
+/// | `journal_mode` | WAL | Concurrent readers never block a writer |
+/// | `synchronous` | NORMAL | One fsync per WAL checkpoint, not per commit |
+/// | `busy_timeout` | 5000 | Retry for 5 s instead of failing with SQLITE_BUSY |
+/// | `cache_size` | -32000 | 32 MB page cache per connection (negative = KiB) |
+/// | `temp_store` | MEMORY | Sort/index temporaries in RAM, not a temp file |
+/// | `mmap_size` | 256 MiB | Memory-map reads — avoids read() syscalls for hot pages |
+/// | `foreign_keys` | ON | Enforce referential integrity |
+/// | `wal_autocheckpoint` | 1000 | Bound WAL size to ~4 MB before auto-checkpoint |
 pub async fn init_db(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
     let options = SqliteConnectOptions::new()
         .filename(db_path)
-        .create_if_missing(true);
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .pragma("busy_timeout",       "5000")
+        .pragma("cache_size",         "-32000")
+        .pragma("temp_store",         "MEMORY")
+        .pragma("mmap_size",          "268435456")
+        .pragma("foreign_keys",       "ON")
+        .pragma("wal_autocheckpoint", "1000");
 
-    let pool = SqlitePool::connect_with(options).await?;
+    let pool = SqlitePoolOptions::new()
+        // 1 write + up to 3 concurrent readers under WAL.
+        .max_connections(4)
+        // Keep 2 warm connections so the first query after idle startup
+        // doesn't pay the connection-creation latency.
+        .min_connections(2)
+        // Surface pool exhaustion quickly rather than hanging silently.
+        .acquire_timeout(Duration::from_secs(30))
+        .connect_with(options)
+        .await?;
 
     // Run migrations
     run_migrations(&pool).await?;
+
+    // Update query-planner statistics after migrations (no-op on a fresh DB).
+    // This is cheap and helps the planner pick optimal indexes on startup.
+    let _ = sqlx::query("PRAGMA optimize").execute(&pool).await;
 
     Ok(pool)
 }
@@ -58,6 +96,17 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    // Composite index: covers the WHERE session_id = ? ORDER BY created_at ASC, id ASC query
+    // so SQLite can satisfy the entire query from the index without a separate sort pass.
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_messages_session_created
+        ON messages(session_id, created_at ASC, id ASC)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    // Keep old single-column index for any queries that filter by session_id alone.
     sqlx::query(
         r#"
         CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id)
@@ -380,7 +429,69 @@ impl SessionRepository {
         Ok(sessions)
     }
 
-    /// Get a session by ID with all messages
+    /// Get session metadata only (no messages) — used by the paginated `load_session` path.
+    pub async fn get_session_meta(&self, id: &str) -> Result<Option<SessionRecord>, sqlx::Error> {
+        sqlx::query_as::<_, SessionRecord>(
+            "SELECT id, name, project_path, created_at, updated_at, active_provider_entry_name FROM sessions WHERE id = ?"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    /// Return at most `limit` messages for `session_id`, ordered newest-first.
+    /// The caller takes `limit` rows and checks `len > limit - 1` to detect older pages.
+    pub async fn get_session_messages_paged(
+        &self,
+        session_id: &str,
+        limit: i64,
+        _offset: i64,
+    ) -> Result<Vec<MessageRecord>, sqlx::Error> {
+        sqlx::query_as::<_, MessageRecord>(
+            r#"
+            SELECT id, session_id, role, content, tool_calls, tool_call_id,
+                   token_usage_json, reasoning_content, created_at
+            FROM messages
+            WHERE session_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(session_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Return at most `limit` messages older than `before_id`, newest-first.
+    /// The caller reverses the result to get chronological order.
+    pub async fn get_messages_before(
+        &self,
+        session_id: &str,
+        before_id: &str,
+        limit: i64,
+    ) -> Result<Vec<MessageRecord>, sqlx::Error> {
+        sqlx::query_as::<_, MessageRecord>(
+            r#"
+            SELECT id, session_id, role, content, tool_calls, tool_call_id,
+                   token_usage_json, reasoning_content, created_at
+            FROM messages
+            WHERE session_id = ?
+              AND (created_at, id) < (
+                  SELECT created_at, id FROM messages WHERE id = ?
+              )
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(session_id)
+        .bind(before_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Get a session by ID with all messages (legacy — used by save_session, etc.)
     pub async fn get_session(&self, id: &str) -> Result<Option<SessionWithMessages>, sqlx::Error> {
         // Get session metadata
         let session = sqlx::query_as::<_, SessionRecord>(
@@ -550,6 +661,45 @@ impl SessionRepository {
         .execute(&self.pool)
         .await?;
 
+        Ok(())
+    }
+
+    /// Persist multiple tool-result rows in a **single transaction**.
+    ///
+    /// Replaces the previous pattern of N individual `save_message` calls (each an
+    /// autocommit) with one `BEGIN` / N `INSERT` / `COMMIT`, reducing fsync overhead
+    /// from O(N) to O(1) under `synchronous = NORMAL`.
+    pub async fn save_tool_results_batch(
+        &self,
+        session_id: &str,
+        results: &[(String, String, Option<String>)], // (tool_use_id, output, id_override)
+    ) -> Result<(), sqlx::Error> {
+        if results.is_empty() {
+            return Ok(());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
+        for (tool_use_id, output, id_override) in results {
+            let msg_id = id_override
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            sqlx::query(
+                r#"
+                INSERT INTO messages
+                    (id, session_id, role, content, tool_calls, tool_call_id,
+                     token_usage_json, reasoning_content, created_at)
+                VALUES (?, ?, 'tool', ?, NULL, ?, NULL, NULL, ?)
+                "#,
+            )
+            .bind(&msg_id)
+            .bind(session_id)
+            .bind(output)
+            .bind(tool_use_id)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -972,6 +1122,49 @@ impl SessionRepository {
         .bind(&now)
         .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Append multiple messages to a background task sidechain transcript in one transaction.
+    pub async fn append_background_agent_messages_batch(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        messages: &[Message],
+    ) -> Result<(), sqlx::Error> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
+        let base_seq: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), 0) FROM background_agent_messages WHERE task_id = ?",
+        )
+        .bind(task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        for (i, message) in messages.iter().enumerate() {
+            let payload_json =
+                serde_json::to_string(message).unwrap_or_else(|_| "{}".to_string());
+            let id = uuid::Uuid::new_v4().to_string();
+            let seq = base_seq + 1 + i as i64;
+            sqlx::query(
+                r#"
+                INSERT INTO background_agent_messages (id, task_id, session_id, seq, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(&id)
+            .bind(task_id)
+            .bind(session_id)
+            .bind(seq)
+            .bind(&payload_json)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(())
     }

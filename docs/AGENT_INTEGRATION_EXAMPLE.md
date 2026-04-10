@@ -72,10 +72,8 @@ async fn run_subagent_session(
     // Agent 特定的系统提示词
     prompt_parts.push(agent_config.system_prompt);
     
-    // 技能发现（如果存在）
-    if skills_exist && !agent_config.omit_claude_md {
-        prompt_parts.push(skills::format_skills_discovery_system_section());
-    }
+    // 技能发现（如果存在）：与生产代码一致，仅追加简短说明 `format_skills_discovery_system_section()`（不注入目录；用 list_skills 按需取元数据）
+    // if skills_exist && !agent_config.omit_claude_md { prompt_parts.push(skills::format_skills_discovery_system_section()); }
     
     sub_cfg.system_prompt = Some(prompt_parts.join("\n\n"));
     

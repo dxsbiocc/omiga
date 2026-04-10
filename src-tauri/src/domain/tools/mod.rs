@@ -26,8 +26,11 @@ pub mod enter_plan_mode;
 pub mod task_stop;
 pub mod task_output;
 pub mod tool_search;
+pub mod skill_config;
 pub mod skill_invoke;
 pub mod list_skills;
+pub mod skill_manage;
+pub mod skill_view;
 pub mod task_create;
 pub mod task_get;
 pub mod task_list;
@@ -686,7 +689,8 @@ pub enum ToolResult {
     Timeout,
 }
 
-/// All tool schemas for LLM. When `include_skill` is true, appends `list_skills` and `skill`
+/// All tool schemas for LLM. Always appends `skill_manage` (project skills CRUD).
+/// When `include_skill` is true, also appends `list_skills`, `skills_list` (alias), `skill_view`, and `skill`
 /// (only when the project has at least one `SKILL.md` — see `domain::skills`).
 pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
     let mut v = vec![
@@ -719,8 +723,13 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
     if env_workflow_scripts_enabled() {
         v.push(workflow::schema());
     }
+    // Procedural memory: available even when no skills exist yet (bootstrap creates first skill).
+    v.push(skill_manage::schema());
+    v.push(skill_config::schema());
     if include_skill {
         v.push(list_skills::schema());
+        v.push(list_skills::skills_list_schema());
+        v.push(skill_view::schema());
         v.push(skill_invoke::schema());
     }
     v
@@ -767,6 +776,8 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
             | "ToolSearch"
             | "tool_search"
             | "list_skills"  // read-only metadata scan
+            | "skills_list"
+            | "skill_view"
     )
 }
 

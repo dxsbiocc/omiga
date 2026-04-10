@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { useSessionStore } from "./sessionStore";
+import { notifyPermissionRequest } from "../utils/notifications";
 
 export type RiskLevel = "safe" | "low" | "medium" | "high" | "critical";
 
@@ -138,6 +139,10 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
 
   setPendingRequest: (request) => {
     set({ pendingRequest: request });
+    // 发送系统通知提醒用户
+    if (request) {
+      void notifyPermissionRequest(request.tool_name, request.risk_level);
+    }
   },
 
   approveRequest: async (mode) => {

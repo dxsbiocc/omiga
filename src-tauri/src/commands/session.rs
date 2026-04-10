@@ -50,7 +50,7 @@ fn message_record_to_api(rec: MessageRecord) -> Message {
 pub async fn list_sessions(
     state: State<'_, OmigaAppState>,
 ) -> CommandResult<Vec<SessionSummary>> {
-    let repo = state.repo.lock().await;
+    let repo = &*state.repo;
 
     let sessions = repo
         .list_sessions()
@@ -62,22 +62,34 @@ pub async fn list_sessions(
         .map(|s| SessionSummary {
             id: s.id,
             name: s.name,
+            project_path: s.project_path,
             message_count: s.message_count as usize,
             updated_at: s.updated_at,
         })
         .collect())
 }
 
-/// Load a session by ID
+/// Default page size for initial session load.  Older messages are fetched on demand
+/// via `load_more_messages` when the user scrolls to the top.
+const DEFAULT_MSG_PAGE_SIZE: i64 = 100;
+
+/// Load a session by ID.
+///
+/// Only the most-recent `limit` messages are returned (default: 100).
+/// `SessionData.has_more_messages` is `true` when the session has older messages.
 #[tauri::command]
 pub async fn load_session(
     state: State<'_, AppState>,
     session_id: String,
+    limit: Option<i64>, // override page size; None → DEFAULT_MSG_PAGE_SIZE
 ) -> CommandResult<SessionData> {
-    let repo = state.repo.lock().await;
+    let start = std::time::Instant::now();
+    tracing::info!(target: "omiga::perf", "load_session started: {}", session_id);
+
+    let repo = &*state.repo;
 
     let session = repo
-        .get_session(&session_id)
+        .get_session_meta(&session_id)
         .await
         .map_err(|e| OmigaError::Persistence(format!("Failed to load session: {}", e)))?;
 
@@ -88,47 +100,82 @@ pub async fn load_session(
     };
 
     let restore_provider = session.active_provider_entry_name.clone();
+    let page = limit.unwrap_or(DEFAULT_MSG_PAGE_SIZE).max(1);
 
-    let crate::domain::persistence::SessionWithMessages {
-        id,
-        name,
-        project_path,
-        created_at,
-        updated_at,
-        messages: raw_messages,
-        ..
-    } = session;
+    // Load one extra row to know whether older messages exist, without fetching them.
+    let raw_messages = repo
+        .get_session_messages_paged(&session_id, page + 1, 0)
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to load messages: {}", e)))?;
+
+    let has_more_messages = raw_messages.len() as i64 > page;
+    // Drop the sentinel row if present; reverse so oldest-first for the UI.
+    let raw_messages: Vec<_> = raw_messages
+        .into_iter()
+        .take(page as usize)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    let db_loaded = start.elapsed();
+    tracing::info!(target: "omiga::perf", "db query completed: {:?}, msg_count: {}, has_more: {}",
+        db_loaded, raw_messages.len(), has_more_messages);
 
     let messages: Vec<Message> = raw_messages
         .into_iter()
         .map(message_record_to_api)
         .collect();
+    let converted = start.elapsed();
+    tracing::info!(target: "omiga::perf", "messages converted: {:?}", converted);
 
-    // Release repo before touching chat LLM runtime (avoids deadlock with other commands).
-    drop(repo);
-
-    if let Err(e) = crate::commands::chat::restore_session_llm_after_load(
+    let provider_changed = crate::commands::chat::restore_session_llm_after_load(
         &state,
         restore_provider,
     )
     .await
-    {
-        tracing::warn!(
-            target: "omiga::llm",
-            "Failed to restore LLM provider for session {}: {}",
-            session_id,
-            e
-        );
-    }
+    .unwrap_or_else(|e| {
+        tracing::warn!(target: "omiga::llm",
+            "Failed to restore LLM provider for session {}: {}", session_id, e);
+        false
+    });
+
+    let total = start.elapsed();
+    tracing::info!(target: "omiga::perf", "load_session completed: {:?}", total);
 
     Ok(SessionData {
-        id,
-        name,
+        id: session.id,
+        name: session.name,
         messages,
-        project_path,
-        created_at,
-        updated_at,
+        project_path: session.project_path,
+        created_at: session.created_at,
+        updated_at: session.updated_at,
+        provider_changed,
+        has_more_messages,
     })
+}
+
+/// Load older messages for a session (pagination: scroll-to-top).
+///
+/// Returns messages strictly older than `before_id`, newest-first then reversed,
+/// so the caller can prepend them to the existing list in correct chronological order.
+#[tauri::command]
+pub async fn load_more_messages(
+    state: State<'_, AppState>,
+    session_id: String,
+    before_id: String, // oldest message id currently loaded
+    limit: Option<i64>,
+) -> CommandResult<Vec<Message>> {
+    let repo = &*state.repo;
+    let page = limit.unwrap_or(DEFAULT_MSG_PAGE_SIZE).max(1);
+
+    let raw = repo
+        .get_messages_before(&session_id, &before_id, page)
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to load more messages: {}", e)))?;
+
+    // raw is DESC order (newest first) — reverse to chronological for the UI.
+    Ok(raw.into_iter().rev().map(message_record_to_api).collect())
 }
 
 /// Save a session (upsert)
@@ -137,7 +184,7 @@ pub async fn save_session(
     state: State<'_, AppState>,
     session: SessionData,
 ) -> CommandResult<()> {
-    let repo = state.repo.lock().await;
+    let repo = &*state.repo;
 
     // Check if session exists
     let existing = repo
@@ -231,7 +278,7 @@ pub async fn create_session(
     name: String,
     project_path: String,
 ) -> CommandResult<SessionData> {
-    let repo = state.repo.lock().await;
+    let repo = &*state.repo;
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -247,6 +294,8 @@ pub async fn create_session(
         project_path,
         created_at: now.clone(),
         updated_at: now,
+        provider_changed: false,
+        has_more_messages: false,
     })
 }
 
@@ -256,7 +305,7 @@ pub async fn delete_session(
     state: State<'_, AppState>,
     session_id: String,
 ) -> CommandResult<()> {
-    let repo = state.repo.lock().await;
+    let repo = &*state.repo;
 
     repo.delete_session(&session_id)
         .await
@@ -272,7 +321,7 @@ pub async fn rename_session(
     session_id: String,
     name: String,
 ) -> CommandResult<()> {
-    let repo = state.repo.lock().await;
+    let repo = &*state.repo;
 
     repo.rename_session(&session_id, &name)
         .await
@@ -288,7 +337,7 @@ pub async fn update_session_project_path(
     session_id: String,
     project_path: String,
 ) -> CommandResult<()> {
-    let repo = state.repo.lock().await;
+    let repo = &*state.repo;
 
     repo.update_session_project_path(&session_id, &project_path)
         .await
@@ -306,7 +355,7 @@ pub async fn save_message(
     session_id: String,
     message: Message,
 ) -> CommandResult<()> {
-    let repo = state.repo.lock().await;
+    let repo = &*state.repo;
     let msg_id = match &message {
         Message::User { id: Some(i), .. }
         | Message::Assistant { id: Some(i), .. }
@@ -382,7 +431,7 @@ pub async fn clear_session_messages(
     state: State<'_, AppState>,
     session_id: String,
 ) -> CommandResult<()> {
-    let repo = state.repo.lock().await;
+    let repo = &*state.repo;
 
     repo.clear_messages(&session_id)
         .await
@@ -470,7 +519,7 @@ pub async fn get_setting(
     state: State<'_, AppState>,
     key: String,
 ) -> CommandResult<Option<String>> {
-    let repo = state.repo.lock().await;
+    let repo = &*state.repo;
 
     let value = repo
         .get_setting(&key)
@@ -487,7 +536,7 @@ pub async fn set_setting(
     key: String,
     value: String,
 ) -> CommandResult<()> {
-    let repo = state.repo.lock().await;
+    let repo = &*state.repo;
 
     repo.set_setting(&key, &value)
         .await
@@ -501,6 +550,7 @@ pub async fn set_setting(
 pub struct SessionSummary {
     pub id: String,
     pub name: String,
+    pub project_path: String,
     pub message_count: usize,
     pub updated_at: String,
 }
@@ -553,4 +603,9 @@ pub struct SessionData {
     pub project_path: String,
     pub created_at: String,
     pub updated_at: String,
+    /// True when the LLM provider was switched as part of loading this session.
+    /// Frontend should call notifyProviderChanged only when this is true.
+    pub provider_changed: bool,
+    /// True when there are older messages not included in this response (pagination).
+    pub has_more_messages: bool,
 }

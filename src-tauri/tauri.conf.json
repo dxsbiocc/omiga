@@ -40,7 +40,8 @@
             "opener:default",
             "dialog:default",
             "core:path:default",
-            "core:window:default"
+            "core:window:default",
+            "notification:default"
           ]
         }
       ]
@@ -58,6 +59,12 @@
     "icon": [],
     "category": "DeveloperTool",
     "shortDescription": "AI coding assistant",
-    "longDescription": "An IDE-like AI coding assistant with file operations, search, and session persistence"
+    "longDescription": "An IDE-like AI coding assistant with file operations, search, and session persistence",
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "11.0",
+      "entitlements": "./Entitlements.plist",
+      "infoPlist": "./Info.plist"
+    }
   }
 }

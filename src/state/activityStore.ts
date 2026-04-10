@@ -1,4 +1,8 @@
 import { create } from "zustand";
+import {
+  notifyBackgroundTaskCompleted,
+  notifyBackgroundTaskFailed,
+} from "../utils/notifications";
 
 /** One row in the pencil-style step list (only done + current; no gray “future” rows). */
 export interface ExecutionStep {
@@ -115,11 +119,24 @@ export const useActivityStore = create<ActivityState>((set) => ({
     }),
 
   updateBackgroundJob: (toolUseId, patch) =>
-    set((s) => ({
-      backgroundJobs: s.backgroundJobs.map((j) =>
+    set((s) => {
+      const prevJob = s.backgroundJobs.find((j) => j.toolUseId === toolUseId);
+      const nextJobs = s.backgroundJobs.map((j) =>
         j.toolUseId === toolUseId ? { ...j, ...patch } : j,
-      ),
-    })),
+      );
+      const nextJob = nextJobs.find((j) => j.toolUseId === toolUseId);
+
+      // 后台任务完成时发送通知
+      if (prevJob && nextJob && prevJob.state === "running" && nextJob.state !== "running") {
+        if (nextJob.state === "done") {
+          void notifyBackgroundTaskCompleted(nextJob.label);
+        } else if (nextJob.state === "error" || nextJob.state === "interrupted") {
+          void notifyBackgroundTaskFailed(nextJob.label, nextJob.exitCode !== undefined ? `exit ${nextJob.exitCode}` : undefined);
+        }
+      }
+
+      return { backgroundJobs: nextJobs };
+    }),
 
   beginExecutionRun: () =>
     set({

@@ -85,6 +85,7 @@ async fn background_agent_messages_append_order() {
         content: "hi".to_string(),
         tool_calls: None,
         token_usage: None,
+        reasoning_content: None,
     };
     let t1 = Message::Tool {
         tool_call_id: "tu1".to_string(),
@@ -157,6 +158,7 @@ async fn background_agent_messages_tool_calls_roundtrip() {
             arguments: "{}".to_string(),
         }]),
         token_usage: None,
+        reasoning_content: None,
     };
     repo.append_background_agent_message("bg-task-tools", &session_id, &asst)
         .await

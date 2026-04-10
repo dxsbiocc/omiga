@@ -8,6 +8,7 @@ import {
 import {
   Alert,
   Box,
+  Chip,
   CircularProgress,
   Collapse,
   Dialog,
@@ -29,6 +30,8 @@ import { materialIconFileExtension } from "../../utils/materialIconTheme";
 export type SkillPreviewTarget = {
   name: string;
   skillMdPath: string;
+  /** From catalog / frontmatter `tags`; shown as chips when set */
+  tags?: string[];
 };
 
 type DirectoryListResponse = {
@@ -729,6 +732,32 @@ export function SkillPreviewDialog({ open, skill, onClose }: Props) {
           >
             {skill.skillMdPath}
           </Typography>
+          {skill.tags && skill.tags.length > 0 && (
+            <Box
+              sx={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 0.5,
+                mt: 1,
+              }}
+            >
+              {skill.tags.map((tag) => (
+                <Chip
+                  key={tag}
+                  size="small"
+                  label={tag}
+                  variant="outlined"
+                  sx={(theme) => ({
+                    height: 22,
+                    fontSize: "0.68rem",
+                    fontWeight: 500,
+                    borderColor: alpha(theme.palette.primary.main, 0.35),
+                    color: "text.secondary",
+                  })}
+                />
+              ))}
+            </Box>
+          )}
         </Box>
         <IconButton
           aria-label="关闭"

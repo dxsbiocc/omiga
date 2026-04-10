@@ -1,13 +1,5 @@
-import { useState, useEffect, useMemo } from "react";
-import {
-  Box,
-  Typography,
-  Stack,
-  Chip,
-  Fade,
-  Tabs,
-  Tab,
-} from "@mui/material";
+import { useState, useEffect, useMemo, useRef } from "react";
+import { Box, Typography, Stack, Chip, Fade, Tabs, Tab } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import {
   Terminal,
@@ -29,6 +21,7 @@ import { PlanTodoList, type PlanTodoItem } from "./PlanTodoList";
 import { ReactStepList } from "./ReactStepList";
 import { SchedulerPlanPanel } from "./SchedulerPlanPanel";
 import { RunningTaskCard, PendingTaskCard } from "./TaskCards";
+import { notifyTaskCompleted, notifyTaskFailed } from "../../utils/notifications";
 
 interface TodoLine {
   id: string;
@@ -103,10 +96,10 @@ function getCurrentSchedulerPlan(messages: Message[]) {
 
 /** 判断任务状态 */
 function getTaskStatus(items: PlanTodoItem[]) {
-  const running = items.filter(i => i.status === "running");
-  const completed = items.filter(i => i.status === "completed");
-  const pending = items.filter(i => i.status === "pending");
-  const error = items.filter(i => i.status === "error");
+  const running = items.filter((i) => i.status === "running");
+  const completed = items.filter((i) => i.status === "completed");
+  const pending = items.filter((i) => i.status === "pending");
+  const error = items.filter((i) => i.status === "error");
   return { running, completed, pending, error };
 }
 
@@ -124,10 +117,9 @@ export function TaskStatus() {
 
   const [elapsedTick, setElapsedTick] = useState(0);
   const [activeTab, setActiveTab] = useState(0);
-  
-  const runActive =
-    executionSteps.length > 0 && executionEndedAt == null;
-    
+
+  const runActive = executionSteps.length > 0 && executionEndedAt == null;
+
   useEffect(() => {
     if (!runActive) return;
     const id = window.setInterval(() => setElapsedTick((n) => n + 1), 1000);
@@ -157,6 +149,33 @@ export function TaskStatus() {
     return getTaskStatus(todoItems);
   }, [todoItems]);
 
+  // 检测任务状态变化，完成时发送通知
+  const prevTaskStatusRef = useRef(taskStatus);
+  useEffect(() => {
+    const prev = prevTaskStatusRef.current;
+    console.log("[TaskStatus] Task status changed:", {
+      prev: { pending: prev.pending.length, running: prev.running.length },
+      current: { pending: taskStatus.pending.length, running: taskStatus.running.length, completed: taskStatus.completed.length, error: taskStatus.error.length },
+    });
+
+    // 检测从有进行中任务到全部完成的变化
+    const wasActive = prev.pending.length + prev.running.length > 0;
+    const isNowInactive = taskStatus.pending.length + taskStatus.running.length === 0;
+    const hasCompleted = taskStatus.completed.length > 0 || taskStatus.error.length > 0;
+
+    console.log("[TaskStatus] Notification check:", { wasActive, isNowInactive, hasCompleted });
+
+    if (wasActive && isNowInactive && hasCompleted) {
+      console.log("[TaskStatus] Triggering task completion notification");
+      if (taskStatus.error.length > 0) {
+        void notifyTaskFailed();
+      } else {
+        void notifyTaskCompleted();
+      }
+    }
+    prevTaskStatusRef.current = taskStatus;
+  }, [taskStatus]);
+
   const hasExecution = executionSteps.length > 0;
   const hasBackground = backgroundJobs.length > 0;
   const hasTodos = todoItems.length > 0;
@@ -179,20 +198,56 @@ export function TaskStatus() {
 
   // 获取模式标签和图标
   const getModeInfo = () => {
-    if (isPlanMode) return { label: "计划模式", icon: <Assignment fontSize="small" />, color: "warning" as const };
-    if (isExploreMode) return { label: "探索模式", icon: <Route fontSize="small" />, color: "info" as const };
-    if (isAutoMode) return { label: "智能调度", icon: <SmartToy fontSize="small" />, color: "primary" as const };
-    if (hasExecution) return { label: "ReAct", icon: <Terminal fontSize="small" />, color: "default" as const };
-    return { label: "就绪", icon: <Pending fontSize="small" />, color: "default" as const };
+    if (isPlanMode)
+      return {
+        label: "计划模式",
+        icon: <Assignment fontSize="small" />,
+        color: "warning" as const,
+      };
+    if (isExploreMode)
+      return {
+        label: "探索模式",
+        icon: <Route fontSize="small" />,
+        color: "info" as const,
+      };
+    if (isAutoMode)
+      return {
+        label: "智能调度",
+        icon: <SmartToy fontSize="small" />,
+        color: "primary" as const,
+      };
+    if (hasExecution)
+      return {
+        label: "ReAct",
+        icon: <Terminal fontSize="small" />,
+        color: "default" as const,
+      };
+    return {
+      label: "就绪",
+      icon: <Pending fontSize="small" />,
+      color: "default" as const,
+    };
   };
 
   const modeInfo = getModeInfo();
 
   return (
-    <Box sx={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+    <Box
+      sx={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
+      }}
+    >
       {/* 头部：模式标识 + 统计 */}
-      <Box sx={{ px: 1.5, pt: 1.25, pb: 0.75, borderBottom: 1, borderColor: "divider" }}>
-        <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+      <Box sx={{ px: 1.5, py: 1.25, borderBottom: 1, borderColor: "divider" }}>
+        <Stack
+          direction="row"
+          alignItems="center"
+          justifyContent="space-between"
+          spacing={1}
+        >
           <Stack direction="row" alignItems="center" spacing={0.75}>
             <Typography
               variant="body2"
@@ -209,7 +264,7 @@ export function TaskStatus() {
               sx={{ height: 20, fontSize: 10, fontWeight: 600 }}
             />
           </Stack>
-          
+
           {/* 统计显示 */}
           {(hasTodos || hasExecution) && (
             <Stack direction="row" alignItems="center" spacing={0.5}>
@@ -217,9 +272,9 @@ export function TaskStatus() {
                 <Chip
                   size="small"
                   label={`${taskStatus.running.length} 运行中`}
-                  sx={{ 
-                    height: 18, 
-                    fontSize: 9, 
+                  sx={{
+                    height: 18,
+                    fontSize: 9,
                     bgcolor: alpha("#6366f1", 0.1),
                     color: "#6366f1",
                   }}
@@ -230,9 +285,9 @@ export function TaskStatus() {
                   size="small"
                   icon={<CheckCircle sx={{ fontSize: 10 }} />}
                   label={taskStatus.completed.length}
-                  sx={{ 
-                    height: 18, 
-                    fontSize: 9, 
+                  sx={{
+                    height: 18,
+                    fontSize: 9,
                     bgcolor: alpha("#22c55e", 0.1),
                     color: "#22c55e",
                   }}
@@ -257,22 +312,40 @@ export function TaskStatus() {
           value={activeTab}
           onChange={(_, v) => setActiveTab(v)}
           variant="fullWidth"
-          sx={{ 
+          sx={{
             minHeight: 32,
-            borderBottom: 1, 
+            borderBottom: 1,
             borderColor: "divider",
             "& .MuiTabs-flexContainer": { gap: 0 },
-            "& .MuiTab-root": { 
-              minHeight: 32, 
+            "& .MuiTab-root": {
+              minHeight: 32,
               py: 0.5,
               fontSize: 11,
               textTransform: "none",
             },
           }}
         >
-          {hasTodos && <Tab label="计划清单" icon={<Assignment sx={{ fontSize: 14 }} />} iconPosition="start" />}
-          {hasExecution && <Tab label="执行步骤" icon={<Terminal sx={{ fontSize: 14 }} />} iconPosition="start" />}
-          {hasSchedulerPlan && <Tab label="调度计划" icon={<Route sx={{ fontSize: 14 }} />} iconPosition="start" />}
+          {hasTodos && (
+            <Tab
+              label="计划清单"
+              icon={<Assignment sx={{ fontSize: 14 }} />}
+              iconPosition="start"
+            />
+          )}
+          {hasExecution && (
+            <Tab
+              label="执行步骤"
+              icon={<Terminal sx={{ fontSize: 14 }} />}
+              iconPosition="start"
+            />
+          )}
+          {hasSchedulerPlan && (
+            <Tab
+              label="调度计划"
+              icon={<Route sx={{ fontSize: 14 }} />}
+              iconPosition="start"
+            />
+          )}
         </Tabs>
       )}
 
@@ -387,19 +460,33 @@ export function TaskStatus() {
         )}
 
         {/* 调度计划视图 */}
-        {hasSchedulerPlan && activeTab === (hasTodos && hasExecution ? 2 : hasTodos || hasExecution ? 1 : 0) && (
-          <Box sx={{ p: 1.5 }}>
-            <SchedulerPlanPanel plan={schedulerPlan} />
-          </Box>
-        )}
+        {hasSchedulerPlan &&
+          activeTab ===
+            (hasTodos && hasExecution
+              ? 2
+              : hasTodos || hasExecution
+                ? 1
+                : 0) && (
+            <Box sx={{ p: 1.5 }}>
+              <SchedulerPlanPanel plan={schedulerPlan} />
+            </Box>
+          )}
 
         {/* 空状态 */}
         {!hasTodos && !hasExecution && !hasSchedulerPlan && (
           <Box sx={{ p: 2, textAlign: "center" }}>
-            <Typography variant="body2" color="text.secondary" sx={{ fontSize: 12 }}>
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              sx={{ fontSize: 12 }}
+            >
               暂无任务
             </Typography>
-            <Typography variant="caption" color="text.disabled" sx={{ fontSize: 11, mt: 0.5, display: "block" }}>
+            <Typography
+              variant="caption"
+              color="text.disabled"
+              sx={{ fontSize: 11, mt: 0.5, display: "block" }}
+            >
               发送消息后任务将显示在这里
             </Typography>
           </Box>
@@ -417,12 +504,25 @@ export function TaskStatus() {
           }}
         >
           <Box sx={{ px: 1.5, py: 1 }}>
-            <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 1 }}>
+            <Stack
+              direction="row"
+              alignItems="center"
+              spacing={0.75}
+              sx={{ mb: 1 }}
+            >
               <CloudQueue fontSize="small" sx={{ color: "#6366f1" }} />
-              <Typography variant="body2" fontWeight={600} sx={{ fontSize: 12 }}>
+              <Typography
+                variant="body2"
+                fontWeight={600}
+                sx={{ fontSize: 12 }}
+              >
                 后台任务
               </Typography>
-              <Chip size="small" label={backgroundJobs.length} sx={{ height: 18, fontSize: 10 }} />
+              <Chip
+                size="small"
+                label={backgroundJobs.length}
+                sx={{ height: 18, fontSize: 10 }}
+              />
             </Stack>
             <Stack spacing={0.75}>
               {backgroundJobs.map((job) => (
@@ -444,10 +544,18 @@ export function TaskStatus() {
                       sx={{ color: "#6366f1", mt: 0.15, flexShrink: 0 }}
                     />
                     <Box sx={{ minWidth: 0, flex: 1 }}>
-                      <Typography variant="body2" sx={{ fontSize: 12, lineHeight: 1.35 }}>
+                      <Typography
+                        variant="body2"
+                        sx={{ fontSize: 12, lineHeight: 1.35 }}
+                      >
                         {job.label}
                       </Typography>
-                      <Stack direction="row" alignItems="center" spacing={0.5} sx={{ mt: 0.5 }}>
+                      <Stack
+                        direction="row"
+                        alignItems="center"
+                        spacing={0.5}
+                        sx={{ mt: 0.5 }}
+                      >
                         {job.state === "running" && (
                           <Chip
                             size="small"
@@ -464,10 +572,13 @@ export function TaskStatus() {
                             sx={{ height: 20, fontSize: 10 }}
                           />
                         )}
-                        {(job.state === "error" || job.state === "interrupted") && (
+                        {(job.state === "error" ||
+                          job.state === "interrupted") && (
                           <Chip
                             size="small"
-                            label={job.state === "interrupted" ? "已中断" : "失败"}
+                            label={
+                              job.state === "interrupted" ? "已中断" : "失败"
+                            }
                             color="warning"
                             variant="outlined"
                             sx={{ height: 20, fontSize: 10 }}

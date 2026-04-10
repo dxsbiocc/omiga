@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 use tauri::State;
-use tokio::sync::Mutex;
 
 /// TTL for the integrations config cache. Short enough to pick up edits quickly.
 pub const INTEGRATIONS_CONFIG_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -30,7 +29,9 @@ pub struct IntegrationsConfigCacheSlot {
 
 /// Process-wide state (managed once in `lib.rs`).
 pub struct OmigaAppState {
-    pub repo: Arc<Mutex<SessionRepository>>,
+    /// `SessionRepository` wraps a `SqlitePool` which is already `Send + Sync` and manages
+    /// concurrent access internally (WAL mode).  No Mutex needed here.
+    pub repo: Arc<SessionRepository>,
     pub chat: ChatState,
     /// Process start time for uptime in snapshots.
     pub started_at: Instant,
@@ -50,7 +51,7 @@ pub struct OmigaAppState {
 impl OmigaAppState {
     pub fn new(repo: SessionRepository) -> Self {
         Self {
-            repo: Arc::new(Mutex::new(repo)),
+            repo: Arc::new(repo),
             chat: ChatState::default(),
             started_at: Instant::now(),
             integrations_catalog_cache: Arc::new(StdMutex::new(HashMap::new())),

@@ -815,7 +815,7 @@ impl PermissionManager {
                     mitigation: Some("使用受限的 file_* 工具替代".to_string()),
                 }],
             },
-            "file_write" | "file_edit" => RiskAssessment {
+            "file_write" | "file_edit" | "skill_manage" | "skill_config" => RiskAssessment {
                 level: RiskLevel::Low,
                 categories: vec![RiskCategory::FileSystem, RiskCategory::DataLoss],
                 description: "修改文件内容".to_string(),
@@ -850,7 +850,13 @@ impl PermissionManager {
                 }],
             },
             // 其他常见安全工具
-            "list_skills" | "search" | "tool_search" | "get_current_time" | "get_system_info" => RiskAssessment {
+            "list_skills"
+            | "skills_list"
+            | "skill_view"
+            | "search"
+            | "tool_search"
+            | "get_current_time"
+            | "get_system_info" => RiskAssessment {
                 level: RiskLevel::Safe,
                 categories: vec![],
                 description: format!("使用工具: {}", tool_name),

@@ -495,6 +495,19 @@ function groupMessagesForRender(messages: Message[]): RenderMsgItem[] {
           m.toolCallsList.length > 0,
       );
       if (hasPersistedToolPlan) {
+        // Build O(1) lookup: toolCallId → {index, message} for all tool rows in segment.
+        // Previously used segment.findIndex() inside a nested loop — O(N²).
+        const toolRowByCallId = new Map<string, { idx: number; msg: Message }>();
+        for (let si = 0; si < segment.length; si++) {
+          const m = segment[si];
+          if (m.role === "tool" && m.toolCall?.id) {
+            // Only record first occurrence; duplicates stay unconsumed.
+            if (!toolRowByCallId.has(m.toolCall.id)) {
+              toolRowByCallId.set(m.toolCall.id, { idx: si, msg: m });
+            }
+          }
+        }
+
         const fold: Message[] = [];
         const consumedToolIdx = new Set<number>();
         for (let si = 0; si < segment.length; si++) {
@@ -504,20 +517,13 @@ function groupMessagesForRender(messages: Message[]): RenderMsgItem[] {
             const list = m.toolCallsList;
             if (list?.length) {
               for (const tc of list) {
-                const rawIdx = segment.findIndex(
-                  (x, i) =>
-                    i !== si &&
-                    x.role === "tool" &&
-                    x.toolCall?.id === tc.id &&
-                    !consumedToolIdx.has(i),
-                );
+                const entry = toolRowByCallId.get(tc.id);
                 let output = "";
-                if (rawIdx >= 0) {
-                  consumedToolIdx.add(rawIdx);
-                  const raw = segment[rawIdx];
+                if (entry && !consumedToolIdx.has(entry.idx)) {
+                  consumedToolIdx.add(entry.idx);
                   output = (
-                    raw.toolCall?.output ??
-                    raw.content ??
+                    entry.msg.toolCall?.output ??
+                    entry.msg.content ??
                     ""
                   ).trimEnd();
                 }
@@ -877,7 +883,7 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
                   mt: 0.5,
                 }}
               >
-                {group.map((taskId, idx) => {
+                {group.map((taskId) => {
                   const task = plan.subtasks.find((t) => t.id === taskId);
                   if (!task) return null;
 
@@ -1121,6 +1127,7 @@ export function Chat({ sessionId }: ChatProps) {
   >("idle");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   /** Populated by `follow_up_suggestions` stream frame; consumed when attaching the final assistant row */
   const pendingFollowUpSuggestionsRef = useRef<Array<{
@@ -1152,6 +1159,10 @@ export function Chat({ sessionId }: ChatProps) {
   const {
     storeMessages,
     currentSession,
+    isSwitchingSession,
+    hasMoreMessages,
+    isLoadingMoreMessages,
+    loadMoreMessages,
     addMessage,
     replaceStoreMessagesSnapshot,
     updateRoundStatus,
@@ -1301,6 +1312,19 @@ export function Chat({ sessionId }: ChatProps) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
   }, [messages, currentResponse, isConnecting, waitingFirstChunk, isStreaming]);
+
+  // Scroll-to-top pagination: load older messages when user scrolls near the top.
+  useEffect(() => {
+    const el = messagesScrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      if (el.scrollTop < 120 && hasMoreMessages && !isLoadingMoreMessages) {
+        void loadMoreMessages();
+      }
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [hasMoreMessages, isLoadingMoreMessages, loadMoreMessages]);
 
   const messageRenderItems = useMemo(
     () => groupMessagesForRender(messages),
@@ -3395,6 +3419,7 @@ export function Chat({ sessionId }: ChatProps) {
 
           {/* Messages Area */}
           <Box
+            ref={messagesScrollRef}
             sx={{
               flex: 1,
               minWidth: 0,
@@ -3405,8 +3430,44 @@ export function Chat({ sessionId }: ChatProps) {
               flexDirection: "column",
               /* 统一：仅由 gap 控制气泡之间的间距（用户消息不再额外 pb 撑高） */
               gap: 2,
+              position: "relative",
             }}
           >
+            {/* Session-switch loading overlay: keeps previous messages visible
+                instead of going blank. Fades in/out smoothly. */}
+            <Fade in={isSwitchingSession} timeout={120} unmountOnExit>
+              <Box
+                sx={{
+                  position: "absolute",
+                  inset: 0,
+                  zIndex: 10,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  bgcolor: (t) => alpha(t.palette.background.default, 0.6),
+                  backdropFilter: "blur(2px)",
+                  pointerEvents: "none",
+                }}
+              >
+                <CircularProgress size={28} thickness={3} />
+              </Box>
+            </Fade>
+
+            {/* Pagination: "load older messages" indicator at the top of the list */}
+            {(hasMoreMessages || isLoadingMoreMessages) && (
+              <Box sx={{ display: "flex", justifyContent: "center", py: 1 }}>
+                {isLoadingMoreMessages ? (
+                  <CircularProgress size={20} thickness={3} />
+                ) : (
+                  <Typography
+                    variant="caption"
+                    sx={{ color: "text.disabled", userSelect: "none" }}
+                  >
+                    向上滚动加载更多历史消息
+                  </Typography>
+                )}
+              </Box>
+            )}
             {messages.length === 0 && !currentResponse && (
               <Box
                 sx={{

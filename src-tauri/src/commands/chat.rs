@@ -59,6 +59,14 @@ struct ListSkillsArgs {
     query: Option<String>,
 }
 
+/// `skill_view` tool JSON — Hermes may use `name` instead of `skill`.
+#[derive(Debug, Deserialize)]
+struct SkillViewArgs {
+    #[serde(alias = "name")]
+    skill: String,
+    file_path: Option<String>,
+}
+
 /// Max assistant↔tool iterations per user send (safety valve; TS query loop is bounded similarly).
 const MAX_TOOL_ROUNDS: usize = 25;
 
@@ -75,7 +83,7 @@ pub(crate) struct AgentLlmRuntime {
     round_id: String,
     cancel_flag: Arc<RwLock<bool>>,
     pending_tools: Arc<Mutex<HashMap<String, PendingToolCall>>>,
-    repo: Arc<Mutex<crate::domain::persistence::SessionRepository>>,
+    repo: Arc<crate::domain::persistence::SessionRepository>,
     /// Same `Arc` as [`SessionRuntimeState::plan_mode`] — sub-agent filter reads plan mode for `ExitPlanMode` parity.
     plan_mode_flag: Option<Arc<Mutex<bool>>>,
     /// `USER_TYPE=ant` — nested `Agent` allowed (`ALL_AGENT_DISALLOWED_TOOLS` omits Agent).
@@ -330,7 +338,7 @@ fn append_truncated_results_note(output: &mut String, truncated: bool) {
 /// Persist `todo_write` + V2 task list so the next `send_message` turn reloads from SQLite.
 async fn persist_session_tool_state(
     sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
-    repo: &Arc<Mutex<crate::domain::persistence::SessionRepository>>,
+    repo: &Arc<crate::domain::persistence::SessionRepository>,
     session_id: &str,
 ) {
     let snapshots = {
@@ -342,7 +350,7 @@ async fn persist_session_tool_state(
         let tasks = runtime.agent_tasks.lock().await.clone();
         (todos, tasks)
     };
-    let repo_guard = repo.lock().await;
+    let repo_guard = &**repo;
     if let Err(e) = repo_guard
         .upsert_session_tool_state(session_id, &snapshots.0, &snapshots.1)
         .await
@@ -607,7 +615,7 @@ pub async fn send_message(
     }
 
     // Get or create session (database is single source of truth)
-    let repo = app_state.repo.lock().await;
+    let repo = &*app_state.repo;
 
     let (session_id, mut session, user_message_id, project_path) = if let Some(ref id) = request.session_id {
         // Load existing session from database
@@ -928,8 +936,6 @@ pub async fn send_message(
             OmigaError::Chat(ChatError::StreamError(format!("Failed to create round: {}", e)))
         })?;
 
-    drop(repo); // Release lock
-
     // Set up cancellation tracking
     let cancel_flag = Arc::new(RwLock::new(false));
     let cancellation_state = RoundCancellationState {
@@ -1152,7 +1158,7 @@ pub async fn send_message(
         {
             Ok(result) => result,
             Err(e) => {
-                let repo = repo_clone.lock().await;
+                let repo = &*repo_clone;
                 let _ = repo.cancel_round(&round_id_clone, Some(&e.to_string())).await;
 
                 let _ = app_clone.emit(
@@ -1192,7 +1198,7 @@ pub async fn send_message(
         let tool_calls_json = tool_calls_json_opt(&pending_tool_calls);
         let reasoning_save = (!assistant_reasoning.is_empty()).then_some(assistant_reasoning.as_str());
         {
-            let repo = repo_clone.lock().await;
+            let repo = &*repo_clone;
             if let Err(e) = repo
                 .save_message(
                     &assistant_msg_id,
@@ -1234,7 +1240,7 @@ pub async fn send_message(
                         .map(|r| r.session.project_path.clone())
                         .unwrap_or_else(|| ".".to_string())
                 };
-                let repo = repo_clone.lock().await;
+                let repo = &*repo_clone;
                 let session_name = {
                     let sessions = sessions_clone.read().await;
                     sessions.get(&session_id_clone)
@@ -1245,7 +1251,7 @@ pub async fn send_message(
             }
             
             {
-                let repo = repo_clone.lock().await;
+                let repo = &*repo_clone;
                 if let Err(e) = repo
                     .complete_round(&round_id_clone, Some(&last_assistant_id))
                     .await
@@ -1325,24 +1331,17 @@ pub async fn send_message(
             .await;
 
             {
-                let repo = repo_clone.lock().await;
-                for (tool_use_id, output, _) in &tool_results {
-                    let msg_id = uuid::Uuid::new_v4().to_string();
-                    if let Err(e) = repo
-                        .save_message(
-                            &msg_id,
-                            &session_id_clone,
-                            "tool",
-                            output,
-                            None,
-                            Some(tool_use_id),
-                            None,
-                            None,
-                        )
-                        .await
-                    {
-                        tracing::warn!("Failed to save tool result: {}", e);
-                    }
+                let repo = &*repo_clone;
+                // Write all tool results in a single transaction (one fsync instead of N).
+                let batch: Vec<(String, String, Option<String>)> = tool_results
+                    .iter()
+                    .map(|(id, out, _)| (id.clone(), out.clone(), None))
+                    .collect();
+                if let Err(e) = repo
+                    .save_tool_results_batch(&session_id_clone, &batch)
+                    .await
+                {
+                    tracing::warn!("Failed to save tool results batch: {}", e);
                 }
             }
 
@@ -1361,7 +1360,7 @@ pub async fn send_message(
             {
                 let mut sessions = sessions_clone.write().await;
                 if let Some(runtime) = sessions.get_mut(&session_id_clone) {
-                    let repo = repo_clone.lock().await;
+                    let repo = &*repo_clone;
                     if let Err(e) = crate::domain::auto_compact::compact_session_and_persist(
                         &repo,
                         &session_id_clone,
@@ -1386,7 +1385,7 @@ pub async fn send_message(
                 if let Some(runtime) = sessions.get(&session_id_clone) {
                     SessionCodec::to_api_messages(&runtime.session.messages)
                 } else {
-                    let repo = repo_clone.lock().await;
+                    let repo = &*repo_clone;
                     if let Ok(Some(db_session)) = repo.get_session(&session_id_clone).await {
                         let session = SessionCodec::db_to_domain(db_session);
                         SessionCodec::to_api_messages(&session.messages)
@@ -1413,7 +1412,7 @@ pub async fn send_message(
             {
                 Ok(r) => r,
                 Err(e) => {
-                    let repo = repo_clone.lock().await;
+                    let repo = &*repo_clone;
                     let _ = repo.cancel_round(&round_id_clone, Some(&e.to_string())).await;
                     let _ = app_clone.emit(
                         &format!("chat-stream-{}", message_id_clone),
@@ -1446,7 +1445,7 @@ pub async fn send_message(
             let next_tc_json = tool_calls_json_opt(&next_tools);
             let next_reasoning_save = (!next_reasoning.is_empty()).then_some(next_reasoning.as_str());
             {
-                let repo = repo_clone.lock().await;
+                let repo = &*repo_clone;
                 if let Err(e) = repo
                     .save_message(
                         &next_assistant_id,
@@ -1487,7 +1486,7 @@ pub async fn send_message(
                             .map(|r| r.session.project_path.clone())
                             .unwrap_or_else(|| ".".to_string())
                     };
-                    let repo = repo_clone.lock().await;
+                    let repo = &*repo_clone;
                     let session_name = {
                         let sessions = sessions_clone.read().await;
                         sessions.get(&session_id_clone)
@@ -1498,7 +1497,7 @@ pub async fn send_message(
                 }
                 
                 {
-                    let repo = repo_clone.lock().await;
+                    let repo = &*repo_clone;
                     if let Err(e) = repo
                         .complete_round(&round_id_clone, Some(&last_assistant_id))
                         .await
@@ -1541,7 +1540,7 @@ pub async fn send_message(
             )),
         );
         {
-            let repo = repo_clone.lock().await;
+            let repo = &*repo_clone;
             let _ = repo
                 .complete_round(&round_id_clone, Some(&last_assistant_id))
                 .await;
@@ -1653,7 +1652,7 @@ async fn stream_llm_response_with_cancel(
     tools: &[ToolSchema],
     pending_tools: &Arc<Mutex<HashMap<String, PendingToolCall>>>,
     cancel_flag: &Arc<RwLock<bool>>,
-    repo: Arc<Mutex<crate::domain::persistence::SessionRepository>>,
+    repo: Arc<crate::domain::persistence::SessionRepository>,
 ) -> Result<(Vec<(String, String, String)>, String, String, bool, Option<crate::llm::TokenUsage>), OmigaError> {
     use futures::StreamExt;
 
@@ -1678,7 +1677,6 @@ async fn stream_llm_response_with_cancel(
         if *cancel_flag.read().await {
             was_cancelled = true;
             // Mark round as cancelled in database
-            let repo = repo.lock().await;
             let _ = repo.cancel_round(round_id, Some("User cancelled")).await;
             break;
         }
@@ -1689,7 +1687,6 @@ async fn stream_llm_response_with_cancel(
                     LlmStreamChunk::Text(text) => {
                         if !marked_partial && !text.is_empty() {
                             // Mark as partial in database
-                            let repo = repo.lock().await;
                             let _ = repo.mark_round_partial(round_id, None).await;
                             marked_partial = true;
                         }
@@ -1804,7 +1801,7 @@ async fn stream_llm_response_with_cancel(
 /// Persist aggregated main-agent token usage on the final assistant DB row for this turn, then emit for live UI.
 async fn persist_and_emit_turn_token_usage(
     app: &AppHandle,
-    repo: &Arc<Mutex<crate::domain::persistence::SessionRepository>>,
+    repo: &Arc<crate::domain::persistence::SessionRepository>,
     last_assistant_message_id: &str,
     stream_message_id: &str,
     usage: &Option<crate::llm::TokenUsage>,
@@ -1835,7 +1832,7 @@ async fn persist_and_emit_turn_token_usage(
         }
     };
     if let Some(ref j) = json {
-        let r = repo.lock().await;
+        let r = &**repo;
         if let Err(e) = r
             .update_message_token_usage(last_assistant_message_id, Some(j.as_str()))
             .await
@@ -1869,7 +1866,7 @@ async fn emit_post_turn_meta_then_complete(
 ) {
     let (summary_enabled, follow_enabled) = match app.try_state::<OmigaAppState>() {
         Some(state) => {
-            let repo = state.repo.lock().await;
+            let repo = &*state.repo;
             crate::domain::post_turn_settings::load_post_turn_meta_flags(&*repo)
                 .await
                 .unwrap_or((true, true))
@@ -2419,16 +2416,18 @@ async fn run_subagent_session_foreground_inner(
             skill_cache.clone(),
         )
         .await;
-        for (tool_use_id, output, _) in &results {
-            let tm = Message::Tool {
+        let tool_messages: Vec<Message> = results
+            .iter()
+            .map(|(tool_use_id, output, _)| Message::Tool {
                 tool_call_id: tool_use_id.clone(),
                 output: output.clone(),
-            };
-            if let Some(tid) = background_task_id {
-                persist_background_transcript_message(&runtime.repo, tid, session_id, &tm).await;
-            }
-            transcript.push(tm);
+            })
+            .collect();
+        if let Some(tid) = background_task_id {
+            persist_background_transcript_messages(&runtime.repo, tid, session_id, &tool_messages)
+                .await;
         }
+        transcript.extend(tool_messages);
     }
     Err(format!(
         "Sub-agent exceeded maximum tool rounds ({MAX_SUBAGENT_TOOL_ROUNDS})."
@@ -2515,10 +2514,10 @@ async fn run_subagent_session(
 
 /// Write-through snapshot of a background task to SQLite (best-effort).
 async fn persist_background_agent_task_snapshot(
-    repo: &Arc<Mutex<crate::domain::persistence::SessionRepository>>,
+    repo: &Arc<crate::domain::persistence::SessionRepository>,
     task: &crate::domain::agents::background::BackgroundAgentTask,
 ) {
-    let guard = repo.lock().await;
+    let guard = &**repo;
     if let Err(e) = guard.upsert_background_agent_task(task).await {
         tracing::warn!(target: "omiga::bg_agent", "persist background task failed: {}", e);
     }
@@ -2526,12 +2525,12 @@ async fn persist_background_agent_task_snapshot(
 
 /// Sidechain transcript row for a background worker (SQLite `background_agent_messages`).
 async fn persist_background_transcript_message(
-    repo: &Arc<Mutex<crate::domain::persistence::SessionRepository>>,
+    repo: &Arc<crate::domain::persistence::SessionRepository>,
     task_id: &str,
     session_id: &str,
     message: &Message,
 ) {
-    let guard = repo.lock().await;
+    let guard = &**repo;
     if let Err(e) = guard
         .append_background_agent_message(task_id, session_id, message)
         .await
@@ -2540,12 +2539,31 @@ async fn persist_background_transcript_message(
     }
 }
 
+/// Batch sidechain transcript rows for a background worker — one transaction for N messages.
+async fn persist_background_transcript_messages(
+    repo: &Arc<crate::domain::persistence::SessionRepository>,
+    task_id: &str,
+    session_id: &str,
+    messages: &[Message],
+) {
+    if messages.is_empty() {
+        return;
+    }
+    let guard = &**repo;
+    if let Err(e) = guard
+        .append_background_agent_messages_batch(task_id, session_id, messages)
+        .await
+    {
+        tracing::warn!(target: "omiga::bg_agent", "persist bg transcript batch failed: {}", e);
+    }
+}
+
 /// User-visible line in the sidechain when the background worker stops due to cancellation.
 const BG_SIDECHAIN_CANCEL_NOTICE: &str =
     "[系统] 后台任务已取消（用户或系统终止了运行）。";
 
 async fn persist_background_cancel_notice(
-    repo: &Arc<Mutex<crate::domain::persistence::SessionRepository>>,
+    repo: &Arc<crate::domain::persistence::SessionRepository>,
     task_id: &str,
     session_id: &str,
 ) {
@@ -3398,7 +3416,7 @@ async fn execute_one_tool(
     // === Permission Check for ALL tools (not just skill) ===
     // Skip permission check for certain safe tools
     let needs_permission_check = !matches!(tool_name.as_str(),
-        "list_skills" | "ask_user" | "ask_user_question"
+        "list_skills" | "skills_list" | "skill_view" | "ask_user" | "ask_user_question"
     );
     
     if needs_permission_check {
@@ -3496,7 +3514,9 @@ async fn execute_one_tool(
     // === End permission check ===
 
     // Parse and execute the tool
-    let result = if tool_name.eq_ignore_ascii_case("list_skills") {
+    let result = if tool_name.eq_ignore_ascii_case("list_skills")
+        || tool_name.eq_ignore_ascii_case("skills_list")
+    {
             let args: ListSkillsArgs = if arguments.trim().is_empty() {
                 ListSkillsArgs::default()
             } else {
@@ -3509,15 +3529,15 @@ async fn execute_one_tool(
             all_skills = integrations_config::filter_skill_entries(all_skills, &icfg);
             let filtered_count = all_skills.len();
             
-            // Telemetry for list_skills (aligned with SkillTool telemetry)
+            // Telemetry for list_skills / skills_list (aligned with SkillTool telemetry)
             tracing::info!(
-                tool = "list_skills",
+                tool = %tool_name,
                 query = ?args.query,
                 has_task_context = skill_task_context.is_some(),
                 total_skills = total_skills_before_filter,
                 after_filter = filtered_count,
                 disabled_count = total_skills_before_filter - filtered_count,
-                "list_skills tool invoked"
+                "list skills tool invoked"
             );
             
             let json = skills::list_skills_metadata_json(
@@ -3563,6 +3583,200 @@ async fn execute_one_tool(
                 tool_results_dir,
             )
             .await;
+            (tool_use_id.clone(), model_output, is_error)
+        } else if tool_name.eq_ignore_ascii_case("skill_view") {
+            match serde_json::from_str::<SkillViewArgs>(arguments) {
+                Err(e) => {
+                    let error_msg = format!("skill_view: invalid JSON: {e}");
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: arguments.clone(),
+                            output: error_msg.clone(),
+                            is_error: true,
+                        },
+                    );
+                    (tool_use_id.clone(), error_msg, true)
+                }
+                Ok(args) => {
+                    if args.skill.trim().is_empty() {
+                        let error_msg =
+                            "skill_view: missing or empty `skill` (or `name`) field".to_string();
+                        let _ = app.emit(
+                            &format!("chat-stream-{}", message_id),
+                            &StreamOutputItem::ToolResult {
+                                tool_use_id: tool_use_id.clone(),
+                                name: tool_name.clone(),
+                                input: arguments.clone(),
+                                output: error_msg.clone(),
+                                is_error: true,
+                            },
+                        );
+                        (tool_use_id.clone(), error_msg, true)
+                    } else {
+                        let icfg = integrations_config::load_integrations_config(project_root);
+                        let mut all_skills =
+                            skills::load_skills_cached(project_root, &skill_cache).await;
+                        all_skills = integrations_config::filter_skill_entries(all_skills, &icfg);
+                        match skills::execute_skill_view(
+                            &all_skills,
+                            args.skill.trim(),
+                            args.file_path.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(json_val) => {
+                                let json = serde_json::to_string_pretty(&json_val)
+                                    .unwrap_or_else(|_| "{\"success\":false}".to_string());
+                                let is_error = false;
+                                let display_output = if json.len() > PREVIEW_SIZE_BYTES {
+                                    let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
+                                    format!(
+                                        "{}\n\n[Output truncated... {} total characters]",
+                                        prefix,
+                                        json.len()
+                                    )
+                                } else {
+                                    json.clone()
+                                };
+                                let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                                    let prefix = truncate_utf8_prefix(
+                                        arguments,
+                                        TOOL_DISPLAY_MAX_INPUT_CHARS,
+                                    );
+                                    format!(
+                                        "{}\n\n[Input truncated... {} total characters]",
+                                        prefix,
+                                        arguments.len()
+                                    )
+                                } else {
+                                    arguments.clone()
+                                };
+                                let _ = app.emit(
+                                    &format!("chat-stream-{}", message_id),
+                                    &StreamOutputItem::ToolResult {
+                                        tool_use_id: tool_use_id.clone(),
+                                        name: tool_name.clone(),
+                                        input: display_input,
+                                        output: display_output,
+                                        is_error,
+                                    },
+                                );
+                                let model_output = process_tool_output_for_model(
+                                    json,
+                                    tool_use_id,
+                                    tool_results_dir,
+                                )
+                                .await;
+                                (tool_use_id.clone(), model_output, is_error)
+                            }
+                            Err(e) => {
+                                tracing::warn!(tool = "skill_view", error = %e, "skill_view failed");
+                                let _ = app.emit(
+                                    &format!("chat-stream-{}", message_id),
+                                    &StreamOutputItem::ToolResult {
+                                        tool_use_id: tool_use_id.clone(),
+                                        name: tool_name.clone(),
+                                        input: arguments.clone(),
+                                        output: e.clone(),
+                                        is_error: true,
+                                    },
+                                );
+                                (tool_use_id.clone(), e, true)
+                            }
+                        }
+                    }
+                }
+            }
+        } else if tool_name.eq_ignore_ascii_case("skill_manage") {
+            let out = skills::execute_skill_manage(project_root, arguments, &skill_cache).await;
+            match out {
+                Ok(json_val) => {
+                    let json = serde_json::to_string_pretty(&json_val)
+                        .unwrap_or_else(|_| "{\"success\":false}".to_string());
+                    let is_error = false;
+                    let display_output = if json.len() > PREVIEW_SIZE_BYTES {
+                        let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
+                        format!(
+                            "{}\n\n[Output truncated... {} total characters]",
+                            prefix,
+                            json.len()
+                        )
+                    } else {
+                        json.clone()
+                    };
+                    let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                        let prefix =
+                            truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+                        format!(
+                            "{}\n\n[Input truncated... {} total characters]",
+                            prefix,
+                            arguments.len()
+                        )
+                    } else {
+                        arguments.clone()
+                    };
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: display_input,
+                            output: display_output,
+                            is_error,
+                        },
+                    );
+                    let model_output = process_tool_output_for_model(
+                        json,
+                        tool_use_id,
+                        tool_results_dir,
+                    )
+                    .await;
+                    (tool_use_id.clone(), model_output, is_error)
+                }
+                Err(e) => {
+                    tracing::warn!(tool = "skill_manage", error = %e, "skill_manage failed");
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: arguments.clone(),
+                            output: e.clone(),
+                            is_error: true,
+                        },
+                    );
+                    (tool_use_id.clone(), e, true)
+                }
+            }
+        } else if tool_name.eq_ignore_ascii_case("skill_config") {
+            let result = handle_skill_config(project_root, arguments, &skill_cache).await;
+            let (json, is_error) = match result {
+                Ok(v) => (serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{\"success\":false}".to_string()), false),
+                Err(e) => {
+                    tracing::warn!(tool = "skill_config", error = %e, "skill_config failed");
+                    (e, true)
+                }
+            };
+            let display_output = if json.len() > PREVIEW_SIZE_BYTES {
+                let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
+                format!("{}\n\n[Output truncated... {} total characters]", prefix, json.len())
+            } else {
+                json.clone()
+            };
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: display_output,
+                    is_error,
+                },
+            );
+            let model_output = process_tool_output_for_model(json, tool_use_id, tool_results_dir).await;
             (tool_use_id.clone(), model_output, is_error)
         } else if tool_name.eq_ignore_ascii_case("skill") || tool_name == "Skill" {
             match serde_json::from_str::<SkillToolArgs>(arguments) {
@@ -4370,7 +4584,7 @@ pub async fn cancel_stream(
         )
         .await;
     } else {
-        let repo = app_state.repo.lock().await;
+        let repo = &*app_state.repo;
         if let Ok(Some(round)) = repo.get_round_by_message_id(&message_id).await {
             cancel_ask_user_waiters_for_message(
                 &app_state.chat.ask_user_waiters,
@@ -4388,7 +4602,7 @@ pub async fn cancel_stream(
     }
 
     // Look up the round by message_id
-    let repo = app_state.repo.lock().await;
+    let repo = &*app_state.repo;
 
     // Find active round
     if let Ok(Some(round)) = repo.get_round_by_message_id(&message_id).await {
@@ -4399,8 +4613,6 @@ pub async fn cancel_stream(
                 .map_err(|e| {
                     OmigaError::Chat(ChatError::StreamError(format!("Failed to cancel round: {}", e)))
                 })?;
-
-            drop(repo);
 
             // Set cancellation flag for in-memory tracking
             let active_rounds = app_state.chat.active_rounds.lock().await;
@@ -4423,7 +4635,7 @@ pub async fn cancel_stream(
             let round_id = round_state.round_id.clone();
             drop(active_rounds);
 
-            let repo = app_state.repo.lock().await;
+            let repo = &*app_state.repo;
             let _ = repo.cancel_round(&round_id, Some("User requested cancellation")).await;
         }
     }
@@ -4437,7 +4649,7 @@ pub async fn cancel_session_rounds(
     app_state: State<'_, OmigaAppState>,
     session_id: String,
 ) -> CommandResult<Vec<String>> {
-    let repo = app_state.repo.lock().await;
+    let repo = &*app_state.repo;
 
     // Get all active rounds for this session
     let active_rounds_db = repo.get_active_rounds(&session_id).await.map_err(|e| {
@@ -4933,7 +5145,7 @@ pub async fn list_session_background_tasks(
     let from_mem = mgr.get_session_tasks(&session_id).await;
 
     let mut from_db = {
-        let repo = app_state.repo.lock().await;
+        let repo = &*app_state.repo;
         repo.list_background_agent_tasks_for_session(&session_id)
             .await
             .map_err(|e| OmigaError::Persistence(e.to_string()))?
@@ -4957,7 +5169,7 @@ pub async fn load_background_agent_transcript(
     session_id: String,
     task_id: String,
 ) -> CommandResult<Vec<Message>> {
-    let repo = app_state.repo.lock().await;
+    let repo = &*app_state.repo;
     let task = repo
         .get_background_agent_task_by_id(&task_id)
         .await
@@ -5012,7 +5224,7 @@ pub async fn cancel_background_agent_task(
         return Ok(task);
     }
 
-    let repo = app_state.repo.lock().await;
+    let repo = &*app_state.repo;
     let row = repo
         .get_background_agent_task_by_id(&task_id)
         .await
@@ -5034,7 +5246,6 @@ pub async fn cancel_background_agent_task(
         BackgroundAgentStatus::Completed
         | BackgroundAgentStatus::Failed
         | BackgroundAgentStatus::Cancelled => {
-            drop(repo);
             return Ok(task);
         }
         BackgroundAgentStatus::Pending | BackgroundAgentStatus::Running => {
@@ -5049,7 +5260,6 @@ pub async fn cancel_background_agent_task(
                 .upsert_background_agent_task(&task)
                 .await
                 .map_err(|e| OmigaError::Persistence(e.to_string()))?;
-            drop(repo);
             if let Err(e) = emit_background_agent_update(&app, &task) {
                 tracing::warn!(target: "omiga::bg_agent", "emit background-agent-update failed: {}", e);
             }
@@ -5496,10 +5706,25 @@ pub(crate) async fn apply_yaml_default_runtime(state: &OmigaAppState) -> Result<
 }
 
 /// When switching sessions, restore that session's quick-switched provider or yaml default.
+/// Returns `true` when the active provider was actually changed (UI needs refresh),
+/// `false` when the desired provider was already active (no-op, skip UI event).
 pub(crate) async fn restore_session_llm_after_load(
     state: &OmigaAppState,
     active_provider_entry_name: Option<String>,
-) -> Result<(), OmigaError> {
+) -> Result<bool, OmigaError> {
+    // Skip re-initializing the provider when it hasn't changed — avoids redundant disk I/O on
+    // every session switch when the user stays on the same model.
+    let current_name = state.chat.active_provider_entry_name.lock().await.clone();
+    let desired_name = active_provider_entry_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if current_name == desired_name {
+        return Ok(false); // unchanged — caller can skip notifyProviderChanged
+    }
+    drop(current_name);
+
     match active_provider_entry_name {
         Some(name) if !name.trim().is_empty() => {
             if let Err(e) = apply_named_provider_runtime(state, name.trim()).await {
@@ -5514,7 +5739,7 @@ pub(crate) async fn restore_session_llm_after_load(
         }
         _ => apply_yaml_default_runtime(state).await?,
     }
-    Ok(())
+    Ok(true) // provider changed — caller should fire notifyProviderChanged
 }
 
 /// Quick switch provider - set active without saving to file (for UI quick-switch).
@@ -5535,7 +5760,7 @@ pub async fn quick_switch_provider(
     if let Some(sid) = session_id {
         let sid = sid.trim();
         if !sid.is_empty() {
-            let repo = state.repo.lock().await;
+            let repo = &*state.repo;
             repo.set_session_active_provider(sid, Some(name))
                 .await
                 .map_err(|e| {
@@ -5688,6 +5913,94 @@ pub async fn run_agent_schedule(
         .map_err(|e| OmigaError::Chat(ChatError::StreamError(e)))?;
 
     Ok(orch_result)
+}
+
+/// Handle the `skill_config` tool: get / set / list skill configuration variables.
+async fn handle_skill_config(
+    project_root: &std::path::Path,
+    arguments: &str,
+    skill_cache: &std::sync::Arc<std::sync::Mutex<skills::SkillCacheMap>>,
+) -> Result<serde_json::Value, String> {
+    use crate::domain::tools::skill_config::{ConfigAction, SkillConfigArgs};
+
+    let args: SkillConfigArgs = serde_json::from_str(arguments)
+        .map_err(|e| format!("skill_config: invalid JSON: {e}"))?;
+
+    match args.action {
+        ConfigAction::List => {
+            let all_skills = skills::load_skills_cached(project_root, skill_cache).await;
+            let mut entries = Vec::new();
+            for skill in &all_skills {
+                if skill.config_vars.is_empty() {
+                    continue;
+                }
+                let resolved = skills::skill_config::resolve_config_vars(&skill.config_vars, project_root);
+                entries.push(serde_json::json!({
+                    "skill": skill.name,
+                    "config_vars": resolved,
+                }));
+            }
+            Ok(serde_json::json!({ "success": true, "skills": entries, "count": entries.len() }))
+        }
+        ConfigAction::Get => {
+            let skill_name = args.skill
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| "skill_config: `skill` is required for action `get`".to_string())?;
+            let all_skills = skills::load_skills_cached(project_root, skill_cache).await;
+            let entry = skills::find_skill_entry(&all_skills, skill_name)
+                .ok_or_else(|| format!("skill_config: unknown skill `{skill_name}`"))?;
+            if entry.config_vars.is_empty() {
+                return Ok(serde_json::json!({
+                    "success": true,
+                    "skill": entry.name,
+                    "config_vars": [],
+                    "message": "This skill declares no config variables."
+                }));
+            }
+            let resolved = skills::skill_config::resolve_config_vars(&entry.config_vars, project_root);
+            Ok(serde_json::json!({
+                "success": true,
+                "skill": entry.name,
+                "config_vars": resolved,
+                "config_file": skills::project_config_path(project_root),
+            }))
+        }
+        ConfigAction::Set => {
+            let skill_name = args.skill
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| "skill_config: `skill` is required for action `set`".to_string())?;
+            let key = args.key
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| "skill_config: `key` is required for action `set`".to_string())?;
+            let value = args.value
+                .as_deref()
+                .ok_or_else(|| "skill_config: `value` is required for action `set`".to_string())?;
+
+            // Validate the key is declared by the skill.
+            let all_skills = skills::load_skills_cached(project_root, skill_cache).await;
+            let entry = skills::find_skill_entry(&all_skills, skill_name)
+                .ok_or_else(|| format!("skill_config: unknown skill `{skill_name}`"))?;
+            if !entry.config_vars.is_empty() && !entry.config_vars.iter().any(|v| v.key == key) {
+                return Err(format!(
+                    "skill_config: key `{key}` is not declared by skill `{skill_name}`. \
+                     Declared keys: {}",
+                    entry.config_vars.iter().map(|v| v.key.as_str()).collect::<Vec<_>>().join(", ")
+                ));
+            }
+
+            skills::set_config_var(project_root, key, value).await?;
+            Ok(serde_json::json!({
+                "success": true,
+                "skill": skill_name,
+                "key": key,
+                "value": value,
+                "config_file": skills::project_config_path(project_root),
+            }))
+        }
+    }
 }
 
 /// Helper to expand environment variables

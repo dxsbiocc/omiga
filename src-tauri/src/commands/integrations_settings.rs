@@ -122,6 +122,7 @@ pub(crate) async fn build_integrations_catalog(
                 source: e.source,
                 directory_name,
                 skill_md_path: skill_md_path.to_string_lossy().into_owned(),
+                tags: e.tags,
                 can_uninstall_omiga_copy,
             }
         })

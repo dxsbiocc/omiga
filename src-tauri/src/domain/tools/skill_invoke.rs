@@ -30,7 +30,7 @@ How to invoke:
   - `skill: "review-pr", args: "123"` - invoke with arguments
 
 Important:
-- Available skills are listed via `list_skills` tool
+- Available skills are listed via `list_skills` / `skills_list`; use `skill_view` to read full `SKILL.md` or a reference file without executing
 - When a skill matches the user's request, this is a BLOCKING REQUIREMENT: invoke the relevant skill tool BEFORE generating any other response about the task
 - NEVER mention a skill without actually calling this tool
 - Do not invoke a skill that is already running
@@ -61,7 +61,7 @@ How to invoke:
   - `skill: "review-pr", args: "123"` - invoke with arguments
 
 Important:
-- Available skills are listed via `list_skills` tool
+- Available skills are listed via `list_skills` / `skills_list`; use `skill_view` to read full `SKILL.md` or a reference file without executing
 - When a skill matches the user's request, this is a BLOCKING REQUIREMENT: invoke the relevant skill tool BEFORE generating any other response about the task
 - NEVER mention a skill without actually calling this tool
 - Do not invoke a skill that is already running

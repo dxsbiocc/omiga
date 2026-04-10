@@ -59,6 +59,8 @@ type SkillCatalogEntry = {
   source: SkillSource;
   directoryName: string;
   skillMdPath: string;
+  /** YAML frontmatter `tags` */
+  tags: string[];
   canUninstallOmigaCopy: boolean;
 };
 
@@ -805,6 +807,35 @@ export function IntegrationsCatalogPanel({
                           >
                             {sk.description || "—"}
                           </Typography>
+                          {sk.tags && sk.tags.length > 0 && (
+                            <Box
+                              sx={{
+                                display: "flex",
+                                flexWrap: "wrap",
+                                gap: 0.5,
+                                mt: 1.25,
+                              }}
+                            >
+                              {sk.tags.map((tag) => (
+                                <Chip
+                                  key={tag}
+                                  size="small"
+                                  label={tag}
+                                  variant="outlined"
+                                  sx={(theme) => ({
+                                    height: 22,
+                                    fontSize: "0.68rem",
+                                    fontWeight: 500,
+                                    borderColor: alpha(
+                                      theme.palette.primary.main,
+                                      0.35,
+                                    ),
+                                    color: "text.secondary",
+                                  })}
+                                />
+                              ))}
+                            </Box>
+                          )}
                         </CardContent>
                         <Box
                           onClick={(e) => e.stopPropagation()}
