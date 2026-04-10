@@ -7,6 +7,7 @@
 use crate::domain::chat_state::ChatState;
 use crate::domain::integrations_catalog::IntegrationsCatalog;
 use crate::domain::integrations_config::IntegrationsConfig;
+use crate::domain::permissions::PermissionManager;
 use crate::domain::skills::SkillCacheMap;
 use crate::commands::CommandResult;
 use crate::domain::persistence::SessionRepository;
@@ -42,6 +43,8 @@ pub struct OmigaAppState {
     /// Process-level integrations config cache: keyed by resolved project root.
     /// Short TTL (30 s) to pick up config edits promptly.
     pub integrations_config_cache: Arc<StdMutex<HashMap<PathBuf, IntegrationsConfigCacheSlot>>>,
+    /// Permission manager for tool execution security.
+    pub permission_manager: Arc<PermissionManager>,
 }
 
 impl OmigaAppState {
@@ -53,6 +56,7 @@ impl OmigaAppState {
             integrations_catalog_cache: Arc::new(StdMutex::new(HashMap::new())),
             skill_cache: Arc::new(StdMutex::new(SkillCacheMap::default())),
             integrations_config_cache: Arc::new(StdMutex::new(HashMap::new())),
+            permission_manager: Arc::new(PermissionManager::new()),
         }
     }
 }

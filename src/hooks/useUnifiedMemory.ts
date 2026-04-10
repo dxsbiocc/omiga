@@ -17,6 +17,8 @@ export interface MemoryConfig {
   root_dir: string;
   wiki_dir: string;
   implicit_dir: string;
+  /** `user_home` (default, ~/.omiga/memory/projects/...) or `project_relative` */
+  memory_mode: string;
   auto_build_index: boolean;
   index_extensions: string[];
   exclude_dirs: string[];
@@ -40,6 +42,8 @@ export interface MemoryPaths {
   root: string;
   wiki: string;
   implicit: string;
+  /** ~/.omiga/memory/permanent/wiki */
+  permanent_wiki: string;
 }
 
 export interface UnifiedMemoryStatus {
@@ -56,6 +60,7 @@ export interface SetMemoryConfigRequest {
   root_dir?: string;
   wiki_dir?: string;
   implicit_dir?: string;
+  memory_mode?: "user_home" | "project_relative";
   auto_build_index?: boolean;
   index_extensions?: string[];
   exclude_dirs?: string[];

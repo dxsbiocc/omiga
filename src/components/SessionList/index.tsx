@@ -449,11 +449,14 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                   cursor: "pointer",
                   bgcolor:
                     currentSession?.id === session.id
-                      ? "action.selected"
+                      ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.14 : 0.1)
                       : "transparent",
                   border: "1px solid transparent",
                   "&:hover": {
-                    bgcolor: "action.hover",
+                    bgcolor:
+                      currentSession?.id === session.id
+                        ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.2 : 0.14)
+                        : "action.hover",
                   },
                 }}
               >

@@ -5,6 +5,7 @@ use crate::app_state::OmigaAppState;
 use crate::domain::session::{
     Message as DomainMessage, MessageTokenUsage, ToolCall as DomainToolCall,
 };
+use crate::domain::persistence::MessageRecord;
 use crate::domain::session_codec::SessionCodec;
 use crate::errors::OmigaError;
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,37 @@ use tauri::State;
 
 /// Back-end global state (repo + chat runtime). Same managed type as `OmigaAppState`.
 pub type AppState = OmigaAppState;
+
+fn message_record_to_api(rec: MessageRecord) -> Message {
+    let id = Some(rec.id.clone());
+    match rec.role.as_str() {
+        "assistant" => {
+            let tool_calls = rec
+                .tool_calls
+                .and_then(|tc| serde_json::from_str::<Vec<ToolCall>>(&tc).ok());
+            let token_usage = rec
+                .token_usage_json
+                .as_ref()
+                .and_then(|j| serde_json::from_str::<MessageTokenUsage>(j).ok());
+            Message::Assistant {
+                content: rec.content,
+                tool_calls,
+                token_usage,
+                reasoning_content: rec.reasoning_content,
+                id,
+            }
+        }
+        "tool" => Message::Tool {
+            tool_call_id: rec.tool_call_id.unwrap_or_default(),
+            output: rec.content,
+            id,
+        },
+        _ => Message::User {
+            content: rec.content,
+            id,
+        },
+    }
+}
 
 /// List all sessions
 #[tauri::command]
@@ -55,48 +87,47 @@ pub async fn load_session(
         });
     };
 
-    // Use SessionCodec for conversion (eliminates duplication)
-    let domain_session = SessionCodec::db_to_domain(session);
+    let restore_provider = session.active_provider_entry_name.clone();
 
-    // Convert domain messages to command messages
-    let messages: Vec<Message> = domain_session
-        .messages
+    let crate::domain::persistence::SessionWithMessages {
+        id,
+        name,
+        project_path,
+        created_at,
+        updated_at,
+        messages: raw_messages,
+        ..
+    } = session;
+
+    let messages: Vec<Message> = raw_messages
         .into_iter()
-        .map(|m| match m {
-            DomainMessage::User { content } => Message::User { content },
-            DomainMessage::Assistant {
-                content,
-                tool_calls,
-                token_usage,
-                reasoning_content,
-            } => Message::Assistant {
-                content,
-                tool_calls: tool_calls.map(|tc| {
-                    tc.into_iter()
-                        .map(|t| ToolCall {
-                            id: t.id,
-                            name: t.name,
-                            arguments: t.arguments,
-                        })
-                        .collect()
-                }),
-                token_usage,
-                reasoning_content,
-            },
-            DomainMessage::Tool { tool_call_id, output } => Message::Tool {
-                tool_call_id,
-                output,
-            },
-        })
+        .map(message_record_to_api)
         .collect();
 
+    // Release repo before touching chat LLM runtime (avoids deadlock with other commands).
+    drop(repo);
+
+    if let Err(e) = crate::commands::chat::restore_session_llm_after_load(
+        &state,
+        restore_provider,
+    )
+    .await
+    {
+        tracing::warn!(
+            target: "omiga::llm",
+            "Failed to restore LLM provider for session {}: {}",
+            session_id,
+            e
+        );
+    }
+
     Ok(SessionData {
-        id: domain_session.id,
-        name: domain_session.name,
+        id,
+        name,
         messages,
-        project_path: domain_session.project_path,
-        created_at: domain_session.created_at.to_rfc3339(),
-        updated_at: domain_session.updated_at.to_rfc3339(),
+        project_path,
+        created_at,
+        updated_at,
     })
 }
 
@@ -128,16 +159,22 @@ pub async fn save_session(
 
     // Save all messages using SessionCodec (eliminates duplication)
     for message in &session.messages {
-        let msg_id = uuid::Uuid::new_v4().to_string();
+        let msg_id = match message {
+            Message::User { id: Some(i), .. }
+            | Message::Assistant { id: Some(i), .. }
+            | Message::Tool { id: Some(i), .. } => i.clone(),
+            _ => uuid::Uuid::new_v4().to_string(),
+        };
 
         // Convert command Message to domain Message for codec
         let domain_msg = match message {
-            Message::User { content } => DomainMessage::User { content: content.clone() },
+            Message::User { content, .. } => DomainMessage::User { content: content.clone() },
             Message::Assistant {
                 content,
                 tool_calls,
                 token_usage,
                 reasoning_content,
+                ..
             } => DomainMessage::Assistant {
                 content: content.clone(),
                 tool_calls: tool_calls.as_ref().map(|tc| {
@@ -152,7 +189,7 @@ pub async fn save_session(
                 token_usage: token_usage.clone(),
                 reasoning_content: reasoning_content.clone(),
             },
-            Message::Tool { tool_call_id, output } => DomainMessage::Tool {
+            Message::Tool { tool_call_id, output, .. } => DomainMessage::Tool {
                 tool_call_id: tool_call_id.clone(),
                 output: output.clone(),
             },
@@ -270,16 +307,22 @@ pub async fn save_message(
     message: Message,
 ) -> CommandResult<()> {
     let repo = state.repo.lock().await;
-    let msg_id = uuid::Uuid::new_v4().to_string();
+    let msg_id = match &message {
+        Message::User { id: Some(i), .. }
+        | Message::Assistant { id: Some(i), .. }
+        | Message::Tool { id: Some(i), .. } => i.clone(),
+        _ => uuid::Uuid::new_v4().to_string(),
+    };
 
     // Convert command Message to domain Message for codec
     let domain_msg = match message {
-        Message::User { content } => DomainMessage::User { content },
+        Message::User { content, .. } => DomainMessage::User { content },
         Message::Assistant {
             content,
             tool_calls,
             token_usage,
             reasoning_content,
+            ..
         } => DomainMessage::Assistant {
             content,
             tool_calls: tool_calls.map(|tc| {
@@ -294,7 +337,7 @@ pub async fn save_message(
             token_usage,
             reasoning_content,
         },
-        Message::Tool { tool_call_id, output } => DomainMessage::Tool {
+        Message::Tool { tool_call_id, output, .. } => DomainMessage::Tool {
             tool_call_id,
             output,
         },
@@ -467,7 +510,12 @@ pub struct SessionSummary {
 #[serde(tag = "role")]
 pub enum Message {
     #[serde(rename = "user")]
-    User { content: String },
+    User {
+        content: String,
+        /// SQLite `messages.id` when loaded from DB; omitted for legacy JSON.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
     #[serde(rename = "assistant")]
     Assistant {
         content: String,
@@ -476,9 +524,16 @@ pub enum Message {
         token_usage: Option<MessageTokenUsage>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
     #[serde(rename = "tool")]
-    Tool { tool_call_id: String, output: String },
+    Tool {
+        tool_call_id: String,
+        output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
 }
 
 /// A tool call

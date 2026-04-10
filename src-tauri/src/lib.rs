@@ -58,11 +58,14 @@ pub fn run() {
 
                 let repo = SessionRepository::new(pool);
                 let app_state = OmigaAppState::new(repo);
-
+                // `permission_*` Tauri commands take `State<Arc<PermissionManager>>`; register the
+                // same Arc as held by `OmigaAppState` so chat/tools and IPC approve/deny share one manager.
+                let permission_manager = app_state.permission_manager.clone();
+                app_handle.manage(permission_manager);
                 app_handle.manage(app_state);
 
                 // Load `omiga.yaml` default provider into memory so the first message uses the
-                // saved default; dialog `quick_switch_provider` overrides only for this session.
+                // saved default; per-session choice is restored from SQLite when loading a session.
                 {
                     let state = app_handle.state::<OmigaAppState>();
                     let mut g = state.chat.llm_config.lock().await;
@@ -120,9 +123,19 @@ pub fn run() {
             commands::chat::save_provider_config,
             commands::chat::delete_provider_config,
             commands::chat::quick_switch_provider,
+            commands::chat::set_default_provider_config,
             commands::chat::run_agent_schedule,
-            commands::permissions::get_omiga_permission_denies,
-            commands::permissions::save_omiga_permission_denies,
+            commands::permissions::permission_check,
+            commands::permissions::permission_approve,
+            commands::permissions::permission_deny,
+            commands::permissions::permission_list_rules,
+            commands::permissions::permission_add_rule,
+            commands::permissions::permission_delete_rule,
+            commands::permissions::permission_get_recent_denials,
+            commands::permissions::permission_update_rule,
+            commands::permissions::permission_set_default_mode,
+            commands::permissions::permission_get_approval_status,
+            commands::permissions::permission_clear_session_approvals,
             app_state::get_app_state_snapshot,
             commands::tools::execute_tool,
             commands::session::list_sessions,

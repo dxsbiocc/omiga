@@ -4,11 +4,14 @@
 //! with configurable paths.
 
 use crate::domain::memory::{
-    config::MemoryConfig,
+    config::{MemoryConfig, MemoryMode},
+    load_resolved_config,
     migration::{detect_structure_version, MemoryStructureVersion},
+    permanent_wiki_path,
+    registry,
     MemorySystem,
 };
-use crate::domain::pageindex::{IndexConfig, PageIndex, QueryResult};
+use crate::domain::pageindex::{IndexConfig, IndexStorage, PageIndex, QueryEngine, QueryResult};
 use crate::errors::AppError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -34,12 +37,11 @@ impl MemoryLevel {
     pub async fn wiki_path(&self, project_path: &PathBuf) -> PathBuf {
         match self {
             MemoryLevel::Project => {
-                let config = MemorySystem::load_config(project_path).await.unwrap_or_default();
-                let memory_root = config.effective_root(project_path);
-                memory_root.join(&config.wiki_dir)
+                let config = load_resolved_config(project_path).await.unwrap_or_default();
+                config.wiki_path(project_path)
             }
             MemoryLevel::User => {
-                Self::user_root().join("memory/wiki")
+                permanent_wiki_path()
             }
         }
     }
@@ -55,6 +57,7 @@ pub struct MemoryConfigResponse {
     pub root_dir: String,
     pub wiki_dir: String,
     pub implicit_dir: String,
+    pub memory_mode: String,
     pub auto_build_index: bool,
     pub index_extensions: Vec<String>,
     pub exclude_dirs: Vec<String>,
@@ -67,6 +70,10 @@ impl From<MemoryConfig> for MemoryConfigResponse {
             root_dir: c.root_dir.to_string_lossy().to_string(),
             wiki_dir: c.wiki_dir,
             implicit_dir: c.implicit_dir,
+            memory_mode: match c.memory_mode {
+                MemoryMode::UserHome => "user_home".to_string(),
+                MemoryMode::ProjectRelative => "project_relative".to_string(),
+            },
             auto_build_index: c.auto_build_index,
             index_extensions: c.index_extensions,
             exclude_dirs: c.exclude_dirs,
@@ -81,6 +88,8 @@ pub struct SetMemoryConfigRequest {
     pub root_dir: Option<String>,
     pub wiki_dir: Option<String>,
     pub implicit_dir: Option<String>,
+    /// `user_home` | `project_relative`
+    pub memory_mode: Option<String>,
     pub auto_build_index: Option<bool>,
     pub index_extensions: Option<Vec<String>>,
     pub exclude_dirs: Option<Vec<String>>,
@@ -118,6 +127,8 @@ pub struct MemoryPaths {
     pub root: String,
     pub wiki: String,
     pub implicit: String,
+    /// User-level permanent wiki (`~/.omiga/memory/permanent/wiki`)
+    pub permanent_wiki: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -128,7 +139,7 @@ pub struct MemoryPaths {
 #[tauri::command]
 pub async fn memory_get_config(project_path: String) -> Result<MemoryConfigResponse, AppError> {
     let root = project_root(&project_path);
-    let config = MemorySystem::load_config(&root).await.unwrap_or_default();
+    let config = load_resolved_config(&root).await.unwrap_or_default();
     Ok(config.into())
 }
 
@@ -137,7 +148,11 @@ pub async fn memory_get_config(project_path: String) -> Result<MemoryConfigRespo
 pub async fn memory_set_config(req: SetMemoryConfigRequest) -> Result<MemoryConfigResponse, AppError> {
     let root = project_root(&req.project_path);
     
-    let mut config = MemorySystem::load_config(&root).await.unwrap_or_default();
+    let mut config = if let Some(c) = MemorySystem::load_config(&root).await {
+        c
+    } else {
+        load_resolved_config(&root).await.unwrap_or_default()
+    };
     
     if let Some(root_dir) = req.root_dir {
         config.root_dir = PathBuf::from(root_dir);
@@ -147,6 +162,12 @@ pub async fn memory_set_config(req: SetMemoryConfigRequest) -> Result<MemoryConf
     }
     if let Some(implicit_dir) = req.implicit_dir {
         config.implicit_dir = implicit_dir;
+    }
+    if let Some(mode) = req.memory_mode.as_deref() {
+        config.memory_mode = match mode {
+            "project_relative" => MemoryMode::ProjectRelative,
+            _ => MemoryMode::UserHome,
+        };
     }
     if let Some(auto_build) = req.auto_build_index {
         config.auto_build_index = auto_build;
@@ -166,6 +187,7 @@ pub async fn memory_set_config(req: SetMemoryConfigRequest) -> Result<MemoryConf
     let memory = MemorySystem::with_config(&root, config);
     memory.save_config().await?;
     memory.init().await.map_err(|e| AppError::Unknown(e.to_string()))?;
+    register_project_memory(&root, memory.config()).await;
     
     Ok(memory.config().clone().into())
 }
@@ -202,18 +224,14 @@ pub async fn memory_get_unified_status(project_path: String) -> Result<UnifiedMe
     let root = project_root(&project_path);
     let version = detect_structure_version(&root).await;
     
-    // Load or create config
-    let config = if let Some(cfg) = MemorySystem::load_config(&root).await {
-        cfg
-    } else {
-        MemoryConfig::default()
-    };
-    
+    let config = load_resolved_config(&root).await.unwrap_or_default();
     let memory = MemorySystem::with_config(&root, config.clone());
     let stats = memory.stats().await;
     
     // Get implicit memory details
     let implicit_status = get_implicit_status(&root, &config).await?;
+    
+    register_project_memory(&root, memory.config()).await;
     
     Ok(UnifiedMemoryStatus {
         exists: version != MemoryStructureVersion::None,
@@ -228,6 +246,7 @@ pub async fn memory_get_unified_status(project_path: String) -> Result<UnifiedMe
             root: memory.root_path().to_string_lossy().to_string(),
             wiki: memory.wiki_path().to_string_lossy().to_string(),
             implicit: memory.implicit_path().to_string_lossy().to_string(),
+            permanent_wiki: permanent_wiki_path().to_string_lossy().to_string(),
         },
     })
 }
@@ -274,6 +293,20 @@ async fn get_implicit_status(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+async fn register_project_memory(root: &std::path::Path, config: &MemoryConfig) {
+    if let Err(e) = registry::upsert_project_paths(
+        root,
+        &config.effective_root(root),
+        &config.wiki_path(root),
+        &config.implicit_path(root),
+        &permanent_wiki_path(),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "memory registry update failed");
+    }
+}
 
 fn project_root(project_path: &str) -> PathBuf {
     let p = project_path.trim();
@@ -344,7 +377,7 @@ fn project_root(project_path: &str) -> PathBuf {
     #[tauri::command]
     pub async fn memory_get_status(project_path: String) -> Result<MemoryStatus, AppError> {
         let root = project_root(&project_path);
-        let config = MemorySystem::load_config(&root).await.unwrap_or_default();
+        let config = load_resolved_config(&root).await.unwrap_or_default();
         let memory = MemorySystem::with_config(&root, config);
         let implicit_path = memory.implicit_path();
         
@@ -380,7 +413,7 @@ fn project_root(project_path: &str) -> PathBuf {
     #[tauri::command]
     pub async fn memory_build_index(req: BuildIndexRequest) -> Result<MemoryStatus, AppError> {
         let root = project_root(&req.project_path);
-        let config = MemorySystem::load_config(&root).await.unwrap_or_default();
+        let config = load_resolved_config(&root).await.unwrap_or_default();
         let memory = MemorySystem::with_config(&root, config.clone());
         
         memory.init().await.map_err(|e| AppError::Unknown(e.to_string()))?;
@@ -396,8 +429,11 @@ fn project_root(project_path: &str) -> PathBuf {
             index_config.exclude_dirs.extend(exclude);
         }
         
-        let mut pageindex = PageIndex::new(&root, index_config);
+        let implicit_dir = memory.implicit_path();
+        let mut pageindex = PageIndex::with_memory_dir(&root, &implicit_dir, index_config);
         pageindex.build().await.map_err(|e| AppError::Unknown(e.to_string()))?;
+        
+        register_project_memory(&root, memory.config()).await;
         
         memory_get_status(req.project_path).await
     }
@@ -415,7 +451,7 @@ fn project_root(project_path: &str) -> PathBuf {
     #[tauri::command]
     pub async fn memory_query(req: QueryRequest) -> Result<QueryResponse, AppError> {
         let root = project_root(&req.project_path);
-        let config = MemorySystem::load_config(&root).await.unwrap_or_default();
+        let config = load_resolved_config(&root).await.unwrap_or_default();
         let implicit_path = config.implicit_path(&root);
         let tree_path = implicit_path.join("tree.json");
         
@@ -423,11 +459,19 @@ fn project_root(project_path: &str) -> PathBuf {
             return Err(AppError::Unknown("Memory index not found".to_string()));
         }
         
-        let index_config = IndexConfig::default();
-        let pageindex = PageIndex::new(&root, index_config);
-        
         let limit = req.limit.unwrap_or(5);
-        let results = pageindex.query(&req.query, limit).await
+        let storage = IndexStorage::new(&implicit_path);
+        let tree = match storage.load_tree().await {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                return Err(AppError::Unknown("Memory index not found".to_string()));
+            }
+            Err(e) => return Err(AppError::Unknown(e.to_string())),
+        };
+        let engine = QueryEngine::new();
+        let results = engine
+            .search(&tree, &req.query, limit)
+            .await
             .map_err(|e| AppError::Unknown(e.to_string()))?;
         
         Ok(QueryResponse {
@@ -440,7 +484,7 @@ fn project_root(project_path: &str) -> PathBuf {
     #[tauri::command]
     pub async fn memory_clear_index(project_path: String) -> Result<(), AppError> {
         let root = project_root(&project_path);
-        let config = MemorySystem::load_config(&root).await.unwrap_or_default();
+        let config = load_resolved_config(&root).await.unwrap_or_default();
         let implicit_path = config.implicit_path(&root);
         
         if implicit_path.exists() {
@@ -452,9 +496,9 @@ fn project_root(project_path: &str) -> PathBuf {
     }
 
     #[tauri::command]
-    pub fn memory_get_dir(project_path: String) -> String {
+    pub async fn memory_get_dir(project_path: String) -> String {
         let root = project_root(&project_path);
-        let config = MemoryConfig::default();
+        let config = load_resolved_config(&root).await.unwrap_or_default();
         let memory = MemorySystem::with_config(&root, config);
         memory.implicit_path().to_string_lossy().to_string()
 }
@@ -465,8 +509,10 @@ pub async fn get_memory_context(
     query: &str,
     limit: usize,
 ) -> Option<String> {
+    let mem_cfg = load_resolved_config(project_path).await.ok()?;
+    let implicit = mem_cfg.implicit_path(project_path);
     let index_config = IndexConfig::default();
-    let mut pageindex = PageIndex::new(project_path, index_config);
+    let mut pageindex = PageIndex::with_memory_dir(project_path, &implicit, index_config);
 
     // load_tree returns Ok(None) when no index exists — no pre-check needed.
     match pageindex.load_tree().await {
@@ -542,15 +588,15 @@ pub async fn memory_import_to_wiki(req: ImportToWikiRequest) -> Result<ImportToW
     let (root, wiki_dir) = match memory_level {
         MemoryLevel::Project => {
             let root = project_root(&req.project_path);
-            let config = MemorySystem::load_config(&root).await.unwrap_or_default();
+            let config = load_resolved_config(&root).await.unwrap_or_default();
             let memory = MemorySystem::with_config(&root, config);
             let wiki_dir = memory.wiki_path();
             (root, wiki_dir)
         }
         MemoryLevel::User => {
             let user_root = MemoryLevel::user_root();
-            let wiki_dir = user_root.join("memory/wiki");
-            (user_root.clone(), wiki_dir)
+            let wiki_dir = permanent_wiki_path();
+            (user_root, wiki_dir)
         }
     };
     

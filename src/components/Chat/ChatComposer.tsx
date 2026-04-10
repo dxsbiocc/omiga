@@ -8,6 +8,8 @@ import {
   type Ref,
   type MutableRefObject,
   type KeyboardEvent,
+  type Dispatch,
+  type SetStateAction,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -36,6 +38,7 @@ import {
   alpha,
   useTheme,
 } from "@mui/material";
+import type { Theme } from "@mui/material/styles";
 import {
   Add,
   ExpandMore,
@@ -77,6 +80,19 @@ import {
   canSendFollowUpToTask,
   shortBgTaskLabel,
 } from "./backgroundAgentTypes";
+import { PermissionPromptBar } from "../permissions/PermissionPromptBar";
+import {
+  AskUserQuestionWizard,
+  type AskUserQuestionItem,
+} from "./AskUserQuestionWizard";
+
+export type ChatComposerAskUserQuestion = {
+  resetKey: string;
+  questions: AskUserQuestionItem[];
+  selections: Record<string, string>;
+  onSelectionsChange: Dispatch<SetStateAction<Record<string, string>>>;
+  onSubmit: () => void;
+};
 
 export interface GitWorkspaceInfo {
   isGit: boolean;
@@ -114,6 +130,21 @@ const PERMISSION_META: Record<PermissionMode, { label: string; hint: string }> =
       hint: "尽量减少权限提示（谨慎使用）。",
     },
   };
+
+/** 权限等级语义色：保守询问 / 默认自动 / 高风险跳过 */
+function permissionModeAccent(theme: Theme, mode: PermissionMode): string {
+  const p = theme.palette;
+  switch (mode) {
+    case "ask":
+      return p.info.main;
+    case "auto":
+      return p.primary.main;
+    case "bypass":
+      return p.warning.main;
+    default:
+      return p.primary.main;
+  }
+}
 
 type AvailableAgentRow = { agentType: string; description: string };
 
@@ -224,6 +255,8 @@ export interface ChatComposerProps {
   onCancelBackgroundTask?: (taskId: string) => void;
   /** Open sidechain transcript drawer (`load_background_agent_transcript`). */
   onOpenBackgroundTranscript?: (taskId: string) => void;
+  /** Blocked `ask_user_question` — wizard above permission bar, same band as permission prompt. */
+  askUserQuestion?: ChatComposerAskUserQuestion | null;
 }
 
 export function ChatComposer({
@@ -249,6 +282,7 @@ export function ChatComposer({
   onEditQueuedAt,
   onCancelBackgroundTask,
   onOpenBackgroundTranscript,
+  askUserQuestion = null,
 }: ChatComposerProps) {
   const theme = useTheme();
   const pen = usePencilPalette();
@@ -301,6 +335,8 @@ export function ChatComposer({
     selectedBranchByRoot,
     setBranchForRoot,
   } = useChatComposerStore();
+
+  const permissionAccent = permissionModeAccent(theme, permissionMode);
 
   const [plusAnchor, setPlusAnchor] = useState<null | HTMLElement>(null);
   const [permissionAnchor, setPermissionAnchor] = useState<null | HTMLElement>(
@@ -538,6 +574,32 @@ export function ChatComposer({
         onKeyDown(e);
         return;
       }
+      /* Home / End：光标到全文首/尾（保留 Ctrl/Cmd/Alt 给系统或浏览器默认） */
+      if (
+        (e.key === "Home" || e.key === "End") &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        const el = e.currentTarget;
+        const len = el.value.length;
+        const a = el.selectionStart ?? 0;
+        const b = el.selectionEnd ?? 0;
+        if (e.key === "Home") {
+          if (e.shiftKey) {
+            el.setSelectionRange(0, Math.max(a, b));
+          } else {
+            el.setSelectionRange(0, 0);
+          }
+        } else if (e.shiftKey) {
+          el.setSelectionRange(Math.min(a, b), len);
+        } else {
+          el.setSelectionRange(len, len);
+        }
+        onKeyDown(e);
+        return;
+      }
       /* 输入框无内容时退格：先移除末尾附件 Chip，再清除 Agent */
       if (
         (e.key === "Backspace" || e.key === "Delete") &&
@@ -664,17 +726,23 @@ export function ChatComposer({
       ? shortRepoLabel(gitInfo.displayPath)
       : shortRepoLabel(workspacePath);
 
-  const placeholder = !sessionId
-    ? "Select a session"
-    : needsWorkspacePath
-      ? "请先选择工作目录后再发送消息…"
-      : followUpTaskId
-        ? "追加说明将进入该后台 Agent 的下一轮工具循环…"
-        : "输入 / 选择 Agent；输入 @ 从当前工作目录选择…";
+  const askUserBlocksInput = Boolean(askUserQuestion);
+
+  const placeholder = askUserBlocksInput
+    ? "请先完成上方的选择题…"
+    : !sessionId
+      ? "Select a session"
+      : needsWorkspacePath
+        ? "请先选择工作目录后再发送消息…"
+        : followUpTaskId
+          ? "追加说明将进入该后台 Agent 的下一轮工具循环…"
+          : "输入 / 选择 Agent；输入 @ 从当前工作目录选择…";
 
   /** 允许排队时：连接中 / 流式中均可继续输入；否则与旧行为一致（等待响应或生成时禁用）。 */
   const inputDisabled =
-    !sessionId || (!allowInputWhileStreaming && (isConnecting || isStreaming));
+    !sessionId ||
+    (!allowInputWhileStreaming && (isConnecting || isStreaming)) ||
+    askUserBlocksInput;
 
   const showSlashPopover =
     slashParse.active &&
@@ -1090,6 +1158,17 @@ export function ChatComposer({
           },
         }}
       >
+        {askUserQuestion ? (
+          <AskUserQuestionWizard
+            variant="composer"
+            resetKey={askUserQuestion.resetKey}
+            questions={askUserQuestion.questions}
+            selections={askUserQuestion.selections}
+            onSelectionsChange={askUserQuestion.onSelectionsChange}
+            onSubmit={askUserQuestion.onSubmit}
+          />
+        ) : null}
+        <PermissionPromptBar />
         <Box
           sx={{
             position: "relative",
@@ -1156,7 +1235,7 @@ export function ChatComposer({
                     height: "var(--composer-chip-h)",
                     maxHeight: "var(--composer-chip-h)",
                     fontWeight: 700,
-                    bgcolor: alpha(accent, isDark ? 0.16 : 0.1),
+                    bgcolor: alpha(accent, isDark ? 0.3 : 0.4),
                     borderColor: alpha(accent, 0.58),
                     color: ink,
                     maxWidth: { xs: 140, sm: 220 },
@@ -1202,7 +1281,7 @@ export function ChatComposer({
                       maxHeight: "var(--composer-chip-h)",
                       maxWidth: 200,
                       fontWeight: 600,
-                      bgcolor: alpha(accent, isDark ? 0.16 : 0.1),
+                      bgcolor: alpha(accent, isDark ? 0.3 : 0.4),
                       borderColor: alpha(accent, 0.58),
                       color: ink,
                       boxShadow: `0 1px 2px ${edge(0.12)}`,
@@ -1545,10 +1624,10 @@ export function ChatComposer({
                   transition: "none",
                 },
                 "&:hover": {
-                  bgcolor: alpha(accent, 0.16),
+                  bgcolor: alpha(accent, 0.3),
                   color: accent,
-                  borderColor: alpha(accent, 0.32),
-                  boxShadow: `0 2px 10px ${alpha(accent, 0.18)}`,
+                  borderColor: alpha(accent, 0.26),
+                  boxShadow: `0 2px 10px ${alpha(accent, 0.12)}`,
                   transform: "translateY(-1px)",
                 },
                 "&:hover .MuiSvgIcon-root": {
@@ -1593,7 +1672,7 @@ export function ChatComposer({
                 sx={{
                   display: "inline-flex",
                   alignItems: "center",
-                  color: accent,
+                  color: permissionAccent,
                   lineHeight: 0,
                   "& svg": { display: "block" },
                 }}
@@ -1601,7 +1680,7 @@ export function ChatComposer({
                 {createElement(PERMISSION_ICON[permissionMode], {
                   size: 18,
                   strokeWidth: 2,
-                  color: accent,
+                  color: permissionAccent,
                 })}
               </Box>
             }
@@ -1611,17 +1690,17 @@ export function ChatComposer({
                 sx={{
                   display: "inline-flex",
                   alignItems: "center",
-                  color: accent,
+                  color: permissionAccent,
                   lineHeight: 0,
                   "& svg": { display: "block" },
                 }}
               >
-                <ChevronDown size={18} strokeWidth={2} color={accent} />
+                <ChevronDown size={18} strokeWidth={2} color={permissionAccent} />
               </Box>
             }
             sx={{
               textTransform: "none",
-              color: ink,
+              color: permissionAccent,
               ...composerLabelText,
               borderRadius: 2.5,
               px: 1,
@@ -1632,13 +1711,13 @@ export function ChatComposer({
               bgcolor: "transparent",
               boxShadow: "none",
               transition:
-                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease",
+                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease",
               "@media (prefers-reduced-motion: reduce)": {
                 transition: "none",
               },
               "&:hover": {
-                bgcolor: alpha(accent, 0.14),
-                borderColor: alpha(accent, 0.3),
+                bgcolor: alpha(permissionAccent, 0.12),
+                borderColor: alpha(permissionAccent, 0.28),
                 boxShadow: "none",
               },
             }}
@@ -1678,42 +1757,54 @@ export function ChatComposer({
                 </Typography>
               </Tooltip>
             </Box>
-            {(Object.keys(PERMISSION_META) as PermissionMode[]).map((key) => (
-              <Tooltip
-                key={key}
-                title={PERMISSION_META[key].hint}
-                placement="left"
-                enterDelay={200}
-              >
-                <MenuItem
-                  selected={permissionMode === key}
-                  onClick={() => {
-                    setPermissionMode(key);
-                    setPermissionAnchor(null);
-                  }}
+            {(Object.keys(PERMISSION_META) as PermissionMode[]).map((key) => {
+              const rowAccent = permissionModeAccent(theme, key);
+              return (
+                <Tooltip
+                  key={key}
+                  title={PERMISSION_META[key].hint}
+                  placement="left"
+                  enterDelay={200}
                 >
-                  <ListItemIcon
+                  <MenuItem
+                    selected={permissionMode === key}
+                    onClick={() => {
+                      setPermissionMode(key);
+                      setPermissionAnchor(null);
+                    }}
                     sx={{
-                      minWidth: 40,
-                      lineHeight: 0,
-                      "& svg": { display: "block" },
+                      "&.Mui-selected": {
+                        bgcolor: alpha(rowAccent, isDark ? 0.18 : 0.12),
+                        "&:hover": {
+                          bgcolor: alpha(rowAccent, isDark ? 0.26 : 0.16),
+                        },
+                      },
                     }}
                   >
-                    {createElement(PERMISSION_ICON[key], {
-                      size: 20,
-                      strokeWidth: 2,
-                      color: accent,
-                    })}
-                  </ListItemIcon>
-                  <ListItemText
-                    primary={PERMISSION_META[key].label}
-                    primaryTypographyProps={{
-                      sx: { ...composerLabelText, color: ink },
-                    }}
-                  />
-                </MenuItem>
-              </Tooltip>
-            ))}
+                    <ListItemIcon
+                      sx={{
+                        minWidth: 40,
+                        lineHeight: 0,
+                        color: rowAccent,
+                        "& svg": { display: "block" },
+                      }}
+                    >
+                      {createElement(PERMISSION_ICON[key], {
+                        size: 20,
+                        strokeWidth: 2,
+                        color: rowAccent,
+                      })}
+                    </ListItemIcon>
+                    <ListItemText
+                      primary={PERMISSION_META[key].label}
+                      primaryTypographyProps={{
+                        sx: { ...composerLabelText, color: rowAccent },
+                      }}
+                    />
+                  </MenuItem>
+                </Tooltip>
+              );
+            })}
           </Menu>
 
           <Stack
@@ -1746,9 +1837,9 @@ export function ChatComposer({
                   transition: "none",
                 },
                 "&:hover": {
-                  borderColor: alpha(accent, 0.5),
-                  bgcolor: isDark ? alpha(paper, 0.48) : alpha(accent, 0.12),
-                  boxShadow: `0 2px 12px ${alpha(accent, 0.2)}, 0 0 0 1px ${alpha(accent, 0.22)}`,
+                  borderColor: alpha(accent, 0.42),
+                  bgcolor: isDark ? alpha(paper, 0.4) : alpha(accent, 0.3),
+                  boxShadow: `0 2px 12px ${alpha(accent, 0.14)}, 0 0 0 1px ${alpha(accent, 0.16)}`,
                   transform: "translateY(-1px)",
                 },
                 "& .MuiChip-root": {
@@ -1900,11 +1991,11 @@ export function ChatComposer({
               },
               "&:hover": {
                 bgcolor: needsWorkspacePath
-                  ? alpha(warningMain, 0.22)
-                  : alpha(accent, 0.12),
+                  ? alpha(warningMain, 0.3)
+                  : alpha(accent, 0.3),
                 borderColor: needsWorkspacePath
-                  ? alpha(warningMain, 0.55)
-                  : alpha(accent, 0.28),
+                  ? alpha(warningMain, 0.48)
+                  : alpha(accent, 0.22),
               },
             }}
           >
@@ -2039,8 +2130,8 @@ export function ChatComposer({
                 color: ink,
               },
               "&:hover": {
-                bgcolor: alpha(accent, 0.12),
-                borderColor: alpha(accent, 0.22),
+                bgcolor: alpha(accent, 0.3),
+                borderColor: alpha(accent, 0.24),
               },
             }}
           />
@@ -2097,8 +2188,8 @@ export function ChatComposer({
               transition:
                 "border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease",
               "&:hover": {
-                borderColor: alpha(accent, 0.32),
-                bgcolor: alpha(accent, 0.12),
+                borderColor: alpha(accent, 0.24),
+                bgcolor: alpha(accent, 0.3),
                 boxShadow: "none",
               },
             }}

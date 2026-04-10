@@ -111,10 +111,22 @@ pub struct PageIndex {
 }
 
 impl PageIndex {
-    /// Create a new PageIndex instance.
+    /// Create a new PageIndex instance with default storage at `.omiga/memory/implicit/`
+    /// (unified memory layout; matches [`crate::domain::memory::MemoryConfig`] defaults).
     pub fn new(project_root: impl AsRef<Path>, config: IndexConfig) -> Self {
         let project_root = project_root.as_ref().to_path_buf();
-        let memory_dir = project_root.join(".omiga").join("memory");
+        let memory_dir = project_root.join(".omiga").join("memory").join("implicit");
+        Self::with_memory_dir(project_root, memory_dir, config)
+    }
+
+    /// Create PageIndex with an explicit storage directory (e.g. configured `implicit_path`).
+    pub fn with_memory_dir(
+        project_root: impl AsRef<Path>,
+        memory_dir: impl AsRef<Path>,
+        config: IndexConfig,
+    ) -> Self {
+        let project_root = project_root.as_ref().to_path_buf();
+        let memory_dir = memory_dir.as_ref().to_path_buf();
         let storage = IndexStorage::new(&memory_dir);
         let tree = DocumentTree::new();
         let query_engine = QueryEngine::new();

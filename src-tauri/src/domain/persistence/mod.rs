@@ -76,6 +76,13 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await;
 
+    // Migration: per-session active provider (omiga.yaml entry name), independent of global default
+    let _ = sqlx::query(
+        "ALTER TABLE sessions ADD COLUMN active_provider_entry_name TEXT",
+    )
+    .execute(pool)
+    .await;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS settings (
@@ -377,7 +384,7 @@ impl SessionRepository {
     pub async fn get_session(&self, id: &str) -> Result<Option<SessionWithMessages>, sqlx::Error> {
         // Get session metadata
         let session = sqlx::query_as::<_, SessionRecord>(
-            "SELECT id, name, project_path, created_at, updated_at FROM sessions WHERE id = ?"
+            "SELECT id, name, project_path, created_at, updated_at, active_provider_entry_name FROM sessions WHERE id = ?"
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -387,13 +394,15 @@ impl SessionRepository {
             return Ok(None);
         };
 
+        let active_provider_entry_name = session.active_provider_entry_name.clone();
+
         // Get all messages for this session
         let messages = sqlx::query_as::<_, MessageRecord>(
             r#"
             SELECT id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, created_at
             FROM messages
             WHERE session_id = ?
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, id ASC
             "#
         )
         .bind(id)
@@ -406,6 +415,7 @@ impl SessionRepository {
             project_path: session.project_path,
             created_at: session.created_at,
             updated_at: session.updated_at,
+            active_provider_entry_name,
             messages,
         }))
     }
@@ -488,6 +498,26 @@ impl SessionRepository {
         Ok(())
     }
 
+    /// Persist which `omiga.yaml` provider entry this session uses (quick-switch), or `null` to mean "yaml default".
+    pub async fn set_session_active_provider(
+        &self,
+        session_id: &str,
+        provider_entry_name: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "UPDATE sessions SET active_provider_entry_name = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(provider_entry_name)
+        .bind(&now)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// Save a message
     pub async fn save_message(
         &self,
@@ -544,6 +574,67 @@ impl SessionRepository {
             .execute(&self.pool)
             .await?;
 
+        Ok(())
+    }
+
+    /// Update plain-text `content` on an existing message row (e.g. retry with edited user text).
+    pub async fn update_message_content(
+        &self,
+        message_id: &str,
+        content: &str,
+    ) -> Result<u64, sqlx::Error> {
+        let r = sqlx::query("UPDATE messages SET content = ? WHERE id = ?")
+            .bind(content)
+            .bind(message_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected())
+    }
+
+    /// Delete all messages strictly **after** `anchor_message_id` in transcript order, and any
+    /// `conversation_rounds` rows that reference those message ids. Used when retrying from a user row.
+    pub async fn delete_messages_after_anchor(
+        &self,
+        session_id: &str,
+        anchor_message_id: &str,
+    ) -> Result<(), sqlx::Error> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT id FROM messages WHERE session_id = ? ORDER BY created_at ASC, id ASC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let ids: Vec<String> = rows.into_iter().map(|r| r.0).collect();
+        let Some(pos) = ids.iter().position(|id| id == anchor_message_id) else {
+            return Ok(());
+        };
+        let to_delete: Vec<String> = ids[(pos + 1)..].to_vec();
+        if to_delete.is_empty() {
+            return Ok(());
+        }
+
+        let mut tx = self.pool.begin().await?;
+        for mid in &to_delete {
+            sqlx::query(
+                r#"DELETE FROM conversation_rounds WHERE session_id = ? AND (
+                    message_id = ? OR user_message_id = ? OR assistant_message_id = ?
+                )"#,
+            )
+            .bind(session_id)
+            .bind(mid)
+            .bind(mid)
+            .bind(mid)
+            .execute(&mut *tx)
+            .await?;
+        }
+        for mid in &to_delete {
+            sqlx::query("DELETE FROM messages WHERE id = ?")
+                .bind(mid)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -976,6 +1067,7 @@ pub struct SessionRecord {
     pub project_path: String,
     pub created_at: String,
     pub updated_at: String,
+    pub active_provider_entry_name: Option<String>,
 }
 
 /// Session with message count
@@ -1011,6 +1103,8 @@ pub struct SessionWithMessages {
     pub project_path: String,
     pub created_at: String,
     pub updated_at: String,
+    /// `omiga.yaml` provider map key; `None` means "use saved default_provider" for this session.
+    pub active_provider_entry_name: Option<String>,
     pub messages: Vec<MessageRecord>,
 }
 

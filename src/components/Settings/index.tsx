@@ -16,6 +16,7 @@ import {
   ListSubheader,
   FormControlLabel,
   Switch,
+  alpha,
 } from "@mui/material";
 import {
   Visibility,
@@ -195,6 +196,8 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
     clampSettingsTab(initialTab),
   );
   const isLlmTab = activeTab === 0 || activeTab === 1;
+  const currentSessionId = useSessionStore((s) => s.currentSession?.id ?? null);
+
   const projectPath = useSessionStore(
     (s) => s.currentSession?.projectPath ?? ".",
   );
@@ -477,10 +480,18 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
                       borderRadius: 1,
                       mb: 0.25,
                       "&.Mui-selected": {
-                        bgcolor: "action.selected",
+                        bgcolor: (t) =>
+                          alpha(
+                            t.palette.primary.main,
+                            t.palette.mode === "dark" ? 0.3 : 0.4,
+                          ),
                       },
                       "&.Mui-selected:hover": {
-                        bgcolor: "action.hover",
+                        bgcolor: (t) =>
+                          alpha(
+                            t.palette.primary.main,
+                            t.palette.mode === "dark" ? 0.5 : 0.4,
+                          ),
                       },
                     }}
                   >
@@ -519,6 +530,7 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
             </Typography>
             {activeTab === 0 && (
               <ProviderManager
+                sessionId={currentSessionId}
                 onActiveProviderChange={(provider, model) => {
                   // Update local state for compatibility
                   setProvider(provider);

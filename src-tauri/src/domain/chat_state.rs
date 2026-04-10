@@ -33,6 +33,14 @@ pub struct AskUserWaiter {
     pub tx: oneshot::Sender<Result<serde_json::Value, String>>,
 }
 
+/// Blocked until the user approves or denies in the chat UI (`permission_approve` / `permission_deny`).
+/// Map key: permission `request_id` from the backend.
+pub struct PermissionToolWaiter {
+    pub tx: oneshot::Sender<Result<(), String>>,
+    pub session_id: String,
+    pub message_id: String,
+}
+
 /// Active chat state with optimized in-memory caching.
 /// Database remains the single source of truth for persistence.
 pub struct ChatState {
@@ -50,6 +58,8 @@ pub struct ChatState {
     pub pending_tools: Arc<Mutex<HashMap<String, PendingToolCall>>>,
     /// Key: `session_id\\x1fmessage_id\\x1ftool_use_id` — blocked until user submits or cancels.
     pub ask_user_waiters: Arc<Mutex<HashMap<String, AskUserWaiter>>>,
+    /// Key: permission `request_id` — blocked until user approves/denies or cancels the round.
+    pub permission_tool_waiters: Arc<Mutex<HashMap<String, PermissionToolWaiter>>>,
     /// MCP tool schema cache keyed by project root. Avoids re-spawning MCP server
     /// processes on every `send_message` call (primary cause of slow first response).
     pub mcp_tool_cache: Arc<Mutex<HashMap<PathBuf, McpToolCache>>>,
@@ -109,6 +119,7 @@ impl Default for ChatState {
             active_rounds: Arc::new(Mutex::new(HashMap::new())),
             pending_tools: Arc::new(Mutex::new(HashMap::new())),
             ask_user_waiters: Arc::new(Mutex::new(HashMap::new())),
+            permission_tool_waiters: Arc::new(Mutex::new(HashMap::new())),
             mcp_tool_cache: Arc::new(Mutex::new(HashMap::new())),
             mcp_manager: Arc::new(GlobalMcpManager::new()),
             permission_deny_cache: Arc::new(Mutex::new(HashMap::new())),

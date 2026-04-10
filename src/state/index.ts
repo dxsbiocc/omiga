@@ -59,3 +59,11 @@ export {
   STATUS_ICONS,
   STATUS_LABELS,
 } from "./agentStore";
+export {
+  usePermissionStore,
+  type RiskLevel,
+  type ToolPermissionMode,
+  type PermissionCheckResult,
+  type RiskInfo,
+  type PermissionRule,
+} from "./permissionStore";

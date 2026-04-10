@@ -233,8 +233,10 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
               Knowledge · 统一记忆
             </Typography>
             <Typography variant="body2" color="text.primary" sx={{ lineHeight: 1.65 }}>
-              <strong>显性记忆</strong>（Wiki）存储外部知识库文档；<strong>隐性记忆</strong>（PageIndex）自动索引聊天历史。
-              对话前会合并检索，显性优先。存储根目录可在概览中修改。
+              默认将项目记忆放在 <strong>~/.omiga/memory/projects/&lt;项目键&gt;/</strong>；跨项目永久笔记在{" "}
+              <strong>~/.omiga/memory/permanent/wiki</strong>。所有项目的索引路径登记在{" "}
+              <strong>~/.omiga/memory/registry.json</strong>。
+              <strong>显性记忆</strong>（Wiki）与<strong>隐性记忆</strong>（PageIndex）对话后自动索引；可在概览中改为项目内存储（project_relative）。
             </Typography>
           </Box>
         </Stack>
@@ -383,6 +385,9 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                 bgcolor: alpha(theme.palette.action.hover, 0.04),
               }}
             >
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+                模式：{memory.config?.memory_mode === "project_relative" ? "项目内 .omiga/memory" : "用户目录 ~/.omiga/memory/projects/…"}
+              </Typography>
               <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }}>
                 <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0, flex: 1 }}>
                   <FolderIcon sx={{ color: "action.active", flexShrink: 0 }} />

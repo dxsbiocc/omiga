@@ -4,6 +4,7 @@ import {
   OMIGA_PROVIDER_CHANGED_EVENT,
   notifyProviderChanged,
 } from "../../utils/providerEvents";
+import { useSessionStore } from "../../state/sessionStore";
 import type { SxProps, Theme } from "@mui/material/styles";
 import {
   Box,
@@ -18,6 +19,8 @@ import {
   CircularProgress,
   Snackbar,
   Alert,
+  alpha,
+  useTheme,
 } from "@mui/material";
 import {
   CheckCircle,
@@ -64,6 +67,9 @@ export function ProviderSwitcher({
   onOpenSettings,
   triggerSx,
 }: ProviderSwitcherProps) {
+  const currentSessionId = useSessionStore((s) => s.currentSession?.id);
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
   const [providers, setProviders] = useState<ProviderConfigEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [switching, setSwitching] = useState<string | null>(null);
@@ -130,7 +136,10 @@ export function ProviderSwitcher({
         provider: string;
         model: string | null;
         apiKeyPreview: string;
-      }>("quick_switch_provider", { providerName: provider.name });
+      }>("quick_switch_provider", {
+        providerName: provider.name,
+        sessionId: currentSessionId ?? null,
+      });
 
       // Update local state
       setProviders((prev) =>
@@ -289,6 +298,18 @@ export function ProviderSwitcher({
                 borderBottom: 1,
                 borderColor: "divider",
                 "&:last-child": { borderBottom: 0 },
+                "&.Mui-selected": {
+                  bgcolor: alpha(
+                    theme.palette.primary.main,
+                    isDark ? 0.16 : 0.12,
+                  ),
+                  "&:hover": {
+                    bgcolor: alpha(
+                      theme.palette.primary.main,
+                      isDark ? 0.22 : 0.16,
+                    ),
+                  },
+                },
               }}
             >
               <ListItemIcon>

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Box, Paper, Stack, useTheme, alpha } from "@mui/material";
 import { Layout } from "./components/Layout";
 import { Chat } from "./components/Chat";
@@ -15,6 +16,7 @@ import {
   useSessionStore,
   useWorkspaceStore,
   useUiStore,
+  usePermissionStore,
   LAYOUT_PANEL_MIN,
 } from "./state";
 
@@ -147,6 +149,83 @@ export default function App() {
     if (!hasCodeWorkspace) return;
     ensureCodePanelMin();
   }, [hasCodeWorkspace, ensureCodePanelMin]);
+
+  // Listen for permission requests from backend
+  useEffect(() => {
+    const setupListener = async () => {
+      try {
+        const unlisten = await listen<{
+          type: string;
+          request_id: string;
+          tool_name: string;
+          risk_level: string;
+          risk_description: string;
+          detected_risks?: Array<{
+            category: string;
+            severity: string;
+            description: string;
+            mitigation?: string;
+          }>;
+          recommendations?: string[];
+          session_id?: string;
+        }>("permission-request", (event) => {
+          try {
+            console.log("Permission request received:", event.payload);
+
+            // Validate risk_level is one of the expected values
+            const validRiskLevels = ["safe", "low", "medium", "high", "critical"];
+            const riskLevel = event.payload.risk_level;
+            if (!validRiskLevels.includes(riskLevel)) {
+              console.warn("Invalid risk level received:", riskLevel, "- defaulting to 'medium'");
+            }
+
+            console.log("[Permission] Setting pending request for:", event.payload.tool_name);
+            const { setPendingRequest } = usePermissionStore.getState();
+            const detectedRisks = (event.payload.detected_risks || []).map(r => ({
+              category: r.category,
+              severity: (validRiskLevels.includes(r.severity) ? r.severity : "medium") as import("./state/permissionStore").RiskLevel,
+              description: r.description,
+              mitigation: r.mitigation,
+            }));
+            const rawArgs = (event.payload as { arguments?: Record<string, unknown> }).arguments;
+            const sessionFromEvent = (event.payload as { session_id?: string }).session_id;
+            setPendingRequest({
+              allowed: false,
+              requires_approval: true,
+              request_id: event.payload.request_id,
+              tool_name: event.payload.tool_name,
+              risk_level: (validRiskLevels.includes(riskLevel) ? riskLevel : "medium") as import("./state/permissionStore").RiskLevel,
+              risk_description: event.payload.risk_description,
+              detected_risks: detectedRisks,
+              recommendations: event.payload.recommendations || [],
+              arguments: rawArgs,
+              session_id: sessionFromEvent,
+            });
+            console.log("[Permission] Pending request set");
+          } catch (error) {
+            console.error("Error handling permission request:", error);
+          }
+        });
+        return unlisten;
+      } catch (error) {
+        console.error("Error setting up permission listener:", error);
+        return () => {};
+      }
+    };
+
+    let unlistenFn: (() => void) | undefined;
+    setupListener().then((fn) => {
+      unlistenFn = fn;
+    }).catch((error) => {
+      console.error("Failed to setup permission listener:", error);
+    });
+
+    return () => {
+      if (unlistenFn) {
+        unlistenFn();
+      }
+    };
+  }, []);
 
   return (
     <>

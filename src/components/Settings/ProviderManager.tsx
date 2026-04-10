@@ -28,7 +28,10 @@ import {
   InputAdornment,
   FormControlLabel,
   Switch,
+  alpha,
+  useTheme,
 } from "@mui/material";
+import { darken } from "@mui/material/styles";
 import {
   CheckCircle,
   Delete,
@@ -38,6 +41,8 @@ import {
   VisibilityOff,
   RadioButtonChecked,
   RadioButtonUnchecked,
+  Star,
+  StarBorder,
 } from "@mui/icons-material";
 
 import { notifyProviderChanged } from "../../utils/providerEvents";
@@ -131,9 +136,24 @@ interface ProviderConfigEntry {
 
 interface ProviderManagerProps {
   onActiveProviderChange?: (provider: string, model: string) => void;
+  /** When set, quick-switch is persisted for this chat session only. */
+  sessionId?: string | null;
 }
 
-export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps) {
+export function ProviderManager({
+  onActiveProviderChange,
+  sessionId,
+}: ProviderManagerProps) {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+  const selectedRowBg = alpha(
+    theme.palette.primary.main,
+    isDark ? 0.14 : 0.1,
+  );
+  const selectedRowHoverBg = alpha(
+    theme.palette.primary.main,
+    isDark ? 0.2 : 0.14,
+  );
   // List of configured providers
   const [providers, setProviders] = useState<ProviderConfigEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -187,7 +207,10 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
         provider: string;
         model: string | null;
         apiKeyPreview: string;
-      }>("quick_switch_provider", { providerName: name });
+      }>("quick_switch_provider", {
+        providerName: name,
+        sessionId: sessionId ?? null,
+      });
 
       // Update local state
       setProviders((prev) =>
@@ -207,6 +230,23 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
       notifyProviderChanged();
     } catch (err) {
       setError(`Failed to switch: ${err}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /** 仅写入 omiga.yaml 的 default_provider，不改变当前会话正在用的模型 */
+  const handleSetDefaultProvider = async (name: string) => {
+    try {
+      setLoading(true);
+      setError(null);
+      await invoke("set_default_provider_config", { providerName: name });
+      await loadProviders();
+      setSuccess(`「${name}」已设为默认启动模型`);
+      setTimeout(() => setSuccess(null), 3000);
+      notifyProviderChanged();
+    } catch (err) {
+      setError(`设置默认失败: ${err}`);
     } finally {
       setLoading(false);
     }
@@ -347,7 +387,14 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
           (DeepSeek, Kimi, Qwen, etc.).
         </Alert>
       ) : (
-        <List sx={{ bgcolor: "background.paper", borderRadius: 1 }}>
+        <>
+          <Alert severity="info" sx={{ mb: 2 }}>
+            <Typography variant="body2" component="div">
+              <strong>默认</strong>：下次启动、新会话使用的配置（点击星标设置）。
+              <strong> 当前会话</strong>：右侧圆圈仅切换本轮对话，不会改默认。
+            </Typography>
+          </Alert>
+          <List sx={{ bgcolor: "background.paper", borderRadius: 1 }}>
           {providers.map((provider) => {
             const info = getProviderDisplay(provider.providerType);
 
@@ -357,8 +404,12 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
                 sx={{
                   borderBottom: 1,
                   borderColor: "divider",
-                  bgcolor: provider.isSessionActive ? "action.selected" : "inherit",
-                  "&:hover": { bgcolor: "action.hover" },
+                  bgcolor: provider.isSessionActive ? selectedRowBg : "inherit",
+                  "&:hover": {
+                    bgcolor: provider.isSessionActive
+                      ? selectedRowHoverBg
+                      : "action.hover",
+                  },
                 }}
               >
                 <ListItemText
@@ -375,7 +426,29 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
                         />
                       )}
                       {provider.isDefault && (
-                        <Chip label="Default" size="small" variant="outlined" sx={{ ml: 0.5 }} />
+                        <Chip
+                          label="Default"
+                          size="small"
+                          color="warning"
+                          variant="filled"
+                          sx={{
+                            ml: 0.5,
+                            fontWeight: 700,
+                            color: (t) =>
+                              t.palette.mode === "dark"
+                                ? t.palette.warning.contrastText
+                                : darken(t.palette.warning.main, 0.58),
+                            bgcolor: (t) =>
+                              alpha(
+                                t.palette.warning.main,
+                                t.palette.mode === "dark" ? 0.45 : 0.28,
+                              ),
+                            border: (t) =>
+                              `1px solid ${alpha(darken(t.palette.warning.main, 0.2), 0.45)}`,
+                            boxShadow: (t) =>
+                              `inset 0 1px 0 ${alpha(t.palette.common.white, 0.15)}`,
+                          }}
+                        />
                       )}
                     </Box>
                   }
@@ -391,7 +464,78 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
                   }
                 />
                 <ListItemSecondaryAction>
-                  <Box sx={{ display: "flex", gap: 0.5 }}>
+                  <Box
+                    sx={{
+                      display: "flex",
+                      gap: 0.25,
+                      alignItems: "center",
+                    }}
+                  >
+                    <Tooltip
+                      title={
+                        provider.isDefault
+                          ? "已是默认启动模型"
+                          : "设为默认启动模型（写入配置，不切换当前会话）"
+                      }
+                    >
+                      <span>
+                        <IconButton
+                          size="small"
+                          onClick={() => handleSetDefaultProvider(provider.name)}
+                          disabled={loading || provider.isDefault}
+                          aria-label={
+                            provider.isDefault
+                              ? "默认启动模型"
+                              : "设为默认启动模型"
+                          }
+                          sx={(t) => {
+                            const deepWarnFilled =
+                              t.palette.mode === "dark"
+                                ? t.palette.warning.main
+                                : darken(t.palette.warning.main, 0.55);
+                            return {
+                              /* 默认模型：琥珀/金，与会话(绿)、编辑(主色)、删除(红) 区分 */
+                              ...(provider.isDefault && {
+                                bgcolor: alpha(
+                                  t.palette.warning.main,
+                                  t.palette.mode === "dark" ? 0.32 : 0.24,
+                                ),
+                                color: deepWarnFilled,
+                              }),
+                              ...(!provider.isDefault && {
+                                color:
+                                  t.palette.mode === "dark"
+                                    ? alpha(t.palette.warning.light, 0.95)
+                                    : darken(t.palette.warning.main, 0.12),
+                              }),
+                              "&:hover": {
+                                bgcolor: provider.isDefault
+                                  ? alpha(t.palette.warning.main, 0.4)
+                                  : alpha(t.palette.warning.main, 0.16),
+                              },
+                              "&.Mui-disabled": {
+                                color: provider.isDefault
+                                  ? deepWarnFilled
+                                  : alpha(t.palette.warning.main, 0.38),
+                                opacity: provider.isDefault ? 1 : undefined,
+                                ...(provider.isDefault && {
+                                  bgcolor: alpha(
+                                    t.palette.warning.main,
+                                    t.palette.mode === "dark" ? 0.32 : 0.24,
+                                  ),
+                                }),
+                              },
+                            };
+                          }}
+                        >
+                          {provider.isDefault ? (
+                            <Star fontSize="small" />
+                          ) : (
+                            <StarBorder fontSize="small" />
+                          )}
+                        </IconButton>
+                      </span>
+                    </Tooltip>
                     <Tooltip
                       title={
                         provider.isSessionActive
@@ -404,7 +548,44 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
                           size="small"
                           onClick={() => handleSwitchProvider(provider.name)}
                           disabled={provider.isSessionActive || loading}
-                          color={provider.isSessionActive ? "success" : "default"}
+                          sx={(t) => {
+                            const deepSuccessIcon =
+                              t.palette.mode === "dark"
+                                ? t.palette.success.main
+                                : darken(t.palette.success.main, 0.48);
+                            return {
+                              ...(provider.isSessionActive && {
+                                bgcolor: alpha(
+                                  t.palette.success.main,
+                                  t.palette.mode === "dark" ? 0.26 : 0.2,
+                                ),
+                                color: deepSuccessIcon,
+                              }),
+                              ...(!provider.isSessionActive && {
+                                color:
+                                  t.palette.mode === "dark"
+                                    ? alpha(t.palette.primary.light, 0.92)
+                                    : t.palette.primary.dark,
+                              }),
+                              "&:hover": {
+                                bgcolor: provider.isSessionActive
+                                  ? alpha(t.palette.success.main, 0.32)
+                                  : alpha(t.palette.primary.main, 0.14),
+                              },
+                              "&.Mui-disabled": {
+                                color: provider.isSessionActive
+                                  ? deepSuccessIcon
+                                  : alpha(t.palette.primary.main, 0.38),
+                                opacity: provider.isSessionActive ? 1 : undefined,
+                                ...(provider.isSessionActive && {
+                                  bgcolor: alpha(
+                                    t.palette.success.main,
+                                    t.palette.mode === "dark" ? 0.26 : 0.2,
+                                  ),
+                                }),
+                              },
+                            };
+                          }}
                         >
                           {provider.isSessionActive ? (
                             <RadioButtonChecked fontSize="small" />
@@ -415,7 +596,23 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
                       </span>
                     </Tooltip>
                     <Tooltip title="Edit">
-                      <IconButton size="small" onClick={() => handleEdit(provider)} disabled={loading}>
+                      <IconButton
+                        size="small"
+                        onClick={() => handleEdit(provider)}
+                        disabled={loading}
+                        sx={(t) => ({
+                          color:
+                            t.palette.mode === "dark"
+                              ? alpha(t.palette.primary.light, 0.92)
+                              : t.palette.primary.dark,
+                          "&:hover": {
+                            bgcolor: alpha(t.palette.primary.main, 0.14),
+                          },
+                          "&.Mui-disabled": {
+                            color: alpha(t.palette.primary.main, 0.38),
+                          },
+                        })}
+                      >
                         <Edit fontSize="small" />
                       </IconButton>
                     </Tooltip>
@@ -424,6 +621,18 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
                         size="small"
                         onClick={() => handleDelete(provider.name)}
                         disabled={loading || provider.isSessionActive}
+                        sx={(t) => ({
+                          color:
+                            t.palette.mode === "dark"
+                              ? t.palette.error.light
+                              : t.palette.error.dark,
+                          "&:hover": {
+                            bgcolor: alpha(t.palette.error.main, 0.14),
+                          },
+                          "&.Mui-disabled": {
+                            color: alpha(t.palette.error.main, 0.38),
+                          },
+                        })}
                       >
                         <Delete fontSize="small" />
                       </IconButton>
@@ -433,7 +642,8 @@ export function ProviderManager({ onActiveProviderChange }: ProviderManagerProps
               </ListItem>
             );
           })}
-        </List>
+          </List>
+        </>
       )}
 
       {/* Add/Edit Dialog */}

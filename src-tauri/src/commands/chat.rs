@@ -13,8 +13,10 @@ use crate::constants::tool_limits::{
 use crate::domain::agent_runtime::ChatInputTarget;
 use crate::domain::coordinator;
 use crate::domain::chat_state::{
-    AskUserWaiter, McpToolCache, MCP_TOOL_CACHE_TTL, PermissionDenyCache, PERMISSION_DENY_CACHE_TTL,
+    AskUserWaiter, McpToolCache, MCP_TOOL_CACHE_TTL, PermissionDenyCache, PermissionToolWaiter,
+    PERMISSION_DENY_CACHE_TTL,
 };
+use crate::domain::permissions::PermissionRequest;
 use crate::domain::tools::ask_user_question;
 use crate::domain::session::{AgentTask, Message, MessageTokenUsage, Session, TodoItem, ToolCall};
 use crate::domain::session_codec::SessionCodec;
@@ -409,9 +411,12 @@ async fn index_chat_to_implicit_memory(
         return;
     }
 
-    // Get memory directory path
+    // Get memory directory path (respects ~/.omiga/memory/projects/... default)
     let project_root = resolve_session_project_root(project_path);
-    let memory_dir = project_root.join(".omiga/memory/implicit");
+    let memory_dir = match crate::domain::memory::load_resolved_config(&project_root).await {
+        Ok(cfg) => cfg.implicit_path(&project_root),
+        Err(_) => project_root.join(".omiga/memory/implicit"),
+    };
 
     // Initialize indexer
     let mut indexer = crate::domain::memory::ChatIndexer::new(&memory_dir);
@@ -436,6 +441,7 @@ async fn index_chat_to_implicit_memory(
     match indexer.index_session(session_id, session_name, &messages).await {
         Ok(_) => {
             tracing::info!("Indexed chat session {} into implicit memory", session_id);
+            crate::domain::memory::touch_project_registry(&project_root).await;
             let _ = app.emit("chat-index-complete", serde_json::json!({
                 "session_id": session_id,
                 "document_count": indexer.document_count(),
@@ -596,6 +602,7 @@ pub async fn send_message(
             input_kind: Some("background_followup_queued".to_string()),
             scheduler_plan: None,
             initial_todos: None,
+            user_message_id: None,
         });
     }
 
@@ -609,17 +616,66 @@ pub async fn send_message(
         })?;
 
         if let Some(db_session) = db_session {
-            let mut session = SessionCodec::db_to_domain(db_session);
-            session.add_user_message(&request.content);
+            let mut session;
+            let msg_id: String;
 
-            // Save user message to database
-            let msg_id = uuid::Uuid::new_v4().to_string();
-            let _now = chrono::Utc::now().to_rfc3339();
-            repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None, None)
-                .await
-                .map_err(|e| {
-                    OmigaError::Chat(ChatError::StreamError(format!("Failed to save message: {}", e)))
-                })?;
+            if let Some(ref anchor) = request.retry_from_user_message_id {
+                let anchor_row = db_session.messages.iter().find(|m| m.id == *anchor);
+                let Some(anchor_row) = anchor_row else {
+                    return Err(OmigaError::Chat(ChatError::StreamError(
+                        "retry_from_user_message_id not found in session".to_string(),
+                    )));
+                };
+                if anchor_row.role != "user" {
+                    return Err(OmigaError::Chat(ChatError::StreamError(
+                        "retry_from_user_message_id must reference a user message".to_string(),
+                    )));
+                }
+                repo.delete_messages_after_anchor(id, anchor)
+                    .await
+                    .map_err(|e| {
+                        OmigaError::Chat(ChatError::StreamError(format!(
+                            "Failed to truncate session for retry: {}",
+                            e
+                        )))
+                    })?;
+                if anchor_row.content != request.content {
+                    repo.update_message_content(anchor, &request.content)
+                        .await
+                        .map_err(|e| {
+                            OmigaError::Chat(ChatError::StreamError(format!(
+                                "Failed to update user message for retry: {}",
+                                e
+                            )))
+                        })?;
+                }
+                let db_session = repo
+                    .get_session(id)
+                    .await
+                    .map_err(|e| {
+                        OmigaError::Chat(ChatError::StreamError(format!(
+                            "Failed to reload session after retry: {}",
+                            e
+                        )))
+                    })?
+                    .ok_or_else(|| {
+                        OmigaError::Chat(ChatError::StreamError(
+                            "Session not found after retry truncate".to_string(),
+                        ))
+                    })?;
+                session = SessionCodec::db_to_domain(db_session);
+                msg_id = anchor.clone();
+            } else {
+                session = SessionCodec::db_to_domain(db_session);
+                session.add_user_message(&request.content);
+
+                msg_id = uuid::Uuid::new_v4().to_string();
+                repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None, None)
+                    .await
+                    .map_err(|e| {
+                        OmigaError::Chat(ChatError::StreamError(format!("Failed to save message: {}", e)))
+                    })?;
+            }
 
             // Update session timestamp
             repo.touch_session(&session.id).await.ok();
@@ -1532,6 +1588,7 @@ pub async fn send_message(
         message_id,
         session_id,
         round_id,
+        user_message_id: Some(user_message_id),
         input_kind: None,
         scheduler_plan: scheduler_result,
         initial_todos,
@@ -2203,7 +2260,13 @@ async fn run_subagent_session_foreground_inner(
         .unwrap_or(false);
 
     if is_memory_agent {
-        prompt_parts.push(crate::domain::memory::memory_agent_system_prompt(effective_root));
+        let mem_cfg = crate::domain::memory::load_resolved_config(effective_root)
+            .await
+            .unwrap_or_default();
+        prompt_parts.push(crate::domain::memory::memory_agent_system_prompt_with_config(
+            effective_root,
+            &mem_cfg,
+        ));
     } else {
         let tool_ctx = ToolContext::new(effective_root);
         let agent_specific_prompt = agent_def.system_prompt(&tool_ctx);
@@ -2718,6 +2781,156 @@ async fn cancel_ask_user_waiters_for_message(
     }
 }
 
+async fn cancel_permission_tool_waiters_for_message(
+    waiters: &Arc<Mutex<HashMap<String, PermissionToolWaiter>>>,
+    session_id: &str,
+    message_id: &str,
+) {
+    let mut map = waiters.lock().await;
+    let keys: Vec<String> = map
+        .iter()
+        .filter(|(_, w)| w.session_id == session_id && w.message_id == message_id)
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in keys {
+        if let Some(w) = map.remove(&k) {
+            let _ = w.tx.send(Err("用户已取消".to_string()));
+        }
+    }
+}
+
+async fn cancel_permission_tool_waiters_for_session(
+    waiters: &Arc<Mutex<HashMap<String, PermissionToolWaiter>>>,
+    session_id: &str,
+) {
+    let mut map = waiters.lock().await;
+    let keys: Vec<String> = map
+        .iter()
+        .filter(|(_, w)| w.session_id == session_id)
+        .map(|(k, _)| k.clone())
+        .collect();
+    for k in keys {
+        if let Some(w) = map.remove(&k) {
+            let _ = w.tx.send(Err("会话已关闭".to_string()));
+        }
+    }
+}
+
+fn permission_risk_level_event_str(level: crate::domain::permissions::RiskLevel) -> &'static str {
+    match level {
+        crate::domain::permissions::RiskLevel::Safe => "safe",
+        crate::domain::permissions::RiskLevel::Low => "low",
+        crate::domain::permissions::RiskLevel::Medium => "medium",
+        crate::domain::permissions::RiskLevel::High => "high",
+        crate::domain::permissions::RiskLevel::Critical => "critical",
+    }
+}
+
+fn build_permission_request_event_json(
+    tool_name: &str,
+    session_id: &str,
+    args_value: &serde_json::Value,
+    req: &PermissionRequest,
+) -> serde_json::Value {
+    let risk_level_str = permission_risk_level_event_str(req.risk.level);
+    serde_json::json!({
+        "type": "permission_request",
+        "request_id": req.request_id,
+        "tool_name": tool_name,
+        "risk_level": risk_level_str,
+        "risk_description": req.risk.description,
+        "session_id": session_id,
+        "arguments": args_value.clone(),
+        "detected_risks": req.risk.detected_risks.iter().map(|r| {
+            let severity_str = permission_risk_level_event_str(r.severity);
+            serde_json::json!({
+                "category": format!("{:?}", r.category),
+                "severity": severity_str,
+                "description": r.description,
+                "mitigation": r.mitigation,
+            })
+        }).collect::<Vec<_>>(),
+        "recommendations": req.risk.recommendations,
+    })
+}
+
+/// Register a waiter, emit `permission-request`, then block until approve/deny/cancel.
+async fn wait_for_permission_tool_resolution(
+    app: &AppHandle,
+    app_state: &OmigaAppState,
+    session_id: &str,
+    message_id: &str,
+    tool_use_id: &str,
+    stream_tool_name: &str,
+    tool_name_for_event: &str,
+    arguments_display: &str,
+    args_value: &serde_json::Value,
+    req: &PermissionRequest,
+    cancel_flag: Option<Arc<RwLock<bool>>>,
+) -> Result<(), String> {
+    let request_id = req.request_id.clone();
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+    {
+        let mut map = app_state.chat.permission_tool_waiters.lock().await;
+        map.insert(
+            request_id.clone(),
+            PermissionToolWaiter {
+                tx,
+                session_id: session_id.to_string(),
+                message_id: message_id.to_string(),
+            },
+        );
+    }
+
+    let permission_event =
+        build_permission_request_event_json(tool_name_for_event, session_id, args_value, req);
+    let _ = app.emit("permission-request", &permission_event);
+
+    let pending_msg = format!(
+        "⏳ 需要权限确认: {}\n\n风险级别: {:?}\n{}\n\n请在输入框上方批准或拒绝。",
+        tool_name_for_event,
+        req.risk.level,
+        req.risk.description
+    );
+    let _ = app.emit(
+        &format!("chat-stream-{}", message_id),
+        &StreamOutputItem::ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            name: stream_tool_name.to_string(),
+            input: arguments_display.to_string(),
+            output: pending_msg,
+            is_error: false,
+        },
+    );
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(120));
+    interval.tick().await;
+    let outcome = loop {
+        tokio::select! {
+            res = &mut rx => break res,
+            _ = interval.tick() => {
+                if let Some(ref f) = cancel_flag {
+                    if *f.read().await {
+                        let mut map = app_state.chat.permission_tool_waiters.lock().await;
+                        map.remove(&request_id);
+                        return Err("用户已取消".to_string());
+                    }
+                }
+            }
+        }
+    };
+
+    {
+        let mut map = app_state.chat.permission_tool_waiters.lock().await;
+        map.remove(&request_id);
+    }
+
+    match outcome {
+        Ok(inner) => inner,
+        Err(_) => Err("权限确认通道意外关闭".to_string()),
+    }
+}
+
 fn build_ask_user_success_output(
     questions: &[ask_user_question::QuestionItem],
     answers: &serde_json::Value,
@@ -3182,6 +3395,106 @@ async fn execute_one_tool(
         }
     }
 
+    // === Permission Check for ALL tools (not just skill) ===
+    // Skip permission check for certain safe tools
+    let needs_permission_check = !matches!(tool_name.as_str(),
+        "list_skills" | "ask_user" | "ask_user_question"
+    );
+    
+    if needs_permission_check {
+        let Some(app_state) = app.try_state::<OmigaAppState>() else {
+            let error_msg = "内部错误：无法获取应用状态".to_string();
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            return (tool_use_id.clone(), error_msg, true);
+        };
+        let permission_manager = app_state.permission_manager.clone();
+
+        let args_value: serde_json::Value = serde_json::from_str(arguments)
+            .unwrap_or_else(|_| serde_json::json!({"raw": arguments}));
+
+        loop {
+            let perm_decision = permission_manager
+                .check_tool(session_id, &tool_name, &args_value)
+                .await;
+
+            match perm_decision {
+                crate::domain::permissions::PermissionDecision::Deny(ref reason) => {
+                    tracing::warn!(
+                        tool = %tool_name,
+                        reason = %reason,
+                        "Tool denied by permission manager"
+                    );
+                    let error_msg = format!("权限被拒绝: {}", reason);
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: arguments.clone(),
+                            output: error_msg.clone(),
+                            is_error: true,
+                        },
+                    );
+                    return (tool_use_id.clone(), error_msg, true);
+                }
+                crate::domain::permissions::PermissionDecision::RequireApproval(ref req) => {
+                    tracing::info!(
+                        tool = %tool_name,
+                        risk_level = ?req.risk.level,
+                        "Tool requires user approval — blocking until UI resolves"
+                    );
+                    match wait_for_permission_tool_resolution(
+                        &app,
+                        &app_state,
+                        session_id,
+                        message_id,
+                        tool_use_id,
+                        tool_name,
+                        tool_name,
+                        arguments,
+                        &args_value,
+                        req,
+                        cancel_flag.clone(),
+                    )
+                    .await
+                    {
+                        Ok(()) => continue,
+                        Err(e) => {
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", message_id),
+                                &StreamOutputItem::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    name: tool_name.clone(),
+                                    input: arguments.clone(),
+                                    output: e.clone(),
+                                    is_error: true,
+                                },
+                            );
+                            return (tool_use_id.clone(), e, true);
+                        }
+                    }
+                }
+                crate::domain::permissions::PermissionDecision::Allow => {
+                    tracing::debug!(
+                        tool = %tool_name,
+                        "Tool allowed by permission manager"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    // === End permission check ===
+
     // Parse and execute the tool
     let result = if tool_name.eq_ignore_ascii_case("list_skills") {
             let args: ListSkillsArgs = if arguments.trim().is_empty() {
@@ -3307,74 +3620,104 @@ async fn execute_one_tool(
                             );
                             (tool_use_id.clone(), error_msg, true)
                         } else {
-                            // === Fine-grained permission check (aligned with SkillTool.checkPermissions) ===
-                            use crate::domain::permissions::{self, PermissionDecision};
-                            let perm_ctx = permissions::build_permission_context(project_root);
+                            // === Permission Check (New PermissionManager) ===
                             let skill_display = resolved_name
                                 .clone()
                                 .unwrap_or_else(|| args.skill.trim().to_string());
 
-                            // Get allowed_tools from skill metadata if available
-                            let allowed_tools: Option<Vec<String>> = resolved_name
-                                .as_ref()
-                                .and_then(|name| {
-                                    skills::find_skill_entry(&all_skills, name)
-                                        .map(|entry| entry.allowed_tools.clone())
-                                });
+                            let Some(app_state_skill) = app.try_state::<OmigaAppState>() else {
+                                let error_msg = "内部错误：无法获取应用状态".to_string();
+                                let _ = app.emit(
+                                    &format!("chat-stream-{}", message_id),
+                                    &StreamOutputItem::ToolResult {
+                                        tool_use_id: tool_use_id.clone(),
+                                        name: tool_name.clone(),
+                                        input: arguments.clone(),
+                                        output: error_msg.clone(),
+                                        is_error: true,
+                                    },
+                                );
+                                return (tool_use_id.clone(), error_msg, true);
+                            };
+                            let permission_manager = app_state_skill.permission_manager.clone();
 
-                            let perm_decision = permissions::check_permissions(
-                                &skill_display,
-                                Some(&args.args),
-                                allowed_tools.as_deref(),
-                                &perm_ctx,
-                            );
+                            let args_value = serde_json::json!({
+                                "skill": args.skill,
+                                "args": args.args,
+                                "execution_mode": args.execution_mode,
+                            });
 
-                            match perm_decision {
-                                PermissionDecision::Deny(deny_decision) => {
-                                    tracing::warn!(
-                                        skill = %skill_display,
-                                        reason = ?deny_decision.decision_reason,
-                                        "Skill denied by permission rules"
-                                    );
-                                    let _ = app.emit(
-                                        &format!("chat-stream-{}", message_id),
-                                        &StreamOutputItem::ToolResult {
-                                            tool_use_id: tool_use_id.clone(),
-                                            name: tool_name.clone(),
-                                            input: arguments.clone(),
-                                            output: deny_decision.message.clone(),
-                                            is_error: true,
-                                        },
-                                    );
-                                    return (tool_use_id.clone(), deny_decision.message, true);
-                                }
-                                PermissionDecision::Ask(ask_decision) => {
-                                    tracing::info!(
-                                        skill = %skill_display,
-                                        reason = ?ask_decision.decision_reason,
-                                        "Skill requires user permission"
-                                    );
-                                    let ask_message = format!(
-                                        "Skill '{}' requires permission to run. Suggestions: {:?}",
-                                        skill_display,
-                                        ask_decision.suggestions
-                                    );
-                                    let _ = app.emit(
-                                        &format!("chat-stream-{}", message_id),
-                                        &StreamOutputItem::ToolResult {
-                                            tool_use_id: tool_use_id.clone(),
-                                            name: tool_name.clone(),
-                                            input: arguments.clone(),
-                                            output: ask_message.clone(),
-                                            is_error: false,
-                                        },
-                                    );
-                                }
-                                PermissionDecision::Allow(_) => {
-                                    tracing::debug!(
-                                        skill = %skill_display,
-                                        "Skill allowed by permission rules"
-                                    );
+                            loop {
+                                let perm_decision = permission_manager
+                                    .check_tool(session_id, &skill_display, &args_value)
+                                    .await;
+
+                                match perm_decision {
+                                    crate::domain::permissions::PermissionDecision::Deny(ref reason) => {
+                                        tracing::warn!(
+                                            skill = %skill_display,
+                                            reason = %reason,
+                                            "Skill denied by permission manager"
+                                        );
+                                        let error_msg = format!("权限被拒绝: {}", reason);
+                                        let _ = app.emit(
+                                            &format!("chat-stream-{}", message_id),
+                                            &StreamOutputItem::ToolResult {
+                                                tool_use_id: tool_use_id.clone(),
+                                                name: tool_name.clone(),
+                                                input: arguments.clone(),
+                                                output: error_msg.clone(),
+                                                is_error: true,
+                                            },
+                                        );
+                                        return (tool_use_id.clone(), error_msg, true);
+                                    }
+                                    crate::domain::permissions::PermissionDecision::RequireApproval(
+                                        ref req,
+                                    ) => {
+                                        tracing::info!(
+                                            skill = %skill_display,
+                                            risk_level = ?req.risk.level,
+                                            "Skill requires user approval — blocking until UI resolves"
+                                        );
+                                        match wait_for_permission_tool_resolution(
+                                            &app,
+                                            &app_state_skill,
+                                            session_id,
+                                            message_id,
+                                            tool_use_id,
+                                            tool_name,
+                                            skill_display.as_str(),
+                                            arguments,
+                                            &args_value,
+                                            req,
+                                            cancel_flag.clone(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => continue,
+                                            Err(e) => {
+                                                let _ = app.emit(
+                                                    &format!("chat-stream-{}", message_id),
+                                                    &StreamOutputItem::ToolResult {
+                                                        tool_use_id: tool_use_id.clone(),
+                                                        name: tool_name.clone(),
+                                                        input: arguments.clone(),
+                                                        output: e.clone(),
+                                                        is_error: true,
+                                                    },
+                                                );
+                                                return (tool_use_id.clone(), e, true);
+                                            }
+                                        }
+                                    }
+                                    crate::domain::permissions::PermissionDecision::Allow => {
+                                        tracing::debug!(
+                                            skill = %skill_display,
+                                            "Skill allowed by permission manager"
+                                        );
+                                        break;
+                                    }
                                 }
                             }
                             // === End permission check ===
@@ -4020,11 +4363,23 @@ pub async fn cancel_stream(
             &message_id,
         )
         .await;
+        cancel_permission_tool_waiters_for_message(
+            &app_state.chat.permission_tool_waiters,
+            sid,
+            &message_id,
+        )
+        .await;
     } else {
         let repo = app_state.repo.lock().await;
         if let Ok(Some(round)) = repo.get_round_by_message_id(&message_id).await {
             cancel_ask_user_waiters_for_message(
                 &app_state.chat.ask_user_waiters,
+                &round.session_id,
+                &message_id,
+            )
+            .await;
+            cancel_permission_tool_waiters_for_message(
+                &app_state.chat.permission_tool_waiters,
                 &round.session_id,
                 &message_id,
             )
@@ -4113,6 +4468,12 @@ pub async fn cancel_session_rounds(
         sessions.remove(&session_id);
     }
 
+    cancel_permission_tool_waiters_for_session(
+        &app_state.chat.permission_tool_waiters,
+        &session_id,
+    )
+    .await;
+
     Ok(cancelled_round_ids)
 }
 
@@ -4163,8 +4524,10 @@ pub async fn set_llm_config(
     Ok(())
 }
 
-/// Persist the Settings panel LLM choice to `omiga.yaml` as `default_provider` and refresh runtime memory.
-/// (Dialog `quick_switch_provider` does not call this — it only updates the current session.)
+/// Persist the Settings panel LLM choice to `omiga.yaml` as `default_provider`.
+/// Does **not** overwrite the in-memory provider used for the current chat when the user has
+/// switched to another named config via `quick_switch_provider` — only updates `omiga.yaml` and
+/// refreshes runtime when no active entry is set or the active entry is the same one being saved.
 #[tauri::command]
 pub async fn save_llm_settings_to_config(
     state: State<'_, OmigaAppState>,
@@ -4242,7 +4605,7 @@ pub async fn save_llm_settings_to_config(
         ..Default::default()
     };
     providers.insert(entry_key.clone(), provider_cfg);
-    config_file.default_provider = Some(entry_key);
+    config_file.default_provider = Some(entry_key.clone());
 
     let config_path = crate::llm::config::find_config_file()
         .or_else(|| dirs::config_dir().map(|d| d.join("omiga").join("omiga.yaml")))
@@ -4262,9 +4625,21 @@ pub async fn save_llm_settings_to_config(
     config.base_url = bu_opt;
     config.thinking = thinking_resolved;
 
-    let mut config_guard = state.chat.llm_config.lock().await;
-    *config_guard = Some(config);
-    *state.chat.active_provider_entry_name.lock().await = config_file.default_provider.clone();
+    let active_opt = state.chat.active_provider_entry_name.lock().await.clone();
+    let should_apply_runtime = match active_opt.as_deref() {
+        None => true,
+        Some(active) => active == entry_key.as_str(),
+    };
+
+    if should_apply_runtime {
+        let mut config_guard = state.chat.llm_config.lock().await;
+        *config_guard = Some(config);
+        drop(config_guard);
+        let mut active_guard = state.chat.active_provider_entry_name.lock().await;
+        if active_guard.is_none() {
+            *active_guard = Some(entry_key.clone());
+        }
+    }
     Ok(())
 }
 
@@ -4424,6 +4799,9 @@ pub struct MessageResponse {
     pub message_id: String,
     pub session_id: String,
     pub round_id: String,
+    /// Persisted SQLite row id for the user message for this turn (for client-side retry anchoring).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<String>,
     /// `leader` (default) | `background_followup_queued` when text was routed to a bg task queue.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_kind: Option<String>,
@@ -4539,6 +4917,9 @@ pub struct SendMessageRequest {
     /// `ask` | `auto` | `bypass` — user-facing permission stance for this turn.
     #[serde(default, rename = "permissionMode")]
     pub permission_mode: Option<String>,
+    /// When set, truncate SQLite transcript after this user row and reuse it instead of inserting a new user message.
+    #[serde(default, rename = "retryFromUserMessageId")]
+    pub retry_from_user_message_id: Option<String>,
 }
 
 /// Background Agent tasks for one session (Claude Code–style teammate follow-ups).
@@ -5029,13 +5410,16 @@ pub async fn delete_provider_config(
     Ok(())
 }
 
-/// Quick switch provider - set active without saving to file (for UI quick-switch)
-#[tauri::command]
-pub async fn quick_switch_provider(
-    state: State<'_, OmigaAppState>,
-    provider_name: String,
-) -> CommandResult<LlmConfigResponse> {
-    // Load config file
+/// Apply a named `omiga.yaml` provider entry to in-memory chat state (no file write).
+pub(crate) async fn apply_named_provider_runtime(
+    state: &OmigaAppState,
+    provider_name: &str,
+) -> Result<LlmConfigResponse, OmigaError> {
+    let name = provider_name.trim();
+    if name.is_empty() {
+        return Err(OmigaError::Config("Provider name is required".to_string()));
+    }
+
     let config_file = crate::llm::config::load_config_file()
         .map_err(|e| OmigaError::Config(format!("Failed to load config file: {}", e)))?;
 
@@ -5044,31 +5428,28 @@ pub async fn quick_switch_provider(
         .ok_or_else(|| OmigaError::Config("No providers configured".to_string()))?;
 
     let provider_config = providers
-        .get(&provider_name)
-        .ok_or_else(|| OmigaError::Config(format!("Provider '{}' not found", provider_name)))?;
+        .get(name)
+        .ok_or_else(|| OmigaError::Config(format!("Provider '{}' not found", name)))?;
 
     if !provider_config.enabled {
         return Err(OmigaError::Config(format!(
             "Provider '{}' is disabled",
-            provider_name
+            name
         )));
     }
 
-    // Parse provider type
     let provider_enum = provider_config
         .provider_type
         .parse::<LlmProvider>()
         .map_err(|e| OmigaError::Config(format!("Invalid provider type: {}", e)))?;
 
-    // Get API key with env var expansion
     let api_key = provider_config
         .api_key
         .as_ref()
         .map(|k| expand_env_vars(k))
         .filter(|k| !k.is_empty())
-        .ok_or_else(|| OmigaError::Config(format!("API key not set for provider '{}'", provider_name)))?;
+        .ok_or_else(|| OmigaError::Config(format!("API key not set for provider '{}'", name)))?;
 
-    // Build and apply config
     let mut config = LlmConfig::new(provider_enum, api_key);
 
     if let Some(model) = &provider_config.model {
@@ -5086,11 +5467,10 @@ pub async fn quick_switch_provider(
         }
     }
 
-    // Update state
     let mut config_guard = state.chat.llm_config.lock().await;
     *config_guard = Some(config.clone());
     drop(config_guard);
-    *state.chat.active_provider_entry_name.lock().await = Some(provider_name);
+    *state.chat.active_provider_entry_name.lock().await = Some(name.to_string());
 
     Ok(LlmConfigResponse {
         provider: format!("{:?}", provider_enum),
@@ -5103,6 +5483,116 @@ pub async fn quick_switch_provider(
         base_url: config.base_url,
         thinking: config.thinking,
     })
+}
+
+/// Same as app startup: `omiga.yaml` merged default (and env), plus `default_provider` key for UI.
+pub(crate) async fn apply_yaml_default_runtime(state: &OmigaAppState) -> Result<(), OmigaError> {
+    let cfg = crate::llm::load_config().map_err(OmigaError::from)?;
+    *state.chat.llm_config.lock().await = Some(cfg);
+    let cf = crate::llm::config::load_config_file()
+        .map_err(|e| OmigaError::Config(format!("Failed to load config file: {}", e)))?;
+    *state.chat.active_provider_entry_name.lock().await = cf.default_provider.clone();
+    Ok(())
+}
+
+/// When switching sessions, restore that session's quick-switched provider or yaml default.
+pub(crate) async fn restore_session_llm_after_load(
+    state: &OmigaAppState,
+    active_provider_entry_name: Option<String>,
+) -> Result<(), OmigaError> {
+    match active_provider_entry_name {
+        Some(name) if !name.trim().is_empty() => {
+            if let Err(e) = apply_named_provider_runtime(state, name.trim()).await {
+                tracing::warn!(
+                    target: "omiga::llm",
+                    "Session provider {:?} unavailable ({}), falling back to yaml default",
+                    name,
+                    e
+                );
+                apply_yaml_default_runtime(state).await?;
+            }
+        }
+        _ => apply_yaml_default_runtime(state).await?,
+    }
+    Ok(())
+}
+
+/// Quick switch provider - set active without saving to file (for UI quick-switch).
+/// Persists the choice on the given `session_id` when provided (per-session model).
+#[tauri::command]
+pub async fn quick_switch_provider(
+    state: State<'_, OmigaAppState>,
+    provider_name: String,
+    session_id: Option<String>,
+) -> CommandResult<LlmConfigResponse> {
+    let name = provider_name.trim();
+    if name.is_empty() {
+        return Err(OmigaError::Config("Provider name is required".to_string()));
+    }
+
+    let resp = apply_named_provider_runtime(&state, name).await?;
+
+    if let Some(sid) = session_id {
+        let sid = sid.trim();
+        if !sid.is_empty() {
+            let repo = state.repo.lock().await;
+            repo.set_session_active_provider(sid, Some(name))
+                .await
+                .map_err(|e| {
+                    OmigaError::Persistence(format!("Failed to save session provider: {}", e))
+                })?;
+        }
+    }
+
+    Ok(resp)
+}
+
+/// Set `default_provider` in `omiga.yaml` only — which model starts as default on next launch.
+/// Does **not** change [`OmigaAppState::llm_config`] or [`active_provider_entry_name`]
+/// (use `quick_switch_provider` for the current session).
+#[tauri::command]
+pub async fn set_default_provider_config(
+    _state: State<'_, OmigaAppState>,
+    provider_name: String,
+) -> CommandResult<()> {
+    let name = provider_name.trim();
+    if name.is_empty() {
+        return Err(OmigaError::Config("Provider name is required".to_string()));
+    }
+
+    let mut config_file = crate::llm::config::load_config_file()
+        .map_err(|e| OmigaError::Config(format!("Failed to load config file: {}", e)))?;
+
+    let providers = config_file
+        .providers
+        .as_mut()
+        .ok_or_else(|| OmigaError::Config("No providers configured".to_string()))?;
+
+    let entry = providers
+        .get(name)
+        .ok_or_else(|| OmigaError::Config(format!("Provider '{}' not found", name)))?;
+
+    if !entry.enabled {
+        return Err(OmigaError::Config(format!(
+            "Provider '{}' is disabled",
+            name
+        )));
+    }
+
+    config_file.default_provider = Some(name.to_string());
+
+    let config_path = crate::llm::config::find_config_file()
+        .or_else(|| dirs::config_dir().map(|d| d.join("omiga").join("omiga.yaml")))
+        .ok_or_else(|| OmigaError::Config("Could not determine config file path".to_string()))?;
+
+    if let Some(parent) = config_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    crate::llm::config::save_config_file(&config_file, &config_path)
+        .map_err(|e| OmigaError::Config(format!("Failed to save config: {}", e)))?;
+
+    Ok(())
 }
 
 // ─── Agent Scheduler ────────────────────────────────────────────────────────

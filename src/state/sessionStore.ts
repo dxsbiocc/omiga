@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { notifyProviderChanged } from "../utils/providerEvents";
 
 const dbg = (...args: unknown[]) =>
   console.debug("[OmigaDebug][sessionStore]", ...args);
@@ -191,6 +192,8 @@ interface SessionData {
   name: string;
   messages: Array<{
     role: "user" | "assistant" | "tool";
+    /** SQLite `messages.id` when present */
+    id?: string;
     content?: string; // User and Assistant have content
     output?: string; // Tool messages have output instead of content
     tool_calls?: Array<{
@@ -220,12 +223,16 @@ interface SendMessageRequest {
   use_tools: boolean;
   /** `leader` (default) | `bg:<task_id>` to queue follow-up for a background Agent task */
   inputTarget?: string;
+  /** DB user row id — truncate after this row and reuse instead of inserting a duplicate user message */
+  retryFromUserMessageId?: string;
 }
 
 interface MessageResponse {
   message_id: string;
   session_id: string;
   round_id: string;
+  /** Persisted SQLite user message row id for this turn */
+  user_message_id?: string;
   /** Present when `inputTarget` routed away from the main session */
   input_kind?: string;
 }
@@ -250,7 +257,7 @@ interface SessionState {
   deleteSession: (sessionId: string) => Promise<void>;
   renameSession: (sessionId: string, name: string) => Promise<void>;
   setCurrentSession: (sessionId: string | null) => Promise<void>;
-  addMessage: (message: Omit<Message, "id">) => void;
+  addMessage: (message: Omit<Message, "id"> & { id?: string }) => void;
   /** Replace transcript (user + tools + assistant) so tool rows are not dropped when a turn completes. */
   replaceStoreMessagesSnapshot: (messages: Message[]) => void;
   clearMessages: () => void;
@@ -450,7 +457,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             : undefined;
 
         return sanitizeMessageForPersistence({
-          id: `${sessionId}-msg-${index}`,
+          id: m.id ?? `${sessionId}-msg-${index}`,
           role: m.role,
           content,
           toolCallsList,
@@ -475,6 +482,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         };
       });
       dbg("loadSession:ok", { sessionId, messageCount: messages.length });
+      notifyProviderChanged();
     } catch (error) {
       console.error("[OmigaDebug] loadSession failed", error);
       const fallback = get().sessions.find((s) => s.id === sessionId) ?? null;
@@ -563,7 +571,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   addMessage: (message) => {
     const newMessage: Message = sanitizeMessageForPersistence({
       ...message,
-      id: `msg-${Date.now()}`,
+      id: message.id ?? `msg-${Date.now()}`,
     });
     set((state) => ({
       messages: [...state.messages, newMessage],

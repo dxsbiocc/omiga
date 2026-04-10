@@ -264,26 +264,40 @@ impl QueryEngine {
         let mut best_score = 0;
 
         // Find the best position (most keyword matches in window)
-        let window_size = max_length.min(content.len());
-        if window_size >= content.len() {
+        // Use character-based indexing to handle UTF-8 safely
+        let char_count = content.chars().count();
+        let window_chars = max_length.min(char_count);
+        if window_chars >= char_count {
             return content.to_string();
         }
 
-        for pos in (0..content.len() - window_size).step_by(window_size / 4) {
-            let window = &content_lower[pos..pos + window_size];
+        // Collect char byte positions for safe slicing
+        let char_positions: Vec<usize> = content.char_indices().map(|(i, _)| i).collect();
+        let max_start_idx = char_positions.len().saturating_sub(window_chars);
+        let step = (window_chars / 4).max(1);
+
+        for idx in (0..max_start_idx).step_by(step) {
+            let byte_start = char_positions[idx];
+            let byte_end = char_positions.get(idx + window_chars).copied().unwrap_or(content.len());
+            let window = &content_lower[byte_start..byte_end];
             let score = keywords
                 .iter()
                 .filter(|kw| window.contains(&kw.to_lowercase()))
                 .count();
             if score > best_score {
                 best_score = score;
-                best_pos = pos;
+                best_pos = byte_start;
             }
         }
 
-        // Extract the window
+        // Extract the window - ensure byte indices are at char boundaries for UTF-8 safety
         let start = best_pos;
+        let window_size = content.floor_char_boundary(max_length).min(content.len());
         let end = (start + window_size).min(content.len());
+
+        // Adjust to char boundaries to avoid panics on multi-byte UTF-8 characters
+        let start = content.floor_char_boundary(start);
+        let end = content.floor_char_boundary(end);
 
         // Adjust to word boundaries
         let adjusted_start = if start > 0 {
@@ -298,6 +312,10 @@ impl QueryEngine {
         let adjusted_end = content[..end]
             .rfind(|c: char| c.is_whitespace())
             .unwrap_or(end);
+
+        // Ensure final indices are at char boundaries
+        let adjusted_start = content.floor_char_boundary(adjusted_start);
+        let adjusted_end = content.floor_char_boundary(adjusted_end);
 
         let mut excerpt = content[adjusted_start..adjusted_end].to_string();
 

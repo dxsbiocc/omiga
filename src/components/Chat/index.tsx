@@ -26,11 +26,6 @@ import {
   TextField,
   Snackbar,
   CircularProgress,
-  FormControl,
-  FormControlLabel,
-  Radio,
-  RadioGroup,
-  Checkbox,
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import {
@@ -78,6 +73,7 @@ import {
 } from "../../state";
 import { Terminal } from "../Terminal";
 import { ChatComposer } from "./ChatComposer";
+import type { AskUserQuestionItem } from "./AskUserQuestionWizard";
 import { getChatTokens } from "./chatTokens";
 import type { BackgroundAgentTask } from "./backgroundAgentTypes";
 import {
@@ -88,6 +84,13 @@ import { BackgroundAgentTranscriptDrawer } from "./BackgroundAgentTranscriptDraw
 import { AgentSessionStatus } from "./AgentSessionStatus";
 import { formatToolDisplayName } from "../../utils/executionSurfaceLabel";
 import { parseNextStepSuggestionsFromMarkdown } from "../../utils/parseAssistantNextSteps";
+
+/** SQLite `messages.id` shape — used to pass `retryFromUserMessageId` (not temp `user-…` ids). */
+function isPersistedMessageIdForRetry(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    id.trim(),
+  );
+}
 
 interface ChatProps {
   sessionId: string;
@@ -111,20 +114,6 @@ interface InitialTodoItem {
   id: string;
   content: string;
   status: "pending" | "in_progress" | "completed";
-}
-
-/** `ask_user_question` — matches backend / Claude Code shape */
-interface AskUserQuestionOption {
-  label: string;
-  description: string;
-  preview?: string;
-}
-
-interface AskUserQuestionItem {
-  question: string;
-  header: string;
-  multiSelect?: boolean;
-  options: AskUserQuestionOption[];
 }
 
 interface Message {
@@ -1007,7 +996,7 @@ export function Chat({ sessionId }: ChatProps) {
     id: string;
     draft: string;
   } | null>(null);
-  /** 重试前确认：将截断该条之后的所有消息并重新 send_message */
+  /** 重试前确认弹窗：说明节点后记录将删除，确认后截断并 send_message */
   const [retryConfirmForMessage, setRetryConfirmForMessage] =
     useState<Message | null>(null);
   /** Sidechain transcript drawer (`load_background_agent_transcript`). */
@@ -1047,6 +1036,8 @@ export function Chat({ sessionId }: ChatProps) {
     isStreamingRef.current = isStreaming;
   }, [isStreaming]);
 
+  /** Prevents overlapping `retryUserMessage` runs (React `isConnecting` can lag one frame behind the store). */
+  const retrySendInFlightRef = useRef(false);
   /** FIFO: main-session messages enqueued while a turn is still streaming (flush one per stream end). */
   const queuedMainSendQueueRef = useRef<QueuedMainSend[]>([]);
   /** Bumps when the in-memory queue mutates so the composer list re-renders. */
@@ -1421,7 +1412,7 @@ export function Chat({ sessionId }: ChatProps) {
       if (sessionId && storeMessages.length > 0) {
         const convertedMessages: Message[] = storeMessages.map(
           (msg, index) => ({
-            id: `${sessionId}-msg-${index}`,
+            id: msg.id || `${sessionId}-msg-${index}`,
             role: msg.role,
             content: msg.content ?? "",
             composerAgentType: msg.composerAgentType,
@@ -2227,6 +2218,7 @@ export function Chat({ sessionId }: ChatProps) {
       content: messageContent,
       composerAgentType: bubbleComposerAgent,
       composerAttachedPaths: bubbleAttachedPaths,
+      id: userMessage.id,
     });
 
     setInput("");
@@ -2248,6 +2240,7 @@ export function Chat({ sessionId }: ChatProps) {
         message_id: string;
         session_id: string;
         round_id: string;
+        user_message_id?: string;
         scheduler_plan?: SchedulerPlan;
         initial_todos?: InitialTodoItem[];
       }>("send_message", {
@@ -2288,6 +2281,24 @@ export function Chat({ sessionId }: ChatProps) {
             msg.id === userMessageId
               ? { ...msg, initialTodos: response.initial_todos }
               : msg,
+          ),
+        );
+      }
+
+      if (response.user_message_id) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === userMessageId
+              ? { ...m, id: response.user_message_id! }
+              : m,
+          ),
+        );
+        const sm = useSessionStore.getState().storeMessages;
+        replaceStoreMessagesSnapshot(
+          sm.map((m) =>
+            m.id === userMessageId
+              ? { ...m, id: response.user_message_id! }
+              : m,
           ),
         );
       }
@@ -2422,7 +2433,12 @@ export function Chat({ sessionId }: ChatProps) {
         setBgToast("请在主会话中重试（当前为后台跟进模式）");
         return;
       }
-      if (isConnecting || isStreamingRef.current) {
+      const actNow = useActivityStore.getState();
+      if (
+        actNow.isConnecting ||
+        isStreamingRef.current ||
+        retrySendInFlightRef.current
+      ) {
         setBgToast("请等待当前回复结束后再重试");
         return;
       }
@@ -2443,6 +2459,11 @@ export function Chat({ sessionId }: ChatProps) {
             ? { ...m, schedulerPlan: undefined, initialTodos: undefined }
             : m,
         );
+
+      retrySendInFlightRef.current = true;
+      queuedMainSendQueueRef.current = [];
+      mainQueueFlushPayloadRef.current = null;
+      bumpQueueUi();
 
       setMessages(truncated);
       replaceStoreMessagesSnapshot(truncated.map(chatMessageToStore));
@@ -2467,6 +2488,7 @@ export function Chat({ sessionId }: ChatProps) {
           message_id: string;
           session_id: string;
           round_id: string;
+          user_message_id?: string;
           scheduler_plan?: SchedulerPlan;
           initial_todos?: InitialTodoItem[];
         }>("send_message", {
@@ -2478,6 +2500,9 @@ export function Chat({ sessionId }: ChatProps) {
             use_tools: true,
             composerAgentType: composeAgent,
             permissionMode,
+            ...(isPersistedMessageIdForRetry(message.id)
+              ? { retryFromUserMessageId: message.id }
+              : {}),
           },
         });
 
@@ -2504,6 +2529,24 @@ export function Chat({ sessionId }: ChatProps) {
               msg.id === userMessageId
                 ? { ...msg, initialTodos: response.initial_todos }
                 : msg,
+            ),
+          );
+        }
+
+        if (response.user_message_id) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === userMessageId
+                ? { ...m, id: response.user_message_id! }
+                : m,
+            ),
+          );
+          const sm = useSessionStore.getState().storeMessages;
+          replaceStoreMessagesSnapshot(
+            sm.map((m) =>
+              m.id === userMessageId
+                ? { ...m, id: response.user_message_id! }
+                : m,
             ),
           );
         }
@@ -2568,6 +2611,8 @@ export function Chat({ sessionId }: ChatProps) {
           isStreamingRef.current = false;
           flushQueuedMainSendIfAnyRef.current();
         });
+      } finally {
+        retrySendInFlightRef.current = false;
       }
     },
     [
@@ -2575,9 +2620,9 @@ export function Chat({ sessionId }: ChatProps) {
       messages,
       needsWorkspacePath,
       followUpTaskId,
-      isConnecting,
       currentSession,
       replaceStoreMessagesSnapshot,
+      bumpQueueUi,
     ],
   );
 
@@ -2592,7 +2637,11 @@ export function Chat({ sessionId }: ChatProps) {
         setBgToast("请在主会话中重试（当前为后台跟进模式）");
         return;
       }
-      if (isConnecting || isStreamingRef.current) {
+      if (
+        useActivityStore.getState().isConnecting ||
+        isStreamingRef.current ||
+        retrySendInFlightRef.current
+      ) {
         setBgToast("请等待当前回复结束后再重试");
         return;
       }
@@ -2604,20 +2653,15 @@ export function Chat({ sessionId }: ChatProps) {
       }
       setRetryConfirmForMessage(message);
     },
-    [
-      sessionId,
-      needsWorkspacePath,
-      followUpTaskId,
-      isConnecting,
-      messages,
-    ],
+    [sessionId, needsWorkspacePath, followUpTaskId, messages],
   );
 
   const confirmRetryUserMessage = useCallback(() => {
-    const m = retryConfirmForMessage;
-    setRetryConfirmForMessage(null);
-    if (m) void retryUserMessage(m);
-  }, [retryConfirmForMessage, retryUserMessage]);
+    setRetryConfirmForMessage((cur) => {
+      if (cur) void retryUserMessage(cur);
+      return null;
+    });
+  }, [retryUserMessage]);
 
   flushQueuedMainSendIfAnyRef.current = () => {
     const q = queuedMainSendQueueRef.current;
@@ -2684,10 +2728,12 @@ export function Chat({ sessionId }: ChatProps) {
     useActivityStore.getState().setConnecting(true);
     useActivityStore.getState().setStreaming(false, false);
 
+    const resumeLocalUserId = `user-${Date.now()}`;
+
     setMessages((prev) => {
       const stripped = prev.filter((m) => !m.id.startsWith("cancelled-"));
       const userMessage: Message = {
-        id: `user-${Date.now()}`,
+        id: resumeLocalUserId,
         role: "user",
         content: RESUME_AFTER_CANCEL_PROMPT,
         timestamp: Date.now(),
@@ -2705,6 +2751,7 @@ export function Chat({ sessionId }: ChatProps) {
         message_id: string;
         session_id: string;
         round_id: string;
+        user_message_id?: string;
         scheduler_plan?: SchedulerPlan;
       }>("send_message", {
         request: {
@@ -2719,6 +2766,24 @@ export function Chat({ sessionId }: ChatProps) {
       });
 
       useChatComposerStore.getState().setComposerAgentType("general-purpose");
+
+      if (response.user_message_id) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === resumeLocalUserId
+              ? { ...m, id: response.user_message_id! }
+              : m,
+          ),
+        );
+        const sm = useSessionStore.getState().storeMessages;
+        replaceStoreMessagesSnapshot(
+          sm.map((m) =>
+            m.id === resumeLocalUserId
+              ? { ...m, id: response.user_message_id! }
+              : m,
+          ),
+        );
+      }
 
       setCurrentRoundId(response.round_id);
       setCurrentStreamId(response.message_id);
@@ -3397,7 +3462,8 @@ export function Chat({ sessionId }: ChatProps) {
                           px: 1.75,
                           py: 1.25,
                           fontFamily: CHAT.font,
-                          overflow: "hidden",
+                          /* 勿用 overflow:hidden：流式输出时圆角裁剪会导致新文本被边框/圆角遮住，重绘后才撑开 */
+                          overflow: "visible",
                         }}
                       >
                         <Stack
@@ -3753,219 +3819,6 @@ export function Chat({ sessionId }: ChatProps) {
                                           </Stack>
                                         )}
 
-                                        {showAskUserPanel && pendingAskUser && (
-                                          <Box
-                                            sx={{
-                                              mt: 1.5,
-                                              pt: 1.5,
-                                              borderTop: `1px solid ${alpha(CHAT.agentBubbleBorder, 0.85)}`,
-                                            }}
-                                          >
-                                            <Typography
-                                              sx={{
-                                                fontSize: 11,
-                                                fontWeight: 600,
-                                                mb: 1.25,
-                                                color: CHAT.textPrimary,
-                                              }}
-                                            >
-                                              请选择答案（完成后点击提交）
-                                            </Typography>
-                                            {pendingAskUser.questions.map(
-                                              (q) => (
-                                                <FormControl
-                                                  key={q.question}
-                                                  component="fieldset"
-                                                  sx={{
-                                                    mb: 2,
-                                                    display: "block",
-                                                    width: "100%",
-                                                  }}
-                                                >
-                                                  <Typography
-                                                    sx={{
-                                                      fontSize: 11,
-                                                      mb: 0.75,
-                                                      color: CHAT.textPrimary,
-                                                    }}
-                                                  >
-                                                    {q.question}
-                                                  </Typography>
-                                                  {q.multiSelect ? (
-                                                    <Stack spacing={0.25}>
-                                                      {q.options.map((opt) => {
-                                                        const qt =
-                                                          q.question.trim();
-                                                        const cur = (
-                                                          askUserSelections[
-                                                            qt
-                                                          ] ?? ""
-                                                        )
-                                                          .split(",")
-                                                          .map((s) => s.trim())
-                                                          .filter(Boolean);
-                                                        const checked =
-                                                          cur.includes(
-                                                            opt.label,
-                                                          );
-                                                        return (
-                                                          <FormControlLabel
-                                                            key={opt.label}
-                                                            control={
-                                                              <Checkbox
-                                                                size="small"
-                                                                checked={
-                                                                  checked
-                                                                }
-                                                                onChange={() => {
-                                                                  setAskUserSelections(
-                                                                    (prev) => {
-                                                                      const qt =
-                                                                        q.question.trim();
-                                                                      const cur =
-                                                                        (
-                                                                          prev[
-                                                                            qt
-                                                                          ] ??
-                                                                          ""
-                                                                        )
-                                                                          .split(
-                                                                            ",",
-                                                                          )
-                                                                          .map(
-                                                                            (
-                                                                              s,
-                                                                            ) =>
-                                                                              s.trim(),
-                                                                          )
-                                                                          .filter(
-                                                                            Boolean,
-                                                                          );
-                                                                      const set =
-                                                                        new Set(
-                                                                          cur,
-                                                                        );
-                                                                      if (
-                                                                        set.has(
-                                                                          opt.label,
-                                                                        )
-                                                                      )
-                                                                        set.delete(
-                                                                          opt.label,
-                                                                        );
-                                                                      else
-                                                                        set.add(
-                                                                          opt.label,
-                                                                        );
-                                                                      return {
-                                                                        ...prev,
-                                                                        [qt]: Array.from(
-                                                                          set,
-                                                                        ).join(
-                                                                          ", ",
-                                                                        ),
-                                                                      };
-                                                                    },
-                                                                  );
-                                                                }}
-                                                              />
-                                                            }
-                                                            label={
-                                                              <Box>
-                                                                <Typography
-                                                                  variant="caption"
-                                                                  sx={{
-                                                                    fontWeight: 600,
-                                                                  }}
-                                                                >
-                                                                  {opt.label}
-                                                                </Typography>
-                                                                <Typography
-                                                                  variant="caption"
-                                                                  sx={{
-                                                                    display:
-                                                                      "block",
-                                                                    color:
-                                                                      "text.secondary",
-                                                                  }}
-                                                                >
-                                                                  {
-                                                                    opt.description
-                                                                  }
-                                                                </Typography>
-                                                              </Box>
-                                                            }
-                                                          />
-                                                        );
-                                                      })}
-                                                    </Stack>
-                                                  ) : (
-                                                    <RadioGroup
-                                                      value={
-                                                        askUserSelections[
-                                                          q.question.trim()
-                                                        ] ?? ""
-                                                      }
-                                                      onChange={(_, v) =>
-                                                        setAskUserSelections(
-                                                          (prev) => ({
-                                                            ...prev,
-                                                            [q.question.trim()]:
-                                                              v,
-                                                          }),
-                                                        )
-                                                      }
-                                                    >
-                                                      {q.options.map((opt) => (
-                                                        <FormControlLabel
-                                                          key={opt.label}
-                                                          value={opt.label}
-                                                          control={
-                                                            <Radio size="small" />
-                                                          }
-                                                          label={
-                                                            <Box>
-                                                              <Typography
-                                                                variant="caption"
-                                                                sx={{
-                                                                  fontWeight: 600,
-                                                                }}
-                                                              >
-                                                                {opt.label}
-                                                              </Typography>
-                                                              <Typography
-                                                                variant="caption"
-                                                                sx={{
-                                                                  display:
-                                                                    "block",
-                                                                  color:
-                                                                    "text.secondary",
-                                                                }}
-                                                              >
-                                                                {
-                                                                  opt.description
-                                                                }
-                                                              </Typography>
-                                                            </Box>
-                                                          }
-                                                        />
-                                                      ))}
-                                                    </RadioGroup>
-                                                  )}
-                                                </FormControl>
-                                              ),
-                                            )}
-                                            <Button
-                                              variant="contained"
-                                              size="small"
-                                              onClick={() =>
-                                                void submitPendingAskUser()
-                                              }
-                                            >
-                                              提交答案
-                                            </Button>
-                                          </Box>
-                                        )}
 
                                         {!hasInput &&
                                           !hasOutput &&
@@ -4464,7 +4317,7 @@ export function Chat({ sessionId }: ChatProps) {
                             bgcolor: CHAT.agentBubbleBg,
                             border: `1px solid ${CHAT.agentBubbleBorder}`,
                             fontFamily: CHAT.font,
-                            overflow: "hidden",
+                            overflow: "visible",
                           }}
                         >
                           {renderMessageContent(message.content, "agent")}
@@ -4529,12 +4382,12 @@ export function Chat({ sessionId }: ChatProps) {
                     minWidth: 0,
                     maxWidth: "100%",
                     px: 1.75,
-                    py: 1.25,
+                    py: 1.5,
                     borderRadius: `${BUBBLE_RADIUS_PX}px`,
                     bgcolor: CHAT.agentBubbleBg,
                     border: `1px solid ${CHAT.agentBubbleBorder}`,
                     fontFamily: CHAT.font,
-                    overflow: "hidden",
+                    overflow: "visible",
                   }}
                 >
                   {renderMessageContent(currentResponse, "agent")}
@@ -4829,6 +4682,17 @@ export function Chat({ sessionId }: ChatProps) {
                 onEditQueuedAt={editQueuedAt}
                 onCancelBackgroundTask={handleCancelBackgroundTask}
                 onOpenBackgroundTranscript={handleOpenBackgroundTranscript}
+                askUserQuestion={
+                  pendingAskUser
+                    ? {
+                        resetKey: pendingAskUser.toolUseId,
+                        questions: pendingAskUser.questions,
+                        selections: askUserSelections,
+                        onSelectionsChange: setAskUserSelections,
+                        onSubmit: () => void submitPendingAskUser(),
+                      }
+                    : null
+                }
               />
             </Box>
           </Box>
@@ -4844,13 +4708,11 @@ export function Chat({ sessionId }: ChatProps) {
         <DialogTitle>确认重试</DialogTitle>
         <DialogContent>
           <Alert severity="warning" sx={{ mb: 0 }}>
-            将删除此条消息之后的所有会话内容，并基于当前消息重新运行计划与回复。此操作不可撤销。
+            以本条用户消息为节点：该节点之后的全部聊天记录（含助手回复、工具结果等）将被删除，且无法恢复；确认后仅保留该条及之前内容，并基于该条重新发起请求。
           </Alert>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setRetryConfirmForMessage(null)}>
-            取消
-          </Button>
+          <Button onClick={() => setRetryConfirmForMessage(null)}>取消</Button>
           <Button
             variant="contained"
             color="warning"

@@ -8,6 +8,7 @@ use crate::app_state::OmigaAppState;
 use crate::domain::tool_permission_rules::{
     load_merged_permission_deny_rule_entries, matching_deny_entry,
 };
+
 use crate::domain::tools::{Tool, ToolContext};
 use crate::errors::{AppError, ToolError};
 use futures::StreamExt;
@@ -48,10 +49,69 @@ pub async fn execute_tool(
     project_root: String,
 ) -> CommandResult<ToolExecutionResponse> {
     let project = Path::new(&project_root);
-
-    // 权限检查（与 chat 路径一致）
-    let deny_entries = load_merged_permission_deny_rule_entries(project);
     let name = tool.name();
+    
+    // 新权限系统检查 (PermissionManager)
+    let permission_manager = state.permission_manager.clone();
+    let args_value = serde_json::to_value(&tool)
+        .unwrap_or_else(|_| serde_json::json!({"tool_name": name}));
+    let session_id = "execute_tool"; // IPC 调用使用固定 session_id
+    
+    let perm_decision = permission_manager
+        .check_tool(session_id, name, &args_value)
+        .await;
+    
+    match perm_decision {
+        crate::domain::permissions::PermissionDecision::Deny(ref reason) => {
+            tracing::warn!(
+                tool = %name,
+                reason = %reason,
+                "Tool denied by permission manager"
+            );
+            return Err(AppError::Tool(ToolError::PermissionDenied {
+                action: format!("Tool `{name}` is denied: {}", reason),
+            }));
+        }
+        crate::domain::permissions::PermissionDecision::RequireApproval(ref req) => {
+            tracing::info!(
+                tool = %name,
+                risk_level = ?req.risk.level,
+                "Tool requires user approval"
+            );
+            // Emit permission request event to frontend
+            // Risk level uses lowercase to match frontend RiskLevel type
+            let risk_level_str = match req.risk.level {
+                crate::domain::permissions::RiskLevel::Safe => "safe",
+                crate::domain::permissions::RiskLevel::Low => "low",
+                crate::domain::permissions::RiskLevel::Medium => "medium",
+                crate::domain::permissions::RiskLevel::High => "high",
+                crate::domain::permissions::RiskLevel::Critical => "critical",
+            };
+            let permission_event = serde_json::json!({
+                "type": "permission_request",
+                "request_id": req.request_id,
+                "tool_name": name,
+                "risk_level": risk_level_str,
+                "risk_description": req.risk.description,
+                "session_id": session_id,
+                "arguments": args_value,
+            });
+            let _ = app.emit("permission-request", &permission_event);
+            
+            return Err(AppError::Tool(ToolError::PermissionDenied {
+                action: format!(
+                    "Tool `{name}` requires approval. Risk: {:?}. Please approve in the permission dialog.",
+                    req.risk.level
+                ),
+            }));
+        }
+        crate::domain::permissions::PermissionDecision::Allow => {
+            tracing::debug!(tool = %name, "Tool allowed by permission manager");
+        }
+    }
+    
+    // 旧权限系统检查（作为后备）
+    let deny_entries = load_merged_permission_deny_rule_entries(project);
     if let Some(hit) = matching_deny_entry(name, &deny_entries) {
         tracing::debug!(
             target: "omiga::permissions",

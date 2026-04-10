@@ -56,6 +56,7 @@ export interface MemoryConfig {
   root_dir: string;
   wiki_dir: string;
   implicit_dir: string;
+  memory_mode: string;
   auto_build_index: boolean;
   index_extensions: string[];
   exclude_dirs: string[];
@@ -79,6 +80,7 @@ export interface MemoryPaths {
   root: string;
   wiki: string;
   implicit: string;
+  permanent_wiki: string;
 }
 
 export interface UnifiedMemoryStatus {
