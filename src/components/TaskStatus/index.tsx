@@ -1,5 +1,14 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { Box, Typography, Stack, Chip, Fade, Tabs, Tab } from "@mui/material";
+import {
+  Box,
+  Typography,
+  Stack,
+  Chip,
+  Fade,
+  Tabs,
+  Tab,
+  Tooltip,
+} from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import {
   Terminal,
@@ -105,6 +114,8 @@ function getTaskStatus(items: PlanTodoItem[]) {
 
 export function TaskStatus() {
   const composerAgentType = useChatComposerStore((s) => s.composerAgentType);
+  /** 与输入框底部「本地 / 沙箱」同一 store，发消息时随 `executionEnvironment` 同步到后端 */
+  const executionEnvironment = useChatComposerStore((s) => s.environment);
   const storeMessages = useSessionStore((s) => s.storeMessages);
   const executionSteps = useActivityStore((s) => s.executionSteps);
   const executionStartedAt = useActivityStore((s) => s.executionStartedAt);
@@ -263,6 +274,34 @@ export function TaskStatus() {
               color={modeInfo.color}
               sx={{ height: 20, fontSize: 10, fontWeight: 600 }}
             />
+            <Tooltip title="与输入区一致" placement="bottom" enterDelay={400}>
+              <Chip
+                size="small"
+                label={
+                  executionEnvironment === "local"
+                    ? "本地"
+                    : executionEnvironment === "ssh"
+                      ? "SSH"
+                      : "沙箱"
+                }
+                variant="outlined"
+                sx={{
+                  height: 20,
+                  fontSize: 10,
+                  fontWeight: 600,
+                  borderColor: alpha(
+                    executionEnvironment === "local"
+                      ? "#64748b"
+                      : "#0ea5e9",
+                    0.45,
+                  ),
+                  color:
+                    executionEnvironment === "local"
+                      ? "text.secondary"
+                      : "#0ea5e9",
+                }}
+              />
+            </Tooltip>
           </Stack>
 
           {/* 统计显示 */}

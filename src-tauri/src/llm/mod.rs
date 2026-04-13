@@ -25,7 +25,10 @@ pub mod config;
 pub mod types;
 
 pub use anthropic::AnthropicClient;
-pub use config::{LlmConfigFile, load_config_file, save_config_file, ProviderConfig};
+pub use config::{
+    DaytonaExecConfig, ExecutionEnvsConfig, LlmConfigFile, ModalExecConfig, ProviderConfig, 
+    SshExecConfig, load_config_file, save_config_file
+};
 pub use domestic::{AlibabaClient, ZhipuClient};
 pub use openai::OpenAiCompatibleClient;
 pub use types::*;

@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::Manager;
 
+use crate::app_state::OmigaAppState;
+use crate::domain::tools::WebSearchApiKeys;
+
 
 /// 编排结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,13 +330,19 @@ impl AgentOrchestrator {
 
         // 获取 skill_cache（从 Tauri 进程状态）
         let skill_cache = app
-            .try_state::<crate::app_state::OmigaAppState>()
+            .try_state::<OmigaAppState>()
             .map(|s| s.skill_cache.clone())
             .unwrap_or_else(|| {
                 std::sync::Arc::new(std::sync::Mutex::new(
                     crate::domain::skills::SkillCacheMap::default(),
                 ))
             });
+
+        let web_search_keys = if let Some(st) = app.try_state::<OmigaAppState>() {
+            st.chat.web_search_api_keys.lock().await.clone()
+        } else {
+            WebSearchApiKeys::default()
+        };
 
         let groups = plan.get_parallel_groups();
 
@@ -379,7 +388,7 @@ impl AgentOrchestrator {
                         &agent_args,
                         runtime,
                         1, // subagent_execute_depth
-                        None, // brave_search_api_key
+                        web_search_keys.clone(),
                         skill_cache.clone(),
                         agent_def,
                     )

@@ -8,7 +8,7 @@
 //! - TS also omits `workflow` when `WORKFLOW_SCRIPTS` / `feature('WORKFLOW_SCRIPTS')` — see
 //!   [`env_workflow_scripts_enabled`].
 
-use crate::domain::tool_permission_rules::canonical_permission_tool_name;
+use crate::domain::permissions::canonical_permission_tool_name;
 use crate::domain::tools::ToolSchema;
 
 /// Options for filtering sub-agent tools (`filterToolsForAgent` parity).

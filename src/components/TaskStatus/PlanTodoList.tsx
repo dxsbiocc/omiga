@@ -6,7 +6,6 @@ import {
   Typography,
 } from "@mui/material";
 import {
-  CheckBox,
   CheckBoxOutlineBlank,
   ErrorOutline,
   RadioButtonUnchecked,

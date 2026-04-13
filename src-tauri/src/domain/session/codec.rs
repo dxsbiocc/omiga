@@ -1,9 +1,9 @@
-//! Session codec - Message serialization/deserialization between database and domain
+//! Session codec — message serialization/deserialization between database and domain
 //!
-//! This module eliminates duplication by centralizing all record <-> domain conversions.
+//! Centralizes all record ↔ domain conversions.
 
-use super::persistence::{MessageRecord, SessionWithMessages};
-use super::session::{Message, MessageTokenUsage, Session, ToolCall};
+use crate::domain::persistence::{MessageRecord, SessionWithMessages};
+use super::{FollowUpSuggestion, Message, MessageTokenUsage, Session, ToolCall};
 use crate::api::{ContentBlock, Message as ApiMessage, Role};
 
 /// Codec for session-related conversions
@@ -43,11 +43,15 @@ impl SessionCodec {
                     .token_usage_json
                     .as_ref()
                     .and_then(|j| serde_json::from_str::<MessageTokenUsage>(j).ok());
+                let follow_up_suggestions = record
+                    .follow_up_suggestions_json
+                    .and_then(|j| serde_json::from_str::<Vec<FollowUpSuggestion>>(&j).ok());
                 Message::Assistant {
                     content: record.content,
                     tool_calls,
                     token_usage,
                     reasoning_content: record.reasoning_content,
+                    follow_up_suggestions,
                 }
             }
             "tool" => Message::Tool {
@@ -61,7 +65,7 @@ impl SessionCodec {
     }
 
     /// Convert a domain Message to database-ready tuple
-    /// Returns: (id, session_id, role, content, tool_calls_json, tool_call_id, token_usage_json, reasoning_content)
+    /// Returns: (id, session_id, role, content, tool_calls_json, tool_call_id, token_usage_json, reasoning_content, follow_up_suggestions_json)
     pub fn message_to_record(
         message: &Message,
         id: &str,
@@ -71,6 +75,7 @@ impl SessionCodec {
         String,
         String,
         String,
+        Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
@@ -86,12 +91,14 @@ impl SessionCodec {
                 None,
                 None,
                 None,
+                None,
             ),
             Message::Assistant {
                 content,
                 tool_calls,
                 token_usage,
                 reasoning_content,
+                follow_up_suggestions,
             } => {
                 let tool_calls_json = tool_calls.as_ref().map(|tc| {
                     serde_json::to_string(tc).unwrap_or_default()
@@ -103,6 +110,9 @@ impl SessionCodec {
                     .as_ref()
                     .filter(|s| !s.is_empty())
                     .cloned();
+                let follow_up_suggestions_json = follow_up_suggestions
+                    .as_ref()
+                    .and_then(|s| serde_json::to_string(s).ok());
                 (
                     id.to_string(),
                     session_id.to_string(),
@@ -112,6 +122,7 @@ impl SessionCodec {
                     None,
                     token_usage_json,
                     reasoning,
+                    follow_up_suggestions_json,
                 )
             }
             Message::Tool { tool_call_id, output } => (
@@ -121,6 +132,7 @@ impl SessionCodec {
                 output.clone(),
                 None,
                 Some(tool_call_id.clone()),
+                None,
                 None,
                 None,
             ),
@@ -142,6 +154,7 @@ impl SessionCodec {
                     tool_calls,
                     token_usage: _,
                     reasoning_content,
+                    follow_up_suggestions: _,
                 } => {
                     let mut blocks: Vec<ContentBlock> = vec![ContentBlock::text(content.clone())];
 
@@ -200,6 +213,7 @@ impl SessionCodec {
             tool_calls,
             token_usage: None,
             reasoning_content: None,
+            follow_up_suggestions: None,
         }
     }
 }
@@ -207,13 +221,14 @@ impl SessionCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::persistence::MessageRecord;
 
     #[test]
     fn test_user_message_roundtrip() {
         let msg = Message::User {
             content: "Hello".to_string(),
         };
-        let (id, session_id, role, content, tool_calls, tool_call_id, tok, reasoning) =
+        let (id, session_id, role, content, tool_calls, tool_call_id, tok, reasoning, follow_up) =
             SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
 
         assert_eq!(id, "msg-1");
@@ -224,6 +239,7 @@ mod tests {
         assert!(tool_call_id.is_none());
         assert!(tok.is_none());
         assert!(reasoning.is_none());
+        assert!(follow_up.is_none());
     }
 
     #[test]
@@ -238,9 +254,10 @@ mod tests {
             tool_calls: Some(tool_calls),
             token_usage: None,
             reasoning_content: None,
+            follow_up_suggestions: None,
         };
 
-        let (_, _, role, content, tool_calls_json, _, tok, reasoning) =
+        let (_, _, role, content, tool_calls_json, _, tok, reasoning, follow_up) =
             SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
 
         assert_eq!(role, "assistant");
@@ -248,6 +265,7 @@ mod tests {
         assert!(tool_calls_json.is_some());
         assert!(tok.is_none());
         assert!(reasoning.is_none());
+        assert!(follow_up.is_none());
 
         // Verify we can parse it back
         let parsed = SessionCodec::parse_tool_calls(&tool_calls_json.unwrap());
@@ -266,6 +284,7 @@ mod tests {
             tool_call_id: Some("call-1".to_string()),
             token_usage_json: None,
             reasoning_content: None,
+            follow_up_suggestions_json: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
 

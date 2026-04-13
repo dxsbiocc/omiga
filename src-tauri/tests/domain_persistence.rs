@@ -1,9 +1,9 @@
 //! Regression tests for background agent persistence (tasks + sidechain transcript).
 //! Uses a temporary SQLite file with full migrations (`init_db`).
 
-use crate::domain::agents::background::{BackgroundAgentStatus, BackgroundAgentTask};
-use crate::domain::persistence::{init_db, SessionRepository};
-use crate::domain::session::{Message, ToolCall};
+use omiga::domain::agents::background::{BackgroundAgentStatus, BackgroundAgentTask};
+use omiga::domain::persistence::{init_db, SessionRepository};
+use omiga::domain::session::{Message, ToolCall};
 
 async fn setup_session_repo() -> (SessionRepository, tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -86,6 +86,7 @@ async fn background_agent_messages_append_order() {
         tool_calls: None,
         token_usage: None,
         reasoning_content: None,
+        follow_up_suggestions: None,
     };
     let t1 = Message::Tool {
         tool_call_id: "tu1".to_string(),
@@ -159,6 +160,7 @@ async fn background_agent_messages_tool_calls_roundtrip() {
         }]),
         token_usage: None,
         reasoning_content: None,
+        follow_up_suggestions: None,
     };
     repo.append_background_agent_message("bg-task-tools", &session_id, &asst)
         .await

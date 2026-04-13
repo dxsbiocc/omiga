@@ -1,11 +1,11 @@
 //! Tool execution commands
 //!
-//! `execute_tool` applies the same [`permissions.deny`](crate::domain::tool_permission_rules)
+//! `execute_tool` applies the same [`permissions.deny`](crate::domain::permissions::tool_rules)
 //! merge as chat (`send_message` / `execute_tool_calls`), so IPC cannot bypass tool blocks.
 
 use super::CommandResult;
 use crate::app_state::OmigaAppState;
-use crate::domain::tool_permission_rules::{
+use crate::domain::permissions::{
     load_merged_permission_deny_rule_entries, matching_deny_entry,
 };
 
@@ -139,8 +139,8 @@ pub async fn execute_tool(
         .insert(tool_id.clone(), cancel_token.clone());
 
     // 构建工具上下文，注入取消令牌
-    let brave = state.chat.brave_search_api_key.lock().await.clone();
-    let mut ctx = ToolContext::new(&project_root).with_brave_search_api_key(brave);
+    let web_keys = state.chat.web_search_api_keys.lock().await.clone();
+    let mut ctx = ToolContext::new(&project_root).with_web_search_api_keys(web_keys);
     ctx.cancel = cancel_token.clone();
 
     // 执行工具，获取流

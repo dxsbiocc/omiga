@@ -7,7 +7,7 @@ use crate::api::{ContentBlock, Message as ApiMessage};
 use crate::constants::tool_limits::truncate_utf8_prefix;
 use crate::domain::persistence::SessionRepository;
 use crate::domain::session::Message;
-use crate::domain::session_codec::SessionCodec;
+use crate::domain::session::SessionCodec;
 use crate::llm::{LlmConfig, LlmProvider};
 use std::collections::HashSet;
 
@@ -316,6 +316,7 @@ pub async fn replace_session_messages(
             tool_call_id,
             token_usage_json,
             reasoning_content,
+            follow_up_suggestions_json,
         ) = SessionCodec::message_to_record(msg, &id, session_id);
         repo.save_message(
             &row_id,
@@ -326,6 +327,7 @@ pub async fn replace_session_messages(
             tool_call_id.as_deref(),
             token_usage_json.as_deref(),
             reasoning_content.as_deref(),
+            follow_up_suggestions_json.as_deref(),
         )
         .await?;
         if matches!(msg, Message::User { .. }) {
@@ -406,6 +408,7 @@ mod tests {
                 }]),
                 token_usage: None,
                 reasoning_content: None,
+                follow_up_suggestions: None,
             },
             Message::Tool {
                 tool_call_id: "t1".into(),

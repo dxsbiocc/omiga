@@ -132,6 +132,11 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await;
 
+    // Migration: follow-up suggestions JSON (persist LLM-generated next step suggestions)
+    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN follow_up_suggestions_json TEXT")
+        .execute(pool)
+        .await;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS settings (
@@ -450,7 +455,7 @@ impl SessionRepository {
         sqlx::query_as::<_, MessageRecord>(
             r#"
             SELECT id, session_id, role, content, tool_calls, tool_call_id,
-                   token_usage_json, reasoning_content, created_at
+                   token_usage_json, reasoning_content, follow_up_suggestions_json, created_at
             FROM messages
             WHERE session_id = ?
             ORDER BY created_at DESC, id DESC
@@ -474,7 +479,7 @@ impl SessionRepository {
         sqlx::query_as::<_, MessageRecord>(
             r#"
             SELECT id, session_id, role, content, tool_calls, tool_call_id,
-                   token_usage_json, reasoning_content, created_at
+                   token_usage_json, reasoning_content, follow_up_suggestions_json, created_at
             FROM messages
             WHERE session_id = ?
               AND (created_at, id) < (
@@ -510,7 +515,7 @@ impl SessionRepository {
         // Get all messages for this session
         let messages = sqlx::query_as::<_, MessageRecord>(
             r#"
-            SELECT id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, created_at
+            SELECT id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, follow_up_suggestions_json, created_at
             FROM messages
             WHERE session_id = ?
             ORDER BY created_at ASC, id ASC
@@ -640,13 +645,14 @@ impl SessionRepository {
         tool_call_id: Option<&str>,
         token_usage_json: Option<&str>,
         reasoning_content: Option<&str>,
+        follow_up_suggestions_json: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(
             r#"
-            INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, follow_up_suggestions_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#
         )
         .bind(id)
@@ -657,6 +663,7 @@ impl SessionRepository {
         .bind(tool_call_id)
         .bind(token_usage_json)
         .bind(reasoning_content)
+        .bind(follow_up_suggestions_json)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -687,8 +694,8 @@ impl SessionRepository {
                 r#"
                 INSERT INTO messages
                     (id, session_id, role, content, tool_calls, tool_call_id,
-                     token_usage_json, reasoning_content, created_at)
-                VALUES (?, ?, 'tool', ?, NULL, ?, NULL, NULL, ?)
+                     token_usage_json, reasoning_content, follow_up_suggestions_json, created_at)
+                VALUES (?, ?, 'tool', ?, NULL, ?, NULL, NULL, NULL, ?)
                 "#,
             )
             .bind(&msg_id)
@@ -711,6 +718,20 @@ impl SessionRepository {
     ) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE messages SET token_usage_json = ? WHERE id = ?")
             .bind(token_usage_json)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Update follow-up suggestions on an existing assistant message row (after turn completes).
+    pub async fn update_message_follow_up_suggestions(
+        &self,
+        id: &str,
+        follow_up_suggestions_json: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE messages SET follow_up_suggestions_json = ? WHERE id = ?")
+            .bind(follow_up_suggestions_json)
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -1285,6 +1306,7 @@ pub struct MessageRecord {
     pub tool_call_id: Option<String>,
     pub token_usage_json: Option<String>,
     pub reasoning_content: Option<String>,
+    pub follow_up_suggestions_json: Option<String>,
     pub created_at: String,
 }
 

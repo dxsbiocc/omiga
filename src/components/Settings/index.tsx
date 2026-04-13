@@ -33,6 +33,7 @@ import { IntegrationsCatalogPanel } from "./IntegrationsCatalogPanel";
 import { UnifiedMemoryTab } from "./UnifiedMemoryTab";
 import { ThemeAppearancePanel } from "./ThemeAppearancePanel";
 import { ProviderManager } from "./ProviderManager";
+import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 
 interface SettingsProps {
   open: boolean;
@@ -40,6 +41,9 @@ interface SettingsProps {
   /** See `openSettingsTabMap.ts`: 0–7 */
   initialTab?: number;
 }
+
+/** Persisted JSON for built-in `web_search` provider keys (Settings → Advanced). */
+const WEB_SEARCH_KEYS_STORAGE = "omiga_web_search_api_keys";
 
 /** Grouped sidebar — indices must match `openSettingsTabMap` */
 const SETTINGS_SECTIONS: {
@@ -62,6 +66,7 @@ const SETTINGS_SECTIONS: {
       { index: 4, label: "Plugins" },
       { index: 5, label: "MCP" },
       { index: 6, label: "Skills" },
+      { index: 9, label: "Execution" },
     ],
   },
   {
@@ -71,7 +76,7 @@ const SETTINGS_SECTIONS: {
 ];
 
 const SETTINGS_NAV_FLAT = SETTINGS_SECTIONS.flatMap((s) => s.items);
-const SETTINGS_TAB_MAX = 8;
+const SETTINGS_TAB_MAX = 9;
 
 function clampSettingsTab(i: number): number {
   return Math.min(
@@ -207,18 +212,24 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
   const setAccentPreset = useColorModeStore((s) => s.setAccentPreset);
 
   // Provider selection
-  const [provider, setProvider] = useState("anthropic");
+  const [_provider, setProvider] = useState("anthropic");
 
   // API credentials
-  const [apiKey, setApiKey] = useState("");
-  const [secretKey, setSecretKey] = useState("");
-  const [appId, setAppId] = useState("");
+  const [_apiKey, setApiKey] = useState("");
+  const [_secretKey, setSecretKey] = useState("");
+  const [_appId, setAppId] = useState("");
+  const [_model, setModel] = useState("");
 
-  // Advanced settings
-  const [model, setModel] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [braveApiKey, setBraveApiKey] = useState("");
-  const [showBraveKey, setShowBraveKey] = useState(false);
+  // API credentials
+  const [tavilyApiKey, setTavilyApiKey] = useState("");
+  const [showTavilyKey, setShowTavilyKey] = useState(false);
+  const [exaApiKey, setExaApiKey] = useState("");
+  const [showExaKey, setShowExaKey] = useState(false);
+  const [parallelApiKey, setParallelApiKey] = useState("");
+  const [showParallelKey, setShowParallelKey] = useState(false);
+  const [firecrawlApiKey, setFirecrawlApiKey] = useState("");
+  const [showFirecrawlKey, setShowFirecrawlKey] = useState(false);
+  const [firecrawlUrl, setFirecrawlUrl] = useState("");
   /** 回合结束后第二次模型调用：要点摘要 */
   const [postTurnSummaryEnabled, setPostTurnSummaryEnabled] = useState(true);
   /** 回合结束后第二次模型调用：输入框上方「下一步」建议 */
@@ -227,8 +238,6 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
 
   // UI state
   const [isLoading, setIsLoading] = useState(false);
-  const [showKey, setShowKey] = useState(false);
-  const [showSecret, setShowSecret] = useState(false);
   const [message, setMessage] = useState<{
     type: "success" | "error";
     text: string;
@@ -267,12 +276,27 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
         setModel(
           config.model || PROVIDERS[config.provider]?.defaultModel || "",
         );
-        setBaseUrl(config.baseUrl || "");
       }
 
-      const braveStored = localStorage.getItem("omiga_brave_search_api_key");
-      if (braveStored !== null) {
-        setBraveApiKey(braveStored);
+      const rawWebKeys = localStorage.getItem(WEB_SEARCH_KEYS_STORAGE);
+      if (rawWebKeys) {
+        try {
+          const j = JSON.parse(rawWebKeys) as Record<string, string>;
+          setTavilyApiKey(j.tavily ?? "");
+          setExaApiKey(j.exa ?? "");
+          setParallelApiKey(j.parallel ?? "");
+          setFirecrawlApiKey(j.firecrawl ?? "");
+          setFirecrawlUrl(j.firecrawlUrl ?? "");
+        } catch {
+          /* ignore */
+        }
+      } else {
+        const tavilyStored =
+          localStorage.getItem("omiga_tavily_search_api_key") ??
+          localStorage.getItem("omiga_brave_search_api_key");
+        if (tavilyStored !== null) {
+          setTavilyApiKey(tavilyStored);
+        }
       }
 
       const backendConfig = await invoke<{
@@ -309,11 +333,55 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
           prev.trim() ? prev : PROVIDERS.anthropic.defaultModel,
         );
       }
-      if (braveStored?.trim()) {
+      let wsPayload: {
+        tavily: string;
+        exa: string;
+        parallel: string;
+        firecrawl: string;
+        firecrawlUrl: string;
+      };
+      if (rawWebKeys) {
         try {
-          await invoke("set_brave_search_api_key", {
-            apiKey: braveStored.trim(),
-          });
+          const j = JSON.parse(rawWebKeys) as Record<string, string>;
+          wsPayload = {
+            tavily: (j.tavily ?? "").trim(),
+            exa: (j.exa ?? "").trim(),
+            parallel: (j.parallel ?? "").trim(),
+            firecrawl: (j.firecrawl ?? "").trim(),
+            firecrawlUrl: (j.firecrawlUrl ?? "").trim(),
+          };
+        } catch {
+          wsPayload = {
+            tavily: "",
+            exa: "",
+            parallel: "",
+            firecrawl: "",
+            firecrawlUrl: "",
+          };
+        }
+      } else {
+        const legacy = (
+          localStorage.getItem("omiga_tavily_search_api_key") ??
+          localStorage.getItem("omiga_brave_search_api_key") ??
+          ""
+        ).trim();
+        wsPayload = {
+          tavily: legacy,
+          exa: "",
+          parallel: "",
+          firecrawl: "",
+          firecrawlUrl: "",
+        };
+      }
+      if (
+        wsPayload.tavily ||
+        wsPayload.exa ||
+        wsPayload.parallel ||
+        wsPayload.firecrawl ||
+        wsPayload.firecrawlUrl
+      ) {
+        try {
+          await invoke("set_web_search_api_keys", wsPayload);
         } catch {
           /* non-fatal */
         }
@@ -349,37 +417,41 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
         value: followUpSuggestionsEnabled ? "true" : "false",
       });
 
-      const braveTrim = braveApiKey.trim();
-      await invoke("set_brave_search_api_key", {
-        apiKey: braveTrim,
+      const ws = {
+        tavily: tavilyApiKey.trim(),
+        exa: exaApiKey.trim(),
+        parallel: parallelApiKey.trim(),
+        firecrawl: firecrawlApiKey.trim(),
+        firecrawlUrl: firecrawlUrl.trim(),
+      };
+      await invoke("set_web_search_api_keys", {
+        tavily: ws.tavily,
+        exa: ws.exa,
+        parallel: ws.parallel,
+        firecrawl: ws.firecrawl,
+        firecrawlUrl: ws.firecrawlUrl,
       });
-      if (braveTrim) {
-        localStorage.setItem("omiga_brave_search_api_key", braveApiKey);
-      } else {
-        localStorage.removeItem("omiga_brave_search_api_key");
-      }
+      localStorage.setItem(WEB_SEARCH_KEYS_STORAGE, JSON.stringify(ws));
+      localStorage.removeItem("omiga_tavily_search_api_key");
+      localStorage.removeItem("omiga_brave_search_api_key");
 
       const stored = localStorage.getItem("omiga_llm_config");
       if (stored) {
         const config: LlmConfig = JSON.parse(stored);
-        const next: LlmConfig = {
-          ...config,
-          baseUrl: baseUrl.trim() || undefined,
-        };
         await invoke("save_llm_settings_to_config", {
-          provider: next.provider,
-          apiKey: next.apiKey,
-          secretKey: next.secretKey,
-          appId: next.appId,
-          model: next.model,
-          baseUrl: next.baseUrl,
+          provider: config.provider,
+          apiKey: config.apiKey,
+          secretKey: config.secretKey,
+          appId: config.appId,
+          model: config.model,
+          baseUrl: config.baseUrl,
         });
-        localStorage.setItem("omiga_llm_config", JSON.stringify(next));
+        localStorage.setItem("omiga_llm_config", JSON.stringify(config));
       }
 
       setMessage({
         type: "success",
-        text: "Advanced settings saved (base URL, Brave, post-turn summary & follow-up suggestions)",
+        text: "Advanced settings saved (web search keys, post-turn summary & follow-up suggestions)",
       });
     } catch (error) {
       console.error("Failed to save advanced settings:", error);
@@ -630,36 +702,24 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
 
                 <Divider sx={{ mb: 3 }} />
 
-                {/* Base URL (for custom endpoints) */}
                 <TextField
                   fullWidth
-                  label="Base URL (optional)"
-                  placeholder="https://api.example.com/v1"
-                  value={baseUrl}
-                  onChange={(e) => setBaseUrl(e.target.value)}
+                  type={showTavilyKey ? "text" : "password"}
+                  label="Tavily API key (optional)"
+                  placeholder="tvly-..."
+                  value={tavilyApiKey}
+                  onChange={(e) => setTavilyApiKey(e.target.value)}
                   disabled={isLoading}
-                  helperText="Override the default API endpoint. For Azure or custom OpenAI-compatible services."
-                  sx={{ mb: 3 }}
-                />
-
-                <TextField
-                  fullWidth
-                  type={showBraveKey ? "text" : "password"}
-                  label="Brave Search API key (optional)"
-                  placeholder="BSA..."
-                  value={braveApiKey}
-                  onChange={(e) => setBraveApiKey(e.target.value)}
-                  disabled={isLoading}
-                  helperText={`Used by the built-in web_search tool (Brave API). If empty, Omiga tries $OMIGA_BRAVE_API_KEY / $BRAVE_API_KEY, then falls back to DuckDuckGo.`}
+                  helperText="Used by built-in web_search (provider order: Tavily → Exa → Firecrawl → Parallel → DuckDuckGo). Overrides OMIGA_TAVILY_API_KEY / TAVILY_API_KEY when set."
                   InputProps={{
                     endAdornment: (
                       <InputAdornment position="end">
                         <IconButton
-                          onClick={() => setShowBraveKey(!showBraveKey)}
+                          onClick={() => setShowTavilyKey(!showTavilyKey)}
                           edge="end"
                           size="small"
                         >
-                          {showBraveKey ? <VisibilityOff /> : <Visibility />}
+                          {showTavilyKey ? <VisibilityOff /> : <Visibility />}
                         </IconButton>
                       </InputAdornment>
                     ),
@@ -673,7 +733,7 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
                 >
                   Get a key from{" "}
                   <Link
-                    href="https://brave.com/search/api/"
+                    href="https://tavily.com/"
                     target="_blank"
                     rel="noopener noreferrer"
                     sx={{
@@ -682,10 +742,111 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
                       gap: 0.5,
                     }}
                   >
-                    Brave Search API
+                    Tavily
                     <OpenInNew fontSize="inherit" />
                   </Link>
                   . Stored locally.
+                </Typography>
+
+                <TextField
+                  fullWidth
+                  type={showExaKey ? "text" : "password"}
+                  label="Exa API key (optional)"
+                  placeholder="exa-..."
+                  value={exaApiKey}
+                  onChange={(e) => setExaApiKey(e.target.value)}
+                  disabled={isLoading}
+                  helperText="Overrides OMIGA_EXA_API_KEY / EXA_API_KEY."
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton
+                          onClick={() => setShowExaKey(!showExaKey)}
+                          edge="end"
+                          size="small"
+                        >
+                          {showExaKey ? <VisibilityOff /> : <Visibility />}
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  }}
+                  sx={{ mb: 2 }}
+                />
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
+                  <Link href="https://exa.ai/" target="_blank" rel="noopener noreferrer" sx={{ display: "inline-flex", alignItems: "center", gap: 0.5 }}>
+                    Exa
+                    <OpenInNew fontSize="inherit" />
+                  </Link>
+                </Typography>
+
+                <TextField
+                  fullWidth
+                  type={showParallelKey ? "text" : "password"}
+                  label="Parallel API key (optional)"
+                  value={parallelApiKey}
+                  onChange={(e) => setParallelApiKey(e.target.value)}
+                  disabled={isLoading}
+                  helperText="Overrides OMIGA_PARALLEL_API_KEY / PARALLEL_API_KEY."
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton
+                          onClick={() => setShowParallelKey(!showParallelKey)}
+                          edge="end"
+                          size="small"
+                        >
+                          {showParallelKey ? <VisibilityOff /> : <Visibility />}
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  }}
+                  sx={{ mb: 2 }}
+                />
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
+                  <Link href="https://parallel.ai/" target="_blank" rel="noopener noreferrer" sx={{ display: "inline-flex", alignItems: "center", gap: 0.5 }}>
+                    Parallel
+                    <OpenInNew fontSize="inherit" />
+                  </Link>
+                </Typography>
+
+                <TextField
+                  fullWidth
+                  type={showFirecrawlKey ? "text" : "password"}
+                  label="Firecrawl API key (optional)"
+                  value={firecrawlApiKey}
+                  onChange={(e) => setFirecrawlApiKey(e.target.value)}
+                  disabled={isLoading}
+                  helperText="Overrides OMIGA_FIRECRAWL_API_KEY / FIRECRAWL_API_KEY."
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton
+                          onClick={() => setShowFirecrawlKey(!showFirecrawlKey)}
+                          edge="end"
+                          size="small"
+                        >
+                          {showFirecrawlKey ? <VisibilityOff /> : <Visibility />}
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  }}
+                  sx={{ mb: 2 }}
+                />
+                <TextField
+                  fullWidth
+                  label="Firecrawl API base URL (optional)"
+                  placeholder="https://api.firecrawl.dev"
+                  value={firecrawlUrl}
+                  onChange={(e) => setFirecrawlUrl(e.target.value)}
+                  disabled={isLoading}
+                  helperText="Self-hosted or alternate endpoint. Overrides OMIGA_FIRECRAWL_API_URL. Default: https://api.firecrawl.dev"
+                  sx={{ mb: 2 }}
+                />
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2 }}>
+                  <Link href="https://firecrawl.dev/" target="_blank" rel="noopener noreferrer" sx={{ display: "inline-flex", alignItems: "center", gap: 0.5 }}>
+                    Firecrawl
+                    <OpenInNew fontSize="inherit" />
+                  </Link>
                 </Typography>
 
                 <Button
@@ -700,9 +861,8 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
                 <Divider sx={{ my: 2 }} />
 
                 <Typography variant="body2" color="text.secondary">
-                  Saving the model on the Model tab also saves the Brave key and
-                  base URL from this page. Use the button above if you only
-                  changed advanced options.
+                  Saving the model on the Model tab also persists settings from this
+                  page. Use the button above if you only changed advanced options.
                 </Typography>
               </Box>
             )}
@@ -798,6 +958,12 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
             {activeTab === 8 && (
               <Box>
                 <UnifiedMemoryTab projectPath={projectPath} />
+              </Box>
+            )}
+
+            {activeTab === 9 && (
+              <Box>
+                <ExecutionEnvsSettingsTab />
               </Box>
             )}
 

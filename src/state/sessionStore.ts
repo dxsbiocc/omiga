@@ -32,7 +32,9 @@ export const PLACEHOLDER_SESSION_TITLE_PREFIX = "New chat ·";
 export const UNUSED_SESSION_LABEL = "New session";
 
 /** True when the title is still the empty-session placeholder (first message will rename). */
-export function isPlaceholderSessionTitle(name: string | undefined | null): boolean {
+export function isPlaceholderSessionTitle(
+  name: string | undefined | null,
+): boolean {
   if (!name) return false;
   const t = name.trim();
   if (t === UNUSED_SESSION_LABEL) return true;
@@ -196,7 +198,14 @@ interface RawMessage {
   output?: string;
   tool_calls?: Array<{ id: string; name: string; arguments: string }>;
   tool_call_id?: string;
-  token_usage?: { input: number; output: number; total?: number; provider?: string };
+  token_usage?: {
+    input: number;
+    output: number;
+    total?: number;
+    provider?: string;
+  };
+  /** Follow-up suggestions from backend (LLM-generated) */
+  follow_up_suggestions?: Array<{ label: string; prompt: string }>;
 }
 
 interface SessionData {
@@ -218,6 +227,8 @@ interface SendMessageRequest {
   use_tools: boolean;
   /** `leader` (default) | `bg:<task_id>` to queue follow-up for a background Agent task */
   inputTarget?: string;
+  /** `local` | `remote` — chat composer execution surface */
+  executionEnvironment?: "local" | "remote";
   /** DB user row id — truncate after this row and reuse instead of inserting a duplicate user message */
   retryFromUserMessageId?: string;
 }
@@ -272,7 +283,10 @@ interface SessionState {
 
 /** Convert raw DB message rows to store Messages. Extracted so both loadSession
  *  and loadMoreMessages can share the same conversion logic. */
-function convertRawMessages(rawMessages: RawMessage[], sessionId: string): Message[] {
+function convertRawMessages(
+  rawMessages: RawMessage[],
+  sessionId: string,
+): Message[] {
   // Build tool_call_id → {name, arguments} map from assistant rows in O(N).
   const toolMetaById = new Map<string, { name: string; arguments: string }>();
   for (const m of rawMessages) {
@@ -318,6 +332,11 @@ function convertRawMessages(rawMessages: RawMessage[], sessionId: string): Messa
           }
         : undefined;
 
+    const followUpSuggestions: Message["followUpSuggestions"] =
+      m.role === "assistant" && m.follow_up_suggestions?.length
+        ? m.follow_up_suggestions
+        : undefined;
+
     return sanitizeMessageForPersistence({
       id: m.id ?? `${sessionId}-msg-${index}`,
       role: m.role,
@@ -325,6 +344,7 @@ function convertRawMessages(rawMessages: RawMessage[], sessionId: string): Messa
       toolCallsList,
       toolCall,
       ...(tokenUsage ? { tokenUsage } : {}),
+      ...(followUpSuggestions ? { followUpSuggestions } : {}),
     });
   });
 }
@@ -446,8 +466,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const perfStart = performance.now();
     dbg("loadSession:start", { sessionId });
     try {
-      const sessionData = await invoke<SessionData>("load_session", { sessionId });
-      const messages = convertRawMessages(sessionData.messages ?? [], sessionId);
+      const sessionData = await invoke<SessionData>("load_session", {
+        sessionId,
+      });
+      const messages = convertRawMessages(
+        sessionData.messages ?? [],
+        sessionId,
+      );
       const session: Session = {
         id: sessionData.id,
         name: sessionData.name,
@@ -461,7 +486,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       set((state) => {
         const exists = state.sessions.some((s) => s.id === session.id);
         const sessions = exists
-          ? state.sessions.map((s) => (s.id === session.id ? { ...s, ...session } : s))
+          ? state.sessions.map((s) =>
+              s.id === session.id ? { ...s, ...session } : s,
+            )
           : [session, ...state.sessions];
         return {
           currentSession: session,
@@ -477,17 +504,31 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (sessionData.provider_changed) notifyProviderChanged();
 
       const duration = Math.round(performance.now() - perfStart);
-      dbg("loadSession:ok", { sessionId, messageCount: messages.length, duration });
+      dbg("loadSession:ok", {
+        sessionId,
+        messageCount: messages.length,
+        duration,
+      });
     } catch (error) {
       console.error("[OmigaDebug] loadSession failed", error);
       const fallback = get().sessions.find((s) => s.id === sessionId) ?? null;
-      dbg("loadSession:error", { sessionId, fallbackName: fallback?.name ?? null });
-      set({ isLoading: false, currentSession: fallback, messages: [], storeMessages: [], hasMoreMessages: false });
+      dbg("loadSession:error", {
+        sessionId,
+        fallbackName: fallback?.name ?? null,
+      });
+      set({
+        isLoading: false,
+        currentSession: fallback,
+        messages: [],
+        storeMessages: [],
+        hasMoreMessages: false,
+      });
     }
   },
 
   loadMoreMessages: async () => {
-    const { currentSession, messages, hasMoreMessages, isLoadingMoreMessages } = get();
+    const { currentSession, messages, hasMoreMessages, isLoadingMoreMessages } =
+      get();
     if (!currentSession || !hasMoreMessages || isLoadingMoreMessages) return;
     const oldestId = messages[0]?.id;
     if (!oldestId) return;
@@ -559,11 +600,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   setCurrentSession: async (sessionId) => {
-    const perfLabel = `[OmigaPerf] switch-${sessionId?.slice(0, 8) || 'null'}`;
+    const perfLabel = `[OmigaPerf] switch-${sessionId?.slice(0, 8) || "null"}`;
     console.time(perfLabel);
     dbg("setCurrentSession", { sessionId });
     if (!sessionId) {
-      set({ currentSession: null, messages: [], storeMessages: [], isSwitchingSession: false });
+      set({
+        currentSession: null,
+        messages: [],
+        storeMessages: [],
+        isSwitchingSession: false,
+      });
       return;
     }
     const session = get().sessions.find((s) => s.id === sessionId);

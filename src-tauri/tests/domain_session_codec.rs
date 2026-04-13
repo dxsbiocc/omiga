@@ -1,7 +1,9 @@
 //! Session codec tests
 
-use super::*;
-use crate::domain::persistence::MessageRecord;
+use chrono::Utc;
+use omiga::domain::session::{Message, ToolCall, SessionCodec};
+use omiga::domain::persistence::MessageRecord;
+use omiga::api::Role;
 
 #[test]
 fn test_user_message_roundtrip() {
@@ -103,7 +105,7 @@ fn test_record_to_message_user() {
         tool_call_id: None,
         token_usage_json: None,
         reasoning_content: None,
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: Utc::now().to_rfc3339(),
     };
 
     let msg = SessionCodec::record_to_message(record);
@@ -126,7 +128,7 @@ fn test_record_to_message_assistant_with_tool_calls() {
         tool_call_id: None,
         token_usage_json: None,
         reasoning_content: None,
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: Utc::now().to_rfc3339(),
     };
 
     let msg = SessionCodec::record_to_message(record);
@@ -158,7 +160,7 @@ fn test_record_to_message_tool() {
         tool_call_id: Some("call-1".to_string()),
         token_usage_json: None,
         reasoning_content: None,
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: Utc::now().to_rfc3339(),
     };
 
     let msg = SessionCodec::record_to_message(record);
@@ -181,7 +183,7 @@ fn test_to_api_messages_user_only() {
 
     let api_messages = SessionCodec::to_api_messages(&messages);
     assert_eq!(api_messages.len(), 1);
-    assert_eq!(api_messages[0].role, crate::api::Role::User);
+    assert_eq!(api_messages[0].role, Role::User);
 }
 
 #[test]
@@ -210,14 +212,14 @@ fn test_to_api_messages_conversation() {
     assert_eq!(api_messages.len(), 3);
 
     // Check user message
-    assert_eq!(api_messages[0].role, crate::api::Role::User);
+    assert_eq!(api_messages[0].role, Role::User);
 
     // Check assistant message with tool use
-    assert_eq!(api_messages[1].role, crate::api::Role::Assistant);
+    assert_eq!(api_messages[1].role, Role::Assistant);
     assert_eq!(api_messages[1].content.len(), 2); // Text + ToolUse
 
     // Check tool result
-    assert_eq!(api_messages[2].role, crate::api::Role::User);
+    assert_eq!(api_messages[2].role, Role::User);
 }
 
 #[test]

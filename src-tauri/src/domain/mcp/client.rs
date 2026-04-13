@@ -333,6 +333,9 @@ pub async fn call_tool_on_server(
 }
 
 /// Create a `RunningService` from a config (used by both the pool and one-shot helpers).
+///
+/// For remote HTTP connections, this function implements retry logic with exponential backoff
+/// to handle transient network failures (e.g., "Connection reset by peer").
 async fn create_running_service(
     project_root: &Path,
     config: McpServerConfig,
@@ -358,20 +361,94 @@ async fn create_running_service(
                 .map_err(|e| format!("MCP stdio handshake: {e}"))
         }
         McpServerConfig::Url(url) => {
-            let http = reqwest::Client::builder()
-                .timeout(timeout)
-                .build()
-                .map_err(|e| format!("reqwest: {e}"))?;
+            // Retry configuration for HTTP connections
+            const MAX_RETRIES: u32 = 3;
+            const INITIAL_BACKOFF_MS: u64 = 500;
 
-            let worker = StreamableHttpClientWorker::new(
-                http,
-                StreamableHttpClientTransportConfig::with_uri(url),
-            );
+            let mut last_error = None;
 
-            tokio::time::timeout(timeout, ().serve(worker))
-                .await
-                .map_err(|_| "MCP HTTP handshake timed out".to_string())?
-                .map_err(|e| format!("MCP HTTP handshake: {e}"))
+            for attempt in 0..MAX_RETRIES {
+                if attempt > 0 {
+                    let backoff = INITIAL_BACKOFF_MS * (1 << (attempt - 1)); // Exponential backoff
+                    tracing::info!(
+                        target: "omiga::mcp",
+                        url = %url,
+                        attempt = attempt + 1,
+                        max_retries = MAX_RETRIES,
+                        backoff_ms = backoff,
+                        "Retrying MCP HTTP connection after failure"
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(backoff)).await;
+                }
+
+                // Create a fresh client for each attempt to avoid connection reuse issues
+                let http = reqwest::Client::builder()
+                    .timeout(timeout)
+                    .pool_max_idle_per_host(0) // Disable connection pooling to avoid stale connections
+                    .build()
+                    .map_err(|e| format!("reqwest client build: {e}"))?;
+
+                let worker = StreamableHttpClientWorker::new(
+                    http,
+                    StreamableHttpClientTransportConfig::with_uri(url.clone()),
+                );
+
+                match tokio::time::timeout(timeout, ().serve(worker)).await {
+                    Ok(Ok(service)) => {
+                        if attempt > 0 {
+                            tracing::info!(
+                                target: "omiga::mcp",
+                                url = %url,
+                                attempt = attempt + 1,
+                                "MCP HTTP connection succeeded after retry"
+                            );
+                        }
+                        return Ok(service);
+                    }
+                    Ok(Err(e)) => {
+                        let error_msg = format!("{}", e);
+                        // Check if this is a retriable error
+                        let is_retriable = error_msg.contains("Connection reset")
+                            || error_msg.contains("connection reset")
+                            || error_msg.contains("Connect")
+                            || error_msg.contains("timed out")
+                            || error_msg.contains("timeout");
+
+                        tracing::warn!(
+                            target: "omiga::mcp",
+                            url = %url,
+                            attempt = attempt + 1,
+                            error = %error_msg,
+                            is_retriable = is_retriable,
+                            "MCP HTTP handshake failed"
+                        );
+
+                        if !is_retriable || attempt == MAX_RETRIES - 1 {
+                            return Err(format!("MCP HTTP handshake: {e}"));
+                        }
+                        last_error = Some(error_msg);
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "omiga::mcp",
+                            url = %url,
+                            attempt = attempt + 1,
+                            "MCP HTTP handshake timed out"
+                        );
+                        if attempt == MAX_RETRIES - 1 {
+                            return Err("MCP HTTP handshake timed out after retries".to_string());
+                        }
+                        last_error = Some("Timeout".to_string());
+                    }
+                }
+            }
+
+            // Should not reach here, but handle just in case
+            Err(format!(
+                "MCP HTTP connection failed after {} retries: {}",
+                MAX_RETRIES,
+                last_error.unwrap_or_else(|| "Unknown error".to_string())
+            ))
         }
     }
 }

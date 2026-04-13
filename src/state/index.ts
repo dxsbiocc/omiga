@@ -45,6 +45,8 @@ export {
 export {
   useChatComposerStore,
   type PermissionMode,
+  type SandboxBackend,
+  type ExecutionEnvironment,
 } from "./chatComposerStore";
 export {
   useNotebookViewerStore,

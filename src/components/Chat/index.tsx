@@ -64,6 +64,8 @@ import {
   useActivityStore,
   useChatComposerStore,
   type PermissionMode,
+  type SandboxBackend,
+  type ExecutionEnvironment,
   type Message as StoreMessage,
   isPlaceholderSessionTitle,
   titleFromFirstUserMessage,
@@ -169,6 +171,11 @@ interface QueuedMainSend {
   composerAttachedPaths: string[];
   composerAgentType: string;
   permissionMode: PermissionMode;
+  /** 发送入队时的运行环境（与 composer 一致） */
+  environment: ExecutionEnvironment;
+  /** SSH 服务器名称（仅在 environment === "ssh" 时有效） */
+  sshServer: string | null;
+  sandboxBackend: SandboxBackend;
 }
 
 /** User bubble: show body only when paths are shown as chips (content still stores full payload). */
@@ -497,7 +504,10 @@ function groupMessagesForRender(messages: Message[]): RenderMsgItem[] {
       if (hasPersistedToolPlan) {
         // Build O(1) lookup: toolCallId → {index, message} for all tool rows in segment.
         // Previously used segment.findIndex() inside a nested loop — O(N²).
-        const toolRowByCallId = new Map<string, { idx: number; msg: Message }>();
+        const toolRowByCallId = new Map<
+          string,
+          { idx: number; msg: Message }
+        >();
         for (let si = 0; si < segment.length; si++) {
           const m = segment[si];
           if (m.role === "tool" && m.toolCall?.id) {
@@ -697,40 +707,12 @@ function parseToolDescriptionFromInput(
   return null;
 }
 
-/** Title when `description` is absent: tool name or a short hint from JSON. */
-function toolTitleFallbackFromInput(
-  input: string | undefined,
-  toolName: string,
-): string {
-  if (!input?.trim()) return toolName;
-  try {
-    const j = JSON.parse(input) as Record<string, unknown>;
-    const n = toolName.toLowerCase();
-    if (n === "bash" || n.includes("bash")) {
-      const cmd = j.command;
-      if (typeof cmd === "string" && cmd.trim()) {
-        const line = cmd.trim().split(/\r?\n/u)[0] ?? "";
-        if (line) return line.length > 80 ? `${line.slice(0, 80)}…` : line;
-      }
-    }
-    const keys = Object.keys(j).filter((k) => k !== "description");
-    if (keys.length) return `${toolName} · ${keys.slice(0, 2).join(", ")}`;
-  } catch {
-    /* */
-  }
-  const t = input.trim();
-  return t.length > 72 ? `${t.slice(0, 72)}…` : t;
-}
-
-/** Display title for a tool row: `description` from arguments JSON, else fallback. */
+/** Display title for a tool row: `description` from arguments JSON, else tool name. */
 function toolCallPanelTitle(
   input: string | undefined,
   toolName: string,
 ): string {
-  return (
-    parseToolDescriptionFromInput(input) ??
-    toolTitleFallbackFromInput(input, toolName)
-  );
+  return parseToolDescriptionFromInput(input) ?? toolName;
 }
 
 function getNestedToolPanelOpen(
@@ -1044,6 +1026,8 @@ export function Chat({ sessionId }: ChatProps) {
 
   /** Prevents overlapping `retryUserMessage` runs (React `isConnecting` can lag one frame behind the store). */
   const retrySendInFlightRef = useRef(false);
+  /** User pressed stop while `send_message` is still in flight (no `message_id` / listener yet). */
+  const sendCancelledDuringRequestRef = useRef(false);
   /** FIFO: main-session messages enqueued while a turn is still streaming (flush one per stream end). */
   const queuedMainSendQueueRef = useRef<QueuedMainSend[]>([]);
   /** Bumps when the in-memory queue mutates so the composer list re-renders. */
@@ -1115,6 +1099,8 @@ export function Chat({ sessionId }: ChatProps) {
         }
         st.setComposerAgentType(item.composerAgentType);
         st.setPermissionMode(item.permissionMode);
+        st.setEnvironment(item.environment);
+        st.setSshServer(item.sshServer);
       });
       queueMicrotask(() => inputRef.current?.focus());
     },
@@ -2078,6 +2064,7 @@ export function Chat({ sessionId }: ChatProps) {
 
   const handleSend = async () => {
     if (!sessionId) return;
+    sendCancelledDuringRequestRef.current = false;
     setAwaitingResumeAfterCancel(false);
 
     const flushPayload = mainQueueFlushPayloadRef.current;
@@ -2093,6 +2080,8 @@ export function Chat({ sessionId }: ChatProps) {
       composerAgentType: storeAgent,
       permissionMode: storePerm,
       composerAttachedPaths: storePaths,
+      environment: storeEnv,
+      sandboxBackend: storeSb,
     } = useChatComposerStore.getState();
 
     const composerAgentType = flushPayload
@@ -2101,6 +2090,10 @@ export function Chat({ sessionId }: ChatProps) {
     const permissionMode = flushPayload
       ? flushPayload.permissionMode
       : storePerm;
+    const environment = flushPayload ? flushPayload.environment : storeEnv;
+    const sandboxBackend = flushPayload
+      ? flushPayload.sandboxBackend
+      : storeSb;
     const composerAttachedPaths = flushPayload
       ? [...flushPayload.composerAttachedPaths]
       : storePaths;
@@ -2151,6 +2144,8 @@ export function Chat({ sessionId }: ChatProps) {
             session_name: currentSession?.name,
             use_tools: true,
             inputTarget: `bg:${followUpTaskId}`,
+            executionEnvironment: useChatComposerStore.getState().environment,
+            sandboxBackend: useChatComposerStore.getState().sandboxBackend,
           },
         });
         if (response.input_kind === "background_followup_queued") {
@@ -2192,6 +2187,9 @@ export function Chat({ sessionId }: ChatProps) {
         composerAttachedPaths: [...composerAttachedPaths],
         composerAgentType,
         permissionMode,
+        environment,
+        sshServer: useChatComposerStore.getState().sshServer,
+        sandboxBackend: useChatComposerStore.getState().sandboxBackend,
       });
       bumpQueueUi();
       setInput("");
@@ -2267,7 +2265,7 @@ export function Chat({ sessionId }: ChatProps) {
         user_message_id?: string;
         scheduler_plan?: SchedulerPlan;
         initial_todos?: InitialTodoItem[];
-      }>("send_message", {
+        }>("send_message", {
         request: {
           content: messageContent,
           session_id: sessionId,
@@ -2276,8 +2274,27 @@ export function Chat({ sessionId }: ChatProps) {
           use_tools: true,
           composerAgentType,
           permissionMode,
+          executionEnvironment: environment,
+          sandboxBackend,
         },
       });
+
+      if (sendCancelledDuringRequestRef.current) {
+        sendCancelledDuringRequestRef.current = false;
+        try {
+          await invoke("cancel_stream", { messageId: response.message_id });
+        } catch (e) {
+          console.error(
+            "[Chat] cancel_stream after user stopped during send_message",
+            e,
+          );
+        }
+        useActivityStore.getState().clearTransient();
+        useActivityStore.getState().resetExecutionState();
+        setCurrentStreamId(null);
+        setCurrentRoundId(null);
+        return;
+      }
 
       useChatComposerStore.getState().setComposerAgentType("general-purpose");
 
@@ -2331,6 +2348,7 @@ export function Chat({ sessionId }: ChatProps) {
       setCurrentStreamId(response.message_id);
       await setupStreamListener(response.message_id);
     } catch (error: unknown) {
+      sendCancelledDuringRequestRef.current = false;
       console.error("Failed to send message:", error);
       useActivityStore.getState().clearTransient();
       useActivityStore.getState().resetExecutionState();
@@ -2524,6 +2542,8 @@ export function Chat({ sessionId }: ChatProps) {
             use_tools: true,
             composerAgentType: composeAgent,
             permissionMode,
+            executionEnvironment: useChatComposerStore.getState().environment,
+            sandboxBackend: useChatComposerStore.getState().sandboxBackend,
             ...(isPersistedMessageIdForRetry(message.id)
               ? { retryFromUserMessageId: message.id }
               : {}),
@@ -2703,6 +2723,9 @@ export function Chat({ sessionId }: ChatProps) {
       }
       st.setComposerAgentType(next.composerAgentType);
       st.setPermissionMode(next.permissionMode);
+      st.setEnvironment(next.environment);
+      st.setSshServer(next.sshServer);
+      st.setSandboxBackend(next.sandboxBackend);
     });
     void handleSendRef.current();
   };
@@ -2724,15 +2747,95 @@ export function Chat({ sessionId }: ChatProps) {
     handleSend();
   };
 
-  const handleCancel = async () => {
-    if (!currentStreamId) return;
+  /** 仅中断当前一轮流式生成 / 工具执行（不退出会话）。用于顶部状态条、输入区「停止生成」。 */
+  const handleCancelStream = async () => {
+    const streamId = currentStreamId;
+    if (streamId) {
+      try {
+        await invoke("cancel_stream", { messageId: streamId });
+      } catch (error) {
+        console.error("Failed to cancel stream:", error);
+      }
+      return;
+    }
+
+    const act = useActivityStore.getState();
+    const busy =
+      act.isConnecting ||
+      act.isStreaming ||
+      act.waitingFirstChunk ||
+      isStreamingRef.current;
+    if (!busy) return;
+
+    sendCancelledDuringRequestRef.current = true;
+    if (unlistenRef.current) {
+      unlistenRef.current();
+      unlistenRef.current = null;
+    }
+    setCurrentStreamId(null);
+    setIsStreaming(false);
+    isStreamingRef.current = false;
+    setCurrentResponse("");
+    setAwaitingResumeAfterCancel(false);
+    act.clearTransient();
+    act.resetExecutionState();
+  };
+
+  /**
+   * 退出当前对话：取消进行中的流、清理监听与队列，并清空当前会话选择（回到侧栏选会话）。
+   * 用于确认类对话框中的「取消」等需要结束会话的操作。
+   */
+  const handleExitConversation = useCallback(async () => {
+    sendCancelledDuringRequestRef.current = false;
+    retrySendInFlightRef.current = false;
+    setRetryConfirmForMessage(null);
+    setUserMessageEdit(null);
+    setPendingAskUser(null);
+    setAskUserSelections({});
+    clearQueuedMainSends();
+    setFollowUpTaskId(null);
+    setBgTranscriptTaskId(null);
+    setIndexingStatus("idle");
+    setInput("");
+    setBgToast(null);
+    setPathRequiredToast(null);
+    setCopySuccessToast(false);
+    setCurrentRoundId(null);
+    useChatComposerStore.getState().clearComposerAttachedPaths();
+    useChatComposerStore.getState().setComposerAgentType("general-purpose");
+
+    const streamId = currentStreamId;
+    if (streamId) {
+      try {
+        await invoke("cancel_stream", { messageId: streamId });
+      } catch (e) {
+        console.error(
+          "[Chat] cancel_stream before exit conversation failed:",
+          e,
+        );
+      }
+    }
+
+    if (unlistenRef.current) {
+      unlistenRef.current();
+      unlistenRef.current = null;
+    }
+    setCurrentStreamId(null);
+    setIsStreaming(false);
+    isStreamingRef.current = false;
+    setCurrentResponse("");
+    setAwaitingResumeAfterCancel(false);
+    const act = useActivityStore.getState();
+    act.clearTransient();
+    act.resetExecutionState();
+    act.clearBackgroundJobs();
 
     try {
-      await invoke("cancel_stream", { messageId: currentStreamId });
-    } catch (error) {
-      console.error("Failed to cancel stream:", error);
+      await useSessionStore.getState().setCurrentSession(null);
+    } catch (e) {
+      console.error("[Chat] setCurrentSession(null) failed:", e);
     }
-  };
+  }, [currentStreamId, clearQueuedMainSends]);
 
   const handleResumeAfterCancel = async () => {
     if (
@@ -2767,7 +2870,7 @@ export function Chat({ sessionId }: ChatProps) {
       return next;
     });
 
-    const { composerAgentType, permissionMode } =
+    const { composerAgentType, permissionMode, environment, sandboxBackend } =
       useChatComposerStore.getState();
 
     try {
@@ -2786,6 +2889,8 @@ export function Chat({ sessionId }: ChatProps) {
           use_tools: true,
           composerAgentType,
           permissionMode,
+          executionEnvironment: environment,
+          sandboxBackend,
         },
       });
 
@@ -3409,7 +3514,7 @@ export function Chat({ sessionId }: ChatProps) {
                     !followUpTaskId &&
                     (isConnecting || isStreaming || waitingFirstChunk)
                   }
-                  onCancel={handleCancel}
+                  onCancel={handleCancelStream}
                   showResume={awaitingResumeAfterCancel && !followUpTaskId}
                   onResume={handleResumeAfterCancel}
                 />
@@ -3879,7 +3984,6 @@ export function Chat({ sessionId }: ChatProps) {
                                             )}
                                           </Stack>
                                         )}
-
 
                                         {!hasInput &&
                                           !hasOutput &&
@@ -4731,7 +4835,7 @@ export function Chat({ sessionId }: ChatProps) {
                 inputRef={inputRef}
                 isStreaming={isStreaming}
                 isConnecting={isConnecting}
-                onCancel={handleCancel}
+                onCancel={handleCancelStream}
                 backgroundTasks={backgroundTasks}
                 followUpTaskId={followUpTaskId}
                 onFollowUpTaskIdChange={setFollowUpTaskId}
@@ -4771,10 +4875,32 @@ export function Chat({ sessionId }: ChatProps) {
           <Alert severity="warning" sx={{ mb: 0 }}>
             以本条用户消息为节点：该节点之后的全部聊天记录（含助手回复、工具结果等）将被删除，且无法恢复；确认后仅保留该条及之前内容，并基于该条重新发起请求。
           </Alert>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ display: "block", mt: 1.5 }}
+          >
+            「返回」关闭此窗口；「取消」退出当前对话（结束本会话）；「确认重试」执行重试。
+          </Typography>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setRetryConfirmForMessage(null)}>取消</Button>
           <Button
+            type="button"
+            variant="outlined"
+            color="inherit"
+            onClick={() => setRetryConfirmForMessage(null)}
+          >
+            返回
+          </Button>
+          <Button
+            type="button"
+            color="error"
+            onClick={() => void handleExitConversation()}
+          >
+            取消
+          </Button>
+          <Button
+            type="button"
             variant="contained"
             color="warning"
             onClick={confirmRetryUserMessage}

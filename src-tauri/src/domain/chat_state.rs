@@ -2,17 +2,18 @@
 //! Lives in `OmigaAppState` alongside the DB repo — backend analogue of chat runtime in AppStateStore.
 
 use crate::domain::session::{AgentTask, Session, TodoItem};
-use crate::domain::tools::ToolSchema;
+use crate::domain::tools::{ToolSchema, WebSearchApiKeys};
 use crate::domain::mcp::connection_manager::GlobalMcpManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, oneshot};
+use tokio_util::sync::CancellationToken;
 
 /// Cached permission deny entries for one project root.
 pub struct PermissionDenyCache {
-    pub entries: Vec<crate::domain::tool_permission_rules::DenyRuleEntry>,
+    pub entries: Vec<crate::domain::permissions::DenyRuleEntry>,
     pub cached_at: Instant,
 }
 
@@ -49,8 +50,8 @@ pub struct ChatState {
     /// `omiga.yaml` `providers` map key for the entry currently driving [`Self::llm_config`].
     /// Used so Settings only marks one row as "In use" when multiple entries share the same provider+model.
     pub active_provider_entry_name: Mutex<Option<String>>,
-    /// User-configured Brave Search API key (Settings); overrides env when set.
-    pub brave_search_api_key: Mutex<Option<String>>,
+    /// User-configured API keys for built-in `web_search` (Settings override env when set).
+    pub web_search_api_keys: Mutex<WebSearchApiKeys>,
     /// In-memory session cache for O(1) lookup by session_id
     pub sessions: Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
     /// Active conversation rounds for cancellation tracking
@@ -90,6 +91,12 @@ pub struct SessionRuntimeState {
     /// `true` after `EnterPlanMode` until `ExitPlanMode` — aligns with TS `permissionMode === 'plan'`
     /// (sub-agents may keep `ExitPlanMode` in the tool list when this is true).
     pub plan_mode: Arc<tokio::sync::Mutex<bool>>,
+    /// `local` | `ssh` | `sandbox` — matches composer [`executionEnvironment`](SendMessageRequest) from the UI.
+    pub execution_environment: String,
+    /// Selected SSH server name; used when `execution_environment == "ssh"`.
+    pub ssh_server: Option<String>,
+    /// `modal` | `daytona` | `docker` | `singularity` — composer sandbox backend; used when `execution_environment == "sandbox"`.
+    pub sandbox_backend: String,
 }
 
 /// Cancellation state for an active conversation round
@@ -99,6 +106,8 @@ pub struct RoundCancellationState {
     pub message_id: String,
     pub session_id: String,
     pub cancelled: Arc<RwLock<bool>>,
+    /// Cancels in-flight tools (foreground/background bash, web_fetch, …) when the user stops the round.
+    pub round_cancel: CancellationToken,
 }
 
 /// A pending tool call being collected from the stream
@@ -114,7 +123,7 @@ impl Default for ChatState {
         Self {
             llm_config: Mutex::new(None),
             active_provider_entry_name: Mutex::new(None),
-            brave_search_api_key: Mutex::new(None),
+            web_search_api_keys: Mutex::new(WebSearchApiKeys::default()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             active_rounds: Arc::new(Mutex::new(HashMap::new())),
             pending_tools: Arc::new(Mutex::new(HashMap::new())),

@@ -20,7 +20,7 @@ import { zhCN, enUS } from "date-fns/locale";
 import { useLocaleStore } from "../../state/localeStore";
 
 export function AgentPanel() {
-  const { showTaskPanel, setTaskPanelVisible, initEventListeners } = useAgentStore();
+  const { showTaskPanel, initEventListeners } = useAgentStore();
 
   // 初始化事件监听
   useEffect(() => {
@@ -42,7 +42,7 @@ export function AgentPanel() {
 }
 
 function AgentPanelHeader() {
-  const { setTaskPanelVisible, clearAll, backgroundTasks } = useAgentStore();
+  const { setTaskPanelVisible, backgroundTasks } = useAgentStore();
   const hasCompleted = backgroundTasks.some(
     (t) => t.status === "completed" || t.status === "failed" || t.status === "cancelled"
   );
@@ -102,7 +102,8 @@ function TaskCountBadge() {
 
 function AgentTaskList() {
   const { backgroundTasks, selectedTaskId, setSelectedTask } = useAgentStore();
-  const { currentSessionId } = useSessionStore();
+  const { currentSession } = useSessionStore();
+  const currentSessionId = currentSession?.id ?? null;
 
   // 按会话筛选并排序（最新的在前）
   const tasks = useMemo(() => {

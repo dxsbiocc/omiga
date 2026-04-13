@@ -23,7 +23,6 @@ import {
   useTheme,
 } from "@mui/material";
 import {
-  CheckCircle,
   RadioButtonChecked,
   RadioButtonUnchecked,
   Settings,
@@ -71,7 +70,7 @@ export function ProviderSwitcher({
   const theme = useTheme();
   const isDark = theme.palette.mode === "dark";
   const [providers, setProviders] = useState<ProviderConfigEntry[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, _setLoading] = useState(false);
   const [switching, setSwitching] = useState<string | null>(null);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [activeProvider, setActiveProvider] = useState<ProviderConfigEntry | null>(null);

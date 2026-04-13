@@ -21,6 +21,10 @@ Use this tool when you need to:
 - Apply code changes
 - Save generated content
 
+Large files:
+- Do not put the entire body of a very large file in one `content` field. Tool arguments are JSON streamed in the assistant response; if output or context limits truncate that JSON mid-string, parsing fails (e.g. "EOF while parsing a string").
+- Prefer chunked `file_edit`, several smaller `file_write` steps, or generating the file via `bash` when a single giant payload is unavoidable.
+
 Safety features:
 - Content hash conflict detection (prevents overwriting changes)
 - Atomic writes (no partial writes on crash)
@@ -265,7 +269,7 @@ pub fn schema() -> ToolSchema {
                 },
                 "content": {
                     "type": "string",
-                    "description": "Content to write to the file"
+                    "description": "UTF-8 text for the full file body. For very large documents, prefer smaller chunks (file_edit or multiple calls)—one enormous string can exceed streaming limits and fail to parse."
                 },
                 "expected_hash": {
                     "type": "string",

@@ -2,6 +2,8 @@
 
 use super::patterns::DangerousPatternDB;
 use super::types::*;
+use super::tool_rules::canonical_permission_tool_name;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
@@ -22,13 +24,13 @@ pub struct PermissionManager {
     rules: Arc<RwLock<Vec<PermissionRule>>>,
     /// 危险模式数据库
     patterns: DangerousPatternDB,
-    /// 会话级批准缓存: session_id → {tool_hash}
+    /// 会话级批准缓存: session_id → 规范化工具名（忽略参数，同一会话内同一工具只问一次）
     session_approvals: Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    /// 时间窗口批准缓存: "session_id:tool_hash" → expire_time
+    /// 时间窗口批准: "session_id:tool_key" → expire_time
     window_approvals: Arc<RwLock<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
-    /// 单次批准缓存（AskEveryTime）: "session_id:tool_hash" → expire_time（30秒内有效）
+    /// 单次批准: "session_id:tool_key" → expire_time（30 秒内有效）
     once_approvals: Arc<RwLock<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
-    /// 会话级拒绝缓存: session_id → {tool_hash}（用户主动拒绝后不再重复询问）
+    /// 会话级拒绝: session_id → 规范化工具名（拒绝后本会话内该工具一律不再询问）
     session_denials: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     /// 最近拒绝记录（审计日志）
     recent_denials: Arc<RwLock<VecDeque<DenialRecord>>>,
@@ -54,13 +56,13 @@ impl PermissionManager {
 
     /// 核心权限检查方法
     pub async fn check_permission(&self, context: &PermissionContext) -> PermissionDecision {
-        let tool_hash = Self::compute_tool_hash(&context.tool_name, &context.arguments);
+        let tool_key = Self::approval_cache_key(&context.tool_name);
 
-        // 0. 检查本会话是否已主动拒绝此工具（避免重复询问）
+        // 0. 检查本会话是否已主动拒绝此工具（按工具名，不区分参数）
         {
             let denials = self.session_denials.read().await;
             if let Some(session_denied) = denials.get(&context.session_id) {
-                if session_denied.contains(&tool_hash) {
+                if session_denied.contains(&tool_key) {
                     return PermissionDecision::Deny(format!(
                         "工具 '{}' 已在本会话中被拒绝",
                         context.tool_name
@@ -69,10 +71,16 @@ impl PermissionManager {
             }
         }
 
-        // 1. 风险评估
+        // 1. 用户已选择「本会话 / 时间窗口 / 单次」记住的批准优先于风险等级与规则
+        //    （否则 Critical 短路、AskEveryTime 规则等会跳过缓存，导致每次都弹窗）
+        if self.is_remembered_tool_allowed(&context.session_id, &tool_key).await {
+            return PermissionDecision::Allow;
+        }
+
+        // 2. 风险评估
         let risk = self.assess_risk(context).await;
 
-        // 2. Critical 风险立即要求确认
+        // 3. Critical 风险立即要求确认（未命中上述批准缓存时）
         if risk.level == RiskLevel::Critical {
             return PermissionDecision::RequireApproval(PermissionRequest {
                 request_id: uuid::Uuid::new_v4().to_string(),
@@ -82,7 +90,7 @@ impl PermissionManager {
             });
         }
 
-        // 3. 规则匹配（克隆匹配到的规则，释放读锁）
+        // 4. 规则匹配（克隆匹配到的规则，释放读锁）
         let maybe_rule = {
             let rules = self.rules.read().await;
             rules
@@ -101,12 +109,7 @@ impl PermissionManager {
             return decision;
         }
 
-        // 4. 检查会话/时间窗口批准（复用已算好的 hash）
-        if self.is_approved_by_hash(&context.session_id, &tool_hash).await {
-            return PermissionDecision::Allow;
-        }
-
-        // 5. 根据风险等级的默认行为
+        // 5. 根据风险等级的默认行为（批准缓存已在步骤 1 处理）
         self.default_decision(context, &risk).await
     }
 
@@ -137,13 +140,13 @@ impl PermissionManager {
         // 校验模式合法性（前端不能传 Bypass）
         mode.validate_user_mode()?;
 
-        let tool_hash = Self::compute_tool_hash(&context.tool_name, &context.arguments);
+        let tool_key = Self::approval_cache_key(&context.tool_name);
 
-        // 批准时移除会话拒绝记录（用户改变了主意）
+        // 批准时移除本会话内对该工具的拒绝记录（用户改变了主意）
         {
             let mut denials = self.session_denials.write().await;
             if let Some(session_denied) = denials.get_mut(session_id) {
-                session_denied.remove(&tool_hash);
+                session_denied.remove(&tool_key);
             }
         }
 
@@ -153,15 +156,14 @@ impl PermissionManager {
                 approvals
                     .entry(session_id.to_string())
                     .or_default()
-                    .insert(tool_hash);
+                    .insert(tool_key);
             }
             PermissionMode::TimeWindow { minutes } => {
                 // 已经在 validate_user_mode 中校验了最大值和非零
                 let expire_at = chrono::Utc::now()
                     + chrono::Duration::minutes(minutes as i64);
                 let mut windows = self.window_approvals.write().await;
-                // 使用时间窗口绑定到 session: "session_id:tool_hash"
-                let session_key = format!("{}:{}", session_id, tool_hash);
+                let session_key = format!("{}:{}", session_id, tool_key);
                 windows.insert(session_key, expire_at);
             }
             PermissionMode::AskEveryTime => {
@@ -169,7 +171,7 @@ impl PermissionManager {
                 // 这给用户时间重新触发操作，但不会长期保留
                 let expire_at = chrono::Utc::now() + chrono::Duration::seconds(30);
                 let mut once = self.once_approvals.write().await;
-                let session_key = format!("{}:{}", session_id, tool_hash);
+                let session_key = format!("{}:{}", session_id, tool_key);
                 once.insert(session_key, expire_at);
             }
             PermissionMode::Auto => {
@@ -184,17 +186,16 @@ impl PermissionManager {
         Ok(())
     }
 
-    /// 拒绝请求（记录审计日志，并在本会话中不再询问）
+    /// 拒绝请求（记录审计日志，并在本会话中不再询问该工具——与参数无关）
     pub async fn deny_request(&self, context: &PermissionContext, reason: &str) -> Result<(), String> {
-        let tool_hash = Self::compute_tool_hash(&context.tool_name, &context.arguments);
+        let tool_key = Self::approval_cache_key(&context.tool_name);
 
-        // 将此工具加入会话拒绝缓存
         {
             let mut denials = self.session_denials.write().await;
             denials
                 .entry(context.session_id.clone())
                 .or_default()
-                .insert(tool_hash);
+                .insert(tool_key);
         }
 
         // 写入审计日志
@@ -260,33 +261,40 @@ impl PermissionManager {
         self.rules.read().await.clone()
     }
 
-    /// 会话级别批准（使用完整参数计算 hash，避免安全风险）
-    pub async fn approve_session(&self, session_id: String, tool_name: String, arguments: &serde_json::Value) {
-        let tool_hash = Self::compute_tool_hash(&tool_name, arguments);
+    /// 会话级别批准（按工具名，忽略参数）
+    pub async fn approve_session(&self, session_id: String, tool_name: String, _arguments: &serde_json::Value) {
+        let tool_key = Self::approval_cache_key(&tool_name);
         let mut approvals = self.session_approvals.write().await;
         approvals
             .entry(session_id)
             .or_default()
-            .insert(tool_hash);
+            .insert(tool_key);
     }
 
-    /// 时间窗口批准（使用完整参数计算 hash，绑定到 session）
-    pub async fn approve_time_window(&self, session_id: String, tool_name: String, arguments: &serde_json::Value, minutes: i64) {
-        let tool_hash = Self::compute_tool_hash(&tool_name, arguments);
+    /// 时间窗口批准（按工具名，绑定到 session）
+    pub async fn approve_time_window(
+        &self,
+        session_id: String,
+        tool_name: String,
+        _arguments: &serde_json::Value,
+        minutes: i64,
+    ) {
+        let tool_key = Self::approval_cache_key(&tool_name);
         let expire_at = chrono::Utc::now() + chrono::Duration::minutes(minutes);
         let mut windows = self.window_approvals.write().await;
-        // 使用组合 key: "session_id:tool_hash" 确保时间窗口绑定到特定 session
-        let session_key = format!("{}:{}", session_id, tool_hash);
+        let session_key = format!("{}:{}", session_id, tool_key);
         windows.insert(session_key, expire_at);
     }
 
-    /// 使用哈希批准（用于 Plan 模式）
-    pub async fn approve_with_hash(&self, session_id: String, _tool_name: String, hash: String) {
+    /// 按 `tool_name` 记入本会话批准（与 `approve_session` 相同语义）。
+    /// `_legacy_hash` 已废弃：旧调用方传入 SHA-256(tool+args)，现在只按工具名缓存，不再区分参数。
+    pub async fn approve_with_hash(&self, session_id: String, tool_name: String, _legacy_hash: String) {
+        let tool_key = Self::approval_cache_key(&tool_name);
         let mut approvals = self.session_approvals.write().await;
         approvals
             .entry(session_id)
             .or_default()
-            .insert(hash);
+            .insert(tool_key);
     }
 
     /// 单次批准（仅这次允许，不持久化）
@@ -295,15 +303,15 @@ impl PermissionManager {
         // 这里可以添加临时缓存如果需要
     }
 
-    /// 拒绝工具
-    pub async fn deny_tool(&self, session_id: String, tool_name: String, hash: String, reason: String) {
-        // 将工具加入会话拒绝缓存
+    /// 拒绝工具（按工具名记入本会话拒绝列表，`hash` 参数已忽略）
+    pub async fn deny_tool(&self, session_id: String, tool_name: String, _hash: String, reason: String) {
+        let tool_key = Self::approval_cache_key(&tool_name);
         {
             let mut denials = self.session_denials.write().await;
             denials
                 .entry(session_id.clone())
                 .or_default()
-                .insert(hash.clone());
+                .insert(tool_key);
         }
 
         // 写入审计日志
@@ -369,8 +377,18 @@ impl PermissionManager {
     // 内部辅助方法
     // =========================================================================
 
-    /// 使用 SHA-256 计算工具哈希（防止碰撞攻击）
-    /// 使用 canonical JSON 确保语义相同的参数产生相同的哈希
+    /// 用户「记住」批准 / 本会话拒绝 使用的键：与 `tool_rules` 一致，Read/WebSearch 等与内置名合并
+    fn approval_cache_key(tool_name: &str) -> String {
+        let c = canonical_permission_tool_name(tool_name.trim());
+        if c.starts_with("mcp__") {
+            c
+        } else {
+            c.to_ascii_lowercase()
+        }
+    }
+
+    /// 使用 SHA-256 计算工具+参数哈希（仅单元测试校验 canonical 行为；批准缓存按工具名）
+    #[cfg(test)]
     fn compute_tool_hash(tool_name: &str, arguments: &serde_json::Value) -> String {
         let mut hasher = Sha256::new();
         hasher.update(tool_name.as_bytes());
@@ -382,7 +400,7 @@ impl PermissionManager {
         format!("{:x}", hasher.finalize())
     }
 
-    /// 将 JSON Value 转换为 canonical 字符串（键按字母顺序排序）
+    #[cfg(test)]
     fn canonicalize_json(value: &serde_json::Value) -> String {
         match value {
             serde_json::Value::Object(map) => {
@@ -398,7 +416,7 @@ impl PermissionManager {
         }
     }
 
-    /// 递归 canonicalize JSON value
+    #[cfg(test)]
     fn canonicalize_value(value: &serde_json::Value) -> serde_json::Value {
         match value {
             serde_json::Value::Object(map) => {
@@ -417,16 +435,15 @@ impl PermissionManager {
         }
     }
 
-    /// 检查是否已批准（会话、时间窗口或单次），接受预计算的 hash 避免重复计算
-    async fn is_approved_by_hash(&self, session_id: &str, tool_hash: &str) -> bool {
-        let session_key = format!("{}:{}", session_id, tool_hash);
+    /// 本会话 / 时间窗口 / 单次「记住」是否已覆盖该工具（`tool_key` = `approval_cache_key`）
+    async fn is_remembered_tool_allowed(&self, session_id: &str, tool_key: &str) -> bool {
+        let session_key = format!("{}:{}", session_id, tool_key);
         let now = chrono::Utc::now();
 
-        // 检查会话批准
         {
             let approvals = self.session_approvals.read().await;
             if let Some(session_approved) = approvals.get(session_id) {
-                if session_approved.contains(tool_hash) {
+                if session_approved.contains(tool_key) {
                     return true;
                 }
             }
@@ -435,16 +452,9 @@ impl PermissionManager {
         // 检查时间窗口批准（绑定到特定 session）
         {
             let mut windows = self.window_approvals.write().await;
-            
-            // 惰性清理过期条目
-            windows.retain(|key, expire_at| {
-                if now >= *expire_at {
-                    // 清理当前 session 的过期条目
-                    key.starts_with(&format!("{}:", session_id))
-                } else {
-                    true
-                }
-            });
+
+            // 惰性清理：移除所有已过期的条目（retain 为 true 表示保留）
+            windows.retain(|_key, expire_at| now < *expire_at);
             
             if let Some(expire_at) = windows.get(&session_key) {
                 if now < *expire_at {
@@ -456,16 +466,8 @@ impl PermissionManager {
         // 检查单次批准（AskEveryTime）
         {
             let mut once = self.once_approvals.write().await;
-            
-            // 惰性清理过期条目
-            once.retain(|key, expire_at| {
-                if now >= *expire_at {
-                    // 清理当前 session 的过期条目
-                    key.starts_with(&format!("{}:", session_id))
-                } else {
-                    true
-                }
-            });
+
+            once.retain(|_key, expire_at| now < *expire_at);
             
             if let Some(expire_at) = once.get(&session_key) {
                 if now < *expire_at {
@@ -510,7 +512,7 @@ impl PermissionManager {
             return self.default_decision(context, risk).await;
         }
 
-        let tool_hash = Self::compute_tool_hash(&context.tool_name, &context.arguments);
+        let tool_key = Self::approval_cache_key(&context.tool_name);
 
         match rule.mode {
             PermissionMode::AskEveryTime => PermissionDecision::RequireApproval(PermissionRequest {
@@ -520,7 +522,10 @@ impl PermissionManager {
                 suggested_mode: PermissionMode::Session,
             }),
             PermissionMode::Session | PermissionMode::Plan => {
-                if self.is_approved_by_hash(&context.session_id, &tool_hash).await {
+                if self
+                    .is_remembered_tool_allowed(&context.session_id, &tool_key)
+                    .await
+                {
                     PermissionDecision::Allow
                 } else {
                     PermissionDecision::RequireApproval(PermissionRequest {
@@ -532,7 +537,10 @@ impl PermissionManager {
                 }
             }
             PermissionMode::TimeWindow { .. } => {
-                if self.is_approved_by_hash(&context.session_id, &tool_hash).await {
+                if self
+                    .is_remembered_tool_allowed(&context.session_id, &tool_key)
+                    .await
+                {
                     PermissionDecision::Allow
                 } else {
                     PermissionDecision::RequireApproval(PermissionRequest {
@@ -963,11 +971,20 @@ mod tests {
         // 第一次拒绝
         mgr.deny_request(&ctx, "用户拒绝").await.unwrap();
 
-        // 后续调用应直接返回 Deny
+        // 后续调用应直接返回 Deny（同工具不同参数也拒绝）
         let dec = mgr.check_permission(&ctx).await;
         assert!(
             matches!(dec, PermissionDecision::Deny(_)),
             "后续调用应返回 Deny，实际: {:?}", dec
+        );
+        let ctx_other_cmd = PermissionContext {
+            arguments: serde_json::json!({"command": "echo other"}),
+            ..ctx.clone()
+        };
+        let dec2 = mgr.check_permission(&ctx_other_cmd).await;
+        assert!(
+            matches!(dec2, PermissionDecision::Deny(_)),
+            "同工具不同参数仍应 Deny，实际: {:?}", dec2
         );
     }
 
@@ -1020,6 +1037,107 @@ mod tests {
             matches!(dec, PermissionDecision::Allow),
             "批准后应 Allow，实际: {:?}", dec
         );
+        let ctx_other = PermissionContext {
+            arguments: serde_json::json!({"command": "cp a b"}),
+            ..ctx.clone()
+        };
+        let dec2 = mgr.check_permission(&ctx_other).await;
+        assert!(
+            matches!(dec2, PermissionDecision::Allow),
+            "同工具不同参数也应 Allow，实际: {:?}", dec2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_approve_wire_name_aliases_merge() {
+        let mgr = PermissionManager::new();
+        let ctx_read = PermissionContext {
+            tool_name: "Read".to_string(),
+            arguments: serde_json::json!({"path": "/a"}),
+            session_id: "s_alias".to_string(),
+            file_paths: Some(vec![std::path::PathBuf::from("/a")]),
+            timestamp: chrono::Utc::now(),
+        };
+        mgr.approve_request("s_alias", PermissionMode::Session, &ctx_read)
+            .await
+            .unwrap();
+        let ctx_file_read = PermissionContext {
+            tool_name: "file_read".to_string(),
+            arguments: serde_json::json!({"path": "/b"}),
+            file_paths: Some(vec![std::path::PathBuf::from("/b")]),
+            ..ctx_read.clone()
+        };
+        let dec = mgr.check_permission(&ctx_file_read).await;
+        assert!(
+            matches!(dec, PermissionDecision::Allow),
+            "Read 与 file_read 应共享会话批准，实际: {:?}",
+            dec
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_approve_file_write_different_paths() {
+        let mgr = PermissionManager::new();
+        let ctx_a = PermissionContext {
+            tool_name: "file_write".to_string(),
+            arguments: serde_json::json!({"path": "/tmp/a.txt", "content": "x"}),
+            session_id: "s_fw".to_string(),
+            file_paths: Some(vec![std::path::PathBuf::from("/tmp/a.txt")]),
+            timestamp: chrono::Utc::now(),
+        };
+        mgr.approve_request("s_fw", PermissionMode::Session, &ctx_a)
+            .await
+            .unwrap();
+        let ctx_b = PermissionContext {
+            arguments: serde_json::json!({"path": "/tmp/b.txt", "content": "y"}),
+            file_paths: Some(vec![std::path::PathBuf::from("/tmp/b.txt")]),
+            ..ctx_a.clone()
+        };
+        let dec = mgr.check_permission(&ctx_b).await;
+        assert!(
+            matches!(dec, PermissionDecision::Allow),
+            "file_write 不同路径应共享会话批准，实际: {:?}", dec
+        );
+    }
+
+    /// Critical 风险（patterns 中如直接写磁盘设备）在未批准前走 Critical 分支；
+    /// 本会话批准后应命中缓存而不再弹窗
+    #[tokio::test]
+    async fn test_session_approve_allows_critical_bash_same_args() {
+        let mgr = PermissionManager::new();
+        let ctx = PermissionContext {
+            tool_name: "bash".to_string(),
+            arguments: serde_json::json!({"command": "echo x > /dev/sda"}),
+            session_id: "s_crit".to_string(),
+            file_paths: None,
+            timestamp: chrono::Utc::now(),
+        };
+
+        let before = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(before, PermissionDecision::RequireApproval(_)),
+            "未批准时应 RequireApproval"
+        );
+
+        mgr.approve_request("s_crit", PermissionMode::Session, &ctx)
+            .await
+            .unwrap();
+
+        let after = mgr.check_permission(&ctx).await;
+        assert!(
+            matches!(after, PermissionDecision::Allow),
+            "本会话记住后应 Allow，实际: {:?}", after
+        );
+        let ctx_other = PermissionContext {
+            arguments: serde_json::json!({"command": "dd if=/dev/zero of=/dev/sda"}),
+            ..ctx.clone()
+        };
+        let after_other = mgr.check_permission(&ctx_other).await;
+        assert!(
+            matches!(after_other, PermissionDecision::Allow),
+            "Critical 工具本会话记住后，其它 bash 参数也应 Allow，实际: {:?}",
+            after_other
+        );
     }
 
     #[tokio::test]
@@ -1039,6 +1157,16 @@ mod tests {
 
         let dec = mgr.check_permission(&ctx).await;
         assert!(matches!(dec, PermissionDecision::Allow));
+        let ctx2 = PermissionContext {
+            arguments: serde_json::json!({"command": "different"}),
+            ..ctx.clone()
+        };
+        let dec2 = mgr.check_permission(&ctx2).await;
+        assert!(
+            matches!(dec2, PermissionDecision::Allow),
+            "时间窗口内同工具不同参数应 Allow，实际: {:?}",
+            dec2
+        );
     }
 
     #[tokio::test]
@@ -1100,10 +1228,11 @@ mod tests {
 
         // 第二次：规则已失效（use_count=1 >= limit=1），走 default_decision
         let dec2 = mgr.check_permission(&ctx).await;
-        // file_write 是 Low 风险，default_decision 会 RequireApproval（non-Safe）
+        // file_write 在 assess_tool_risk 中为 Low，default_decision 对 Low 为 Allow
         assert!(
-            matches!(dec2, PermissionDecision::RequireApproval(_)),
-            "超出使用次数后应 RequireApproval"
+            matches!(dec2, PermissionDecision::Allow),
+            "规则失效后应按默认策略：Low 风险 Allow，实际: {:?}",
+            dec2
         );
     }
 

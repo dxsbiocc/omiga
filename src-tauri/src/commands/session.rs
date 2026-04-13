@@ -6,7 +6,7 @@ use crate::domain::session::{
     Message as DomainMessage, MessageTokenUsage, ToolCall as DomainToolCall,
 };
 use crate::domain::persistence::MessageRecord;
-use crate::domain::session_codec::SessionCodec;
+use crate::domain::session::SessionCodec;
 use crate::errors::OmigaError;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -25,11 +25,15 @@ fn message_record_to_api(rec: MessageRecord) -> Message {
                 .token_usage_json
                 .as_ref()
                 .and_then(|j| serde_json::from_str::<MessageTokenUsage>(j).ok());
+            let follow_up_suggestions = rec
+                .follow_up_suggestions_json
+                .and_then(|j| serde_json::from_str::<Vec<FollowUpSuggestion>>(&j).ok());
             Message::Assistant {
                 content: rec.content,
                 tool_calls,
                 token_usage,
                 reasoning_content: rec.reasoning_content,
+                follow_up_suggestions,
                 id,
             }
         }
@@ -235,6 +239,7 @@ pub async fn save_session(
                 }),
                 token_usage: token_usage.clone(),
                 reasoning_content: reasoning_content.clone(),
+                follow_up_suggestions: None, // Not used in this path
             },
             Message::Tool { tool_call_id, output, .. } => DomainMessage::Tool {
                 tool_call_id: tool_call_id.clone(),
@@ -252,6 +257,7 @@ pub async fn save_session(
             tool_call_id,
             token_usage_json,
             reasoning_content,
+            follow_up_suggestions_json,
         ) = SessionCodec::message_to_record(&domain_msg, &msg_id, &session.id);
 
         repo.save_message(
@@ -263,6 +269,7 @@ pub async fn save_session(
             tool_call_id.as_deref(),
             token_usage_json.as_deref(),
             reasoning_content.as_deref(),
+            follow_up_suggestions_json.as_deref(),
         )
         .await
         .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
@@ -385,6 +392,7 @@ pub async fn save_message(
             }),
             token_usage,
             reasoning_content,
+            follow_up_suggestions: None, // Not used in this path
         },
         Message::Tool { tool_call_id, output, .. } => DomainMessage::Tool {
             tool_call_id,
@@ -402,6 +410,7 @@ pub async fn save_message(
         tool_call_id,
         token_usage_json,
         reasoning_content,
+        follow_up_suggestions_json,
     ) = SessionCodec::message_to_record(&domain_msg, &msg_id, &session_id);
 
     repo.save_message(
@@ -413,6 +422,7 @@ pub async fn save_message(
         tool_call_id.as_deref(),
         token_usage_json.as_deref(),
         reasoning_content.as_deref(),
+        follow_up_suggestions_json.as_deref(),
     )
     .await
     .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
@@ -575,6 +585,8 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow_up_suggestions: Option<Vec<FollowUpSuggestion>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
     #[serde(rename = "tool")]
@@ -592,6 +604,13 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
+}
+
+/// A follow-up suggestion
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FollowUpSuggestion {
+    pub label: String,
+    pub prompt: String,
 }
 
 /// Full session data

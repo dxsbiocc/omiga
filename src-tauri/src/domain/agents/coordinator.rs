@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use super::tools::ToolSchema;
+use crate::domain::tools::ToolSchema;
 
 /// Tool names exposed to the model in coordinator mode (must match `ToolSchema::name` from each tool's `schema()`).
 pub const COORDINATOR_ALLOWED_TOOL_NAMES: &[&str] = &[

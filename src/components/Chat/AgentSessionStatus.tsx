@@ -250,7 +250,8 @@ export function AgentSessionStatus({
           ) : canCancel && onCancel && hover ? (
             <IconButton
               size="small"
-              aria-label="取消任务"
+              aria-label="停止生成"
+              title="停止生成"
               onClick={(e) => {
                 e.stopPropagation();
                 onCancel();

@@ -77,10 +77,43 @@ export default function App() {
   }, [loadSessions]);
 
   useEffect(() => {
-    const raw = localStorage.getItem("omiga_brave_search_api_key");
-    const t = raw?.trim();
-    if (t) {
-      void invoke("set_brave_search_api_key", { apiKey: t }).catch(() => {});
+    const WEB_SEARCH_KEYS_STORAGE = "omiga_web_search_api_keys";
+    const raw = localStorage.getItem(WEB_SEARCH_KEYS_STORAGE);
+    if (raw) {
+      try {
+        const j = JSON.parse(raw) as Record<string, string>;
+        const payload = {
+          tavily: (j.tavily ?? "").trim(),
+          exa: (j.exa ?? "").trim(),
+          parallel: (j.parallel ?? "").trim(),
+          firecrawl: (j.firecrawl ?? "").trim(),
+          firecrawlUrl: (j.firecrawlUrl ?? "").trim(),
+        };
+        if (
+          payload.tavily ||
+          payload.exa ||
+          payload.parallel ||
+          payload.firecrawl ||
+          payload.firecrawlUrl
+        ) {
+          void invoke("set_web_search_api_keys", payload).catch(() => {});
+        }
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    const tavily = localStorage.getItem("omiga_tavily_search_api_key");
+    const legacy = localStorage.getItem("omiga_brave_search_api_key") ?? undefined;
+    const legacyTavily = (tavily?.trim() ? tavily : legacy)?.trim();
+    if (legacyTavily) {
+      void invoke("set_web_search_api_keys", {
+        tavily: legacyTavily,
+        exa: "",
+        parallel: "",
+        firecrawl: "",
+        firecrawlUrl: "",
+      }).catch(() => {});
     }
   }, []);
 

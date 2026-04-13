@@ -7,6 +7,7 @@
 
 pub mod chat;
 pub mod claude_import;
+pub mod execution_envs;
 pub mod integrations_settings;
 pub mod fs;
 pub mod notebook;

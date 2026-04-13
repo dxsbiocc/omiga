@@ -11,7 +11,11 @@
 
 use super::{ToolContext, ToolError, ToolSchema};
 use crate::errors::{BashError, FsError};
+use crate::execution::{
+    create_environment, EnvironmentConfig, EnvironmentType, ExecOptions,
+};
 use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
+use crate::llm::config::{load_config_file, LlmConfigFile, SshExecConfig};
 use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -274,6 +278,338 @@ fn max_timeout_secs() -> u64 {
     (max_timeout_ms() + 999) / 1000
 }
 
+pub(crate) struct BashRawOutput {
+    pub(crate) exit_code: i32,
+    pub(crate) stdout: Vec<String>,
+    pub(crate) stderr: Vec<String>,
+}
+
+/// Map local cwd under `project_root` to a path on the SSH host. Set `OMIGA_SSH_REMOTE_ROOT`
+/// to the directory on the server that corresponds to the project root (default `~`).
+fn ssh_remote_cwd(project_root: &Path, local_cwd: &Path) -> String {
+    let root = std::env::var("OMIGA_SSH_REMOTE_ROOT").unwrap_or_else(|_| "~".to_string());
+    let rel = match local_cwd.strip_prefix(project_root) {
+        Ok(p) if p.as_os_str().is_empty() => {
+            return root;
+        }
+        Ok(p) => p
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+            .to_string(),
+        Err(_) => String::new(),
+    };
+    if rel.is_empty() {
+        root
+    } else {
+        format!("{}/{}", root.trim_end_matches('/'), rel)
+    }
+}
+
+fn pick_ssh_profile(cfg: &LlmConfigFile) -> Option<(&String, &SshExecConfig)> {
+    let ssh_map = cfg.execution_envs.as_ref()?.ssh.as_ref()?;
+    if let Ok(name) = std::env::var("OMIGA_SSH_PROFILE") {
+        if let Some(c) = ssh_map.get(&name) {
+            if c.enabled
+                && c.effective_hostname().is_some()
+                && c.user.as_ref().map_or(false, |u| !u.is_empty())
+            {
+                return ssh_map.get_key_value(&name);
+            }
+        }
+    }
+    let mut pairs: Vec<_> = ssh_map.iter().filter(|(_, c)| c.enabled).collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, c) in pairs {
+        if c.effective_hostname().is_some() && c.user.as_ref().map_or(false, |u| !u.is_empty()) {
+            return Some((name, c));
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+enum RemoteBackend {
+    Ssh,
+    Modal,
+    Daytona,
+    Docker,
+    Singularity,
+}
+
+fn pick_remote_backend(cfg: &LlmConfigFile, ctx: &ToolContext) -> Result<RemoteBackend, String> {
+    let sb = ctx.sandbox_backend.trim().to_lowercase();
+    if sb != "auto" && !sb.is_empty() {
+        return match sb.as_str() {
+            "ssh" => Ok(RemoteBackend::Ssh),
+            "modal" => Ok(RemoteBackend::Modal),
+            "daytona" => Ok(RemoteBackend::Daytona),
+            "docker" => Ok(RemoteBackend::Docker),
+            "singularity" => Ok(RemoteBackend::Singularity),
+            _ => Err(format!("unknown sandbox backend: {}", sb)),
+        };
+    }
+    if let Ok(s) = std::env::var("OMIGA_REMOTE_BACKEND") {
+        return match s.to_lowercase().as_str() {
+            "ssh" => Ok(RemoteBackend::Ssh),
+            "modal" => Ok(RemoteBackend::Modal),
+            "daytona" => Ok(RemoteBackend::Daytona),
+            "docker" => Ok(RemoteBackend::Docker),
+            "singularity" => Ok(RemoteBackend::Singularity),
+            _ => Err(format!("unknown OMIGA_REMOTE_BACKEND={}", s)),
+        };
+    }
+    if pick_ssh_profile(cfg).is_some() {
+        return Ok(RemoteBackend::Ssh);
+    }
+    if cfg.is_modal_configured() {
+        return Ok(RemoteBackend::Modal);
+    }
+    if cfg.is_daytona_configured() {
+        return Ok(RemoteBackend::Daytona);
+    }
+    Err(
+        "「远程」bash 需要可用的远端执行配置：在 omiga.yaml 的 execution_envs.ssh 下添加已启用且含 HostName/User 的主机；\
+         或在沙箱菜单选择 SSH / Modal / Daytona / Docker / Singularity，\
+         或设置 OMIGA_REMOTE_BACKEND=modal|daytona|docker|singularity 并配置对应环境。\
+         可选环境变量：OMIGA_SSH_REMOTE_ROOT（远端项目根目录，默认 ~）、OMIGA_SSH_PROFILE（指定 ssh 配置名）。"
+            .to_string(),
+    )
+}
+
+fn exec_result_to_bash_raw(exec_result: crate::execution::ExecResult) -> BashRawOutput {
+    BashRawOutput {
+        exit_code: exec_result.returncode,
+        stdout: if exec_result.output.is_empty() {
+            vec![]
+        } else {
+            exec_result.output.lines().map(String::from).collect()
+        },
+        stderr: vec![],
+    }
+}
+
+async fn run_remote_bash_ssh(
+    ctx: &ToolContext,
+    ssh_cfg: &SshExecConfig,
+    local_cwd: &Path,
+    command: &str,
+    timeout_ms: u64,
+) -> Result<BashRawOutput, ToolError> {
+    let remote_cwd = ssh_remote_cwd(&ctx.project_root, local_cwd);
+    let host = ssh_cfg.effective_hostname().ok_or_else(|| ToolError::ExecutionFailed {
+        message: "SSH: 配置缺少 HostName 或 Host".to_string(),
+    })?;
+    let user = ssh_cfg.user.as_ref().ok_or_else(|| ToolError::ExecutionFailed {
+        message: "SSH: 配置缺少 User".to_string(),
+    })?;
+    let config = EnvironmentConfig {
+        r#type: EnvironmentType::Ssh,
+        cwd: remote_cwd.clone(),
+        timeout: timeout_ms.max(1_000),
+        ssh_host: Some(host.to_string()),
+        ssh_user: Some(user.clone()),
+        ssh_port: ssh_cfg.port,
+        ssh_key_path: ssh_cfg.identity_file.clone(),
+        task_id: format!("omiga-{}", uuid::Uuid::new_v4()),
+        ..Default::default()
+    };
+    let env = create_environment(config).await.map_err(|e| ToolError::ExecutionFailed {
+        message: format!("远程 SSH 环境: {}", e),
+    })?;
+    let exec_opts = ExecOptions {
+        timeout: Some(timeout_ms),
+        cwd: Some(remote_cwd),
+        stdin_data: None,
+    };
+    let exec_result = {
+        let mut guard = env.lock().await;
+        let r = guard.execute(command, exec_opts).await;
+        let _ = guard.cleanup().await;
+        r
+    }
+    .map_err(|e| ToolError::ExecutionFailed {
+        message: format!("远程 SSH 执行: {}", e),
+    })?;
+    Ok(exec_result_to_bash_raw(exec_result))
+}
+
+async fn run_remote_bash_modal(
+    cfg: &LlmConfigFile,
+    command: &str,
+    timeout_ms: u64,
+) -> Result<BashRawOutput, ToolError> {
+    let image = cfg
+        .execution_envs
+        .as_ref()
+        .and_then(|e| e.modal.as_ref())
+        .and_then(|m| m.default_image.clone())
+        .unwrap_or_else(|| "ubuntu:22.04".to_string());
+    let cwd = "/workspace".to_string();
+    let config = EnvironmentConfig {
+        r#type: EnvironmentType::Modal,
+        image: Some(image),
+        cwd: cwd.clone(),
+        timeout: timeout_ms.max(1_000),
+        task_id: format!("omiga-{}", uuid::Uuid::new_v4()),
+        ..Default::default()
+    };
+    let env = create_environment(config).await.map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Modal 远程: {}", e),
+    })?;
+    let exec_opts = ExecOptions {
+        timeout: Some(timeout_ms),
+        cwd: Some(cwd),
+        stdin_data: None,
+    };
+    let exec_result = {
+        let mut guard = env.lock().await;
+        let r = guard.execute(command, exec_opts).await;
+        let _ = guard.cleanup().await;
+        r
+    }
+    .map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Modal 远程执行: {}", e),
+    })?;
+    Ok(exec_result_to_bash_raw(exec_result))
+}
+
+async fn run_remote_bash_docker(
+    _cfg: &LlmConfigFile,
+    command: &str,
+    timeout_ms: u64,
+) -> Result<BashRawOutput, ToolError> {
+    let image = std::env::var("OMIGA_DOCKER_IMAGE").unwrap_or_else(|_| "ubuntu:22.04".to_string());
+    let cwd = "/workspace".to_string();
+    let config = EnvironmentConfig {
+        r#type: EnvironmentType::Docker,
+        image: Some(image),
+        cwd: cwd.clone(),
+        timeout: timeout_ms.max(1_000),
+        task_id: format!("omiga-{}", uuid::Uuid::new_v4()),
+        ..Default::default()
+    };
+    let env = create_environment(config).await.map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Docker 远程: {}", e),
+    })?;
+    let exec_opts = ExecOptions {
+        timeout: Some(timeout_ms),
+        cwd: Some(cwd),
+        stdin_data: None,
+    };
+    let exec_result = {
+        let mut guard = env.lock().await;
+        let r = guard.execute(command, exec_opts).await;
+        let _ = guard.cleanup().await;
+        r
+    }
+    .map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Docker 远程执行: {}", e),
+    })?;
+    Ok(exec_result_to_bash_raw(exec_result))
+}
+
+async fn run_remote_bash_singularity(
+    _cfg: &LlmConfigFile,
+    command: &str,
+    timeout_ms: u64,
+) -> Result<BashRawOutput, ToolError> {
+    let image = std::env::var("OMIGA_SINGULARITY_IMAGE")
+        .unwrap_or_else(|_| "docker://ubuntu:22.04".to_string());
+    let cwd = "/workspace".to_string();
+    let config = EnvironmentConfig {
+        r#type: EnvironmentType::Singularity,
+        image: Some(image),
+        cwd: cwd.clone(),
+        timeout: timeout_ms.max(1_000),
+        task_id: format!("omiga-{}", uuid::Uuid::new_v4()),
+        network: true,
+        ..Default::default()
+    };
+    let env = create_environment(config).await.map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Singularity 远程: {}", e),
+    })?;
+    let exec_opts = ExecOptions {
+        timeout: Some(timeout_ms),
+        cwd: Some(cwd),
+        stdin_data: None,
+    };
+    let exec_result = {
+        let mut guard = env.lock().await;
+        let r = guard.execute(command, exec_opts).await;
+        let _ = guard.cleanup().await;
+        r
+    }
+    .map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Singularity 远程执行: {}", e),
+    })?;
+    Ok(exec_result_to_bash_raw(exec_result))
+}
+
+async fn run_remote_bash_daytona(
+    cfg: &LlmConfigFile,
+    command: &str,
+    timeout_ms: u64,
+) -> Result<BashRawOutput, ToolError> {
+    let image = cfg
+        .execution_envs
+        .as_ref()
+        .and_then(|e| e.daytona.as_ref())
+        .and_then(|d| d.default_image.clone())
+        .unwrap_or_else(|| "ubuntu:22.04".to_string());
+    let cwd = "/workspace".to_string();
+    let config = EnvironmentConfig {
+        r#type: EnvironmentType::Daytona,
+        image: Some(image),
+        cwd: cwd.clone(),
+        timeout: timeout_ms.max(1_000),
+        task_id: format!("omiga-{}", uuid::Uuid::new_v4()),
+        ..Default::default()
+    };
+    let env = create_environment(config).await.map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Daytona 远程: {}", e),
+    })?;
+    let exec_opts = ExecOptions {
+        timeout: Some(timeout_ms),
+        cwd: Some(cwd),
+        stdin_data: None,
+    };
+    let exec_result = {
+        let mut guard = env.lock().await;
+        let r = guard.execute(command, exec_opts).await;
+        let _ = guard.cleanup().await;
+        r
+    }
+    .map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Daytona 远程执行: {}", e),
+    })?;
+    Ok(exec_result_to_bash_raw(exec_result))
+}
+
+async fn run_remote_bash(
+    ctx: &ToolContext,
+    cfg: &LlmConfigFile,
+    local_cwd: &Path,
+    command: &str,
+    timeout_ms: u64,
+) -> Result<BashRawOutput, ToolError> {
+    let backend =
+        pick_remote_backend(cfg, ctx).map_err(|m| ToolError::ExecutionFailed { message: m })?;
+    match backend {
+        RemoteBackend::Ssh => {
+            let profile = pick_ssh_profile(cfg).ok_or_else(|| ToolError::ExecutionFailed {
+                message: "未找到可用的 SSH 配置（execution_envs.ssh：enabled，且设置 HostName/User）。"
+                    .to_string(),
+            })?;
+            run_remote_bash_ssh(ctx, profile.1, local_cwd, command, timeout_ms).await
+        }
+        RemoteBackend::Modal => run_remote_bash_modal(cfg, command, timeout_ms).await,
+        RemoteBackend::Daytona => run_remote_bash_daytona(cfg, command, timeout_ms).await,
+        RemoteBackend::Docker => run_remote_bash_docker(cfg, command, timeout_ms).await,
+        RemoteBackend::Singularity => run_remote_bash_singularity(cfg, command, timeout_ms).await,
+    }
+}
+
 pub struct BashTool;
 
 #[async_trait]
@@ -312,6 +648,30 @@ impl super::ToolImpl for BashTool {
         let description = args.description.clone();
         let destructive = destructive_command_warning(&args.command).map(str::to_string);
 
+        if ctx.execution_environment == "remote" {
+            if args.run_in_background == Some(true) {
+                return Err(ToolError::InvalidArguments {
+                    message: "run_in_background is not supported when execution environment is remote."
+                        .to_string(),
+                });
+            }
+            let cfg = load_config_file().map_err(|e| ToolError::ExecutionFailed {
+                message: format!("Failed to load config: {}", e),
+            })?;
+            let output = run_remote_bash(ctx, &cfg, &cwd, &command, timeout_ms).await?;
+            return Ok(BashOutput {
+                command,
+                description,
+                destructive_warning: destructive,
+                exit_code: output.exit_code,
+                stdout: output.stdout,
+                stderr: output.stderr,
+                background_task_id: None,
+                output_file: None,
+            }
+            .into_stream());
+        }
+
         if args.run_in_background == Some(true) {
             let Some(bg) = ctx.background_shell.clone() else {
                 return Err(ToolError::InvalidArguments {
@@ -335,6 +695,7 @@ impl super::ToolImpl for BashTool {
                 output_path.clone(),
                 task_id.clone(),
                 desc_text,
+                ctx.cancel.clone(),
             );
             let msg = format!(
                 "Command running in background with task ID: {}\nOutput will be written to: {}\nYou will receive a notification when the command completes.",
@@ -431,12 +792,6 @@ fn resolve_path(project_root: &Path, path: &str) -> Result<PathBuf, FsError> {
     }
 
     Ok(path_buf)
-}
-
-pub(crate) struct BashRawOutput {
-    pub(crate) exit_code: i32,
-    pub(crate) stdout: Vec<String>,
-    pub(crate) stderr: Vec<String>,
 }
 
 pub(crate) async fn run_bash_command(

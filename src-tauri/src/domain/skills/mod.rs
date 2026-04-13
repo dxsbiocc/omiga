@@ -15,7 +15,7 @@
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tracing;
@@ -839,6 +839,120 @@ pub fn format_skills_discovery_system_section() -> String {
      fields (`description`, `when_to_use`, `tags`, `source`); optional `query` filters. The tool uses the \
      same cached scan as the rest of the app after the first load. Use `skill_view` / `skill` as appropriate.\n"
         .to_string()
+}
+
+/// Upper bound for the skill index block (names + truncated descriptions) in the system prompt.
+const SKILL_INDEX_BODY_MAX_CHARS: usize = 16_000;
+
+/// Category label for grouping in [`format_skills_index_system_section`] (Hermes-style paths).
+fn skill_index_category(skill: &SkillEntry, project_root: &Path) -> String {
+    if let Some(ref user_base) = user_skills_dir_omiga() {
+        if skill.skill_dir.starts_with(user_base) {
+            let rel = skill.skill_dir.strip_prefix(user_base).unwrap_or_else(|_| Path::new(""));
+            let parts: Vec<&str> = rel
+                .components()
+                .filter_map(|c| c.as_os_str().to_str())
+                .collect();
+            if parts.len() >= 2 {
+                return parts[0].to_string();
+            }
+            return "user".to_string();
+        }
+    }
+    let proj_base = project_root.join(".omiga").join("skills");
+    if skill.skill_dir.starts_with(&proj_base) {
+        let rel = skill.skill_dir.strip_prefix(&proj_base).unwrap_or_else(|_| Path::new(""));
+        let parts: Vec<&str> = rel
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect();
+        if parts.len() >= 2 {
+            return parts[0].to_string();
+        }
+        return "project".to_string();
+    }
+    "skills".to_string()
+}
+
+fn truncate_desc_chars(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return "…".to_string();
+    }
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    format!(
+        "{}…",
+        s.chars().take(max_chars.saturating_sub(1)).collect::<String>()
+    )
+}
+
+/// Inject **names and short descriptions** for all discovered skills into the system prompt (Hermes-style
+/// index). Full `SKILL.md` bodies are still loaded on demand via `skill_view` or `skill`.
+///
+/// When `skills` is empty, falls back to [`format_skills_discovery_system_section`].
+#[must_use]
+pub fn format_skills_index_system_section(project_root: &Path, skills: &[SkillEntry]) -> String {
+    if skills.is_empty() {
+        return format_skills_discovery_system_section();
+    }
+
+    let preamble = "## Skills (available)\n\n\
+        Scan the skills below. If one matches the user\u{2019}s task, call `skill` with that name, \
+        or use `skill_view` / `list_skills` / `skills_list` for details. Full instructions are **not** inlined \
+        here \u{2014} load them with `skill_view` or `skill`.\n\n\
+        <available_skills>\n";
+
+    let mut by_cat: BTreeMap<String, Vec<&SkillEntry>> = BTreeMap::new();
+    for s in skills {
+        let cat = skill_index_category(s, project_root);
+        by_cat.entry(cat).or_default().push(s);
+    }
+    for v in by_cat.values_mut() {
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+
+    let mut desc_limit = MAX_LISTING_DESC_CHARS;
+    let mut body = String::new();
+    loop {
+        body.clear();
+        for (cat, entries) in &by_cat {
+            body.push_str(&format!("  {}:\n", cat));
+            for s in entries {
+                let desc = truncate_desc_chars(&s.description, desc_limit);
+                body.push_str(&format!("    - {}: {}\n", s.name, desc));
+            }
+        }
+        if body.len() <= SKILL_INDEX_BODY_MAX_CHARS {
+            break;
+        }
+        if desc_limit > 48 {
+            desc_limit = (desc_limit * 2 / 3).max(48);
+            continue;
+        }
+        // Still too large: hard-truncate (very many skills).
+        let note = "\n  … (index truncated; call `list_skills` for the full catalog.)\n";
+        let cap = SKILL_INDEX_BODY_MAX_CHARS.saturating_sub(note.len());
+        if body.len() > cap {
+            let mut t = body.chars().take(cap).collect::<String>();
+            // Avoid cutting mid-line: snap to last newline if possible
+            if let Some(pos) = t.rfind('\n') {
+                if pos > cap * 3 / 4 {
+                    t.truncate(pos + 1);
+                }
+            }
+            body = t;
+        }
+        body.push_str(note);
+        break;
+    }
+
+    let footer = "</available_skills>\n";
+    let mut out = String::with_capacity(preamble.len() + body.len() + footer.len());
+    out.push_str(preamble);
+    out.push_str(&body);
+    out.push_str(footer);
+    out
 }
 
 /// JSON for `list_skills` tool: metadata only, no full SKILL.md body.

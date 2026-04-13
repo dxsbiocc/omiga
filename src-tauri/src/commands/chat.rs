@@ -10,22 +10,32 @@ use crate::constants::tool_limits::{
     large_output_persist_failed_message, large_tool_output_files_enabled, truncate_utf8_prefix,
     DEFAULT_MAX_RESULT_SIZE_CHARS, PREVIEW_SIZE_BYTES, TOOL_DISPLAY_MAX_INPUT_CHARS,
 };
-use crate::domain::agent_runtime::ChatInputTarget;
-use crate::domain::coordinator;
+use crate::domain::agents::ChatInputTarget;
+use crate::domain::agents::coordinator;
 use crate::domain::chat_state::{
     AskUserWaiter, McpToolCache, MCP_TOOL_CACHE_TTL, PermissionDenyCache, PermissionToolWaiter,
     PERMISSION_DENY_CACHE_TTL,
 };
-use crate::domain::permissions::PermissionRequest;
+use crate::domain::permissions::{
+    PermissionRequest,
+    canonical_permission_tool_name,
+    filter_tool_schemas_by_deny_rule_entries,
+    load_merged_permission_deny_rule_entries,
+    matching_deny_entry,
+    validate_permission_deny_entries,
+};
 use crate::domain::tools::ask_user_question;
 use crate::domain::session::{AgentTask, Message, MessageTokenUsage, Session, TodoItem, ToolCall};
-use crate::domain::session_codec::SessionCodec;
+use crate::domain::session::SessionCodec;
 use crate::utils::large_output_instructions::get_large_output_instructions;
 use crate::domain::integrations_config;
 use crate::domain::skills;
-use crate::domain::subagent_tool_filter::{env_allow_nested_agent, SubagentFilterOptions};
+use crate::domain::agents::subagent_tool_filter::{
+    env_allow_nested_agent, filter_tool_schemas_for_subagent, should_block_subagent_builtin_call,
+    SubagentFilterOptions,
+};
 use crate::domain::agents::scheduler::{AgentSelector, AgentScheduler, SchedulingRequest, SchedulingStrategy};
-use crate::domain::tools::{all_tool_schemas, Tool, ToolContext, ToolSchema};
+use crate::domain::tools::{all_tool_schemas, Tool, ToolContext, ToolSchema, WebSearchApiKeys};
 use crate::errors::{ApiError, ChatError, OmigaError};
 use crate::infrastructure::streaming::StreamOutputItem;
 use crate::llm::{create_client, load_config_from_env, LlmClient, LlmConfig, LlmContent, LlmMessage, LlmRole, LlmStreamChunk, LlmProvider};
@@ -88,6 +98,14 @@ pub(crate) struct AgentLlmRuntime {
     plan_mode_flag: Option<Arc<Mutex<bool>>>,
     /// `USER_TYPE=ant` — nested `Agent` allowed (`ALL_AGENT_DISALLOWED_TOOLS` omits Agent).
     allow_nested_agent: bool,
+    /// Same token as [`RoundCancellationState::round_cancel`] for main chat; stops foreground/background bash on cancel.
+    round_cancel: tokio_util::sync::CancellationToken,
+    /// `local` | `ssh` | `sandbox` — from [`SessionRuntimeState::execution_environment`].
+    execution_environment: String,
+    /// Selected SSH server name; from [`SessionRuntimeState::ssh_server`].
+    ssh_server: Option<String>,
+    /// `modal` | `daytona` | `docker` | `singularity` — from [`SessionRuntimeState::sandbox_backend`].
+    sandbox_backend: String,
 }
 
 pub use crate::domain::chat_state::{
@@ -513,6 +531,57 @@ fn composer_permission_addendum(raw: &str) -> Option<String> {
     }
 }
 
+/// Normalize composer `sandboxBackend` from the UI (`modal` | `daytona` | `docker` | `singularity`).
+/// Note: `ssh` is no longer a sandbox backend - it's now a separate execution environment.
+fn normalize_sandbox_backend(raw: Option<&String>) -> String {
+    let Some(r) = raw else {
+        return "docker".to_string();
+    };
+    let s = r.trim().to_lowercase();
+    if s.is_empty() {
+        return "docker".to_string();
+    }
+    match s.as_str() {
+        "modal" | "daytona" | "docker" | "singularity" | "auto" => s,
+        // Legacy: ssh was moved to be an execution environment, not a sandbox backend
+        "ssh" => "docker".to_string(),
+        _ => "docker".to_string(),
+    }
+}
+
+/// Normalize composer `executionEnvironment` from the UI (`local` | `ssh` | `sandbox`).
+/// 
+/// - `local`: Run tools and terminal on the local machine
+/// - `ssh`: Run tools and terminal on a remote SSH server
+/// - `sandbox`: Run tools and terminal in a remote sandbox (Modal, Daytona, Docker, Singularity)
+fn normalize_execution_environment(raw: Option<&String>) -> String {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("ssh") => "ssh".to_string(),
+        Some("sandbox") | Some("remote") => "sandbox".to_string(),
+        _ => "local".to_string(),
+    }
+}
+
+fn composer_execution_addendum(env: &str, ssh_server: Option<&str>) -> Option<String> {
+    match env {
+        "ssh" => {
+            let server_info = ssh_server.map(|s| format!(" (server: `{}`)", s)).unwrap_or_default();
+            Some(format!(
+                "### Composer execution environment\nThe user chose **SSH**{} for this session turn: assume tools and shell should run on the configured SSH server when available; local-only tools may error until remote is fully wired.",
+                server_info
+            ))
+        }
+        "sandbox" => Some(
+            "### Composer execution environment\nThe user chose **sandbox** for this session turn: assume tools and shell should run on the configured remote sandbox when available; local-only tools may error until remote is fully wired."
+                .to_string(),
+        ),
+        _ => Some(
+            "### Composer execution environment\nThe user chose **local**: run terminal commands and workspace tools on this machine."
+                .to_string(),
+        ),
+    }
+}
+
 /// 格式化调度计划为 system prompt 的一部分
 fn format_scheduler_plan(result: &crate::domain::agents::scheduler::SchedulingResult) -> String {
     let is_content_generation = result.plan.subtasks.iter().any(|t| {
@@ -616,6 +685,8 @@ pub async fn send_message(
 
     // Get or create session (database is single source of truth)
     let repo = &*app_state.repo;
+    let exec_env = normalize_execution_environment(request.execution_environment.as_ref());
+    let sandbox_backend = normalize_sandbox_backend(request.sandbox_backend.as_ref());
 
     let (session_id, mut session, user_message_id, project_path) = if let Some(ref id) = request.session_id {
         // Load existing session from database
@@ -678,7 +749,7 @@ pub async fn send_message(
                 session.add_user_message(&request.content);
 
                 msg_id = uuid::Uuid::new_v4().to_string();
-                repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None, None)
+                repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None, None, None)
                     .await
                     .map_err(|e| {
                         OmigaError::Chat(ChatError::StreamError(format!("Failed to save message: {}", e)))
@@ -691,9 +762,13 @@ pub async fn send_message(
             // Cache in memory — keep todo/task Arcs if already present; else load from SQLite
             {
                 let mut sessions = app_state.chat.sessions.write().await;
-                if let Some(runtime) = sessions.get_mut(&session.id) {
+                let ssh_server = request.ssh_server.clone();
+            if let Some(runtime) = sessions.get_mut(&session.id) {
                     runtime.session = session.clone();
                     runtime.active_round_ids.clear();
+                    runtime.execution_environment = exec_env.clone();
+                    runtime.ssh_server = ssh_server.clone();
+                    runtime.sandbox_backend = sandbox_backend.clone();
                 } else {
                     let (todos_v, tasks_v) = repo.get_session_tool_state(&session.id).await.map_err(
                         |e| {
@@ -711,6 +786,9 @@ pub async fn send_message(
                             todos: Arc::new(tokio::sync::Mutex::new(todos_v)),
                             agent_tasks: Arc::new(tokio::sync::Mutex::new(tasks_v)),
                             plan_mode: Arc::new(Mutex::new(false)),
+                            execution_environment: exec_env.clone(),
+                            ssh_server: ssh_server.clone(),
+                            sandbox_backend: sandbox_backend.clone(),
                         },
                     );
                 }
@@ -743,19 +821,23 @@ pub async fn send_message(
 
         // Save user message
         let msg_id = uuid::Uuid::new_v4().to_string();
-        repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None, None)
+        repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None, None, None)
             .await
             .map_err(|e| {
                 OmigaError::Chat(ChatError::StreamError(format!("Failed to save message: {}", e)))
             })?;
 
         // Cache in memory
+        let ssh_server = request.ssh_server.clone();
         let runtime_state = SessionRuntimeState {
             session: session.clone(),
             active_round_ids: vec![],
             todos: Arc::new(tokio::sync::Mutex::new(vec![])),
             agent_tasks: Arc::new(tokio::sync::Mutex::new(vec![])),
             plan_mode: Arc::new(Mutex::new(false)),
+            execution_environment: exec_env.clone(),
+            ssh_server: ssh_server.clone(),
+            sandbox_backend: sandbox_backend.clone(),
         };
         {
             let mut sessions = app_state.chat.sessions.write().await;
@@ -833,6 +915,13 @@ pub async fn send_message(
         crate::commands::memory::get_memory_context(&project_root, &request.content, 3),
     );
 
+    let skills_system_section = if skills_exist {
+        let loaded = skills::load_skills_cached(&project_root, skill_cache_ref).await;
+        skills::format_skills_index_system_section(&project_root, &loaded)
+    } else {
+        String::new()
+    };
+
     // Ported agent system prompt from `src/constants/prompts.ts` — injected when tools are enabled.
     let mut prompt_parts: Vec<String> = Vec::new();
     if request.use_tools {
@@ -851,7 +940,7 @@ pub async fn send_message(
         }
     }
     if skills_exist {
-        prompt_parts.push(skills::format_skills_discovery_system_section());
+        prompt_parts.push(skills_system_section);
     }
     if let Some(ctx) = memory_ctx {
         prompt_parts.push(ctx);
@@ -869,7 +958,10 @@ pub async fn send_message(
             if !t.is_empty() && t != "general-purpose" {
                 let router = crate::domain::agents::get_agent_router();
                 let agent = router.select_agent(Some(t));
-                let tool_ctx = ToolContext::new(project_root.clone());
+                let tool_ctx = ToolContext::new(project_root.clone())
+                    .with_execution_environment(exec_env.clone())
+                    .with_ssh_server(request.ssh_server.clone())
+                    .with_sandbox_backend(sandbox_backend.clone());
                 prompt_parts.push(agent.system_prompt(&tool_ctx));
             }
         }
@@ -877,6 +969,9 @@ pub async fn send_message(
             if let Some(line) = composer_permission_addendum(pm) {
                 prompt_parts.push(line);
             }
+        }
+        if let Some(line) = composer_execution_addendum(exec_env.as_str(), request.ssh_server.as_deref()) {
+            prompt_parts.push(line);
         }
     }
     llm_config.system_prompt = if prompt_parts.is_empty() {
@@ -938,11 +1033,13 @@ pub async fn send_message(
 
     // Set up cancellation tracking
     let cancel_flag = Arc::new(RwLock::new(false));
+    let round_cancel = tokio_util::sync::CancellationToken::new();
     let cancellation_state = RoundCancellationState {
         round_id: round_id.clone(),
         message_id: message_id.clone(),
         session_id: session_id.clone(),
         cancelled: cancel_flag.clone(),
+        round_cancel: round_cancel.clone(),
     };
 
     {
@@ -974,17 +1071,17 @@ pub async fn send_message(
                 }
                 None => {
                     // Lock released above; safe to do blocking file reads here.
-                    let entries = crate::domain::tool_permission_rules::load_merged_permission_deny_rule_entries(&project_root);
+                    let entries = load_merged_permission_deny_rule_entries(&project_root);
                     app_state.chat.permission_deny_cache.lock().await
                         .insert(project_root.clone(), PermissionDenyCache { entries: entries.clone(), cached_at: std::time::Instant::now() });
                     entries
                 }
             }
         };
-        crate::domain::tool_permission_rules::validate_permission_deny_entries(&deny_entries);
+        validate_permission_deny_entries(&deny_entries);
         let all_schemas = all_tool_schemas(skills_exist);
         let n_builtin_before = all_schemas.len();
-        let mut built = crate::domain::tool_permission_rules::filter_tool_schemas_by_deny_rule_entries(
+        let mut built = filter_tool_schemas_by_deny_rule_entries(
             all_schemas,
             &deny_entries,
         );
@@ -1023,7 +1120,7 @@ pub async fn send_message(
             }
         };
         let n_mcp_before = mcp_tools.len();
-        let mcp_after_deny = crate::domain::tool_permission_rules::filter_tool_schemas_by_deny_rule_entries(
+        let mcp_after_deny = filter_tool_schemas_by_deny_rule_entries(
             mcp_tools,
             &deny_entries,
         );
@@ -1100,12 +1197,13 @@ pub async fn send_message(
     let repo_clone = app_state.repo.clone();
     let llm_config_for_spawn = llm_config_for_agent;
     let skill_task_context = request.content.clone();
-    let brave_search_api_key = app_state.chat.brave_search_api_key.lock().await.clone();
+    let web_search_api_keys = app_state.chat.web_search_api_keys.lock().await.clone();
     let skill_cache_for_spawn = app_state.skill_cache.clone();
     // 回合开始前预判：短确认类输入可跳过回合结束后的 Output Formatter，加快到 Complete。
     let preflight_skip_turn_summary =
         crate::domain::agents::output_formatter::preflight_skip_turn_summary(&request.content);
 
+    let round_cancel_spawn = round_cancel.clone();
     tokio::spawn(async move {
         let _ = app_clone.emit(
             &format!("chat-stream-{}", message_id_clone),
@@ -1124,11 +1222,17 @@ pub async fn send_message(
 
         let tool_results_dir = tool_results_dir_for_session(&app_clone, &session_id_clone);
 
-        let plan_mode_flag = sessions_clone
-            .read()
-            .await
-            .get(&session_id_clone)
-            .map(|s| s.plan_mode.clone());
+        let (plan_mode_flag, execution_environment, ssh_server_rt, sandbox_backend_rt) = {
+            let sessions = sessions_clone.read().await;
+            let s = sessions.get(&session_id_clone);
+            (
+                s.map(|x| x.plan_mode.clone()),
+                s.map(|x| x.execution_environment.clone())
+                    .unwrap_or_else(|| "local".to_string()),
+                s.and_then(|x| x.ssh_server.clone()),
+                s.map(|x| x.sandbox_backend.clone()).unwrap_or_else(|| "docker".to_string()),
+            )
+        };
 
         let agent_runtime = AgentLlmRuntime {
             llm_config: llm_config_for_spawn.clone(),
@@ -1138,6 +1242,10 @@ pub async fn send_message(
             repo: repo_clone.clone(),
             plan_mode_flag,
             allow_nested_agent: env_allow_nested_agent(),
+            round_cancel: round_cancel_spawn.clone(),
+            execution_environment,
+            ssh_server: ssh_server_rt,
+            sandbox_backend: sandbox_backend_rt,
         };
 
         let mut turn_token_usage: Option<crate::llm::TokenUsage> = None;
@@ -1209,6 +1317,7 @@ pub async fn send_message(
                     None,
                     None,
                     reasoning_save,
+                    None,
                 )
                 .await
             {
@@ -1271,6 +1380,7 @@ pub async fn send_message(
             emit_post_turn_meta_then_complete(
                 &app_clone,
                 &message_id_clone,
+                &last_assistant_id,
                 client.as_ref(),
                 &final_reply_for_follow_up,
                 preflight_skip_turn_summary,
@@ -1325,8 +1435,11 @@ pub async fn send_message(
                 Some(&agent_runtime),
                 0,
                 Some(skill_task_context.as_str()),
-                brave_search_api_key.clone(),
+                web_search_api_keys.clone(),
                 skill_cache_for_spawn.clone(),
+                agent_runtime.execution_environment.clone(),
+                agent_runtime.ssh_server.clone(),
+                agent_runtime.sandbox_backend.clone(),
             )
             .await;
 
@@ -1456,6 +1569,7 @@ pub async fn send_message(
                         None,
                         None,
                         next_reasoning_save,
+                        None,
                     )
                     .await
                 {
@@ -1520,6 +1634,7 @@ pub async fn send_message(
                 emit_post_turn_meta_then_complete(
                     &app_clone,
                     &message_id_clone,
+                    &last_assistant_id,
                     client.as_ref(),
                     &final_reply_for_follow_up,
                     preflight_skip_turn_summary || send_user_message_called,
@@ -1560,6 +1675,7 @@ pub async fn send_message(
         emit_post_turn_meta_then_complete(
             &app_clone,
             &message_id_clone,
+            &last_assistant_id,
             client.as_ref(),
             &final_reply_for_follow_up,
             preflight_skip_turn_summary || send_user_message_called,
@@ -1858,20 +1974,22 @@ async fn persist_and_emit_turn_token_usage(
 ///   而非 LLM 的空壳收尾文本；其余情况与 `final_reply` 相同。
 async fn emit_post_turn_meta_then_complete(
     app: &AppHandle,
-    message_id: &str,
+    stream_message_id: &str,
+    assistant_message_id: &str,
     client: &dyn LlmClient,
     final_reply: &str,
     skip_summary: bool,
     suggestions_reply: &str,
 ) {
-    let (summary_enabled, follow_enabled) = match app.try_state::<OmigaAppState>() {
+    let (summary_enabled, follow_enabled, state) = match app.try_state::<OmigaAppState>() {
         Some(state) => {
             let repo = &*state.repo;
-            crate::domain::post_turn_settings::load_post_turn_meta_flags(&*repo)
+            let flags = crate::domain::post_turn_settings::load_post_turn_meta_flags(&*repo)
                 .await
-                .unwrap_or((true, true))
+                .unwrap_or((true, true));
+            (flags.0, flags.1, Some(state))
         }
-        None => (true, true),
+        None => (true, true, None),
     };
 
     let (summary_res, follow_res) = tokio::join!(
@@ -1886,7 +2004,7 @@ async fn emit_post_turn_meta_then_complete(
             )
             .await
         },
-        crate::domain::follow_up_suggestions::generate_follow_up_suggestions(
+        crate::domain::suggestions::generate_follow_up_suggestions(
             client,
             suggestions_reply,
             follow_enabled,
@@ -1901,7 +2019,7 @@ async fn emit_post_turn_meta_then_complete(
         }
     };
     let _ = app.emit(
-        &format!("chat-stream-{}", message_id),
+        &format!("chat-stream-{}", stream_message_id),
         &StreamOutputItem::TurnSummary {
             text: summary_text,
         },
@@ -1910,15 +2028,27 @@ async fn emit_post_turn_meta_then_complete(
     match follow_res {
         Ok(items) if !items.is_empty() => {
             let _ = app.emit(
-                &format!("chat-stream-{}", message_id),
-                &StreamOutputItem::FollowUpSuggestions(items),
+                &format!("chat-stream-{}", stream_message_id),
+                &StreamOutputItem::FollowUpSuggestions(items.clone()),
             );
+            // Persist follow-up suggestions to database for reload
+            if let Some(ref app_state) = state {
+                if let Ok(json) = serde_json::to_string(&items) {
+                    let repo = &*app_state.repo;
+                    if let Err(e) = repo
+                        .update_message_follow_up_suggestions(assistant_message_id, Some(&json))
+                        .await
+                    {
+                        tracing::warn!("Failed to persist follow-up suggestions: {}", e);
+                    }
+                }
+            }
         }
         Ok(_) => {}
         Err(e) => tracing::warn!(target: "omiga::follow_up", "follow-up suggestions: {}", e),
     }
     let _ = app.emit(
-        &format!("chat-stream-{}", message_id),
+        &format!("chat-stream-{}", stream_message_id),
         &StreamOutputItem::Complete,
     );
 }
@@ -2005,22 +2135,22 @@ async fn build_subagent_tool_schemas(
 ) -> Vec<ToolSchema> {
     let integrations_cfg = integrations_config::load_integrations_config(project_root);
     let deny_entries =
-        crate::domain::tool_permission_rules::load_merged_permission_deny_rule_entries(
+        load_merged_permission_deny_rule_entries(
             project_root,
         );
-    crate::domain::tool_permission_rules::validate_permission_deny_entries(&deny_entries);
-    let built = crate::domain::tool_permission_rules::filter_tool_schemas_by_deny_rule_entries(
+    validate_permission_deny_entries(&deny_entries);
+    let built = filter_tool_schemas_by_deny_rule_entries(
         all_tool_schemas(include_skill),
         &deny_entries,
     );
     let mut built =
-        crate::domain::subagent_tool_filter::filter_tool_schemas_for_subagent(built, subagent_opts);
+        filter_tool_schemas_for_subagent(built, subagent_opts);
     built.sort_by(|a, b| a.name.cmp(&b.name));
     let base_names: HashSet<String> = built.iter().map(|t| t.name.clone()).collect();
     let mcp_timeout = std::time::Duration::from_secs(45);
     let mcp_tools =
         crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(project_root, mcp_timeout).await;
-    let mcp_after_deny = crate::domain::tool_permission_rules::filter_tool_schemas_by_deny_rule_entries(
+    let mcp_after_deny = filter_tool_schemas_by_deny_rule_entries(
         mcp_tools,
         &deny_entries,
     );
@@ -2053,7 +2183,7 @@ async fn run_skill_forked(
     allowed_tools: Option<Vec<String>>,
     runtime: &AgentLlmRuntime,
     subagent_execute_depth: u8,
-    brave_search_api_key: Option<String>,
+    web_search_api_keys: WebSearchApiKeys,
     skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
 ) -> Result<String, String> {
     // Build subagent configuration
@@ -2087,7 +2217,8 @@ async fn run_skill_forked(
         }
     }
     if skills_exist {
-        prompt_parts.push(skills::format_skills_discovery_system_section());
+        let loaded = skills::load_skills_cached(project_root, &skill_cache).await;
+        prompt_parts.push(skills::format_skills_index_system_section(project_root, &loaded));
     }
     sub_cfg.system_prompt = Some(prompt_parts.join("\n\n"));
 
@@ -2162,6 +2293,7 @@ async fn run_skill_forked(
             tool_calls: tc.clone(),
             token_usage: None,
             reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text.clone()),
+            follow_up_suggestions: None,
         });
 
         if tool_calls.is_empty() {
@@ -2181,8 +2313,11 @@ async fn run_skill_forked(
             Some(runtime),
             subagent_execute_depth,
             Some(subagent_skill_task_context.as_str()),
-            brave_search_api_key.clone(),
+            web_search_api_keys.clone(),
             skill_cache.clone(),
+            runtime.execution_environment.clone(),
+            runtime.ssh_server.clone(),
+            runtime.sandbox_backend.clone(),
         )
         .await;
 
@@ -2211,7 +2346,7 @@ async fn run_subagent_session_foreground_inner(
     args: &crate::domain::tools::agent::AgentArgs,
     runtime: &AgentLlmRuntime,
     subagent_execute_depth: u8,
-    brave_search_api_key: Option<String>,
+    web_search_api_keys: WebSearchApiKeys,
     skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
     agent_def: &dyn crate::domain::agents::AgentDefinition,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
@@ -2265,7 +2400,10 @@ async fn run_subagent_session_foreground_inner(
             &mem_cfg,
         ));
     } else {
-        let tool_ctx = ToolContext::new(effective_root);
+        let tool_ctx = ToolContext::new(effective_root)
+            .with_execution_environment(runtime.execution_environment.clone())
+            .with_ssh_server(runtime.ssh_server.clone())
+            .with_sandbox_backend(runtime.sandbox_backend.clone());
         let agent_specific_prompt = agent_def.system_prompt(&tool_ctx);
 
         let nested_agent_note = if runtime.allow_nested_agent {
@@ -2306,7 +2444,8 @@ async fn run_subagent_session_foreground_inner(
         }
     }
     if skills_exist && !agent_def.omit_claude_md() {
-        prompt_parts.push(skills::format_skills_discovery_system_section());
+        let loaded = skills::load_skills_cached(effective_root, &skill_cache).await;
+        prompt_parts.push(skills::format_skills_index_system_section(effective_root, &loaded));
     }
     sub_cfg.system_prompt = Some(prompt_parts.join("\n\n"));
     let client = create_client(sub_cfg).map_err(|e| e.to_string())?;
@@ -2392,6 +2531,7 @@ async fn run_subagent_session_foreground_inner(
             tool_calls: tc.clone(),
             token_usage: None,
             reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text.clone()),
+            follow_up_suggestions: None,
         };
         if let Some(tid) = background_task_id {
             persist_background_transcript_message(&runtime.repo, tid, session_id, &asst).await;
@@ -2412,8 +2552,11 @@ async fn run_subagent_session_foreground_inner(
             Some(runtime),
             subagent_execute_depth,
             Some(subagent_skill_task_context.as_str()),
-            brave_search_api_key.clone(),
+            web_search_api_keys.clone(),
             skill_cache.clone(),
+            runtime.execution_environment.clone(),
+            runtime.ssh_server.clone(),
+            runtime.sandbox_backend.clone(),
         )
         .await;
         let tool_messages: Vec<Message> = results
@@ -2447,7 +2590,7 @@ async fn run_subagent_session(
     runtime: &AgentLlmRuntime,
     // Depth for [`execute_tool_calls`] inside this sub-session (main chat uses `0`; first sub-agent uses `1`).
     subagent_execute_depth: u8,
-    brave_search_api_key: Option<String>,
+    web_search_api_keys: WebSearchApiKeys,
     skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
 ) -> Result<String, String> {
     // ===== Agent 路由系统集成（含自动调度）=====
@@ -2486,7 +2629,7 @@ async fn run_subagent_session(
             args,
             runtime,
             subagent_execute_depth,
-            brave_search_api_key,
+            web_search_api_keys,
             skill_cache,
             agent_def,
         ).await;
@@ -2503,7 +2646,7 @@ async fn run_subagent_session(
         args,
         runtime,
         subagent_execute_depth,
-        brave_search_api_key,
+        web_search_api_keys,
         skill_cache,
         agent_def,
         None,
@@ -2585,7 +2728,7 @@ pub(crate) async fn spawn_background_agent(
     args: &crate::domain::tools::agent::AgentArgs,
     runtime: &AgentLlmRuntime,
     subagent_execute_depth: u8,
-    brave_search_api_key: Option<String>,
+    web_search_api_keys: WebSearchApiKeys,
     skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
     agent_def: &dyn crate::domain::agents::AgentDefinition,
 ) -> Result<String, String> {
@@ -2630,7 +2773,7 @@ pub(crate) async fn spawn_background_agent(
     let args_clone = args.clone();
     let runtime_clone = runtime.clone();
     let bg_repo_spawn = bg_repo.clone();
-    let brave_search_api_key_clone = brave_search_api_key.clone();
+    let web_search_api_keys_clone = web_search_api_keys.clone();
     let skill_cache_clone = skill_cache.clone();
     let task_id_clone = task_id.clone();
     let output_path_clone = output_path.clone();
@@ -2652,6 +2795,10 @@ pub(crate) async fn spawn_background_agent(
             repo: runtime_clone.repo,
             plan_mode_flag: runtime_clone.plan_mode_flag,
             allow_nested_agent: runtime_clone.allow_nested_agent,
+            round_cancel: cancel_token.clone(),
+            execution_environment: runtime_clone.execution_environment.clone(),
+            ssh_server: runtime_clone.ssh_server.clone(),
+            sandbox_backend: runtime_clone.sandbox_backend.clone(),
         };
         
         // 运行子 Agent 会话（同步等待结果）
@@ -2666,7 +2813,7 @@ pub(crate) async fn spawn_background_agent(
             &args_clone,
             &runtime_for_task,
             subagent_execute_depth,
-            brave_search_api_key_clone,
+            web_search_api_keys_clone,
             skill_cache_clone,
             cancel_token,
             &task_id_clone,
@@ -2731,7 +2878,7 @@ async fn run_subagent_session_internal(
     args: &crate::domain::tools::agent::AgentArgs,
     runtime: &AgentLlmRuntime,
     subagent_execute_depth: u8,
-    brave_search_api_key: Option<String>,
+    web_search_api_keys: WebSearchApiKeys,
     skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
     cancel_token: tokio_util::sync::CancellationToken,
     background_task_id: &str,
@@ -2749,7 +2896,7 @@ async fn run_subagent_session_internal(
         args,
         runtime,
         subagent_execute_depth,
-        brave_search_api_key,
+        web_search_api_keys,
         skill_cache,
         agent_def,
         Some(&cancel_token),
@@ -3192,17 +3339,21 @@ async fn execute_tool_calls(
     subagent_depth: u8,
     // Task text for `list_skills` ordering (main user message or sub-agent description+prompt).
     skill_task_context: Option<&str>,
-    brave_search_api_key: Option<String>,
+    web_search_api_keys: WebSearchApiKeys,
     skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+    execution_environment: String,
+    ssh_server: Option<String>,
+    sandbox_backend: String,
 ) -> Vec<(String, String, bool)> {
     use futures::future::join_all;
 
     let cancel_flag = agent_runtime.map(|r| r.cancel_flag.clone());
+    let round_cancel = agent_runtime.map(|r| r.round_cancel.clone());
 
     // (tool_use_id, output, is_error)
     let mut results = Vec::new();
     let deny_entries =
-        crate::domain::tool_permission_rules::load_merged_permission_deny_rule_entries(project_root);
+        load_merged_permission_deny_rule_entries(project_root);
 
     // Pre-compute permission + subagent-filter results for every call (fast, sequential).
     // Calls that pass become futures; blocked calls become immediate error results.
@@ -3214,7 +3365,7 @@ async fn execute_tool_calls(
     let prepped: Vec<CallPrep<'_>> = tool_calls
         .iter()
         .map(|(tool_use_id, tool_name, _arguments)| {
-            if let Some(hit) = crate::domain::tool_permission_rules::matching_deny_entry(
+            if let Some(hit) = matching_deny_entry(
                 tool_name,
                 &deny_entries,
             ) {
@@ -3226,7 +3377,7 @@ async fn execute_tool_calls(
                 return CallPrep::Blocked(tool_use_id.clone(), error_msg, true);
             }
             if subagent_depth > 0 {
-                let c = crate::domain::tool_permission_rules::canonical_permission_tool_name(
+                let c = canonical_permission_tool_name(
                     tool_name,
                 );
                 let parent_in_plan = false; // checked per-call below in execute_one_tool
@@ -3237,7 +3388,7 @@ async fn execute_tool_calls(
                     parent_in_plan_mode: parent_in_plan,
                     allow_nested_agent: allow_nested,
                 };
-                if crate::domain::subagent_tool_filter::should_block_subagent_builtin_call(
+                if should_block_subagent_builtin_call(
                     &c, sub_opts,
                 ) {
                     let error_msg = format!(
@@ -3305,9 +3456,13 @@ async fn execute_tool_calls(
                     None, // parallelizable tools don't need agent_runtime
                     subagent_depth,
                     skill_task_context.map(str::to_owned),
-                    brave_search_api_key.clone(),
+                    web_search_api_keys.clone(),
                     skill_cache.clone(),
                     cancel_flag.clone(),
+                    round_cancel.clone(),
+                    execution_environment.clone(),
+                    ssh_server.clone(),
+                    sandbox_backend.clone(),
                 )
             })
             .collect();
@@ -3335,9 +3490,13 @@ async fn execute_tool_calls(
             agent_runtime,
             subagent_depth,
             skill_task_context.map(str::to_owned),
-            brave_search_api_key.clone(),
+            web_search_api_keys.clone(),
             skill_cache.clone(),
             cancel_flag.clone(),
+            round_cancel.clone(),
+            execution_environment.clone(),
+            ssh_server.clone(),
+            sandbox_backend.clone(),
         )
         .await;
         ordered_results[idx] = Some(res);
@@ -3363,9 +3522,13 @@ async fn execute_one_tool(
     agent_runtime: Option<&AgentLlmRuntime>,
     subagent_depth: u8,
     skill_task_context: Option<String>,
-    brave_search_api_key: Option<String>,
+    web_search_api_keys: WebSearchApiKeys,
     skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
     cancel_flag: Option<Arc<RwLock<bool>>>,
+    round_cancel: Option<tokio_util::sync::CancellationToken>,
+    execution_environment: String,
+    ssh_server: Option<String>,
+    sandbox_backend: String,
 ) -> (String, String, bool) {
     let tool_use_id = &tool_use_id;
     let tool_name = &tool_name;
@@ -3378,7 +3541,7 @@ async fn execute_one_tool(
 
     // Subagent plan-mode re-check (fast, per-call)
     if subagent_depth > 0 {
-        let c = crate::domain::tool_permission_rules::canonical_permission_tool_name(tool_name);
+        let c = canonical_permission_tool_name(tool_name);
         let parent_in_plan = if let Some(ar) = agent_runtime {
             if let Some(ref pm) = ar.plan_mode_flag {
                 *pm.lock().await
@@ -3395,7 +3558,7 @@ async fn execute_one_tool(
             parent_in_plan_mode: parent_in_plan,
             allow_nested_agent: allow_nested,
         };
-        if crate::domain::subagent_tool_filter::should_block_subagent_builtin_call(&c, sub_opts) {
+        if should_block_subagent_builtin_call(&c, sub_opts) {
             let error_msg = format!(
                 "Tool `{tool_name}` is not available to sub-agents (Claude Code `ALL_AGENT_DISALLOWED_TOOLS`)."
             );
@@ -3989,7 +4152,7 @@ async fn execute_one_tool(
                                         skill_allowed_tools,
                                         ar,
                                         subagent_depth.saturating_add(1),
-                                        brave_search_api_key.clone(),
+                                        web_search_api_keys.clone(),
                                         skill_cache.clone(),
                                     )
                                     .await
@@ -4214,7 +4377,7 @@ async fn execute_one_tool(
                             &agent_args,
                             ar,
                             subagent_depth.saturating_add(1),
-                            brave_search_api_key.clone(),
+                            web_search_api_keys.clone(),
                             skill_cache.clone(),
                         )
                         .await
@@ -4409,21 +4572,30 @@ async fn execute_one_tool(
                     .await;
                 }
             }
-            let ctx = ToolContext::new(project_root.to_path_buf())
-                .with_todos(session_todos.clone())
-                .with_agent_tasks(session_agent_tasks.clone())
-                .with_plan_mode(agent_runtime.and_then(|r| r.plan_mode_flag.clone()))
-                .with_brave_search_api_key(brave_search_api_key.clone())
-                .with_tool_results_dir(tool_results_dir.to_path_buf())
-                .with_background_shell(
-                    crate::domain::background_shell::BackgroundShellHandle {
-                        app: app.clone(),
-                        chat_stream_event: format!("chat-stream-{}", message_id),
-                        session_id: session_id.to_string(),
-                        tool_use_id: tool_use_id.clone(),
-                    },
-                    tool_results_dir.to_path_buf(),
-                );
+            let ctx = {
+                let base = ToolContext::new(project_root.to_path_buf())
+                    .with_todos(session_todos.clone())
+                    .with_agent_tasks(session_agent_tasks.clone())
+                    .with_plan_mode(agent_runtime.and_then(|r| r.plan_mode_flag.clone()))
+                    .with_web_search_api_keys(web_search_api_keys.clone())
+                    .with_tool_results_dir(tool_results_dir.to_path_buf())
+                    .with_execution_environment(execution_environment.clone())
+                    .with_ssh_server(ssh_server.clone())
+                    .with_sandbox_backend(sandbox_backend.clone())
+                    .with_background_shell(
+                        crate::domain::background_shell::BackgroundShellHandle {
+                            app: app.clone(),
+                            chat_stream_event: format!("chat-stream-{}", message_id),
+                            session_id: session_id.to_string(),
+                            tool_use_id: tool_use_id.clone(),
+                        },
+                        tool_results_dir.to_path_buf(),
+                    );
+                match &round_cancel {
+                    Some(t) => base.with_cancel_token(t.clone()),
+                    None => base,
+                }
+            };
             match Tool::from_json_str(tool_name, arguments) {
             Ok(tool) => {
                 match tool.execute(&ctx).await {
@@ -4566,6 +4738,14 @@ pub async fn cancel_stream(
     app_state: State<'_, OmigaAppState>,
     message_id: String,
 ) -> CommandResult<()> {
+    // Kill foreground/background bash and any tool that listens on `ToolContext.cancel` for this round.
+    {
+        let ar = app_state.chat.active_rounds.lock().await;
+        if let Some(rs) = ar.get(&message_id) {
+            rs.round_cancel.cancel();
+        }
+    }
+
     let session_for_waiters = {
         let ar = app_state.chat.active_rounds.lock().await;
         ar.get(&message_id).map(|r| r.session_id.clone())
@@ -4666,9 +4846,10 @@ pub async fn cancel_session_rounds(
             cancelled_round_ids.push(round.id.clone());
         }
 
-        // Set cancellation flag
+        // Set cancellation flag + stop tool subprocesses
         let active_rounds = app_state.chat.active_rounds.lock().await;
         if let Some(round_state) = active_rounds.get(&round.message_id) {
+            round_state.round_cancel.cancel();
             let mut cancelled = round_state.cancelled.write().await;
             *cancelled = true;
         }
@@ -4885,36 +5066,122 @@ pub struct LlmConfigResponse {
     pub thinking: Option<bool>,
 }
 
-/// Brave Search API key status for Settings UI (never returns full secret).
+/// Tavily API key status for Settings UI (never returns full secret).
 #[derive(Debug, Serialize)]
-pub struct BraveSearchKeyState {
+pub struct TavilySearchKeyState {
     pub configured: bool,
     pub preview: String,
 }
 
-/// Store Brave Search API key for built-in `web_search` (empty clears user override; env still works).
+/// Set all web search API keys from Settings (empty string clears that field; env still applies when unset).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetWebSearchApiKeysArgs {
+    pub tavily: String,
+    pub exa: String,
+    pub parallel: String,
+    pub firecrawl: String,
+    pub firecrawl_url: String,
+}
+
+fn normalize_web_search_key_field(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
 #[tauri::command]
-pub async fn set_brave_search_api_key(
+pub async fn set_web_search_api_keys(
+    state: State<'_, OmigaAppState>,
+    args: SetWebSearchApiKeysArgs,
+) -> CommandResult<()> {
+    let mut g = state.chat.web_search_api_keys.lock().await;
+    g.tavily = normalize_web_search_key_field(&args.tavily);
+    g.exa = normalize_web_search_key_field(&args.exa);
+    g.parallel = normalize_web_search_key_field(&args.parallel);
+    g.firecrawl = normalize_web_search_key_field(&args.firecrawl);
+    g.firecrawl_url = normalize_web_search_key_field(&args.firecrawl_url);
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchKeyFieldState {
+    pub configured: bool,
+    pub preview: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchApiKeysState {
+    pub tavily: WebSearchKeyFieldState,
+    pub exa: WebSearchKeyFieldState,
+    pub parallel: WebSearchKeyFieldState,
+    pub firecrawl: WebSearchKeyFieldState,
+    pub firecrawl_url: WebSearchKeyFieldState,
+}
+
+fn web_search_key_field_state(key: &Option<String>) -> WebSearchKeyFieldState {
+    match key {
+        None => WebSearchKeyFieldState {
+            configured: false,
+            preview: String::new(),
+        },
+        Some(k) if k.trim().is_empty() => WebSearchKeyFieldState {
+            configured: false,
+            preview: String::new(),
+        },
+        Some(key) => WebSearchKeyFieldState {
+            configured: true,
+            preview: if key.len() > 8 {
+                format!("{}...", &key[..8])
+            } else {
+                key.clone()
+            },
+        },
+    }
+}
+
+#[tauri::command]
+pub async fn get_web_search_api_keys_state(
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<WebSearchApiKeysState> {
+    let g = state.chat.web_search_api_keys.lock().await;
+    Ok(WebSearchApiKeysState {
+        tavily: web_search_key_field_state(&g.tavily),
+        exa: web_search_key_field_state(&g.exa),
+        parallel: web_search_key_field_state(&g.parallel),
+        firecrawl: web_search_key_field_state(&g.firecrawl),
+        firecrawl_url: web_search_key_field_state(&g.firecrawl_url),
+    })
+}
+
+/// Store Tavily API key for built-in `web_search` (empty clears user override; env still works).
+#[tauri::command]
+pub async fn set_tavily_search_api_key(
     state: State<'_, OmigaAppState>,
     api_key: String,
 ) -> CommandResult<()> {
     let t = api_key.trim();
-    let mut g = state.chat.brave_search_api_key.lock().await;
+    let mut g = state.chat.web_search_api_keys.lock().await;
     if t.is_empty() {
-        *g = None;
+        g.tavily = None;
     } else {
-        *g = Some(t.to_string());
+        g.tavily = Some(t.to_string());
     }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn get_brave_search_api_key_state(
+pub async fn get_tavily_search_api_key_state(
     state: State<'_, OmigaAppState>,
-) -> CommandResult<BraveSearchKeyState> {
-    let g = state.chat.brave_search_api_key.lock().await;
-    let Some(ref key) = *g else {
-        return Ok(BraveSearchKeyState {
+) -> CommandResult<TavilySearchKeyState> {
+    let g = state.chat.web_search_api_keys.lock().await;
+    let Some(ref key) = g.tavily else {
+        return Ok(TavilySearchKeyState {
             configured: false,
             preview: String::new(),
         });
@@ -4924,7 +5191,7 @@ pub async fn get_brave_search_api_key_state(
     } else {
         key.clone()
     };
-    Ok(BraveSearchKeyState {
+    Ok(TavilySearchKeyState {
         configured: true,
         preview,
     })
@@ -5129,6 +5396,15 @@ pub struct SendMessageRequest {
     /// `ask` | `auto` | `bypass` — user-facing permission stance for this turn.
     #[serde(default, rename = "permissionMode")]
     pub permission_mode: Option<String>,
+    /// `local` | `ssh` | `sandbox` — chat composer execution surface (tools / terminal).
+    #[serde(default, rename = "executionEnvironment")]
+    pub execution_environment: Option<String>,
+    /// Selected SSH server name; used when `execution_environment == "ssh"`.
+    #[serde(default, rename = "sshServer")]
+    pub ssh_server: Option<String>,
+    /// `modal` | `daytona` | `docker` | `singularity` — composer sandbox backend; used when `execution_environment == "sandbox"`.
+    #[serde(default, rename = "sandboxBackend")]
+    pub sandbox_backend: Option<String>,
     /// When set, truncate SQLite transcript after this user row and reuse it instead of inserting a new user message.
     #[serde(default, rename = "retryFromUserMessageId")]
     pub retry_from_user_message_id: Option<String>,
@@ -5874,6 +6150,10 @@ pub async fn run_agent_schedule(
         repo: app_state.repo.clone(),
         plan_mode_flag: None,
         allow_nested_agent: false,
+        round_cancel: tokio_util::sync::CancellationToken::new(),
+        execution_environment: "local".to_string(),
+        ssh_server: None,
+        sandbox_backend: "docker".to_string(),
     };
 
     let max_agents = request.max_agents.unwrap_or(5);

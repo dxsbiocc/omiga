@@ -38,7 +38,7 @@ pub mod task_update;
 pub mod workflow;
 
 use crate::domain::background_shell::BackgroundShellHandle;
-use crate::domain::subagent_tool_filter::env_workflow_scripts_enabled;
+use crate::domain::agents::subagent_tool_filter::env_workflow_scripts_enabled;
 use crate::domain::session::AgentTask;
 use crate::errors::ToolError;
 use std::sync::Arc;
@@ -558,6 +558,17 @@ impl Tool {
     }
 }
 
+/// API keys for built-in `web_search` (Settings override env). See `web_search` module for provider order.
+#[derive(Debug, Clone, Default)]
+pub struct WebSearchApiKeys {
+    pub tavily: Option<String>,
+    pub exa: Option<String>,
+    pub parallel: Option<String>,
+    pub firecrawl: Option<String>,
+    /// Self-hosted Firecrawl base URL, e.g. `https://api.firecrawl.dev` (no trailing path).
+    pub firecrawl_url: Option<String>,
+}
+
 /// Execution context passed to all tools
 #[derive(Debug, Clone)]
 pub struct ToolContext {
@@ -565,6 +576,12 @@ pub struct ToolContext {
     pub cwd: std::path::PathBuf,
     /// Project root directory
     pub project_root: std::path::PathBuf,
+    /// `local` | `ssh` | `sandbox` — from chat composer; tools may branch on this for execution surface.
+    pub execution_environment: String,
+    /// Selected SSH server name; used when `execution_environment == "ssh"`.
+    pub ssh_server: Option<String>,
+    /// `modal` | `daytona` | `docker` | `singularity` — sandbox backend; used when `execution_environment == "sandbox"`.
+    pub sandbox_backend: String,
     /// Cancellation token
     pub cancel: tokio_util::sync::CancellationToken,
     /// Timeout duration (default: 60s)
@@ -580,8 +597,8 @@ pub struct ToolContext {
     pub tool_results_dir: Option<std::path::PathBuf>,
     /// When set, `EnterPlanMode` / `ExitPlanMode` toggle this (TS `permissionMode === 'plan'`).
     pub plan_mode: Option<Arc<tokio::sync::Mutex<bool>>>,
-    /// Brave Search API key from Omiga Settings (non-empty overrides `OMIGA_BRAVE_API_KEY` / `BRAVE_API_KEY`).
-    pub brave_search_api_key: Option<String>,
+    /// Search API keys from Omiga Settings (`web_search` tool).
+    pub web_search_api_keys: WebSearchApiKeys,
 }
 
 impl ToolContext {
@@ -591,6 +608,9 @@ impl ToolContext {
         Self {
             cwd: project_root.clone(),
             project_root,
+            execution_environment: "local".to_string(),
+            ssh_server: None,
+            sandbox_backend: String::new(),
             cancel: tokio_util::sync::CancellationToken::new(),
             timeout_secs: 60,
             todos: None,
@@ -599,7 +619,7 @@ impl ToolContext {
             background_output_dir: None,
             tool_results_dir: None,
             plan_mode: None,
-            brave_search_api_key: None,
+            web_search_api_keys: WebSearchApiKeys::default(),
         }
     }
 
@@ -656,9 +676,39 @@ impl ToolContext {
         self
     }
 
-    /// Brave Search API key from settings (used by `web_search`).
-    pub fn with_brave_search_api_key(mut self, key: Option<String>) -> Self {
-        self.brave_search_api_key = key.filter(|s| !s.trim().is_empty());
+    /// All web search API keys from settings (used by `web_search`).
+    pub fn with_web_search_api_keys(mut self, keys: WebSearchApiKeys) -> Self {
+        self.web_search_api_keys = keys;
+        self
+    }
+
+    /// `local` | `ssh` | `sandbox` — set from chat composer for this round / session.
+    pub fn with_execution_environment(mut self, env: impl Into<String>) -> Self {
+        self.execution_environment = env.into();
+        self
+    }
+
+    /// Selected SSH server name (used when `execution_environment == "ssh"`).
+    pub fn with_ssh_server(mut self, server: impl Into<Option<String>>) -> Self {
+        self.ssh_server = server.into();
+        self
+    }
+
+    /// Remote sandbox backend from composer (used when `execution_environment == "sandbox"`).
+    pub fn with_sandbox_backend(mut self, backend: impl Into<String>) -> Self {
+        self.sandbox_backend = backend.into();
+        self
+    }
+
+    /// Tavily only (convenience; merges into `web_search_api_keys`).
+    pub fn with_tavily_search_api_key(mut self, key: Option<String>) -> Self {
+        self.web_search_api_keys.tavily = key.filter(|s| !s.trim().is_empty());
+        self
+    }
+
+    /// Use the round cancellation token (chat UI). Drives `bash` kill-on-stop and matches `cancel_stream`.
+    pub fn with_cancel_token(mut self, token: tokio_util::sync::CancellationToken) -> Self {
+        self.cancel = token;
         self
     }
 }

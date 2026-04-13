@@ -20,7 +20,7 @@ async fn run_subagent_session(
     args: &crate::domain::tools::agent::AgentArgs,
     runtime: &AgentLlmRuntime,
     subagent_execute_depth: u8,
-    brave_search_api_key: Option<String>,
+    web_search_api_keys: Option<String>,
     skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
 ) -> Result<String, String> {
     // ===== 新增：使用 Agent 路由系统 =====
@@ -160,7 +160,7 @@ async fn run_subagent_session(
             Some(runtime),
             subagent_execute_depth,
             Some(subagent_skill_task_context.as_str()),
-            brave_search_api_key.clone(),
+            web_search_api_keys.clone(),
             skill_cache.clone(),
         )
         .await;

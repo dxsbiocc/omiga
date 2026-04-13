@@ -16,6 +16,8 @@ async fn web_search_execute_rejects_both_domain_filters() {
         query: "hello".into(),
         allowed_domains: Some(vec!["a.com".into()]),
         blocked_domains: Some(vec!["b.com".into()]),
+        max_results: None,
+        search_url: None,
     };
     assert!(WebSearchTool::execute(&ctx, args).await.is_err());
 }

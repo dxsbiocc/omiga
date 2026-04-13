@@ -16,6 +16,8 @@ use tauri::State;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PermissionCheckResponse {
+    /// 与 `check_tool` / 批准回传一致，便于前端不依赖 `permission-request` 事件也能带上会话 id
+    pub session_id: String,
     pub allowed: bool,
     pub requires_approval: bool,
     pub request_id: Option<String>,
@@ -132,11 +134,13 @@ fn convert_risk_info(risk: &DetectedRisk) -> RiskInfoDto {
 
 fn convert_decision_to_response(
     decision: PermissionDecision,
+    session_id: &str,
     tool_name: &str,
     arguments: &Value,
 ) -> PermissionCheckResponse {
     match decision {
         PermissionDecision::Allow => PermissionCheckResponse {
+            session_id: session_id.to_string(),
             allowed: true,
             requires_approval: false,
             request_id: None,
@@ -148,6 +152,7 @@ fn convert_decision_to_response(
             arguments: Some(arguments.clone()),
         },
         PermissionDecision::Deny(reason) => PermissionCheckResponse {
+            session_id: session_id.to_string(),
             allowed: false,
             requires_approval: false,
             request_id: None,
@@ -159,6 +164,7 @@ fn convert_decision_to_response(
             arguments: Some(arguments.clone()),
         },
         PermissionDecision::RequireApproval(req) => PermissionCheckResponse {
+            session_id: session_id.to_string(),
             allowed: false,
             requires_approval: true,
             request_id: Some(req.request_id.clone()),
@@ -201,7 +207,12 @@ pub async fn permission_check(
     };
 
     let decision = manager.check_permission(&context).await;
-    let response = convert_decision_to_response(decision, &tool_name, &arguments);
+    let response = convert_decision_to_response(
+        decision,
+        &context.session_id,
+        &tool_name,
+        &arguments,
+    );
     
     Ok(response)
 }

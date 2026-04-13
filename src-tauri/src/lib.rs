@@ -11,6 +11,7 @@ pub mod commands;
 pub mod constants;
 pub mod domain;
 pub mod errors;
+pub mod execution;
 pub mod infrastructure;
 pub mod llm;
 pub mod utils;
@@ -116,8 +117,10 @@ pub fn run() {
             commands::chat::set_llm_config,
             commands::chat::save_llm_settings_to_config,
             commands::chat::get_llm_config_state,
-            commands::chat::set_brave_search_api_key,
-            commands::chat::get_brave_search_api_key_state,
+            commands::chat::set_tavily_search_api_key,
+            commands::chat::get_tavily_search_api_key_state,
+            commands::chat::set_web_search_api_keys,
+            commands::chat::get_web_search_api_keys_state,
             commands::chat::test_model,
             commands::chat::list_provider_configs,
             commands::chat::switch_provider,
@@ -173,6 +176,21 @@ pub fn run() {
             commands::claude_import::get_claude_default_paths,
             commands::integrations_settings::get_integrations_catalog,
             commands::integrations_settings::save_integrations_state,
+
+            // Execution environments configuration
+            commands::execution_envs::get_execution_envs_config,
+            commands::execution_envs::save_execution_envs_config,
+            commands::execution_envs::get_modal_config,
+            commands::execution_envs::save_modal_config,
+            commands::execution_envs::get_daytona_config,
+            commands::execution_envs::save_daytona_config,
+            commands::execution_envs::get_ssh_configs,
+            commands::execution_envs::get_ssh_config,
+            commands::execution_envs::save_ssh_config,
+            commands::execution_envs::delete_ssh_config,
+            commands::execution_envs::is_modal_configured,
+            commands::execution_envs::is_daytona_configured,
+            commands::execution_envs::get_execution_envs_config_path,
 
             commands::memory::memory_get_status,
             commands::memory::memory_build_index,

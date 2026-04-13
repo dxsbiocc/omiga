@@ -1,7 +1,6 @@
 import { Box, Typography, Chip, Stack } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import {
-  PlayCircle,
   RadioButtonUnchecked,
   CheckCircle,
   ErrorOutline,

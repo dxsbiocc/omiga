@@ -9,6 +9,185 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Execution environment configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExecutionEnvsConfig {
+    /// Modal cloud configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modal: Option<ModalExecConfig>,
+
+    /// Daytona cloud configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daytona: Option<DaytonaExecConfig>,
+
+    /// SSH configurations (keyed by name)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<HashMap<String, SshExecConfig>>,
+}
+
+/// Modal cloud execution configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModalExecConfig {
+    /// Modal token ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<String>,
+
+    /// Modal token secret
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_secret: Option<String>,
+
+    /// Default image to use
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_image: Option<String>,
+
+    /// Whether Modal is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// Daytona cloud execution configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DaytonaExecConfig {
+    /// Daytona server URL
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
+
+    /// Daytona API key
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    /// Default image to use
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_image: Option<String>,
+
+    /// Whether Daytona is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// SSH execution configuration for a specific host
+/// Matches standard SSH config format (~/.ssh/config)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SshExecConfig {
+    /// Host pattern (the name used to reference this config)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+
+    /// Hostname (actual server address)
+    #[serde(rename = "HostName")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_name: Option<String>,
+
+    /// Username
+    #[serde(rename = "User")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+
+    /// Port (default: 22)
+    #[serde(rename = "Port")]
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+
+    /// Path to private key file (IdentityFile)
+    #[serde(rename = "IdentityFile")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_file: Option<String>,
+
+    /// Whether this SSH config is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+impl SshExecConfig {
+    /// Get the effective hostname (HostName or Host)
+    pub fn effective_hostname(&self) -> Option<&str> {
+        self.host_name.as_ref().or(self.host.as_ref()).map(|s| s.as_str())
+    }
+
+    /// Parse SSH config file (~/.ssh/config)
+    pub fn parse_ssh_config() -> Result<HashMap<String, SshExecConfig>, Box<dyn std::error::Error>> {
+        let ssh_config_path = dirs::home_dir()
+            .map(|h| h.join(".ssh").join("config"))
+            .ok_or("Could not determine home directory")?;
+        
+        Self::parse_ssh_config_file(&ssh_config_path)
+    }
+
+    /// Parse SSH config from a specific file
+    pub fn parse_ssh_config_file(path: &std::path::Path) -> Result<HashMap<String, SshExecConfig>, Box<dyn std::error::Error>> {
+        let mut configs = HashMap::new();
+        
+        if !path.exists() {
+            return Ok(configs);
+        }
+
+        let content = std::fs::read_to_string(path)?;
+        let mut current_host: Option<String> = None;
+        let mut current_config = SshExecConfig::default();
+
+        for line in content.lines() {
+            let line = line.trim();
+            
+            // Skip empty lines and comments
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            // Parse Host line
+            if line.to_lowercase().starts_with("host ") {
+                // Save previous config if exists
+                if let Some(host) = current_host.take() {
+                    configs.insert(host, std::mem::take(&mut current_config));
+                }
+                
+                let host_pattern = line[5..].trim().to_string();
+                // Skip wildcard patterns for now
+                if !host_pattern.contains('*') && !host_pattern.contains('?') {
+                    current_host = Some(host_pattern);
+                }
+            }
+            // Parse other config options
+            else if let Some(_host) = current_host.as_ref() {
+                // SSH config allows "Key Value", "Key=Value", and multiple spaces/tabs
+                let parts: Vec<&str> = line.splitn(2, |c: char| c == '=' || c == ' ' || c == '\t').collect();
+                if parts.len() == 2 {
+                    let key = parts[0].trim();
+                    let value = parts[1].trim().trim_start_matches('=').trim();
+                    
+                    match key.to_lowercase().as_str() {
+                        "hostname" => current_config.host_name = Some(value.to_string()),
+                        "user" => current_config.user = Some(value.to_string()),
+                        "port" => current_config.port = value.parse().unwrap_or(22),
+                        "identityfile" => {
+                            // Expand ~ to home directory
+                            let expanded = if value.starts_with("~/") {
+                                dirs::home_dir()
+                                    .map(|h| h.join(&value[2..]).to_string_lossy().to_string())
+                                    .unwrap_or_else(|| value.to_string())
+                            } else {
+                                value.to_string()
+                            };
+                            current_config.identity_file = Some(expanded);
+                        }
+                        _ => {} // Ignore other options
+                    }
+                }
+            }
+        }
+
+        // Save last config
+        if let Some(host) = current_host {
+            configs.insert(host, current_config);
+        }
+
+        Ok(configs)
+    }
+}
+
 /// Configuration file structure
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +205,10 @@ pub struct LlmConfigFile {
 
     /// Global settings
     pub settings: Option<GlobalSettings>,
+
+    /// Execution environments configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_envs: Option<ExecutionEnvsConfig>,
 }
 
 fn default_version() -> String {
@@ -282,6 +465,7 @@ impl LlmConfigFile {
                 timeout: Some(120),
                 enable_tools: Some(true),
             }),
+            execution_envs: None,
         }
     }
 
@@ -343,7 +527,62 @@ impl LlmConfigFile {
                 timeout: Some(120),
                 enable_tools: Some(true),
             }),
+            execution_envs: None,
         }
+    }
+
+    /// Get Modal token ID from config or environment
+    pub fn modal_token_id(&self) -> Option<String> {
+        self.execution_envs
+            .as_ref()
+            .and_then(|e| e.modal.as_ref())
+            .and_then(|m| m.token_id.clone())
+            .or_else(|| std::env::var("MODAL_TOKEN_ID").ok())
+    }
+
+    /// Get Modal token secret from config or environment
+    pub fn modal_token_secret(&self) -> Option<String> {
+        self.execution_envs
+            .as_ref()
+            .and_then(|e| e.modal.as_ref())
+            .and_then(|m| m.token_secret.clone())
+            .or_else(|| std::env::var("MODAL_TOKEN_SECRET").ok())
+    }
+
+    /// Check if Modal is configured
+    pub fn is_modal_configured(&self) -> bool {
+        self.modal_token_id().is_some() && self.modal_token_secret().is_some()
+    }
+
+    /// Get Daytona server URL from config or environment
+    pub fn daytona_server_url(&self) -> Option<String> {
+        self.execution_envs
+            .as_ref()
+            .and_then(|e| e.daytona.as_ref())
+            .and_then(|d| d.server_url.clone())
+            .or_else(|| std::env::var("DAYTONA_SERVER_URL").ok())
+    }
+
+    /// Get Daytona API key from config or environment
+    pub fn daytona_api_key(&self) -> Option<String> {
+        self.execution_envs
+            .as_ref()
+            .and_then(|e| e.daytona.as_ref())
+            .and_then(|d| d.api_key.clone())
+            .or_else(|| std::env::var("DAYTONA_API_KEY").ok())
+    }
+
+    /// Check if Daytona is configured
+    pub fn is_daytona_configured(&self) -> bool {
+        self.daytona_server_url().is_some() && self.daytona_api_key().is_some()
+    }
+
+    /// Get SSH config by name
+    pub fn get_ssh_config(&self, name: &str) -> Option<&SshExecConfig> {
+        self.execution_envs
+            .as_ref()
+            .and_then(|e| e.ssh.as_ref())
+            .and_then(|ssh| ssh.get(name))
     }
 
     /// Generate example YAML content

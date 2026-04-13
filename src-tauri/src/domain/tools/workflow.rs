@@ -1,7 +1,7 @@
 //! Workflow tool — parity with `WORKFLOW_TOOL_NAME` / `src/tools/WorkflowTool/constants.ts`.
 //!
 //! In Claude Code, workflows are gated by `feature('WORKFLOW_SCRIPTS')`. Omiga mirrors that with
-//! [`crate::domain::subagent_tool_filter::env_workflow_scripts_enabled`].
+//! [`crate::domain::agents::subagent_tool_filter::env_workflow_scripts_enabled`].
 //!
 //! Full workflow execution uses the bundled TS runtime (not shipped in this repo). This
 //! implementation discovers workflow files under `.claude/workflows` or `workflows` and returns
