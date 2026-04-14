@@ -12,6 +12,8 @@ import {
   type SetStateAction,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { confirm } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Box,
   IconButton,
@@ -38,7 +40,7 @@ import {
   alpha,
   useTheme,
 } from "@mui/material";
-import type { Theme } from "@mui/material/styles";
+import { lighten, type Theme } from "@mui/material/styles";
 import {
   Add,
   ExpandMore,
@@ -70,20 +72,38 @@ import {
   Plus,
   Terminal,
   Server,
+  Container,
+  Cloud,
+  Gauge,
+  Atom,
+  Settings,
 } from "lucide-react";
 import {
   useUiStore,
   useChatComposerStore,
   type PermissionMode,
   type SandboxBackend,
+  type LocalVenvType,
 } from "../../state";
+import {
+  RSYNC_INSTALL_HELP_URL,
+  RSYNC_SSH_WARN_STORAGE_KEY,
+} from "../../lib/rsyncSsh";
 
-const SANDBOX_BACKENDS: { id: SandboxBackend; label: string; icon?: React.ReactNode }[] = [
+const SANDBOX_BACKENDS: { id: SandboxBackend; label: string }[] = [
   { id: "docker", label: "Docker" },
   { id: "modal", label: "Modal" },
   { id: "daytona", label: "Daytona" },
   { id: "singularity", label: "Singularity" },
 ];
+
+/** 与各沙箱后端对应的图标（与二级菜单一致） */
+const SANDBOX_BACKEND_ICON: Record<SandboxBackend, LucideIcon> = {
+  docker: Container,
+  modal: Cloud,
+  daytona: Gauge,
+  singularity: Atom,
+};
 
 const SANDBOX_LABEL: Record<SandboxBackend, string> = {
   modal: "Modal",
@@ -92,16 +112,47 @@ const SANDBOX_LABEL: Record<SandboxBackend, string> = {
   singularity: "Singularity",
 };
 
-/** SSH 服务器配置 */
+/** 与 SessionList「Language」二级菜单一致：离开一级行后再关闭子菜单的延迟（ms） */
+const ENV_SUBMENU_PARENT_LEAVE_MS = 200;
+
+/** React StrictMode 下 effect 会双跑，避免同页两次 `invoke` + 弹窗 */
+let rsyncAvailabilityCheckStarted = false;
+
+/** SSH 服务器配置（与 Rust `SshExecConfig` / 设置页一致：serde 使用 HostName、User、Port） */
 interface SshServerConfig {
   host?: string;
   host_name?: string;
+  HostName?: string;
   user?: string;
+  User?: string;
   port?: number;
+  Port?: number;
   enabled?: boolean;
 }
 
 type SshServersMap = Record<string, SshServerConfig>;
+
+function sshResolvedHost(cfg: SshServerConfig): string | undefined {
+  return cfg.HostName ?? cfg.host_name ?? cfg.host ?? undefined;
+}
+
+function sshResolvedUser(cfg: SshServerConfig): string {
+  return cfg.User ?? cfg.user ?? "root";
+}
+
+function sshResolvedPort(cfg: SshServerConfig): number {
+  const p = cfg.Port ?? cfg.port;
+  return typeof p === "number" && !Number.isNaN(p) ? p : 22;
+}
+
+/** 展示为 user@host 或 user@host:port，供二级菜单与副标题使用 */
+function sshConnectionLabel(cfg: SshServerConfig): string | undefined {
+  const host = sshResolvedHost(cfg);
+  if (!host) return undefined;
+  const user = sshResolvedUser(cfg);
+  const port = sshResolvedPort(cfg);
+  return `${user}@${host}${port !== 22 ? `:${port}` : ""}`;
+}
 import { usePencilPalette } from "../../theme";
 import { ProviderSwitcher } from "./ProviderSwitcher";
 import type { BackgroundAgentTask } from "./backgroundAgentTypes";
@@ -160,12 +211,44 @@ const PERMISSION_META: Record<PermissionMode, { label: string; hint: string }> =
     },
   };
 
+/** 解析 hex 相对亮度（0–1），非 hex 时返回 0.5 避免误判 */
+function hexRelativeLuminance(color: string): number {
+  if (typeof color !== "string" || !color.startsWith("#")) return 0.5;
+  const h = color.replace("#", "");
+  if (h.length !== 6 || !/^[0-9a-fA-F]{6}$/.test(h)) return 0.5;
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/**
+ * 「每次询问」用 info 语义色；部分 accent 预设里 info.main 接近黑色，暗色模式下与底栏对比不足。
+ * 暗色模式目标亮度更高（minLum），必要时多级 lighten，保证图标与文字足够醒目。
+ */
+function askPermissionAccent(theme: Theme): string {
+  const { info, mode } = theme.palette;
+  /** 暗色下希望更接近「亮蓝/亮青」观感，略抬高阈值 */
+  const minLum = 0.58;
+  if (mode !== "dark") return info.main;
+  if (hexRelativeLuminance(info.main) >= minLum) return info.main;
+  if (hexRelativeLuminance(info.light) >= minLum) return info.light;
+
+  let next = lighten(info.light, 0.38);
+  if (hexRelativeLuminance(next) >= minLum) return next;
+
+  next = lighten(info.main, 0.82);
+  if (hexRelativeLuminance(next) >= minLum) return next;
+
+  return lighten(next, 0.22);
+}
+
 /** 权限等级语义色：保守询问 / 默认自动 / 高风险跳过 */
 function permissionModeAccent(theme: Theme, mode: PermissionMode): string {
   const p = theme.palette;
   switch (mode) {
     case "ask":
-      return p.info.main;
+      return askPermissionAccent(theme);
     case "auto":
       return p.primary.main;
     case "bypass":
@@ -259,6 +342,8 @@ export interface ChatComposerProps {
   inputRef: React.Ref<HTMLTextAreaElement>;
   isStreaming: boolean;
   isConnecting: boolean;
+  /** True while waiting for first model chunk (show cancel with connecting/streaming). */
+  waitingFirstChunk?: boolean;
   /** Stop streaming (toolbar while generating; main session can queue the next message instead). */
   onCancel?: () => void;
   /** Background Agent tasks for this session (teammate follow-up routing). */
@@ -299,6 +384,7 @@ export function ChatComposer({
   inputRef,
   isStreaming,
   isConnecting,
+  waitingFirstChunk = false,
   onCancel,
   backgroundTasks = [],
   followUpTaskId = null,
@@ -341,6 +427,9 @@ export function ChatComposer({
   /** 使 textarea 首行与 28px Chip 垂直居中对齐（flex-start 时补偿行高差） */
   const COMPOSER_TEXTAREA_PAD_TOP_WITH_CHIPS =
     (COMPOSER_INLINE_CHIP_PX - COMPOSER_LINE_BOX_PX) / 2;
+  /** 主会话一轮进行中：连接中 / 首包前等待 / 流式输出 — 与输入区「取消任务」按钮一致 */
+  const agentTurnActive =
+    isStreaming || isConnecting || waitingFirstChunk;
   /** Hairline border / shadow tint — theme-aware */
   const edge = (a: number) =>
     alpha(isDark ? theme.palette.common.white : theme.palette.common.black, a);
@@ -348,6 +437,9 @@ export function ChatComposer({
   const composerBg = alpha(paper, isDark ? 0.97 : 0.99);
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
   const setSettingsTabIndex = useUiStore((s) => s.setSettingsTabIndex);
+  const setSettingsExecutionSubTab = useUiStore(
+    (s) => s.setSettingsExecutionSubTab,
+  );
   const setRightPanelMode = useUiStore((s) => s.setRightPanelMode);
   const {
     permissionMode,
@@ -365,6 +457,9 @@ export function ChatComposer({
     setSshServer,
     sandboxBackend,
     setSandboxBackend,
+    localVenvType,
+    localVenvName,
+    setLocalVenv,
     selectedBranchByRoot,
     setBranchForRoot,
   } = useChatComposerStore();
@@ -376,116 +471,205 @@ export function ChatComposer({
     null,
   );
   const [envAnchor, setEnvAnchor] = useState<null | HTMLElement>(null);
-  const [sandboxMenuAnchor, setSandboxMenuAnchor] = useState<null | HTMLElement>(
-    null,
-  );
-  const [sshMenuAnchor, setSshMenuAnchor] = useState<null | HTMLElement>(
+  const [sandboxMenuAnchor, setSandboxMenuAnchor] =
+    useState<null | HTMLElement>(null);
+  const [sshMenuAnchor, setSshMenuAnchor] = useState<null | HTMLElement>(null);
+  const [venvMenuAnchor, setVenvMenuAnchor] = useState<null | HTMLElement>(
     null,
   );
   const [sshServers, setSshServers] = useState<SshServersMap>({});
   const [sshServersLoading, setSshServersLoading] = useState(false);
+  const [localVenvs, setLocalVenvs] = useState<
+    { kind: string; label: string; name: string }[]
+  >([]);
+  const [localVenvsLoading, setLocalVenvsLoading] = useState(false);
 
-  // Sandbox submenu hover management
-  const sandboxMenuCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const isHoveringSandbox = useRef<boolean>(false);
-  const sandboxAnchorRef = useRef<HTMLElement | null>(null);
-  const openSandboxSub = useCallback((el: HTMLElement | null) => {
-    if (!el) return;
-    isHoveringSandbox.current = true;
-    // 直接设置 anchor，确保菜单能显示
-    sandboxAnchorRef.current = el;
-    if (sandboxMenuCloseTimer.current) {
-      clearTimeout(sandboxMenuCloseTimer.current);
-      sandboxMenuCloseTimer.current = null;
+  // 沙箱 / SSH 二级菜单：与 SessionList「Language」相同（定时器 + 嵌套 Menu + pointerEvents），避免 Popover 与一级 Menu 模态层事件死循环
+  const sandboxSubmenuLeaveTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  const clearSandboxSubmenuLeaveTimer = useCallback(() => {
+    if (sandboxSubmenuLeaveTimerRef.current) {
+      clearTimeout(sandboxSubmenuLeaveTimerRef.current);
+      sandboxSubmenuLeaveTimerRef.current = null;
     }
-    setSandboxMenuAnchor(el);
   }, []);
+  const openSandboxSub = useCallback(
+    (el: HTMLElement | null) => {
+      if (!el) return;
+      clearSandboxSubmenuLeaveTimer();
+      setSandboxMenuAnchor((prev) => (prev === el ? prev : el));
+    },
+    [clearSandboxSubmenuLeaveTimer],
+  );
   const scheduleCloseSandboxSub = useCallback(() => {
-    isHoveringSandbox.current = false;
-    if (sandboxMenuCloseTimer.current) {
-      clearTimeout(sandboxMenuCloseTimer.current);
-    }
-    sandboxMenuCloseTimer.current = setTimeout(() => {
-      sandboxMenuCloseTimer.current = null;
-      if (!isHoveringSandbox.current) {
-        setSandboxMenuAnchor(null);
-        sandboxAnchorRef.current = null;
-      }
-    }, 200);
-  }, []);
-  const enterSandboxSubMenu = useCallback(() => {
-    isHoveringSandbox.current = true;
-    if (sandboxMenuCloseTimer.current) {
-      clearTimeout(sandboxMenuCloseTimer.current);
-      sandboxMenuCloseTimer.current = null;
-    }
-  }, []);
+    clearSandboxSubmenuLeaveTimer();
+    sandboxSubmenuLeaveTimerRef.current = setTimeout(() => {
+      sandboxSubmenuLeaveTimerRef.current = null;
+      setSandboxMenuAnchor(null);
+    }, ENV_SUBMENU_PARENT_LEAVE_MS);
+  }, [clearSandboxSubmenuLeaveTimer]);
 
-  // SSH submenu hover management
-  const sshMenuCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(
+  const sshSubmenuLeaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  const isHoveringSsh = useRef<boolean>(false);
-  const sshAnchorRef = useRef<HTMLElement | null>(null);
-  const openSshSub = useCallback((el: HTMLElement | null) => {
-    if (!el) return;
-    isHoveringSsh.current = true;
-    // 直接设置 anchor，确保菜单能显示
-    sshAnchorRef.current = el;
-    if (sshMenuCloseTimer.current) {
-      clearTimeout(sshMenuCloseTimer.current);
-      sshMenuCloseTimer.current = null;
+  const clearSshSubmenuLeaveTimer = useCallback(() => {
+    if (sshSubmenuLeaveTimerRef.current) {
+      clearTimeout(sshSubmenuLeaveTimerRef.current);
+      sshSubmenuLeaveTimerRef.current = null;
     }
-    setSshMenuAnchor(el);
   }, []);
+  const openSshSub = useCallback(
+    (el: HTMLElement | null) => {
+      if (!el) return;
+      clearSshSubmenuLeaveTimer();
+      setSshMenuAnchor((prev) => (prev === el ? prev : el));
+    },
+    [clearSshSubmenuLeaveTimer],
+  );
   const scheduleCloseSshSub = useCallback(() => {
-    isHoveringSsh.current = false;
-    if (sshMenuCloseTimer.current) {
-      clearTimeout(sshMenuCloseTimer.current);
-    }
-    sshMenuCloseTimer.current = setTimeout(() => {
-      sshMenuCloseTimer.current = null;
-      if (!isHoveringSsh.current) {
-        setSshMenuAnchor(null);
-        sshAnchorRef.current = null;
-      }
-    }, 200);
-  }, []);
-  const enterSshSubMenu = useCallback(() => {
-    isHoveringSsh.current = true;
-    if (sshMenuCloseTimer.current) {
-      clearTimeout(sshMenuCloseTimer.current);
-      sshMenuCloseTimer.current = null;
-    }
-  }, []);
+    clearSshSubmenuLeaveTimer();
+    sshSubmenuLeaveTimerRef.current = setTimeout(() => {
+      sshSubmenuLeaveTimerRef.current = null;
+      setSshMenuAnchor(null);
+    }, ENV_SUBMENU_PARENT_LEAVE_MS);
+  }, [clearSshSubmenuLeaveTimer]);
 
-  // Load SSH servers when environment menu opens
-  useEffect(() => {
-    if (!envAnchor) return;
-    let cancelled = false;
-    setSshServersLoading(true);
+  const venvSubmenuLeaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const clearVenvSubmenuLeaveTimer = useCallback(() => {
+    if (venvSubmenuLeaveTimerRef.current) {
+      clearTimeout(venvSubmenuLeaveTimerRef.current);
+      venvSubmenuLeaveTimerRef.current = null;
+    }
+  }, []);
+  const openVenvSub = useCallback(
+    (el: HTMLElement | null) => {
+      if (!el) return;
+      clearVenvSubmenuLeaveTimer();
+      setVenvMenuAnchor((prev) => (prev === el ? prev : el));
+    },
+    [clearVenvSubmenuLeaveTimer],
+  );
+  const scheduleCloseVenvSub = useCallback(() => {
+    clearVenvSubmenuLeaveTimer();
+    venvSubmenuLeaveTimerRef.current = setTimeout(() => {
+      venvSubmenuLeaveTimerRef.current = null;
+      setVenvMenuAnchor(null);
+    }, ENV_SUBMENU_PARENT_LEAVE_MS);
+  }, [clearVenvSubmenuLeaveTimer]);
+
+  const sshFetchSeq = useRef(0);
+
+  const loadSshServers = useCallback((opts?: { showLoading?: boolean }) => {
+    const showLoading = opts?.showLoading !== false;
+    const seq = ++sshFetchSeq.current;
+    if (showLoading) setSshServersLoading(true);
     invoke<SshServersMap>("get_ssh_configs")
       .then((configs) => {
-        if (!cancelled) {
-          // Filter only enabled servers
-          const enabledServers = Object.fromEntries(
-            Object.entries(configs).filter(([, cfg]) => cfg.enabled !== false)
-          );
-          setSshServers(enabledServers);
-        }
+        if (seq !== sshFetchSeq.current) return;
+        // 与 Execution 设置页一致：展示 get_ssh_configs 全部条目（含 ~/.ssh/config 合并结果）
+        setSshServers(configs ?? {});
       })
       .catch(() => {
-        if (!cancelled) setSshServers({});
+        if (seq !== sshFetchSeq.current) return;
+        setSshServers({});
       })
       .finally(() => {
-        if (!cancelled) setSshServersLoading(false);
+        if (seq !== sshFetchSeq.current) return;
+        setSshServersLoading(false);
       });
+  }, []);
+
+  const venvFetchSeq = useRef(0);
+
+  const loadLocalVenvs = useCallback((projectRoot: string) => {
+    const seq = ++venvFetchSeq.current;
+    setLocalVenvsLoading(true);
+    invoke<{ kind: string; label: string; name: string }[]>("list_local_venvs", {
+      projectRoot,
+    })
+      .then((items) => {
+        if (seq !== venvFetchSeq.current) return;
+        setLocalVenvs(items ?? []);
+      })
+      .catch(() => {
+        if (seq !== venvFetchSeq.current) return;
+        setLocalVenvs([]);
+      })
+      .finally(() => {
+        if (seq !== venvFetchSeq.current) return;
+        setLocalVenvsLoading(false);
+      });
+  }, []);
+
+  /** Settings → Execution（侧栏 index 9），内层 Tab：0 Modal / 1 Daytona / 2 SSH */
+  const openExecutionSettings = useCallback(
+    (executionSubTab: 0 | 1 | 2) => {
+      setSettingsTabIndex(9);
+      setSettingsExecutionSubTab(executionSubTab);
+      setSettingsOpen(true);
+      setRightPanelMode("settings");
+    },
+    [
+      setSettingsTabIndex,
+      setSettingsExecutionSubTab,
+      setSettingsOpen,
+      setRightPanelMode,
+    ],
+  );
+
+  // 预取 SSH 列表，避免首次 hover 长时间「加载中」
+  useEffect(() => {
+    loadSshServers({ showLoading: true });
+  }, [loadSshServers]);
+
+  // 打开执行环境菜单时静默刷新（不闪 loading），与设置里新增的配置同步
+  useEffect(() => {
+    if (!envAnchor) return;
+    loadSshServers({ showLoading: false });
+  }, [envAnchor, loadSshServers]);
+
+  // 首次使用 SSH 环境时检测 rsync；缺失则弹窗（确认打开安装说明 / 取消），见 `is_rsync_available`
+  useEffect(() => {
+    if (environment !== "ssh") return;
+    if (rsyncAvailabilityCheckStarted) return;
+    rsyncAvailabilityCheckStarted = true;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const ok = await invoke<boolean>("is_rsync_available");
+        if (cancelled || ok) return;
+        if (
+          typeof localStorage !== "undefined" &&
+          localStorage.getItem(RSYNC_SSH_WARN_STORAGE_KEY) === "1"
+        ) {
+          return;
+        }
+        const openDocs = await confirm(
+          "SSH 远程环境的「文件同步」（技能、credentials、缓存等）依赖本机已安装 rsync。\n\n未检测到 rsync：将不会同步上述文件，远端命令仍可执行。\n\n是否在浏览器中打开 rsync 安装说明？\n（点「取消」关闭提示；安装完成后可继续使用 SSH，同步将自动生效。）",
+          {
+            title: "需要安装 rsync",
+            kind: "warning",
+            okLabel: "查看安装说明",
+            cancelLabel: "取消",
+          },
+        );
+        if (typeof localStorage !== "undefined") {
+          localStorage.setItem(RSYNC_SSH_WARN_STORAGE_KEY, "1");
+        }
+        if (!cancelled && openDocs) {
+          await openUrl(RSYNC_INSTALL_HELP_URL);
+        }
+      } catch {
+        /* 非 Tauri 或对话框不可用时忽略 */
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [envAnchor]);
+  }, [environment]);
 
   const [gitInfo, setGitInfo] = useState<GitWorkspaceInfo | null>(null);
   const [availableAgents, setAvailableAgents] = useState<AvailableAgentRow[]>(
@@ -516,6 +700,10 @@ export function ChatComposer({
       setGitInfo(null);
       return;
     }
+    if (environment === "ssh") {
+      setGitInfo(null);
+      return;
+    }
     let cancelled = false;
     invoke<GitWorkspaceInfo>("git_workspace_info", { path: workspacePath })
       .then((r) => {
@@ -527,7 +715,7 @@ export function ChatComposer({
     return () => {
       cancelled = true;
     };
-  }, [workspacePath, needsWorkspacePath]);
+  }, [workspacePath, needsWorkspacePath, environment]);
 
   const rootKey = gitInfo?.displayPath ?? workspacePath;
   const branchValue = useMemo(() => {
@@ -599,16 +787,34 @@ export function ChatComposer({
       setFileGlobMatches([]);
       return;
     }
+    if (environment === "ssh" && !sshServer?.trim()) {
+      setFileGlobMatches([]);
+      return;
+    }
     let cancelled = false;
     setFileGlobLoading(true);
-    invoke<{
-      entries: Array<{
-        name: string;
-        path: string;
-        is_directory: boolean;
-        size?: number | null;
-      }>;
-    }>("list_directory", { path: workspacePath })
+    const useSsh = environment === "ssh" && Boolean(sshServer?.trim());
+    const listPromise = useSsh
+      ? invoke<{
+          entries: Array<{
+            name: string;
+            path: string;
+            is_directory: boolean;
+            size?: number | null;
+          }>;
+        }>("ssh_list_directory", {
+          sshProfileName: sshServer!.trim(),
+          path: workspacePath,
+        })
+      : invoke<{
+          entries: Array<{
+            name: string;
+            path: string;
+            is_directory: boolean;
+            size?: number | null;
+          }>;
+        }>("list_directory", { path: workspacePath });
+    listPromise
       .then((res) => {
         if (cancelled) return;
         const list: GlobMatchRow[] = (res.entries ?? []).map((e) => ({
@@ -631,7 +837,13 @@ export function ChatComposer({
     return () => {
       cancelled = true;
     };
-  }, [fileParse.active, needsWorkspacePath, workspacePath]);
+  }, [
+    fileParse.active,
+    needsWorkspacePath,
+    workspacePath,
+    environment,
+    sshServer,
+  ]);
 
   const filteredFilePaths = useMemo(() => {
     if (!fileParse.active) return [];
@@ -1689,9 +1901,17 @@ export function ChatComposer({
                     key={`${row.is_file ? "f" : "d"}:${row.path}`}
                     data-file-index={i}
                     selected={i === fileHighlightIndex}
+                    alignItems="center"
                     onClick={() => pickFilePath(row.path)}
                   >
-                    <ListItemIcon sx={{ minWidth: 34, mr: 0.25, py: 0 }}>
+                    <ListItemIcon
+                      sx={{
+                        minWidth: 34,
+                        mr: 0.25,
+                        py: 0,
+                        alignSelf: "center",
+                      }}
+                    >
                       <ComposerFilePickerRowIcon
                         path={row.path}
                         isFile={row.is_file}
@@ -1702,7 +1922,7 @@ export function ChatComposer({
                       secondary={
                         row.is_file ? formatBytesShort(row.size) : "文件夹"
                       }
-                      sx={{ my: 0.5 }}
+                      sx={{ m: 0 }}
                       primaryTypographyProps={{
                         sx: {
                           fontFamily:
@@ -1839,7 +2059,11 @@ export function ChatComposer({
                   "& svg": { display: "block" },
                 }}
               >
-                <ChevronDown size={18} strokeWidth={2} color={permissionAccent} />
+                <ChevronDown
+                  size={18}
+                  strokeWidth={2}
+                  color={permissionAccent}
+                />
               </Box>
             }
             sx={{
@@ -1991,11 +2215,12 @@ export function ChatComposer({
                 },
               }}
             />
-            {isStreaming && onCancel ? (
-              <Tooltip title="停止生成">
+            {agentTurnActive && onCancel ? (
+              <Tooltip title="取消任务">
                 <IconButton
                   size="small"
                   onClick={onCancel}
+                  aria-label="取消任务"
                   sx={{
                     width: "var(--composer-toolbar-h)",
                     height: "var(--composer-toolbar-h)",
@@ -2087,6 +2312,94 @@ export function ChatComposer({
           flexWrap="wrap"
           sx={{ flex: 1, minWidth: 0, justifyContent: "flex-start" }}
         >
+          {/* 执行环境选择器 */}
+          <Button
+            size="small"
+            variant="text"
+            color="inherit"
+            onClick={(e) => setEnvAnchor(e.currentTarget)}
+            startIcon={
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  color: accent,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                {environment === "local" ? (
+                  <Laptop size={16} strokeWidth={2} color={accent} />
+                ) : environment === "ssh" ? (
+                  <Terminal size={16} strokeWidth={2} color={accent} />
+                ) : (
+                  createElement(SANDBOX_BACKEND_ICON[sandboxBackend], {
+                    size: 16,
+                    strokeWidth: 2,
+                    color: accent,
+                  })
+                )}
+              </Box>
+            }
+            endIcon={
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  color: accent,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                <ChevronDown size={16} strokeWidth={2} color={accent} />
+              </Box>
+            }
+            sx={{
+              textTransform: "none",
+              color: accent,
+              ...composerLabelText,
+              borderRadius: 2.5,
+              px: 1,
+              py: 0,
+              minHeight: "var(--composer-footer-h)",
+              height: "var(--composer-footer-h)",
+              border: "1px solid transparent",
+              bgcolor: "transparent",
+              boxShadow: "none",
+              gap: 0.5,
+              transition:
+                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease",
+              "@media (prefers-reduced-motion: reduce)": {
+                transition: "none",
+              },
+              "&:hover": {
+                bgcolor: alpha(accent, 0.12),
+                borderColor: alpha(accent, 0.28),
+                boxShadow: "none",
+              },
+              "& .MuiButton-startIcon": { marginRight: 0 },
+              "& .MuiButton-endIcon": { marginLeft: 0 },
+            }}
+          >
+            <Typography
+              component="span"
+              noWrap
+              sx={{ ...composerLabelText, color: "inherit" }}
+            >
+              {environment === "local"
+                ? localVenvType !== "none" && localVenvName
+                  ? `本地·${localVenvName}`
+                  : "本地"
+                : environment === "ssh"
+                  ? sshServer
+                    ? `SSH·${sshServer}`
+                    : "SSH"
+                  : `沙箱·${SANDBOX_LABEL[sandboxBackend]}`}
+            </Typography>
+          </Button>
+
           <Button
             size="small"
             variant="text"
@@ -2115,12 +2428,22 @@ export function ChatComposer({
               textTransform: "none",
               color: needsWorkspacePath ? warningMain : ink,
               ...composerLabelText,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "flex-start",
               maxWidth: { xs: "100%", sm: 240 },
               borderRadius: 2.5,
               px: 1,
               py: 0,
               minHeight: "var(--composer-footer-h)",
               height: "var(--composer-footer-h)",
+              "& .MuiButton-startIcon": {
+                marginRight: 1,
+                marginLeft: 0,
+                display: "inline-flex",
+                alignItems: "center",
+                alignSelf: "center",
+              },
               bgcolor: needsWorkspacePath
                 ? alpha(warningMain, 0.1)
                 : "transparent",
@@ -2147,7 +2470,13 @@ export function ChatComposer({
               variant="body2"
               noWrap
               component="span"
-              sx={{ ...composerLabelText, color: "inherit" }}
+              sx={{
+                ...composerLabelText,
+                color: "inherit",
+                display: "inline-flex",
+                alignItems: "center",
+                lineHeight: 1.25,
+              }}
             >
               {pathLabel}
             </Typography>
@@ -2280,83 +2609,12 @@ export function ChatComposer({
             }}
           />
 
-          <Button
-            size="small"
-            variant="text"
-            color="inherit"
-            startIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: accent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                {environment === "local" ? (
-                  <Laptop size={18} strokeWidth={2} color={accent} />
-                ) : environment === "ssh" ? (
-                  <Terminal size={18} strokeWidth={2} color={accent} />
-                ) : (
-                  <Globe2 size={18} strokeWidth={2} color={accent} />
-                )}
-              </Box>
-            }
-            endIcon={
-              <Box
-                component="span"
-                sx={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: accent,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <ChevronDown size={18} strokeWidth={2} color={accent} />
-              </Box>
-            }
-            onClick={(e) => setEnvAnchor(e.currentTarget)}
-            sx={{
-              textTransform: "none",
-              color: ink,
-              ...composerLabelText,
-              borderRadius: 2.5,
-              minHeight: "var(--composer-footer-h)",
-              height: "var(--composer-footer-h)",
-              px: 1,
-              py: 0,
-              border: "1px solid transparent",
-              bgcolor: "transparent",
-              boxShadow: "none",
-              transition:
-                "border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease",
-              "&:hover": {
-                borderColor: alpha(accent, 0.24),
-                bgcolor: alpha(accent, 0.3),
-                boxShadow: "none",
-              },
-            }}
-          >
-            <Typography
-              component="span"
-              sx={{ ...composerLabelText, color: "inherit" }}
-            >
-              {environment === "local"
-                ? "本地"
-                : environment === "ssh"
-                  ? sshServer
-                    ? `SSH·${sshServer}`
-                    : "SSH"
-                  : `沙箱·${SANDBOX_LABEL[sandboxBackend]}`}
-            </Typography>
-          </Button>
           <Menu
             anchorEl={envAnchor}
             open={Boolean(envAnchor)}
             onClose={() => {
+              clearSshSubmenuLeaveTimer();
+              clearSandboxSubmenuLeaveTimer();
               setEnvAnchor(null);
               setSandboxMenuAnchor(null);
               setSshMenuAnchor(null);
@@ -2373,29 +2631,53 @@ export function ChatComposer({
             {/* 本地环境 */}
             <MenuItem
               selected={environment === "local"}
+              onMouseEnter={(e) => {
+                loadLocalVenvs(workspacePath);
+                openVenvSub(e.currentTarget);
+              }}
+              onMouseLeave={scheduleCloseVenvSub}
               onClick={() => {
                 setEnvironment("local");
+                setLocalVenv("none", "");
                 setEnvAnchor(null);
                 setSshMenuAnchor(null);
                 setSandboxMenuAnchor(null);
+                setVenvMenuAnchor(null);
+              }}
+              sx={{
+                pr: 0.75,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 0.5,
               }}
             >
-              <ListItemIcon
-                sx={{
-                  minWidth: 40,
-                  lineHeight: 0,
-                  "& svg": { display: "block" },
-                }}
-              >
-                <Laptop size={20} strokeWidth={2} color={accent} />
-              </ListItemIcon>
-              <ListItemText
-                primary="本地"
-                secondary="在本机运行工具与终端"
-                primaryTypographyProps={{
-                  sx: { ...composerLabelText, color: ink },
-                }}
-              />
+              <Stack direction="row" alignItems="center" sx={{ minWidth: 0 }}>
+                <ListItemIcon
+                  sx={{
+                    minWidth: 40,
+                    lineHeight: 0,
+                    "& svg": { display: "block" },
+                  }}
+                >
+                  <Laptop size={20} strokeWidth={2} color={accent} />
+                </ListItemIcon>
+                <ListItemText
+                  primary="本地"
+                  secondary={
+                    localVenvType !== "none"
+                      ? `${localVenvType}: ${localVenvName}`
+                      : "在本机运行工具与终端"
+                  }
+                  primaryTypographyProps={{
+                    sx: { ...composerLabelText, color: ink },
+                  }}
+                  secondaryTypographyProps={{
+                    sx: { fontSize: 11, color: mut },
+                  }}
+                />
+              </Stack>
+              <ChevronRight size={18} strokeWidth={2} color={accent} />
             </MenuItem>
 
             <Divider />
@@ -2437,7 +2719,11 @@ export function ChatComposer({
                 </ListItemIcon>
                 <ListItemText
                   primary="SSH"
-                  secondary={Object.keys(sshServers).length > 0 ? `${Object.keys(sshServers).length} 个可用服务器` : "点击配置 SSH 连接"}
+                  secondary={
+                    Object.keys(sshServers).length > 0
+                      ? `${Object.keys(sshServers).length} 个可用服务器`
+                      : "点击配置 SSH 连接"
+                  }
                   primaryTypographyProps={{
                     sx: { ...composerLabelText, color: ink },
                   }}
@@ -2487,197 +2773,314 @@ export function ChatComposer({
             </MenuItem>
           </Menu>
 
-          {/* SSH 二级菜单 - 显示可用服务器 */}
-          <Popover
-            open={Boolean(sshMenuAnchor)}
+          {/* SSH 二级菜单 — 与 SessionList Language 相同：嵌套 Menu + pointerEvents，避免 Popover/Modal 抢事件 */}
+          <Menu
             anchorEl={sshMenuAnchor}
+            open={Boolean(sshMenuAnchor)}
             onClose={() => setSshMenuAnchor(null)}
             anchorOrigin={{ vertical: "top", horizontal: "right" }}
             transformOrigin={{ vertical: "top", horizontal: "left" }}
-            disablePortal
             disableAutoFocus
-            disableEnforceFocus
-            hideBackdrop
+            sx={{
+              pointerEvents: "none",
+              zIndex: (t) => t.zIndex.modal + 2,
+            }}
             slotProps={{
               paper: {
                 sx: {
+                  pointerEvents: "auto",
                   minWidth: 200,
                   maxWidth: 280,
                   mt: 0.5,
-                  boxShadow: (t) => t.shadows[8],
+                  ml: -1.25,
+                  boxShadow: (th) => th.shadows[8],
                 },
-                onMouseEnter: enterSshSubMenu,
-                onMouseLeave: scheduleCloseSshSub,
               },
             }}
+            MenuListProps={{
+              dense: true,
+              sx: { py: 0.5 },
+              onMouseEnter: clearSshSubmenuLeaveTimer,
+              onMouseLeave: () => setSshMenuAnchor(null),
+            }}
           >
-            <List dense sx={{ py: 0.5 }}>
-              {sshServersLoading ? (
-                <ListItemButton disabled>
+            {sshServersLoading ? (
+              <MenuItem disabled sx={{ py: 1 }}>
+                <ListItemIcon sx={{ minWidth: 36 }}>
+                  <CircularProgress size={16} sx={{ color: mut }} />
+                </ListItemIcon>
+                <ListItemText
+                  primary="加载中..."
+                  primaryTypographyProps={{ sx: { fontSize: 13, color: mut } }}
+                />
+              </MenuItem>
+            ) : Object.keys(sshServers).length === 0 ? (
+              <>
+                <MenuItem disabled>
+                  <ListItemText
+                    primary="未配置 SSH 服务器"
+                    secondary="请在设置中添加 SSH 配置"
+                    primaryTypographyProps={{
+                      sx: { fontSize: 13, color: mut },
+                    }}
+                    secondaryTypographyProps={{ sx: { fontSize: 11 } }}
+                  />
+                </MenuItem>
+                <Divider sx={{ my: 0.5 }} />
+                <MenuItem
+                  onClick={() => {
+                    openExecutionSettings(2);
+                    setSshMenuAnchor(null);
+                    setEnvAnchor(null);
+                  }}
+                >
                   <ListItemIcon sx={{ minWidth: 36 }}>
-                    <CircularProgress size={16} sx={{ color: mut }} />
+                    <Plus size={18} strokeWidth={2} color={accent} />
                   </ListItemIcon>
                   <ListItemText
-                    primary="加载中..."
-                    primaryTypographyProps={{ sx: { fontSize: 13, color: mut } }}
+                    primary="添加 SSH 配置"
+                    primaryTypographyProps={{
+                      sx: { fontSize: 13, color: ink, fontWeight: 500 },
+                    }}
                   />
-                </ListItemButton>
-              ) : Object.keys(sshServers).length === 0 ? (
-                <>
-                  <ListItemButton disabled>
-                    <ListItemText
-                      primary="未配置 SSH 服务器"
-                      secondary="请在设置中添加 SSH 配置"
-                      primaryTypographyProps={{ sx: { fontSize: 13, color: mut } }}
-                      secondaryTypographyProps={{ sx: { fontSize: 11 } }}
-                    />
-                  </ListItemButton>
-                  <Divider sx={{ my: 0.5 }} />
-                  <ListItemButton
+                </MenuItem>
+              </>
+            ) : (
+              <>
+                {Object.entries(sshServers).map(([name, cfg]) => (
+                  <MenuItem
+                    key={name}
+                    selected={environment === "ssh" && sshServer === name}
                     onClick={() => {
-                      setSettingsTabIndex(3);
-                      setSettingsOpen(true);
-                      setRightPanelMode("settings");
+                      setSshServer(name);
+                      setEnvironment("ssh");
                       setSshMenuAnchor(null);
                       setEnvAnchor(null);
                     }}
+                    sx={{ px: 1.5, py: 0.75 }}
                   >
-                    <ListItemIcon sx={{ minWidth: 36 }}>
-                      <Plus size={18} strokeWidth={2} color={accent} />
+                    <ListItemIcon sx={{ minWidth: 32 }}>
+                      <Server size={16} strokeWidth={2} color={accent} />
                     </ListItemIcon>
                     <ListItemText
-                      primary="添加 SSH 配置"
-                      primaryTypographyProps={{ sx: { fontSize: 13, color: ink, fontWeight: 500 } }}
+                      primary={name}
+                      secondary={sshConnectionLabel(cfg)}
+                      primaryTypographyProps={{
+                        sx: { fontSize: 13, fontWeight: 500, color: ink },
+                      }}
+                      secondaryTypographyProps={{
+                        sx: { fontSize: 11, color: mut },
+                      }}
                     />
-                  </ListItemButton>
-                </>
-              ) : (
-                <>
-                  {Object.entries(sshServers).map(([name, cfg]) => (
-                    <ListItemButton
-                      key={name}
-                      selected={environment === "ssh" && sshServer === name}
-                      onClick={() => {
-                        setSshServer(name);
-                        setEnvironment("ssh");
-                        setSshMenuAnchor(null);
-                        setEnvAnchor(null);
-                      }}
-                      sx={{
-                        px: 1.5,
-                        py: 0.75,
-                      }}
-                    >
-                      <ListItemIcon sx={{ minWidth: 32 }}>
-                        <Server size={16} strokeWidth={2} color={accent} />
-                      </ListItemIcon>
-                      <ListItemText
-                        primary={name}
-                        secondary={cfg.host_name ? `${cfg.user || "root"}@${cfg.host_name}${cfg.port && cfg.port !== 22 ? `:${cfg.port}` : ""}` : undefined}
-                        primaryTypographyProps={{
-                          sx: { fontSize: 13, fontWeight: 500, color: ink },
-                        }}
-                        secondaryTypographyProps={{
-                          sx: { fontSize: 11, color: mut },
-                        }}
-                      />
-                    </ListItemButton>
-                  ))}
-                  <Divider sx={{ my: 0.5 }} />
-                  <ListItemButton
-                    onClick={() => {
-                      setSettingsTabIndex(3);
-                      setSettingsOpen(true);
-                      setRightPanelMode("settings");
-                      setSshMenuAnchor(null);
-                      setEnvAnchor(null);
+                  </MenuItem>
+                ))}
+                <Divider sx={{ my: 0.5 }} />
+                <MenuItem
+                  onClick={() => {
+                    openExecutionSettings(2);
+                    setSshMenuAnchor(null);
+                    setEnvAnchor(null);
+                  }}
+                >
+                  <ListItemIcon sx={{ minWidth: 36 }}>
+                    <Plus size={18} strokeWidth={2} color={mut} />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary="管理 SSH 配置"
+                    primaryTypographyProps={{
+                      sx: { fontSize: 13, color: mut },
                     }}
-                  >
-                    <ListItemIcon sx={{ minWidth: 36 }}>
-                      <Plus size={18} strokeWidth={2} color={mut} />
-                    </ListItemIcon>
-                    <ListItemText
-                      primary="管理 SSH 配置"
-                      primaryTypographyProps={{ sx: { fontSize: 13, color: mut } }}
-                    />
-                  </ListItemButton>
-                </>
-              )}
-            </List>
-          </Popover>
+                  />
+                </MenuItem>
+              </>
+            )}
+          </Menu>
 
-          {/* 沙箱二级菜单 - 显示可用后端 */}
-          <Popover
-            open={Boolean(sandboxMenuAnchor)}
+          {/* 沙箱二级菜单 — 同上 */}
+          <Menu
             anchorEl={sandboxMenuAnchor}
+            open={Boolean(sandboxMenuAnchor)}
             onClose={() => setSandboxMenuAnchor(null)}
             anchorOrigin={{ vertical: "top", horizontal: "right" }}
             transformOrigin={{ vertical: "top", horizontal: "left" }}
-            disablePortal
             disableAutoFocus
-            disableEnforceFocus
-            hideBackdrop
+            sx={{
+              pointerEvents: "none",
+              zIndex: (t) => t.zIndex.modal + 2,
+            }}
             slotProps={{
               paper: {
                 sx: {
+                  pointerEvents: "auto",
                   minWidth: 160,
                   mt: 0.5,
-                  boxShadow: (t) => t.shadows[8],
+                  ml: -1.25,
+                  boxShadow: (th) => th.shadows[8],
                 },
-                onMouseEnter: enterSandboxSubMenu,
-                onMouseLeave: scheduleCloseSandboxSub,
               },
             }}
+            MenuListProps={{
+              dense: true,
+              sx: { py: 0.5 },
+              onMouseEnter: clearSandboxSubmenuLeaveTimer,
+              onMouseLeave: () => setSandboxMenuAnchor(null),
+            }}
           >
-            <List dense sx={{ py: 0.5 }}>
-              {SANDBOX_BACKENDS.map((b) => (
-                <ListItemButton
+            {SANDBOX_BACKENDS.map((b) => {
+              const BackendIcon = SANDBOX_BACKEND_ICON[b.id];
+              return (
+                <MenuItem
                   key={b.id}
-                  selected={environment === "sandbox" && sandboxBackend === b.id}
+                  selected={
+                    environment === "sandbox" && sandboxBackend === b.id
+                  }
                   onClick={() => {
                     setSandboxBackend(b.id);
                     setEnvironment("sandbox");
                     setSandboxMenuAnchor(null);
                     setEnvAnchor(null);
                   }}
-                  sx={{
-                    px: 2,
-                    py: 0.75,
-                    typography: "body2",
-                    fontSize: 13,
-                    color: ink,
-                    fontWeight: 500,
-                  }}
+                  sx={{ px: 1.5, py: 0.75 }}
                 >
-                  {b.label}
-                </ListItemButton>
-              ))}
-              <Divider sx={{ my: 0.5 }} />
-              <ListItemButton
-                onClick={() => {
-                  setSettingsTabIndex(3);
-                  setSettingsOpen(true);
-                  setRightPanelMode("settings");
-                  setSandboxMenuAnchor(null);
-                  setEnvAnchor(null);
+                  <ListItemIcon sx={{ minWidth: 32 }}>
+                    <BackendIcon size={16} strokeWidth={2} color={accent} />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary={b.label}
+                    primaryTypographyProps={{
+                      sx: { fontSize: 13, fontWeight: 500, color: ink },
+                    }}
+                  />
+                </MenuItem>
+              );
+            })}
+            <Divider sx={{ my: 0.5 }} />
+            <MenuItem
+              onClick={() => {
+                openExecutionSettings(0);
+                setSandboxMenuAnchor(null);
+                setEnvAnchor(null);
+              }}
+              sx={{ px: 1.5, py: 0.75 }}
+            >
+              <ListItemIcon sx={{ minWidth: 36 }}>
+                <Settings size={18} strokeWidth={2} color={mut} />
+              </ListItemIcon>
+              <ListItemText
+                primary="配置沙箱后端"
+                primaryTypographyProps={{
+                  sx: { fontSize: 13, color: mut, fontWeight: 500 },
                 }}
-                sx={{
-                  px: 2,
-                  py: 0.75,
+              />
+            </MenuItem>
+          </Menu>
+
+          {/* 本地虚拟环境二级菜单 */}
+          <Menu
+            anchorEl={venvMenuAnchor}
+            open={Boolean(venvMenuAnchor)}
+            onClose={() => setVenvMenuAnchor(null)}
+            anchorOrigin={{ vertical: "top", horizontal: "right" }}
+            transformOrigin={{ vertical: "top", horizontal: "left" }}
+            disableAutoFocus
+            sx={{
+              pointerEvents: "none",
+              zIndex: (t) => t.zIndex.modal + 2,
+            }}
+            slotProps={{
+              paper: {
+                sx: {
+                  pointerEvents: "auto",
+                  minWidth: 200,
+                  maxWidth: 300,
+                  mt: 0.5,
+                  ml: -1.25,
+                  boxShadow: (th) => th.shadows[8],
+                },
+              },
+            }}
+            MenuListProps={{
+              dense: true,
+              sx: { py: 0.5 },
+              onMouseEnter: clearVenvSubmenuLeaveTimer,
+              onMouseLeave: () => setVenvMenuAnchor(null),
+            }}
+          >
+            {/* 无虚拟环境选项 */}
+            <MenuItem
+              selected={environment === "local" && localVenvType === "none"}
+              onClick={() => {
+                setEnvironment("local");
+                setLocalVenv("none", "");
+                setVenvMenuAnchor(null);
+                setEnvAnchor(null);
+              }}
+              sx={{ px: 1.5, py: 0.75 }}
+            >
+              <ListItemIcon sx={{ minWidth: 32 }}>
+                <Laptop size={16} strokeWidth={2} color={accent} />
+              </ListItemIcon>
+              <ListItemText
+                primary="无虚拟环境"
+                primaryTypographyProps={{
+                  sx: { fontSize: 13, fontWeight: 500, color: ink },
                 }}
-              >
-                <Typography
-                  sx={{
-                    fontSize: 12,
-                    color: mut,
-                    fontWeight: 500,
+              />
+            </MenuItem>
+            {localVenvsLoading ? (
+              <MenuItem disabled sx={{ py: 1 }}>
+                <ListItemIcon sx={{ minWidth: 36 }}>
+                  <CircularProgress size={16} sx={{ color: mut }} />
+                </ListItemIcon>
+                <ListItemText
+                  primary="检测中..."
+                  primaryTypographyProps={{ sx: { fontSize: 13, color: mut } }}
+                />
+              </MenuItem>
+            ) : localVenvs.length === 0 ? (
+              <MenuItem disabled>
+                <ListItemText
+                  primary="未检测到虚拟环境"
+                  secondary="支持 conda、venv、pyenv"
+                  primaryTypographyProps={{
+                    sx: { fontSize: 13, color: mut },
                   }}
-                >
-                  配置沙箱后端
-                </Typography>
-              </ListItemButton>
-            </List>
-          </Popover>
+                  secondaryTypographyProps={{ sx: { fontSize: 11 } }}
+                />
+              </MenuItem>
+            ) : (
+              <>
+                <Divider sx={{ my: 0.5 }} />
+                {localVenvs.map((v) => (
+                  <MenuItem
+                    key={`${v.kind}:${v.name}`}
+                    selected={
+                      environment === "local" &&
+                      localVenvType === (v.kind as LocalVenvType) &&
+                      localVenvName === v.name
+                    }
+                    onClick={() => {
+                      setEnvironment("local");
+                      setLocalVenv(v.kind as LocalVenvType, v.name);
+                      setVenvMenuAnchor(null);
+                      setEnvAnchor(null);
+                    }}
+                    sx={{ px: 1.5, py: 0.75 }}
+                  >
+                    <ListItemIcon sx={{ minWidth: 32 }}>
+                      <Atom size={16} strokeWidth={2} color={accent} />
+                    </ListItemIcon>
+                    <ListItemText
+                      primary={v.label}
+                      primaryTypographyProps={{
+                        sx: { fontSize: 13, fontWeight: 500, color: ink },
+                      }}
+                    />
+                  </MenuItem>
+                ))}
+              </>
+            )}
+          </Menu>
         </Stack>
       </Stack>
     </Stack>

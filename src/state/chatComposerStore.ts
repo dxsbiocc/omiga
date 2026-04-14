@@ -7,6 +7,9 @@ export type PermissionMode = "ask" | "auto" | "bypass";
 /** 与 `omiga/src-tauri/src/execution/types.rs` `EnvironmentType` 对齐（不含 Local）。 */
 export type SandboxBackend = "modal" | "daytona" | "docker" | "singularity";
 
+/** 本地虚拟环境类型 */
+export type LocalVenvType = "none" | "conda" | "venv" | "pyenv";
+
 /** 执行环境类型 */
 export type ExecutionEnvironment = "local" | "ssh" | "sandbox";
 
@@ -23,6 +26,10 @@ interface ChatComposerState {
   sshServer: string | null;
   /** 沙箱执行后端；仅在 `environment === "sandbox"` 时生效。 */
   sandboxBackend: SandboxBackend;
+  /** 本地虚拟环境类型；仅在 `environment === "local"` 时生效。 */
+  localVenvType: LocalVenvType;
+  /** 虚拟环境名称/路径：conda env 名、venv 目录路径、pyenv 版本号。 */
+  localVenvName: string;
   /** Remembered branch choice per workspace root path */
   selectedBranchByRoot: Record<string, string>;
   setPermissionMode: (m: PermissionMode) => void;
@@ -35,6 +42,7 @@ interface ChatComposerState {
   setEnvironment: (e: ExecutionEnvironment) => void;
   setSshServer: (name: string | null) => void;
   setSandboxBackend: (b: SandboxBackend) => void;
+  setLocalVenv: (type: LocalVenvType, name: string) => void;
   setBranchForRoot: (root: string, branch: string) => void;
 }
 
@@ -48,6 +56,8 @@ export const useChatComposerStore = create<ChatComposerState>()(
       environment: "local",
       sshServer: null,
       sandboxBackend: "docker",
+      localVenvType: "none",
+      localVenvName: "",
       selectedBranchByRoot: {},
       setPermissionMode: (permissionMode) => set({ permissionMode }),
       setComposerAgentType: (composerAgentType) => set({ composerAgentType }),
@@ -74,6 +84,7 @@ export const useChatComposerStore = create<ChatComposerState>()(
       setEnvironment: (environment) => set({ environment }),
       setSshServer: (sshServer) => set({ sshServer }),
       setSandboxBackend: (sandboxBackend) => set({ sandboxBackend }),
+      setLocalVenv: (localVenvType, localVenvName) => set({ localVenvType, localVenvName }),
       setBranchForRoot: (root, branch) =>
         set((s) => ({
           selectedBranchByRoot: { ...s.selectedBranchByRoot, [root]: branch },
@@ -90,6 +101,8 @@ export const useChatComposerStore = create<ChatComposerState>()(
         environment: s.environment,
         sshServer: s.sshServer,
         sandboxBackend: s.sandboxBackend,
+        localVenvType: s.localVenvType,
+        localVenvName: s.localVenvName,
         selectedBranchByRoot: s.selectedBranchByRoot,
       }),
       migrate: (persisted, version) => {
