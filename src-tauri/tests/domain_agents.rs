@@ -1,10 +1,10 @@
 //! Agent 系统单元测试
 
-use omiga::domain::agents::{
+use omiga_lib::domain::agents::{
     AgentDefinition, AgentSource, AgentRouter,
     builtins, definition, router,
 };
-use omiga::domain::agents::builtins::{
+use omiga_lib::domain::agents::builtins::{
     explore::ExploreAgent,
     plan::PlanAgent,
     general::{GeneralPurposeAgent, get_disallowed_tools},

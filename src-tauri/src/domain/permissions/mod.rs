@@ -17,6 +17,7 @@ pub use compat::{
     AskDecision,
 };
 pub use tool_rules::{
+    blanket_deny_rule_matches,
     canonical_permission_tool_name,
     filter_tool_schemas_by_deny_rule_entries,
     filter_tool_schemas_by_deny_rules,

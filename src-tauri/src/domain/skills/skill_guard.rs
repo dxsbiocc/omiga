@@ -7,7 +7,7 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! let result = scan_content("my-skill", content);
 //! match check_content(&result) {
 //!     Err(msg) => return Err(format!("security scan blocked: {msg}")),

@@ -1,9 +1,9 @@
 //! Regression tests for background agent persistence (tasks + sidechain transcript).
 //! Uses a temporary SQLite file with full migrations (`init_db`).
 
-use omiga::domain::agents::background::{BackgroundAgentStatus, BackgroundAgentTask};
-use omiga::domain::persistence::{init_db, SessionRepository};
-use omiga::domain::session::{Message, ToolCall};
+use omiga_lib::domain::agents::background::{BackgroundAgentStatus, BackgroundAgentTask};
+use omiga_lib::domain::persistence::{init_db, SessionRepository};
+use omiga_lib::domain::session::{Message, ToolCall};
 
 async fn setup_session_repo() -> (SessionRepository, tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("tempdir");

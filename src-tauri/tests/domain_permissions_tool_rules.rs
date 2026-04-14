@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use omiga::domain::permissions::{
+use omiga_lib::domain::permissions::{
     permission_rule_value_from_string,
     blanket_deny_rule_matches,
     matching_deny_entry,

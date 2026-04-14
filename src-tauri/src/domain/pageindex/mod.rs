@@ -25,7 +25,7 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use crate::domain::pageindex::{PageIndex, IndexConfig};
 //!
 //! let config = IndexConfig::default();
