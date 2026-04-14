@@ -1,4 +1,3 @@
-import { useState } from "react";
 import {
   Box,
   IconButton,
@@ -26,7 +25,6 @@ import {
   Terminal,
   TravelExplore,
   Replay,
-  Stop,
 } from "@mui/icons-material";
 import type { ExecutionStep } from "../../state/activityStore";
 import {
@@ -42,9 +40,6 @@ export interface AgentSessionStatusProps {
   waitingFirstChunk: boolean;
   /** Raw tool name from stream when step row not yet committed */
   toolHintFallback: string | null;
-  /** Main chat turn: show cancel on hover while the agent is busy */
-  canCancel?: boolean;
-  onCancel?: () => void;
   /** After user cancelled a stream: show resume control */
   showResume?: boolean;
   onResume?: () => void;
@@ -106,13 +101,10 @@ export function AgentSessionStatus({
   isStreaming,
   waitingFirstChunk,
   toolHintFallback,
-  canCancel = false,
-  onCancel,
   showResume = false,
   onResume,
 }: AgentSessionStatusProps) {
   const theme = useTheme();
-  const [hover, setHover] = useState(false);
   const ctx: ExecutionSurfaceContext = {
     isConnecting,
     isStreaming,
@@ -134,9 +126,6 @@ export function AgentSessionStatus({
     <Box
       role="status"
       aria-label={displayLabel}
-      title={displayLabel}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
       sx={{
         position: "relative",
         minWidth: 0,
@@ -246,19 +235,6 @@ export function AgentSessionStatus({
               sx={{ p: 0.35 }}
             >
               <Replay sx={{ fontSize: 18 }} />
-            </IconButton>
-          ) : canCancel && onCancel && hover ? (
-            <IconButton
-              size="small"
-              aria-label="停止生成"
-              title="停止生成"
-              onClick={(e) => {
-                e.stopPropagation();
-                onCancel();
-              }}
-              sx={{ p: 0.35, color: "text.secondary" }}
-            >
-              <Stop sx={{ fontSize: 18 }} />
             </IconButton>
           ) : (
             <Box

@@ -13,11 +13,16 @@ function clamp(n: number, min: number, max: number): number {
 }
 
 export interface UiState {
-  /** Settings sidebar index: 0–3 App (Model…Theme), 4–6 Integrations */
+  /** Settings sidebar index — see `Settings/index.tsx` SETTINGS_SECTIONS (0–9) */
   settingsTabIndex: number;
   setSettingsTabIndex: (index: number) => void;
+  /** When sidebar tab is Execution (9): inner tab 0 Modal / 1 Daytona / 2 SSH */
+  settingsExecutionSubTab: number;
+  setSettingsExecutionSubTab: (index: number) => void;
   settingsOpen: boolean;
   rightPanelMode: "default" | "settings";
+  onboardingCompleted: boolean;
+  setOnboardingCompleted: (completed: boolean) => void;
   leftPanelWidth: number;
   rightPanelWidth: number;
   codePanelHeight: number;
@@ -44,8 +49,14 @@ export const useUiStore = create<UiState>()(
       settingsTabIndex: 0,
       setSettingsTabIndex: (index) => set({ settingsTabIndex: index }),
 
+      settingsExecutionSubTab: 0,
+      setSettingsExecutionSubTab: (index) =>
+        set({ settingsExecutionSubTab: Math.max(0, Math.min(2, Math.floor(index))) }),
+
       settingsOpen: false,
       rightPanelMode: "default",
+      onboardingCompleted: false,
+      setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),
       leftPanelWidth: 260,
       rightPanelWidth: 300,
       codePanelHeight: 280,
@@ -125,6 +136,7 @@ export const useUiStore = create<UiState>()(
         rightPanelWidth: s.rightPanelWidth,
         codePanelHeight: s.codePanelHeight,
         tasksPanelHeight: s.tasksPanelHeight,
+        onboardingCompleted: s.onboardingCompleted,
       }),
     }
   )

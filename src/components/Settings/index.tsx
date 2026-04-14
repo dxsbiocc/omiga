@@ -38,8 +38,10 @@ import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 interface SettingsProps {
   open: boolean;
   onClose: () => void;
-  /** See `openSettingsTabMap.ts`: 0–7 */
+  /** See `openSettingsTabMap.ts`: 0–9 */
   initialTab?: number;
+  /** When `initialTab` is Execution (9): inner tab 0 Modal / 1 Daytona / 2 SSH */
+  initialExecutionSubTab?: number;
 }
 
 /** Persisted JSON for built-in `web_search` provider keys (Settings → Advanced). */
@@ -196,7 +198,12 @@ interface LlmConfig {
   baseUrl?: string;
 }
 
-export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
+export function Settings({
+  open,
+  onClose,
+  initialTab = 0,
+  initialExecutionSubTab = 0,
+}: SettingsProps) {
   const [activeTab, setActiveTab] = useState(() =>
     clampSettingsTab(initialTab),
   );
@@ -963,7 +970,12 @@ export function Settings({ open, onClose, initialTab = 0 }: SettingsProps) {
 
             {activeTab === 9 && (
               <Box>
-                <ExecutionEnvsSettingsTab />
+                <ExecutionEnvsSettingsTab
+                  initialSubTab={Math.max(
+                    0,
+                    Math.min(2, Math.floor(Number(initialExecutionSubTab) || 0)),
+                  )}
+                />
               </Box>
             )}
 

@@ -69,7 +69,6 @@ import {
   type Message as StoreMessage,
   isPlaceholderSessionTitle,
   titleFromFirstUserMessage,
-  UNUSED_SESSION_LABEL,
   shouldShowNewSessionPlaceholder,
   isUnsetWorkspacePath,
 } from "../../state";
@@ -996,6 +995,9 @@ export function Chat({ sessionId }: ChatProps) {
   const [pathRequiredToast, setPathRequiredToast] = useState<string | null>(
     null,
   );
+  /** SSH 执行环境：输入远程绝对路径作为工作区（非本机文件夹选择器） */
+  const [sshWorkspaceDialogOpen, setSshWorkspaceDialogOpen] = useState(false);
+  const [sshWorkspacePathDraft, setSshWorkspacePathDraft] = useState("");
   /** 用户气泡「复制」成功提示 */
   const [copySuccessToast, setCopySuccessToast] = useState(false);
   const showPathRequiredWarning = () => {
@@ -1156,6 +1158,13 @@ export function Chat({ sessionId }: ChatProps) {
     renameSession,
   } = useSessionStore();
 
+  /** After `renameSession`, React's `currentSession` can still be stale until re-render — use for `send_message.session_name`. */
+  const getSessionNameForRequest = useCallback(() => {
+    const s = useSessionStore.getState().currentSession;
+    if (s?.id === sessionId) return s.name;
+    return currentSession?.name;
+  }, [sessionId, currentSession?.name]);
+
   const showNewSessionPlaceholder =
     currentSession != null &&
     shouldShowNewSessionPlaceholder(currentSession, {
@@ -1258,6 +1267,22 @@ export function Chat({ sessionId }: ChatProps) {
 
   const handlePickProjectFolder = async () => {
     if (!sessionId) return;
+    const { environment, sshServer } = useChatComposerStore.getState();
+    if (environment === "ssh") {
+      if (!sshServer?.trim()) {
+        setPathToastKey((k) => k + 1);
+        setPathRequiredToast("请先在执行环境中选择 SSH 服务器。");
+        return;
+      }
+      const cur = (
+        currentSession?.workingDirectory ??
+        currentSession?.projectPath ??
+        ""
+      ).trim();
+      setSshWorkspacePathDraft(cur && cur !== "." ? cur : "");
+      setSshWorkspaceDialogOpen(true);
+      return;
+    }
     try {
       const selected = await open({
         directory: true,
@@ -1270,6 +1295,24 @@ export function Chat({ sessionId }: ChatProps) {
       await updateSessionProjectPath(sessionId, path);
     } catch (e) {
       console.error("[Chat] folder dialog failed", e);
+    }
+  };
+
+  const confirmSshWorkspaceFolder = async () => {
+    if (!sessionId) return;
+    const raw = sshWorkspacePathDraft.trim();
+    if (!raw.startsWith("/")) {
+      setPathToastKey((k) => k + 1);
+      setPathRequiredToast(
+        "远程工作区须为绝对路径（以 / 开头），例如 /home/ubuntu/project",
+      );
+      return;
+    }
+    try {
+      await updateSessionProjectPath(sessionId, raw);
+      setSshWorkspaceDialogOpen(false);
+    } catch (e) {
+      console.error("[Chat] ssh workspace path failed", e);
     }
   };
 
@@ -2082,6 +2125,8 @@ export function Chat({ sessionId }: ChatProps) {
       composerAttachedPaths: storePaths,
       environment: storeEnv,
       sandboxBackend: storeSb,
+      localVenvType: storeVenvType,
+      localVenvName: storeVenvName,
     } = useChatComposerStore.getState();
 
     const composerAgentType = flushPayload
@@ -2091,9 +2136,9 @@ export function Chat({ sessionId }: ChatProps) {
       ? flushPayload.permissionMode
       : storePerm;
     const environment = flushPayload ? flushPayload.environment : storeEnv;
-    const sandboxBackend = flushPayload
-      ? flushPayload.sandboxBackend
-      : storeSb;
+    const sandboxBackend = flushPayload ? flushPayload.sandboxBackend : storeSb;
+    const localVenvType = storeVenvType;
+    const localVenvName = storeVenvName;
     const composerAttachedPaths = flushPayload
       ? [...flushPayload.composerAttachedPaths]
       : storePaths;
@@ -2141,11 +2186,13 @@ export function Chat({ sessionId }: ChatProps) {
             content: messageContent,
             session_id: sessionId,
             project_path: currentSession?.projectPath,
-            session_name: currentSession?.name,
+            session_name: getSessionNameForRequest(),
             use_tools: true,
             inputTarget: `bg:${followUpTaskId}`,
             executionEnvironment: useChatComposerStore.getState().environment,
             sandboxBackend: useChatComposerStore.getState().sandboxBackend,
+            localVenvType: useChatComposerStore.getState().localVenvType,
+            localVenvName: useChatComposerStore.getState().localVenvName,
           },
         });
         if (response.input_kind === "background_followup_queued") {
@@ -2251,10 +2298,24 @@ export function Chat({ sessionId }: ChatProps) {
         isFirstMessageInSession &&
         isPlaceholderSessionTitle(currentSession?.name)
       ) {
-        await renameSession(
-          sessionId,
-          titleFromFirstUserMessage(messageContent),
-        );
+        const heuristicTitle = titleFromFirstUserMessage(messageContent);
+        await renameSession(sessionId, heuristicTitle);
+        void (async () => {
+          try {
+            const llmTitle = await invoke<string>("suggest_session_title", {
+              userMessage: messageContent,
+            });
+            const next = (llmTitle ?? "").trim();
+            if (!next) return;
+            const st = useSessionStore.getState();
+            if (st.currentSession?.id !== sessionId) return;
+            if (st.currentSession.name !== heuristicTitle) return;
+            if (next === heuristicTitle) return;
+            await renameSession(sessionId, next);
+          } catch {
+            /* keep heuristic title */
+          }
+        })();
       }
 
       // Call backend with new request structure
@@ -2265,17 +2326,19 @@ export function Chat({ sessionId }: ChatProps) {
         user_message_id?: string;
         scheduler_plan?: SchedulerPlan;
         initial_todos?: InitialTodoItem[];
-        }>("send_message", {
+      }>("send_message", {
         request: {
           content: messageContent,
           session_id: sessionId,
           project_path: currentSession?.projectPath,
-          session_name: currentSession?.name,
+          session_name: getSessionNameForRequest(),
           use_tools: true,
           composerAgentType,
           permissionMode,
           executionEnvironment: environment,
           sandboxBackend,
+          localVenvType,
+          localVenvName,
         },
       });
 
@@ -2538,12 +2601,14 @@ export function Chat({ sessionId }: ChatProps) {
             content: messageContent,
             session_id: sessionId,
             project_path: currentSession?.projectPath,
-            session_name: currentSession?.name,
+            session_name: getSessionNameForRequest(),
             use_tools: true,
             composerAgentType: composeAgent,
             permissionMode,
             executionEnvironment: useChatComposerStore.getState().environment,
             sandboxBackend: useChatComposerStore.getState().sandboxBackend,
+            localVenvType: useChatComposerStore.getState().localVenvType,
+            localVenvName: useChatComposerStore.getState().localVenvName,
             ...(isPersistedMessageIdForRetry(message.id)
               ? { retryFromUserMessageId: message.id }
               : {}),
@@ -2665,6 +2730,7 @@ export function Chat({ sessionId }: ChatProps) {
       needsWorkspacePath,
       followUpTaskId,
       currentSession,
+      getSessionNameForRequest,
       replaceStoreMessagesSnapshot,
       bumpQueueUi,
     ],
@@ -2730,25 +2796,23 @@ export function Chat({ sessionId }: ChatProps) {
     void handleSendRef.current();
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key !== "Enter" || e.shiftKey) return;
-
-    // IME（中文/日文等）：Enter 用于确认候选词，不应发送消息
-    const ne = e.nativeEvent;
-    if (ne.isComposing || ne.keyCode === 229) return;
-
-    e.preventDefault();
-    if (needsWorkspacePath) {
-      if (input.trim()) {
-        showPathRequiredWarning();
-      }
-      return;
-    }
-    handleSend();
-  };
-
-  /** 仅中断当前一轮流式生成 / 工具执行（不退出会话）。用于顶部状态条、输入区「停止生成」。 */
+  /**
+   * 取消当前 Agent 任务（类终端 ESC）：`cancel_stream` 触发 round_cancel（含 bash 等子进程）、
+   * 清空主会话排队、取消进行中的后台跟进任务；无 message_id 时做本地兜底清理。
+   * 唯一入口：输入区工具栏按钮；顶部状态条不再重复提供停止控件。
+   */
   const handleCancelStream = async () => {
+    clearQueuedMainSends();
+
+    const fid = followUpTaskId;
+    if (fid) {
+      try {
+        await handleCancelBackgroundTask(fid);
+      } catch (e) {
+        console.error("[Chat] cancel background task with stream cancel:", e);
+      }
+    }
+
     const streamId = currentStreamId;
     if (streamId) {
       try {
@@ -2779,6 +2843,41 @@ export function Chat({ sessionId }: ChatProps) {
     setAwaitingResumeAfterCancel(false);
     act.clearTransient();
     act.resetExecutionState();
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Escape") {
+      const act = useActivityStore.getState();
+      const agentBusy =
+        isConnecting ||
+        isStreaming ||
+        waitingFirstChunk ||
+        act.isConnecting ||
+        act.isStreaming ||
+        act.waitingFirstChunk ||
+        isStreamingRef.current ||
+        Boolean(currentStreamId);
+      if (agentBusy) {
+        e.preventDefault();
+        void handleCancelStream();
+      }
+      return;
+    }
+
+    if (e.key !== "Enter" || e.shiftKey) return;
+
+    // IME（中文/日文等）：Enter 用于确认候选词，不应发送消息
+    const ne = e.nativeEvent;
+    if (ne.isComposing || ne.keyCode === 229) return;
+
+    e.preventDefault();
+    if (needsWorkspacePath) {
+      if (input.trim()) {
+        showPathRequiredWarning();
+      }
+      return;
+    }
+    handleSend();
   };
 
   /**
@@ -2885,12 +2984,14 @@ export function Chat({ sessionId }: ChatProps) {
           content: RESUME_AFTER_CANCEL_PROMPT,
           session_id: sessionId,
           project_path: currentSession?.projectPath,
-          session_name: currentSession?.name,
+          session_name: getSessionNameForRequest(),
           use_tools: true,
           composerAgentType,
           permissionMode,
           executionEnvironment: environment,
           sandboxBackend,
+          localVenvType: useChatComposerStore.getState().localVenvType,
+          localVenvName: useChatComposerStore.getState().localVenvName,
         },
       });
 
@@ -3475,24 +3576,11 @@ export function Chat({ sessionId }: ChatProps) {
                       spacing={0.75}
                       minWidth={0}
                     >
-                      <Typography
-                        variant="subtitle1"
-                        fontWeight={600}
-                        noWrap
-                        sx={
-                          showNewSessionPlaceholder
-                            ? {
-                                color: "text.secondary",
-                                fontStyle: "italic",
-                                fontWeight: 500,
-                              }
-                            : undefined
-                        }
-                      >
-                        {showNewSessionPlaceholder
-                          ? UNUSED_SESSION_LABEL
-                          : currentSession.name}
-                      </Typography>
+                      {showNewSessionPlaceholder ? null : (
+                        <Typography variant="subtitle1" fontWeight={600} noWrap>
+                          {currentSession.name}
+                        </Typography>
+                      )}
                       {messages.length > 0 && (
                         <Chip
                           size="small"
@@ -3510,11 +3598,6 @@ export function Chat({ sessionId }: ChatProps) {
                   isStreaming={activityIsStreaming}
                   waitingFirstChunk={waitingFirstChunk}
                   toolHintFallback={currentToolHint}
-                  canCancel={
-                    !followUpTaskId &&
-                    (isConnecting || isStreaming || waitingFirstChunk)
-                  }
-                  onCancel={handleCancelStream}
                   showResume={awaitingResumeAfterCancel && !followUpTaskId}
                   onResume={handleResumeAfterCancel}
                 />
@@ -4797,7 +4880,22 @@ export function Chat({ sessionId }: ChatProps) {
               <Alert
                 severity="info"
                 icon={<FolderOpen fontSize="inherit" />}
-                sx={{ mb: 1.5, borderRadius: 2 }}
+                sx={{
+                  mb: 1.5,
+                  borderRadius: 2,
+                  alignItems: "center",
+                  "& .MuiAlert-message": {
+                    display: "flex",
+                    alignItems: "center",
+                    py: 0.25,
+                  },
+                  "& .MuiAlert-action": {
+                    alignItems: "center",
+                    alignSelf: "center",
+                    pt: 0,
+                    pb: 0,
+                  },
+                }}
                 action={
                   <Button
                     color="inherit"
@@ -4810,7 +4908,7 @@ export function Chat({ sessionId }: ChatProps) {
                   </Button>
                 }
               >
-                请为此对话选择工作目录（代码与工具将相对于该路径）。选择后会自动保存并隐藏此提示。
+                请为此对话选择工作目录（代码与工具将相对于该路径），选择后会自动保存并隐藏此提示。
               </Alert>
             </Collapse>
             <Box
@@ -4835,6 +4933,7 @@ export function Chat({ sessionId }: ChatProps) {
                 inputRef={inputRef}
                 isStreaming={isStreaming}
                 isConnecting={isConnecting}
+                waitingFirstChunk={waitingFirstChunk}
                 onCancel={handleCancelStream}
                 backgroundTasks={backgroundTasks}
                 followUpTaskId={followUpTaskId}
@@ -4863,6 +4962,48 @@ export function Chat({ sessionId }: ChatProps) {
           </Box>
         </Box>
       )}
+
+      <Dialog
+        open={sshWorkspaceDialogOpen}
+        onClose={() => setSshWorkspaceDialogOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>远程工作目录</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            在 SSH 执行环境下，工作区为远端服务器上的目录。请输入绝对路径（POSIX，以 /
+            开头），与终端中 <code>cd</code> 的目标一致。
+          </Typography>
+          <TextField
+            autoFocus
+            fullWidth
+            label="远程路径"
+            placeholder="/home/ubuntu/myproject"
+            value={sshWorkspacePathDraft}
+            onChange={(e) => setSshWorkspacePathDraft(e.target.value)}
+            variant="outlined"
+            margin="dense"
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button
+            type="button"
+            variant="outlined"
+            color="inherit"
+            onClick={() => setSshWorkspaceDialogOpen(false)}
+          >
+            取消
+          </Button>
+          <Button
+            type="button"
+            variant="contained"
+            onClick={() => void confirmSshWorkspaceFolder()}
+          >
+            确定
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Dialog
         open={retryConfirmForMessage !== null}

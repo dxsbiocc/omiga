@@ -12,6 +12,7 @@ import { TaskStatus } from "./components/TaskStatus";
 import { CodeWorkspace } from "./components/CodeWorkspace";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ResizeHandle } from "./components/ResizeHandle";
+import { OnboardingWizard } from "./components/Onboarding";
 import {
   useSessionStore,
   useWorkspaceStore,
@@ -22,11 +23,16 @@ import {
 
 export default function App() {
   const theme = useTheme();
-  const { currentSession, loadSessions } = useSessionStore();
+  const { currentSession, loadSessions, createSessionQuick } =
+    useSessionStore();
 
+  const onboardingCompleted = useUiStore((s) => s.onboardingCompleted);
+  const setOnboardingCompleted = useUiStore((s) => s.setOnboardingCompleted);
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
   const settingsTabIndex = useUiStore((s) => s.settingsTabIndex);
   const setSettingsTabIndex = useUiStore((s) => s.setSettingsTabIndex);
+  const settingsExecutionSubTab = useUiStore((s) => s.settingsExecutionSubTab);
+  const setSettingsExecutionSubTab = useUiStore((s) => s.setSettingsExecutionSubTab);
   const rightPanelMode = useUiStore((s) => s.rightPanelMode);
   const setRightPanelMode = useUiStore((s) => s.setRightPanelMode);
   const leftW = useUiStore((s) => s.leftPanelWidth);
@@ -73,8 +79,22 @@ export default function App() {
   }, [clampCodeH, clampTasksH]);
 
   useEffect(() => {
-    void loadSessions();
-  }, [loadSessions]);
+    let cancelled = false;
+    void (async () => {
+      await loadSessions();
+      if (cancelled) return;
+      if (!useSessionStore.getState().currentSession) {
+        try {
+          await createSessionQuick();
+        } catch (e) {
+          console.error("[App] createSessionQuick after loadSessions failed", e);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadSessions, createSessionQuick]);
 
   useEffect(() => {
     const WEB_SEARCH_KEYS_STORAGE = "omiga_web_search_api_keys";
@@ -160,19 +180,31 @@ export default function App() {
 
   useEffect(() => {
     const open = (e: Event) => {
-      const detail = (e as CustomEvent<{ tab?: string }>).detail;
+      const detail = (e as CustomEvent<{ tab?: string; executionSubTab?: number }>)
+        .detail;
       const key = detail?.tab;
       const idx =
         key != null && OPEN_SETTINGS_TAB_DETAIL[key] !== undefined
           ? OPEN_SETTINGS_TAB_DETAIL[key]
           : 0;
       setSettingsTabIndex(idx);
+      if (
+        detail?.executionSubTab != null &&
+        Number.isFinite(detail.executionSubTab)
+      ) {
+        setSettingsExecutionSubTab(detail.executionSubTab);
+      }
       setSettingsOpen(true);
       setRightPanelMode("settings");
     };
     window.addEventListener("openSettings", open);
     return () => window.removeEventListener("openSettings", open);
-  }, [setSettingsOpen, setRightPanelMode, setSettingsTabIndex]);
+  }, [
+    setSettingsOpen,
+    setRightPanelMode,
+    setSettingsTabIndex,
+    setSettingsExecutionSubTab,
+  ]);
 
   const sessionId = currentSession?.id ?? "";
   const filePath = useWorkspaceStore((s) => s.filePath);
@@ -262,6 +294,9 @@ export default function App() {
 
   return (
     <>
+      {!onboardingCompleted && (
+        <OnboardingWizard onComplete={() => setOnboardingCompleted(true)} />
+      )}
       <Layout>
         <Stack
           direction="row"
@@ -336,10 +371,12 @@ export default function App() {
                 <Settings
                   open={true}
                   initialTab={settingsTabIndex}
+                  initialExecutionSubTab={settingsExecutionSubTab}
                   onClose={() => {
                     setSettingsOpen(false);
                     setRightPanelMode("default");
                     setSettingsTabIndex(0);
+                    setSettingsExecutionSubTab(0);
                   }}
                 />
               </Box>
