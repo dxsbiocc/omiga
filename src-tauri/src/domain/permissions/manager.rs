@@ -34,6 +34,8 @@ pub struct PermissionManager {
     session_denials: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     /// 最近拒绝记录（审计日志）
     recent_denials: Arc<RwLock<VecDeque<DenialRecord>>>,
+    /// 会话级 composer「权限模式」：`session_id` → 最近一次 `send_message` 带入的默认拦截立场（无规则匹配时使用）
+    session_composer_stance: Arc<RwLock<HashMap<String, ComposerPermissionStance>>>,
 }
 
 impl PermissionManager {
@@ -47,6 +49,7 @@ impl PermissionManager {
             once_approvals: Arc::new(RwLock::new(HashMap::new())),
             session_denials: Arc::new(RwLock::new(HashMap::new())),
             recent_denials: Arc::new(RwLock::new(VecDeque::with_capacity(100))),
+            session_composer_stance: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -109,8 +112,15 @@ impl PermissionManager {
             return decision;
         }
 
-        // 5. 根据风险等级的默认行为（批准缓存已在步骤 1 处理）
-        self.default_decision(context, &risk).await
+        // 5. 无规则匹配时：按会话 composer 权限立场或系统默认分级
+        let stance = self.get_session_composer_stance(&context.session_id).await;
+        match stance {
+            Some(ComposerPermissionStance::Auto) => self.composer_auto_fallback(context, &risk),
+            Some(ComposerPermissionStance::Bypass) => self.composer_bypass_fallback(),
+            Some(ComposerPermissionStance::Ask) | None => {
+                self.default_decision(context, &risk).await
+            }
+        }
     }
 
     /// 简化的检查接口（用于工具调用，自动构建 context）
@@ -336,6 +346,42 @@ impl PermissionManager {
     pub async fn set_default_mode(&self, mode: crate::domain::permissions::types::PermissionModeInput) {
         // 实际项目中应存储在配置中
         tracing::info!(?mode, "Setting default permission mode");
+    }
+
+    /// 同步聊天 composer 的 `permissionMode`（`ask` \| `auto` \| `bypass`），作为本会话在**无用户规则命中时**的工具拦截默认策略。
+    /// `raw` 为 `None` 或空字符串时不修改已有立场（便于仅更新其它字段的请求）。
+    pub async fn set_session_composer_stance(&self, session_id: &str, raw: Option<&str>) {
+        let Some(s) = raw.map(str::trim).filter(|x| !x.is_empty()) else {
+            return;
+        };
+        let mut map = self.session_composer_stance.write().await;
+        match s {
+            "ask" => {
+                map.insert(session_id.to_string(), ComposerPermissionStance::Ask);
+            }
+            "auto" => {
+                map.insert(session_id.to_string(), ComposerPermissionStance::Auto);
+            }
+            "bypass" => {
+                map.insert(session_id.to_string(), ComposerPermissionStance::Bypass);
+            }
+            _ => {
+                map.remove(session_id);
+            }
+        }
+    }
+
+    pub async fn remove_session_composer_stance(&self, session_id: &str) {
+        let mut map = self.session_composer_stance.write().await;
+        map.remove(session_id);
+    }
+
+    async fn get_session_composer_stance(
+        &self,
+        session_id: &str,
+    ) -> Option<ComposerPermissionStance> {
+        let map = self.session_composer_stance.read().await;
+        map.get(session_id).copied()
     }
 
     /// 获取会话批准状态
@@ -565,6 +611,25 @@ impl PermissionManager {
             }
             PermissionMode::Bypass => PermissionDecision::Allow,
         }
+    }
+
+    /// 与规则引擎 `PermissionMode::Auto` 一致：仅 High 及以上需确认（Critical 已在 `check_permission` 前段单独处理）。
+    fn composer_auto_fallback(&self, context: &PermissionContext, risk: &RiskAssessment) -> PermissionDecision {
+        if risk.level >= RiskLevel::High {
+            PermissionDecision::RequireApproval(PermissionRequest {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                context: context.clone(),
+                risk: risk.clone(),
+                suggested_mode: PermissionMode::AskEveryTime,
+            })
+        } else {
+            PermissionDecision::Allow
+        }
+    }
+
+    /// 尽可能放行；Critical 已在 `check_permission` 步骤 3 强制确认，此处不再出现 Critical。
+    fn composer_bypass_fallback(&self) -> PermissionDecision {
+        PermissionDecision::Allow
     }
 
     /// 默认决定（无规则匹配时）

@@ -399,7 +399,7 @@ const DEFAULT_STOP_WORDS: &[&str] = &[
     "when", "make", "can", "like", "time", "no", "just", "him", "know", "take",
     "people", "into", "year", "your", "good", "some", "could", "them", "see", "other",
     "than", "then", "now", "look", "only", "come", "its", "over", "think", "also",
-    "back", "after", "use", "two", "how", "our", "work", "first", "well", "way",
+    "back", "after", "use", "two", "how", "our", "first", "well", "way",
     "even", "new", "want", "because", "any", "these", "give", "day", "most", "us",
     "was", "were", "been", "has", "had", "did", "does", "doing", "done",
 ];

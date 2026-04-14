@@ -67,7 +67,7 @@ pub struct DaytonaExecConfig {
 
 /// SSH execution configuration for a specific host
 /// Matches standard SSH config format (~/.ssh/config)
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshExecConfig {
     /// Host pattern (the name used to reference this config)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,6 +100,19 @@ pub struct SshExecConfig {
 
 fn default_ssh_port() -> u16 {
     22
+}
+
+impl Default for SshExecConfig {
+    fn default() -> Self {
+        Self {
+            host: None,
+            host_name: None,
+            user: None,
+            port: default_ssh_port(),
+            identity_file: None,
+            enabled: true, // profiles from ~/.ssh/config are enabled by default
+        }
+    }
 }
 
 impl SshExecConfig {
@@ -188,6 +201,32 @@ impl SshExecConfig {
     }
 }
 
+/// Merge `~/.ssh/config` with `omiga.yaml` `execution_envs.ssh` (user definitions override).
+pub fn merged_ssh_configs() -> Result<HashMap<String, SshExecConfig>, String> {
+    let ssh_configs = SshExecConfig::parse_ssh_config()
+        .map_err(|e| format!("Failed to parse SSH config: {}", e))?;
+    let user_configs = match load_config_file() {
+        Ok(config) => config
+            .execution_envs
+            .and_then(|e| e.ssh)
+            .unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    };
+    let mut merged = ssh_configs;
+    for (name, config) in user_configs {
+        merged.insert(name, config);
+    }
+    Ok(merged)
+}
+
+/// Optional `terminal` section (parity with hermes-agent `terminal.credential_files`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TerminalSettings {
+    /// Paths **relative to `~/.omiga`** to rsync to the SSH host under `~/.omiga/<path>`.
+    #[serde(default)]
+    pub credential_files: Vec<String>,
+}
+
 /// Configuration file structure
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -209,6 +248,10 @@ pub struct LlmConfigFile {
     /// Execution environments configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_envs: Option<ExecutionEnvsConfig>,
+
+    /// Terminal / remote sync: extra credential files for SSH rsync (see [`TerminalSettings`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalSettings>,
 }
 
 fn default_version() -> String {
@@ -466,6 +509,7 @@ impl LlmConfigFile {
                 enable_tools: Some(true),
             }),
             execution_envs: None,
+            terminal: None,
         }
     }
 
@@ -528,6 +572,7 @@ impl LlmConfigFile {
                 enable_tools: Some(true),
             }),
             execution_envs: None,
+            terminal: None,
         }
     }
 

@@ -1,12 +1,15 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Box,
+  Stack,
   Typography,
   TextField,
   Button,
   Alert,
   Divider,
+  CircularProgress,
   FormControlLabel,
   Switch,
   IconButton,
@@ -30,7 +33,9 @@ import {
   Delete,
   CheckCircle,
   Error as ErrorIcon,
+  Refresh,
 } from "@mui/icons-material";
+import { RSYNC_INSTALL_HELP_URL } from "../../lib/rsyncSsh";
 
 // Types matching Rust structs
 interface ModalConfig {
@@ -68,13 +73,29 @@ interface SshConfigsMap {
   [name: string]: SshConfig;
 }
 
+/** 本机 `rsync` 是否可用（SSH 同步依赖） */
+type RsyncCheckStatus = "loading" | "ok" | "missing" | "unknown";
+
+function clampExecutionInnerTab(n: number): number {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(2, Math.floor(x)));
+}
+
 interface ExecutionEnvsSettingsTabProps {
   /** When true, renders in compact mode for embedding in Advanced tab */
   embedded?: boolean;
+  /** 0 = Modal, 1 = Daytona, 2 = SSH — e.g. deep link from composer */
+  initialSubTab?: number;
 }
 
-export function ExecutionEnvsSettingsTab({ embedded = false }: ExecutionEnvsSettingsTabProps) {
-  const [activeTab, setActiveTab] = useState(0);
+export function ExecutionEnvsSettingsTab({
+  embedded = false,
+  initialSubTab = 0,
+}: ExecutionEnvsSettingsTabProps) {
+  const [activeTab, setActiveTab] = useState(() =>
+    clampExecutionInnerTab(initialSubTab),
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState<{
     type: "success" | "error";
@@ -109,6 +130,29 @@ export function ExecutionEnvsSettingsTab({ embedded = false }: ExecutionEnvsSett
     IdentityFile: "",
     enabled: true,
   });
+
+  const [rsyncCheckStatus, setRsyncCheckStatus] =
+    useState<RsyncCheckStatus>("loading");
+
+  const refreshRsyncStatus = useCallback(async () => {
+    setRsyncCheckStatus("loading");
+    try {
+      const ok = await invoke<boolean>("is_rsync_available");
+      setRsyncCheckStatus(ok ? "ok" : "missing");
+    } catch {
+      setRsyncCheckStatus("unknown");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 2) return;
+    void refreshRsyncStatus();
+  }, [activeTab, refreshRsyncStatus]);
+
+  useEffect(() => {
+    setActiveTab(clampExecutionInnerTab(initialSubTab));
+  }, [initialSubTab]);
+
   // Load configs on mount
   useEffect(() => {
     loadConfigs();
@@ -492,6 +536,69 @@ export function ExecutionEnvsSettingsTab({ embedded = false }: ExecutionEnvsSett
       {/* SSH Tab */}
       {activeTab === 2 && (
         <Box>
+          <Alert
+            severity={
+              rsyncCheckStatus === "ok"
+                ? "success"
+                : rsyncCheckStatus === "missing"
+                  ? "warning"
+                  : rsyncCheckStatus === "unknown"
+                    ? "info"
+                    : "info"
+            }
+            sx={{ mb: 2 }}
+            action={
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Button
+                  size="small"
+                  startIcon={
+                    rsyncCheckStatus === "loading" ? (
+                      <CircularProgress size={14} color="inherit" />
+                    ) : (
+                      <Refresh fontSize="small" />
+                    )
+                  }
+                  onClick={() => void refreshRsyncStatus()}
+                  disabled={rsyncCheckStatus === "loading"}
+                >
+                  重新检测
+                </Button>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={() => void openUrl(RSYNC_INSTALL_HELP_URL)}
+                >
+                  安装说明
+                </Button>
+              </Stack>
+            }
+          >
+            <Typography variant="subtitle2" fontWeight={600} gutterBottom>
+              rsync（SSH 文件同步）
+            </Typography>
+            {rsyncCheckStatus === "loading" && (
+              <Typography variant="body2">正在检测本机是否已安装 rsync…</Typography>
+            )}
+            {rsyncCheckStatus === "ok" && (
+              <Typography variant="body2">
+                已检测到 rsync。使用 SSH 执行环境时，技能、credentials、缓存等会同步到远端{" "}
+                <code>~/.omiga</code>。
+              </Typography>
+            )}
+            {rsyncCheckStatus === "missing" && (
+              <Typography variant="body2">
+                未检测到 rsync：SSH 远程仍可执行命令，但上述文件<strong>不会</strong>
+                同步。请安装 rsync 后点击「重新检测」，或打开「安装说明」查看各系统安装方式。
+              </Typography>
+            )}
+            {rsyncCheckStatus === "unknown" && (
+              <Typography variant="body2">
+                无法检测 rsync（例如在非桌面环境打开）。请在 Omiga 桌面应用中使用 SSH
+                执行环境；安装说明仍可在浏览器中查看。
+              </Typography>
+            )}
+          </Alert>
+
           <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 2 }}>
             <Box>
               <Typography variant="body2" fontWeight={600}>

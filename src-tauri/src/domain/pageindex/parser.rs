@@ -117,7 +117,9 @@ impl DocumentParser {
 
     /// Extract YAML frontmatter from markdown content.
     fn extract_frontmatter<'a>(&self, content: &'a str) -> (Option<HashMap<String, serde_json::Value>>, &'a str) {
-        if let Some(captures) = self.frontmatter_regex.captures(content) {
+        // Use a dotall-capable regex to match multiline YAML frontmatter
+        let fm_regex = Regex::new(r"(?s)^---\s*\n(.*?)\n---\s*\n(.*)$").unwrap();
+        if let Some(captures) = fm_regex.captures(content) {
             let frontmatter_str = captures.get(1).map(|m| m.as_str()).unwrap_or("");
             let body = captures.get(2).map(|m| m.as_str()).unwrap_or("");
 
@@ -193,6 +195,11 @@ impl DocumentParser {
                 current_content.clear();
 
                 let level = captures.get(1).unwrap().as_str().len();
+                // H1 is the document title — skip it as a section
+                if level == 1 {
+                    current_content.clear();
+                    continue;
+                }
                 let title = captures.get(2).unwrap().as_str().trim().to_string();
                 let section_id = format!("sec_{}_{}", line_num, self.sanitize_id(&title));
 
@@ -252,7 +259,7 @@ impl DocumentParser {
 
     /// Filter sections to max depth recursively.
     fn filter_section_depth(&self, sections: &mut Vec<SectionNode>, current_depth: usize) {
-        if current_depth >= self.max_section_depth {
+        if current_depth > self.max_section_depth {
             sections.clear();
             return;
         }

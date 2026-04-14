@@ -116,6 +116,7 @@ pub async fn create_environment(
                 Some(config.timeout),
                 config.ssh_port,
                 config.ssh_key_path,
+                config.ssh_project_root.clone(),
             ).await?;
             Ok(Arc::new(Mutex::new(env)))
         }

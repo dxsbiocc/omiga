@@ -9,8 +9,11 @@
 //! Working directory resolution matches filesystem tools: project-relative paths,
 //! absolute paths, and `~/` are allowed; relative paths must stay under the project root.
 
+use super::ssh_paths::resolve_bash_cwd_ssh;
 use super::{ToolContext, ToolError, ToolSchema};
+use crate::llm::config::merged_ssh_configs;
 use crate::errors::{BashError, FsError};
+use crate::utils::shell::shell_single_quote;
 use crate::execution::{
     create_environment, EnvironmentConfig, EnvironmentType, ExecOptions,
 };
@@ -389,14 +392,33 @@ fn exec_result_to_bash_raw(exec_result: crate::execution::ExecResult) -> BashRaw
     }
 }
 
+fn ssh_config_for_context(ctx: &ToolContext) -> Result<SshExecConfig, ToolError> {
+    let name = ctx
+        .ssh_server
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| ToolError::ExecutionFailed {
+            message: "未选择 SSH 服务器：请在执行环境菜单中选择 SSH 主机。"
+                .to_string(),
+        })?;
+    let merged = merged_ssh_configs().map_err(|e| ToolError::ExecutionFailed {
+        message: e,
+    })?;
+    merged
+        .get(name)
+        .cloned()
+        .ok_or_else(|| ToolError::ExecutionFailed {
+            message: format!("找不到 SSH 配置: {}", name),
+        })
+}
+
 async fn run_remote_bash_ssh(
     ctx: &ToolContext,
     ssh_cfg: &SshExecConfig,
-    local_cwd: &Path,
+    remote_cwd: String,
     command: &str,
     timeout_ms: u64,
 ) -> Result<BashRawOutput, ToolError> {
-    let remote_cwd = ssh_remote_cwd(&ctx.project_root, local_cwd);
     let host = ssh_cfg.effective_hostname().ok_or_else(|| ToolError::ExecutionFailed {
         message: "SSH: 配置缺少 HostName 或 Host".to_string(),
     })?;
@@ -411,6 +433,7 @@ async fn run_remote_bash_ssh(
         ssh_user: Some(user.clone()),
         ssh_port: ssh_cfg.port,
         ssh_key_path: ssh_cfg.identity_file.clone(),
+        ssh_project_root: Some(ctx.project_root.clone()),
         task_id: format!("omiga-{}", uuid::Uuid::new_v4()),
         ..Default::default()
     };
@@ -601,7 +624,8 @@ async fn run_remote_bash(
                 message: "未找到可用的 SSH 配置（execution_envs.ssh：enabled，且设置 HostName/User）。"
                     .to_string(),
             })?;
-            run_remote_bash_ssh(ctx, profile.1, local_cwd, command, timeout_ms).await
+            let remote_cwd = ssh_remote_cwd(&ctx.project_root, local_cwd);
+            run_remote_bash_ssh(ctx, profile.1, remote_cwd, command, timeout_ms).await
         }
         RemoteBackend::Modal => run_remote_bash_modal(cfg, command, timeout_ms).await,
         RemoteBackend::Daytona => run_remote_bash_daytona(cfg, command, timeout_ms).await,
@@ -630,35 +654,38 @@ impl super::ToolImpl for BashTool {
             message: e.to_string(),
         })?;
 
-        let cwd = resolve_bash_cwd(ctx, args.cwd.as_deref())?;
-        if !cwd.exists() {
-            return Err(BashError::WorkingDirNotFound {
-                path: cwd.display().to_string(),
-            }
-            .into());
-        }
-        if !cwd.is_dir() {
-            return Err(ToolError::InvalidArguments {
-                message: format!("cwd is not a directory: {}", cwd.display()),
-            });
-        }
-
         let timeout_ms = args.effective_timeout_ms();
         let command = args.command.clone();
         let description = args.description.clone();
         let destructive = destructive_command_warning(&args.command).map(str::to_string);
 
-        if ctx.execution_environment == "remote" {
+        if ctx.execution_environment == "ssh" {
             if args.run_in_background == Some(true) {
                 return Err(ToolError::InvalidArguments {
-                    message: "run_in_background is not supported when execution environment is remote."
+                    message: "run_in_background is not supported when execution environment is SSH."
                         .to_string(),
                 });
             }
-            let cfg = load_config_file().map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to load config: {}", e),
-            })?;
-            let output = run_remote_bash(ctx, &cfg, &cwd, &command, timeout_ms).await?;
+            let remote_cwd = resolve_bash_cwd_ssh(&ctx.project_root, &ctx.cwd, args.cwd.as_deref())
+                .map_err(ToolError::from)?;
+            let output = if let Some(ref store) = ctx.env_store {
+                // Session-cached path — no per-call connect/disconnect
+                let env_arc = store.get_or_create(ctx, timeout_ms).await?;
+                let exec_opts = ExecOptions {
+                    timeout: Some(timeout_ms),
+                    cwd: Some(remote_cwd),
+                    stdin_data: None,
+                };
+                let exec_result = {
+                    let mut guard = env_arc.lock().await;
+                    guard.execute(&command, exec_opts).await
+                }.map_err(|e| ToolError::ExecutionFailed { message: format!("远程 SSH 执行: {}", e) })?;
+                exec_result_to_bash_raw(exec_result)
+            } else {
+                // Fallback: legacy per-call path
+                let cfg = ssh_config_for_context(ctx)?;
+                run_remote_bash_ssh(ctx, &cfg, remote_cwd, &command, timeout_ms).await?
+            };
             return Ok(BashOutput {
                 command,
                 description,
@@ -670,6 +697,70 @@ impl super::ToolImpl for BashTool {
                 output_file: None,
             }
             .into_stream());
+        }
+
+        // For sandbox environments, use env_store if available to avoid per-call env create/destroy
+        if ctx.execution_environment == "sandbox" || ctx.execution_environment == "remote" {
+            if args.run_in_background == Some(true) {
+                return Err(ToolError::InvalidArguments {
+                    message: "run_in_background is not supported when execution environment is remote/sandbox."
+                        .to_string(),
+                });
+            }
+            let output = if let Some(ref store) = ctx.env_store {
+                let env_arc = store.get_or_create(ctx, timeout_ms).await?;
+                // Respect args.cwd; fall back to /workspace (sandbox default root).
+                let remote_cwd = args
+                    .cwd
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "/workspace".to_string());
+                let exec_opts = ExecOptions {
+                    timeout: Some(timeout_ms),
+                    cwd: Some(remote_cwd),
+                    stdin_data: None,
+                };
+                let exec_result = {
+                    let mut guard = env_arc.lock().await;
+                    guard.execute(&command, exec_opts).await
+                }.map_err(|e| ToolError::ExecutionFailed { message: format!("远程执行: {}", e) })?;
+                exec_result_to_bash_raw(exec_result)
+            } else {
+                // Fallback: legacy per-call path
+                let cwd = resolve_bash_cwd(ctx, args.cwd.as_deref())?;
+                let cfg = load_config_file().map_err(|e| ToolError::ExecutionFailed {
+                    message: format!("Failed to load config: {}", e),
+                })?;
+                run_remote_bash(ctx, &cfg, &cwd, &command, timeout_ms).await?
+            };
+            return Ok(BashOutput {
+                command,
+                description,
+                destructive_warning: destructive,
+                exit_code: output.exit_code,
+                stdout: output.stdout,
+                stderr: output.stderr,
+                background_task_id: None,
+                output_file: None,
+            }
+            .into_stream());
+        }
+
+        // Wrap command with virtual-env activation when configured.
+        let command = prepend_venv_activation(&ctx.local_venv_type, &ctx.local_venv_name, &command);
+
+        let cwd = resolve_bash_cwd(ctx, args.cwd.as_deref())?;
+        if !cwd.exists() {
+            return Err(BashError::WorkingDirNotFound {
+                path: cwd.display().to_string(),
+            }
+            .into());
+        }
+        if !cwd.is_dir() {
+            return Err(ToolError::InvalidArguments {
+                message: format!("cwd is not a directory: {}", cwd.display()),
+            });
         }
 
         if args.run_in_background == Some(true) {
@@ -737,6 +828,38 @@ impl super::ToolImpl for BashTool {
         }
         .into_stream())
     }
+}
+
+/// Build the activation preamble for a local virtual environment.
+/// Returns the original command unchanged when no venv is configured.
+fn prepend_venv_activation(venv_type: &str, venv_name: &str, command: &str) -> String {
+    let name = venv_name.trim();
+    if name.is_empty() || venv_type == "none" || venv_type.is_empty() {
+        return command.to_string();
+    }
+    let preamble = match venv_type {
+        "conda" => format!(
+            // Source conda init script so `conda activate` is available even in non-interactive shells.
+            "source \"$(conda info --base)/etc/profile.d/conda.sh\"; \
+             conda activate {name}; ",
+            name = shell_escape_arg(name),
+        ),
+        "venv" => format!(
+            "source {path}/bin/activate; ",
+            path = shell_escape_arg(name),
+        ),
+        "pyenv" => format!(
+            "export PYENV_VERSION={ver}; ",
+            ver = shell_escape_arg(name),
+        ),
+        _ => return command.to_string(),
+    };
+    format!("{}{}", preamble, command)
+}
+
+/// Single-quote a shell argument. Delegates to the shared crate utility.
+fn shell_escape_arg(s: &str) -> String {
+    shell_single_quote(s)
 }
 
 fn resolve_bash_cwd(ctx: &ToolContext, cwd: Option<&str>) -> Result<PathBuf, FsError> {
@@ -1107,5 +1230,91 @@ mod tests {
     fn destructive_warning_metadata() {
         let w = destructive_command_warning("git reset --hard");
         assert!(w.is_some());
+    }
+
+    // ─── prepend_venv_activation tests ────────────────────────────────────────
+
+    #[test]
+    fn venv_type_none_returns_command_unchanged() {
+        let cmd = prepend_venv_activation("none", "myenv", "python main.py");
+        assert_eq!(cmd, "python main.py");
+    }
+
+    #[test]
+    fn venv_type_empty_returns_command_unchanged() {
+        let cmd = prepend_venv_activation("", "myenv", "python main.py");
+        assert_eq!(cmd, "python main.py");
+    }
+
+    #[test]
+    fn venv_name_empty_returns_command_unchanged() {
+        let cmd = prepend_venv_activation("conda", "", "python main.py");
+        assert_eq!(cmd, "python main.py");
+    }
+
+    #[test]
+    fn venv_name_whitespace_only_returns_command_unchanged() {
+        let cmd = prepend_venv_activation("conda", "   ", "python main.py");
+        assert_eq!(cmd, "python main.py");
+    }
+
+    #[test]
+    fn conda_env_prepends_source_and_activate() {
+        let cmd = prepend_venv_activation("conda", "myenv", "python main.py");
+        assert!(cmd.contains("conda.sh"), "should source conda init");
+        assert!(cmd.contains("conda activate 'myenv'"), "should activate env");
+        assert!(cmd.ends_with("python main.py"), "original command appended");
+    }
+
+    #[test]
+    fn conda_env_name_with_shell_metacharacters_is_quoted() {
+        // An env named "env; rm -rf /" should appear inside single quotes so the
+        // semicolon is inert — it must NOT appear as a bare unquoted token.
+        let cmd = prepend_venv_activation("conda", "env; rm -rf /", "ls");
+        // The entire name must be single-quoted
+        assert!(cmd.contains("'env; rm -rf /'"), "name must be single-quoted");
+        // The activate call must end with the quoted name (no bare semicolon after it
+        // that would let the shell treat "; rm -rf /" as a separate command segment)
+        let activate_pos = cmd.find("conda activate").expect("activate missing");
+        let after_activate = &cmd[activate_pos..];
+        // After "conda activate " the very next char must be a single quote
+        let name_start = after_activate.find("activate ").unwrap() + "activate ".len();
+        assert_eq!(&after_activate[name_start..name_start + 1], "'", "name must start with single quote");
+    }
+
+    #[test]
+    fn venv_path_prepends_source_activate() {
+        let cmd = prepend_venv_activation("venv", "/home/user/project/.venv", "python main.py");
+        assert!(
+            cmd.contains("source '/home/user/project/.venv'/bin/activate"),
+            "should source activate script"
+        );
+        assert!(cmd.ends_with("python main.py"));
+    }
+
+    #[test]
+    fn venv_path_with_spaces_is_safely_quoted() {
+        let cmd = prepend_venv_activation("venv", "/home/my user/proj/.venv", "ls");
+        assert!(cmd.contains("'/home/my user/proj/.venv'"), "path must be single-quoted");
+    }
+
+    #[test]
+    fn pyenv_version_sets_env_var() {
+        let cmd = prepend_venv_activation("pyenv", "3.11.5", "python --version");
+        assert!(cmd.contains("PYENV_VERSION='3.11.5'"), "should set PYENV_VERSION");
+        assert!(cmd.ends_with("python --version"));
+    }
+
+    #[test]
+    fn pyenv_version_with_shell_special_chars_quoted() {
+        let cmd = prepend_venv_activation("pyenv", "3.11; malicious", "ls");
+        assert!(!cmd.contains("malicious;"), "must not execute injected code bare");
+        assert!(cmd.contains("'3.11; malicious'"), "version must be quoted");
+    }
+
+    #[test]
+    fn unknown_venv_type_returns_command_unchanged() {
+        let cmd = prepend_venv_activation("nix", "myshell", "ls");
+        assert_eq!(cmd, "ls");
     }
 }

@@ -106,6 +106,12 @@ pub(crate) struct AgentLlmRuntime {
     ssh_server: Option<String>,
     /// `modal` | `daytona` | `docker` | `singularity` — from [`SessionRuntimeState::sandbox_backend`].
     sandbox_backend: String,
+    /// Local virtual env type: `"none"` | `"conda"` | `"venv"` | `"pyenv"`.
+    local_venv_type: String,
+    /// Conda env name, venv directory path, or pyenv version string.
+    local_venv_name: String,
+    /// Session-scoped environment cache — shared across all tool calls in this round.
+    env_store: crate::domain::tools::env_store::EnvStore,
 }
 
 pub use crate::domain::chat_state::{
@@ -513,24 +519,6 @@ pub fn list_available_agents() -> Vec<AvailableAgentInfo> {
     out
 }
 
-fn composer_permission_addendum(raw: &str) -> Option<String> {
-    match raw.trim() {
-        "ask" => Some(
-            "### Composer permission mode\nThe user chose **ask**: prefer confirming before applying edits or running destructive tools."
-                .to_string(),
-        ),
-        "auto" => Some(
-            "### Composer permission mode\nThe user chose **auto**: accept reasonable file edits without repeated confirmation when aligned with the task."
-                .to_string(),
-        ),
-        "bypass" => Some(
-            "### Composer permission mode\nThe user chose **bypass**: minimize permission prompts; still follow safety-critical constraints."
-                .to_string(),
-        ),
-        _ => None,
-    }
-}
-
 /// Normalize composer `sandboxBackend` from the UI (`modal` | `daytona` | `docker` | `singularity`).
 /// Note: `ssh` is no longer a sandbox backend - it's now a separate execution environment.
 fn normalize_sandbox_backend(raw: Option<&String>) -> String {
@@ -769,6 +757,8 @@ pub async fn send_message(
                     runtime.execution_environment = exec_env.clone();
                     runtime.ssh_server = ssh_server.clone();
                     runtime.sandbox_backend = sandbox_backend.clone();
+                    runtime.local_venv_type = request.local_venv_type.clone().unwrap_or_default();
+                    runtime.local_venv_name = request.local_venv_name.clone().unwrap_or_default();
                 } else {
                     let (todos_v, tasks_v) = repo.get_session_tool_state(&session.id).await.map_err(
                         |e| {
@@ -789,6 +779,9 @@ pub async fn send_message(
                             execution_environment: exec_env.clone(),
                             ssh_server: ssh_server.clone(),
                             sandbox_backend: sandbox_backend.clone(),
+                            local_venv_type: request.local_venv_type.clone().unwrap_or_default(),
+                            local_venv_name: request.local_venv_name.clone().unwrap_or_default(),
+                            env_store: crate::domain::tools::env_store::EnvStore::new(),
                         },
                     );
                 }
@@ -806,7 +799,7 @@ pub async fn send_message(
         // Create new session with explicit metadata
         let project_path = request.project_path.unwrap_or_else(|| ".".to_string());
         let session_name = request.session_name.unwrap_or_else(|| {
-            request.content.chars().take(50).collect::<String>()
+            crate::domain::chat_session_title::fallback_title_from_message(&request.content)
         });
 
         let mut session = Session::new(session_name, project_path);
@@ -838,6 +831,9 @@ pub async fn send_message(
             execution_environment: exec_env.clone(),
             ssh_server: ssh_server.clone(),
             sandbox_backend: sandbox_backend.clone(),
+            local_venv_type: request.local_venv_type.clone().unwrap_or_default(),
+            local_venv_name: request.local_venv_name.clone().unwrap_or_default(),
+            env_store: crate::domain::tools::env_store::EnvStore::new(),
         };
         {
             let mut sessions = app_state.chat.sessions.write().await;
@@ -850,6 +846,12 @@ pub async fn send_message(
     };
 
     let project_root = resolve_session_project_root(&project_path);
+
+    // Composer「权限模式」→ PermissionManager：无用户规则命中时按本会话立场硬拦截（与前端输入框同步）
+    app_state
+        .permission_manager
+        .set_session_composer_stance(&session_id, request.permission_mode.as_deref())
+        .await;
     
     // 检测是否为 Plan mode
     let is_plan_mode = request.composer_agent_type.as_deref() == Some("Plan");
@@ -910,9 +912,10 @@ pub async fn send_message(
     };
     // Run independent async I/O in parallel to reduce pre-LLM latency.
     let skill_cache_ref = &app_state.skill_cache;
-    let (skills_exist, memory_ctx) = tokio::join!(
+    let (skills_exist, memory_ctx, memory_nav) = tokio::join!(
         skills::skills_any_exist(&project_root, skill_cache_ref),
         crate::commands::memory::get_memory_context(&project_root, &request.content, 3),
+        crate::commands::memory::memory_navigation_section(&project_root),
     );
 
     let skills_system_section = if skills_exist {
@@ -933,6 +936,11 @@ pub async fn send_message(
             prompt_parts.push(agent_prompt::coordinator_mode_addendum().to_string());
         }
     }
+    // 用户级 SOUL / MEMORY / USER 与 ~/.omiga + 项目 .omiga 人格配置（compose_full_agent_system_prompt 会读取同目录下的 personalities）
+    let user_omiga_ctx = crate::domain::agents::load_user_omiga_context();
+    for sec in user_omiga_ctx.main_system_prompt_sections() {
+        prompt_parts.push(sec);
+    }
     if let Some(ref u) = llm_config.system_prompt {
         let t = u.trim();
         if !t.is_empty() {
@@ -941,6 +949,12 @@ pub async fn send_message(
     }
     if skills_exist {
         prompt_parts.push(skills_system_section);
+    }
+    // Memory navigation guide — always injected to override the model's default
+    // "I have no cross-session memory" belief and tell it where to look.
+    let nav = memory_nav.trim().to_string();
+    if !nav.is_empty() {
+        prompt_parts.push(nav);
     }
     if let Some(ctx) = memory_ctx {
         prompt_parts.push(ctx);
@@ -961,13 +975,15 @@ pub async fn send_message(
                 let tool_ctx = ToolContext::new(project_root.clone())
                     .with_execution_environment(exec_env.clone())
                     .with_ssh_server(request.ssh_server.clone())
-                    .with_sandbox_backend(sandbox_backend.clone());
-                prompt_parts.push(agent.system_prompt(&tool_ctx));
-            }
-        }
-        if let Some(ref pm) = request.permission_mode {
-            if let Some(line) = composer_permission_addendum(pm) {
-                prompt_parts.push(line);
+                    .with_sandbox_backend(sandbox_backend.clone())
+                    .with_local_venv(
+                        request.local_venv_type.as_deref().unwrap_or(""),
+                        request.local_venv_name.as_deref().unwrap_or(""),
+                    );
+                prompt_parts.push(crate::domain::agents::compose_full_agent_system_prompt(
+                    agent,
+                    &tool_ctx,
+                ));
             }
         }
         if let Some(line) = composer_execution_addendum(exec_env.as_str(), request.ssh_server.as_deref()) {
@@ -1222,7 +1238,7 @@ pub async fn send_message(
 
         let tool_results_dir = tool_results_dir_for_session(&app_clone, &session_id_clone);
 
-        let (plan_mode_flag, execution_environment, ssh_server_rt, sandbox_backend_rt) = {
+        let (plan_mode_flag, execution_environment, ssh_server_rt, sandbox_backend_rt, local_venv_type_rt, local_venv_name_rt, env_store_rt) = {
             let sessions = sessions_clone.read().await;
             let s = sessions.get(&session_id_clone);
             (
@@ -1231,6 +1247,10 @@ pub async fn send_message(
                     .unwrap_or_else(|| "local".to_string()),
                 s.and_then(|x| x.ssh_server.clone()),
                 s.map(|x| x.sandbox_backend.clone()).unwrap_or_else(|| "docker".to_string()),
+                s.map(|x| x.local_venv_type.clone()).unwrap_or_default(),
+                s.map(|x| x.local_venv_name.clone()).unwrap_or_default(),
+                s.map(|x| x.env_store.clone())
+                    .unwrap_or_else(crate::domain::tools::env_store::EnvStore::new),
             )
         };
 
@@ -1246,6 +1266,9 @@ pub async fn send_message(
             execution_environment,
             ssh_server: ssh_server_rt,
             sandbox_backend: sandbox_backend_rt,
+            local_venv_type: local_venv_type_rt,
+            local_venv_name: local_venv_name_rt,
+            env_store: env_store_rt,
         };
 
         let mut turn_token_usage: Option<crate::llm::TokenUsage> = None;
@@ -1385,6 +1408,7 @@ pub async fn send_message(
                 &final_reply_for_follow_up,
                 preflight_skip_turn_summary,
                 &final_reply_for_follow_up,
+                repo_clone.clone(),
             )
             .await;
             return;
@@ -1440,6 +1464,9 @@ pub async fn send_message(
                 agent_runtime.execution_environment.clone(),
                 agent_runtime.ssh_server.clone(),
                 agent_runtime.sandbox_backend.clone(),
+                agent_runtime.local_venv_type.clone(),
+                agent_runtime.local_venv_name.clone(),
+                agent_runtime.env_store.clone(),
             )
             .await;
 
@@ -1639,6 +1666,7 @@ pub async fn send_message(
                     &final_reply_for_follow_up,
                     preflight_skip_turn_summary || send_user_message_called,
                     suggestions_text,
+                    repo_clone.clone(),
                 )
                 .await;
                 return;
@@ -1680,6 +1708,7 @@ pub async fn send_message(
             &final_reply_for_follow_up,
             preflight_skip_turn_summary || send_user_message_called,
             suggestions_text,
+            repo_clone.clone(),
         )
         .await;
     });
@@ -1980,17 +2009,12 @@ async fn emit_post_turn_meta_then_complete(
     final_reply: &str,
     skip_summary: bool,
     suggestions_reply: &str,
+    repo: std::sync::Arc<crate::domain::persistence::SessionRepository>,
 ) {
-    let (summary_enabled, follow_enabled, state) = match app.try_state::<OmigaAppState>() {
-        Some(state) => {
-            let repo = &*state.repo;
-            let flags = crate::domain::post_turn_settings::load_post_turn_meta_flags(&*repo)
-                .await
-                .unwrap_or((true, true));
-            (flags.0, flags.1, Some(state))
-        }
-        None => (true, true, None),
-    };
+    let flags = crate::domain::post_turn_settings::load_post_turn_meta_flags(&*repo)
+        .await
+        .unwrap_or((true, true));
+    let (summary_enabled, follow_enabled) = flags;
 
     let (summary_res, follow_res) = tokio::join!(
         async {
@@ -2032,15 +2056,12 @@ async fn emit_post_turn_meta_then_complete(
                 &StreamOutputItem::FollowUpSuggestions(items.clone()),
             );
             // Persist follow-up suggestions to database for reload
-            if let Some(ref app_state) = state {
-                if let Ok(json) = serde_json::to_string(&items) {
-                    let repo = &*app_state.repo;
-                    if let Err(e) = repo
-                        .update_message_follow_up_suggestions(assistant_message_id, Some(&json))
-                        .await
-                    {
-                        tracing::warn!("Failed to persist follow-up suggestions: {}", e);
-                    }
+            if let Ok(json) = serde_json::to_string(&items) {
+                if let Err(e) = repo
+                    .update_message_follow_up_suggestions(assistant_message_id, Some(&json))
+                    .await
+                {
+                    tracing::warn!("Failed to persist follow-up suggestions: {}", e);
                 }
             }
         }
@@ -2318,6 +2339,9 @@ async fn run_skill_forked(
             runtime.execution_environment.clone(),
             runtime.ssh_server.clone(),
             runtime.sandbox_backend.clone(),
+            runtime.local_venv_type.clone(),
+            runtime.local_venv_name.clone(),
+            runtime.env_store.clone(),
         )
         .await;
 
@@ -2403,8 +2427,10 @@ async fn run_subagent_session_foreground_inner(
         let tool_ctx = ToolContext::new(effective_root)
             .with_execution_environment(runtime.execution_environment.clone())
             .with_ssh_server(runtime.ssh_server.clone())
-            .with_sandbox_backend(runtime.sandbox_backend.clone());
-        let agent_specific_prompt = agent_def.system_prompt(&tool_ctx);
+            .with_sandbox_backend(runtime.sandbox_backend.clone())
+            .with_local_venv(runtime.local_venv_type.clone(), runtime.local_venv_name.clone());
+        let agent_specific_prompt =
+            crate::domain::agents::compose_full_agent_system_prompt(agent_def, &tool_ctx);
 
         let nested_agent_note = if runtime.allow_nested_agent {
             " Nested `Agent` is allowed."
@@ -2557,6 +2583,9 @@ async fn run_subagent_session_foreground_inner(
             runtime.execution_environment.clone(),
             runtime.ssh_server.clone(),
             runtime.sandbox_backend.clone(),
+            runtime.local_venv_type.clone(),
+            runtime.local_venv_name.clone(),
+            runtime.env_store.clone(),
         )
         .await;
         let tool_messages: Vec<Message> = results
@@ -2799,6 +2828,9 @@ pub(crate) async fn spawn_background_agent(
             execution_environment: runtime_clone.execution_environment.clone(),
             ssh_server: runtime_clone.ssh_server.clone(),
             sandbox_backend: runtime_clone.sandbox_backend.clone(),
+            env_store: runtime_clone.env_store.clone(),
+            local_venv_type: runtime_clone.local_venv_type.clone(),
+            local_venv_name: runtime_clone.local_venv_name.clone(),
         };
         
         // 运行子 Agent 会话（同步等待结果）
@@ -3344,6 +3376,9 @@ async fn execute_tool_calls(
     execution_environment: String,
     ssh_server: Option<String>,
     sandbox_backend: String,
+    local_venv_type: String,
+    local_venv_name: String,
+    env_store: crate::domain::tools::env_store::EnvStore,
 ) -> Vec<(String, String, bool)> {
     use futures::future::join_all;
 
@@ -3463,6 +3498,9 @@ async fn execute_tool_calls(
                     execution_environment.clone(),
                     ssh_server.clone(),
                     sandbox_backend.clone(),
+                    local_venv_type.clone(),
+                    local_venv_name.clone(),
+                    env_store.clone(),
                 )
             })
             .collect();
@@ -3497,6 +3535,9 @@ async fn execute_tool_calls(
             execution_environment.clone(),
             ssh_server.clone(),
             sandbox_backend.clone(),
+            local_venv_type.clone(),
+            local_venv_name.clone(),
+            env_store.clone(),
         )
         .await;
         ordered_results[idx] = Some(res);
@@ -3529,6 +3570,9 @@ async fn execute_one_tool(
     execution_environment: String,
     ssh_server: Option<String>,
     sandbox_backend: String,
+    local_venv_type: String,
+    local_venv_name: String,
+    env_store: crate::domain::tools::env_store::EnvStore,
 ) -> (String, String, bool) {
     let tool_use_id = &tool_use_id;
     let tool_name = &tool_name;
@@ -4582,6 +4626,8 @@ async fn execute_one_tool(
                     .with_execution_environment(execution_environment.clone())
                     .with_ssh_server(ssh_server.clone())
                     .with_sandbox_backend(sandbox_backend.clone())
+                    .with_local_venv(local_venv_type.clone(), local_venv_name.clone())
+                    .with_env_store(Some(env_store.clone()))
                     .with_background_shell(
                         crate::domain::background_shell::BackgroundShellHandle {
                             app: app.clone(),
@@ -4855,11 +4901,23 @@ pub async fn cancel_session_rounds(
         }
     }
 
-    // Clean up in-memory session cache
+    // Clean up in-memory session cache — shut down remote env connections first
     {
+        let env_store = {
+            let sessions = app_state.chat.sessions.read().await;
+            sessions.get(&session_id).map(|s| s.env_store.clone())
+        };
+        if let Some(store) = env_store {
+            store.shutdown().await;
+        }
         let mut sessions = app_state.chat.sessions.write().await;
         sessions.remove(&session_id);
     }
+
+    app_state
+        .permission_manager
+        .remove_session_composer_stance(&session_id)
+        .await;
 
     cancel_permission_tool_waiters_for_session(
         &app_state.chat.permission_tool_waiters,
@@ -5365,6 +5423,47 @@ pub async fn test_model(
     }
 }
 
+/// Generate a short sidebar title from the first user message (one cheap LLM call; falls back to heuristic truncation).
+#[tauri::command]
+pub async fn suggest_session_title(
+    app_state: State<'_, OmigaAppState>,
+    user_message: String,
+) -> CommandResult<String> {
+    let fallback =
+        crate::domain::chat_session_title::fallback_title_from_message(&user_message);
+    if std::env::var("OMIGA_DISABLE_SESSION_TITLE_LLM")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        return Ok(fallback);
+    }
+    let config = match get_llm_config(&app_state.chat).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(target: "omiga::session_title", "no llm config: {}", e);
+            return Ok(fallback);
+        }
+    };
+    let client = match create_client(config) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(target: "omiga::session_title", "create_client: {}", e);
+            return Ok(fallback);
+        }
+    };
+    match crate::domain::chat_session_title::suggest_session_title_llm(client.as_ref(), &user_message)
+        .await
+    {
+        Ok(t) if !t.trim().is_empty() => Ok(t),
+        Ok(_) => Ok(fallback),
+        Err(e) => {
+            tracing::warn!(target: "omiga::session_title", "llm title failed: {}", e);
+            Ok(fallback)
+        }
+    }
+}
+
 /// Result of model test
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -5383,7 +5482,7 @@ pub struct SendMessageRequest {
     pub session_id: Option<String>,
     /// Explicit project path (required for new sessions)
     pub project_path: Option<String>,
-    /// Optional session name (defaults to first 50 chars of content)
+    /// Optional session name (defaults to a one-line title from the first user message, same as the UI)
     pub session_name: Option<String>,
     #[serde(default)]
     pub use_tools: bool,
@@ -5405,6 +5504,12 @@ pub struct SendMessageRequest {
     /// `modal` | `daytona` | `docker` | `singularity` — composer sandbox backend; used when `execution_environment == "sandbox"`.
     #[serde(default, rename = "sandboxBackend")]
     pub sandbox_backend: Option<String>,
+    /// `"none"` | `"conda"` | `"venv"` | `"pyenv"` — local virtual env type.
+    #[serde(default, rename = "localVenvType")]
+    pub local_venv_type: Option<String>,
+    /// Conda env name, venv directory path, or pyenv version string.
+    #[serde(default, rename = "localVenvName")]
+    pub local_venv_name: Option<String>,
     /// When set, truncate SQLite transcript after this user row and reuse it instead of inserting a new user message.
     #[serde(default, rename = "retryFromUserMessageId")]
     pub retry_from_user_message_id: Option<String>,
@@ -6154,6 +6259,9 @@ pub async fn run_agent_schedule(
         execution_environment: "local".to_string(),
         ssh_server: None,
         sandbox_backend: "docker".to_string(),
+        local_venv_type: String::new(),
+        local_venv_name: String::new(),
+        env_store: crate::domain::tools::env_store::EnvStore::new(),
     };
 
     let max_agents = request.max_agents.unwrap_or(5);

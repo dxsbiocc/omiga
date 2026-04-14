@@ -4,6 +4,7 @@ pub mod agents;
 pub mod auto_compact;
 pub mod background_shell;
 pub mod chat_state;
+pub mod chat_session_title;
 pub mod suggestions;
 pub mod post_turn_settings;
 pub mod integrations_catalog;

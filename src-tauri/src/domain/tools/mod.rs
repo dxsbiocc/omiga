@@ -6,11 +6,13 @@
 //! - Tool execution produces StreamOutput for unified streaming interface
 
 pub mod bash;
+pub mod env_store;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
 pub mod glob;
 pub mod grep;
+pub mod shell_file_ops;
 pub mod web_fetch;
 pub mod web_search;
 pub mod todo_write;
@@ -31,6 +33,7 @@ pub mod skill_invoke;
 pub mod list_skills;
 pub mod skill_manage;
 pub mod skill_view;
+pub mod ssh_paths;
 pub mod task_create;
 pub mod task_get;
 pub mod task_list;
@@ -582,6 +585,14 @@ pub struct ToolContext {
     pub ssh_server: Option<String>,
     /// `modal` | `daytona` | `docker` | `singularity` — sandbox backend; used when `execution_environment == "sandbox"`.
     pub sandbox_backend: String,
+    /// Virtual env type for local execution: `"none"` | `"conda"` | `"venv"` | `"pyenv"`.
+    pub local_venv_type: String,
+    /// Virtual env name/path (conda env name, venv dir path, pyenv version string).
+    pub local_venv_name: String,
+    /// Session-scoped environment cache (hermes-agent `_active_environments` pattern).
+    /// Shared across all tool calls in a session so `init_session()` runs once per backend.
+    /// `None` in test / sub-agent contexts where no UI session is attached.
+    pub env_store: Option<env_store::EnvStore>,
     /// Cancellation token
     pub cancel: tokio_util::sync::CancellationToken,
     /// Timeout duration (default: 60s)
@@ -611,6 +622,8 @@ impl ToolContext {
             execution_environment: "local".to_string(),
             ssh_server: None,
             sandbox_backend: String::new(),
+            local_venv_type: String::new(),
+            local_venv_name: String::new(),
             cancel: tokio_util::sync::CancellationToken::new(),
             timeout_secs: 60,
             todos: None,
@@ -620,6 +633,7 @@ impl ToolContext {
             tool_results_dir: None,
             plan_mode: None,
             web_search_api_keys: WebSearchApiKeys::default(),
+            env_store: None,
         }
     }
 
@@ -697,6 +711,20 @@ impl ToolContext {
     /// Remote sandbox backend from composer (used when `execution_environment == "sandbox"`).
     pub fn with_sandbox_backend(mut self, backend: impl Into<String>) -> Self {
         self.sandbox_backend = backend.into();
+        self
+    }
+
+    /// Local virtual environment (conda env name, venv path, pyenv version).
+    pub fn with_local_venv(mut self, venv_type: impl Into<String>, venv_name: impl Into<String>) -> Self {
+        self.local_venv_type = venv_type.into();
+        self.local_venv_name = venv_name.into();
+        self
+    }
+
+    /// Attach the session-scoped environment cache (hermes-agent `_active_environments` pattern).
+    /// Must be set from the chat session to enable remote file operations and env reuse.
+    pub fn with_env_store(mut self, store: Option<env_store::EnvStore>) -> Self {
+        self.env_store = store;
         self
     }
 

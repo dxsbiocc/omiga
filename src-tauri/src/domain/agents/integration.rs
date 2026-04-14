@@ -3,6 +3,9 @@
 //! 将 Agent 路由系统集成到现有的 Chat/Subagent 系统中。
 
 use super::definition::PermissionMode;
+use std::path::Path;
+
+use super::personality::compose_full_agent_system_prompt;
 use super::router::AgentRouter;
 use crate::domain::tools::ToolContext;
 
@@ -34,6 +37,7 @@ pub fn prepare_agent_session_config(
     parent_model: &str,
     parent_in_plan_mode: bool,
     allow_nested_agent: bool,
+    project_root: &Path,
 ) -> AgentSessionConfig {
     // 选择 Agent
     let agent = router.select_agent(subagent_type);
@@ -52,8 +56,8 @@ pub fn prepare_agent_session_config(
     );
     
     // 构建系统提示词（这里只是 Agent 特定的部分，外层会添加基础提示词）
-    let tool_ctx = ToolContext::new("."); // 简化上下文
-    let agent_specific_prompt = agent.system_prompt(&tool_ctx);
+    let tool_ctx = ToolContext::new(project_root.to_path_buf());
+    let agent_specific_prompt = compose_full_agent_system_prompt(agent, &tool_ctx);
     
     // 构建子 Agent 模式说明
     let nested_agent_note = if allow_nested_agent {

@@ -55,6 +55,10 @@ struct AgentFrontmatter {
     color: Option<String>,
     /// 最大轮数
     max_turns: Option<usize>,
+    /// 内置人格预设（与 `personality` 模块中的名称一致，如 concise、teacher）
+    personality: Option<String>,
+    /// 持久身份片段（类似 Hermes SOUL.md），YAML 多行字符串
+    soul: Option<String>,
 }
 
 /// 动态加载的 Agent
@@ -71,6 +75,10 @@ pub struct DynamicAgent {
     pub background: bool,
     pub omit_claude_md: bool,
     pub max_turns: Option<usize>,
+    /// 人格预设名（内置列表）或自定义占位（未知键在叠层时忽略）
+    pub personality_key: Option<String>,
+    /// 身份片段（soul）
+    pub soul_text: Option<String>,
     pub file_path: PathBuf,
 }
 
@@ -85,6 +93,14 @@ impl AgentDefinition for DynamicAgent {
 
     fn system_prompt(&self, _ctx: &ToolContext) -> String {
         self.system_prompt_text.clone()
+    }
+
+    fn soul_fragment(&self) -> Option<&str> {
+        self.soul_text.as_deref()
+    }
+
+    fn personality_preset(&self) -> Option<&str> {
+        self.personality_key.as_deref()
     }
 
     fn source(&self) -> AgentSource {
@@ -313,6 +329,8 @@ impl Clone for DynamicAgent {
             background: self.background,
             omit_claude_md: self.omit_claude_md,
             max_turns: self.max_turns,
+            personality_key: self.personality_key.clone(),
+            soul_text: self.soul_text.clone(),
             file_path: self.file_path.clone(),
         }
     }
@@ -468,6 +486,8 @@ fn parse_agent_from_markdown(content: &str, path: &Path) -> Result<DynamicAgent,
         background: frontmatter.background.unwrap_or(false),
         omit_claude_md: frontmatter.omit_claude_md.unwrap_or(false),
         max_turns: frontmatter.max_turns,
+        personality_key: frontmatter.personality,
+        soul_text: frontmatter.soul,
         file_path: path.to_path_buf(),
     })
 }
@@ -509,6 +529,9 @@ tools:
   - Read
   - Write
 background: true
+personality: teacher
+soul: |
+  用耐心、清晰的语气回答。
 ---
 
 这是一个测试 Agent 的系统提示词。
@@ -521,6 +544,8 @@ background: true
         assert_eq!(agent.when_to_use, "测试 Agent");
         assert_eq!(agent.model, Some("haiku".to_string()));
         assert_eq!(agent.allowed_tools, Some(vec!["Read".to_string(), "Write".to_string()]));
+        assert_eq!(agent.personality_key.as_deref(), Some("teacher"));
+        assert!(agent.soul_text.as_ref().is_some_and(|s| s.contains("耐心")));
         assert!(agent.background);
         assert!(agent.system_prompt_text.contains("这是一个测试 Agent"));
     }

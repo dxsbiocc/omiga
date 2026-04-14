@@ -69,6 +69,25 @@ impl super::ToolImpl for GlobTool {
         ctx: &ToolContext,
         args: Self::Args,
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+        // Remote/SSH/sandbox: use shell-based glob through the cached environment
+        if ctx.execution_environment != "local" {
+            if let Some(ref store) = ctx.env_store {
+                let base = crate::domain::tools::env_store::remote_path(ctx, ".");
+                let env_arc = store.get_or_create(ctx, 30_000).await?;
+                let paths = {
+                    let mut guard = env_arc.lock().await;
+                    let mut ops = crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
+                    ops.glob_find(&args.pattern, &base, args.max_results, args.include_hidden).await?
+                };
+                let truncated = paths.len() >= args.max_results;
+                let matches: Vec<GlobMatch> = paths.into_iter()
+                    .map(|p| GlobMatch { path: p, is_file: true, size: 0 })
+                    .collect();
+                let output = GlobOutput { pattern: args.pattern, matches, truncated };
+                return Ok(output.into_stream());
+            }
+        }
+
         // Parse glob pattern
         let pattern = build_glob_matcher(&args.pattern)
             .map_err(|e| SearchError::InvalidPattern { pattern: e })?;

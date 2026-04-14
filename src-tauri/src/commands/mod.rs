@@ -17,6 +17,9 @@ pub mod permissions;
 pub mod search;
 pub mod session;
 pub mod shell;
+pub mod ssh_fs;
+pub mod sandbox_fs;
+pub mod local_envs;
 pub mod tools;
 
 use crate::errors::AppError;

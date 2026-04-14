@@ -2,7 +2,7 @@
 //! Lives in `OmigaAppState` alongside the DB repo — backend analogue of chat runtime in AppStateStore.
 
 use crate::domain::session::{AgentTask, Session, TodoItem};
-use crate::domain::tools::{ToolSchema, WebSearchApiKeys};
+use crate::domain::tools::{env_store::EnvStore, ToolSchema, WebSearchApiKeys};
 use crate::domain::mcp::connection_manager::GlobalMcpManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -97,6 +97,13 @@ pub struct SessionRuntimeState {
     pub ssh_server: Option<String>,
     /// `modal` | `daytona` | `docker` | `singularity` — composer sandbox backend; used when `execution_environment == "sandbox"`.
     pub sandbox_backend: String,
+    /// `"none"` | `"conda"` | `"venv"` | `"pyenv"` — local virtual env type.
+    pub local_venv_type: String,
+    /// Conda env name, venv directory path, or pyenv version string.
+    pub local_venv_name: String,
+    /// Session-scoped environment cache — shared across all tool calls in this session.
+    /// Created once per session; shutdown on session teardown.
+    pub env_store: EnvStore,
 }
 
 /// Cancellation state for an active conversation round

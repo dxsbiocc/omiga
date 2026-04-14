@@ -10,6 +10,8 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import * as monaco from "monaco-editor";
+import { getWorkspaceFileContext } from "../utils/sshWorkspace";
+import { extractErrorMessage } from "../utils/errorMessage";
 
 // File types that must NOT be read as text
 const BINARY_EXTS = new Set([
@@ -62,15 +64,38 @@ function getLanguageFromPath(path: string): string {
 
 // Read file as bytes and convert to string (faster than line-by-line)
 async function readFileFast(path: string): Promise<string> {
+  const ctx = getWorkspaceFileContext();
+  if (ctx.mode === "ssh") {
+    const result = await invoke<{ content: string }>("ssh_read_file", {
+      sshProfileName: ctx.profile,
+      path,
+      offset: null,
+      limit: null,
+    });
+    return result.content;
+  }
+  if (ctx.mode === "sandbox") {
+    const result = await invoke<{ content: string }>("sandbox_read_file", {
+      sessionId: ctx.sessionId,
+      sandboxBackend: ctx.backend,
+      path,
+      offset: null,
+      limit: null,
+    });
+    return result.content;
+  }
   // Use read_file_bytes from sidex-style backend
   try {
     const bytes: number[] = await invoke("read_file_bytes", { path });
-    // Fast Uint8Array -> string conversion
     const decoder = new TextDecoder("utf-8", { fatal: false });
     return decoder.decode(new Uint8Array(bytes));
   } catch {
     // Fallback to regular read_file if read_file_bytes not available
-    const result = await invoke<{ content: string }>("read_file", { path, offset: null, limit: null });
+    const result = await invoke<{ content: string }>("read_file", {
+      path,
+      offset: null,
+      limit: null,
+    });
     return result.content;
   }
 }
@@ -135,9 +160,9 @@ export const useFileModelStore = create<FileModelState>((set, get) => ({
         error: null 
       });
     } catch (e) {
-      set({ 
-        isLoading: false, 
-        error: String(e),
+      set({
+        isLoading: false,
+        error: extractErrorMessage(e),
         activePath: null,
       });
     }
@@ -194,7 +219,14 @@ export const useFileModelStore = create<FileModelState>((set, get) => ({
     if (!model || !model.isDirty) return;
 
     try {
-      await invoke("write_file", { path, content: model.content });
+      const ctx = getWorkspaceFileContext();
+      if (ctx.mode === "ssh") {
+        await invoke("ssh_write_file", { sshProfileName: ctx.profile, path, content: model.content, expectedHash: null });
+      } else if (ctx.mode === "sandbox") {
+        await invoke("sandbox_write_file", { sessionId: ctx.sessionId, sandboxBackend: ctx.backend, path, content: model.content, expectedHash: null });
+      } else {
+        await invoke("write_file", { path, content: model.content });
+      }
       
       const newModel = { ...model, isDirty: false, version: model.version + 1 };
       const newModels = new Map(models);

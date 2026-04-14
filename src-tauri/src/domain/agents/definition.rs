@@ -42,6 +42,16 @@ pub trait AgentDefinition: Send + Sync {
     /// 生成系统提示词
     fn system_prompt(&self, ctx: &ToolContext) -> String;
 
+    /// 持久身份片段（类似 Hermes `SOUL.md`），描述语气与价值观；由 `compose_full_agent_system_prompt` 拼入最终提示。
+    fn soul_fragment(&self) -> Option<&str> {
+        None
+    }
+
+    /// 内置人格预设名（如 `concise`、`teacher`），与 Hermes `/personality` 命名对齐；未知名称在叠层阶段忽略。
+    fn personality_preset(&self) -> Option<&str> {
+        None
+    }
+
     /// Agent 来源
     fn source(&self) -> AgentSource;
 
@@ -121,6 +131,10 @@ pub struct BuiltInAgent {
     pub color: Option<&'static str>,
     pub background: bool,
     pub omit_claude_md: bool,
+    /// 可选内置人格预设键（与 `personality` 模块中的预设名一致）
+    pub personality_key: Option<&'static str>,
+    /// 可选身份片段（soul），叠在任务提示之前
+    pub soul_text: Option<&'static str>,
 }
 
 impl AgentDefinition for BuiltInAgent {
@@ -134,6 +148,14 @@ impl AgentDefinition for BuiltInAgent {
 
     fn system_prompt(&self, _ctx: &ToolContext) -> String {
         self.system_prompt_text.to_string()
+    }
+
+    fn soul_fragment(&self) -> Option<&str> {
+        self.soul_text
+    }
+
+    fn personality_preset(&self) -> Option<&str> {
+        self.personality_key
     }
 
     fn source(&self) -> AgentSource {

@@ -1,0 +1,17 @@
+# 示例：自定义人格（命名预设）
+# 写入 ~/.omiga/config.yaml，与 skills 等配置共存（仅用户级，无项目 config 叠层）。
+#
+# agent:
+#   personalities:
+#     codereviewer: |
+#       你是严格的代码审查者。优先指出逻辑错误、边界情况与安全风险；
+#       对风格问题次要；输出分条、可执行。
+#     brief_zh: |
+#       默认用中文回答；除非涉及代码标识符或官方文档原文，保持简短。
+
+agent:
+  personalities:
+    example_role: |
+      （在此填写你的人格提示词，支持多行 YAML 文本块。）
+      删除 example_role 或改名为你想要的键；Agent 的 frontmatter 里
+      personality: 对应键名（不区分大小写）。

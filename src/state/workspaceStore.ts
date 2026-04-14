@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { getWorkspaceFileContext } from "../utils/sshWorkspace";
+import { extractErrorMessage } from "../utils/errorMessage";
 
 // File types that must NOT be read as text — handled by their own viewers
 const BINARY_EXTS = new Set([
@@ -90,13 +92,25 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     });
     
     try {
+      const ctx = getWorkspaceFileContext();
+      const readFirst = () => {
+        if (ctx.mode === "ssh")
+          return invoke<FileReadResponse>("ssh_read_file", { sshProfileName: ctx.profile, path, offset: 0, limit: 500 });
+        if (ctx.mode === "sandbox")
+          return invoke<FileReadResponse>("sandbox_read_file", { sessionId: ctx.sessionId, sandboxBackend: ctx.backend, path, offset: 0, limit: 500 });
+        return invoke<FileReadResponse>("read_file", { path, offset: 0, limit: 500 });
+      };
+      const readRest = () => {
+        if (ctx.mode === "ssh")
+          return invoke<FileReadResponse>("ssh_read_file", { sshProfileName: ctx.profile, path, offset: 500, limit: 10000 });
+        if (ctx.mode === "sandbox")
+          return invoke<FileReadResponse>("sandbox_read_file", { sessionId: ctx.sessionId, sandboxBackend: ctx.backend, path, offset: 500, limit: 10000 });
+        return invoke<FileReadResponse>("read_file", { path, offset: 500, limit: 10000 });
+      };
+
       // Use chunked reading for faster initial display of large files
       // First chunk: read first 500 lines to display quickly
-      const firstChunk = await invoke<FileReadResponse>("read_file", {
-        path,
-        offset: 0,
-        limit: 500,
-      });
+      const firstChunk = await readFirst();
       
       // Show first chunk immediately
       set({
@@ -110,11 +124,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       
       // If there's more content, load the rest in background
       if (firstChunk.has_more) {
-        const remaining = await invoke<FileReadResponse>("read_file", {
-          path,
-          offset: 500,
-          limit: 10000, // Large enough to get rest
-        });
+        const remaining = await readRest();
         const fullContent = firstChunk.content + "\n" + remaining.content;
         set({
           savedContent: fullContent,
@@ -124,7 +134,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }
     } catch (e) {
       set({
-        error: String(e),
+        error: extractErrorMessage(e),
         isLoading: false,
         savedContent: "",
         content: "",
@@ -162,18 +172,21 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (!filePath) return;
     set({ isSaving: true, saveError: null });
     try {
-      await invoke<FileWriteResponse>("write_file", {
-        path: filePath,
-        content,
-        expectedHash: null,
-      });
+      const ctx = getWorkspaceFileContext();
+      if (ctx.mode === "ssh") {
+        await invoke<FileWriteResponse>("ssh_write_file", { sshProfileName: ctx.profile, path: filePath, content, expectedHash: null });
+      } else if (ctx.mode === "sandbox") {
+        await invoke<FileWriteResponse>("sandbox_write_file", { sessionId: ctx.sessionId, sandboxBackend: ctx.backend, path: filePath, content, expectedHash: null });
+      } else {
+        await invoke<FileWriteResponse>("write_file", { path: filePath, content, expectedHash: null });
+      }
       set({
         savedContent: content,
         isDirty: false,
         isSaving: false,
       });
     } catch (e) {
-      set({ saveError: String(e), isSaving: false });
+      set({ saveError: extractErrorMessage(e), isSaving: false });
     }
   },
 }));

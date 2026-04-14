@@ -1,16 +1,16 @@
 //! Session codec tests
 
 use chrono::Utc;
-use omiga::domain::session::{Message, ToolCall, SessionCodec};
-use omiga::domain::persistence::MessageRecord;
-use omiga::api::Role;
+use omiga_lib::domain::session::{Message, ToolCall, SessionCodec};
+use omiga_lib::domain::persistence::MessageRecord;
+use omiga_lib::api::Role;
 
 #[test]
 fn test_user_message_roundtrip() {
     let msg = Message::User {
         content: "Hello".to_string(),
     };
-    let (id, session_id, role, content, tool_calls, tool_call_id, tok, reasoning) =
+    let (id, session_id, role, content, tool_calls, tool_call_id, tok, reasoning, _follow_up) =
         SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
 
     assert_eq!(id, "msg-1");
@@ -30,9 +30,10 @@ fn test_assistant_message_roundtrip() {
         tool_calls: None,
         token_usage: None,
         reasoning_content: None,
+        follow_up_suggestions: None,
     };
 
-    let (_, _, role, content, tool_calls, tool_call_id, tok, reasoning) =
+    let (_, _, role, content, tool_calls, tool_call_id, tok, reasoning, _) =
         SessionCodec::message_to_record(&msg, "msg-2", "sess-1");
 
     assert_eq!(role, "assistant");
@@ -56,9 +57,10 @@ fn test_assistant_message_with_tool_calls_roundtrip() {
         tool_calls: Some(tool_calls),
         token_usage: None,
         reasoning_content: None,
+        follow_up_suggestions: None,
     };
 
-    let (_, _, role, content, tool_calls_json, _, tok, reasoning) =
+    let (_, _, role, content, tool_calls_json, _, tok, reasoning, _) =
         SessionCodec::message_to_record(&msg, "msg-3", "sess-1");
 
     assert_eq!(role, "assistant");
@@ -83,7 +85,7 @@ fn test_tool_message_roundtrip() {
         output: "File contents here".to_string(),
     };
 
-    let (_, _, role, content, tool_calls, tool_call_id, tok, reasoning) =
+    let (_, _, role, content, tool_calls, tool_call_id, tok, reasoning, _) =
         SessionCodec::message_to_record(&msg, "msg-4", "sess-1");
 
     assert_eq!(role, "tool");
@@ -105,6 +107,7 @@ fn test_record_to_message_user() {
         tool_call_id: None,
         token_usage_json: None,
         reasoning_content: None,
+        follow_up_suggestions_json: None,
         created_at: Utc::now().to_rfc3339(),
     };
 
@@ -128,6 +131,7 @@ fn test_record_to_message_assistant_with_tool_calls() {
         tool_call_id: None,
         token_usage_json: None,
         reasoning_content: None,
+        follow_up_suggestions_json: None,
         created_at: Utc::now().to_rfc3339(),
     };
 
@@ -160,6 +164,7 @@ fn test_record_to_message_tool() {
         tool_call_id: Some("call-1".to_string()),
         token_usage_json: None,
         reasoning_content: None,
+        follow_up_suggestions_json: None,
         created_at: Utc::now().to_rfc3339(),
     };
 
@@ -201,6 +206,7 @@ fn test_to_api_messages_conversation() {
             }]),
             token_usage: None,
             reasoning_content: None,
+            follow_up_suggestions: None,
         },
         Message::Tool {
             tool_call_id: "call-1".to_string(),
@@ -233,6 +239,7 @@ fn test_extract_tool_calls() {
         }]),
         token_usage: None,
         reasoning_content: None,
+        follow_up_suggestions: None,
     };
 
     let extracted = SessionCodec::extract_tool_calls(&msg_with_tools);

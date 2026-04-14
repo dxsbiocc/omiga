@@ -35,6 +35,7 @@ import {
 } from "@mui/icons-material";
 import { FileIcon, FolderIcon } from "react-material-icon-theme";
 import { materialIconFileExtension } from "../../utils/materialIconTheme";
+import { extractErrorMessage } from "../../utils/errorMessage";
 import {
   createColumnHelper,
   flexRender,
@@ -44,6 +45,7 @@ import {
 } from "@tanstack/react-table";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useSessionStore } from "../../state/sessionStore";
+import { useChatComposerStore } from "../../state/chatComposerStore";
 import { usePencilPalette } from "../../theme";
 
 export interface FileNode {
@@ -256,11 +258,15 @@ export function FileTree() {
   const currentSession = useSessionStore((s) => s.currentSession);
   const sessionId = currentSession?.id;
   const projectPath = (currentSession?.projectPath ?? ".").trim() || ".";
+  const environment = useChatComposerStore((s) => s.environment);
+  const sshServer = useChatComposerStore((s) => s.sshServer);
+  const sandboxBackend = useChatComposerStore((s) => s.sandboxBackend);
 
   const [files, setFiles] = useState<FileNode[]>([]);
   const [sessionRoot, setSessionRoot] = useState<string | null>(null);
   const [currentDir, setCurrentDir] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState<string>("加载文件夹…");
   const [error, setError] = useState<string | null>(null);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
 
@@ -278,19 +284,53 @@ export function FileTree() {
       setError(null);
 
       try {
-        const result = await invoke<unknown>("list_directory", { path });
+        const useSsh = environment === "ssh" && Boolean(sshServer?.trim());
+        const useSandbox = environment === "sandbox" && Boolean(sandboxBackend?.trim());
+
+        if (useSsh) {
+          setLoadingMessage(`正在连接到 ${sshServer!.trim()}…`);
+        } else if (useSandbox) {
+          setLoadingMessage(`正在连接到沙箱 (${sandboxBackend})…`);
+        } else {
+          setLoadingMessage("加载文件夹…");
+        }
+
+        if (environment === "ssh" && !sshServer?.trim()) {
+          setFiles([]);
+          setCurrentDir(null);
+          setSessionRoot(null);
+          setError("请先在聊天输入区选择 SSH 服务器");
+          return;
+        }
+
+        // Remote envs require absolute paths; fall back to sensible defaults.
+        let remotePath = path;
+        if (useSsh && !path.startsWith("/") && !path.startsWith("~/")) {
+          remotePath = "~";
+        } else if (useSandbox && !path.startsWith("/")) {
+          remotePath = "/workspace";
+        }
+
+        let result: unknown;
+        if (useSsh) {
+          result = await invoke("ssh_list_directory", { sshProfileName: sshServer!.trim(), path: remotePath });
+        } else if (useSandbox) {
+          result = await invoke("sandbox_list_directory", { sessionId, sandboxBackend: sandboxBackend!.trim(), path: remotePath });
+        } else {
+          result = await invoke("list_directory", { path });
+        }
         const parsed = parseListResult(result);
         setFiles(parsed.files);
         setCurrentDir(parsed.directory);
         setSessionRoot((prev) => prev ?? parsed.directory);
         setRowSelection({});
       } catch (err) {
-        setError(`无法加载目录: ${err}`);
+        setError(`无法加载目录: ${extractErrorMessage(err)}`);
       } finally {
         setIsLoading(false);
       }
     },
-    [sessionId],
+    [sessionId, environment, sshServer, sandboxBackend],
   );
 
   useEffect(() => {
@@ -568,7 +608,7 @@ export function FileTree() {
       >
         <CircularProgress size={28} thickness={4} sx={{ color: pen.loadingSpinner }} />
         <Typography variant="body2" sx={{ color: pen.textLoading, fontSize: 13 }}>
-          加载文件夹…
+          {loadingMessage}
         </Typography>
       </Box>
     );
