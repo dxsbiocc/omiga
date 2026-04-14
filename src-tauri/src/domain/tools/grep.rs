@@ -74,6 +74,44 @@ impl super::ToolImpl for GrepTool {
         args: Self::Args,
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
         let max_results = args.max_results.min(5000).max(1);
+
+        // Remote/SSH/sandbox: use shell-based grep through the cached environment
+        if ctx.execution_environment != "local" {
+            if let Some(ref store) = ctx.env_store {
+                let search_root = crate::domain::tools::env_store::remote_path(ctx, ".");
+                let env_arc = store.get_or_create(ctx, 30_000).await?;
+                let raw = {
+                    let mut guard = env_arc.lock().await;
+                    let mut ops = crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
+                    ops.grep_raw(
+                        &args.pattern,
+                        &search_root,
+                        args.path_pattern.as_deref(),
+                        args.case_insensitive,
+                        max_results,
+                    ).await?
+                };
+                // Parse "file:line:content" lines into GrepMatches
+                let matches: Vec<GrepMatch> = raw.lines()
+                    .filter_map(|line| {
+                        let mut parts = line.splitn(3, ':');
+                        let file = parts.next()?.to_string();
+                        let lineno: usize = parts.next()?.parse().ok()?;
+                        let content = parts.next().unwrap_or("").to_string();
+                        Some(GrepMatch { file, line: lineno, column: 0, content })
+                    })
+                    .collect();
+                let truncated = matches.len() >= max_results;
+                let output = GrepOutput {
+                    pattern: args.pattern.clone(),
+                    matches,
+                    files_searched: 0,
+                    truncated,
+                };
+                return Ok(output.into_stream());
+            }
+        }
+
         let project_root = ctx.project_root.clone();
         let pattern = args.pattern.clone();
         let path_pattern = args.path_pattern.clone();

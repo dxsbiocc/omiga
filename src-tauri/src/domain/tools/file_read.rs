@@ -61,6 +61,27 @@ impl super::ToolImpl for FileReadTool {
         ctx: &ToolContext,
         args: Self::Args,
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+        // Remote/SSH/sandbox: use shell-based file ops through the cached environment
+        if ctx.execution_environment != "local" {
+            if let Some(ref store) = ctx.env_store {
+                let remote_path = crate::domain::tools::env_store::remote_path(ctx, &args.path);
+                let env_arc = store.get_or_create(ctx, 30_000).await?;
+                let result = {
+                    let mut guard = env_arc.lock().await;
+                    let mut ops = crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
+                    ops.read_file(&remote_path, args.offset, args.limit).await?
+                };
+                let output = FileReadOutput {
+                    path: args.path,
+                    content: result.content,
+                    offset: args.offset,
+                    total_lines: result.total_lines,
+                    has_more: result.has_more,
+                };
+                return Ok(output.into_stream());
+            }
+        }
+
         let path = resolve_path(&ctx.project_root, &args.path)?;
 
         // Check file metadata

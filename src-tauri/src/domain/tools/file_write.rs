@@ -63,6 +63,27 @@ impl super::ToolImpl for FileWriteTool {
         ctx: &ToolContext,
         args: Self::Args,
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+        // Remote/SSH/sandbox: use shell-based file ops through the cached environment
+        if ctx.execution_environment != "local" {
+            if let Some(ref store) = ctx.env_store {
+                let remote_path = crate::domain::tools::env_store::remote_path(ctx, &args.path);
+                let env_arc = store.get_or_create(ctx, 30_000).await?;
+                let bytes_written = {
+                    let mut guard = env_arc.lock().await;
+                    let mut ops = crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
+                    ops.write_file(&remote_path, &args.content).await?
+                };
+                let new_hash = compute_hash(&args.content);
+                let output = FileWriteOutput {
+                    path: args.path,
+                    bytes_written,
+                    new_hash,
+                    created: true, // we can't cheaply know if it existed remotely
+                };
+                return Ok(output.into_stream());
+            }
+        }
+
         let path = resolve_path(&ctx.project_root, &args.path)?;
 
         // Check if file exists and verify hash if provided

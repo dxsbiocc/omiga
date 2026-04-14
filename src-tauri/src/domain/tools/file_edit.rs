@@ -43,6 +43,29 @@ impl super::ToolImpl for FileEditTool {
         ctx: &ToolContext,
         args: Self::Args,
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+        // Remote/SSH/sandbox: delegate to shell-based edit through the cached environment
+        if ctx.execution_environment != "local" {
+            if let Some(ref store) = ctx.env_store {
+                let remote_path = crate::domain::tools::env_store::remote_path(ctx, &args.file_path);
+                let env_arc = store.get_or_create(ctx, 30_000).await?;
+                {
+                    let mut guard = env_arc.lock().await;
+                    let mut ops = crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
+                    ops.edit_file(&remote_path, &args.old_string, &args.new_string, args.replace_all).await?;
+                }
+                return Ok(
+                    FileEditOutput {
+                        path: args.file_path,
+                        replaced: 1,
+                        replace_all: args.replace_all,
+                        created: false,
+                        created_bytes: 0,
+                    }
+                    .into_stream(),
+                );
+            }
+        }
+
         let path = resolve_path(&ctx.project_root, &args.file_path)?;
 
         if args.old_string == args.new_string {
