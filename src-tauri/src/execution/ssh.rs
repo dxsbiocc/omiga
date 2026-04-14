@@ -2,16 +2,75 @@
 //!
 //! 对应 hermes-agent 中的 environments/ssh.py
 //! 通过 SSH 在远程主机上执行命令
+//!
+//! 文件同步：对齐 hermes `ssh._sync_files` + `get_cache_directory_mounts` — rsync
+//! `~/.omiga` 下凭证、skills、cache 子目录及用户上下文 Markdown 到远端 `~/.omiga`。
 
 use super::base::{generate_session_id, BaseEnvironment};
 use super::types::{ExecResult, ExecutionError, ProcessHandle};
 use async_trait::async_trait;
+use crate::utils::shell::shell_single_quote;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+
+fn sh_single_quote(s: &str) -> String {
+    shell_single_quote(s)
+}
+
+/// Escape path for embedding in `rsync -e "ssh ... -i ..."` (POSIX single-quoted).
+fn shell_escape_for_rsync_engine(path: &str) -> String {
+    shell_single_quote(path)
+}
+
+fn load_terminal_credential_rel_paths() -> Vec<String> {
+    let Some(cfg_path) = crate::llm::config::find_config_file() else {
+        return Vec::new();
+    };
+    let Ok(cfg) = crate::llm::config::load_config_file_at(&cfg_path) else {
+        return Vec::new();
+    };
+    cfg.terminal
+        .map(|t| t.credential_files)
+        .unwrap_or_default()
+}
+
+/// Resolve `rel` under `~/.omiga`; reject traversal and non-files (parity with hermes credential_files).
+/// 与 hermes `credential_files._CACHE_DIRS` 布局一致（Omiga 根为 `~/.omiga`）。
+const OMIGA_CACHE_SUBDIRS: &[&str] = &[
+    "cache/documents",
+    "cache/images",
+    "cache/audio",
+    "cache/screenshots",
+];
+
+/// 用户级上下文文件（存在则同步单文件，便于远端 shell/工具引用）。
+const OMIGA_USER_CONTEXT_FILES: &[&str] = &["SOUL.md", "MEMORY.md", "USER.md", "BOOTSTRAP.md"];
+
+// rsync timeout constants (ms) — differentiated by expected data size.
+const RSYNC_TIMEOUT_MKDIR_MS: u64 = 10_000; // mkdir -p: fast remote command
+const RSYNC_TIMEOUT_SINGLE_FILE_MS: u64 = 30_000; // single credential / context file
+const RSYNC_TIMEOUT_DIR_MS: u64 = 60_000; // skills directory (small text files)
+const RSYNC_TIMEOUT_CACHE_DIR_MS: u64 = 90_000; // cache dirs (may contain images/audio)
+
+fn resolve_safe_omiga_file(rel: &str, omiga_home: &Path) -> Option<PathBuf> {
+    let t = rel.trim();
+    if t.is_empty() || t.starts_with('/') || t.contains("..") {
+        return None;
+    }
+    let p = omiga_home.join(t);
+    let meta = std::fs::metadata(&p).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let home_canon = omiga_home.canonicalize().ok()?;
+    let file_canon = p.canonicalize().ok()?;
+    file_canon.strip_prefix(&home_canon).ok()?;
+    Some(file_canon)
+}
 
 /// SSH 执行环境
 pub struct SshEnvironment {
@@ -32,6 +91,8 @@ pub struct SshEnvironment {
     key_path: Option<String>,
     remote_home: String,
     control_socket: PathBuf,
+    /// 本地项目根；用于 rsync `<root>/.omiga/skills` 覆盖远端同名技能。
+    ssh_project_root: Option<PathBuf>,
 }
 
 impl SshEnvironment {
@@ -43,6 +104,7 @@ impl SshEnvironment {
         timeout_ms: Option<u64>,
         port: u16,
         key_path: Option<String>,
+        ssh_project_root: Option<PathBuf>,
     ) -> Result<Self, ExecutionError> {
         // 检查 SSH 是否可用
         Self::ensure_ssh_available().await?;
@@ -84,6 +146,7 @@ impl SshEnvironment {
             key_path: key_path.clone(),
             remote_home: format!("/home/{}", user),
             control_socket: control_socket.clone(),
+            ssh_project_root,
         };
 
         // 建立 SSH 连接
@@ -92,8 +155,13 @@ impl SshEnvironment {
         // 检测远程 home 目录
         me.remote_home = me.detect_remote_home().await;
         
-        // 同步文件
-        me.sync_files().await?;
+        // 同步文件（与 hermes ssh._sync_files 一致：rsync skills + credentials）
+        me.sync_omiga_files_to_remote().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        me.last_sync_time = Some(now);
         
         // 初始化会话快照
         me.init_session().await?;
@@ -190,13 +258,187 @@ impl SshEnvironment {
         }
     }
 
-    /// 同步文件到远程主机
-    async fn sync_files(&self) -> Result<(), ExecutionError> {
-        // 这里可以实现文件同步逻辑
-        // 类似 hermes-agent 中使用 rsync 同步技能和凭证文件
-        // 为简化实现，这里暂时跳过
-        tracing::debug!("File sync not yet implemented for SSH environment");
-        Ok(())
+    /// rsync 使用的 `-e` 参数字符串（经 ControlMaster 复用与 `ssh` 一致的连接）。
+    fn rsync_ssh_engine_arg(&self) -> String {
+        let mut s = format!(
+            "ssh -o ControlPath={} -o ControlMaster=auto",
+            shell_escape_for_rsync_engine(&self.control_socket.to_string_lossy())
+        );
+        if self.port != 22 {
+            s.push_str(&format!(" -p {}", self.port));
+        }
+        if let Some(ref key) = self.key_path {
+            s.push_str(&format!(" -i {}", shell_escape_for_rsync_engine(key)));
+        }
+        s
+    }
+
+    /// 在远端执行单行 shell（不经 `wrap_command`，用于 `mkdir`）。
+    async fn ssh_remote_raw_cmd(&self, remote_cmd: &str, timeout_ms: u64) {
+        let _ = self.execute_remote(remote_cmd, timeout_ms).await;
+    }
+
+    /// 将 `~/.omiga` 下凭证与 skills 目录同步到远端 `~/.omiga`（对齐 hermes-agent `ssh._sync_files`）。
+    async fn sync_omiga_files_to_remote(&mut self) {
+        if Self::ensure_rsync_available().await.is_err() {
+            tracing::warn!("rsync not available; skipping SSH file sync. Install rsync for skills/credentials on remote.");
+            return;
+        }
+
+        let Some(omiga_home) = dirs::home_dir().map(|h| h.join(".omiga")) else {
+            tracing::debug!("SSH sync: no home dir");
+            return;
+        };
+
+        let container_base = format!("{}/.omiga", self.remote_home.trim_end_matches('/'));
+        let engine = self.rsync_ssh_engine_arg();
+        let dest_prefix = format!("{}@{}", self.user, self.host);
+
+        let cred_rel = load_terminal_credential_rel_paths();
+        for rel in cred_rel {
+            let Some(host_path) = resolve_safe_omiga_file(&rel, &omiga_home) else {
+                tracing::debug!(path = %rel, "SSH sync: skip credential (missing or unsafe)");
+                continue;
+            };
+            let remote_path = format!("{}/{}", container_base, rel.replace('\\', "/"));
+            let parent = Path::new(&remote_path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| container_base.clone());
+            self.ssh_remote_raw_cmd(
+                &format!("mkdir -p {}", sh_single_quote(&parent)),
+                RSYNC_TIMEOUT_MKDIR_MS,
+            )
+            .await;
+            let dest = format!("{}:{}", dest_prefix, remote_path);
+            let host_s = host_path.to_string_lossy();
+            if self
+                .run_rsync(&engine, host_s.as_ref(), &dest, RSYNC_TIMEOUT_SINGLE_FILE_MS)
+                .await
+            {
+                tracing::info!(host = %host_s, %remote_path, "SSH: synced credential");
+            } else {
+                tracing::debug!(host = %host_s, "SSH: rsync credential failed");
+            }
+        }
+
+        let user_skills = omiga_home.join("skills");
+        if user_skills.is_dir() {
+            let remote_dir = format!("{}/skills", container_base);
+            self.ssh_remote_raw_cmd(
+                &format!("mkdir -p {}", sh_single_quote(&remote_dir)),
+                RSYNC_TIMEOUT_MKDIR_MS,
+            )
+            .await;
+            let src = format!("{}/", user_skills.to_string_lossy().trim_end_matches('/'));
+            let dest = format!("{}:{}/", dest_prefix, remote_dir.trim_end_matches('/'));
+            if self.run_rsync(&engine, &src, &dest, RSYNC_TIMEOUT_DIR_MS).await {
+                tracing::info!(path = ?user_skills, %remote_dir, "SSH: synced user skills dir");
+            } else {
+                tracing::debug!(path = ?user_skills, "SSH: rsync user skills failed");
+            }
+        }
+
+        if let Some(ref root) = self.ssh_project_root {
+            let proj_skills = root.join(".omiga").join("skills");
+            if proj_skills.is_dir() {
+                let remote_dir = format!("{}/skills", container_base);
+                self.ssh_remote_raw_cmd(
+                    &format!("mkdir -p {}", sh_single_quote(&remote_dir)),
+                    RSYNC_TIMEOUT_MKDIR_MS,
+                )
+                .await;
+                let src = format!("{}/", proj_skills.to_string_lossy().trim_end_matches('/'));
+                let dest = format!("{}:{}/", dest_prefix, remote_dir.trim_end_matches('/'));
+                if self.run_rsync(&engine, &src, &dest, RSYNC_TIMEOUT_DIR_MS).await {
+                    tracing::info!(path = ?proj_skills, %remote_dir, "SSH: synced project skills (overrides)");
+                } else {
+                    tracing::debug!(path = ?proj_skills, "SSH: rsync project skills failed");
+                }
+            }
+        }
+
+        for name in OMIGA_USER_CONTEXT_FILES {
+            if let Some(host_path) = resolve_safe_omiga_file(name, &omiga_home) {
+                let remote_path = format!("{}/{}", container_base, name);
+                let parent = Path::new(&remote_path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| container_base.clone());
+                self.ssh_remote_raw_cmd(
+                    &format!("mkdir -p {}", sh_single_quote(&parent)),
+                    RSYNC_TIMEOUT_MKDIR_MS,
+                )
+                .await;
+                let dest = format!("{}:{}", dest_prefix, remote_path);
+                let host_s = host_path.to_string_lossy();
+                if self
+                    .run_rsync(&engine, host_s.as_ref(), &dest, RSYNC_TIMEOUT_SINGLE_FILE_MS)
+                    .await
+                {
+                    tracing::info!(file = %name, "SSH: synced user context file");
+                }
+            }
+        }
+
+        for rel in OMIGA_CACHE_SUBDIRS {
+            let host_dir = omiga_home.join(rel);
+            if !host_dir.is_dir() {
+                continue;
+            }
+            let remote_dir = format!("{}/{}", container_base, rel.replace('\\', "/"));
+            self.ssh_remote_raw_cmd(
+                &format!("mkdir -p {}", sh_single_quote(&remote_dir)),
+                RSYNC_TIMEOUT_MKDIR_MS,
+            )
+            .await;
+            let src = format!("{}/", host_dir.to_string_lossy().trim_end_matches('/'));
+            let dest = format!("{}:{}/", dest_prefix, remote_dir.trim_end_matches('/'));
+            if self.run_rsync(&engine, &src, &dest, RSYNC_TIMEOUT_CACHE_DIR_MS).await {
+                tracing::info!(dir = %rel, "SSH: synced cache directory");
+            } else {
+                tracing::debug!(dir = %rel, "SSH: rsync cache dir failed");
+            }
+        }
+    }
+
+    async fn ensure_rsync_available() -> Result<(), ()> {
+        match Command::new("rsync").arg("--version").output().await {
+            Ok(o) if o.status.success() => Ok(()),
+            _ => Err(()),
+        }
+    }
+
+    async fn run_rsync(
+        &self,
+        engine: &str,
+        src: &str,
+        dest: &str,
+        timeout_ms: u64,
+    ) -> bool {
+        self.run_rsync_cmd(engine, &[src, dest], timeout_ms).await
+    }
+
+    async fn run_rsync_cmd(&self, engine: &str, args_tail: &[&str], timeout_ms: u64) -> bool {
+        use tokio::time::{timeout, Duration};
+        let mut cmd = Command::new("rsync");
+        cmd.arg("-az")
+            .arg("--timeout=30")
+            .arg("--safe-links")
+            .arg("-e")
+            .arg(engine);
+        for a in args_tail {
+            cmd.arg(a);
+        }
+        match timeout(
+            Duration::from_millis(timeout_ms),
+            cmd.output(),
+        )
+        .await
+        {
+            Ok(Ok(o)) => o.status.success(),
+            _ => false,
+        }
     }
 
     /// 在远程主机上执行命令
@@ -316,6 +558,12 @@ impl BaseEnvironment for SshEnvironment {
 
     fn snapshot_timeout_secs(&self) -> u64 {
         30
+    }
+
+    /// 周期同步（由 [`BaseEnvironment::before_execute`] 限频调用），与 hermes `ssh._sync_files` 一致。
+    async fn sync_files(&mut self) -> Result<(), ExecutionError> {
+        self.sync_omiga_files_to_remote().await;
+        Ok(())
     }
 
     async fn run_bash(
@@ -449,6 +697,7 @@ mod tests {
             key_path: Some("/path/to/key".to_string()),
             remote_home: "/home/testuser".to_string(),
             control_socket: PathBuf::from("/tmp/test.sock"),
+            ssh_project_root: None,
         };
 
         let args = env.build_ssh_base_args();
@@ -481,6 +730,7 @@ mod tests {
             key_path: None,
             remote_home: "/home/testuser".to_string(),
             control_socket: PathBuf::from("/tmp/test.sock"),
+            ssh_project_root: None,
         };
 
         let args = env.build_ssh_base_args();
