@@ -71,6 +71,10 @@ REMEMBER: You can ONLY explore and plan. You CANNOT and MUST NOT write, edit, or
         )
     }
 
+    fn personality_preset(&self) -> Option<&str> {
+        Some("technical")
+    }
+
     fn source(&self) -> AgentSource {
         AgentSource::BuiltIn
     }

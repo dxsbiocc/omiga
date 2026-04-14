@@ -53,6 +53,10 @@ Do NOT modify files - only report findings.
         .to_string()
     }
 
+    fn personality_preset(&self) -> Option<&str> {
+        Some("technical")
+    }
+
     fn source(&self) -> AgentSource {
         AgentSource::BuiltIn
     }

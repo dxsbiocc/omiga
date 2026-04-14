@@ -54,6 +54,10 @@ Complete the user's search request efficiently and report your findings clearly.
         )
     }
 
+    fn personality_preset(&self) -> Option<&str> {
+        Some("concise")
+    }
+
     fn source(&self) -> AgentSource {
         AgentSource::BuiltIn
     }

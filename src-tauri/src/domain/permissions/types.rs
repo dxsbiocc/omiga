@@ -281,6 +281,17 @@ impl From<PermissionModeInput> for PermissionMode {
     }
 }
 
+/// 聊天 composer 与前端 `permissionMode`（`ask` \| `auto` \| `bypass`）一致，作为**无用户规则匹配时**的会话默认拦截策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerPermissionStance {
+    /// 每次询问：保守默认（中风险即需确认）
+    Ask,
+    /// 自动：与规则引擎 `Auto` 一致（仅 High 及以上需确认）
+    Auto,
+    /// 跳过权限：Critical 仍由前置逻辑拦截，其余在无规则时放行
+    Bypass,
+}
+
 /// 权限决定
 #[derive(Debug, Clone)]
 pub enum PermissionDecision {
