@@ -534,6 +534,116 @@ pub async fn get_memory_context(
     Some(crate::domain::pageindex::QueryEngine::new().format_results_as_context(&results))
 }
 
+/// Build a system-prompt section that tells the main agent about its persistent
+/// cross-session memory and how to retrieve it.
+///
+/// Always returns a section (overrides the model's default "I have no cross-session
+/// memory" belief). The wiki page list is appended only when pages exist.
+pub async fn memory_navigation_section(project_root: &std::path::Path) -> String {
+    let (wiki_path, implicit_path, perm_wiki, wiki_pages) =
+        match load_resolved_config(project_root).await {
+            Ok(mem_cfg) => {
+                let wp = mem_cfg.wiki_path(project_root);
+                let ip = mem_cfg.implicit_path(project_root);
+                let pw = crate::domain::memory::config::permanent_wiki_path();
+                let pages = list_wiki_pages(&wp);
+                (wp, ip, pw, pages)
+            }
+            Err(_) => {
+                // Config unavailable — use defaults so we can still emit the section.
+                let default_cfg = crate::domain::memory::MemoryConfig::default();
+                let wp = default_cfg.wiki_path(project_root);
+                let ip = default_cfg.implicit_path(project_root);
+                let pw = crate::domain::memory::config::permanent_wiki_path();
+                (wp, ip, pw, vec![])
+            }
+        };
+
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push("## Omiga Memory System (cross-session persistent memory)".to_string());
+    lines.push(
+        "IMPORTANT: You DO have access to memories from past sessions. \
+         Omiga persists knowledge across sessions as files on disk. \
+         Do NOT tell the user you cannot access other sessions — you CAN, \
+         by reading the memory files described below."
+            .to_string(),
+    );
+    lines.push(String::new());
+    lines.push("### How to retrieve memory".to_string());
+    lines.push(
+        "When the user references past work, past conversations, or asks what you remember:".to_string(),
+    );
+    lines.push(
+        "1. Check the **Relevant memory excerpts** section below (auto-injected from implicit index).".to_string(),
+    );
+    lines.push(format!(
+        "2. Browse wiki pages with `glob` or `file_read` under `{}`.",
+        wiki_path.display()
+    ));
+    lines.push(format!(
+        "3. Check permanent wiki under `{}` for cross-project knowledge.",
+        perm_wiki.display()
+    ));
+    lines.push(
+        "4. Read `~/.omiga/MEMORY.md` for hand-written durable notes (injected above if non-empty).".to_string(),
+    );
+    lines.push(String::new());
+    lines.push("### Memory storage locations".to_string());
+    lines.push(format!(
+        "- **Wiki (explicit)**: `{}` — structured pages; use `file_read <path>` to read.",
+        wiki_path.display()
+    ));
+    lines.push(format!(
+        "- **Implicit index**: `{}` — auto-indexed sessions; semantic excerpts injected automatically.",
+        implicit_path.display()
+    ));
+    lines.push(format!(
+        "- **Permanent wiki**: `{}` — global, cross-project.",
+        perm_wiki.display()
+    ));
+
+    if !wiki_pages.is_empty() {
+        lines.push(String::new());
+        lines.push("### Available wiki pages (read these for detailed past context)".to_string());
+        for page in &wiki_pages {
+            lines.push(format!("- `{}/{}`", wiki_path.display(), page));
+        }
+    } else {
+        lines.push(String::new());
+        lines.push(
+            "No wiki pages exist yet for this project. \
+             If relevant implicit memory excerpts appear below, use them. \
+             Otherwise acknowledge the memory system exists but is empty."
+                .to_string(),
+        );
+    }
+
+    lines.join("\n")
+}
+
+/// List *.md filenames under `wiki_dir`, sorted. Returns empty vec on any error.
+fn list_wiki_pages(wiki_dir: &std::path::Path) -> Vec<String> {
+    if !wiki_dir.is_dir() {
+        return vec![];
+    }
+    let mut pages: Vec<String> = std::fs::read_dir(wiki_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .map_or(false, |x| x.eq_ignore_ascii_case("md"))
+                })
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    pages.sort();
+    pages
+}
+
 // ---------------------------------------------------------------------------
 // Import to Explicit Memory (Wiki)
 // ---------------------------------------------------------------------------
@@ -661,8 +771,79 @@ pub async fn memory_import_to_wiki(req: ImportToWikiRequest) -> Result<ImportToW
     Ok(result.into())
 }
 
+/// Write a file to the user's ~/.omiga/ directory (e.g. USER.md, SOUL.md).
+///
+/// Only allows writing markdown/text files with simple filenames (no path traversal).
+/// Used by the onboarding wizard to persist user profile and agent identity.
+#[tauri::command]
+pub fn write_user_omiga_file(filename: String, content: String) -> Result<(), String> {
+    // Validate: only simple filename, no path separators
+    let name = filename.trim();
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('\0') {
+        return Err("Invalid filename".to_string());
+    }
+    // Only allow markdown/text files
+    let lower = name.to_lowercase();
+    if !lower.ends_with(".md") && !lower.ends_with(".txt") {
+        return Err("Only .md and .txt files are allowed".to_string());
+    }
+    let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
+    let omiga_dir = home.join(".omiga");
+    std::fs::create_dir_all(&omiga_dir).map_err(|e| format!("Cannot create ~/.omiga: {e}"))?;
+    let target = omiga_dir.join(name);
+    std::fs::write(&target, content.as_bytes()).map_err(|e| format!("Write failed: {e}"))?;
+    Ok(())
+}
+
+/// Onboarding: 在 ~/.omiga/ 写入三个模板文件 + BOOTSTRAP.md。
+///
+/// 仅在模型配置完成后由前端调用一次。个性化设置由 Agent 在第一次对话中通过
+/// BOOTSTRAP.md 引导用户完成（CoPaw bootstrap 模式），而非 UI 表单填写。
+///
+/// - SOUL.md   — 写入模板（Agent 引导后自行覆盖）
+/// - USER.md   — 写入模板（Agent 引导后自行覆盖）
+/// - MEMORY.md — 仅首次创建，保留已有内容
+/// - BOOTSTRAP.md — 写入引导指令，Agent 完成引导后自行删除
+#[tauri::command]
+pub fn init_user_context_files() -> Result<(), String> {
+    use crate::domain::agents::markdown::{
+        TEMPLATE_BOOTSTRAP_MD, TEMPLATE_MEMORY_MD, TEMPLATE_SOUL_MD, TEMPLATE_USER_MD,
+    };
+
+    let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
+    let omiga_dir = home.join(".omiga");
+    std::fs::create_dir_all(&omiga_dir).map_err(|e| format!("Cannot create ~/.omiga: {e}"))?;
+
+    // SOUL.md — 写模板，Agent 引导后会用实际内容覆盖（已存在则跳过，保留用户已有配置）
+    let soul_path = omiga_dir.join("SOUL.md");
+    if !soul_path.exists() {
+        std::fs::write(&soul_path, TEMPLATE_SOUL_MD.as_bytes())
+            .map_err(|e| format!("Failed to write SOUL.md: {e}"))?;
+    }
+
+    // USER.md — 同上
+    let user_path = omiga_dir.join("USER.md");
+    if !user_path.exists() {
+        std::fs::write(&user_path, TEMPLATE_USER_MD.as_bytes())
+            .map_err(|e| format!("Failed to write USER.md: {e}"))?;
+    }
+
+    // MEMORY.md — 仅首次创建，保留已有笔记
+    let memory_path = omiga_dir.join("MEMORY.md");
+    if !memory_path.exists() {
+        std::fs::write(&memory_path, TEMPLATE_MEMORY_MD.as_bytes())
+            .map_err(|e| format!("Failed to write MEMORY.md: {e}"))?;
+    }
+
+    // BOOTSTRAP.md — 每次 onboarding 都写入，Agent 看到后执行引导并自行删除
+    std::fs::write(omiga_dir.join("BOOTSTRAP.md"), TEMPLATE_BOOTSTRAP_MD.as_bytes())
+        .map_err(|e| format!("Failed to write BOOTSTRAP.md: {e}"))?;
+
+    Ok(())
+}
+
 /// Get supported file extensions for explicit memory import
-/// 
+///
 /// Returns text-based content formats suitable for explicit memory.
 /// Source code files should be indexed via implicit memory instead.
 #[tauri::command]

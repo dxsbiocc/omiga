@@ -11,27 +11,8 @@ use crate::llm::config::find_config_file;
 use std::collections::HashMap;
 
 /// Merge SSH configs from ~/.ssh/config with user-defined configs
-fn get_merged_ssh_configs() -> Result<HashMap<String, SshExecConfig>, String> {
-    // Parse ~/.ssh/config
-    let ssh_configs = SshExecConfig::parse_ssh_config()
-        .map_err(|e| format!("Failed to parse SSH config: {}", e))?;
-    
-    // Load user-defined configs from omiga.yaml
-    let user_configs = match load_config_file() {
-        Ok(config) => config
-            .execution_envs
-            .and_then(|e| e.ssh)
-            .unwrap_or_default(),
-        Err(_) => HashMap::new(),
-    };
-    
-    // Merge configs: user-defined takes precedence
-    let mut merged = ssh_configs;
-    for (name, config) in user_configs {
-        merged.insert(name, config);
-    }
-    
-    Ok(merged)
+pub(crate) fn get_merged_ssh_configs() -> Result<HashMap<String, SshExecConfig>, String> {
+    crate::llm::config::merged_ssh_configs()
 }
 
 /// Load the unified config file
@@ -186,6 +167,16 @@ pub fn get_execution_envs_config_path() -> Result<String, String> {
         .or_else(|| dirs::config_dir().map(|d| d.join("omiga").join("omiga.yaml")))
         .ok_or("Could not determine config path")?;
     Ok(path.to_string_lossy().to_string())
+}
+
+/// Whether `rsync` is on `PATH` (SSH 远程文件同步依赖 rsync).
+#[tauri::command]
+pub fn is_rsync_available() -> bool {
+    std::process::Command::new("rsync")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
