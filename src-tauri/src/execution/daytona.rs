@@ -314,7 +314,7 @@ mod tests {
         match result {
             Ok(env) => {
                 assert_eq!(env.cwd, "/workspace");
-                assert_eq!(env.image, "ubuntu:22.04");
+                assert_eq!(env._image, "ubuntu:22.04");
                 assert_eq!(env.workspace_id, "test-workspace");
             }
             Err(e) => {

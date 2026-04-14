@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::pin::Pin;
 use tokio::io::AsyncRead;
 
@@ -101,6 +102,9 @@ pub struct EnvironmentConfig {
     #[serde(default = "default_ssh_port")]
     pub ssh_port: u16,
     pub ssh_key_path: Option<String>,
+    /// 本地项目根目录；若设置，会将 `<root>/.omiga/skills` rsync 到远端 `~/.omiga/skills`（覆盖用户级同名文件）。
+    #[serde(default)]
+    pub ssh_project_root: Option<PathBuf>,
 
     // 云环境特定
     #[serde(default = "default_true")]
@@ -144,6 +148,7 @@ impl Default for EnvironmentConfig {
             ssh_user: None,
             ssh_port: 22,
             ssh_key_path: None,
+            ssh_project_root: None,
             persistent_filesystem: true,
             modal_sandbox_kwargs: None,
             task_id: "default".to_string(),
