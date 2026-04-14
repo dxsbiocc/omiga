@@ -343,7 +343,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
 
       {/* App logo */}
       <Box sx={{ px: 2, pt: 2, pb: 1, display: "flex", alignItems: "center", gap: 1 }}>
-        <OmigaLogo size={32} />
+        <OmigaLogo size={18} />
         <Typography variant="subtitle1" fontWeight={700} sx={{ letterSpacing: -0.3, color: "text.primary" }}>
           Omiga
         </Typography>
@@ -528,7 +528,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
           },
         }}
       >
-        <OmigaLogo size={32} animated={false} />
+        <OmigaLogo size={18} animated={false} />
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <Typography variant="body2" fontWeight={600} color="text.primary" noWrap>
             dengxsh

@@ -1,8 +1,12 @@
 /**
- * OmigaLogo — theme-adaptive Momentum brushstroke icon.
+ * OmigaLogo — theme-adaptive Organic brushstroke icon.
+ *
+ * The shape matches the organic.svg design: a dramatic S-curve brushstroke
+ * with watercolor wash and ripple arcs, topped by a pulsing inspiration dot.
  *
  * Colors are derived from the active MUI palette so the icon responds
  * automatically to accent preset changes and light/dark mode switches.
+ * Contrast logic ensures the icon is always distinguishable from its background.
  *
  * Props:
  *   size       — pixel size of the bounding box (default 40)
@@ -32,9 +36,18 @@ export function OmigaLogo({
 }: OmigaLogoProps) {
   const theme = useTheme();
   const uid = useId().replace(/:/g, "");
+  const isDark = theme.palette.mode === "dark";
 
   const color = primaryOverride ?? theme.palette.primary.main;
   const accent = secondaryOverride ?? theme.palette.secondary.main;
+
+  // Contrast plate: subtle contrasting backdrop so the icon never blends
+  // into the background. In dark mode a faint white wash; in light mode a
+  // faint dark wash.
+  const plateColor = isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)";
+
+  // Watercolor wash opacity — slightly stronger in light mode for visibility
+  const washOpacity = isDark ? 0.42 : 0.55;
 
   const gradBg = `omiga-grad-bg-${uid}`;
   const gradStroke = `omiga-grad-stroke-${uid}`;
@@ -52,7 +65,7 @@ export function OmigaLogo({
       <defs>
         {/* Watercolor wash behind the stroke */}
         <radialGradient id={gradBg} cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor={color} stopOpacity="0.35" />
+          <stop offset="0%" stopColor={color} stopOpacity={washOpacity} />
           <stop offset="100%" stopColor={color} stopOpacity="0" />
         </radialGradient>
 
@@ -64,43 +77,48 @@ export function OmigaLogo({
         </linearGradient>
       </defs>
 
-      {/* Watercolor background circle */}
-      <circle cx="50" cy="45" r="35" fill={`url(#${gradBg})`} />
+      {/* Contrast plate — keeps icon legible on any background */}
+      <circle cx="50" cy="50" r="45" fill={plateColor} />
 
-      {/* Main brushstroke — omega/momentum shape */}
+      {/* Watercolor background wash */}
+      <circle cx="50" cy="50" r="45" fill={`url(#${gradBg})`} />
+
+      {/* Main brushstroke — organic S-curve from edge to edge */}
       <path
-        d="M15 80 Q 40 75, 45 40 Q 50 15, 55 40 Q 60 75, 85 80"
+        d="M5 85 Q 40 78, 45 30 Q 50 5, 55 30 Q 60 78, 95 85"
         fill="none"
         stroke={`url(#${gradStroke})`}
-        strokeWidth="5"
+        strokeWidth="6"
         strokeLinecap="round"
-        opacity="0.9"
+        opacity="0.92"
       />
 
-      {/* Qi ripple lines */}
+      {/* Upper ripple arc */}
       <path
-        d="M40 62 Q 50 55, 60 62"
+        d="M38 65 Q 50 58, 62 65"
         stroke={accent}
-        strokeWidth="1.8"
+        strokeWidth="2"
         fill="none"
         strokeLinecap="round"
-        opacity="0.6"
+        opacity={isDark ? 0.72 : 0.65}
       />
+
+      {/* Lower ripple arc */}
       <path
-        d="M44 70 Q 50 66, 56 70"
+        d="M42 75 Q 50 71, 58 75"
         stroke={accent}
-        strokeWidth="1.2"
+        strokeWidth="1.5"
         fill="none"
         strokeLinecap="round"
-        opacity="0.4"
+        opacity={isDark ? 0.52 : 0.45}
       />
 
       {/* Top inspiration dot */}
-      <circle cx="50" cy="18" r="2" fill={color} opacity="0.8">
+      <circle cx="50" cy="12" r="2.5" fill={color} opacity={isDark ? 0.9 : 0.85}>
         {animated && (
           <animate
             attributeName="opacity"
-            values="0.35;1;0.35"
+            values={isDark ? "0.4;1;0.4" : "0.5;0.9;0.5"}
             dur="3s"
             repeatCount="indefinite"
           />

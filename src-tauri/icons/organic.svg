@@ -1,0 +1,18 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="grad-eco-growth" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#10B981" stop-opacity="0.4" />
+      <stop offset="100%" stop-color="#10B981" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="stroke-grad-eco-growth" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#10B981" />
+      <stop offset="50%" stop-color="#34D399" />
+      <stop offset="100%" stop-color="#10B981" />
+    </linearGradient>
+  </defs>
+  <circle cx="50" cy="50" r="45" fill="url(#grad-eco-growth)" />
+  <path d="M5 85 Q 40 78, 45 30 Q 50 5, 55 30 Q 60 78, 95 85" fill="none" stroke="url(#stroke-grad-eco-growth)" stroke-width="6" stroke-linecap="round" opacity="0.9" />
+  <path d="M38 65 Q 50 58, 62 65" stroke="#34D399" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.6" />
+  <path d="M42 75 Q 50 71, 58 75" stroke="#34D399" stroke-width="1.5" fill="none" stroke-linecap="round" opacity="0.4" />
+  <circle cx="50" cy="12" r="2.5" fill="#10B981" opacity="0.8" />
+</svg>
