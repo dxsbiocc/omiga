@@ -28,7 +28,6 @@ pub struct ParseResult {
 pub struct DocumentParser {
     max_section_depth: usize,
     heading_regex: Regex,
-    frontmatter_regex: Regex,
 }
 
 impl DocumentParser {
@@ -37,7 +36,6 @@ impl DocumentParser {
         Self {
             max_section_depth,
             heading_regex: Regex::new(r"^(#{1,6})\s+(.+)$").unwrap(),
-            frontmatter_regex: Regex::new(r"^---\s*\n(.*?)\n---\s*\n(.*)$").unwrap(),
         }
     }
 

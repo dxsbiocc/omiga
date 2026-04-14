@@ -1086,17 +1086,14 @@ export function ChatComposer({
 
   const placeholder = askUserBlocksInput
     ? "请先完成上方的选择题…"
-    : !sessionId
-      ? "Select a session"
-      : needsWorkspacePath
-        ? "请先选择工作目录后再发送消息…"
-        : followUpTaskId
-          ? "追加说明将进入该后台 Agent 的下一轮工具循环…"
-          : "输入 / 选择 Agent；输入 @ 从当前工作目录选择…";
+    : needsWorkspacePath
+      ? "请先选择工作目录后再发送消息…"
+      : followUpTaskId
+        ? "追加说明将进入该后台 Agent 的下一轮工具循环…"
+        : "输入 / 选择 Agent；输入 @ 从当前工作目录选择…";
 
   /** 允许排队时：连接中 / 流式中均可继续输入；否则与旧行为一致（等待响应或生成时禁用）。 */
   const inputDisabled =
-    !sessionId ||
     (!allowInputWhileStreaming && (isConnecting || isStreaming)) ||
     askUserBlocksInput;
 

@@ -82,7 +82,7 @@ export interface QueryResponse {
   total_matches: number;
 }
 
-export type MemoryTab = "overview" | "explicit" | "implicit" | "config" | "import";
+export type MemoryTab = "overview" | "knowledge" | "implicit" | "config";
 
 export interface ImportToWikiResult {
   success: boolean;

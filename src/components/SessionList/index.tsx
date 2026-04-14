@@ -54,6 +54,7 @@ import {
   tSessionList,
   type SessionListStringKey,
 } from "../../i18n/sessionListStrings";
+import { OmigaLogo } from "../OmigaLogo";
 
 interface SessionListProps {
   onSelectSession?: () => void;
@@ -340,6 +341,14 @@ export function SessionList({ onSelectSession }: SessionListProps) {
         </Alert>
       )}
 
+      {/* App logo */}
+      <Box sx={{ px: 2, pt: 2, pb: 1, display: "flex", alignItems: "center", gap: 1 }}>
+        <OmigaLogo size={32} />
+        <Typography variant="subtitle1" fontWeight={700} sx={{ letterSpacing: -0.3, color: "text.primary" }}>
+          Omiga
+        </Typography>
+      </Box>
+
       {/* Top nav: icon + label (reference layout) */}
       <Stack spacing={0} sx={{ p: 1.5, pb: 1 }}>
         <Box
@@ -519,22 +528,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
           },
         }}
       >
-        <Box
-          sx={{
-            width: 32,
-            height: 32,
-            borderRadius: "50%",
-            bgcolor: "#F48FB1",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            flexShrink: 0,
-            color: "#fff",
-            fontSize: 18,
-          }}
-        >
-          ✿
-        </Box>
+        <OmigaLogo size={32} animated={false} />
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <Typography variant="body2" fontWeight={600} color="text.primary" noWrap>
             dengxsh

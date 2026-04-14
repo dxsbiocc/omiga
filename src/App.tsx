@@ -23,8 +23,7 @@ import {
 
 export default function App() {
   const theme = useTheme();
-  const { currentSession, loadSessions, createSessionQuick } =
-    useSessionStore();
+  const { currentSession, loadSessions } = useSessionStore();
 
   const onboardingCompleted = useUiStore((s) => s.onboardingCompleted);
   const setOnboardingCompleted = useUiStore((s) => s.setOnboardingCompleted);
@@ -83,18 +82,23 @@ export default function App() {
     void (async () => {
       await loadSessions();
       if (cancelled) return;
-      if (!useSessionStore.getState().currentSession) {
+      // Auto-select the most recent session if one exists, but never auto-create.
+      // New sessions are created only when the user explicitly clicks "New session"
+      // or sends their first message.
+      const { currentSession, sessions, setCurrentSession } =
+        useSessionStore.getState();
+      if (!currentSession && sessions.length > 0) {
         try {
-          await createSessionQuick();
+          await setCurrentSession(sessions[0].id);
         } catch (e) {
-          console.error("[App] createSessionQuick after loadSessions failed", e);
+          console.error("[App] auto-select most recent session failed", e);
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [loadSessions, createSessionQuick]);
+  }, [loadSessions]);
 
   useEffect(() => {
     const WEB_SEARCH_KEYS_STORAGE = "omiga_web_search_api_keys";

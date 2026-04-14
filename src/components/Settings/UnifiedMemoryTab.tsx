@@ -7,6 +7,7 @@
  */
 
 import { useState } from "react";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   Box,
   Typography,
@@ -29,8 +30,6 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
-  ToggleButtonGroup,
-  ToggleButton,
   Card,
   CardContent,
   Grid,
@@ -75,7 +74,8 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
   const [importTags, setImportTags] = useState("");
   const [showImportDialog, setShowImportDialog] = useState(false);
   const [importType, setImportType] = useState<"file" | "directory" | "text">("file");
-  const [importMemoryLevel, setImportMemoryLevel] = useState<"project" | "user">("project");
+  // Explicit memory is always user-level (global knowledge base)
+  const importMemoryLevel = "user" as const;
 
   const handleSearch = async () => {
     if (memory.searchQuery.trim()) {
@@ -233,10 +233,11 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
               Knowledge · 统一记忆
             </Typography>
             <Typography variant="body2" color="text.primary" sx={{ lineHeight: 1.65 }}>
-              默认将项目记忆放在 <strong>~/.omiga/memory/projects/&lt;项目键&gt;/</strong>；跨项目永久笔记在{" "}
-              <strong>~/.omiga/memory/permanent/wiki</strong>。所有项目的索引路径登记在{" "}
-              <strong>~/.omiga/memory/registry.json</strong>。
-              <strong>显性记忆</strong>（Wiki）与<strong>隐性记忆</strong>（PageIndex）对话后自动索引；可在概览中改为项目内存储（project_relative）。
+              <strong>知识库（显性记忆）</strong>是用户级全局存储，保存在{" "}
+              <strong>~/.omiga/memory/permanent/wiki</strong>，跨所有项目可用。
+              <strong>隐性记忆</strong>（PageIndex）自动索引聊天历史，按项目存储在{" "}
+              <strong>~/.omiga/memory/projects/&lt;项目键&gt;/</strong>。
+              所有路径登记在 <strong>~/.omiga/memory/registry.json</strong>。
             </Typography>
           </Box>
         </Stack>
@@ -452,9 +453,8 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
         }}
       >
         <Tab value="overview" label="概览" />
-        <Tab value="explicit" label="显性记忆" icon={<WikiIcon />} iconPosition="start" />
+        <Tab value="knowledge" label="知识库" icon={<WikiIcon />} iconPosition="start" />
         <Tab value="implicit" label="隐性记忆" icon={<ImplicitIcon />} iconPosition="start" />
-        <Tab value="import" label="导入" icon={<UploadIcon />} iconPosition="start" />
         <Tab value="config" label="配置" icon={<ConfigIcon />} iconPosition="start" />
       </Tabs>
 
@@ -488,8 +488,8 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
               }}
             >
               <li>
-                <strong>显性记忆</strong>：外部知识库文档（PDF、MD、TXT 等），位于{" "}
-                <code>{memory.status?.paths.wiki || ".omiga/memory/wiki"}</code>
+                <strong>知识库（显性记忆）</strong>：用户级全局知识库（PDF、MD、TXT 等），位于{" "}
+                <code>{memory.status?.paths.permanent_wiki || "~/.omiga/memory/permanent/wiki"}</code>
               </li>
               <li>
                 <strong>隐性记忆</strong>：自动索引的聊天历史，每次对话后更新
@@ -528,6 +528,15 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
               <Button
                 variant="outlined"
                 size="small"
+                startIcon={<WikiIcon />}
+                onClick={() => memory.setActiveTab("knowledge")}
+                sx={{ borderRadius: 2, textTransform: "none", fontWeight: 600 }}
+              >
+                知识库
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
                 startIcon={<SearchIcon />}
                 onClick={() => memory.setActiveTab("implicit")}
                 sx={{ borderRadius: 2, textTransform: "none", fontWeight: 600 }}
@@ -538,8 +547,8 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
           </Paper>
         )}
 
-        {/* Explicit Memory */}
-        {memory.activeTab === "explicit" && (
+        {/* Knowledge Base (Explicit Memory + Import) */}
+        {memory.activeTab === "knowledge" && (
           <Stack spacing={2}>
             <Alert
               severity="info"
@@ -549,23 +558,197 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                 bgcolor: alpha(theme.palette.info.main, 0.06),
               }}
             >
-              显性记忆存储外部知识库文档（PDF、Markdown、TXT 等），在 <strong>Wiki</strong> 标签页中管理。
+              知识库（显性记忆）是<strong>用户级全局存储</strong>，跨所有项目可用。导入的文档将保存到{" "}
+              <strong>~/.omiga/memory/permanent/wiki</strong>，对话时自动检索提供上下文。
             </Alert>
+
             <Paper elevation={0} sx={{ p: 2, ...glassSurface }}>
-              <Typography variant="caption" color="text.secondary" fontWeight={700} letterSpacing={0.08}>
-                当前路径
-              </Typography>
+              <Stack direction="row" alignItems="center" spacing={1} mb={1.5}>
+                <WikiIcon sx={{ color: "primary.main", fontSize: 20 }} />
+                <Box>
+                  <Typography variant="subtitle2" fontWeight={700}>
+                    全局知识库路径
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    跨项目共享 · {memory.status?.explicit.document_count ?? 0} 个页面
+                  </Typography>
+                </Box>
+              </Stack>
               <Typography
                 variant="body2"
                 sx={{
-                  mt: 0.75,
                   fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
                   wordBreak: "break-all",
                   color: "text.primary",
+                  p: 1,
+                  borderRadius: 1.5,
+                  bgcolor: alpha(theme.palette.action.hover, 0.06),
+                  border: `1px solid ${alpha(theme.palette.divider, 0.4)}`,
                 }}
               >
-                {memory.status?.paths.wiki}
+                {memory.status?.paths.permanent_wiki || "~/.omiga/memory/permanent/wiki"}
               </Typography>
+            </Paper>
+
+            <Box>
+              <Typography variant="overline" sx={{ letterSpacing: 0.12, color: "text.secondary", fontWeight: 700, display: "block", mb: 1 }}>
+                导入文档到知识库
+              </Typography>
+              <Alert
+                severity="warning"
+                sx={{
+                  mb: 1.5,
+                  borderRadius: 2.5,
+                  border: `1px solid ${alpha(theme.palette.warning.main, 0.3)}`,
+                  bgcolor: alpha(theme.palette.warning.main, 0.05),
+                }}
+              >
+                <strong>支持格式：</strong>Markdown、TXT、PDF、HTML、JSON/YAML/TOML 等文档。
+                <br />
+                <em>聊天记录会自动索引到隐性记忆，无需手动导入。</em>
+              </Alert>
+
+              <Grid container spacing={1.5}>
+                <Grid item xs={12} sm={4}>
+                  <Card
+                    elevation={0}
+                    sx={{
+                      height: "100%",
+                      cursor: "pointer",
+                      borderRadius: 2,
+                      border: `1px solid ${alpha(theme.palette.divider, 0.55)}`,
+                      bgcolor: alpha(theme.palette.background.paper, 0.55),
+                      transition: "all 0.2s ease",
+                      "&:hover": {
+                        borderColor: alpha(theme.palette.primary.main, 0.45),
+                        boxShadow: `0 8px 28px ${alpha(theme.palette.primary.main, 0.1)}`,
+                      },
+                    }}
+                    onClick={() => {
+                      setImportType("file");
+                      setImportSourcePath("");
+                      setShowImportDialog(true);
+                    }}
+                  >
+                    <CardContent sx={{ py: 2, "&:last-child": { pb: 2 } }}>
+                      <UploadIcon color="primary" sx={{ mb: 1 }} />
+                      <Typography variant="subtitle2" fontWeight={700}>
+                        导入文件
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        单文件导入
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} sm={4}>
+                  <Card
+                    elevation={0}
+                    sx={{
+                      height: "100%",
+                      cursor: "pointer",
+                      borderRadius: 2,
+                      border: `1px solid ${alpha(theme.palette.divider, 0.55)}`,
+                      bgcolor: alpha(theme.palette.background.paper, 0.55),
+                      transition: "all 0.2s ease",
+                      "&:hover": {
+                        borderColor: alpha(theme.palette.secondary.main, 0.45),
+                        boxShadow: `0 8px 28px ${alpha(theme.palette.secondary.main, 0.1)}`,
+                      },
+                    }}
+                    onClick={() => {
+                      setImportType("directory");
+                      setImportSourcePath("");
+                      setShowImportDialog(true);
+                    }}
+                  >
+                    <CardContent sx={{ py: 2, "&:last-child": { pb: 2 } }}>
+                      <FolderUploadIcon color="secondary" sx={{ mb: 1 }} />
+                      <Typography variant="subtitle2" fontWeight={700}>
+                        导入文件夹
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        批量目录
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} sm={4}>
+                  <Card
+                    elevation={0}
+                    sx={{
+                      height: "100%",
+                      cursor: "pointer",
+                      borderRadius: 2,
+                      border: `1px solid ${alpha(theme.palette.divider, 0.55)}`,
+                      bgcolor: alpha(theme.palette.background.paper, 0.55),
+                      transition: "all 0.2s ease",
+                      "&:hover": {
+                        borderColor: alpha(theme.palette.info.main, 0.45),
+                        boxShadow: `0 8px 28px ${alpha(theme.palette.info.main, 0.12)}`,
+                      },
+                    }}
+                    onClick={() => {
+                      setImportType("text");
+                      setImportSourcePath("");
+                      setShowImportDialog(true);
+                    }}
+                  >
+                    <CardContent sx={{ py: 2, "&:last-child": { pb: 2 } }}>
+                      <TextIcon sx={{ mb: 1, color: "info.main" }} />
+                      <Typography variant="subtitle2" fontWeight={700}>
+                        导入文本
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        粘贴正文
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              </Grid>
+            </Box>
+
+            {memory.importResult && (
+              <Paper elevation={0} sx={{ p: 2, ...glassSurface }}>
+                <Typography variant="subtitle2" fontWeight={700} gutterBottom>
+                  上次导入结果
+                </Typography>
+                <Stack spacing={0.5}>
+                  <Typography variant="body2">
+                    成功导入: {memory.importResult.imported_count} 个页面
+                  </Typography>
+                  <Typography variant="body2">
+                    跳过: {memory.importResult.skipped_count} 个文件
+                  </Typography>
+                  {memory.importResult.created_pages.length > 0 && (
+                    <Typography variant="body2">
+                      创建页面: {memory.importResult.created_pages.join(", ")}
+                    </Typography>
+                  )}
+                  {memory.importResult.errors.length > 0 && (
+                    <Alert severity="error" sx={{ mt: 1, borderRadius: 2 }}>
+                      {memory.importResult.errors.join("; ")}
+                    </Alert>
+                  )}
+                </Stack>
+              </Paper>
+            )}
+
+            <Paper elevation={0} sx={{ p: 2, ...glassSurface }}>
+              <Typography variant="subtitle2" fontWeight={700} gutterBottom>
+                支持的文件类型
+              </Typography>
+              <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                {memory.supportedExtensions.map((ext) => (
+                  <Chip
+                    key={ext}
+                    label={`.${ext}`}
+                    size="small"
+                    variant="outlined"
+                    sx={{ fontFamily: "ui-monospace, monospace", fontWeight: 600 }}
+                  />
+                ))}
+              </Stack>
             </Paper>
           </Stack>
         )}
@@ -707,176 +890,6 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
           </Stack>
         )}
 
-        {/* Import */}
-        {memory.activeTab === "import" && (
-          <Stack spacing={2}>
-            <Alert
-              severity="info"
-              sx={{
-                borderRadius: 2.5,
-                border: `1px solid ${alpha(theme.palette.info.main, 0.25)}`,
-                bgcolor: alpha(theme.palette.info.main, 0.06),
-              }}
-            >
-              将外部文档导入到显性记忆（知识库）。这些文档将作为参考资料在对话中提供上下文。
-            </Alert>
-
-            <Alert
-              severity="warning"
-              sx={{
-                borderRadius: 2.5,
-                border: `1px solid ${alpha(theme.palette.warning.main, 0.3)}`,
-                bgcolor: alpha(theme.palette.warning.main, 0.05),
-              }}
-            >
-              <strong>支持格式：</strong>Markdown、TXT、PDF、HTML、JSON/YAML/TOML 等文档。
-              <br />
-              <em>聊天记录会自动索引到隐性记忆，无需手动导入。</em>
-            </Alert>
-
-            <Grid container spacing={1.5}>
-              <Grid item xs={12} sm={4}>
-                <Card
-                  elevation={0}
-                  sx={{
-                    height: "100%",
-                    cursor: "pointer",
-                    borderRadius: 2,
-                    border: `1px solid ${alpha(theme.palette.divider, 0.55)}`,
-                    bgcolor: alpha(theme.palette.background.paper, 0.55),
-                    transition: "all 0.2s ease",
-                    "&:hover": {
-                      borderColor: alpha(theme.palette.primary.main, 0.45),
-                      boxShadow: `0 8px 28px ${alpha(theme.palette.primary.main, 0.1)}`,
-                    },
-                  }}
-                  onClick={() => {
-                    setImportType("file");
-                    setImportMemoryLevel("project");
-                    setShowImportDialog(true);
-                  }}
-                >
-                  <CardContent sx={{ py: 2, "&:last-child": { pb: 2 } }}>
-                    <UploadIcon color="primary" sx={{ mb: 1 }} />
-                    <Typography variant="subtitle2" fontWeight={700}>
-                      导入文件
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary">
-                      单文件导入
-                    </Typography>
-                  </CardContent>
-                </Card>
-              </Grid>
-              <Grid item xs={12} sm={4}>
-                <Card
-                  elevation={0}
-                  sx={{
-                    height: "100%",
-                    cursor: "pointer",
-                    borderRadius: 2,
-                    border: `1px solid ${alpha(theme.palette.divider, 0.55)}`,
-                    bgcolor: alpha(theme.palette.background.paper, 0.55),
-                    transition: "all 0.2s ease",
-                    "&:hover": {
-                      borderColor: alpha(theme.palette.secondary.main, 0.45),
-                      boxShadow: `0 8px 28px ${alpha(theme.palette.secondary.main, 0.1)}`,
-                    },
-                  }}
-                  onClick={() => {
-                    setImportType("directory");
-                    setImportMemoryLevel("project");
-                    setShowImportDialog(true);
-                  }}
-                >
-                  <CardContent sx={{ py: 2, "&:last-child": { pb: 2 } }}>
-                    <FolderUploadIcon color="secondary" sx={{ mb: 1 }} />
-                    <Typography variant="subtitle2" fontWeight={700}>
-                      导入文件夹
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary">
-                      批量目录
-                    </Typography>
-                  </CardContent>
-                </Card>
-              </Grid>
-              <Grid item xs={12} sm={4}>
-                <Card
-                  elevation={0}
-                  sx={{
-                    height: "100%",
-                    cursor: "pointer",
-                    borderRadius: 2,
-                    border: `1px solid ${alpha(theme.palette.divider, 0.55)}`,
-                    bgcolor: alpha(theme.palette.background.paper, 0.55),
-                    transition: "all 0.2s ease",
-                    "&:hover": {
-                      borderColor: alpha(theme.palette.info.main, 0.45),
-                      boxShadow: `0 8px 28px ${alpha(theme.palette.info.main, 0.12)}`,
-                    },
-                  }}
-                  onClick={() => {
-                    setImportType("text");
-                    setImportMemoryLevel("project");
-                    setShowImportDialog(true);
-                  }}
-                >
-                  <CardContent sx={{ py: 2, "&:last-child": { pb: 2 } }}>
-                    <TextIcon sx={{ mb: 1, color: "info.main" }} />
-                    <Typography variant="subtitle2" fontWeight={700}>
-                      导入文本
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary">
-                      粘贴正文
-                    </Typography>
-                  </CardContent>
-                </Card>
-              </Grid>
-            </Grid>
-
-            {memory.importResult && (
-              <Paper elevation={0} sx={{ p: 2, ...glassSurface }}>
-                <Typography variant="subtitle2" fontWeight={700} gutterBottom>
-                  上次导入结果
-                </Typography>
-                <Stack spacing={0.5}>
-                  <Typography variant="body2">
-                    成功导入: {memory.importResult.imported_count} 个页面
-                  </Typography>
-                  <Typography variant="body2">
-                    跳过: {memory.importResult.skipped_count} 个文件
-                  </Typography>
-                  {memory.importResult.created_pages.length > 0 && (
-                    <Typography variant="body2">
-                      创建页面: {memory.importResult.created_pages.join(", ")}
-                    </Typography>
-                  )}
-                  {memory.importResult.errors.length > 0 && (
-                    <Alert severity="error" sx={{ mt: 1, borderRadius: 2 }}>
-                      {memory.importResult.errors.join("; ")}
-                    </Alert>
-                  )}
-                </Stack>
-              </Paper>
-            )}
-
-            <Paper elevation={0} sx={{ p: 2, ...glassSurface }}>
-              <Typography variant="subtitle2" fontWeight={700} gutterBottom>
-                支持的文件类型
-              </Typography>
-              <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
-                {memory.supportedExtensions.map((ext) => (
-                  <Chip
-                    key={ext}
-                    label={`.${ext}`}
-                    size="small"
-                    variant="outlined"
-                    sx={{ fontFamily: "ui-monospace, monospace", fontWeight: 600 }}
-                  />
-                ))}
-              </Stack>
-            </Paper>
-          </Stack>
-        )}
 
         {/* Config */}
         {memory.activeTab === "config" && (
@@ -1054,55 +1067,67 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
             </Box>
             <Box>
               <Typography variant="h6" component="span" fontWeight={800}>
-                {importType === "file" && "导入文件到 Wiki"}
-                {importType === "directory" && "导入文件夹到 Wiki"}
-                {importType === "text" && "导入文本到 Wiki"}
+                {importType === "file" && "导入文件到知识库"}
+                {importType === "directory" && "导入文件夹到知识库"}
+                {importType === "text" && "导入文本到知识库"}
               </Typography>
               <Typography variant="caption" color="text.secondary" display="block">
-                PageIndex 解析 · 无需 LLM
+                全局知识库 · ~/.omiga/memory/permanent/wiki
               </Typography>
             </Box>
           </Stack>
         </DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            {/* Memory Level Selection */}
-            <Box>
-              <Typography variant="body2" fontWeight={600} gutterBottom>
-                导入目标
-              </Typography>
-              <ToggleButtonGroup
-                value={importMemoryLevel}
-                exclusive
-                onChange={(_, value) => value && setImportMemoryLevel(value)}
-                size="small"
-                fullWidth
-              >
-                <ToggleButton value="project">
-                  项目记忆 (.omiga/memory/wiki)
-                </ToggleButton>
-                <ToggleButton value="user">
-                  用户记忆 (~/.omiga/memory/wiki)
-                </ToggleButton>
-              </ToggleButtonGroup>
-              <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-                {importMemoryLevel === "project" 
-                  ? "存储在项目目录中，随项目一起共享" 
-                  : "存储在用户主目录中，跨项目可用"}
-              </Typography>
-            </Box>
-
-            <Divider />
-
             {(importType === "file" || importType === "directory") && (
-              <TextField
-                fullWidth
-                label={importType === "file" ? "文件路径" : "文件夹路径"}
-                value={importSourcePath}
-                onChange={(e) => setImportSourcePath(e.target.value)}
-                placeholder={importType === "file" ? "/path/to/document.md" : "/path/to/docs/"}
-                helperText={importMemoryLevel === "project" ? "相对项目根目录的路径" : "绝对路径或相对用户目录的路径"}
-              />
+              <Box>
+                <Typography variant="body2" fontWeight={600} gutterBottom>
+                  {importType === "file" ? "选择文件" : "选择文件夹"}
+                </Typography>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Button
+                    variant="outlined"
+                    startIcon={<FolderIcon />}
+                    onClick={async () => {
+                      try {
+                        const selected = await openFileDialog({
+                          directory: importType === "directory",
+                          multiple: false,
+                          title: importType === "file" ? "选择要导入的文件" : "选择要导入的文件夹",
+                        });
+                        if (selected == null) return;
+                        const path = Array.isArray(selected) ? selected[0] : selected;
+                        if (path) setImportSourcePath(path);
+                      } catch (e) {
+                        console.error("[UnifiedMemoryTab] file dialog failed", e);
+                      }
+                    }}
+                    sx={{ borderRadius: 2, textTransform: "none", fontWeight: 600, flexShrink: 0 }}
+                  >
+                    {importType === "file" ? "浏览文件…" : "浏览文件夹…"}
+                  </Button>
+                  {importSourcePath && (
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      noWrap
+                      sx={{
+                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                        flex: 1,
+                        minWidth: 0,
+                      }}
+                      title={importSourcePath}
+                    >
+                      {importSourcePath}
+                    </Typography>
+                  )}
+                  {!importSourcePath && (
+                    <Typography variant="body2" color="text.disabled" sx={{ fontStyle: "italic" }}>
+                      未选择
+                    </Typography>
+                  )}
+                </Stack>
+              </Box>
             )}
             
             {importType === "text" && (
@@ -1157,7 +1182,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
             startIcon={memory.importing ? <CircularProgress size={16} /> : <UploadIcon />}
             sx={{ borderRadius: 2, textTransform: "none", fontWeight: 700 }}
           >
-            导入到{importMemoryLevel === "project" ? "项目记忆" : "用户记忆"}
+            导入到知识库
           </Button>
         </DialogActions>
       </Dialog>

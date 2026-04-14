@@ -73,6 +73,7 @@ import {
   isUnsetWorkspacePath,
 } from "../../state";
 import { Terminal } from "../Terminal";
+import { OmigaLogo } from "../OmigaLogo";
 import { ChatComposer } from "./ChatComposer";
 import type { AskUserQuestionItem } from "./AskUserQuestionWizard";
 import { getChatTokens } from "./chatTokens";
@@ -1000,6 +1001,8 @@ export function Chat({ sessionId }: ChatProps) {
   const [sshWorkspacePathDraft, setSshWorkspacePathDraft] = useState("");
   /** 用户气泡「复制」成功提示 */
   const [copySuccessToast, setCopySuccessToast] = useState(false);
+  /** True when session was just created on-demand; triggers a deferred send once sessionId updates. */
+  const [pendingFirstSend, setPendingFirstSend] = useState(false);
   const showPathRequiredWarning = () => {
     setPathToastKey((k) => k + 1);
     setPathRequiredToast("请先选择工作目录后再发送消息。");
@@ -1180,6 +1183,15 @@ export function Chat({ sessionId }: ChatProps) {
     queuedMainSendQueueRef.current = [];
     bumpQueueUi();
   }, [sessionId, bumpQueueUi]);
+
+  // Deferred send: when a session was just auto-created from handleSend and
+  // the prop sessionId has now updated to a real ID, fire the send immediately.
+  useEffect(() => {
+    if (pendingFirstSend && sessionId) {
+      setPendingFirstSend(false);
+      void handleSendRef.current();
+    }
+  }, [pendingFirstSend, sessionId]);
 
   const refreshBackgroundTasks = useCallback(async () => {
     if (!sessionId) {
@@ -2106,7 +2118,17 @@ export function Chat({ sessionId }: ChatProps) {
   };
 
   const handleSend = async () => {
-    if (!sessionId) return;
+    if (!sessionId) {
+      // No session yet — create one on-demand. The deferred-send useEffect
+      // will fire handleSend again once the prop sessionId becomes non-empty.
+      try {
+        await useSessionStore.getState().createSessionQuick();
+        setPendingFirstSend(true);
+      } catch (e) {
+        console.error("[Chat] createSessionQuick on-demand failed", e);
+      }
+      return;
+    }
     sendCancelledDuringRequestRef.current = false;
     setAwaitingResumeAfterCancel(false);
 
@@ -3667,7 +3689,7 @@ export function Chat({ sessionId }: ChatProps) {
                   color: "text.secondary",
                 }}
               >
-                <SmartToy sx={{ fontSize: 48, mb: 2, opacity: 0.5 }} />
+                <OmigaLogo size={64} style={{ marginBottom: 16, opacity: 0.85 }} />
                 <Typography variant="h6" gutterBottom>
                   Welcome to Omiga
                 </Typography>
