@@ -1,6 +1,6 @@
 [package]
 name = "omiga"
-version = "0.1.0"
+version = "0.2.0"
 description = "An IDE-like AI coding assistant built with Tauri"
 authors = ["omiga contributors"]
 edition = "2021"
