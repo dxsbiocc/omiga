@@ -55,14 +55,14 @@ pub use storage::{CacheEntry, IndexStorage};
 pub use tree::{DocumentNode, DocumentTree, NodeType, SectionNode};
 
 /// Configuration for the PageIndex system.
-/// 
+///
 /// NOTE: PageIndex now indexes CHAT CONTENT (implicit memory) rather than project code.
 /// Project code should be accessed via tools (ripgrep, glob, file_read) in real-time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexConfig {
     /// Maximum content size to index (in bytes). Default: 10MB
     pub max_file_size: usize,
-    /// File extensions to index (for external documents in wiki). 
+    /// File extensions to index (for external documents in wiki).
     /// Default: ["md", "txt"] - focused on document formats
     pub include_extensions: Vec<String>,
     /// Directories to exclude. Default: ["node_modules", ".git", "target", ".omiga"]
@@ -181,7 +181,9 @@ impl PageIndex {
     /// Build or rebuild the full index.
     pub async fn build(&mut self) -> Result<(), AppError> {
         info!("Starting PageIndex build for {:?}", self.project_root);
-        self.init().await.map_err(|e| AppError::Unknown(e.to_string()))?;
+        self.init()
+            .await
+            .map_err(|e| AppError::Unknown(e.to_string()))?;
 
         // Load existing cache
         let cache: HashMap<String, CacheEntry> = if self.config.enable_cache {
@@ -216,7 +218,7 @@ impl PageIndex {
         // Update tree and save
         self.tree = new_tree;
         self.storage.save_tree(&self.tree).await?;
-        
+
         if self.config.enable_cache {
             self.storage.save_cache(&new_cache).await?;
         }

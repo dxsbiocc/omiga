@@ -13,12 +13,12 @@
 //!
 //! Now only step 1 happens once per session; steps 2 repeat; step 3 runs at session teardown.
 
+use super::{ToolContext, ToolError};
 use crate::execution::{create_environment, BaseEnvironment, EnvironmentConfig, EnvironmentType};
 use crate::llm::config::{load_config_file, merged_ssh_configs};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use super::{ToolContext, ToolError};
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -73,9 +73,11 @@ impl EnvStore {
 
         // Slow path — create and cache
         let config = build_env_config(ctx, timeout_ms)?;
-        let env = create_environment(config).await.map_err(|e| ToolError::ExecutionFailed {
-            message: format!("执行环境初始化失败 ({}): {}", key, e),
-        })?;
+        let env = create_environment(config)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("执行环境初始化失败 ({}): {}", key, e),
+            })?;
 
         {
             let mut guard = self.0.envs.lock().await;
@@ -146,15 +148,19 @@ fn build_ssh_config(ctx: &ToolContext, timeout_ms: u64) -> Result<EnvironmentCon
     let cfg = merged.get(name).ok_or_else(|| ToolError::ExecutionFailed {
         message: format!("SSH: 找不到配置 '{}'", name),
     })?;
-    let host = cfg.effective_hostname().ok_or_else(|| ToolError::ExecutionFailed {
-        message: "SSH: 配置缺少 HostName".to_string(),
-    })?;
-    let user = cfg.user.as_ref().ok_or_else(|| ToolError::ExecutionFailed {
-        message: "SSH: 配置缺少 User".to_string(),
-    })?;
+    let host = cfg
+        .effective_hostname()
+        .ok_or_else(|| ToolError::ExecutionFailed {
+            message: "SSH: 配置缺少 HostName".to_string(),
+        })?;
+    let user = cfg
+        .user
+        .as_ref()
+        .ok_or_else(|| ToolError::ExecutionFailed {
+            message: "SSH: 配置缺少 User".to_string(),
+        })?;
 
-    let remote_root =
-        std::env::var("OMIGA_SSH_REMOTE_ROOT").unwrap_or_else(|_| "~".to_string());
+    let remote_root = std::env::var("OMIGA_SSH_REMOTE_ROOT").unwrap_or_else(|_| "~".to_string());
     let remote_cwd = if let Ok(rel) = ctx.cwd.strip_prefix(&ctx.project_root) {
         let r = rel.to_string_lossy().replace('\\', "/");
         let r = r.trim_start_matches('/');
@@ -181,7 +187,10 @@ fn build_ssh_config(ctx: &ToolContext, timeout_ms: u64) -> Result<EnvironmentCon
     })
 }
 
-fn build_sandbox_config(ctx: &ToolContext, timeout_ms: u64) -> Result<EnvironmentConfig, ToolError> {
+fn build_sandbox_config(
+    ctx: &ToolContext,
+    timeout_ms: u64,
+) -> Result<EnvironmentConfig, ToolError> {
     let cfg_file = load_config_file().map_err(|e| ToolError::ExecutionFailed {
         message: format!("配置读取失败: {}", e),
     })?;
@@ -190,8 +199,8 @@ fn build_sandbox_config(ctx: &ToolContext, timeout_ms: u64) -> Result<Environmen
 
     match backend {
         "docker" => {
-            let image = std::env::var("OMIGA_DOCKER_IMAGE")
-                .unwrap_or_else(|_| "ubuntu:22.04".to_string());
+            let image =
+                std::env::var("OMIGA_DOCKER_IMAGE").unwrap_or_else(|_| "ubuntu:22.04".to_string());
             Ok(EnvironmentConfig {
                 r#type: EnvironmentType::Docker,
                 image: Some(image),
@@ -203,7 +212,8 @@ fn build_sandbox_config(ctx: &ToolContext, timeout_ms: u64) -> Result<Environmen
         }
         "modal" => {
             let image = cfg_file
-                .execution_envs.as_ref()
+                .execution_envs
+                .as_ref()
                 .and_then(|e| e.modal.as_ref())
                 .and_then(|m| m.default_image.clone())
                 .unwrap_or_else(|| "ubuntu:22.04".to_string());
@@ -218,7 +228,8 @@ fn build_sandbox_config(ctx: &ToolContext, timeout_ms: u64) -> Result<Environmen
         }
         "daytona" => {
             let image = cfg_file
-                .execution_envs.as_ref()
+                .execution_envs
+                .as_ref()
                 .and_then(|e| e.daytona.as_ref())
                 .and_then(|d| d.default_image.clone())
                 .unwrap_or_else(|| "ubuntu:22.04".to_string());

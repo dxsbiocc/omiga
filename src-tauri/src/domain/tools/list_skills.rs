@@ -1,7 +1,7 @@
 //! `list_skills` — returns skill metadata only (no full SKILL.md). Pair with `skill` for full load.
 
-use serde::{Deserialize, Serialize};
 use super::ToolSchema;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ListSkillsArgs {
@@ -9,18 +9,14 @@ pub struct ListSkillsArgs {
     pub query: Option<String>,
 }
 
-pub const DESCRIPTION: &str = r#"List available skills with metadata only (`name`, `description`, `when_to_use`, optional `tags`, `source`). Does not load full SKILL.md. Use this to discover skills before invoking with `skill` tool.
+pub const DESCRIPTION: &str = r#"Discover available specialized skills. Returns metadata (`name`, `description`, `when_to_use`, optional `tags`, `source`) but not full SKILL.md.
 
-When to use:
-- At the start of a conversation to see what skills are available
-- When the user asks about a specialized domain (bioinformatics, databases, design, deployment, etc.)
-- When you're unsure how to approach a task
+Core principle: do not reinvent the wheel.
 
-How to use:
-- Call without `query` to get all skills ordered by relevance to current task
-- Call with `query: "keyword"` to filter by domain (e.g., `query: "pdb"` for protein structures, `query: "react"` for frontend, `query: "deploy"` for deployment)
-
-After finding a relevant skill, use `skill_view` to read full `SKILL.md` (or a reference file) without executing, or call `skill` to run the workflow."#;
+Discovery protocol:
+1. Try `query: "keyword"` with 1-2 relevant keywords.
+2. If nothing matches, **immediately** call without arguments to list the full catalog. Do **not** keep guessing keywords.
+3. When you find a candidate, **use `skill_view` to read its instructions before calling `skill`**."#;
 
 /// Hermes wire name `skills_list` — same parameters and behavior as [`schema`].
 pub fn skills_list_schema() -> ToolSchema {
@@ -36,24 +32,13 @@ pub fn skills_list_schema() -> ToolSchema {
 pub fn schema() -> ToolSchema {
     ToolSchema::new(
         "list_skills",
-        r#"List available skills with metadata only (`name`, `description`, `when_to_use`, optional `tags`, `source`). Does not load full SKILL.md. Use this to discover skills before invoking with `skill` tool.
-
-When to use:
-- At the start of a conversation to see what skills are available
-- When the user asks about a specialized domain (bioinformatics, databases, design, deployment, etc.)
-- When you're unsure how to approach a task
-
-How to use:
-- Call without `query` to get all skills ordered by relevance to current task
-- Call with `query: "keyword"` to filter by domain (e.g., `query: "pdb"` for protein structures, `query: "react"` for frontend, `query: "deploy"` for deployment)
-
-After finding a relevant skill, use `skill_view` to read full `SKILL.md` (or a reference file) without executing, or call `skill` to run the workflow."#,
+        DESCRIPTION,
         serde_json::json!({
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Optional filter substring (matches name, description, when_to_use, or tags). Use domain keywords like 'pdb', 'alphafold', 'react', 'design', 'deploy'."
+                    "description": "Optional filter substring (matches name, description, when_to_use, or tags). Use domain keywords like 'commit', 'review', 'deploy', 'pdb', 'alphafold', 'react', 'design'."
                 }
             }
         }),

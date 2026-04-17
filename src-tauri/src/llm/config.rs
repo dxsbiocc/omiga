@@ -118,22 +118,28 @@ impl Default for SshExecConfig {
 impl SshExecConfig {
     /// Get the effective hostname (HostName or Host)
     pub fn effective_hostname(&self) -> Option<&str> {
-        self.host_name.as_ref().or(self.host.as_ref()).map(|s| s.as_str())
+        self.host_name
+            .as_ref()
+            .or(self.host.as_ref())
+            .map(|s| s.as_str())
     }
 
     /// Parse SSH config file (~/.ssh/config)
-    pub fn parse_ssh_config() -> Result<HashMap<String, SshExecConfig>, Box<dyn std::error::Error>> {
+    pub fn parse_ssh_config() -> Result<HashMap<String, SshExecConfig>, Box<dyn std::error::Error>>
+    {
         let ssh_config_path = dirs::home_dir()
             .map(|h| h.join(".ssh").join("config"))
             .ok_or("Could not determine home directory")?;
-        
+
         Self::parse_ssh_config_file(&ssh_config_path)
     }
 
     /// Parse SSH config from a specific file
-    pub fn parse_ssh_config_file(path: &std::path::Path) -> Result<HashMap<String, SshExecConfig>, Box<dyn std::error::Error>> {
+    pub fn parse_ssh_config_file(
+        path: &std::path::Path,
+    ) -> Result<HashMap<String, SshExecConfig>, Box<dyn std::error::Error>> {
         let mut configs = HashMap::new();
-        
+
         if !path.exists() {
             return Ok(configs);
         }
@@ -144,7 +150,7 @@ impl SshExecConfig {
 
         for line in content.lines() {
             let line = line.trim();
-            
+
             // Skip empty lines and comments
             if line.is_empty() || line.starts_with('#') {
                 continue;
@@ -156,7 +162,7 @@ impl SshExecConfig {
                 if let Some(host) = current_host.take() {
                     configs.insert(host, std::mem::take(&mut current_config));
                 }
-                
+
                 let host_pattern = line[5..].trim().to_string();
                 // Skip wildcard patterns for now
                 if !host_pattern.contains('*') && !host_pattern.contains('?') {
@@ -166,11 +172,13 @@ impl SshExecConfig {
             // Parse other config options
             else if let Some(_host) = current_host.as_ref() {
                 // SSH config allows "Key Value", "Key=Value", and multiple spaces/tabs
-                let parts: Vec<&str> = line.splitn(2, |c: char| c == '=' || c == ' ' || c == '\t').collect();
+                let parts: Vec<&str> = line
+                    .splitn(2, |c: char| c == '=' || c == ' ' || c == '\t')
+                    .collect();
                 if parts.len() == 2 {
                     let key = parts[0].trim();
                     let value = parts[1].trim().trim_start_matches('=').trim();
-                    
+
                     match key.to_lowercase().as_str() {
                         "hostname" => current_config.host_name = Some(value.to_string()),
                         "user" => current_config.user = Some(value.to_string()),
@@ -389,6 +397,7 @@ impl LlmConfigFile {
         if let Some(prompt) = &provider_config.system_prompt {
             config.system_prompt = Some(expand_env_vars(prompt));
         }
+        let provider_has_timeout = provider_config.timeout.is_some();
         if let Some(timeout) = provider_config.timeout {
             config.timeout_secs = timeout;
         }
@@ -411,7 +420,9 @@ impl LlmConfigFile {
         if let Some(thinking) = provider_config.thinking {
             config.thinking = Some(thinking);
         }
-        if matches!(provider, LlmProvider::Moonshot | LlmProvider::Custom) && config.thinking.is_none() {
+        if matches!(provider, LlmProvider::Moonshot | LlmProvider::Custom)
+            && config.thinking.is_none()
+        {
             config.thinking = Some(false);
         }
 
@@ -425,7 +436,7 @@ impl LlmConfigFile {
             if config.temperature.is_none() {
                 config.temperature = settings.temperature;
             }
-            if config.timeout_secs == 120 {
+            if !provider_has_timeout {
                 if let Some(timeout) = settings.timeout {
                     config.timeout_secs = timeout;
                 }
@@ -505,7 +516,7 @@ impl LlmConfigFile {
             settings: Some(GlobalSettings {
                 max_tokens: Some(4096),
                 temperature: Some(0.7),
-                timeout: Some(120),
+                timeout: Some(600),
                 enable_tools: Some(true),
             }),
             execution_envs: None,
@@ -568,7 +579,7 @@ impl LlmConfigFile {
             settings: Some(GlobalSettings {
                 max_tokens: Some(4096),
                 temperature: Some(0.7),
-                timeout: Some(120),
+                timeout: Some(600),
                 enable_tools: Some(true),
             }),
             execution_envs: None,
@@ -670,7 +681,7 @@ settings:
             self.settings
                 .as_ref()
                 .and_then(|s| s.timeout)
-                .unwrap_or(120),
+                .unwrap_or(600),
             self.settings
                 .as_ref()
                 .and_then(|s| s.enable_tools)

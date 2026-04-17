@@ -17,19 +17,11 @@ use tracing::{debug, error, info, warn};
 #[derive(Debug, Clone)]
 pub enum HotReloadEvent {
     /// Agent 已加载或更新
-    AgentLoaded {
-        agent_type: String,
-        source: PathBuf,
-    },
+    AgentLoaded { agent_type: String, source: PathBuf },
     /// Agent 已卸载
-    AgentUnloaded {
-        agent_type: String,
-    },
+    AgentUnloaded { agent_type: String },
     /// 加载失败
-    LoadFailed {
-        path: PathBuf,
-        error: String,
-    },
+    LoadFailed { path: PathBuf, error: String },
 }
 
 /// Agent frontmatter 配置
@@ -154,13 +146,13 @@ impl AgentHotReloadManager {
     /// 创建新的热重载管理器
     pub fn new() -> (Self, mpsc::Receiver<HotReloadEvent>) {
         let (event_tx, event_rx) = mpsc::channel(100);
-        
+
         let manager = Self {
             dynamic_agents: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             watch_dirs: Vec::new(),
         };
-        
+
         (manager, event_rx)
     }
 
@@ -177,22 +169,20 @@ impl AgentHotReloadManager {
         let dynamic_agents = self.dynamic_agents.clone();
         let event_tx = self.event_tx.clone();
         let router_for_watcher = router.clone();
-        
+
         // 创建 watcher
         let watcher = RecommendedWatcher::new(
-            move |res: Result<Event, notify::Error>| {
-                match res {
-                    Ok(event) => {
-                        tokio::spawn(handle_notify_event(
-                            event,
-                            dynamic_agents.clone(),
-                            event_tx.clone(),
-                            router_for_watcher.clone(),
-                        ));
-                    }
-                    Err(e) => {
-                        error!("文件监控错误: {}", e);
-                    }
+            move |res: Result<Event, notify::Error>| match res {
+                Ok(event) => {
+                    tokio::spawn(handle_notify_event(
+                        event,
+                        dynamic_agents.clone(),
+                        event_tx.clone(),
+                        router_for_watcher.clone(),
+                    ));
+                }
+                Err(e) => {
+                    error!("文件监控错误: {}", e);
                 }
             },
             Config::default(),
@@ -204,7 +194,7 @@ impl AgentHotReloadManager {
             if dir.exists() {
                 // 初始加载所有现有文件
                 self.load_all_agents_in_dir(dir, &router).await?;
-                
+
                 // 添加监控
                 // 注意：watcher 需要被保持存活才能继续监控
                 // 这里我们返回 watcher，由调用者保持
@@ -233,10 +223,13 @@ impl AgentHotReloadManager {
             if path.extension().map(|e| e == "md").unwrap_or(false) {
                 if let Err(e) = self.load_agent_from_file(&path, router).await {
                     warn!("加载 Agent 文件失败 {}: {}", path.display(), e);
-                    let _ = self.event_tx.send(HotReloadEvent::LoadFailed {
-                        path: path.clone(),
-                        error: e,
-                    }).await;
+                    let _ = self
+                        .event_tx
+                        .send(HotReloadEvent::LoadFailed {
+                            path: path.clone(),
+                            error: e,
+                        })
+                        .await;
                 }
             }
         }
@@ -256,7 +249,7 @@ impl AgentHotReloadManager {
 
         let agent = parse_agent_from_markdown(&content, path)?;
         let agent_type = agent.agent_type.clone();
-        
+
         // 保存到动态缓存
         {
             let mut agents = self.dynamic_agents.write().await;
@@ -270,11 +263,14 @@ impl AgentHotReloadManager {
         }
 
         info!("Agent 已加载: {} (来自 {})", agent_type, path.display());
-        
-        let _ = self.event_tx.send(HotReloadEvent::AgentLoaded {
-            agent_type,
-            source: path.to_path_buf(),
-        }).await;
+
+        let _ = self
+            .event_tx
+            .send(HotReloadEvent::AgentLoaded {
+                agent_type,
+                source: path.to_path_buf(),
+            })
+            .await;
 
         Ok(())
     }
@@ -282,7 +278,8 @@ impl AgentHotReloadManager {
     /// 卸载 Agent（保留供手动调用）
     #[allow(dead_code)]
     async fn unload_agent(&self, path: &Path, router: &Arc<RwLock<AgentRouter>>) {
-        let agent_type = path.file_stem()
+        let agent_type = path
+            .file_stem()
             .and_then(|s| s.to_str())
             .map(|s| s.to_string());
 
@@ -300,10 +297,11 @@ impl AgentHotReloadManager {
             }
 
             info!("Agent 已卸载: {}", agent_type);
-            
-            let _ = self.event_tx.send(HotReloadEvent::AgentUnloaded {
-                agent_type,
-            }).await;
+
+            let _ = self
+                .event_tx
+                .send(HotReloadEvent::AgentUnloaded { agent_type })
+                .await;
         }
     }
 
@@ -353,10 +351,12 @@ async fn handle_notify_event(
                     // 重新加载 Agent
                     if let Err(e) = load_agent_file(path, &dynamic_agents, &event_tx).await {
                         warn!("重新加载 Agent 失败: {}", e);
-                        let _ = event_tx.send(HotReloadEvent::LoadFailed {
-                            path: path.clone(),
-                            error: e,
-                        }).await;
+                        let _ = event_tx
+                            .send(HotReloadEvent::LoadFailed {
+                                path: path.clone(),
+                                error: e,
+                            })
+                            .await;
                     }
                 }
                 EventKind::Remove(_) => {
@@ -367,17 +367,19 @@ async fn handle_notify_event(
                             let mut agents = dynamic_agents.write().await;
                             agents.remove(agent_type);
                         }
-                        
+
                         // 从 router 注销
                         {
                             let mut router_guard = router.write().await;
                             router_guard.unregister(agent_type);
                         }
-                        
+
                         info!("Agent 已卸载: {}", agent_type);
-                        let _ = event_tx.send(HotReloadEvent::AgentUnloaded {
-                            agent_type: agent_type.to_string(),
-                        }).await;
+                        let _ = event_tx
+                            .send(HotReloadEvent::AgentUnloaded {
+                                agent_type: agent_type.to_string(),
+                            })
+                            .await;
                     }
                 }
                 _ => {}
@@ -406,10 +408,12 @@ async fn load_agent_file(
 
     info!("Agent 已热重载: {} (来自 {})", agent_type, path.display());
 
-    let _ = event_tx.send(HotReloadEvent::AgentLoaded {
-        agent_type,
-        source: path.to_path_buf(),
-    }).await;
+    let _ = event_tx
+        .send(HotReloadEvent::AgentLoaded {
+            agent_type,
+            source: path.to_path_buf(),
+        })
+        .await;
 
     Ok(())
 }
@@ -456,15 +460,17 @@ fn parse_agent_from_markdown(content: &str, path: &Path) -> Result<DynamicAgent,
     }
 
     // 解析权限模式
-    let permission_mode = frontmatter.permission_mode.as_deref().and_then(|pm| {
-        match pm.to_lowercase().as_str() {
-            "default" => Some(PermissionMode::Default),
-            "acceptedits" => Some(PermissionMode::AcceptEdits),
-            "plan" => Some(PermissionMode::Plan),
-            "bypasspermissions" => Some(PermissionMode::BypassPermissions),
-            _ => None,
-        }
-    });
+    let permission_mode =
+        frontmatter
+            .permission_mode
+            .as_deref()
+            .and_then(|pm| match pm.to_lowercase().as_str() {
+                "default" => Some(PermissionMode::Default),
+                "acceptedits" => Some(PermissionMode::AcceptEdits),
+                "plan" => Some(PermissionMode::Plan),
+                "bypasspermissions" => Some(PermissionMode::BypassPermissions),
+                _ => None,
+            });
 
     // 判断来源
     let source = if path.starts_with(dirs::home_dir().unwrap_or_default()) {
@@ -496,14 +502,21 @@ fn parse_agent_from_markdown(content: &str, path: &Path) -> Result<DynamicAgent,
 pub async fn start_agent_hot_reload(
     router: Arc<RwLock<AgentRouter>>,
     project_root: &Path,
-) -> Result<(AgentHotReloadManager, RecommendedWatcher, mpsc::Receiver<HotReloadEvent>), String> {
+) -> Result<
+    (
+        AgentHotReloadManager,
+        RecommendedWatcher,
+        mpsc::Receiver<HotReloadEvent>,
+    ),
+    String,
+> {
     let (mut manager, event_rx) = AgentHotReloadManager::new();
 
     // 添加监控目录
     let user_agents_dir = dirs::home_dir()
         .map(|h| h.join(".omiga").join("agents"))
         .unwrap_or_default();
-    
+
     let project_agents_dir = project_root.join(".omiga").join("agents");
 
     manager.add_watch_dir(user_agents_dir);
@@ -539,11 +552,14 @@ soul: |
 "#;
 
         let agent = parse_agent_from_markdown(markdown, Path::new("/tmp/test.md")).unwrap();
-        
+
         assert_eq!(agent.agent_type, "test-agent");
         assert_eq!(agent.when_to_use, "测试 Agent");
         assert_eq!(agent.model, Some("haiku".to_string()));
-        assert_eq!(agent.allowed_tools, Some(vec!["Read".to_string(), "Write".to_string()]));
+        assert_eq!(
+            agent.allowed_tools,
+            Some(vec!["Read".to_string(), "Write".to_string()])
+        );
         assert_eq!(agent.personality_key.as_deref(), Some("teacher"));
         assert!(agent.soul_text.as_ref().is_some_and(|s| s.contains("耐心")));
         assert!(agent.background);

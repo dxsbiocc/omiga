@@ -17,12 +17,5 @@ pub const MODEL_INHERIT: &str = "inherit";
 
 /// 内置 Agent 颜色
 pub const AGENT_COLORS: &[&str] = &[
-    "blue",
-    "green",
-    "yellow",
-    "red",
-    "purple",
-    "orange",
-    "pink",
-    "cyan",
+    "blue", "green", "yellow", "red", "purple", "orange", "pink", "cyan",
 ];

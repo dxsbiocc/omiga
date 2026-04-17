@@ -41,7 +41,11 @@ fn parse_quarto_version_line(text: &str) -> Option<(u32, u32, u32)> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"(\d+)\.(\d+)\.(\d+)").expect("regex"));
     let cap = re.captures(text)?;
-    Some((cap[1].parse().ok()?, cap[2].parse().ok()?, cap[3].parse().ok()?))
+    Some((
+        cap[1].parse().ok()?,
+        cap[2].parse().ok()?,
+        cap[3].parse().ok()?,
+    ))
 }
 
 fn version_lt(a: (u32, u32, u32), b: (u32, u32, u32)) -> bool {
@@ -103,10 +107,7 @@ fn truncate(s: &str) -> String {
 pub async fn render_rmarkdown(path: String) -> CommandResult<RmdRenderResponse> {
     let canonical = canonical_file_with_ext(&path, "rmd")?;
     let path_str = canonical.to_string_lossy().to_string();
-    let r_expr = format!(
-        "rmarkdown::render({})",
-        r_double_quoted_path(&path_str)
-    );
+    let r_expr = format!("rmarkdown::render({})", r_double_quoted_path(&path_str));
 
     let run = Command::new("Rscript")
         .arg("-e")
@@ -124,9 +125,7 @@ pub async fn render_rmarkdown(path: String) -> CommandResult<RmdRenderResponse> 
         })?
         .map_err(|e| {
             AppError::Fs(FsError::IoError {
-                message: format!(
-                    "无法运行 Rscript（请确认已安装 R，且 `rmarkdown` 包可用）: {e}"
-                ),
+                message: format!("无法运行 Rscript（请确认已安装 R，且 `rmarkdown` 包可用）: {e}"),
             })
         })?;
 
@@ -194,9 +193,7 @@ pub async fn render_quarto(path: String) -> CommandResult<RmdRenderResponse> {
         }
         Ok(Err(e)) => {
             return Err(AppError::Fs(FsError::IoError {
-                message: format!(
-                    "无法启动 quarto（请确认已安装 Quarto CLI 且在 PATH 中）: {e}"
-                ),
+                message: format!("无法启动 quarto（请确认已安装 Quarto CLI 且在 PATH 中）: {e}"),
             }));
         }
     };
@@ -215,10 +212,7 @@ pub async fn render_quarto(path: String) -> CommandResult<RmdRenderResponse> {
 /// `quarto::quarto_render()` — requires R and the **quarto** R package (`install.packages("quarto")`).
 async fn render_quarto_via_r(canonical: &PathBuf) -> CommandResult<RmdRenderResponse> {
     let path_str = canonical.to_string_lossy().to_string();
-    let r_expr = format!(
-        "quarto::quarto_render({})",
-        r_double_quoted_path(&path_str)
-    );
+    let r_expr = format!("quarto::quarto_render({})", r_double_quoted_path(&path_str));
 
     let run = Command::new("Rscript")
         .arg("-e")

@@ -128,7 +128,9 @@ fn set_nested(root: &mut serde_yaml::Value, dotted: &str, value: serde_yaml::Val
             *cur = serde_yaml::Value::Mapping(Default::default());
         }
         let map = cur.as_mapping_mut().unwrap();
-        cur = map.entry(key).or_insert(serde_yaml::Value::Mapping(Default::default()));
+        cur = map
+            .entry(key)
+            .or_insert(serde_yaml::Value::Mapping(Default::default()));
     }
     if !cur.is_mapping() {
         *cur = serde_yaml::Value::Mapping(Default::default());
@@ -196,7 +198,9 @@ const ALLOWED_ENV_VARS: &[&str] = &[
 
 /// Check if an environment variable name is in the allowlist.
 fn is_env_var_allowed(name: &str) -> bool {
-    ALLOWED_ENV_VARS.iter().any(|&allowed| allowed.eq_ignore_ascii_case(name))
+    ALLOWED_ENV_VARS
+        .iter()
+        .any(|&allowed| allowed.eq_ignore_ascii_case(name))
 }
 
 /// Expand `~` and `${VAR}` in path-like values.
@@ -288,11 +292,7 @@ pub fn format_config_injection(resolved: &[ResolvedConfigVar]) -> Option<String>
 
 /// Set a config var value in the project-level config file.
 /// Creates the file (and parent directories) if it doesn't exist.
-pub async fn set_config_var(
-    project_root: &Path,
-    key: &str,
-    value: &str,
-) -> Result<(), String> {
+pub async fn set_config_var(project_root: &Path, key: &str, value: &str) -> Result<(), String> {
     let config_path = project_config_path(project_root);
 
     if let Some(parent) = config_path.parent() {
@@ -312,10 +312,14 @@ pub async fn set_config_var(
     };
 
     let storage_key = format!("{CONFIG_STORAGE_PREFIX}.{key}");
-    set_nested(&mut root, &storage_key, serde_yaml::Value::String(value.to_string()));
+    set_nested(
+        &mut root,
+        &storage_key,
+        serde_yaml::Value::String(value.to_string()),
+    );
 
-    let yaml_text = serde_yaml::to_string(&root)
-        .map_err(|e| format!("skill_config: serialize: {e}"))?;
+    let yaml_text =
+        serde_yaml::to_string(&root).map_err(|e| format!("skill_config: serialize: {e}"))?;
 
     // Write atomically via temp + rename.
     let dir = config_path.parent().unwrap();
@@ -332,10 +336,7 @@ pub async fn set_config_var(
 
 /// List all config vars from a skill's declaration.
 /// Returns the vars with their resolved values from the config files.
-pub fn list_skill_config_vars(
-    vars: &[ConfigVar],
-    project_root: &Path,
-) -> serde_json::Value {
+pub fn list_skill_config_vars(vars: &[ConfigVar], project_root: &Path) -> serde_json::Value {
     let resolved = resolve_config_vars(vars, project_root);
     serde_json::to_value(&resolved).unwrap_or(serde_json::Value::Array(vec![]))
 }
@@ -351,10 +352,8 @@ mod tests {
 
     #[test]
     fn get_nested_works() {
-        let yaml: serde_yaml::Value = serde_yaml::from_str(
-            "skills:\n  config:\n    wiki:\n      path: ~/notes\n",
-        )
-        .unwrap();
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str("skills:\n  config:\n    wiki:\n      path: ~/notes\n").unwrap();
         let v = get_nested(&yaml, "skills.config.wiki.path").unwrap();
         assert_eq!(v.as_str().unwrap(), "~/notes");
     }

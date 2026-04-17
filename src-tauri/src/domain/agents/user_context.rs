@@ -109,7 +109,8 @@ pub fn load_user_omiga_context() -> UserOmigaContext {
         .map(|udir| normalize_personality_map(load_personalities_yaml(&udir.join("config.yaml"))))
         .unwrap_or_default();
 
-    let (bootstrap_md, soul, memory_md, user_profile_md) = if let Some(ref udir) = user_omiga_dir() {
+    let (bootstrap_md, soul, memory_md, user_profile_md) = if let Some(ref udir) = user_omiga_dir()
+    {
         (
             // BOOTSTRAP.md：首次引导指令，小文件，截断即可
             read_optional_markdown(&udir.join("BOOTSTRAP.md"), BOOTSTRAP_MAX_BYTES, false),

@@ -172,7 +172,9 @@ fn truncate_tool_results_for_budget(
             break;
         };
         let excess_tokens = est.saturating_sub(budget);
-        let target_drop_chars = (excess_tokens as usize).saturating_mul(4).saturating_add(512);
+        let target_drop_chars = (excess_tokens as usize)
+            .saturating_mul(4)
+            .saturating_add(512);
         if let Message::Tool { output, .. } = &mut messages[i] {
             if output.len() <= MIN_TOOL_OUTPUT_KEEP_BYTES {
                 break;
@@ -207,9 +209,7 @@ fn truncate_text_messages_for_budget(
             if content.len() > 512 {
                 let new_len = content.len().saturating_sub(drop_chars).max(256);
                 let prefix = truncate_utf8_prefix(content.as_str(), new_len);
-                *content = format!(
-                    "{prefix}\n\n[Omiga: message truncated by auto-compact]"
-                );
+                *content = format!("{prefix}\n\n[Omiga: message truncated by auto-compact]");
             }
             break;
         }
@@ -274,12 +274,7 @@ pub fn compact_session_messages(
         );
         let notice_cost = rough_token_estimate_chars(notice.len());
         if after.saturating_add(notice_cost) <= budget.saturating_add(SAFETY_BUFFER_TOKENS / 2) {
-            messages.insert(
-                0,
-                Message::User {
-                    content: notice,
-                },
-            );
+            messages.insert(0, Message::User { content: notice });
             let api = SessionCodec::to_api_messages(messages);
             after = estimate_tokens_api_messages(&api);
         }
@@ -363,9 +358,7 @@ pub async fn compact_session_and_persist(
     let last_user_message_id = last_user.unwrap_or_else(|| fallback_user_message_id.to_string());
     let log_line = format!(
         "Auto-compact: ~{} → ~{} tokens (trimmed {} head block(s)).",
-        result.estimated_tokens_before,
-        result.estimated_tokens_after,
-        result.removed_head_blocks
+        result.estimated_tokens_before, result.estimated_tokens_after, result.removed_head_blocks
     );
     tracing::info!(target: "omiga::auto_compact", "{}", log_line);
     Ok(Some(AutoCompactPersisted {

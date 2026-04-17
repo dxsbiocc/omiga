@@ -5,9 +5,7 @@
 
 use super::CommandResult;
 use crate::app_state::OmigaAppState;
-use crate::domain::permissions::{
-    load_merged_permission_deny_rule_entries, matching_deny_entry,
-};
+use crate::domain::permissions::{load_merged_permission_deny_rule_entries, matching_deny_entry};
 
 use crate::domain::tools::{Tool, ToolContext};
 use crate::errors::{AppError, ToolError};
@@ -22,8 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 // ─── 全局取消令牌注册表 ────────────────────────────────────────────────────────
 
-static TOOL_CANCEL_MAP: OnceLock<TokioMutex<HashMap<String, CancellationToken>>> =
-    OnceLock::new();
+static TOOL_CANCEL_MAP: OnceLock<TokioMutex<HashMap<String, CancellationToken>>> = OnceLock::new();
 
 fn tool_cancel_map() -> &'static TokioMutex<HashMap<String, CancellationToken>> {
     TOOL_CANCEL_MAP.get_or_init(|| TokioMutex::new(HashMap::new()))
@@ -50,17 +47,17 @@ pub async fn execute_tool(
 ) -> CommandResult<ToolExecutionResponse> {
     let project = Path::new(&project_root);
     let name = tool.name();
-    
+
     // 新权限系统检查 (PermissionManager)
     let permission_manager = state.permission_manager.clone();
-    let args_value = serde_json::to_value(&tool)
-        .unwrap_or_else(|_| serde_json::json!({"tool_name": name}));
+    let args_value =
+        serde_json::to_value(&tool).unwrap_or_else(|_| serde_json::json!({"tool_name": name}));
     let session_id = "execute_tool"; // IPC 调用使用固定 session_id
-    
+
     let perm_decision = permission_manager
         .check_tool(session_id, name, &args_value)
         .await;
-    
+
     match perm_decision {
         crate::domain::permissions::PermissionDecision::Deny(ref reason) => {
             tracing::warn!(
@@ -97,7 +94,7 @@ pub async fn execute_tool(
                 "arguments": args_value,
             });
             let _ = app.emit("permission-request", &permission_event);
-            
+
             return Err(AppError::Tool(ToolError::PermissionDenied {
                 action: format!(
                     "Tool `{name}` requires approval. Risk: {:?}. Please approve in the permission dialog.",
@@ -109,7 +106,7 @@ pub async fn execute_tool(
             tracing::debug!(tool = %name, "Tool allowed by permission manager");
         }
     }
-    
+
     // 旧权限系统检查（作为后备）
     let deny_entries = load_merged_permission_deny_rule_entries(project);
     if let Some(hit) = matching_deny_entry(name, &deny_entries) {

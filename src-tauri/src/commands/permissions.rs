@@ -2,8 +2,8 @@ use crate::app_state::OmigaAppState;
 use crate::commands::CommandResult;
 use crate::domain::permissions::manager::PermissionManager;
 use crate::domain::permissions::types::{
-    PermissionRule, PermissionContext, PermissionDecision, RiskLevel, PermissionModeInput,
-    DetectedRisk,
+    DetectedRisk, PermissionContext, PermissionDecision, PermissionModeInput, PermissionRule,
+    RiskLevel,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -109,7 +109,8 @@ fn risk_level_to_string(level: RiskLevel) -> String {
         RiskLevel::Medium => "medium",
         RiskLevel::High => "high",
         RiskLevel::Critical => "critical",
-    }.to_string()
+    }
+    .to_string()
 }
 
 fn risk_category_to_string(category: &crate::domain::permissions::RiskCategory) -> String {
@@ -120,7 +121,8 @@ fn risk_category_to_string(category: &crate::domain::permissions::RiskCategory) 
         crate::domain::permissions::RiskCategory::DataLoss => "data_loss",
         crate::domain::permissions::RiskCategory::Security => "security",
         crate::domain::permissions::RiskCategory::Privacy => "privacy",
-    }.to_string()
+    }
+    .to_string()
 }
 
 fn convert_risk_info(risk: &DetectedRisk) -> RiskInfoDto {
@@ -171,7 +173,12 @@ fn convert_decision_to_response(
             tool_name: tool_name.to_string(),
             risk_level: risk_level_to_string(req.risk.level),
             risk_description: req.risk.description.clone(),
-            detected_risks: req.risk.detected_risks.iter().map(convert_risk_info).collect(),
+            detected_risks: req
+                .risk
+                .detected_risks
+                .iter()
+                .map(convert_risk_info)
+                .collect(),
             recommendations: req.risk.recommendations.clone(),
             arguments: Some(arguments.clone()),
         },
@@ -207,13 +214,9 @@ pub async fn permission_check(
     };
 
     let decision = manager.check_permission(&context).await;
-    let response = convert_decision_to_response(
-        decision,
-        &context.session_id,
-        &tool_name,
-        &arguments,
-    );
-    
+    let response =
+        convert_decision_to_response(decision, &context.session_id, &tool_name, &arguments);
+
     Ok(response)
 }
 
@@ -242,7 +245,9 @@ pub async fn permission_approve(
 
     // 转换 PermissionModeInput -> PermissionMode
     let mode = match request.mode {
-        PermissionModeInput::AskEveryTime => crate::domain::permissions::types::PermissionMode::AskEveryTime,
+        PermissionModeInput::AskEveryTime => {
+            crate::domain::permissions::types::PermissionMode::AskEveryTime
+        }
         PermissionModeInput::Session => crate::domain::permissions::types::PermissionMode::Session,
         PermissionModeInput::TimeWindow { minutes } => {
             crate::domain::permissions::types::PermissionMode::TimeWindow { minutes }
@@ -251,7 +256,9 @@ pub async fn permission_approve(
         PermissionModeInput::Auto => crate::domain::permissions::types::PermissionMode::Auto,
     };
 
-    manager.approve_request(&request.session_id, mode, &context).await
+    manager
+        .approve_request(&request.session_id, mode, &context)
+        .await
         .map_err(|e| crate::errors::AppError::Unknown(e))?;
 
     if let Some(rid) = request.request_id.as_ref() {
@@ -288,7 +295,9 @@ pub async fn permission_deny(
         timestamp: chrono::Utc::now(),
     };
 
-    manager.deny_request(&context, &request.reason).await
+    manager
+        .deny_request(&context, &request.reason)
+        .await
         .map_err(|e| crate::errors::AppError::Unknown(e))?;
 
     if let Some(rid) = request.request_id.as_ref() {
@@ -317,7 +326,9 @@ pub async fn permission_add_rule(
     request: AddRuleRequest,
     manager: State<'_, Arc<PermissionManager>>,
 ) -> CommandResult<()> {
-    manager.add_rule(request.rule).await
+    manager
+        .add_rule(request.rule)
+        .await
         .map_err(|e| crate::errors::AppError::Unknown(e))?;
     Ok(())
 }
@@ -328,7 +339,9 @@ pub async fn permission_delete_rule(
     id: String,
     manager: State<'_, Arc<PermissionManager>>,
 ) -> CommandResult<()> {
-    manager.delete_rule(&id).await
+    manager
+        .delete_rule(&id)
+        .await
         .map_err(|e| crate::errors::AppError::Unknown(e))?;
     Ok(())
 }
@@ -339,7 +352,9 @@ pub async fn permission_update_rule(
     request: UpdateRuleRequest,
     manager: State<'_, Arc<PermissionManager>>,
 ) -> CommandResult<()> {
-    manager.update_rule(request.rule).await
+    manager
+        .update_rule(request.rule)
+        .await
         .map_err(|e| crate::errors::AppError::Unknown(e))?;
     Ok(())
 }
@@ -352,7 +367,7 @@ pub async fn permission_get_recent_denials(
 ) -> CommandResult<Vec<DenialRecordDto>> {
     let limit = limit.unwrap_or(50);
     let denials = manager.get_recent_denials(limit).await;
-    
+
     let dtos: Vec<DenialRecordDto> = denials
         .into_iter()
         .map(|d| DenialRecordDto {
@@ -362,7 +377,7 @@ pub async fn permission_get_recent_denials(
             reason: d.reason,
         })
         .collect();
-    
+
     Ok(dtos)
 }
 
@@ -383,7 +398,7 @@ pub async fn permission_get_approval_status(
     manager: State<'_, Arc<PermissionManager>>,
 ) -> CommandResult<ApprovalStatusResponse> {
     let (approved_tools, approved_until) = manager.get_session_approvals(&session_id).await;
-    
+
     Ok(ApprovalStatusResponse {
         session_id,
         approved_tools: approved_tools.into_iter().collect(),

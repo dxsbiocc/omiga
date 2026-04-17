@@ -5,7 +5,9 @@ use std::path::Path;
 
 /// Check if a path is within the project
 pub fn is_within_project(project_root: &Path, path: &Path) -> bool {
-    let canonical_project = project_root.canonicalize().unwrap_or_else(|_| project_root.to_path_buf());
+    let canonical_project = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
     let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
     canonical_path.starts_with(canonical_project)
@@ -15,8 +17,9 @@ pub fn is_within_project(project_root: &Path, path: &Path) -> bool {
 pub fn resolve_path(project_root: &Path, path: &str) -> Result<std::path::PathBuf, FsError> {
     let path_buf = if path.starts_with('/') || path.starts_with("~/") {
         if path.starts_with("~/") {
-            let home = std::env::var("HOME")
-                .map_err(|_| FsError::InvalidPath { path: path.to_string() })?;
+            let home = std::env::var("HOME").map_err(|_| FsError::InvalidPath {
+                path: path.to_string(),
+            })?;
             std::path::PathBuf::from(path.replacen("~", &home, 1))
         } else {
             std::path::PathBuf::from(path)
@@ -60,7 +63,9 @@ impl FileTree {
             });
         }
 
-        let mut entries = tokio::fs::read_dir(&full_path).await.map_err(FsError::from)?;
+        let mut entries = tokio::fs::read_dir(&full_path)
+            .await
+            .map_err(FsError::from)?;
         let mut result = Vec::new();
         let mut index = 0;
 

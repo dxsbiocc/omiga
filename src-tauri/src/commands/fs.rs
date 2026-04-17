@@ -1,8 +1,8 @@
 //! File system commands
 
 use super::CommandResult;
-use crate::errors::{FsError, AppError};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use crate::errors::{AppError, FsError};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -36,7 +36,7 @@ pub async fn read_file_bytes_fast(path: String) -> CommandResult<Vec<u8>> {
     let bytes = tokio::fs::read(&canonical)
         .await
         .map_err(|e| AppError::Fs(FsError::from(e)))?;
-    
+
     Ok(bytes)
 }
 
@@ -156,20 +156,23 @@ pub async fn read_image_base64(path: String) -> CommandResult<ImageReadResponse>
         .to_lowercase();
 
     let mime = match ext.as_str() {
-        "png"  => "image/png",
+        "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
-        "gif"  => "image/gif",
+        "gif" => "image/gif",
         "webp" => "image/webp",
-        "svg"  => "image/svg+xml",
-        "bmp"  => "image/bmp",
-        "ico"  => "image/x-icon",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
         "tiff" | "tif" => "image/tiff",
         "avif" => "image/avif",
-        _      => "application/octet-stream",
+        _ => "application/octet-stream",
     };
 
     let data = BASE64.encode(&bytes);
-    Ok(ImageReadResponse { data, mime_type: mime.to_string() })
+    Ok(ImageReadResponse {
+        data,
+        mime_type: mime.to_string(),
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -233,20 +236,19 @@ pub async fn list_directory(
             name,
             path: path_str,
             is_directory: meta.is_dir(),
-            size: if meta.is_file() { Some(meta.len()) } else { None },
+            size: if meta.is_file() {
+                Some(meta.len())
+            } else {
+                None
+            },
             modified,
         });
     }
 
-    entries.sort_by(|a, b| {
-        match (a.is_directory, b.is_directory) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a
-                .name
-                .to_lowercase()
-                .cmp(&b.name.to_lowercase()),
-        }
+    entries.sort_by(|a, b| match (a.is_directory, b.is_directory) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
 
     let total = entries.len();

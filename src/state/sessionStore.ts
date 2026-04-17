@@ -1,9 +1,59 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { notifyProviderChanged } from "../utils/providerEvents";
+import {
+  useChatComposerStore,
+  type SessionConfigResponse,
+} from "./chatComposerStore";
 
 const dbg = (...args: unknown[]) =>
   console.debug("[OmigaDebug][sessionStore]", ...args);
+
+// ── Session message cache ────────────────────────────────────────────────────
+// Module-level (outside Zustand) so cache ops never trigger React re-renders.
+// On a cache hit, setCurrentSession shows content instantly (~0ms) and fires
+// a silent background IPC refresh to pick up any new messages.
+//
+// Root cause for slow IPC: Tauri WKWebView (macOS) routes invoke() through
+// NSURLProtocol; while the WebView is rendering, calls queue up and can take
+// 200-800ms regardless of payload size. Caching bypasses this entirely.
+
+const MSG_CACHE_TTL_MS = 10 * 60 * 1_000; // 10 min — keep frequently-used sessions warm longer
+const MSG_CACHE_MAX_SESSIONS = 40;
+
+interface CachedSession {
+  session: Session;
+  messages: Message[];
+  hasMoreMessages: boolean;
+  activeProviderEntryName: string | null;
+  sessionConfig: SessionConfigResponse;
+  cachedAt: number; // Date.now()
+}
+
+const _msgCache = new Map<string, CachedSession>();
+
+function msgCacheGet(sessionId: string): CachedSession | null {
+  const entry = _msgCache.get(sessionId);
+  if (!entry) return null;
+  if (Date.now() - entry.cachedAt > MSG_CACHE_TTL_MS) {
+    _msgCache.delete(sessionId);
+    return null;
+  }
+  return entry;
+}
+
+function msgCacheSet(sessionId: string, data: Omit<CachedSession, "cachedAt">) {
+  if (_msgCache.size >= MSG_CACHE_MAX_SESSIONS && !_msgCache.has(sessionId)) {
+    // Evict the oldest entry (Map preserves insertion order)
+    const oldest = _msgCache.keys().next().value;
+    if (oldest !== undefined) _msgCache.delete(oldest);
+  }
+  _msgCache.set(sessionId, { ...data, cachedAt: Date.now() });
+}
+
+function msgCacheInvalidate(sessionId: string) {
+  _msgCache.delete(sessionId);
+}
 
 const PENDING_PROJECT_PATH_KEY = "omiga.pendingProjectPathSessions";
 
@@ -215,8 +265,9 @@ interface SessionData {
   project_path: string;
   created_at: string;
   updated_at: string;
-  provider_changed: boolean;
+  active_provider_entry_name: string | null;
   has_more_messages: boolean;
+  session_config: SessionConfigResponse;
 }
 
 interface SendMessageRequest {
@@ -227,10 +278,24 @@ interface SendMessageRequest {
   use_tools: boolean;
   /** `leader` (default) | `bg:<task_id>` to queue follow-up for a background Agent task */
   inputTarget?: string;
-  /** `local` | `remote` — chat composer execution surface */
-  executionEnvironment?: "local" | "remote";
+  /** `local` | `ssh` | `sandbox` — chat composer execution surface */
+  executionEnvironment?: "local" | "ssh" | "sandbox";
+  /** Selected SSH server name; used when executionEnvironment === "ssh" */
+  sshServer?: string | null;
+  /** `modal` | `daytona` | `docker` | `singularity` — composer sandbox backend */
+  sandboxBackend?: string;
+  /** `"none"` | `"conda"` | `"venv"` | `"pyenv"` — local virtual env type */
+  localVenvType?: string;
+  /** Conda env name, venv directory path, or pyenv version string */
+  localVenvName?: string;
+  /** Specialist agent id from list_available_agents (e.g. Explore, Plan) */
+  composerAgentType?: string;
+  /** `ask` | `auto` | `bypass` — user-facing permission stance for this turn */
+  permissionMode?: string;
   /** DB user row id — truncate after this row and reuse instead of inserting a duplicate user message */
   retryFromUserMessageId?: string;
+  /** Session's stored provider entry name — passed through for lazy LLM config restoration. */
+  activeProviderEntryName?: string | null;
 }
 
 interface MessageResponse {
@@ -257,6 +322,9 @@ interface SessionState {
   isLoadingMoreMessages: boolean;
   storeMessages: Message[];
   activeRounds: Map<string, RoundStatus>;
+  /** Provider entry name for the current session (from DB).  Used by ProviderSwitcher
+   *  to show the correct chip without an extra round-trip after session switch. */
+  activeProviderEntryName: string | null;
   /** Sessions created with placeholder path — show “pick folder” until set */
   pendingProjectPathSessions: Set<string>;
   createSession: (name: string, projectPath: string) => Promise<void>;
@@ -266,7 +334,7 @@ interface SessionState {
     projectPath: string,
   ) => Promise<void>;
   loadSessions: () => Promise<void>;
-  loadSession: (sessionId: string) => Promise<void>;
+  loadSession: (sessionId: string, opts?: { silent?: boolean }) => Promise<void>;
   /** Prepend older messages for the current session (scroll-to-top pagination). */
   loadMoreMessages: () => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
@@ -359,6 +427,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   hasMoreMessages: false,
   isLoadingMoreMessages: false,
   activeRounds: new Map(),
+  activeProviderEntryName: null,
   pendingProjectPathSessions: readPendingProjectPathIds(),
 
   createSession: async (name, projectPath) => {
@@ -393,6 +462,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           pendingProjectPathSessions: pending,
         };
       });
+      useChatComposerStore.getState().initForSession(
+        sessionData.id,
+        sessionData.session_config,
+      );
     } catch (error) {
       console.error("Failed to create session:", error);
       throw error;
@@ -462,13 +535,31 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  loadSession: async (sessionId: string) => {
+  loadSession: async (sessionId: string, opts?: { clearSwitching?: boolean; silent?: boolean }) => {
     const perfStart = performance.now();
-    dbg("loadSession:start", { sessionId });
+    dbg("loadSession:start", { sessionId, silent: opts?.silent });
+    // T1: IPC call starts
+    if (!opts?.silent) performance.mark("sw:ipc-start");
     try {
       const sessionData = await invoke<SessionData>("load_session", {
         sessionId,
       });
+      // T2: IPC call done
+      const ipcMs = Math.round(performance.now() - perfStart);
+      if (!opts?.silent) {
+        performance.mark("sw:ipc-done");
+        try { performance.measure("sw: IPC round-trip", "sw:ipc-start", "sw:ipc-done"); } catch { /**/ }
+      }
+
+      const currentSessionId = get().currentSession?.id ?? null;
+      if (!opts?.silent && currentSessionId !== sessionId) {
+        dbg("loadSession:stale-foreground-skip", {
+          sessionId,
+          currentSessionId,
+        });
+        return;
+      }
+
       const messages = convertRawMessages(
         sessionData.messages ?? [],
         sessionId,
@@ -483,6 +574,51 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         messageCount: messages.length,
       };
 
+      const newActiveProvider = sessionData.active_provider_entry_name ?? null;
+      // Write to cache so subsequent switches to this session are instant.
+      msgCacheSet(sessionId, {
+        session,
+        messages,
+        hasMoreMessages: sessionData.has_more_messages,
+        activeProviderEntryName: newActiveProvider,
+        sessionConfig: sessionData.session_config,
+      });
+
+      if (opts?.silent) {
+        // Silent background refresh: only update if this session is still current
+        // and the loaded data is different (new messages arrived).
+        const cur = get().currentSession;
+        if (cur?.id === sessionId) {
+          set((state) => {
+            const exists = state.sessions.some((s) => s.id === session.id);
+            const sessions = exists
+              ? state.sessions.map((s) => s.id === session.id ? { ...s, ...session } : s)
+              : [session, ...state.sessions];
+            return {
+              messages,
+              storeMessages: messages,
+              hasMoreMessages: sessionData.has_more_messages,
+              activeProviderEntryName: newActiveProvider,
+              currentSession: session,
+              sessions,
+            };
+          });
+          notifyProviderChanged();
+          // Sync composer config only while this session is still active.
+          useChatComposerStore
+            .getState()
+            .initForSession(sessionId, sessionData.session_config);
+        }
+        dbg("loadSession:silent-refresh-ok", { sessionId, msgs: messages.length });
+        return;
+      }
+
+      // T3: Zustand state set (React reconciliation starts after this)
+      const jsConvertMs = Math.round(performance.now() - perfStart) - ipcMs;
+      if (!opts?.silent) {
+        performance.mark("sw:state-set");
+        try { performance.measure("sw: JS conversion", "sw:ipc-done", "sw:state-set"); } catch { /**/ }
+      }
       set((state) => {
         const exists = state.sessions.some((s) => s.id === session.id);
         const sessions = exists
@@ -496,12 +632,33 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           storeMessages: messages,
           isLoading: false,
           hasMoreMessages: sessionData.has_more_messages,
+          activeProviderEntryName: newActiveProvider,
           sessions,
         };
       });
+      // Log store-side breakdown (React render time logged separately in Chat component)
+      const clickAt = (window as unknown as { __swClickAt?: number }).__swClickAt;
+      const t0ToStore = clickAt != null ? Math.round(performance.now() - clickAt) : "?";
+      console.info(
+        `%c[SwPerf] ${sessionId.slice(0, 8)} | click→store: ${t0ToStore}ms | IPC: ${ipcMs}ms | JS-conv: ${jsConvertMs}ms | msgs: ${messages.length}`,
+        "color:#6c9ef8;font-weight:bold",
+      );
 
-      // Only fire the provider-changed event when the backend actually switched providers.
-      if (sessionData.provider_changed) notifyProviderChanged();
+      // Sync composer config so the latest per-session settings are applied.
+      useChatComposerStore.getState().initForSession(sessionId, sessionData.session_config);
+
+      // Always notify so ProviderSwitcher refreshes its "active" chip for the new session.
+      notifyProviderChanged();
+
+      // Fire-and-forget: pre-warm LLM config / integrations / permission / MCP caches
+      // so the first send_message in this session doesn't pay cold-cache penalties.
+      // Inspired by codex's startup prewarm pattern.
+      void invoke("prewarm_session", {
+        projectPath: session.projectPath,
+        activeProviderEntryName: newActiveProvider,
+      }).catch(() => {
+        // Prewarm is best-effort — silently ignore errors.
+      });
 
       const duration = Math.round(performance.now() - perfStart);
       dbg("loadSession:ok", {
@@ -516,13 +673,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessionId,
         fallbackName: fallback?.name ?? null,
       });
-      set({
-        isLoading: false,
-        currentSession: fallback,
-        messages: [],
-        storeMessages: [],
-        hasMoreMessages: false,
-      });
+      if (get().currentSession?.id === sessionId) {
+        set({
+          isLoading: false,
+          isSwitchingSession: false,
+          currentSession: fallback,
+          messages: [],
+          storeMessages: [],
+          hasMoreMessages: false,
+        });
+      }
     }
   },
 
@@ -546,8 +706,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       set((state) => ({
         messages: [...older, ...state.messages],
         storeMessages: [...older, ...state.storeMessages],
-        // If backend returned fewer than page size, we're at the beginning
-        hasMoreMessages: raw.length >= 100,
+        // Backend page size is 30 — fewer results means we've reached the beginning.
+        hasMoreMessages: raw.length >= 30,
         isLoadingMoreMessages: false,
       }));
     } catch (e) {
@@ -557,6 +717,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   deleteSession: async (sessionId: string) => {
+    msgCacheInvalidate(sessionId);
     try {
       await invoke("delete_session", { sessionId });
 
@@ -600,8 +761,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   setCurrentSession: async (sessionId) => {
-    const perfLabel = `[OmigaPerf] switch-${sessionId?.slice(0, 8) || "null"}`;
-    console.time(perfLabel);
+    const t0 = performance.now();
     dbg("setCurrentSession", { sessionId });
     if (!sessionId) {
       set({
@@ -610,11 +770,41 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         storeMessages: [],
         isSwitchingSession: false,
       });
+      useChatComposerStore.getState().resetToDefaults();
       return;
     }
+
+    // ── Cache hit: show content instantly, refresh in background ─────────────
+    const cached = msgCacheGet(sessionId);
+    if (cached) {
+      set({
+        currentSession: cached.session,
+        messages: cached.messages,
+        storeMessages: cached.messages,
+        hasMoreMessages: cached.hasMoreMessages,
+        activeProviderEntryName: cached.activeProviderEntryName,
+        isSwitchingSession: false,
+      });
+      useChatComposerStore.getState().initForSession(sessionId, cached.sessionConfig);
+      notifyProviderChanged();
+      const hitMs = Math.round(performance.now() - t0);
+      console.info(
+        `%c[SwPerf] ${sessionId.slice(0, 8)} | CACHE HIT ~${hitMs}ms | msgs: ${cached.messages.length} — background refresh…`,
+        "color:#4caf50;font-weight:bold",
+      );
+      // Silent background refresh: picks up any messages that arrived since cache
+      void get().loadSession(sessionId, { silent: true }).catch(() => {});
+      dbg("setCurrentSession:cache-hit", { sessionId });
+      return;
+    }
+
+    // ── Cache miss: instant UI update, load messages in background ───────────
+    // We already have session metadata from list_sessions, so we can show the
+    // header + sidebar selection immediately instead of waiting for the DB round-trip.
+    // The chat area simply goes blank briefly while messages load (~200-800 ms on macOS IPC).
     const session = get().sessions.find((s) => s.id === sessionId);
     const now = new Date().toISOString();
-    const placeholder: Session = {
+    const fallbackSession: Session = {
       id: sessionId,
       name: session?.name || "Loading…",
       projectPath: session?.projectPath || ".",
@@ -622,16 +812,50 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       createdAt: session?.createdAt || now,
       updatedAt: session?.updatedAt || now,
     };
-    // Keep previous messages visible (avoid blank flash); Chat overlays a loading indicator.
-    // Messages are replaced atomically when loadSession resolves.
-    set({ currentSession: placeholder, isSwitchingSession: true });
-    try {
-      await get().loadSession(sessionId);
-    } finally {
-      set({ isSwitchingSession: false });
-    }
-    console.timeEnd(perfLabel);
-    dbg("setCurrentSession:done", { sessionId });
+    // Use the real metadata when available so the header never flashes "Loading…"
+    const immediateSession = session ? { ...session, id: sessionId } : fallbackSession;
+    set({
+      currentSession: immediateSession,
+      messages: [],
+      storeMessages: [],
+      isSwitchingSession: false,
+    });
+    notifyProviderChanged();
+
+    // Load per-session config immediately so composer settings don't flash stale values.
+    void invoke<SessionConfigResponse>("get_session_config", { sessionId })
+      .then((cfg) => {
+        if (get().currentSession?.id !== sessionId) return;
+        useChatComposerStore.getState().initForSession(sessionId, cfg);
+      })
+      .catch(() => {
+        if (get().currentSession?.id !== sessionId) return;
+        useChatComposerStore.getState().initForSession(sessionId, {
+          active_provider_entry_name: null,
+          permission_mode: "auto",
+          composer_agent_type: "auto",
+          execution_environment: "local",
+          ssh_server: null,
+          sandbox_backend: "docker",
+          local_venv_type: "none",
+          local_venv_name: "",
+          use_worktree: false,
+        });
+      });
+
+    void get()
+      .loadSession(sessionId)
+      .catch((error) => {
+        console.error("[OmigaDebug] loadSession from setCurrentSession failed", error);
+      })
+      .finally(() => {
+        const missMs = Math.round(performance.now() - t0);
+        console.info(
+          `%c[SwPerf] ${sessionId.slice(0, 8)} | CACHE MISS total: ${missMs}ms`,
+          "color:#ff9800;font-weight:bold",
+        );
+        dbg("setCurrentSession:done", { sessionId, missMs });
+      });
   },
 
   addMessage: (message) => {
@@ -639,17 +863,38 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       ...message,
       id: message.id ?? `msg-${Date.now()}`,
     });
-    // Build one array and share the reference — avoids the two O(N) spreads that
-    // were here before, which penalized every streaming token in long sessions.
     set((state) => {
       const messages = [...state.messages, newMessage];
+      // Keep cache in sync so switching away and back shows the latest messages.
+      if (state.currentSession) {
+        const cached = _msgCache.get(state.currentSession.id);
+        if (cached) {
+          _msgCache.set(state.currentSession.id, {
+            ...cached,
+            messages,
+            cachedAt: Date.now(),
+          });
+        }
+      }
       return { messages, storeMessages: messages };
     });
   },
 
   replaceStoreMessagesSnapshot: (messages) => {
     const cleaned = messages.map(sanitizeMessageForPersistence);
-    set({ storeMessages: cleaned, messages: cleaned });
+    set((state) => {
+      if (state.currentSession) {
+        const cached = _msgCache.get(state.currentSession.id);
+        if (cached) {
+          _msgCache.set(state.currentSession.id, {
+            ...cached,
+            messages: cleaned,
+            cachedAt: Date.now(),
+          });
+        }
+      }
+      return { storeMessages: cleaned, messages: cleaned };
+    });
   },
 
   clearMessages: () => {

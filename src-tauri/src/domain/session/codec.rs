@@ -2,9 +2,9 @@
 //!
 //! Centralizes all record ↔ domain conversions.
 
-use crate::domain::persistence::{MessageRecord, SessionWithMessages};
 use super::{FollowUpSuggestion, Message, MessageTokenUsage, Session, ToolCall};
 use crate::api::{ContentBlock, Message as ApiMessage, Role};
+use crate::domain::persistence::{MessageRecord, SessionWithMessages};
 
 /// Codec for session-related conversions
 pub struct SessionCodec;
@@ -36,9 +36,9 @@ impl SessionCodec {
     pub fn record_to_message(record: MessageRecord) -> Message {
         match record.role.as_str() {
             "assistant" => {
-                let tool_calls = record.tool_calls.and_then(|tc| {
-                    serde_json::from_str::<Vec<ToolCall>>(&tc).ok()
-                });
+                let tool_calls = record
+                    .tool_calls
+                    .and_then(|tc| serde_json::from_str::<Vec<ToolCall>>(&tc).ok());
                 let token_usage = record
                     .token_usage_json
                     .as_ref()
@@ -100,9 +100,9 @@ impl SessionCodec {
                 reasoning_content,
                 follow_up_suggestions,
             } => {
-                let tool_calls_json = tool_calls.as_ref().map(|tc| {
-                    serde_json::to_string(tc).unwrap_or_default()
-                });
+                let tool_calls_json = tool_calls
+                    .as_ref()
+                    .map(|tc| serde_json::to_string(tc).unwrap_or_default());
                 let token_usage_json = token_usage
                     .as_ref()
                     .and_then(|u| serde_json::to_string(u).ok());
@@ -125,7 +125,10 @@ impl SessionCodec {
                     follow_up_suggestions_json,
                 )
             }
-            Message::Tool { tool_call_id, output } => (
+            Message::Tool {
+                tool_call_id,
+                output,
+            } => (
                 id.to_string(),
                 session_id.to_string(),
                 "tool".to_string(),
@@ -175,7 +178,10 @@ impl SessionCodec {
                         reasoning_content: reasoning_content.clone(),
                     })
                 }
-                Message::Tool { tool_call_id, output } => Some(ApiMessage {
+                Message::Tool {
+                    tool_call_id,
+                    output,
+                } => Some(ApiMessage {
                     role: Role::User,
                     content: vec![ContentBlock::ToolResult {
                         tool_use_id: tool_call_id.clone(),
@@ -191,11 +197,9 @@ impl SessionCodec {
     /// Extract tool calls from assistant message for database storage
     pub fn extract_tool_calls(message: &Message) -> Option<String> {
         match message {
-            Message::Assistant { tool_calls, .. } => {
-                tool_calls.as_ref().map(|tc| {
-                    serde_json::to_string(tc).unwrap_or_default()
-                })
-            }
+            Message::Assistant { tool_calls, .. } => tool_calls
+                .as_ref()
+                .map(|tc| serde_json::to_string(tc).unwrap_or_default()),
             _ => None,
         }
     }
@@ -290,7 +294,10 @@ mod tests {
 
         let msg = SessionCodec::record_to_message(record);
         match msg {
-            Message::Tool { tool_call_id, output } => {
+            Message::Tool {
+                tool_call_id,
+                output,
+            } => {
                 assert_eq!(tool_call_id, "call-1");
                 assert_eq!(output, "File contents");
             }

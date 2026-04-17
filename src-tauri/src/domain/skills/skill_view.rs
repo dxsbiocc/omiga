@@ -45,7 +45,10 @@ fn list_linked_files(skill_dir: &Path) -> Vec<String> {
                 continue;
             }
             if p.is_dir() {
-                if matches!(name.as_str(), "references" | "templates" | "scripts" | "assets") {
+                if matches!(
+                    name.as_str(),
+                    "references" | "templates" | "scripts" | "assets"
+                ) {
                     if let Ok(w) = walk_rel(skill_dir, &p, 80) {
                         out.extend(w);
                     }
@@ -109,7 +112,9 @@ pub async fn execute_skill_view(
             if !path.starts_with(skill_dir) {
                 return Err("skill_view: invalid path".to_string());
             }
-            let meta = tokio::fs::metadata(&path).await.map_err(|e| format!("skill_view: {e}"))?;
+            let meta = tokio::fs::metadata(&path)
+                .await
+                .map_err(|e| format!("skill_view: {e}"))?;
             if meta.len() as usize > MAX_READ_BYTES {
                 return Err(format!(
                     "skill_view: file too large (max {} bytes)",

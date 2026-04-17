@@ -42,23 +42,16 @@ pub enum LlmContent {
         is_error: Option<bool>,
     },
     /// Image (for vision models)
-    Image {
-        source: ImageSource,
-    },
+    Image { source: ImageSource },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ImageSource {
     /// Base64 encoded image
-    Base64 {
-        media_type: String,
-        data: String,
-    },
+    Base64 { media_type: String, data: String },
     /// URL to image
-    Url {
-        url: String,
-    },
+    Url { url: String },
 }
 
 impl LlmContent {
@@ -68,7 +61,11 @@ impl LlmContent {
     }
 
     /// Create tool use content
-    pub fn tool_use(id: impl Into<String>, name: impl Into<String>, arguments: serde_json::Value) -> Self {
+    pub fn tool_use(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
         LlmContent::ToolUse {
             id: id.into(),
             name: name.into(),
@@ -299,7 +296,9 @@ impl LlmRequest {
     }
 
     pub fn with_usage(mut self) -> Self {
-        self.stream_options = Some(StreamOptions { include_usage: true });
+        self.stream_options = Some(StreamOptions {
+            include_usage: true,
+        });
         self
     }
 }
@@ -312,12 +311,20 @@ impl From<crate::api::Message> for LlmMessage {
             .into_iter()
             .map(|block| match block {
                 crate::api::ContentBlock::Text { text } => LlmContent::Text { text },
-                crate::api::ContentBlock::ToolUse { id, name, input } => {
-                    LlmContent::ToolUse { id, name, arguments: input }
-                }
-                crate::api::ContentBlock::ToolResult { tool_use_id, content, is_error } => {
-                    LlmContent::ToolResult { tool_use_id, content, is_error }
-                }
+                crate::api::ContentBlock::ToolUse { id, name, input } => LlmContent::ToolUse {
+                    id,
+                    name,
+                    arguments: input,
+                },
+                crate::api::ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => LlmContent::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                },
             })
             .collect();
 
@@ -343,15 +350,29 @@ impl From<LlmMessage> for crate::api::Message {
             .into_iter()
             .map(|block| match block {
                 LlmContent::Text { text } => crate::api::ContentBlock::Text { text },
-                LlmContent::ToolUse { id, name, arguments } => {
-                    crate::api::ContentBlock::ToolUse { id, name, input: arguments }
-                }
-                LlmContent::ToolResult { tool_use_id, content, is_error } => {
-                    crate::api::ContentBlock::ToolResult { tool_use_id, content, is_error }
-                }
+                LlmContent::ToolUse {
+                    id,
+                    name,
+                    arguments,
+                } => crate::api::ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input: arguments,
+                },
+                LlmContent::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => crate::api::ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                },
                 LlmContent::Image { .. } => {
                     // Images not supported in domain model
-                    crate::api::ContentBlock::Text { text: "[Image]".to_string() }
+                    crate::api::ContentBlock::Text {
+                        text: "[Image]".to_string(),
+                    }
                 }
             })
             .collect();

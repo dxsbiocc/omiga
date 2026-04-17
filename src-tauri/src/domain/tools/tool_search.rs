@@ -81,11 +81,7 @@ impl super::ToolImpl for ToolSearchTool {
                 }
             }
             scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-            scored
-                .into_iter()
-                .map(|(_, name)| name)
-                .take(max)
-                .collect()
+            scored.into_iter().map(|(_, name)| name).take(max).collect()
         };
 
         #[derive(Serialize)]

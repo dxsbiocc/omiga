@@ -3,7 +3,10 @@
 //! Adapts the existing Claude API implementation to the LlmClient trait
 
 use super::{LlmClient, LlmConfig, LlmMessage, LlmStreamChunk};
-use crate::api::{ClaudeClient as InnerClient, ClaudeConfig as InnerConfig, ContentBlock, Message, Role, StreamChunk};
+use crate::api::{
+    ClaudeClient as InnerClient, ClaudeConfig as InnerConfig, ContentBlock, Message, Role,
+    StreamChunk,
+};
 use crate::domain::tools::ToolSchema;
 use crate::errors::ApiError;
 use async_trait::async_trait;
@@ -26,6 +29,7 @@ impl AnthropicClient {
             temperature: config.temperature,
             system: config.system_prompt.clone(),
             version: "2023-06-01".to_string(),
+            timeout: config.timeout_secs,
         };
 
         Self {
@@ -41,7 +45,8 @@ impl LlmClient for AnthropicClient {
         &self,
         messages: Vec<LlmMessage>,
         tools: Vec<ToolSchema>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError>
+    {
         // Convert LlmMessage to inner Message format
         let inner_messages: Vec<Message> = messages
             .into_iter()
@@ -56,9 +61,15 @@ impl LlmClient for AnthropicClient {
                     .into_iter()
                     .filter_map(|c| match c {
                         super::LlmContent::Text { text } => Some(ContentBlock::Text { text }),
-                        super::LlmContent::ToolUse { id, name, arguments } => {
-                            Some(ContentBlock::ToolUse { id, name, input: arguments })
-                        }
+                        super::LlmContent::ToolUse {
+                            id,
+                            name,
+                            arguments,
+                        } => Some(ContentBlock::ToolUse {
+                            id,
+                            name,
+                            input: arguments,
+                        }),
                         super::LlmContent::ToolResult {
                             tool_use_id,
                             content,

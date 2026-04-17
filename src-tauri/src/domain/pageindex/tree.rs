@@ -78,10 +78,7 @@ impl DocumentTree {
 
     /// Get the total bytes of content across all documents.
     pub fn total_bytes(&self) -> usize {
-        self.documents
-            .values()
-            .map(|doc| doc.content.len())
-            .sum()
+        self.documents.values().map(|doc| doc.content.len()).sum()
     }
 
     /// Flatten the tree into a list of all nodes (documents and sections).
@@ -271,7 +268,10 @@ impl SectionNode {
         let keyword = keyword.to_lowercase();
         self.title.to_lowercase().contains(&keyword)
             || self.content.to_lowercase().contains(&keyword)
-            || self.children.iter().any(|c| c.contains_keyword(keyword.as_str()))
+            || self
+                .children
+                .iter()
+                .any(|c| c.contains_keyword(keyword.as_str()))
     }
 }
 
@@ -320,23 +320,26 @@ impl DocumentMetadata {
             .and_then(|e| e.to_str())
             .map(|s| s.to_lowercase());
 
-        let language = extension.as_ref().map(|ext| match ext.as_str() {
-            "rs" => "rust",
-            "py" => "python",
-            "js" => "javascript",
-            "ts" => "typescript",
-            "tsx" => "typescript-react",
-            "jsx" => "javascript-react",
-            "go" => "go",
-            "java" => "java",
-            "cpp" | "hpp" | "cc" => "cpp",
-            "c" | "h" => "c",
-            "md" => "markdown",
-            "json" => "json",
-            "yaml" | "yml" => "yaml",
-            "toml" => "toml",
-            _ => "text",
-        }.to_string());
+        let language = extension.as_ref().map(|ext| {
+            match ext.as_str() {
+                "rs" => "rust",
+                "py" => "python",
+                "js" => "javascript",
+                "ts" => "typescript",
+                "tsx" => "typescript-react",
+                "jsx" => "javascript-react",
+                "go" => "go",
+                "java" => "java",
+                "cpp" | "hpp" | "cc" => "cpp",
+                "c" | "h" => "c",
+                "md" => "markdown",
+                "json" => "json",
+                "yaml" | "yml" => "yaml",
+                "toml" => "toml",
+                _ => "text",
+            }
+            .to_string()
+        });
 
         Self {
             extension,
@@ -370,7 +373,7 @@ mod tests {
     #[test]
     fn test_document_tree() {
         let mut tree = DocumentTree::new();
-        
+
         let doc = DocumentNode {
             id: "doc1".to_string(),
             path: "test.md".to_string(),
@@ -382,7 +385,7 @@ mod tests {
         };
 
         tree.add_document(doc);
-        
+
         assert_eq!(tree.document_count(), 1);
         assert!(tree.get_document("doc1").is_some());
         assert!(tree.get_document("nonexistent").is_none());
@@ -391,7 +394,7 @@ mod tests {
     #[test]
     fn test_flatten_tree() {
         let mut tree = DocumentTree::new();
-        
+
         let mut doc = DocumentNode {
             id: "doc1".to_string(),
             path: "test.md".to_string(),
@@ -404,9 +407,9 @@ mod tests {
 
         let section = SectionNode::new("s1".to_string(), "Section 1".to_string(), 1);
         doc.sections.push(section);
-        
+
         tree.add_document(doc);
-        
+
         let flat = tree.flatten();
         assert_eq!(flat.len(), 2); // Document + 1 section
     }

@@ -7,7 +7,8 @@
 //! the plan-file rules from `getPlanModeV2Instructions` in `src/utils/messages.ts`.
 
 /// External `EnterPlanMode` tool prompt (default non-`USER_TYPE=ant` path).
-pub const ENTER_PLAN_MODE_TOOL_PROMPT: &str = include_str!("plan_mode/enter_plan_mode_external.txt");
+pub const ENTER_PLAN_MODE_TOOL_PROMPT: &str =
+    include_str!("plan_mode/enter_plan_mode_external.txt");
 
 /// `ExitPlanMode` (V2) tool prompt.
 pub const EXIT_PLAN_MODE_V2_TOOL_PROMPT: &str = include_str!("plan_mode/exit_plan_mode_v2.txt");

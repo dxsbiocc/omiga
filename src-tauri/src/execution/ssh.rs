@@ -8,8 +8,8 @@
 
 use super::base::{generate_session_id, BaseEnvironment};
 use super::types::{ExecResult, ExecutionError, ProcessHandle};
-use async_trait::async_trait;
 use crate::utils::shell::shell_single_quote;
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -33,9 +33,7 @@ fn load_terminal_credential_rel_paths() -> Vec<String> {
     let Ok(cfg) = crate::llm::config::load_config_file_at(&cfg_path) else {
         return Vec::new();
     };
-    cfg.terminal
-        .map(|t| t.credential_files)
-        .unwrap_or_default()
+    cfg.terminal.map(|t| t.credential_files).unwrap_or_default()
 }
 
 /// Resolve `rel` under `~/.omiga`; reject traversal and non-files (parity with hermes credential_files).
@@ -83,7 +81,7 @@ pub struct SshEnvironment {
     cwd_marker: String,
     snapshot_ready: bool,
     last_sync_time: Option<f64>,
-    
+
     // SSH 特定配置
     host: String,
     user: String,
@@ -110,7 +108,7 @@ impl SshEnvironment {
         Self::ensure_ssh_available().await?;
 
         let cwd = cwd.unwrap_or_else(|| "~".to_string());
-        
+
         let session_id = generate_session_id();
         let snapshot_path = format!("/tmp/hermes-snap-{}.sh", session_id);
         let cwd_file = format!("/tmp/hermes-cwd-{}.txt", session_id);
@@ -118,8 +116,19 @@ impl SshEnvironment {
 
         // 创建控制 socket 目录
         // 对 user/host 中的非安全字符进行过滤，防止路径遍历攻击
-        let safe_user = user.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect::<String>();
-        let safe_host = host.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '.' || *c == '_').collect::<String>();
+        let safe_user = user
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect::<String>();
+        let safe_host = host
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '.' || *c == '_')
+            .collect::<String>();
+        // macOS temp dirs under /var/folders/... are ~95 chars before SSH adds its own suffix,
+        // blowing past the 104-byte Unix domain socket limit. Use /tmp on Unix.
+        #[cfg(unix)]
+        let control_dir = PathBuf::from(format!("/tmp/omiga-ssh-{}", safe_user));
+        #[cfg(not(unix))]
         let control_dir = std::env::temp_dir().join("hermes-ssh");
         tokio::fs::create_dir_all(&control_dir).await.ok();
         // 仅当前用户可读写，防止其他用户观察 socket 路径或复用控制连接
@@ -151,10 +160,10 @@ impl SshEnvironment {
 
         // 建立 SSH 连接
         me.establish_connection().await?;
-        
+
         // 检测远程 home 目录
         me.remote_home = me.detect_remote_home().await;
-        
+
         // 同步文件（与 hermes ssh._sync_files 一致：rsync skills + credentials）
         me.sync_omiga_files_to_remote().await;
         let now = std::time::SystemTime::now()
@@ -162,7 +171,7 @@ impl SshEnvironment {
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         me.last_sync_time = Some(now);
-        
+
         // 初始化会话快照
         me.init_session().await?;
 
@@ -174,7 +183,8 @@ impl SshEnvironment {
         match Command::new("ssh").arg("-V").output().await {
             Ok(_) => Ok(()),
             Err(e) => Err(ExecutionError::SshError(format!(
-                "SSH not available: {}. Please install OpenSSH client.", e
+                "SSH not available: {}. Please install OpenSSH client.",
+                e
             ))),
         }
     }
@@ -221,12 +231,15 @@ impl SshEnvironment {
             .args(&args)
             .output()
             .await
-            .map_err(|e| ExecutionError::SshError(format!("Failed to establish SSH connection: {}", e)))?;
+            .map_err(|e| {
+                ExecutionError::SshError(format!("Failed to establish SSH connection: {}", e))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(ExecutionError::SshError(format!(
-                "SSH connection failed: {}", stderr
+                "SSH connection failed: {}",
+                stderr
             )));
         }
 
@@ -313,7 +326,12 @@ impl SshEnvironment {
             let dest = format!("{}:{}", dest_prefix, remote_path);
             let host_s = host_path.to_string_lossy();
             if self
-                .run_rsync(&engine, host_s.as_ref(), &dest, RSYNC_TIMEOUT_SINGLE_FILE_MS)
+                .run_rsync(
+                    &engine,
+                    host_s.as_ref(),
+                    &dest,
+                    RSYNC_TIMEOUT_SINGLE_FILE_MS,
+                )
                 .await
             {
                 tracing::info!(host = %host_s, %remote_path, "SSH: synced credential");
@@ -332,7 +350,10 @@ impl SshEnvironment {
             .await;
             let src = format!("{}/", user_skills.to_string_lossy().trim_end_matches('/'));
             let dest = format!("{}:{}/", dest_prefix, remote_dir.trim_end_matches('/'));
-            if self.run_rsync(&engine, &src, &dest, RSYNC_TIMEOUT_DIR_MS).await {
+            if self
+                .run_rsync(&engine, &src, &dest, RSYNC_TIMEOUT_DIR_MS)
+                .await
+            {
                 tracing::info!(path = ?user_skills, %remote_dir, "SSH: synced user skills dir");
             } else {
                 tracing::debug!(path = ?user_skills, "SSH: rsync user skills failed");
@@ -350,7 +371,10 @@ impl SshEnvironment {
                 .await;
                 let src = format!("{}/", proj_skills.to_string_lossy().trim_end_matches('/'));
                 let dest = format!("{}:{}/", dest_prefix, remote_dir.trim_end_matches('/'));
-                if self.run_rsync(&engine, &src, &dest, RSYNC_TIMEOUT_DIR_MS).await {
+                if self
+                    .run_rsync(&engine, &src, &dest, RSYNC_TIMEOUT_DIR_MS)
+                    .await
+                {
                     tracing::info!(path = ?proj_skills, %remote_dir, "SSH: synced project skills (overrides)");
                 } else {
                     tracing::debug!(path = ?proj_skills, "SSH: rsync project skills failed");
@@ -373,7 +397,12 @@ impl SshEnvironment {
                 let dest = format!("{}:{}", dest_prefix, remote_path);
                 let host_s = host_path.to_string_lossy();
                 if self
-                    .run_rsync(&engine, host_s.as_ref(), &dest, RSYNC_TIMEOUT_SINGLE_FILE_MS)
+                    .run_rsync(
+                        &engine,
+                        host_s.as_ref(),
+                        &dest,
+                        RSYNC_TIMEOUT_SINGLE_FILE_MS,
+                    )
                     .await
                 {
                     tracing::info!(file = %name, "SSH: synced user context file");
@@ -394,7 +423,10 @@ impl SshEnvironment {
             .await;
             let src = format!("{}/", host_dir.to_string_lossy().trim_end_matches('/'));
             let dest = format!("{}:{}/", dest_prefix, remote_dir.trim_end_matches('/'));
-            if self.run_rsync(&engine, &src, &dest, RSYNC_TIMEOUT_CACHE_DIR_MS).await {
+            if self
+                .run_rsync(&engine, &src, &dest, RSYNC_TIMEOUT_CACHE_DIR_MS)
+                .await
+            {
                 tracing::info!(dir = %rel, "SSH: synced cache directory");
             } else {
                 tracing::debug!(dir = %rel, "SSH: rsync cache dir failed");
@@ -409,13 +441,7 @@ impl SshEnvironment {
         }
     }
 
-    async fn run_rsync(
-        &self,
-        engine: &str,
-        src: &str,
-        dest: &str,
-        timeout_ms: u64,
-    ) -> bool {
+    async fn run_rsync(&self, engine: &str, src: &str, dest: &str, timeout_ms: u64) -> bool {
         self.run_rsync_cmd(engine, &[src, dest], timeout_ms).await
     }
 
@@ -430,12 +456,7 @@ impl SshEnvironment {
         for a in args_tail {
             cmd.arg(a);
         }
-        match timeout(
-            Duration::from_millis(timeout_ms),
-            cmd.output(),
-        )
-        .await
-        {
+        match timeout(Duration::from_millis(timeout_ms), cmd.output()).await {
             Ok(Ok(o)) => o.status.success(),
             _ => false,
         }
@@ -470,25 +491,23 @@ impl SshEnvironment {
             });
         }
 
-        let result = timeout(
-            Duration::from_millis(timeout_ms),
-            async {
-                let mut stdout_lines: Vec<String> = Vec::new();
+        let result = timeout(Duration::from_millis(timeout_ms), async {
+            let mut stdout_lines: Vec<String> = Vec::new();
 
-                if let Some(stdout) = child.stdout.take() {
-                    let reader = BufReader::new(stdout);
-                    let mut lines = reader.lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        stdout_lines.push(line);
-                    }
-                }
-
-                match child.wait().await {
-                    Ok(status) => Ok((stdout_lines.join("\n"), status.code().unwrap_or(-1))),
-                    Err(e) => Err(ExecutionError::IoError(e)),
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    stdout_lines.push(line);
                 }
             }
-        ).await;
+
+            match child.wait().await {
+                Ok(status) => Ok((stdout_lines.join("\n"), status.code().unwrap_or(-1))),
+                Err(e) => Err(ExecutionError::IoError(e)),
+            }
+        })
+        .await;
 
         match result {
             Ok(Ok((output, code))) => Ok((output, code)),
@@ -574,7 +593,7 @@ impl BaseEnvironment for SshEnvironment {
         _stdin_data: Option<&str>,
     ) -> Result<Box<dyn ProcessHandle>, ExecutionError> {
         Err(ExecutionError::NotAvailable(
-            "SshEnvironment uses execute_direct".to_string()
+            "SshEnvironment uses execute_direct".to_string(),
         ))
     }
 
@@ -612,7 +631,7 @@ impl BaseEnvironment for SshEnvironment {
 
         // 在远程执行
         let (output, returncode) = self.execute_remote(&wrapped, effective_timeout).await?;
-        
+
         let mut result = ExecResult { output, returncode };
 
         // 更新 CWD
@@ -626,22 +645,26 @@ impl BaseEnvironment for SshEnvironment {
         if self.control_socket.exists() {
             let _ = Command::new("ssh")
                 .args(&[
-                    "-o", &format!("ControlPath={}", self.control_socket.display()),
-                    "-O", "exit",
+                    "-o",
+                    &format!("ControlPath={}", self.control_socket.display()),
+                    "-O",
+                    "exit",
                     &format!("{}@{}", self.user, self.host),
                 ])
                 .output()
                 .await;
-            
+
             // 删除 socket 文件
             let _ = tokio::fs::remove_file(&self.control_socket).await;
         }
 
         // 清理远程临时文件
-        let _ = self.execute_remote(
-            &format!("rm -f {} {}", self.snapshot_path, self.cwd_file),
-            10_000
-        ).await;
+        let _ = self
+            .execute_remote(
+                &format!("rm -f {} {}", self.snapshot_path, self.cwd_file),
+                10_000,
+            )
+            .await;
 
         Ok(())
     }
@@ -652,12 +675,22 @@ pub struct SshProcessHandle;
 
 #[async_trait]
 impl ProcessHandle for SshProcessHandle {
-    fn poll(&self) -> Option<i32> { None }
+    fn poll(&self) -> Option<i32> {
+        None
+    }
     fn kill(&self) {}
-    async fn wait(&self) -> i32 { -1 }
-    fn stdout(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> { None }
-    fn stderr(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> { None }
-    fn returncode(&self) -> Option<i32> { None }
+    async fn wait(&self) -> i32 {
+        -1
+    }
+    fn stdout(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> {
+        None
+    }
+    fn stderr(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> {
+        None
+    }
+    fn returncode(&self) -> Option<i32> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -701,12 +734,12 @@ mod tests {
         };
 
         let args = env.build_ssh_base_args();
-        
+
         // 验证控制 socket 参数
         assert!(args.iter().any(|a| a.contains("ControlPath")));
         assert!(args.iter().any(|a| a == "ControlMaster=auto"));
         assert!(args.iter().any(|a| a == "BatchMode=yes"));
-        
+
         // 验证密钥参数
         assert!(args.iter().any(|a| a == "-i"));
         assert!(args.iter().any(|a| a == "/path/to/key"));
@@ -734,7 +767,7 @@ mod tests {
         };
 
         let args = env.build_ssh_base_args();
-        
+
         // 验证端口参数
         assert!(args.iter().any(|a| a == "-p"));
         assert!(args.iter().any(|a| a == "2222"));

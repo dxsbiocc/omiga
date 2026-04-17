@@ -109,9 +109,7 @@ async fn background_agent_messages_append_order() {
     assert_eq!(rows.len(), 3);
     assert!(matches!(&rows[0], Message::User { content } if content == "hello"));
     assert!(matches!(&rows[1], Message::Assistant { content, .. } if content == "hi"));
-    assert!(
-        matches!(&rows[2], Message::Tool { tool_call_id, .. } if tool_call_id == "tu1")
-    );
+    assert!(matches!(&rows[2], Message::Tool { tool_call_id, .. } if tool_call_id == "tu1"));
 }
 
 #[tokio::test]
@@ -172,9 +170,9 @@ async fn background_agent_messages_tool_calls_roundtrip() {
     assert_eq!(rows.len(), 1);
     match &rows[0] {
         Message::Assistant { tool_calls, .. } => {
-            assert!(tool_calls.as_ref().is_some_and(|c| {
-                c.len() == 1 && c[0].name == "read" && c[0].id == "c1"
-            }));
+            assert!(tool_calls
+                .as_ref()
+                .is_some_and(|c| { c.len() == 1 && c[0].name == "read" && c[0].id == "c1" }));
         }
         _ => panic!("expected assistant"),
     }

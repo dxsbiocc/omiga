@@ -4,7 +4,9 @@
 
 use super::CommandResult;
 use crate::commands::execution_envs::get_merged_ssh_configs;
-use crate::commands::fs::{DirectoryEntry, DirectoryListResponse, FileReadResponse, FileWriteResponse};
+use crate::commands::fs::{
+    DirectoryEntry, DirectoryListResponse, FileReadResponse, FileWriteResponse,
+};
 use crate::errors::{AppError, FsError};
 use crate::llm::config::SshExecConfig;
 use std::path::{Component, Path, PathBuf};
@@ -43,7 +45,9 @@ fn validate_remote_path(p: &str) -> Result<String, AppError> {
     if let Some(rest) = t.strip_prefix("~/") {
         // Validate the suffix (no traversal)
         if rest.split('/').any(|seg| seg == "..") {
-            return Err(AppError::Fs(FsError::PathTraversal { path: p.to_string() }));
+            return Err(AppError::Fs(FsError::PathTraversal {
+                path: p.to_string(),
+            }));
         }
         return Ok(format!("~/{}", rest));
     }
@@ -76,11 +80,8 @@ fn sh_quote(s: &str) -> String {
 }
 
 fn resolve_profile(name: &str) -> Result<SshExecConfig, AppError> {
-    let merged = get_merged_ssh_configs().map_err(|e| {
-        AppError::Fs(FsError::IoError {
-            message: e,
-        })
-    })?;
+    let merged =
+        get_merged_ssh_configs().map_err(|e| AppError::Fs(FsError::IoError { message: e }))?;
     let cfg = merged.get(name).cloned().ok_or_else(|| {
         AppError::Fs(FsError::IoError {
             message: format!("Unknown SSH profile: {}", name),
@@ -91,11 +92,15 @@ fn resolve_profile(name: &str) -> Result<SshExecConfig, AppError> {
             message: format!("SSH profile `{}` has no HostName", name),
         })
     })?;
-    let _ = cfg.user.as_ref().filter(|u| !u.trim().is_empty()).ok_or_else(|| {
-        AppError::Fs(FsError::IoError {
-            message: format!("SSH profile `{}` has no User", name),
-        })
-    })?;
+    let _ = cfg
+        .user
+        .as_ref()
+        .filter(|u| !u.trim().is_empty())
+        .ok_or_else(|| {
+            AppError::Fs(FsError::IoError {
+                message: format!("SSH profile `{}` has no User", name),
+            })
+        })?;
     Ok(cfg)
 }
 
@@ -133,10 +138,7 @@ async fn ssh_run_remote(
     let target = format!("{}@{}", user, host);
     let mut args = ssh_base_args(cfg);
     args.push(target);
-    args.push(format!(
-        "bash -lc {}",
-        sh_quote(remote_bash_script)
-    ));
+    args.push(format!("bash -lc {}", sh_quote(remote_bash_script)));
 
     let fut = async {
         let out = Command::new("ssh")
@@ -153,13 +155,11 @@ async fn ssh_run_remote(
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         Ok::<_, AppError>((code, stdout, stderr))
     };
-    timeout(SSH_TIMEOUT, fut)
-        .await
-        .map_err(|_| {
-            AppError::Fs(FsError::IoError {
-                message: "ssh: timed out".to_string(),
-            })
-        })?
+    timeout(SSH_TIMEOUT, fut).await.map_err(|_| {
+        AppError::Fs(FsError::IoError {
+            message: "ssh: timed out".to_string(),
+        })
+    })?
 }
 
 /// Expand a validated remote path — replace leading `~` with `$HOME` so it works
@@ -180,6 +180,25 @@ fn sh_double_quote(s: &str) -> String {
     // Since our validated paths never contain $, `, or \ except via $HOME, we only
     // escape " and literal backslashes.
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Get the remote user's home directory.
+#[tauri::command]
+pub async fn ssh_get_home_directory(ssh_profile_name: String) -> CommandResult<String> {
+    let cfg = resolve_profile(&ssh_profile_name)?;
+    let script = "echo $HOME";
+    let (code, stdout, stderr) = ssh_run_remote(&cfg, script).await?;
+    if code != 0 {
+        return Err(AppError::Fs(FsError::IoError {
+            message: format!(
+                "ssh get home directory failed ({}): {}",
+                code,
+                stderr.trim()
+            ),
+        }));
+    }
+    let home = stdout.trim().to_string();
+    Ok(home)
 }
 
 /// List a directory on the remote host (GNU `find` with `-printf`, common on Linux).
@@ -275,8 +294,7 @@ fn parse_find_mtime(s: &str) -> Option<String> {
     }
     let secs = sec.floor() as i64;
     let nanos = ((sec - sec.floor()) * 1e9).round() as u32;
-    chrono::DateTime::from_timestamp(secs, nanos)
-        .map(|dt| dt.to_rfc3339())
+    chrono::DateTime::from_timestamp(secs, nanos).map(|dt| dt.to_rfc3339())
 }
 
 /// Read a text file from the remote host (up to 2 MiB).
@@ -297,9 +315,7 @@ wc -c < {q}"#,
     );
     let (code, stdout, stderr) = ssh_run_remote(&cfg, &script).await?;
     if code != 0 || stdout.contains("__OMIGA_ERR__") {
-        return Err(AppError::Fs(FsError::InvalidPath {
-            path: path.clone(),
-        }));
+        return Err(AppError::Fs(FsError::InvalidPath { path: path.clone() }));
     }
     let size_line = stdout.lines().next().unwrap_or("").trim();
     let nbytes: u64 = size_line.parse().map_err(|_| {
@@ -315,12 +331,13 @@ wc -c < {q}"#,
         }));
     }
 
-    let cat_script = format!(r#"cat {}"#, sh_double_quote(&expand_tilde_to_home_var(&file)));
+    let cat_script = format!(
+        r#"cat {}"#,
+        sh_double_quote(&expand_tilde_to_home_var(&file))
+    );
     let (_c2, full, e2) = ssh_run_remote(&cfg, &cat_script).await?;
     if !e2.trim().is_empty() && full.is_empty() {
-        return Err(AppError::Fs(FsError::IoError {
-            message: e2,
-        }));
+        return Err(AppError::Fs(FsError::IoError { message: e2 }));
     }
 
     let lines: Vec<&str> = full.lines().collect();
@@ -402,13 +419,11 @@ pub async fn ssh_write_file(
         })?;
         Ok::<_, AppError>(out)
     };
-    let out = timeout(SSH_TIMEOUT, fut)
-        .await
-        .map_err(|_| {
-            AppError::Fs(FsError::IoError {
-                message: "ssh write timed out".to_string(),
-            })
-        })??;
+    let out = timeout(SSH_TIMEOUT, fut).await.map_err(|_| {
+        AppError::Fs(FsError::IoError {
+            message: "ssh write timed out".to_string(),
+        })
+    })??;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(AppError::Fs(FsError::IoError {
@@ -419,4 +434,20 @@ pub async fn ssh_write_file(
         bytes_written: bytes.len(),
         new_hash: String::new(),
     })
+}
+
+/// Create a directory on the remote host (parents created with `mkdir -p`).
+#[tauri::command]
+pub async fn ssh_create_directory(ssh_profile_name: String, path: String) -> CommandResult<String> {
+    let cfg = resolve_profile(&ssh_profile_name)?;
+    let dir = validate_remote_path(&path)?;
+    let dir_q = sh_double_quote(&expand_tilde_to_home_var(&dir));
+    let script = format!("mkdir -p {}", dir_q);
+    let (code, _stdout, stderr) = ssh_run_remote(&cfg, &script).await?;
+    if code != 0 {
+        return Err(AppError::Fs(FsError::IoError {
+            message: format!("ssh mkdir failed ({}): {}", code, stderr.trim()),
+        }));
+    }
+    Ok(dir)
 }

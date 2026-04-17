@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use tokio::fs::read_to_string;
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 /// CWD 同步间隔（秒）
 const SYNC_INTERVAL_SECONDS: f64 = 5.0;
@@ -198,9 +198,7 @@ pub trait BaseEnvironment: Send + Sync {
                 .map(char::from)
                 .collect();
             // A heredoc closes when a line equals exactly the delimiter
-            let safe = !stdin_data
-                .lines()
-                .any(|l| l.trim() == candidate.as_str());
+            let safe = !stdin_data.lines().any(|l| l.trim() == candidate.as_str());
             if safe {
                 break candidate;
             }
@@ -242,14 +240,20 @@ pub trait BaseEnvironment: Send + Sync {
         match timeout(Duration::from_millis(timeout_ms), wait_fut).await {
             Ok(exit_code) => {
                 let output = stdout_lines.join("\n");
-                Ok(ExecResult { output, returncode: exit_code })
+                Ok(ExecResult {
+                    output,
+                    returncode: exit_code,
+                })
             }
             Err(_) => {
                 // 超时
                 handle.kill();
-                let output = stdout_lines.join("\n") + 
-                    &format!("\n[Command timed out after {}ms]", timeout_ms);
-                Ok(ExecResult { output, returncode: 124 })
+                let output = stdout_lines.join("\n")
+                    + &format!("\n[Command timed out after {}ms]", timeout_ms);
+                Ok(ExecResult {
+                    output,
+                    returncode: 124,
+                })
             }
         }
     }
@@ -304,7 +308,12 @@ pub trait BaseEnvironment: Send + Sync {
         let login = !self.snapshot_ready();
 
         let handle = self
-            .run_bash(&wrapped, login, effective_timeout / 1000, effective_stdin.as_deref())
+            .run_bash(
+                &wrapped,
+                login,
+                effective_timeout / 1000,
+                effective_stdin.as_deref(),
+            )
             .await?;
 
         let mut result = self.wait_for_process(handle, effective_timeout).await?;
@@ -368,7 +377,7 @@ pub trait BaseEnvironment: Send + Sync {
 }
 
 /// 异步读取流的所有内容并发送到通道
-/// 
+///
 /// 用于在 ProcessHandle 中读取 stdout/stderr
 pub async fn read_to_end<R>(mut reader: R, tx: tokio::sync::mpsc::Sender<Vec<u8>>)
 where
@@ -383,11 +392,7 @@ where
 
 /// 生成唯一会话 ID
 pub fn generate_session_id() -> String {
-    uuid::Uuid::new_v4()
-        .to_string()
-        .replace("-", "")
-        [..12]
-        .to_string()
+    uuid::Uuid::new_v4().to_string().replace("-", "")[..12].to_string()
 }
 
 #[cfg(test)]

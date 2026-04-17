@@ -21,6 +21,8 @@ pub struct ClaudeConfig {
     pub temperature: Option<f32>,
     pub system: Option<String>,
     pub version: String,
+    /// Request timeout in seconds (total including streaming)
+    pub timeout: u64,
 }
 
 impl ClaudeConfig {
@@ -33,6 +35,7 @@ impl ClaudeConfig {
             temperature: None,
             system: None,
             version: "2023-06-01".to_string(),
+            timeout: 600,
         }
     }
 
@@ -80,9 +83,17 @@ pub enum ContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "tool_use")]
-    ToolUse { id: String, name: String, input: serde_json::Value },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
     #[serde(rename = "tool_result")]
-    ToolResult { tool_use_id: String, content: String, is_error: Option<bool> },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        is_error: Option<bool>,
+    },
 }
 
 impl ContentBlock {
@@ -111,7 +122,10 @@ pub struct ToolDefinition {
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
     Text(String),
-    ToolStart { id: String, name: String },
+    ToolStart {
+        id: String,
+        name: String,
+    },
     ToolJson(String),
     BlockStop,
     /// Final usage for this Anthropic stream (emitted before [`Stop`])
@@ -128,7 +142,10 @@ enum StreamEvent {
     #[serde(rename = "message_start")]
     MessageStart { message: MessageStart },
     #[serde(rename = "content_block_start")]
-    ContentBlockStart { index: usize, content_block: ContentBlockStart },
+    ContentBlockStart {
+        index: usize,
+        content_block: ContentBlockStart,
+    },
     #[serde(rename = "content_block_delta")]
     ContentBlockDelta { index: usize, delta: ContentDelta },
     #[serde(rename = "content_block_stop")]
@@ -173,7 +190,11 @@ enum ContentBlockStart {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "tool_use")]
-    ToolUse { id: String, name: String, input: serde_json::Value },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -201,7 +222,8 @@ pub struct ClaudeClient {
 impl ClaudeClient {
     pub fn new(config: ClaudeConfig) -> Self {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .connect_timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(config.timeout))
             .build()
             .expect("Failed to create HTTP client");
         Self { config, client }
@@ -242,7 +264,9 @@ impl ClaudeClient {
             .json(&request)
             .send()
             .await
-            .map_err(|e| ApiError::Network { message: e.to_string() })?;
+            .map_err(|e| ApiError::Network {
+                message: e.to_string(),
+            })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -299,25 +323,27 @@ async fn parse_sse_stream(
                             let event = buffer[..pos].to_string();
                             buffer = buffer[pos + 2..].to_string();
 
-                            if let Err(_) =
-                                process_sse_event(&event, &tx, &mut usage_acc).await
-                            {
+                            if let Err(_) = process_sse_event(&event, &tx, &mut usage_acc).await {
                                 return; // Channel closed
                             }
                         }
                     }
                     Err(_) => {
-                        let _ = tx.send(Err(ApiError::SseParse {
-                            message: "Invalid UTF-8 in stream".to_string(),
-                        })).await;
+                        let _ = tx
+                            .send(Err(ApiError::SseParse {
+                                message: "Invalid UTF-8 in stream".to_string(),
+                            }))
+                            .await;
                         return;
                     }
                 }
             }
             Err(e) => {
-                let _ = tx.send(Err(ApiError::Network {
-                    message: format!("Stream error: {}", e),
-                })).await;
+                let _ = tx
+                    .send(Err(ApiError::Network {
+                        message: format!("Stream error: {}", e),
+                    }))
+                    .await;
                 return;
             }
         }
@@ -377,31 +403,23 @@ async fn process_sse_event(
                             // Text block started - no special handling
                             Ok(())
                         }
-                        ContentBlockStart::ToolUse { id, name, .. } => {
-                            tx.send(Ok(StreamChunk::ToolStart { id, name }))
-                                .await
-                                .map_err(|_| ())
-                        }
+                        ContentBlockStart::ToolUse { id, name, .. } => tx
+                            .send(Ok(StreamChunk::ToolStart { id, name }))
+                            .await
+                            .map_err(|_| ()),
                     }
                 }
-                StreamEvent::ContentBlockDelta { delta, .. } => {
-                    match delta {
-                        ContentDelta::TextDelta { text } => {
-                            tx.send(Ok(StreamChunk::Text(text)))
-                                .await
-                                .map_err(|_| ())
-                        }
-                        ContentDelta::InputJsonDelta { partial_json } => {
-                            tx.send(Ok(StreamChunk::ToolJson(partial_json)))
-                                .await
-                                .map_err(|_| ())
-                        }
+                StreamEvent::ContentBlockDelta { delta, .. } => match delta {
+                    ContentDelta::TextDelta { text } => {
+                        tx.send(Ok(StreamChunk::Text(text))).await.map_err(|_| ())
                     }
-                }
-                StreamEvent::ContentBlockStop { .. } => {
-                    tx.send(Ok(StreamChunk::BlockStop))
+                    ContentDelta::InputJsonDelta { partial_json } => tx
+                        .send(Ok(StreamChunk::ToolJson(partial_json)))
                         .await
-                        .map_err(|_| ())
+                        .map_err(|_| ()),
+                },
+                StreamEvent::ContentBlockStop { .. } => {
+                    tx.send(Ok(StreamChunk::BlockStop)).await.map_err(|_| ())
                 }
                 StreamEvent::MessageDelta { usage, .. } => {
                     if let Some(u) = usage {
@@ -419,17 +437,11 @@ async fn process_sse_event(
                         .prompt_tokens
                         .saturating_add(usage_acc.completion_tokens);
                     if usage_acc.prompt_tokens > 0 || usage_acc.completion_tokens > 0 {
-                        let _ = tx
-                            .send(Ok(StreamChunk::Usage(usage_acc.clone())))
-                            .await;
+                        let _ = tx.send(Ok(StreamChunk::Usage(usage_acc.clone()))).await;
                     }
                     tx.send(Ok(StreamChunk::Stop)).await.map_err(|_| ())
                 }
-                StreamEvent::Ping => {
-                    tx.send(Ok(StreamChunk::Ping))
-                        .await
-                        .map_err(|_| ())
-                }
+                StreamEvent::Ping => tx.send(Ok(StreamChunk::Ping)).await.map_err(|_| ()),
             }
         }
         Err(e) => {
@@ -449,11 +461,14 @@ async fn process_sse_event(
             }
 
             tx.send(Err(ApiError::SseParse {
-                message: format!("Parse error: {} | Data: {}", e, data.chars().take(200).collect::<String>()),
+                message: format!(
+                    "Parse error: {} | Data: {}",
+                    e,
+                    data.chars().take(200).collect::<String>()
+                ),
             }))
             .await
             .map_err(|_| ())
         }
     }
 }
-

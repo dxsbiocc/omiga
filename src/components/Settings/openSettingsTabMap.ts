@@ -1,6 +1,6 @@
 /**
  * Maps `window` event `openSettings` → `detail.tab` string to Settings sidebar index.
- * Keep in sync with `SETTINGS_SECTIONS` in `Settings/index.tsx` (0–9). Language is not a tab — use profile menu + locale store.
+ * Keep in sync with `SETTINGS_SECTIONS` in `Settings/index.tsx` (0–10). Language is not a tab — use profile menu + locale store.
  * Optional `detail.executionSubTab`: 0 Modal, 1 Daytona, 2 SSH (see `ExecutionEnvsSettingsTab`).
  */
 export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
@@ -9,6 +9,9 @@ export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
   advanced: 1,
   permissions: 2,
   theme: 3,
+  harness: 10,
+  "runtime-constraints": 10,
+  trace: 10,
   /** Integrations — Plugins / MCP / Skills */
   plugins: 4,
   extensions: 4,

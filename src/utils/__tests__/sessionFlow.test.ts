@@ -14,16 +14,40 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke } from '@tauri-apps/api/core';
 import { useSessionStore } from '../../state/sessionStore';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('Session Flow Integration', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
+    const win = globalThis as typeof globalThis & {
+      window?: typeof globalThis & {
+        dispatchEvent?: (event: Event) => boolean;
+      };
+      dispatchEvent?: (event: Event) => boolean;
+    };
+    win.window = win;
+    win.dispatchEvent = vi.fn(() => true);
+    win.window.dispatchEvent = win.dispatchEvent;
     // Reset store state
-    const store = useSessionStore.getState();
     useSessionStore.setState({
       sessions: [],
       currentSession: null,
       messages: [],
       storeMessages: [],
       isLoading: false,
+      isSwitchingSession: false,
+      hasMoreMessages: false,
+      isLoadingMoreMessages: false,
+      activeProviderEntryName: null,
+      pendingProjectPathSessions: new Set(),
       activeRounds: new Map(),
     });
   });
@@ -147,6 +171,159 @@ describe('Session Flow Integration', () => {
       events.forEach((event) => {
         expect(event).toBeDefined();
       });
+    });
+  });
+
+  describe('setCurrentSession', () => {
+    it('should switch into loading state immediately on cache miss', async () => {
+      const mockInvoke = vi.mocked(invoke);
+      const loadDeferred = deferred<{
+        id: string;
+        name: string;
+        messages: Array<{ id: string; role: 'user'; content: string }>;
+        project_path: string;
+        created_at: string;
+        updated_at: string;
+        active_provider_entry_name: string | null;
+        has_more_messages: boolean;
+      }>();
+
+      mockInvoke.mockImplementation(async (command) => {
+        if (command === 'load_session') return loadDeferred.promise;
+        throw new Error(`unexpected invoke: ${command}`);
+      });
+
+      useSessionStore.setState({
+        sessions: [
+          {
+            id: 'session-miss',
+            name: 'Session miss',
+            projectPath: '/tmp/project',
+            workingDirectory: '/tmp/project',
+            createdAt: '2026-04-16T00:00:00.000Z',
+            updatedAt: '2026-04-16T00:00:00.000Z',
+            messageCount: 1,
+          },
+        ],
+      });
+
+      const switchPromise = useSessionStore.getState().setCurrentSession('session-miss');
+      await switchPromise;
+
+      let state = useSessionStore.getState();
+      expect(state.currentSession?.id).toBe('session-miss');
+      expect(state.currentSession?.name).toBe('Session miss');
+      expect(state.isSwitchingSession).toBe(true);
+      expect(state.storeMessages).toEqual([]);
+
+      loadDeferred.resolve({
+        id: 'session-miss',
+        name: 'Session miss',
+        messages: [{ id: 'm-1', role: 'user', content: 'hello' }],
+        project_path: '/tmp/project',
+        created_at: '2026-04-16T00:00:00.000Z',
+        updated_at: '2026-04-16T00:00:01.000Z',
+        active_provider_entry_name: null,
+        has_more_messages: false,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      state = useSessionStore.getState();
+      expect(state.currentSession?.id).toBe('session-miss');
+      expect(state.storeMessages).toHaveLength(1);
+      expect(state.isSwitchingSession).toBe(false);
+    });
+
+    it('should ignore stale session loads when a newer switch starts', async () => {
+      const mockInvoke = vi.mocked(invoke);
+      const sessionOneLoad = deferred<{
+        id: string;
+        name: string;
+        messages: Array<{ id: string; role: 'user'; content: string }>;
+        project_path: string;
+        created_at: string;
+        updated_at: string;
+        active_provider_entry_name: string | null;
+        has_more_messages: boolean;
+      }>();
+      const sessionTwoLoad = deferred<{
+        id: string;
+        name: string;
+        messages: Array<{ id: string; role: 'user'; content: string }>;
+        project_path: string;
+        created_at: string;
+        updated_at: string;
+        active_provider_entry_name: string | null;
+        has_more_messages: boolean;
+      }>();
+
+      mockInvoke.mockImplementation(async (command, payload) => {
+        if (command !== 'load_session') {
+          throw new Error(`unexpected invoke: ${command}`);
+        }
+        const sessionId = (payload as { sessionId: string }).sessionId;
+        if (sessionId === 'session-race-1') return sessionOneLoad.promise;
+        if (sessionId === 'session-race-2') return sessionTwoLoad.promise;
+        throw new Error(`unexpected session: ${sessionId}`);
+      });
+
+      useSessionStore.setState({
+        sessions: [
+          {
+            id: 'session-race-1',
+            name: 'First session',
+            projectPath: '/tmp/project-a',
+            workingDirectory: '/tmp/project-a',
+            createdAt: '2026-04-16T00:00:00.000Z',
+            updatedAt: '2026-04-16T00:00:00.000Z',
+            messageCount: 1,
+          },
+          {
+            id: 'session-race-2',
+            name: 'Second session',
+            projectPath: '/tmp/project-b',
+            workingDirectory: '/tmp/project-b',
+            createdAt: '2026-04-16T00:00:00.000Z',
+            updatedAt: '2026-04-16T00:00:00.000Z',
+            messageCount: 1,
+          },
+        ],
+      });
+
+      await useSessionStore.getState().setCurrentSession('session-race-1');
+      await useSessionStore.getState().setCurrentSession('session-race-2');
+
+      sessionTwoLoad.resolve({
+        id: 'session-race-2',
+        name: 'Second session',
+        messages: [{ id: 'm-2', role: 'user', content: 'two' }],
+        project_path: '/tmp/project-b',
+        created_at: '2026-04-16T00:00:00.000Z',
+        updated_at: '2026-04-16T00:00:02.000Z',
+        active_provider_entry_name: null,
+        has_more_messages: false,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      sessionOneLoad.resolve({
+        id: 'session-race-1',
+        name: 'First session',
+        messages: [{ id: 'm-1', role: 'user', content: 'one' }],
+        project_path: '/tmp/project-a',
+        created_at: '2026-04-16T00:00:00.000Z',
+        updated_at: '2026-04-16T00:00:01.000Z',
+        active_provider_entry_name: null,
+        has_more_messages: false,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const state = useSessionStore.getState();
+      expect(state.currentSession?.id).toBe('session-race-2');
+      expect(state.storeMessages.map((message) => message.content)).toEqual(['two']);
+      expect(state.isSwitchingSession).toBe(false);
     });
   });
 });

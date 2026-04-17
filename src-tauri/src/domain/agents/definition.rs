@@ -27,8 +27,6 @@ pub enum AgentSource {
     Plugin,
 }
 
-
-
 /// Agent 定义 Trait
 ///
 /// 所有 Agent（内置或自定义）必须实现此接口
@@ -117,7 +115,7 @@ pub trait AgentDefinition: Send + Sync {
 }
 
 /// 内置 Agent 定义结构（简化版）
-/// 
+///
 /// 注意：这是一个辅助结构，用于快速创建简单的内置 Agent。
 /// 对于复杂的 Agent，建议直接实现 AgentDefinition trait。
 pub struct BuiltInAgent {

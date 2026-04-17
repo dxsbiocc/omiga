@@ -155,10 +155,8 @@ fn strategy_exact(content: &str, pattern: &str) -> Vec<ByteRange> {
 
 fn strategy_line_trimmed(content: &str, pattern: &str) -> Vec<ByteRange> {
     let offsets = line_start_offsets(content);
-    let content_norm: Vec<String> =
-        content.split('\n').map(|l| l.trim().to_string()).collect();
-    let pat_norm: Vec<String> =
-        pattern.split('\n').map(|l| l.trim().to_string()).collect();
+    let content_norm: Vec<String> = content.split('\n').map(|l| l.trim().to_string()).collect();
+    let pat_norm: Vec<String> = pattern.split('\n').map(|l| l.trim().to_string()).collect();
     find_line_pattern(content, &offsets, &content_norm, &pat_norm)
 }
 
@@ -185,10 +183,14 @@ fn collapse_whitespace(s: &str) -> String {
 
 fn strategy_whitespace_normalized(content: &str, pattern: &str) -> Vec<ByteRange> {
     let offsets = line_start_offsets(content);
-    let content_norm: Vec<String> =
-        content.split('\n').map(|l| collapse_whitespace(l)).collect();
-    let pat_norm: Vec<String> =
-        pattern.split('\n').map(|l| collapse_whitespace(l)).collect();
+    let content_norm: Vec<String> = content
+        .split('\n')
+        .map(|l| collapse_whitespace(l))
+        .collect();
+    let pat_norm: Vec<String> = pattern
+        .split('\n')
+        .map(|l| collapse_whitespace(l))
+        .collect();
     find_line_pattern(content, &offsets, &content_norm, &pat_norm)
 }
 
@@ -198,10 +200,14 @@ fn strategy_whitespace_normalized(content: &str, pattern: &str) -> Vec<ByteRange
 
 fn strategy_indentation_flexible(content: &str, pattern: &str) -> Vec<ByteRange> {
     let offsets = line_start_offsets(content);
-    let content_norm: Vec<String> =
-        content.split('\n').map(|l| l.trim_start().to_string()).collect();
-    let pat_norm: Vec<String> =
-        pattern.split('\n').map(|l| l.trim_start().to_string()).collect();
+    let content_norm: Vec<String> = content
+        .split('\n')
+        .map(|l| l.trim_start().to_string())
+        .collect();
+    let pat_norm: Vec<String> = pattern
+        .split('\n')
+        .map(|l| l.trim_start().to_string())
+        .collect();
     find_line_pattern(content, &offsets, &content_norm, &pat_norm)
 }
 
@@ -334,7 +340,11 @@ fn strategy_block_anchor(content: &str, pattern: &str) -> Vec<ByteRange> {
         })
         .collect();
 
-    let threshold = if candidates.len() == 1 { 0.10_f64 } else { 0.30_f64 };
+    let threshold = if candidates.len() == 1 {
+        0.10_f64
+    } else {
+        0.30_f64
+    };
     let mut matches = vec![];
 
     for i in candidates {
@@ -391,8 +401,7 @@ mod tests {
 
     #[test]
     fn exact_replace() {
-        let (out, n) =
-            fuzzy_find_and_replace("Hello WORLD", "WORLD", "Omiga", false).unwrap();
+        let (out, n) = fuzzy_find_and_replace("Hello WORLD", "WORLD", "Omiga", false).unwrap();
         assert_eq!(out, "Hello Omiga");
         assert_eq!(n, 1);
     }
@@ -402,8 +411,7 @@ mod tests {
         let content = "    fn foo() {\n        pass\n    }";
         let pattern = "fn foo() {\n    pass\n}";
         let (out, n) =
-            fuzzy_find_and_replace(content, pattern, "fn bar() {\n    return\n}", false)
-                .unwrap();
+            fuzzy_find_and_replace(content, pattern, "fn bar() {\n    return\n}", false).unwrap();
         assert_eq!(n, 1, "expected 1 replacement");
         assert!(out.contains("fn bar()"), "replacement not applied: {out}");
     }
@@ -412,8 +420,7 @@ mod tests {
     fn indentation_flexible_ignores_leading_spaces() {
         let content = "  hello\n  world";
         let pattern = "hello\nworld";
-        let (out, n) =
-            fuzzy_find_and_replace(content, pattern, "foo\nbar", false).unwrap();
+        let (out, n) = fuzzy_find_and_replace(content, pattern, "foo\nbar", false).unwrap();
         assert_eq!(n, 1);
         assert!(out.contains("foo"));
     }
@@ -422,8 +429,7 @@ mod tests {
     fn whitespace_normalized_collapses_spaces() {
         let content = "x  =  1\ny  =  2";
         let pattern = "x = 1\ny = 2";
-        let (out, n) =
-            fuzzy_find_and_replace(content, pattern, "x = 10\ny = 20", false).unwrap();
+        let (out, n) = fuzzy_find_and_replace(content, pattern, "x = 10\ny = 20", false).unwrap();
         assert_eq!(n, 1);
         assert!(out.contains("10"));
     }
@@ -442,8 +448,7 @@ mod tests {
 
     #[test]
     fn replace_all_replaces_every_occurrence() {
-        let (out, n) =
-            fuzzy_find_and_replace("aa bb aa", "aa", "cc", true).unwrap();
+        let (out, n) = fuzzy_find_and_replace("aa bb aa", "aa", "cc", true).unwrap();
         assert_eq!(out, "cc bb cc");
         assert_eq!(n, 2);
     }
@@ -458,8 +463,7 @@ mod tests {
     fn trimmed_boundary_handles_trailing_space() {
         let content = "  foo  \n  bar\n  baz  ";
         let pattern = "foo\n  bar\nbaz";
-        let (out, n) =
-            fuzzy_find_and_replace(content, pattern, "X\n  Y\nZ", false).unwrap();
+        let (out, n) = fuzzy_find_and_replace(content, pattern, "X\n  Y\nZ", false).unwrap();
         assert_eq!(n, 1);
         assert!(out.contains("X"), "got: {out}");
     }
@@ -469,8 +473,7 @@ mod tests {
         let content = "START\nhello world here\nEND";
         let pattern = "START\nhello world there\nEND"; // middle differs slightly
         let (out, n) =
-            fuzzy_find_and_replace(content, pattern, "START\nnew middle\nEND", false)
-                .unwrap();
+            fuzzy_find_and_replace(content, pattern, "START\nnew middle\nEND", false).unwrap();
         assert_eq!(n, 1);
         assert!(out.contains("new middle"), "got: {out}");
     }
@@ -480,8 +483,7 @@ mod tests {
         let content = "line1\nTARGET_A\nTARGET_B\nline4";
         let pattern = "TARGET_A\nTARGET_B";
         let (out, n) =
-            fuzzy_find_and_replace(content, pattern, "REPLACED_A\nREPLACED_B", false)
-                .unwrap();
+            fuzzy_find_and_replace(content, pattern, "REPLACED_A\nREPLACED_B", false).unwrap();
         assert_eq!(n, 1);
         assert_eq!(out, "line1\nREPLACED_A\nREPLACED_B\nline4");
     }

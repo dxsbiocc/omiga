@@ -2,10 +2,12 @@
 
 pub mod agent_task;
 pub mod codec;
+pub mod config;
 
 use serde::{Deserialize, Serialize};
 
 pub use codec::SessionCodec;
+pub use config::{delete_session_config, load_session_config, save_session_config, SessionConfig};
 
 pub use agent_task::{AgentTask, TaskV2Status};
 
@@ -120,7 +122,9 @@ pub struct MessageTokenUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum Message {
-    User { content: String },
+    User {
+        content: String,
+    },
     Assistant {
         content: String,
         tool_calls: Option<Vec<ToolCall>>,
@@ -174,9 +178,7 @@ pub struct ToolCall {
 }
 
 /// Convert messages to Anthropic API format
-pub fn to_anthropic_messages(
-    messages: &[Message],
-) -> Vec<serde_json::Value> {
+pub fn to_anthropic_messages(messages: &[Message]) -> Vec<serde_json::Value> {
     messages
         .iter()
         .map(|msg| match msg {
@@ -200,7 +202,10 @@ pub fn to_anthropic_messages(
                 }
                 msg
             }
-            Message::Tool { tool_call_id, output } => serde_json::json!({
+            Message::Tool {
+                tool_call_id,
+                output,
+            } => serde_json::json!({
                 "role": "tool",
                 "tool_call_id": tool_call_id,
                 "content": output

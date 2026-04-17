@@ -9,8 +9,8 @@ use crate::domain::mcp::client::{
     call_tool_on_server, call_tool_via_peer, connect_mcp_server_legacy, McpLiveConnection,
 };
 use crate::domain::mcp::config::merged_mcp_servers;
-use crate::domain::mcp::names::{normalize_name_for_mcp, parse_mcp_tool_name};
 use crate::domain::mcp::connection_manager::GlobalMcpManager;
+use crate::domain::mcp::names::{normalize_name_for_mcp, parse_mcp_tool_name};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -76,11 +76,9 @@ pub async fn execute_mcp_tool_call(
     // --- Session-aware managed path (recommended) ---
     if let (Some(manager), Some(session_id)) = (mcp_manager, session_id) {
         let project_root_owned = project_root.to_path_buf();
-        
+
         // Get or create manager for this project
-        let project_manager = manager
-            .get_manager(project_root_owned, session_id)
-            .await;
+        let project_manager = manager.get_manager(project_root_owned, session_id).await;
 
         // Get connection (will auto-reconnect if needed based on session/health)
         match project_manager.get_connection(&server_key, timeout).await {
@@ -91,19 +89,13 @@ pub async fn execute_mcp_tool_call(
                     .cloned()
                     .unwrap_or_else(|| tool_norm.clone());
 
-                let result = call_tool_via_peer(
-                    &conn.peer,
-                    &orig,
-                    Some(args_map.clone()),
-                    timeout,
-                )
-                .await;
+                let result =
+                    call_tool_via_peer(&conn.peer, &orig, Some(args_map.clone()), timeout).await;
 
                 match result {
                     Ok(r) => {
                         let is_err = r.is_error.unwrap_or(false);
-                        let text = serde_json::to_string_pretty(&r)
-                            .map_err(|e| e.to_string())?;
+                        let text = serde_json::to_string_pretty(&r).map_err(|e| e.to_string())?;
                         return Ok((text, is_err));
                     }
                     Err(e) => {
@@ -116,8 +108,13 @@ pub async fn execute_mcp_tool_call(
                         );
                         let _ = project_manager.reconnect_server(&server_key).await;
                         return execute_one_shot(
-                            project_root, &server_key, &tool_norm, args_map, timeout,
-                        ).await;
+                            project_root,
+                            &server_key,
+                            &tool_norm,
+                            args_map,
+                            timeout,
+                        )
+                        .await;
                     }
                 }
             }
@@ -128,9 +125,8 @@ pub async fn execute_mcp_tool_call(
                     error = %e,
                     "managed connection failed — falling back to one-shot"
                 );
-                return execute_one_shot(
-                    project_root, &server_key, &tool_norm, args_map, timeout,
-                ).await;
+                return execute_one_shot(project_root, &server_key, &tool_norm, args_map, timeout)
+                    .await;
             }
         }
     }
@@ -188,8 +184,13 @@ pub async fn execute_mcp_tool_call(
                     );
                     // Fall back to legacy one-shot path below.
                     return execute_one_shot(
-                        project_root, &server_key, &tool_norm, args_map, timeout,
-                    ).await;
+                        project_root,
+                        &server_key,
+                        &tool_norm,
+                        args_map,
+                        timeout,
+                    )
+                    .await;
                 }
             }
         };
@@ -212,9 +213,8 @@ pub async fn execute_mcp_tool_call(
                 );
                 let pool_key2 = format!("{}::{}", project_root.display(), server_key);
                 let _ = pool.lock().await.remove(&pool_key2);
-                return execute_one_shot(
-                    project_root, &server_key, &tool_norm, args_map, timeout,
-                ).await;
+                return execute_one_shot(project_root, &server_key, &tool_norm, args_map, timeout)
+                    .await;
             }
         }
     }
@@ -240,8 +240,14 @@ async fn execute_one_shot(
         .map(|t| t.name.to_string())
         .ok_or_else(|| format!("MCP tool \"{tool_norm}\" not found on server \"{server_key}\""))?;
 
-    let result = call_tool_on_server(project_root, server_key, &orig_name, Some(args_map), timeout)
-        .await?;
+    let result = call_tool_on_server(
+        project_root,
+        server_key,
+        &orig_name,
+        Some(args_map),
+        timeout,
+    )
+    .await?;
     let is_err = result.is_error.unwrap_or(false);
     let text = serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?;
     Ok((text, is_err))

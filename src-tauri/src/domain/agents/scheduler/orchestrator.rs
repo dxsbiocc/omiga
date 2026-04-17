@@ -6,7 +6,7 @@
 //! - `execute`: mock 模式（向后兼容，用于测试）
 //! - `execute_with_runtime`: 真实模式，通过 `spawn_background_agent` 驱动实际 LLM 子 Agent
 
-use super::{TaskPlan, SchedulingRequest, SubTask};
+use super::{SchedulingRequest, SubTask, TaskPlan};
 
 #[inline]
 fn unix_timestamp_secs() -> u64 {
@@ -22,7 +22,6 @@ use tauri::Manager;
 
 use crate::app_state::OmigaAppState;
 use crate::domain::tools::WebSearchApiKeys;
-
 
 /// 编排结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,7 +111,12 @@ impl AgentOrchestrator {
         let groups = plan.get_parallel_groups();
 
         for (group_idx, group) in groups.iter().enumerate() {
-            self.log(&mut result, None, &format!("执行组 {}: {:?}", group_idx + 1, group), LogLevel::Info);
+            self.log(
+                &mut result,
+                None,
+                &format!("执行组 {}: {:?}", group_idx + 1, group),
+                LogLevel::Info,
+            );
 
             let mut handles = Vec::new();
 
@@ -131,13 +135,16 @@ impl AgentOrchestrator {
                 match handle.await {
                     Ok(subtask_result) => {
                         let status = subtask_result.status.clone();
-                        result.subtask_results.insert(task_id.clone(), subtask_result);
+                        result
+                            .subtask_results
+                            .insert(task_id.clone(), subtask_result);
 
                         if status == ExecutionStatus::Failed {
                             self.log(&mut result, Some(&task_id), "子任务失败", LogLevel::Error);
                             if plan.subtasks.iter().any(|t| t.id == task_id && t.critical) {
                                 result.status = ExecutionStatus::Failed;
-                                result.final_summary = format!("关键任务 {} 失败，中止执行", task_id);
+                                result.final_summary =
+                                    format!("关键任务 {} 失败，中止执行", task_id);
                                 return Ok(result);
                             }
                         } else {
@@ -145,15 +152,23 @@ impl AgentOrchestrator {
                         }
                     }
                     Err(e) => {
-                        self.log(&mut result, Some(&task_id), &format!("执行错误: {}", e), LogLevel::Error);
-                        result.subtask_results.insert(task_id.clone(), SubTaskResult {
-                            subtask_id: task_id,
-                            status: ExecutionStatus::Failed,
-                            output: None,
-                            error: Some(e.to_string()),
-                            started_at: None,
-                            completed_at: None,
-                        });
+                        self.log(
+                            &mut result,
+                            Some(&task_id),
+                            &format!("执行错误: {}", e),
+                            LogLevel::Error,
+                        );
+                        result.subtask_results.insert(
+                            task_id.clone(),
+                            SubTaskResult {
+                                subtask_id: task_id,
+                                status: ExecutionStatus::Failed,
+                                output: None,
+                                error: Some(e.to_string()),
+                                started_at: None,
+                                completed_at: None,
+                            },
+                        );
                     }
                 }
             }
@@ -185,7 +200,10 @@ impl AgentOrchestrator {
     ) -> Result<String, String> {
         // 这里应该调用实际的 Agent 执行
         // 暂时返回模拟结果
-        Ok(format!("Agent {} executed with prompt: {}", agent_type, prompt))
+        Ok(format!(
+            "Agent {} executed with prompt: {}",
+            agent_type, prompt
+        ))
     }
 
     /// 执行带确认的计划
@@ -197,7 +215,7 @@ impl AgentOrchestrator {
         confirmation_callback: impl FnOnce(&str) -> bool,
     ) -> Result<Option<OrchestrationResult>, String> {
         let summary = self.generate_execution_summary(plan);
-        
+
         if confirmation_callback(&summary) {
             let result = self.execute(plan, request, app).await?;
             Ok(Some(result))
@@ -209,31 +227,33 @@ impl AgentOrchestrator {
     /// 生成执行摘要
     fn generate_execution_summary(&self, plan: &TaskPlan) -> String {
         let mut summary = format!("执行计划将使用以下 Agent:\n\n");
-        
+
         for subtask in &plan.subtasks {
             summary.push_str(&format!(
                 "- [{}] {}\n",
-                subtask.agent_type,
-                subtask.description
+                subtask.agent_type, subtask.description
             ));
             if !subtask.dependencies.is_empty() {
-                summary.push_str(&format!(
-                    "  依赖: {}\n",
-                    subtask.dependencies.join(", ")
-                ));
+                summary.push_str(&format!("  依赖: {}\n", subtask.dependencies.join(", ")));
             }
         }
-        
+
         summary.push_str(&format!(
             "\n预估执行时间: {} 分钟",
             plan.estimate_total_duration() / 60
         ));
-        
+
         summary
     }
 
     /// 添加日志条目
-    fn log(&self, result: &mut OrchestrationResult, subtask_id: Option<&str>, message: &str, level: LogLevel) {
+    fn log(
+        &self,
+        result: &mut OrchestrationResult,
+        subtask_id: Option<&str>,
+        message: &str,
+        level: LogLevel,
+    ) {
         result.execution_log.push(ExecutionLogEntry {
             timestamp: unix_timestamp_secs(),
             subtask_id: subtask_id.map(|s| s.to_string()),
@@ -244,10 +264,14 @@ impl AgentOrchestrator {
 
     /// Shared finalization: compute status, set completed_at, write final_summary.
     fn finalize_result(&self, result: &mut OrchestrationResult, total_subtasks: usize) {
-        let completed = result.subtask_results.values()
+        let completed = result
+            .subtask_results
+            .values()
             .filter(|r| r.status == ExecutionStatus::Completed)
             .count();
-        let failed = result.subtask_results.values()
+        let failed = result
+            .subtask_results
+            .values()
             .filter(|r| r.status == ExecutionStatus::Failed)
             .count();
 
@@ -260,7 +284,10 @@ impl AgentOrchestrator {
         };
         result.completed_at = Some(unix_timestamp_secs());
 
-        let summary = format!("计划执行完成: {}/{} 成功, {} 失败", completed, total_subtasks, failed);
+        let summary = format!(
+            "计划执行完成: {}/{} 成功, {} 失败",
+            completed, total_subtasks, failed
+        );
         result.final_summary = summary.clone();
         self.log(result, None, &summary, LogLevel::Info);
     }
@@ -283,7 +310,10 @@ impl AgentOrchestrator {
             SubTaskResult {
                 subtask_id: subtask_id.clone(),
                 status: ExecutionStatus::Completed,
-                output: Some(format!("Agent '{}' completed task: {}", agent_type, description)),
+                output: Some(format!(
+                    "Agent '{}' completed task: {}",
+                    agent_type, description
+                )),
                 error: None,
                 started_at: Some(start_time),
                 completed_at: Some(unix_timestamp_secs()),
@@ -323,10 +353,14 @@ impl AgentOrchestrator {
             final_summary: String::new(),
         };
 
-        self.log(&mut result, None, "开始执行计划（真实 Agent 模式）", LogLevel::Info);
+        self.log(
+            &mut result,
+            None,
+            "开始执行计划（真实 Agent 模式）",
+            LogLevel::Info,
+        );
 
-        let tool_results_dir =
-            crate::commands::chat::tool_results_dir_for_session(app, session_id);
+        let tool_results_dir = crate::commands::chat::tool_results_dir_for_session(app, session_id);
 
         // 获取 skill_cache（从 Tauri 进程状态）
         let skill_cache = app
@@ -442,10 +476,17 @@ impl AgentOrchestrator {
             for (subtask_result, is_critical_failure) in poll_results {
                 let subtask_id = subtask_result.subtask_id.clone();
                 let is_fail = subtask_result.status == ExecutionStatus::Failed;
-                result.subtask_results.insert(subtask_id.clone(), subtask_result);
+                result
+                    .subtask_results
+                    .insert(subtask_id.clone(), subtask_result);
 
                 if is_fail {
-                    self.log(&mut result, Some(&subtask_id), "子任务失败", LogLevel::Error);
+                    self.log(
+                        &mut result,
+                        Some(&subtask_id),
+                        "子任务失败",
+                        LogLevel::Error,
+                    );
                     if is_critical_failure {
                         result.status = ExecutionStatus::Failed;
                         result.final_summary = format!("关键任务 {} 失败，中止执行", subtask_id);
@@ -469,7 +510,9 @@ pub async fn execute_single_task(
     app: &tauri::AppHandle,
 ) -> Result<String, String> {
     let orchestrator = AgentOrchestrator::new();
-    orchestrator.execute_single_agent(agent_type, prompt, app).await
+    orchestrator
+        .execute_single_agent(agent_type, prompt, app)
+        .await
 }
 
 /// Poll a single background agent until it reaches a terminal state or times out.
@@ -506,7 +549,10 @@ async fn poll_background_agent(
                     );
                 }
                 BackgroundAgentStatus::Failed => {
-                    let err = task.error_message.clone().unwrap_or_else(|| "Agent failed.".to_string());
+                    let err = task
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "Agent failed.".to_string());
                     return (
                         SubTaskResult {
                             subtask_id,

@@ -9,9 +9,9 @@
 //! tool implementations work on SSH, Docker, Modal, Daytona, and Singularity
 //! without per-backend code paths.
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use crate::execution::{BaseEnvironment, ExecOptions};
 use crate::errors::ToolError;
+use crate::execution::{BaseEnvironment, ExecOptions};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 /// Timeout for a single file-operation shell command (ms).
 const FILE_OP_TIMEOUT_MS: u64 = 30_000;
@@ -90,9 +90,8 @@ impl<'a> ShellFileOps<'a> {
         // Decode base64 and write atomically via a temp file
         let tmp = format!("{}.omiga_tmp", path);
         let q_tmp = shell_quote(&tmp);
-        let write_cmd = format!(
-            "printf '%s' {q_b64} | base64 -d > {q_tmp} && mv -f {q_tmp} {q_path}"
-        );
+        let write_cmd =
+            format!("printf '%s' {q_b64} | base64 -d > {q_tmp} && mv -f {q_tmp} {q_path}");
         let res = self.run(&write_cmd).await?;
         if !res.trim().is_empty() && res.contains("error") {
             return Err(ToolError::ExecutionFailed {
@@ -229,7 +228,9 @@ OMIGA_EDIT_EOF"
             .env
             .execute(cmd, opts)
             .await
-            .map_err(|e| ToolError::ExecutionFailed { message: e.to_string() })?;
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: e.to_string(),
+            })?;
         Ok(result.output)
     }
 }

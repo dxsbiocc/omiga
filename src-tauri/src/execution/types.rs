@@ -84,7 +84,7 @@ pub struct EnvironmentConfig {
     #[serde(default)]
     pub memory: u64, // MB
     #[serde(default)]
-    pub disk: u64,   // MB
+    pub disk: u64, // MB
 
     // Docker 特定
     #[serde(default)]

@@ -69,17 +69,59 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   const locale = useLocaleStore((s) => s.locale);
   const setLocale = useLocaleStore((s) => s.setLocale);
   const t = (key: SessionListStringKey) => tSessionList(locale, key);
-  const {
-    sessions,
-    currentSession,
-    setCurrentSession,
-    loadSessions,
-    deleteSession,
-    renameSession,
-    createSessionQuick,
-    isLoading,
-    storeMessages,
-  } = useSessionStore();
+
+  // ── Selective subscriptions ───────────────────────────────────────────────
+  // Subscribe to storeMessages.length (a primitive) instead of the full array.
+  // During streaming, storeMessages grows with every chunk; subscribing to the
+  // full array would re-render SessionList (and re-run filteredSessions useMemo)
+  // on every token — completely unnecessary since SessionList only needs to know
+  // whether the current session has messages (for placeholder detection).
+  const sessions = useSessionStore((s) => s.sessions);
+  const currentSession = useSessionStore((s) => s.currentSession);
+  const isLoading = useSessionStore((s) => s.isLoading);
+  const storeMessagesLength = useSessionStore((s) => s.storeMessages.length);
+  const setCurrentSession = useSessionStore((s) => s.setCurrentSession);
+  const loadSessions = useSessionStore((s) => s.loadSessions);
+  const loadSession = useSessionStore((s) => s.loadSession);
+  const deleteSession = useSessionStore((s) => s.deleteSession);
+  const renameSession = useSessionStore((s) => s.renameSession);
+  const createSessionQuick = useSessionStore((s) => s.createSessionQuick);
+
+  // ── Hover-prefetch ────────────────────────────────────────────────────────
+  // When the user hovers a session for >150 ms, silently load it into the cache
+  // so the click is a cache hit and shows content instantly (~0 ms).
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prefetchingRef = useRef<Set<string>>(new Set());
+  const idlePrefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const prefetchSession = (sessionId: string) => {
+    if (sessionId === currentSession?.id) return;
+    if (prefetchingRef.current.has(sessionId)) return;
+    prefetchingRef.current.add(sessionId);
+    loadSession(sessionId, { silent: true })
+      .catch(() => {})
+      .finally(() => {
+        prefetchingRef.current.delete(sessionId);
+      });
+  };
+
+  const handleSessionMouseEnter = (sessionId: string) => {
+    if (sessionId === currentSession?.id) return; // already showing
+    if (hoverTimerRef.current !== null) {
+      clearTimeout(hoverTimerRef.current);
+    }
+    if (prefetchingRef.current.has(sessionId)) return; // already in-flight
+    hoverTimerRef.current = setTimeout(() => {
+      prefetchSession(sessionId);
+    }, 50);
+  };
+
+  const handleSessionMouseLeave = () => {
+    if (hoverTimerRef.current !== null) {
+      clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+  };
 
   const [menuAnchorEl, setMenuAnchorEl] = useState<null | HTMLElement>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
@@ -103,6 +145,30 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   }, [loadSessions]);
 
   useEffect(() => {
+    if (idlePrefetchTimerRef.current !== null) {
+      clearTimeout(idlePrefetchTimerRef.current);
+      idlePrefetchTimerRef.current = null;
+    }
+    if (sessions.length <= 1) return;
+    const targetIds = sessions
+      .filter((s) => s.id !== currentSession?.id)
+      .slice(0, 12)
+      .map((s) => s.id);
+    if (targetIds.length === 0) return;
+    idlePrefetchTimerRef.current = setTimeout(() => {
+      for (const id of targetIds) {
+        prefetchSession(id);
+      }
+    }, 250);
+    return () => {
+      if (idlePrefetchTimerRef.current !== null) {
+        clearTimeout(idlePrefetchTimerRef.current);
+        idlePrefetchTimerRef.current = null;
+      }
+    };
+  }, [sessions, currentSession?.id, loadSession]);
+
+  useEffect(() => {
     document.documentElement.lang = locale === "zh-CN" ? "zh-CN" : "en";
   }, [locale]);
 
@@ -122,6 +188,9 @@ export function SessionList({ onSelectSession }: SessionListProps) {
 
   const handleSelectSession = async (sessionId: string) => {
     setSelectError(null);
+    // T0: user click
+    performance.mark("sw:click");
+    (window as unknown as { __swClickAt?: number }).__swClickAt = performance.now();
     console.debug("[OmigaDebug][SessionList] click session", sessionId);
     try {
       await setCurrentSession(sessionId);
@@ -258,14 +327,13 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   // shouldShowNewSessionPlaceholder is never called twice per session per render.
   const filteredSessions = useMemo(() => {
     const currentId = currentSession?.id;
-    const msgCount = storeMessages.length;
     const q = searchQuery.toLowerCase().trim();
     const result: Array<{ session: typeof sessions[number]; isPlaceholder: boolean }> = [];
     for (const s of sessions) {
       const isCurrent = s.id === currentId;
       const isPlaceholder = shouldShowNewSessionPlaceholder(s, {
         isCurrentSession: isCurrent,
-        storeMessageCount: isCurrent ? msgCount : undefined,
+        storeMessageCount: isCurrent ? storeMessagesLength : undefined,
       });
       if (q) {
         const label = (isPlaceholder ? UNUSED_SESSION_LABEL : s.name).toLowerCase();
@@ -274,7 +342,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
       result.push({ session: s, isPlaceholder });
     }
     return result;
-  }, [sessions, currentSession?.id, storeMessages.length, searchQuery]);
+  }, [sessions, currentSession?.id, storeMessagesLength, searchQuery]);
 
   const navTextSx = useMemo(
     () => ({
@@ -449,6 +517,8 @@ export function SessionList({ onSelectSession }: SessionListProps) {
               <Box
                 key={session.id}
                 onClick={() => handleSelectSession(session.id)}
+                onMouseEnter={() => handleSessionMouseEnter(session.id)}
+                onMouseLeave={handleSessionMouseLeave}
                 sx={{
                   px: 1.25,
                   py: 1,

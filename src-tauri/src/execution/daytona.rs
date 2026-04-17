@@ -22,7 +22,7 @@ pub struct DaytonaEnvironment {
     cwd_marker: String,
     snapshot_ready: bool,
     last_sync_time: Option<f64>,
-    
+
     // Daytona 特定配置（API 集成待实现）
     workspace_id: String,
     _image: String,
@@ -46,7 +46,7 @@ impl DaytonaEnvironment {
         let (url, key) = Self::check_daytona_config(daytona_url, api_key).await?;
 
         let cwd = cwd.unwrap_or_else(|| "/workspace".to_string());
-        
+
         let session_id = generate_session_id();
         let snapshot_path = format!("/tmp/hermes-snap-{}.sh", session_id);
         let cwd_file = format!("/tmp/hermes-cwd-{}.txt", session_id);
@@ -73,7 +73,7 @@ impl DaytonaEnvironment {
 
         // 验证/创建工作空间
         de.init_workspace().await?;
-        
+
         // 初始化会话快照
         de.init_session().await?;
 
@@ -88,19 +88,19 @@ impl DaytonaEnvironment {
         // 从统一配置文件读取
         let config = crate::llm::config::load_config_file()
             .map_err(|e| ExecutionError::DaytonaError(format!("Failed to load config: {}", e)))?;
-        
+
         let url = url
             .or_else(|| config.daytona_server_url())
             .ok_or_else(|| ExecutionError::DaytonaError(
                 "Daytona server URL not found. Please configure in Advanced Settings or set DAYTONA_SERVER_URL environment variable.".to_string()
             ))?;
-        
+
         let key = key
             .or_else(|| config.daytona_api_key())
             .ok_or_else(|| ExecutionError::DaytonaError(
                 "Daytona API key not found. Please configure in Advanced Settings or set DAYTONA_API_KEY environment variable.".to_string()
             ))?;
-        
+
         Ok((url, key))
     }
 
@@ -127,7 +127,6 @@ impl DaytonaEnvironment {
                 .to_string(),
         ))
     }
-
 }
 
 #[async_trait]
@@ -181,11 +180,11 @@ impl BaseEnvironment for DaytonaEnvironment {
     }
 
     fn stdin_mode(&self) -> &'static str {
-        "heredoc"  // Daytona 使用 heredoc 模式
+        "heredoc" // Daytona 使用 heredoc 模式
     }
 
     fn snapshot_timeout_secs(&self) -> u64 {
-        60  // Daytona 冷启动较慢
+        60 // Daytona 冷启动较慢
     }
 
     async fn run_bash(
@@ -196,7 +195,7 @@ impl BaseEnvironment for DaytonaEnvironment {
         _stdin_data: Option<&str>,
     ) -> Result<Box<dyn ProcessHandle>, ExecutionError> {
         Err(ExecutionError::NotAvailable(
-            "DaytonaEnvironment uses execute_direct".to_string()
+            "DaytonaEnvironment uses execute_direct".to_string(),
         ))
     }
 
@@ -223,8 +222,10 @@ impl BaseEnvironment for DaytonaEnvironment {
         let wrapped = self.wrap_command(&exec_command, &effective_cwd);
 
         // 在 Daytona workspace 中执行
-        let (output, returncode) = self.execute_in_workspace(&wrapped, effective_timeout).await?;
-        
+        let (output, returncode) = self
+            .execute_in_workspace(&wrapped, effective_timeout)
+            .await?;
+
         let mut result = ExecResult { output, returncode };
 
         // 更新 CWD
@@ -235,7 +236,7 @@ impl BaseEnvironment for DaytonaEnvironment {
 
     async fn cleanup(&mut self) -> Result<(), ExecutionError> {
         tracing::info!("Cleaning up Daytona workspace: {}", self.workspace_id);
-        
+
         // 如果持久化，保留工作空间
         if self._persistent {
             tracing::info!("Daytona workspace {} persists", self.workspace_id);
@@ -253,12 +254,22 @@ pub struct DaytonaProcessHandle;
 
 #[async_trait]
 impl ProcessHandle for DaytonaProcessHandle {
-    fn poll(&self) -> Option<i32> { None }
+    fn poll(&self) -> Option<i32> {
+        None
+    }
     fn kill(&self) {}
-    async fn wait(&self) -> i32 { -1 }
-    fn stdout(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> { None }
-    fn stderr(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> { None }
-    fn returncode(&self) -> Option<i32> { None }
+    async fn wait(&self) -> i32 {
+        -1
+    }
+    fn stdout(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> {
+        None
+    }
+    fn stderr(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> {
+        None
+    }
+    fn returncode(&self) -> Option<i32> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -269,7 +280,7 @@ mod tests {
     async fn test_daytona_check_config() {
         // 此测试验证配置检查逻辑
         let result = DaytonaEnvironment::check_daytona_config(None, None).await;
-        
+
         // 如果配置存在则通过，否则失败 - 两种都是有效行为
         match result {
             Ok((url, key)) => println!("Daytona is configured: url={}, key_len={}", url, key.len()),
@@ -283,8 +294,9 @@ mod tests {
         let result = DaytonaEnvironment::check_daytona_config(
             Some("https://api.daytona.io".to_string()),
             Some("test-api-key".to_string()),
-        ).await;
-        
+        )
+        .await;
+
         assert!(result.is_ok());
         let (url, key) = result.unwrap();
         assert_eq!(url, "https://api.daytona.io");
@@ -294,8 +306,8 @@ mod tests {
     #[tokio::test]
     async fn test_daytona_environment_creation() {
         // 此测试需要 Daytona 凭证，如果没有则跳过
-        if std::env::var("DAYTONA_SERVER_URL").is_err() || 
-           std::env::var("DAYTONA_API_KEY").is_err() {
+        if std::env::var("DAYTONA_SERVER_URL").is_err() || std::env::var("DAYTONA_API_KEY").is_err()
+        {
             println!("Daytona credentials not available, skipping test");
             return;
         }
@@ -309,7 +321,8 @@ mod tests {
             "test-workspace".to_string(),
             None,
             None,
-        ).await;
+        )
+        .await;
 
         match result {
             Ok(env) => {
@@ -318,7 +331,10 @@ mod tests {
                 assert_eq!(env.workspace_id, "test-workspace");
             }
             Err(e) => {
-                println!("Daytona environment creation failed (expected without real API): {}", e);
+                println!(
+                    "Daytona environment creation failed (expected without real API): {}",
+                    e
+                );
             }
         }
     }

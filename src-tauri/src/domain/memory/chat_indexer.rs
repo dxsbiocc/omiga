@@ -27,7 +27,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-use crate::domain::pageindex::{CacheEntry, DocumentNode, DocumentParser, DocumentTree, IndexConfig, IndexStorage};
+use crate::domain::pageindex::{
+    CacheEntry, DocumentNode, DocumentParser, DocumentTree, IndexConfig, IndexStorage,
+};
 use crate::errors::AppError;
 
 /// Chat message for indexing
@@ -165,7 +167,11 @@ impl ChatIndexer {
             self.storage.save_cache(&self.cache).await?;
         }
 
-        info!("Indexed chat session {} with {} messages", session_id, messages.len());
+        info!(
+            "Indexed chat session {} with {} messages",
+            session_id,
+            messages.len()
+        );
         Ok(())
     }
 
@@ -178,41 +184,41 @@ impl ChatIndexer {
     ) -> Result<(), AppError> {
         // Get existing messages for this session from the document
         let doc_id = format!("chat_{}", session_id);
-        
+
         // For incremental single-message updates, we need to:
         // 1. Check if document exists
         // 2. Append the new message content
         // 3. Re-parse and update
-        
+
         let doc_path = format!("chat/{}.md", session_id);
-        
+
         // Build the message content
         let message_content = format_single_message(message);
-        
+
         // Get existing content if available
         let existing_content = if let Some(doc) = self.tree.get_document(&doc_id) {
             doc.content.clone()
         } else {
             format!("# Chat Session: {}\n\n", session_name)
         };
-        
+
         // Append new message
         let new_content = format!("{}\n{}", existing_content, message_content);
-        
+
         // Calculate hash
         let hash = calculate_hash(&new_content);
-        
+
         // Check if changed
         if let Some(cached) = self.cache.get(&doc_path) {
             if cached.hash == hash {
                 return Ok(());
             }
         }
-        
+
         // Parse and update
         let parser = DocumentParser::new(self.config.max_section_depth);
         let parse_result = parser.parse(&doc_path, &new_content)?;
-        
+
         let doc_node = DocumentNode {
             id: doc_id.clone(),
             path: doc_path.clone(),
@@ -222,7 +228,7 @@ impl ChatIndexer {
             hash: hash.clone(),
             metadata: parse_result.metadata,
         };
-        
+
         self.tree.add_document(doc_node);
         self.cache.insert(
             doc_path,
@@ -232,13 +238,13 @@ impl ChatIndexer {
                 doc_id,
             },
         );
-        
+
         // Persist
         self.storage.save_tree(&self.tree).await?;
         if self.config.enable_cache {
             self.storage.save_cache(&self.cache).await?;
         }
-        
+
         debug!("Indexed message {} for session {}", message.id, session_id);
         Ok(())
     }
@@ -246,8 +252,12 @@ impl ChatIndexer {
     /// Format chat messages into markdown content
     fn format_chat_content(&self, session_name: &str, messages: &[ChatMessage]) -> String {
         let mut content = format!("# Chat Session: {}\n\n", session_name);
-        content.push_str(&format!("> **Session ID**: {}\n\n",
-            messages.first().map(|m| m.session_id.clone()).unwrap_or_default()
+        content.push_str(&format!(
+            "> **Session ID**: {}\n\n",
+            messages
+                .first()
+                .map(|m| m.session_id.clone())
+                .unwrap_or_default()
         ));
         content.push_str("---\n\n");
 
@@ -287,10 +297,7 @@ fn format_single_message(msg: &ChatMessage) -> String {
         ChatRole::Tool => ("Tool", "🔧"),
     };
 
-    let mut formatted = format!(
-        "## {} {} ({}\n\n",
-        role_emoji, role_label, timestamp
-    );
+    let mut formatted = format!("## {} {} ({}\n\n", role_emoji, role_label, timestamp);
 
     // Add content
     formatted.push_str(&msg.content);

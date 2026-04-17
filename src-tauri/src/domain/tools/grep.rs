@@ -82,23 +82,31 @@ impl super::ToolImpl for GrepTool {
                 let env_arc = store.get_or_create(ctx, 30_000).await?;
                 let raw = {
                     let mut guard = env_arc.lock().await;
-                    let mut ops = crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
+                    let mut ops =
+                        crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
                     ops.grep_raw(
                         &args.pattern,
                         &search_root,
                         args.path_pattern.as_deref(),
                         args.case_insensitive,
                         max_results,
-                    ).await?
+                    )
+                    .await?
                 };
                 // Parse "file:line:content" lines into GrepMatches
-                let matches: Vec<GrepMatch> = raw.lines()
+                let matches: Vec<GrepMatch> = raw
+                    .lines()
                     .filter_map(|line| {
                         let mut parts = line.splitn(3, ':');
                         let file = parts.next()?.to_string();
                         let lineno: usize = parts.next()?.parse().ok()?;
                         let content = parts.next().unwrap_or("").to_string();
-                        Some(GrepMatch { file, line: lineno, column: 0, content })
+                        Some(GrepMatch {
+                            file,
+                            line: lineno,
+                            column: 0,
+                            content,
+                        })
                     })
                     .collect();
                 let truncated = matches.len() >= max_results;
@@ -142,9 +150,8 @@ fn run_grep_sync(
     case_insensitive: bool,
     max_results: usize,
 ) -> Result<GrepOutput, ToolError> {
-    let regex = build_regex(pattern, case_insensitive).map_err(|e| SearchError::RegexError {
-        message: e,
-    })?;
+    let regex = build_regex(pattern, case_insensitive)
+        .map_err(|e| SearchError::RegexError { message: e })?;
 
     let glob_filter = build_glob_set(path_pattern)?;
 
@@ -323,10 +330,33 @@ fn should_skip_file(path: &std::path::Path) -> bool {
         let e = ext.to_ascii_lowercase();
         if matches!(
             e.as_str(),
-            "exe" | "dll" | "so" | "dylib" | "bin" | "o" | "a" | "lib" | "pyc"
-                | "jpg" | "jpeg" | "png" | "gif" | "bmp" | "ico" | "webp"
-                | "mp3" | "mp4" | "avi" | "mov" | "wav"
-                | "zip" | "tar" | "gz" | "bz2" | "7z" | "rar"
+            "exe"
+                | "dll"
+                | "so"
+                | "dylib"
+                | "bin"
+                | "o"
+                | "a"
+                | "lib"
+                | "pyc"
+                | "jpg"
+                | "jpeg"
+                | "png"
+                | "gif"
+                | "bmp"
+                | "ico"
+                | "webp"
+                | "mp3"
+                | "mp4"
+                | "avi"
+                | "mov"
+                | "wav"
+                | "zip"
+                | "tar"
+                | "gz"
+                | "bz2"
+                | "7z"
+                | "rar"
                 | "pdf"
         ) {
             return true;

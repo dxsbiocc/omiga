@@ -23,7 +23,7 @@ pub struct ModalEnvironment {
     cwd_marker: String,
     snapshot_ready: bool,
     last_sync_time: Option<f64>,
-    
+
     // Modal 特定配置（SDK 集成待实现）
     _image: String,
     _task_id: String,
@@ -46,7 +46,7 @@ impl ModalEnvironment {
         Self::check_modal_config().await?;
 
         let cwd = cwd.unwrap_or_else(|| "/root".to_string());
-        
+
         let session_id = generate_session_id();
         let snapshot_path = format!("/tmp/hermes-snap-{}.sh", session_id);
         let cwd_file = format!("/tmp/hermes-cwd-{}.txt", session_id);
@@ -71,7 +71,7 @@ impl ModalEnvironment {
 
         // 初始化 Modal sandbox
         me.init_sandbox().await?;
-        
+
         // 初始化会话快照
         me.init_session().await?;
 
@@ -83,7 +83,7 @@ impl ModalEnvironment {
         // 从统一配置文件读取
         let config = crate::llm::config::load_config_file()
             .map_err(|e| ExecutionError::ModalError(format!("Failed to load config: {}", e)))?;
-        
+
         // 检查配置文件或环境变量
         if config.modal_token_id().is_none() || config.modal_token_secret().is_none() {
             return Err(ExecutionError::ModalError(
@@ -126,7 +126,7 @@ impl ModalEnvironment {
 
         // 实际实现应该调用 Modal API 创建快照
         tracing::info!("Creating Modal snapshot for sandbox {:?}", self._sandbox_id);
-        
+
         // 模拟快照 ID
         Ok(Some(format!("snap-{}", self.session_id)))
     }
@@ -183,11 +183,11 @@ impl BaseEnvironment for ModalEnvironment {
     }
 
     fn stdin_mode(&self) -> &'static str {
-        "heredoc"  // Modal 使用 heredoc 模式
+        "heredoc" // Modal 使用 heredoc 模式
     }
 
     fn snapshot_timeout_secs(&self) -> u64 {
-        60  // Modal 冷启动较慢
+        60 // Modal 冷启动较慢
     }
 
     async fn run_bash(
@@ -198,7 +198,7 @@ impl BaseEnvironment for ModalEnvironment {
         _stdin_data: Option<&str>,
     ) -> Result<Box<dyn ProcessHandle>, ExecutionError> {
         Err(ExecutionError::NotAvailable(
-            "ModalEnvironment uses execute_direct".to_string()
+            "ModalEnvironment uses execute_direct".to_string(),
         ))
     }
 
@@ -226,7 +226,7 @@ impl BaseEnvironment for ModalEnvironment {
 
         // 在 Modal sandbox 中执行
         let (output, returncode) = self.execute_in_sandbox(&wrapped, effective_timeout).await?;
-        
+
         let mut result = ExecResult { output, returncode };
 
         // 更新 CWD
@@ -258,12 +258,22 @@ pub struct ModalProcessHandle;
 
 #[async_trait]
 impl ProcessHandle for ModalProcessHandle {
-    fn poll(&self) -> Option<i32> { None }
+    fn poll(&self) -> Option<i32> {
+        None
+    }
     fn kill(&self) {}
-    async fn wait(&self) -> i32 { -1 }
-    fn stdout(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> { None }
-    fn stderr(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> { None }
-    fn returncode(&self) -> Option<i32> { None }
+    async fn wait(&self) -> i32 {
+        -1
+    }
+    fn stdout(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> {
+        None
+    }
+    fn stderr(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> {
+        None
+    }
+    fn returncode(&self) -> Option<i32> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -281,9 +291,9 @@ mod tests {
     async fn test_modal_check_config() {
         // 此测试验证配置检查逻辑
         // 实际行为取决于配置文件和环境变量
-        
+
         let result = ModalEnvironment::check_modal_config().await;
-        
+
         // 如果配置存在则通过，否则失败 - 两种都是有效行为
         match result {
             Ok(()) => println!("Modal is configured"),
@@ -294,8 +304,8 @@ mod tests {
     #[tokio::test]
     async fn test_modal_environment_creation() {
         // 此测试需要 Modal 凭证，如果没有则跳过
-        if std::env::var("MODAL_TOKEN_ID").is_err() || 
-           std::env::var("MODAL_TOKEN_SECRET").is_err() {
+        if std::env::var("MODAL_TOKEN_ID").is_err() || std::env::var("MODAL_TOKEN_SECRET").is_err()
+        {
             println!("Modal credentials not available, skipping test");
             return;
         }
@@ -308,7 +318,8 @@ mod tests {
             None,
             false,
             "test-task".to_string(),
-        ).await;
+        )
+        .await;
 
         // 由于我们没有真正的 Modal SDK 集成，这里预期会失败或创建模拟环境
         match result {
@@ -318,7 +329,10 @@ mod tests {
                 assert!(env._sandbox_id.is_some());
             }
             Err(e) => {
-                println!("Modal environment creation failed (expected without real SDK): {}", e);
+                println!(
+                    "Modal environment creation failed (expected without real SDK): {}",
+                    e
+                );
             }
         }
     }

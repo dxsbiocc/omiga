@@ -52,10 +52,7 @@ impl super::ToolImpl for NotebookEditTool {
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
         let path = resolve_path(&ctx.project_root, &args.notebook_path)?;
 
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if !ext.eq_ignore_ascii_case("ipynb") {
             return Err(ToolError::InvalidArguments {
                 message: "File must be a Jupyter notebook (.ipynb). For other files use file_edit or file_write."
@@ -72,22 +69,18 @@ impl super::ToolImpl for NotebookEditTool {
 
         let meta = tokio::fs::metadata(&path).await.map_err(FsError::from)?;
         if !meta.is_file() {
-            return Err(
-                FsError::InvalidPath {
-                    path: args.notebook_path.clone(),
-                }
-                .into(),
-            );
+            return Err(FsError::InvalidPath {
+                path: args.notebook_path.clone(),
+            }
+            .into());
         }
         if meta.len() > MAX_FILE_BYTES {
-            return Err(
-                FsError::FileTooLarge {
-                    path: args.notebook_path.clone(),
-                    size: meta.len(),
-                    max: MAX_FILE_BYTES,
-                }
-                .into(),
-            );
+            return Err(FsError::FileTooLarge {
+                path: args.notebook_path.clone(),
+                size: meta.len(),
+                max: MAX_FILE_BYTES,
+            }
+            .into());
         }
 
         let raw = tokio::fs::read(&path).await.map_err(FsError::from)?;
@@ -172,11 +165,8 @@ impl super::ToolImpl for NotebookEditTool {
                 } else {
                     None
                 };
-                let new_cell = build_new_cell(
-                    cell_type_opt.as_deref().unwrap(),
-                    &args.new_source,
-                    id,
-                )?;
+                let new_cell =
+                    build_new_cell(cell_type_opt.as_deref().unwrap(), &args.new_source, id)?;
                 if cell_index > cells.len() {
                     return Err(ToolError::InvalidArguments {
                         message: format!(
@@ -241,9 +231,11 @@ impl super::ToolImpl for NotebookEditTool {
             .map_err(|e| FsError::IoError {
                 message: format!("Failed to write temp file: {}", e),
             })?;
-        tokio::fs::rename(&temp_path, &path).await.map_err(|e| FsError::IoError {
-            message: format!("Failed to rename temp file: {}", e),
-        })?;
+        tokio::fs::rename(&temp_path, &path)
+            .await
+            .map_err(|e| FsError::IoError {
+                message: format!("Failed to rename temp file: {}", e),
+            })?;
 
         let report_cell_id = new_cell_id_report
             .as_deref()
@@ -256,13 +248,11 @@ impl super::ToolImpl for NotebookEditTool {
             report_cell_id,
         );
 
-        Ok(
-            NotebookEditOutput {
-                notebook_path: args.notebook_path,
-                summary,
-            }
-            .into_stream(),
-        )
+        Ok(NotebookEditOutput {
+            notebook_path: args.notebook_path,
+            summary,
+        }
+        .into_stream())
     }
 }
 
@@ -310,7 +300,10 @@ fn validate_cell_type(s: &str) -> Result<(), ToolError> {
 
 fn should_generate_cell_ids(nb: &Value) -> bool {
     let major = nb.get("nbformat").and_then(|v| v.as_u64()).unwrap_or(0);
-    let minor = nb.get("nbformat_minor").and_then(|v| v.as_u64()).unwrap_or(0);
+    let minor = nb
+        .get("nbformat_minor")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     major > 4 || (major == 4 && minor >= 5)
 }
 
@@ -323,11 +316,7 @@ fn random_cell_id() -> String {
         .collect()
 }
 
-fn build_new_cell(
-    cell_type: &str,
-    source: &str,
-    id: Option<String>,
-) -> Result<Value, ToolError> {
+fn build_new_cell(cell_type: &str, source: &str, id: Option<String>) -> Result<Value, ToolError> {
     let mut m = serde_json::Map::new();
     m.insert(
         "cell_type".to_string(),
@@ -395,9 +384,12 @@ fn compute_cell_index(
             Ok(base + 1)
         }
         "replace" | "delete" => {
-            let cid = args.cell_id.as_ref().ok_or_else(|| ToolError::InvalidArguments {
-                message: "cell_id is required for replace and delete.".to_string(),
-            })?;
+            let cid = args
+                .cell_id
+                .as_ref()
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    message: "cell_id is required for replace and delete.".to_string(),
+                })?;
             find_cell_index(cells, cid).ok_or_else(|| ToolError::InvalidArguments {
                 message: format!("Cell with ID \"{}\" not found in notebook.", cid),
             })
@@ -430,14 +422,12 @@ impl StreamOutput for NotebookEditOutput {
     }
 }
 
-fn resolve_path(
-    project_root: &std::path::Path,
-    path: &str,
-) -> Result<std::path::PathBuf, FsError> {
+fn resolve_path(project_root: &std::path::Path, path: &str) -> Result<std::path::PathBuf, FsError> {
     let path_buf = if path.starts_with('/') || path.starts_with("~/") {
         if path.starts_with("~/") {
-            let home = std::env::var("HOME")
-                .map_err(|_| FsError::InvalidPath { path: path.to_string() })?;
+            let home = std::env::var("HOME").map_err(|_| FsError::InvalidPath {
+                path: path.to_string(),
+            })?;
             std::path::PathBuf::from(path.replacen("~", &home, 1))
         } else {
             std::path::PathBuf::from(path)

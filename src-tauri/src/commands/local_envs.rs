@@ -53,7 +53,10 @@ async fn list_conda() -> Vec<LocalVenvInfo> {
 // ─── pyenv ────────────────────────────────────────────────────────────────────
 
 async fn list_pyenv() -> Vec<LocalVenvInfo> {
-    let out = Command::new("pyenv").args(["versions", "--bare"]).output().await;
+    let out = Command::new("pyenv")
+        .args(["versions", "--bare"])
+        .output()
+        .await;
     let Ok(out) = out else { return vec![] };
     if !out.status.success() {
         return vec![];

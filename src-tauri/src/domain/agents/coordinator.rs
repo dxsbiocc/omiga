@@ -10,12 +10,8 @@ use std::collections::HashSet;
 use crate::domain::tools::ToolSchema;
 
 /// Tool names exposed to the model in coordinator mode (must match `ToolSchema::name` from each tool's `schema()`).
-pub const COORDINATOR_ALLOWED_TOOL_NAMES: &[&str] = &[
-    "Agent",
-    "TaskStop",
-    "SendUserMessage",
-    "TaskOutput",
-];
+pub const COORDINATOR_ALLOWED_TOOL_NAMES: &[&str] =
+    &["Agent", "TaskStop", "SendUserMessage", "TaskOutput"];
 
 /// `OMIGA_COORDINATOR_MODE` takes precedence when set; otherwise `CLAUDE_CODE_COORDINATOR_MODE` is read.
 /// Truthy: `1`, `true`, `yes`, `on` (ASCII case-insensitive). Any other non-empty value is false.

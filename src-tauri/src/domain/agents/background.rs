@@ -159,7 +159,9 @@ impl BackgroundAgentManager {
                 BackgroundAgentStatus::Running => {
                     task.started_at = Some(unix_timestamp_secs());
                 }
-                BackgroundAgentStatus::Completed | BackgroundAgentStatus::Failed | BackgroundAgentStatus::Cancelled => {
+                BackgroundAgentStatus::Completed
+                | BackgroundAgentStatus::Failed
+                | BackgroundAgentStatus::Cancelled => {
                     task.completed_at = Some(unix_timestamp_secs());
                 }
                 _ => {}
@@ -268,7 +270,9 @@ impl BackgroundAgentManager {
         let to_remove: Vec<String> = tasks
             .iter()
             .filter(|(_, task)| {
-                task.completed_at.map(|t| now.saturating_sub(t) > max_age_secs).unwrap_or(false)
+                task.completed_at
+                    .map(|t| now.saturating_sub(t) > max_age_secs)
+                    .unwrap_or(false)
             })
             .map(|(id, _)| id.clone())
             .collect();

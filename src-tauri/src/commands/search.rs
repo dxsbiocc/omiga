@@ -35,12 +35,11 @@ pub async fn grep_files(
     let root = project_root.clone();
     let pp = path_pattern.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
-        run_grep(&root, &pattern, pp.as_deref(), ci, max)
-    })
-    .await
-    .map_err(|e| AppError::Unknown(format!("grep task error: {}", e)))?
-    .map_err(|e| AppError::Unknown(e))?;
+    let result =
+        tokio::task::spawn_blocking(move || run_grep(&root, &pattern, pp.as_deref(), ci, max))
+            .await
+            .map_err(|e| AppError::Unknown(format!("grep task error: {}", e)))?
+            .map_err(|e| AppError::Unknown(e))?;
 
     Ok(result)
 }
@@ -152,12 +151,9 @@ fn run_grep(
 fn should_skip(path: &Path) -> bool {
     // 跳过明显的二进制扩展名
     const BINARY_EXTS: &[&str] = &[
-        "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg",
-        "pdf", "zip", "tar", "gz", "bz2", "xz", "7z", "rar",
-        "exe", "dll", "so", "dylib", "a", "lib",
-        "wasm", "bin", "dat",
-        "ttf", "otf", "woff", "woff2",
-        "mp3", "mp4", "avi", "mov", "mkv",
+        "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg", "pdf", "zip", "tar", "gz", "bz2",
+        "xz", "7z", "rar", "exe", "dll", "so", "dylib", "a", "lib", "wasm", "bin", "dat", "ttf",
+        "otf", "woff", "woff2", "mp3", "mp4", "avi", "mov", "mkv",
     ];
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         if BINARY_EXTS.contains(&ext.to_ascii_lowercase().as_str()) {
@@ -186,12 +182,11 @@ pub async fn glob_files(
     let max = max_results.unwrap_or(DEFAULT_MAX_GLOB).min(10_000).max(1);
     let hidden = include_hidden.unwrap_or(false);
 
-    let result = tokio::task::spawn_blocking(move || {
-        run_glob(&project_root, &pattern, max, hidden)
-    })
-    .await
-    .map_err(|e| AppError::Unknown(format!("glob task error: {}", e)))?
-    .map_err(|e| AppError::Unknown(e))?;
+    let result =
+        tokio::task::spawn_blocking(move || run_glob(&project_root, &pattern, max, hidden))
+            .await
+            .map_err(|e| AppError::Unknown(format!("glob task error: {}", e)))?
+            .map_err(|e| AppError::Unknown(e))?;
 
     Ok(result)
 }

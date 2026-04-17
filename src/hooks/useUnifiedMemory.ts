@@ -17,6 +17,8 @@ export interface MemoryConfig {
   root_dir: string;
   wiki_dir: string;
   implicit_dir: string;
+  /** Absolute path where raw original files are kept. Defaults to ~/.omiga/memory/raw. */
+  raw_dir: string;
   /** `user_home` (default, ~/.omiga/memory/projects/...) or `project_relative` */
   memory_mode: string;
   auto_build_index: boolean;
@@ -44,6 +46,8 @@ export interface MemoryPaths {
   implicit: string;
   /** ~/.omiga/memory/permanent/wiki */
   permanent_wiki: string;
+  /** ~/.omiga/memory/raw (configurable) */
+  raw: string;
 }
 
 export interface UnifiedMemoryStatus {
@@ -60,6 +64,8 @@ export interface SetMemoryConfigRequest {
   root_dir?: string;
   wiki_dir?: string;
   implicit_dir?: string;
+  /** Absolute path for raw file storage. Pass empty string to reset to default. */
+  raw_dir?: string;
   memory_mode?: "user_home" | "project_relative";
   auto_build_index?: boolean;
   index_extensions?: string[];

@@ -10,7 +10,9 @@
 
 use super::CommandResult;
 use crate::app_state::OmigaAppState;
-use crate::commands::fs::{DirectoryEntry, DirectoryListResponse, FileReadResponse, FileWriteResponse};
+use crate::commands::fs::{
+    DirectoryEntry, DirectoryListResponse, FileReadResponse, FileWriteResponse,
+};
 use crate::domain::tools::{env_store::EnvStore, ToolContext};
 use crate::errors::{AppError, FsError};
 use crate::execution::ExecOptions;
@@ -32,10 +34,14 @@ fn validate_sandbox_path(p: &str) -> Result<String, AppError> {
         return Ok("/workspace".to_string());
     }
     if t.contains('\n') || t.contains('\0') {
-        return Err(AppError::Fs(FsError::InvalidPath { path: p.to_string() }));
+        return Err(AppError::Fs(FsError::InvalidPath {
+            path: p.to_string(),
+        }));
     }
     if !t.starts_with('/') {
-        return Err(AppError::Fs(FsError::InvalidPath { path: p.to_string() }));
+        return Err(AppError::Fs(FsError::InvalidPath {
+            path: p.to_string(),
+        }));
     }
     let pb = Path::new(t);
     let mut out = PathBuf::new();
@@ -44,7 +50,9 @@ fn validate_sandbox_path(p: &str) -> Result<String, AppError> {
             Component::RootDir => out.push("/"),
             Component::Normal(x) => {
                 if x == ".." {
-                    return Err(AppError::Fs(FsError::PathTraversal { path: p.to_string() }));
+                    return Err(AppError::Fs(FsError::PathTraversal {
+                        path: p.to_string(),
+                    }));
                 }
                 out.push(x);
             }
@@ -106,7 +114,11 @@ find {q} -mindepth 1 -maxdepth 1 -printf '%P\t%y\t%s\t%T@\n' 2>/dev/null | LC_AL
     let env_arc = env_store
         .get_or_create(&ctx, SANDBOX_TIMEOUT_MS)
         .await
-        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+        .map_err(|e| {
+            AppError::Fs(FsError::IoError {
+                message: e.to_string(),
+            })
+        })?;
 
     let result = {
         let mut guard = env_arc.lock().await;
@@ -114,7 +126,11 @@ find {q} -mindepth 1 -maxdepth 1 -printf '%P\t%y\t%s\t%T@\n' 2>/dev/null | LC_AL
             .execute(&script, ExecOptions::with_timeout(SANDBOX_TIMEOUT_MS))
             .await
     }
-    .map_err(|e| AppError::Fs(FsError::IoError { message: format!("sandbox execute: {}", e) }))?;
+    .map_err(|e| {
+        AppError::Fs(FsError::IoError {
+            message: format!("sandbox execute: {}", e),
+        })
+    })?;
 
     if result.returncode != 0 {
         let msg = if result.output.contains("__OMIGA_ERR__not_a_dir") {
@@ -149,14 +165,24 @@ find {q} -mindepth 1 -maxdepth 1 -printf '%P\t%y\t%s\t%T@\n' 2>/dev/null | LC_AL
             continue;
         }
         let is_directory = kind == "d";
-        let size = if is_directory { None } else { size_s.parse::<u64>().ok() };
+        let size = if is_directory {
+            None
+        } else {
+            size_s.parse::<u64>().ok()
+        };
         let modified = parse_find_mtime(mtime_s);
         let full_path = if resolved_dir.ends_with('/') {
             format!("{}{}", resolved_dir, name)
         } else {
             format!("{}/{}", resolved_dir, name)
         };
-        entries.push(DirectoryEntry { name, path: full_path, is_directory, size, modified });
+        entries.push(DirectoryEntry {
+            name,
+            path: full_path,
+            is_directory,
+            size,
+            modified,
+        });
     }
 
     entries.sort_by(|a, b| match (a.is_directory, b.is_directory) {
@@ -166,7 +192,12 @@ find {q} -mindepth 1 -maxdepth 1 -printf '%P\t%y\t%s\t%T@\n' 2>/dev/null | LC_AL
     });
 
     let total = entries.len();
-    Ok(DirectoryListResponse { directory: resolved_dir, entries, total, has_more: false })
+    Ok(DirectoryListResponse {
+        directory: resolved_dir,
+        entries,
+        total,
+        has_more: false,
+    })
 }
 
 /// Read a text file inside the sandbox container (up to 2 MiB).
@@ -194,13 +225,23 @@ wc -c < {q}"#,
     let env_arc = env_store
         .get_or_create(&ctx, SANDBOX_TIMEOUT_MS)
         .await
-        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+        .map_err(|e| {
+            AppError::Fs(FsError::IoError {
+                message: e.to_string(),
+            })
+        })?;
 
     let size_result = {
         let mut guard = env_arc.lock().await;
-        guard.execute(&size_script, ExecOptions::with_timeout(30_000)).await
+        guard
+            .execute(&size_script, ExecOptions::with_timeout(30_000))
+            .await
     }
-    .map_err(|e| AppError::Fs(FsError::IoError { message: format!("sandbox execute: {}", e) }))?;
+    .map_err(|e| {
+        AppError::Fs(FsError::IoError {
+            message: format!("sandbox execute: {}", e),
+        })
+    })?;
 
     if size_result.returncode != 0 || size_result.output.contains("__OMIGA_ERR__") {
         return Err(AppError::Fs(FsError::InvalidPath { path: path.clone() }));
@@ -213,7 +254,11 @@ wc -c < {q}"#,
         .unwrap_or("")
         .trim()
         .parse()
-        .map_err(|_| AppError::Fs(FsError::IoError { message: "sandbox wc failed".to_string() }))?;
+        .map_err(|_| {
+            AppError::Fs(FsError::IoError {
+                message: "sandbox wc failed".to_string(),
+            })
+        })?;
 
     if nbytes > MAX_READ_BYTES {
         return Err(AppError::Fs(FsError::FileTooLarge {
@@ -229,7 +274,11 @@ wc -c < {q}"#,
             .execute(&format!("cat {}", q), ExecOptions::with_timeout(30_000))
             .await
     }
-    .map_err(|e| AppError::Fs(FsError::IoError { message: format!("sandbox execute: {}", e) }))?;
+    .map_err(|e| {
+        AppError::Fs(FsError::IoError {
+            message: format!("sandbox execute: {}", e),
+        })
+    })?;
 
     let full = cat_result.output;
     let lines: Vec<&str> = full.lines().collect();
@@ -241,7 +290,11 @@ wc -c < {q}"#,
     let returned = slice.len();
     let has_more = off + returned < total_lines;
 
-    Ok(FileReadResponse { content, total_lines, has_more })
+    Ok(FileReadResponse {
+        content,
+        total_lines,
+        has_more,
+    })
 }
 
 /// Write a file inside the sandbox container.
@@ -268,14 +321,25 @@ pub async fn sandbox_write_file(
     let env_arc = env_store
         .get_or_create(&ctx, SANDBOX_TIMEOUT_MS)
         .await
-        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+        .map_err(|e| {
+            AppError::Fs(FsError::IoError {
+                message: e.to_string(),
+            })
+        })?;
 
     {
         let mut guard = env_arc.lock().await;
         guard
-            .execute(&format!("mkdir -p {}", sh_quote(&parent)), ExecOptions::with_timeout(10_000))
+            .execute(
+                &format!("mkdir -p {}", sh_quote(&parent)),
+                ExecOptions::with_timeout(10_000),
+            )
             .await
-            .map_err(|e| AppError::Fs(FsError::IoError { message: format!("mkdir: {}", e) }))?;
+            .map_err(|e| {
+                AppError::Fs(FsError::IoError {
+                    message: format!("mkdir: {}", e),
+                })
+            })?;
     }
 
     let bytes = content.len();
@@ -292,7 +356,11 @@ pub async fn sandbox_write_file(
             )
             .await
     }
-    .map_err(|e| AppError::Fs(FsError::IoError { message: format!("sandbox write: {}", e) }))?;
+    .map_err(|e| {
+        AppError::Fs(FsError::IoError {
+            message: format!("sandbox write: {}", e),
+        })
+    })?;
 
     if write_result.returncode != 0 {
         return Err(AppError::Fs(FsError::IoError {
@@ -300,5 +368,8 @@ pub async fn sandbox_write_file(
         }));
     }
 
-    Ok(FileWriteResponse { bytes_written: bytes, new_hash: String::new() })
+    Ok(FileWriteResponse {
+        bytes_written: bytes,
+        new_hash: String::new(),
+    })
 }

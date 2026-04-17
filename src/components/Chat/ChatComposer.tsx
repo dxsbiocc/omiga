@@ -1,9 +1,11 @@
 import {
+  memo,
   useEffect,
   useState,
   useMemo,
   useRef,
   useCallback,
+  useImperativeHandle,
   createElement,
   type Ref,
   type MutableRefObject,
@@ -330,16 +332,24 @@ function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
   else (ref as MutableRefObject<T | null>).current = value;
 }
 
+export interface ChatComposerRef {
+  getValue: () => string;
+  setValue: (value: string) => void;
+  focus: () => void;
+}
+
 export interface ChatComposerProps {
   sessionId: string | null;
   /** Absolute workspace path when set */
   workspacePath: string;
   needsWorkspacePath: boolean;
   onPickWorkspace: () => void;
-  input: string;
-  onInputChange: (v: string) => void;
+  /** Optional controlled initial value; use composerRef for programmatic updates. */
+  input?: string;
+  onInputChange?: (v: string) => void;
   onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
-  inputRef: React.Ref<HTMLTextAreaElement>;
+  inputRef?: React.Ref<HTMLTextAreaElement>;
+  composerRef?: React.Ref<ChatComposerRef>;
   isStreaming: boolean;
   isConnecting: boolean;
   /** True while waiting for first model chunk (show cancel with connecting/streaming). */
@@ -373,15 +383,16 @@ export interface ChatComposerProps {
   askUserQuestion?: ChatComposerAskUserQuestion | null;
 }
 
-export function ChatComposer({
+export const ChatComposer = memo(function ChatComposer({
   sessionId,
   workspacePath,
   needsWorkspacePath,
   onPickWorkspace,
-  input,
+  input: initialInput,
   onInputChange,
   onKeyDown,
   inputRef,
+  composerRef,
   isStreaming,
   isConnecting,
   waitingFirstChunk = false,
@@ -399,6 +410,25 @@ export function ChatComposer({
   onOpenBackgroundTranscript,
   askUserQuestion = null,
 }: ChatComposerProps) {
+  const [input, setInput] = useState(initialInput ?? "");
+  const inputValueRef = useRef(input);
+  inputValueRef.current = input;
+  const setInputValue = useCallback(
+    (v: string) => {
+      setInput(v);
+      onInputChange?.(v);
+    },
+    [onInputChange],
+  );
+  useImperativeHandle(
+    composerRef,
+    () => ({
+      getValue: () => inputValueRef.current,
+      setValue: (v: string) => setInputValue(v),
+      focus: () => textareaRef.current?.focus(),
+    }),
+    [setInputValue],
+  );
   const theme = useTheme();
   const pen = usePencilPalette();
   const accent = theme.palette.primary.main;
@@ -900,9 +930,9 @@ export function ChatComposer({
   const pickAtAgent = useCallback(
     (agentType: string) => {
       setComposerAgentType(agentType);
-      onInputChange("");
+      setInputValue("");
     },
-    [setComposerAgentType, onInputChange],
+    [setComposerAgentType, setInputValue],
   );
 
   const pickFilePath = useCallback(
@@ -910,9 +940,9 @@ export function ChatComposer({
       const safe = normalizeFsPath(relPath).replace(/^\//u, "");
       if (!safe) return;
       addComposerAttachedPath(safe);
-      onInputChange("");
+      setInputValue("");
     },
-    [addComposerAttachedPath, onInputChange],
+    [addComposerAttachedPath, setInputValue],
   );
 
   const mergedTextareaRef = useCallback(
@@ -974,7 +1004,7 @@ export function ChatComposer({
       }
       if (fileParse.active) {
         if (e.key === "Escape") {
-          onInputChange("");
+          setInputValue("");
           e.preventDefault();
           return;
         }
@@ -1016,7 +1046,7 @@ export function ChatComposer({
       }
       if (slashParse.active) {
         if (e.key === "Escape") {
-          onInputChange("");
+          setInputValue("");
           e.preventDefault();
           return;
         }
@@ -1067,7 +1097,7 @@ export function ChatComposer({
       filteredFilePaths,
       fileGlobLoading,
       input,
-      onInputChange,
+      setInputValue,
       onKeyDown,
       pickAtAgent,
       pickFilePath,
@@ -1656,7 +1686,7 @@ export function ChatComposer({
             component="textarea"
             ref={mergedTextareaRef}
             value={input}
-            onChange={(e) => onInputChange(e.target.value)}
+            onChange={(e) => setInputValue(e.target.value)}
             onFocus={() => {
               if (slashParse.active) setSlashPickerDismissed(false);
               if (fileParse.active) setFilePickerDismissed(false);
@@ -3082,4 +3112,4 @@ export function ChatComposer({
       </Stack>
     </Stack>
   );
-}
+});

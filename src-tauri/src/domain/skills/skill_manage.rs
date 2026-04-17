@@ -9,8 +9,10 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::{
-    find_skill_entry, fuzzy_match::fuzzy_find_and_replace, invalidate_skill_cache,
-    load_skills_for_project, normalize_skill_name, parse_frontmatter, resolve_skill_entry,
+    find_skill_entry,
+    fuzzy_match::fuzzy_find_and_replace,
+    invalidate_skill_cache, load_skills_for_project, normalize_skill_name, parse_frontmatter,
+    resolve_skill_entry,
     skill_guard::{check_content, scan_content},
     SkillCacheMap, SkillEntry, SkillSource,
 };
@@ -31,10 +33,7 @@ async fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
         .ok_or_else(|| format!("atomic_write: no parent directory for {}", path.display()))?;
 
     // Unique temp name inside the same directory so rename stays on-device.
-    let tmp = dir.join(format!(
-        ".tmp.{}.write",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let tmp = dir.join(format!(".tmp.{}.write", uuid::Uuid::new_v4().simple()));
 
     tokio::fs::write(&tmp, content)
         .await
@@ -108,11 +107,7 @@ fn sanitize_skill_dir_name(raw: &str) -> Result<String, String> {
         return Err("skill_manage: `name` exceeds 64 characters".to_string());
     }
     for ch in n.chars() {
-        if ch.is_ascii_lowercase()
-            || ch.is_ascii_digit()
-            || ch == '_'
-            || ch == '-'
-        {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-' {
             continue;
         }
         return Err(format!(
@@ -182,9 +177,7 @@ pub async fn execute_skill_manage(
     let dir_key = sanitize_skill_dir_name(&args.name)?;
     let category_seg = sanitize_category_segment(&args.category)?;
     if category_seg.is_some() && !matches!(args.action, Action::Create) {
-        return Err(
-            "skill_manage: `category` is only valid for action `create`".to_string(),
-        );
+        return Err("skill_manage: `category` is only valid for action `create`".to_string());
     }
     let skills = load_skills_for_project(project_root).await;
 
@@ -263,9 +256,13 @@ pub async fn execute_skill_manage(
             }
             let entry = resolve_project_skill_entry(project_root, &skills, &args.name).await?;
 
-            let rel = args.file_path.as_deref().map(str::trim).filter(|s| !s.is_empty());
-            let is_skill_md = rel.is_none()
-                || rel.is_some_and(|r| r.eq_ignore_ascii_case("SKILL.md"));
+            let rel = args
+                .file_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let is_skill_md =
+                rel.is_none() || rel.is_some_and(|r| r.eq_ignore_ascii_case("SKILL.md"));
 
             let path = if is_skill_md {
                 entry.skill_dir.join("SKILL.md")
@@ -387,12 +384,12 @@ pub async fn execute_skill_manage(
             }
         }
         Action::WriteFile => {
-            let rel = args
-                .file_path
-                .ok_or_else(|| "skill_manage: `file_path` is required for write_file".to_string())?;
-            let fc = args
-                .file_content
-                .ok_or_else(|| "skill_manage: `file_content` is required for write_file".to_string())?;
+            let rel = args.file_path.ok_or_else(|| {
+                "skill_manage: `file_path` is required for write_file".to_string()
+            })?;
+            let fc = args.file_content.ok_or_else(|| {
+                "skill_manage: `file_content` is required for write_file".to_string()
+            })?;
             if fc.len() > MAX_AUX_FILE_BYTES {
                 return Err("skill_manage: file_content exceeds size limit".to_string());
             }
@@ -425,9 +422,9 @@ pub async fn execute_skill_manage(
             }
         }
         Action::RemoveFile => {
-            let rel = args
-                .file_path
-                .ok_or_else(|| "skill_manage: `file_path` is required for remove_file".to_string())?;
+            let rel = args.file_path.ok_or_else(|| {
+                "skill_manage: `file_path` is required for remove_file".to_string()
+            })?;
             if rel.trim().eq_ignore_ascii_case("SKILL.md") {
                 return Err("skill_manage: refusing to remove SKILL.md — use `delete` to remove the whole skill".to_string());
             }

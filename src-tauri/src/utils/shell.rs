@@ -28,7 +28,10 @@ mod tests {
 
     #[test]
     fn path_with_spaces_is_safe() {
-        assert_eq!(shell_single_quote("/home/user/my dir"), "'/home/user/my dir'");
+        assert_eq!(
+            shell_single_quote("/home/user/my dir"),
+            "'/home/user/my dir'"
+        );
     }
 
     #[test]

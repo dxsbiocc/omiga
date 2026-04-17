@@ -133,22 +133,22 @@ pub async fn read_resource_result_to_ts_json(
                         message: format!("Invalid base64 in MCP blob for {uri}: {e}"),
                     })?;
 
-                match persist_binary_content(&decoded, mime_str, &persist_id, tool_results_dir).await
+                match persist_binary_content(&decoded, mime_str, &persist_id, tool_results_dir)
+                    .await
                 {
                     Ok(filepath) => {
                         let source = format!("[Resource from {server} at {uri}] ");
-                        let text = binary_blob_saved_message(
-                            &filepath,
-                            mime_str,
-                            decoded.len(),
-                            &source,
-                        );
+                        let text =
+                            binary_blob_saved_message(&filepath, mime_str, decoded.len(), &source);
                         let mut o = serde_json::Map::new();
                         o.insert("uri".to_string(), json!(uri));
                         if let Some(mt) = mime_type {
                             o.insert("mimeType".to_string(), json!(mt));
                         }
-                        o.insert("blobSavedTo".to_string(), json!(filepath.display().to_string()));
+                        o.insert(
+                            "blobSavedTo".to_string(),
+                            json!(filepath.display().to_string()),
+                        );
                         o.insert("text".to_string(), json!(text));
                         serde_json::Value::Object(o)
                     }
@@ -180,9 +180,15 @@ mod tests {
     #[test]
     fn extension_for_mime_type_matches_ts_table() {
         assert_eq!(extension_for_mime_type(Some("application/pdf")), "pdf");
-        assert_eq!(extension_for_mime_type(Some("text/plain; charset=utf-8")), "txt");
+        assert_eq!(
+            extension_for_mime_type(Some("text/plain; charset=utf-8")),
+            "txt"
+        );
         assert_eq!(extension_for_mime_type(Some("IMAGE/PNG")), "png");
         assert_eq!(extension_for_mime_type(None), "bin");
-        assert_eq!(extension_for_mime_type(Some("application/octet-stream")), "bin");
+        assert_eq!(
+            extension_for_mime_type(Some("application/octet-stream")),
+            "bin"
+        );
     }
 }

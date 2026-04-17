@@ -1,9 +1,9 @@
 //! Session codec tests
 
 use chrono::Utc;
-use omiga_lib::domain::session::{Message, ToolCall, SessionCodec};
-use omiga_lib::domain::persistence::MessageRecord;
 use omiga_lib::api::Role;
+use omiga_lib::domain::persistence::MessageRecord;
+use omiga_lib::domain::session::{Message, SessionCodec, ToolCall};
 
 #[test]
 fn test_user_message_roundtrip() {
@@ -170,7 +170,10 @@ fn test_record_to_message_tool() {
 
     let msg = SessionCodec::record_to_message(record);
     match msg {
-        Message::Tool { tool_call_id, output } => {
+        Message::Tool {
+            tool_call_id,
+            output,
+        } => {
             assert_eq!(tool_call_id, "call-1");
             assert!(output.contains("total 32"));
         }
@@ -180,11 +183,9 @@ fn test_record_to_message_tool() {
 
 #[test]
 fn test_to_api_messages_user_only() {
-    let messages = vec![
-        Message::User {
-            content: "Hello".to_string(),
-        },
-    ];
+    let messages = vec![Message::User {
+        content: "Hello".to_string(),
+    }];
 
     let api_messages = SessionCodec::to_api_messages(&messages);
     assert_eq!(api_messages.len(), 1);

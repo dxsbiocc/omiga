@@ -2,7 +2,7 @@
  * 当前文件夹扁平列表（非树形）：TanStack Table + MUI Table；
  * 路径导航：MUI Breadcrumbs；类型图标按扩展名区分。
  */
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Box,
@@ -258,6 +258,7 @@ export function FileTree() {
   const currentSession = useSessionStore((s) => s.currentSession);
   const sessionId = currentSession?.id;
   const projectPath = (currentSession?.projectPath ?? ".").trim() || ".";
+  const composerConfigSessionId = useChatComposerStore((s) => s.activeSessionId);
   const environment = useChatComposerStore((s) => s.environment);
   const sshServer = useChatComposerStore((s) => s.sshServer);
   const sandboxBackend = useChatComposerStore((s) => s.sandboxBackend);
@@ -269,9 +270,21 @@ export function FileTree() {
   const [loadingMessage, setLoadingMessage] = useState<string>("加载文件夹…");
   const [error, setError] = useState<string | null>(null);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+  // Session switches briefly reuse the previous session's execution-environment
+  // config until the new session config hydrates. That can trigger overlapping
+  // directory loads where an older request fails after a newer one succeeds.
+  // Sequence every load so stale responses never overwrite the latest state.
+  const directoryLoadSeq = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      directoryLoadSeq.current += 1;
+    };
+  }, []);
 
   const loadDirectory = useCallback(
     async (path: string) => {
+      const requestSeq = ++directoryLoadSeq.current;
       if (!sessionId) {
         setFiles([]);
         setSessionRoot(null);
@@ -319,14 +332,17 @@ export function FileTree() {
         } else {
           result = await invoke("list_directory", { path });
         }
+        if (requestSeq !== directoryLoadSeq.current) return;
         const parsed = parseListResult(result);
         setFiles(parsed.files);
         setCurrentDir(parsed.directory);
         setSessionRoot((prev) => prev ?? parsed.directory);
         setRowSelection({});
       } catch (err) {
+        if (requestSeq !== directoryLoadSeq.current) return;
         setError(`无法加载目录: ${extractErrorMessage(err)}`);
       } finally {
+        if (requestSeq !== directoryLoadSeq.current) return;
         setIsLoading(false);
       }
     },
@@ -342,10 +358,18 @@ export function FileTree() {
       setRowSelection({});
       return;
     }
+    if (composerConfigSessionId !== sessionId) {
+      setSessionRoot(null);
+      setCurrentDir(null);
+      setError(null);
+      setIsLoading(true);
+      setLoadingMessage("加载会话配置…");
+      return;
+    }
     setSessionRoot(null);
     setCurrentDir(null);
     void loadDirectory(projectPath);
-  }, [sessionId, projectPath, loadDirectory]);
+  }, [sessionId, projectPath, composerConfigSessionId, loadDirectory]);
 
   const [pendingOpen, setPendingOpen] = useState<string | null>(null);
   

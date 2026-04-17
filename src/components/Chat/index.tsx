@@ -1,6 +1,8 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, startTransition } from "react";
 import { flushSync } from "react-dom";
 import type { CSSProperties } from "react";
+import type { Components } from "react-markdown";
+import type { Theme } from "@mui/material/styles";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -59,6 +61,9 @@ import {
 } from "react-syntax-highlighter/dist/esm/styles/prism";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import {
   useSessionStore,
   useActivityStore,
@@ -74,16 +79,18 @@ import {
 } from "../../state";
 import { Terminal } from "../Terminal";
 import { OmigaLogo } from "../OmigaLogo";
-import { ChatComposer } from "./ChatComposer";
+import { ChatComposer, type ChatComposerRef } from "./ChatComposer";
 import type { AskUserQuestionItem } from "./AskUserQuestionWizard";
 import { getChatTokens } from "./chatTokens";
 import type { BackgroundAgentTask } from "./backgroundAgentTypes";
+import { OmigaVizRenderer } from "./viz/OmigaVizRenderer";
 import {
   canSendFollowUpToTask,
   shortBgTaskLabel,
 } from "./backgroundAgentTypes";
 import { BackgroundAgentTranscriptDrawer } from "./BackgroundAgentTranscriptDrawer";
 import { AgentSessionStatus } from "./AgentSessionStatus";
+import { SshDirectoryTreeDialog } from "./SshDirectoryTreeDialog";
 import { formatToolDisplayName } from "../../utils/executionSurfaceLabel";
 import { parseNextStepSuggestionsFromMarkdown } from "../../utils/parseAssistantNextSteps";
 
@@ -259,6 +266,7 @@ interface StreamOutputItem {
     | "cancelled"
     | "turn_summary"
     | "follow_up_suggestions"
+    | "suggestions_generating"
     | "token_usage"
     | "complete";
   data?: unknown;
@@ -322,6 +330,7 @@ function toolRowIcon(toolName: string) {
   if (n.includes("notebook_edit") || n.includes("notebookedit"))
     return MenuBookIcon;
   if (n === "skill" || n === "skilltool") return MenuBookIcon;
+  if (n === "recall") return SearchIcon;
   if (n.includes("web_search") || n.includes("websearch"))
     return TravelExploreIcon;
   if (n.includes("web_fetch") || n.includes("fetch")) return LinkIcon;
@@ -402,6 +411,7 @@ function humanizeToolStepTitle(name: string, args?: string): string {
   }
   if (n.includes("todo_write") || n.includes("todowrite"))
     return "更新任务清单";
+  if (n === "recall") return "检索知识库";
   if (n.includes("web_search")) return "网络搜索";
   if (n.includes("web_fetch") || n.includes("fetch")) return "获取网页";
   if (n.includes("glob")) return "搜索文件";
@@ -957,14 +967,468 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
   );
 }
 
+/** How close to the bottom (px) before auto-scroll kicks in */
+const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 100;
+
+function buildMarkdownComponents(
+  isAgent: boolean,
+  theme: Theme,
+  CHAT: ReturnType<typeof getChatTokens>,
+  onImageClick: (src: string, alt: string) => void,
+) {
+  const prismStyleRaw = theme.palette.mode === "dark" ? oneDark : oneLight;
+  const prismStyleFenced = prismStyleTransparentCodeSurface(
+    prismStyleRaw as Record<string, CSSProperties>,
+  );
+  return {
+  code({
+    className,
+    children,
+  }: {
+    className?: string;
+    children?: React.ReactNode;
+  }) {
+    const match = /language-(.+)/.exec(className || "");
+    const language = match ? match[1].trim() : "";
+    const isInline = !className?.includes("language-");
+
+    if (!isInline && language) {
+      const blockBody = String(children).replace(/\n$/, "");
+
+      if (language === "omiga:viz") {
+        let config: { type: string } | null = null;
+        try {
+          config = JSON.parse(blockBody);
+        } catch {
+          return (
+            <Alert severity="error" sx={{ my: 1 }}>
+              无效的可视化配置
+            </Alert>
+          );
+        }
+        if (!config) return null;
+        return <OmigaVizRenderer config={config} />;
+      }
+
+      const lang = language || "text";
+      const fencedScrollStyle = {
+        margin: 0,
+        borderRadius: 0,
+        background: "transparent",
+        whiteSpace: "pre" as const,
+        wordBreak: "normal" as const,
+        overflowWrap: "normal" as const,
+        minWidth: "min-content",
+      };
+      if (isAgent) {
+        return (
+          <Box sx={{ my: 1.25 }}>
+            <Typography
+              sx={{
+                fontSize: 10,
+                color: CHAT.labelMuted,
+                fontWeight: 400,
+                mb: 0.5,
+                display: "block",
+              }}
+            >
+              {lang}
+            </Typography>
+            <Box
+              sx={{
+                borderRadius: `${MD_BLOCK_RADIUS_PX}px`,
+                border: `1px solid ${CHAT.agentBubbleBorder}`,
+                bgcolor: CHAT.codeBg,
+                maxHeight: 320,
+                maxWidth: "100%",
+                overflow: "auto",
+                [`& ${PRISM_PRE_SEL}, & ${PRISM_CODE_SEL}`]: {
+                  background: "transparent !important",
+                  backgroundColor: "transparent !important",
+                },
+              }}
+            >
+              <SyntaxHighlighter
+                style={prismStyleFenced}
+                language={lang}
+                PreTag="div"
+                customStyle={{
+                  ...fencedScrollStyle,
+                  padding: "8px 12px",
+                  fontSize: 11,
+                  lineHeight: 1.45,
+                }}
+              >
+                {blockBody}
+              </SyntaxHighlighter>
+            </Box>
+          </Box>
+        );
+      }
+      return (
+        <Box
+          component="div"
+          sx={{
+            my: 1.5,
+            borderRadius: `${MD_BLOCK_RADIUS_PX}px`,
+            overflow: "hidden",
+            border: 1,
+            borderColor: alpha(theme.palette.divider, 0.5),
+          }}
+        >
+          <Box
+            sx={{
+              px: 2,
+              py: 0.5,
+              bgcolor: alpha(theme.palette.background.paper, 0.5),
+              borderBottom: 1,
+              borderColor: alpha(theme.palette.divider, 0.3),
+            }}
+          >
+            <Typography variant="caption" color="text.secondary">
+              {lang}
+            </Typography>
+          </Box>
+          <Box
+            sx={{
+              bgcolor: CHAT.codeBg,
+              maxHeight: 360,
+              maxWidth: "100%",
+              overflow: "auto",
+              [`& ${PRISM_PRE_SEL}, & ${PRISM_CODE_SEL}`]: {
+                background: "transparent !important",
+                backgroundColor: "transparent !important",
+              },
+            }}
+          >
+            <SyntaxHighlighter
+              style={prismStyleFenced}
+              language={lang}
+              PreTag="div"
+              customStyle={{
+                ...fencedScrollStyle,
+                padding: "12px 16px",
+                fontSize: "0.8125rem",
+                lineHeight: 1.6,
+              }}
+            >
+              {blockBody}
+            </SyntaxHighlighter>
+          </Box>
+        </Box>
+      );
+    }
+    const inlineRaw = String(children);
+    const longInline = inlineRaw.length > INLINE_CODE_LONG_LEN;
+    return (
+      <Box
+        component="code"
+        className={className}
+        sx={{
+          fontFamily: "Menlo, Monaco, Consolas, monospace",
+          fontSize: isAgent ? 12 : "0.875em",
+          lineHeight: 1.45,
+          background: "transparent",
+          ...(longInline
+            ? {
+                padding: 0,
+                borderRadius: 0,
+                boxDecorationBreak: "unset",
+                WebkitBoxDecorationBreak: "unset",
+                color: isAgent ? CHAT.textPrimary : "inherit",
+              }
+            : {
+                padding: isAgent ? "2px 5px" : "0.1em 0.35em",
+                borderRadius: `${MD_BLOCK_RADIUS_PX}px`,
+                boxDecorationBreak: "clone",
+                WebkitBoxDecorationBreak: "clone",
+                color: isAgent ? CHAT.textPrimary : "inherit",
+              }),
+          display: "inline-block",
+          maxWidth: "100%",
+          verticalAlign: "baseline",
+          boxSizing: "border-box",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-all",
+          overflowWrap: "anywhere",
+        }}
+      >
+        {children}
+      </Box>
+    );
+  },
+  p({ children }) {
+    return (
+      <Typography
+        variant="body1"
+        sx={{
+          my: 1,
+          lineHeight: isAgent ? 1.45 : 1.7,
+          fontSize: isAgent ? 13 : undefined,
+          color: isAgent ? CHAT.textPrimary : undefined,
+          maxWidth: "100%",
+          // 无空格超长串（如蛋白序列）也可在容器内折行
+          overflowWrap: "anywhere",
+          wordBreak: "break-word",
+        }}
+      >
+        {children}
+      </Typography>
+    );
+  },
+  a({ href, children }) {
+    return (
+      <Typography
+        component="a"
+        href={href ?? "#"}
+        sx={{
+          color: isAgent ? CHAT.accent : "primary.main",
+          overflowWrap: "anywhere",
+          wordBreak: "break-all",
+        }}
+      >
+        {children}
+      </Typography>
+    );
+  },
+  table({ children }) {
+    return (
+      <Box
+        component="table"
+        sx={{
+          width: "100%",
+          maxWidth: "100%",
+          tableLayout: "fixed",
+          borderCollapse: "collapse",
+          my: 1,
+          fontSize: isAgent ? 12 : undefined,
+          "& th, & td": {
+            border: `1px solid ${alpha(theme.palette.divider, 0.6)}`,
+            px: 0.75,
+            py: 0.5,
+            wordBreak: "break-word",
+            overflowWrap: "anywhere",
+            verticalAlign: "top",
+          },
+        }}
+      >
+        {children}
+      </Box>
+    );
+  },
+  img({ src, alt }) {
+    const url = typeof src === "string" ? src : "";
+    return (
+      <Box
+        component="img"
+        src={url}
+        alt={typeof alt === "string" ? alt : ""}
+        onClick={() => onImageClick(url, typeof alt === "string" ? alt : "")}
+        sx={{
+          display: "block",
+          maxWidth: "100%",
+          height: "auto",
+          borderRadius: 1,
+          my: 1,
+          cursor: "pointer",
+          transition: "opacity 0.2s",
+          "&:hover": { opacity: 0.92 },
+        }}
+      />
+    );
+  },
+  ul({ children }) {
+    return (
+      <Box
+        component="ul"
+        sx={{
+          my: 1,
+          // 为默认 outside 序号/圆点留出左侧空间，避免被气泡 overflow 裁切
+          pl: 3.5,
+          ...(isAgent
+            ? { color: CHAT.textPrimary, fontSize: 13 }
+            : {}),
+        }}
+      >
+        {children}
+      </Box>
+    );
+  },
+  ol({ children }) {
+    return (
+      <Box
+        component="ol"
+        sx={{
+          my: 1,
+          pl: 3.5,
+          ...(isAgent
+            ? { color: CHAT.textPrimary, fontSize: 13 }
+            : {}),
+        }}
+      >
+        {children}
+      </Box>
+    );
+  },
+  li({ children }) {
+    return (
+      <Box
+        component="li"
+        sx={{
+          display: "list-item",
+          my: 0.5,
+          maxWidth: "100%",
+        }}
+      >
+        <Typography
+          variant="body1"
+          sx={{
+            maxWidth: "100%",
+            overflowWrap: "anywhere",
+            wordBreak: "break-word",
+            ...(isAgent ? { fontSize: 13, lineHeight: 1.45 } : {}),
+          }}
+        >
+          {children}
+        </Typography>
+      </Box>
+    );
+  },
+  h1({ children }) {
+    return (
+      <Typography
+        variant="h4"
+        sx={{
+          mt: 3,
+          mb: 1,
+          fontWeight: 600,
+          ...(isAgent
+            ? { color: CHAT.textPrimary, fontSize: 15 }
+            : {}),
+        }}
+      >
+        {children}
+      </Typography>
+    );
+  },
+  h2({ children }) {
+    return (
+      <Typography
+        variant="h5"
+        sx={{
+          mt: 2.5,
+          mb: 1,
+          fontWeight: 600,
+          ...(isAgent
+            ? { color: CHAT.textPrimary, fontSize: 15 }
+            : {}),
+        }}
+      >
+        {children}
+      </Typography>
+    );
+  },
+  h3({ children }) {
+    return (
+      <Typography
+        variant="h6"
+        sx={{
+          mt: 2,
+          mb: 1,
+          fontWeight: 600,
+          ...(isAgent
+            ? { color: CHAT.textPrimary, fontSize: 15 }
+            : {}),
+        }}
+      >
+        {children}
+      </Typography>
+    );
+  },
+  blockquote({ children }) {
+    return (
+      <Box
+        component="blockquote"
+        sx={{
+          my: 1.5,
+          pl: 2,
+          borderLeft: 3,
+          borderColor: isAgent
+            ? CHAT.agentBubbleBorder
+            : "primary.main",
+          bgcolor: isAgent
+            ? "transparent"
+            : alpha(theme.palette.primary.main, 0.05),
+          py: 1,
+          borderRadius: `0 ${MD_BLOCK_RADIUS_PX}px ${MD_BLOCK_RADIUS_PX}px 0`,
+          ...(isAgent ? { color: CHAT.textMuted, fontSize: 13 } : {}),
+        }}
+      >
+        {children}
+      </Box>
+    );
+  },
+
+  } as Components;
+}
+
+/** Pure helper — converts store messages to local Message[] for rendering. */
+function convertStoreMessages(storeMessages: StoreMessage[], sessionId: string): Message[] {
+  return storeMessages.map((msg, index) => ({
+    id: msg.id || `${sessionId}-msg-${index}`,
+    role: msg.role,
+    content: msg.content ?? "",
+    composerAgentType: msg.composerAgentType,
+    composerAttachedPaths: msg.composerAttachedPaths,
+    followUpSuggestions: msg.followUpSuggestions,
+    turnSummary: msg.turnSummary,
+    tokenUsage: msg.tokenUsage,
+    prefaceBeforeTools: msg.prefaceBeforeTools,
+    toolCallsList: msg.toolCallsList,
+    timestamp: Date.now() - (storeMessages.length - index) * 1000,
+    toolCall: msg.toolCall
+      ? {
+          id: msg.toolCall.id,
+          name: msg.toolCall.name,
+          status: msg.toolCall.status ?? ("completed" as const),
+          input: msg.toolCall.arguments ?? "",
+          output:
+            msg.toolCall.output ??
+            (msg.role === "tool" ? (msg.content ?? "") : undefined),
+        }
+      : undefined,
+  }));
+}
+
 export function Chat({ sessionId }: ChatProps) {
   const theme = useTheme();
   const CHAT = useMemo(() => getChatTokens(theme), [theme]);
   const isDev = import.meta.env.DEV;
   const [panelTab, setPanelTab] = useState(0);
-  const [input, setInput] = useState("");
+  const composerRef = useRef<ChatComposerRef>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  // Track which session we last initialized messages for, so we can reset
+  // synchronously during render instead of waiting for a useEffect commit.
+  // React allows calling setState during render when guarded by a different
+  // state value — it abandons the current render and restarts immediately.
+  // This eliminates the "render with stale messages → effect → render with new
+  // messages" double-render cycle that was the primary source of switch latency.
+  const [prevSessionIdForMsg, setPrevSessionIdForMsg] = useState<string>(sessionId ?? "");
+
+  // ── Progressive rendering ─────────────────────────────────────────────────
+  // For long sessions, render only the most-recent INSTANT_RENDER_COUNT items
+  // first so the user sees content on the first paint. Older items are added
+  // in a low-priority background render (startTransition + rAF) that does not
+  // block the main thread. Phase-2 restores the scroll position so the
+  // viewport stays anchored to the same latest messages.
+  const INSTANT_RENDER_COUNT = 30;
+  const [allItemsVisible, setAllItemsVisible] = useState(true);
+  /** Saved scrollHeight of the scroll container just before phase-2 renders.
+   *  Used to compute how much height was added above the current view. */
+  const scrollRestoreRef = useRef<number | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  /** True while background follow-up suggestions are being generated after `complete` fires */
+  const [suggestionsGenerating, setSuggestionsGenerating] = useState(false);
   const [currentResponse, setCurrentResponse] = useState("");
   const [currentStreamId, setCurrentStreamId] = useState<string | null>(null);
   const [currentRoundId, setCurrentRoundId] = useState<string | null>(null);
@@ -996,9 +1460,8 @@ export function Chat({ sessionId }: ChatProps) {
   const [pathRequiredToast, setPathRequiredToast] = useState<string | null>(
     null,
   );
-  /** SSH 执行环境：输入远程绝对路径作为工作区（非本机文件夹选择器） */
+  /** SSH 执行环境：树形选择远程绝对路径作为工作区（非本机文件夹选择器） */
   const [sshWorkspaceDialogOpen, setSshWorkspaceDialogOpen] = useState(false);
-  const [sshWorkspacePathDraft, setSshWorkspacePathDraft] = useState("");
   /** 用户气泡「复制」成功提示 */
   const [copySuccessToast, setCopySuccessToast] = useState(false);
   /** True when session was just created on-demand; triggers a deferred send once sessionId updates. */
@@ -1039,6 +1502,7 @@ export function Chat({ sessionId }: ChatProps) {
   const [queueRevision, setQueueRevision] = useState(0);
   const bumpQueueUi = useCallback(() => setQueueRevision((r) => r + 1), []);
   const handleSendRef = useRef<() => Promise<void>>(async () => {});
+  const retryUserMessageRef = useRef<(message: Message) => Promise<void>>(async () => {});
   const flushQueuedMainSendIfAnyRef = useRef<() => void>(() => {});
   /**
    * Set immediately before `handleSend` when draining the main-session FIFO queue.
@@ -1096,7 +1560,7 @@ export function Chat({ sessionId }: ChatProps) {
       q.splice(index, 1);
       bumpQueueUi();
       flushSync(() => {
-        setInput(item.body);
+        composerRef.current?.setValue(item.body);
         const st = useChatComposerStore.getState();
         st.clearComposerAttachedPaths();
         for (const p of item.composerAttachedPaths) {
@@ -1137,6 +1601,10 @@ export function Chat({ sessionId }: ChatProps) {
   const unlistenRef = useRef<(() => void) | null>(null);
   const currentResponseRef = useRef(currentResponse);
   const currentRoundIdRef = useRef(currentRoundId);
+  /** Buffered text chunks waiting to be batched into React state */
+  const pendingTextBufferRef = useRef("");
+  /** RAF handle for scheduled text flush */
+  const textFlushRafRef = useRef<number | null>(null);
 
   // Keep refs in sync with state for access in event listeners
   useEffect(() => {
@@ -1146,6 +1614,19 @@ export function Chat({ sessionId }: ChatProps) {
   useEffect(() => {
     currentRoundIdRef.current = currentRoundId;
   }, [currentRoundId]);
+
+  useEffect(() => {
+    return () => {
+      if (textFlushRafRef.current !== null) {
+        cancelAnimationFrame(textFlushRafRef.current);
+        textFlushRafRef.current = null;
+      }
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+    };
+  }, []);
 
   const {
     storeMessages,
@@ -1159,7 +1640,25 @@ export function Chat({ sessionId }: ChatProps) {
     updateRoundStatus,
     updateSessionProjectPath,
     renameSession,
+    activeProviderEntryName,
   } = useSessionStore();
+
+  // ── Synchronous messages reset on session change ───────────────────────────
+  // When sessionId changes, reset local messages during the CURRENT render
+  // instead of waiting for a useEffect → setMessages → second render cycle.
+  // React re-renders immediately when setState is called during render and the
+  // guard state differs — no extra commit, no blank flash between sessions.
+  if (prevSessionIdForMsg !== (sessionId ?? "")) {
+    setPrevSessionIdForMsg(sessionId ?? "");
+    const converted =
+      sessionId && storeMessages.length > 0
+        ? convertStoreMessages(storeMessages, sessionId)
+        : [];
+    setMessages(converted);
+    // Phase-1 of progressive rendering: immediately show only recent items.
+    // Phase-2 (older items) is scheduled after the first paint via the effect below.
+    setAllItemsVisible(converted.length <= INSTANT_RENDER_COUNT);
+  }
 
   /** After `renameSession`, React's `currentSession` can still be stale until re-render — use for `send_message.session_name`. */
   const getSessionNameForRequest = useCallback(() => {
@@ -1182,7 +1681,87 @@ export function Chat({ sessionId }: ChatProps) {
     setAwaitingResumeAfterCancel(false);
     queuedMainSendQueueRef.current = [];
     bumpQueueUi();
+    // Reset per-session UI state so previous session's expanded panels don't
+    // bleed into the newly selected session.
+    setExpandedToolGroups(new Set());
+    setNestedToolPanelOpen({});
   }, [sessionId, bumpQueueUi]);
+
+  // ── Progressive rendering: phase-2 scheduler ─────────────────────────────
+  // When allItemsVisible is false (long session, phase 1 rendered), schedule
+  // a low-priority update that renders all older items after the first paint.
+  // The effect fires only when allItemsVisible is false, so it doesn't run
+  // during streaming (where allItemsVisible stays true).
+  useEffect(() => {
+    if (allItemsVisible) return; // Phase 2 already done or small session
+    // Save scroll container's total height before adding older items.
+    // Used in useLayoutEffect below to restore the viewport position.
+    const el = messagesScrollRef.current;
+    scrollRestoreRef.current = el ? el.scrollHeight : 0;
+    // Wait for the first paint to show phase-1 items, then add older items
+    // via startTransition so React can yield to user input between chunks.
+    const rafId = requestAnimationFrame(() => {
+      startTransition(() => setAllItemsVisible(true));
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [allItemsVisible]);
+
+  // ── Progressive rendering: scroll restoration after phase-2 ──────────────
+  // Fires synchronously after React commits the full item list. Computes how
+  // much height was added above the current view and adjusts scrollTop so the
+  // user's viewport stays anchored to the same latest messages.
+  useLayoutEffect(() => {
+    if (!allItemsVisible || scrollRestoreRef.current === null) return;
+    const el = messagesScrollRef.current;
+    if (el) {
+      const addedHeight = el.scrollHeight - scrollRestoreRef.current;
+      if (addedHeight > 0) {
+        if (shouldAutoScrollRef.current) {
+          // User was at the bottom: scroll to the new bottom (same visual position)
+          el.scrollTop = el.scrollHeight - el.clientHeight;
+        } else {
+          // User scrolled up: shift scrollTop by the added height to preserve their view
+          el.scrollTop += addedHeight;
+        }
+      }
+    }
+    scrollRestoreRef.current = null;
+  }, [allItemsVisible]);
+
+  // ── Session-switch render timing ──────────────────────────────────────────
+  // useLayoutEffect fires synchronously after React commits the DOM — closest
+  // point we can measure "render done" without a real paint observer.
+  // We then schedule a rAF to capture the first frame painted after the update.
+  const isSwitchingSessionRef = useRef(false);
+  useLayoutEffect(() => {
+    const nowSwitching = isSwitchingSession;
+    // Detect the transition false (overlay gone, messages visible)
+    if (!nowSwitching && isSwitchingSessionRef.current) {
+      isSwitchingSessionRef.current = false;
+      // T4: React committed DOM — measure layout time from state-set
+      performance.mark("sw:layout");
+      try { performance.measure("sw: React layout", "sw:state-set", "sw:layout"); } catch { /**/ }
+      const clickAt = (window as unknown as { __swClickAt?: number }).__swClickAt;
+      const layoutMs = clickAt != null ? Math.round(performance.now() - clickAt) : 0;
+      // T5: schedule rAF to get first-paint time
+      requestAnimationFrame(() => {
+        performance.mark("sw:paint");
+        try { performance.measure("sw: rAF (paint)", "sw:layout", "sw:paint"); } catch { /**/ }
+        const paintMs = clickAt != null ? Math.round(performance.now() - clickAt) : 0;
+        console.info(
+          `%c[SwPerf] click→layout: ${layoutMs}ms | click→paint: ${paintMs}ms | rAF delta: ${paintMs - layoutMs}ms`,
+          "color:#f0a500;font-weight:bold",
+        );
+        // Clean up marks so next switch starts fresh
+        ["sw:click","sw:ipc-start","sw:ipc-done","sw:state-set","sw:layout","sw:paint"].forEach(
+          (m) => { try { performance.clearMarks(m); } catch { /**/ } },
+        );
+        (window as unknown as { __swClickAt?: number }).__swClickAt = undefined;
+      });
+    } else if (nowSwitching) {
+      isSwitchingSessionRef.current = true;
+    }
+  }, [isSwitchingSession]);
 
   // Deferred send: when a session was just auto-created from handleSend and
   // the prop sessionId has now updated to a real ID, fire the send immediately.
@@ -1270,6 +1849,37 @@ export function Chat({ sessionId }: ChatProps) {
     };
   }, [refreshBackgroundTasks]);
 
+  // Listen for background title updates emitted by spawn_session_title_async.
+  // The backend already persisted the rename; we only need to refresh local state.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    const setup = async () => {
+      unlisten = await listen<{ sessionId: string; title: string }>(
+        "session-title-updated",
+        ({ payload }) => {
+          const st = useSessionStore.getState();
+          // Only apply if this session is still active and name hasn't been changed
+          // manually by the user since the heuristic rename.
+          if (st.currentSession?.id !== payload.sessionId) return;
+          if (payload.title === st.currentSession.name) return;
+          useSessionStore.setState((prev) => ({
+            sessions: prev.sessions.map((s) =>
+              s.id === payload.sessionId ? { ...s, name: payload.title } : s,
+            ),
+            currentSession:
+              prev.currentSession?.id === payload.sessionId
+                ? { ...prev.currentSession, name: payload.title }
+                : prev.currentSession,
+          }));
+        },
+      );
+    };
+    void setup();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
   const needsWorkspacePath =
     Boolean(sessionId) &&
     currentSession != null &&
@@ -1286,12 +1896,6 @@ export function Chat({ sessionId }: ChatProps) {
         setPathRequiredToast("请先在执行环境中选择 SSH 服务器。");
         return;
       }
-      const cur = (
-        currentSession?.workingDirectory ??
-        currentSession?.projectPath ??
-        ""
-      ).trim();
-      setSshWorkspacePathDraft(cur && cur !== "." ? cur : "");
       setSshWorkspaceDialogOpen(true);
       return;
     }
@@ -1310,10 +1914,9 @@ export function Chat({ sessionId }: ChatProps) {
     }
   };
 
-  const confirmSshWorkspaceFolder = async () => {
+  const handleSshWorkspaceConfirm = async (path: string) => {
     if (!sessionId) return;
-    const raw = sshWorkspacePathDraft.trim();
-    if (!raw.startsWith("/")) {
+    if (!path.startsWith("/")) {
       setPathToastKey((k) => k + 1);
       setPathRequiredToast(
         "远程工作区须为绝对路径（以 / 开头），例如 /home/ubuntu/project",
@@ -1321,7 +1924,7 @@ export function Chat({ sessionId }: ChatProps) {
       return;
     }
     try {
-      await updateSessionProjectPath(sessionId, raw);
+      await updateSessionProjectPath(sessionId, path);
       setSshWorkspaceDialogOpen(false);
     } catch (e) {
       console.error("[Chat] ssh workspace path failed", e);
@@ -1349,12 +1952,11 @@ export function Chat({ sessionId }: ChatProps) {
     });
   };
 
-  // Scroll to bottom when messages change (include isStreaming so the thread settles after a turn completes)
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
-  }, [messages, currentResponse, isConnecting, waitingFirstChunk, isStreaming]);
+  // Auto-scroll: only when user is already near the bottom, throttled by RAF
+  const shouldAutoScrollRef = useRef(true);
+  const scrollRafRef = useRef<number | null>(null);
 
-  // Scroll-to-top pagination: load older messages when user scrolls near the top.
+  // Scroll-to-top pagination + auto-scroll bottom detection
   useEffect(() => {
     const el = messagesScrollRef.current;
     if (!el) return;
@@ -1362,6 +1964,9 @@ export function Chat({ sessionId }: ChatProps) {
       if (el.scrollTop < 120 && hasMoreMessages && !isLoadingMoreMessages) {
         void loadMoreMessages();
       }
+      const isNearBottom =
+        el.scrollTop + el.clientHeight >= el.scrollHeight - AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+      shouldAutoScrollRef.current = isNearBottom;
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
@@ -1372,6 +1977,8 @@ export function Chat({ sessionId }: ChatProps) {
     [messages],
   );
   const lastReactFoldId = useMemo(() => {
+    // Always computed from the FULL list so "isLastFold" identifies the real
+    // last tool-group even when only a subset is rendered in phase 1.
     for (let i = messageRenderItems.length - 1; i >= 0; i--) {
       const it = messageRenderItems[i];
       if (it.kind === "react_fold") return it.id;
@@ -1383,6 +1990,33 @@ export function Chat({ sessionId }: ChatProps) {
     lastReactFoldIdRef.current = lastReactFoldId;
   }, [lastReactFoldId]);
 
+  // Phase-1: show only the most-recent items so the viewport is populated
+  // on the very first paint. Phase-2 (allItemsVisible=true) adds all older
+  // items without blocking the thread (see progressive rendering effects above).
+  const displayedItems = allItemsVisible
+    ? messageRenderItems
+    : messageRenderItems.slice(-INSTANT_RENDER_COUNT);
+
+  const scheduleScrollToBottom = useCallback(() => {
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      if (!shouldAutoScrollRef.current) return;
+      messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+    });
+  }, []);
+
+  useEffect(() => {
+    scheduleScrollToBottom();
+  }, [
+    messages,
+    currentResponse,
+    isConnecting,
+    waitingFirstChunk,
+    isStreaming,
+    scheduleScrollToBottom,
+  ]);
+
   /** Blocked `ask_user_question` — show inline picker until user submits */
   const [pendingAskUser, setPendingAskUser] = useState<{
     toolUseId: string;
@@ -1393,6 +2027,13 @@ export function Chat({ sessionId }: ChatProps) {
   const [askUserSelections, setAskUserSelections] = useState<
     Record<string, string>
   >({});
+
+  /** Image lightbox for markdown images */
+  const [imageLightbox, setImageLightbox] = useState<{
+    open: boolean;
+    src: string;
+    alt: string;
+  }>({ open: false, src: "", alt: "" });
 
   const composerSuggestionBundle = useMemo(() => {
     const last = messages[messages.length - 1];
@@ -1471,50 +2112,32 @@ export function Chat({ sessionId }: ChatProps) {
     }
   }, [pendingAskUser, askUserSelections]);
 
-  // Load messages from store when session changes
+  // Sync messages from store when storeMessages change (e.g. streaming new messages).
+  // On session switch the render-time guard above already resets messages synchronously,
+  // so this effect only fires for same-session updates (incoming stream chunks, etc.).
+  // We compare length + last message id to avoid re-rendering when already in sync.
   useEffect(() => {
     try {
       if (sessionId && storeMessages.length > 0) {
-        const convertedMessages: Message[] = storeMessages.map(
-          (msg, index) => ({
-            id: msg.id || `${sessionId}-msg-${index}`,
-            role: msg.role,
-            content: msg.content ?? "",
-            composerAgentType: msg.composerAgentType,
-            composerAttachedPaths: msg.composerAttachedPaths,
-            followUpSuggestions: msg.followUpSuggestions,
-            turnSummary: msg.turnSummary,
-            tokenUsage: msg.tokenUsage,
-            prefaceBeforeTools: msg.prefaceBeforeTools,
-            toolCallsList: msg.toolCallsList,
-            timestamp: Date.now() - (storeMessages.length - index) * 1000,
-            toolCall: msg.toolCall
-              ? {
-                  id: msg.toolCall.id,
-                  name: msg.toolCall.name,
-                  status: msg.toolCall.status ?? ("completed" as const),
-                  input: msg.toolCall.arguments ?? "",
-                  output:
-                    msg.toolCall.output ??
-                    (msg.role === "tool" ? (msg.content ?? "") : undefined),
-                }
-              : undefined,
-          }),
-        );
-        setMessages(convertedMessages);
-      } else if (!sessionId) {
-        setMessages([]);
-      } else if (sessionId && storeMessages.length === 0) {
-        setMessages([]);
+        const converted = convertStoreMessages(storeMessages, sessionId);
+        setMessages((prev) => {
+          // Skip if content is already the same (render-time reset already applied it)
+          if (
+            prev.length === converted.length &&
+            prev[prev.length - 1]?.id === converted[converted.length - 1]?.id
+          ) {
+            return prev;
+          }
+          return converted;
+        });
+      } else if (!sessionId || storeMessages.length === 0) {
+        setMessages((prev) => (prev.length === 0 ? prev : []));
       }
     } catch (e) {
       console.error(
         "[OmigaDebug][Chat] failed to sync messages from store",
         e,
-        {
-          sessionId,
-          storeMessagesLength: storeMessages.length,
-        },
+        { sessionId, storeMessagesLength: storeMessages.length },
       );
       setMessages([]);
     }
@@ -1593,25 +2216,16 @@ export function Chat({ sessionId }: ChatProps) {
 
   // Wiki dispatch: window event "wikiSendMessage" → fill input then auto-send.
   // Used by WikiSettingsTab (inside Settings modal) to dispatch agent prompts to the chat.
-  const wikiPendingSendRef = useRef<string | null>(null);
   useEffect(() => {
     const handler = (e: Event) => {
       const content = (e as CustomEvent<{ content: string }>).detail?.content;
       if (!content?.trim()) return;
-      wikiPendingSendRef.current = content.trim();
-      setInput(content.trim());
+      composerRef.current?.setValue(content.trim());
+      queueMicrotask(() => handleSendRef.current());
     };
     window.addEventListener("wikiSendMessage", handler);
     return () => window.removeEventListener("wikiSendMessage", handler);
   }, []);
-
-  // Trigger send once input has been updated by wikiPendingSendRef
-  useEffect(() => {
-    if (wikiPendingSendRef.current && input === wikiPendingSendRef.current) {
-      wikiPendingSendRef.current = null;
-      handleSend();
-    }
-  });
 
   // Set up stream listener for a specific stream ID
   const setupStreamListener = async (streamId: string) => {
@@ -1619,8 +2233,44 @@ export function Chat({ sessionId }: ChatProps) {
     if (unlistenRef.current) {
       unlistenRef.current();
     }
+    // Flush any buffered text before swapping listeners
+    if (textFlushRafRef.current !== null) {
+      cancelAnimationFrame(textFlushRafRef.current);
+      textFlushRafRef.current = null;
+    }
+    const buffered = pendingTextBufferRef.current;
+    if (buffered) {
+      pendingTextBufferRef.current = "";
+      setCurrentResponse((prev) => {
+        const next = prev + buffered;
+        currentResponseRef.current = next;
+        return next;
+      });
+    }
 
     const eventName = `chat-stream-${streamId}`;
+
+    const flushPendingText = () => {
+      if (textFlushRafRef.current !== null) {
+        cancelAnimationFrame(textFlushRafRef.current);
+        textFlushRafRef.current = null;
+      }
+      const text = pendingTextBufferRef.current;
+      if (!text) return;
+      pendingTextBufferRef.current = "";
+      setCurrentResponse((prev) => {
+        const next = prev + text;
+        currentResponseRef.current = next;
+        return next;
+      });
+    };
+
+    const scheduleFlush = () => {
+      if (textFlushRafRef.current !== null) return;
+      textFlushRafRef.current = requestAnimationFrame(() => {
+        flushPendingText();
+      });
+    };
 
     const unlisten = await listen<StreamOutputItem>(eventName, (event) => {
       const payload = event.payload;
@@ -1644,17 +2294,25 @@ export function Chat({ sessionId }: ChatProps) {
         pendingTokenUsageRef.current = null;
         isStreamingRef.current = true;
         setIsStreaming(true);
+        setSuggestionsGenerating(false);
         act.setConnecting(false);
         act.setStreaming(true, true);
         segmentStartRef.current = true;
         act.onStreamStart();
         if (clearAssistantDraft) {
+          pendingTextBufferRef.current = "";
+          if (textFlushRafRef.current !== null) {
+            cancelAnimationFrame(textFlushRafRef.current);
+            textFlushRafRef.current = null;
+          }
           setCurrentResponse("");
+          currentResponseRef.current = "";
         }
       };
 
       switch (payload.type) {
         case "Start": {
+          flushPendingText();
           ensureChatStreamStarted(true);
           if (isDev) {
             console.debug("[OmigaDev][AgentStream]", {
@@ -1672,9 +2330,12 @@ export function Chat({ sessionId }: ChatProps) {
               segmentStartRef.current = false;
               useActivityStore.getState().onFirstTextChunk();
             }
-            const firstChunk = currentResponseRef.current.length === 0;
-            setCurrentResponse((prev) => prev + text);
-            if (firstChunk) {
+            const isFirstChunk =
+              currentResponseRef.current.length === 0 &&
+              pendingTextBufferRef.current.length === 0;
+            pendingTextBufferRef.current += text;
+            scheduleFlush();
+            if (isFirstChunk) {
               useActivityStore.getState().setStreaming(true, false);
             }
           }
@@ -1695,6 +2356,7 @@ export function Chat({ sessionId }: ChatProps) {
           break;
         }
         case "tool_use": {
+          flushPendingText();
           ensureChatStreamStarted(false);
           const toolData = payload.data as
             | { id?: string; name?: string; arguments?: string }
@@ -1915,6 +2577,7 @@ export function Chat({ sessionId }: ChatProps) {
           break;
         }
         case "error": {
+          flushPendingText();
           const errorData = payload.data as
             | { message: string; code?: string }
             | undefined;
@@ -1927,6 +2590,7 @@ export function Chat({ sessionId }: ChatProps) {
           useActivityStore.getState().finalizeExecutionRun();
           useActivityStore.getState().clearTransient();
           setCurrentResponse("");
+          currentResponseRef.current = "";
           const errorMsg: Message = {
             id: `error-${Date.now()}`,
             role: "assistant",
@@ -1948,6 +2612,7 @@ export function Chat({ sessionId }: ChatProps) {
           break;
         }
         case "cancelled": {
+          flushPendingText();
           setAwaitingResumeAfterCancel(true);
           isStreamingRef.current = false;
           setIsStreaming(false);
@@ -1977,6 +2642,7 @@ export function Chat({ sessionId }: ChatProps) {
             return next;
           });
           setCurrentResponse("");
+          currentResponseRef.current = "";
           if (isDev) {
             console.debug("[OmigaDev][AgentCancelled]", {
               streamId,
@@ -2003,13 +2669,39 @@ export function Chat({ sessionId }: ChatProps) {
           const rows = Array.isArray(raw)
             ? (raw as Array<{ label?: unknown; prompt?: unknown }>)
             : [];
-          pendingFollowUpSuggestionsRef.current = rows
+          const parsed = rows
             .map((r) => ({
               label: typeof r.label === "string" ? r.label.trim() : "",
               prompt: typeof r.prompt === "string" ? r.prompt.trim() : "",
             }))
             .filter((r) => r.label.length > 0 && r.prompt.length > 0)
             .slice(0, 5);
+
+          // If complete already fired (isStreamingRef is false), patch the last assistant message directly.
+          // Do NOT call replaceStoreMessagesSnapshot here — the user may have already sent a new
+          // message, and overwriting the store snapshot with fewer messages would cause the
+          // storeMessages useEffect to wipe out that new user message.
+          // The suggestions are already persisted to the DB by the Rust backend.
+          if (!isStreamingRef.current) {
+            setSuggestionsGenerating(false);
+            if (parsed.length > 0) {
+              setMessages((prev) => {
+                const lastIdx = prev.length - 1;
+                if (lastIdx < 0 || prev[lastIdx].role !== "assistant") return prev;
+                const updated = {
+                  ...prev[lastIdx],
+                  followUpSuggestions: parsed,
+                };
+                return [...prev.slice(0, lastIdx), updated];
+              });
+            }
+          } else {
+            pendingFollowUpSuggestionsRef.current = parsed;
+          }
+          break;
+        }
+        case "suggestions_generating": {
+          setSuggestionsGenerating(true);
           break;
         }
         case "token_usage": {
@@ -2038,6 +2730,7 @@ export function Chat({ sessionId }: ChatProps) {
           break;
         }
         case "complete": {
+          flushPendingText();
           setAwaitingResumeAfterCancel(false);
           isStreamingRef.current = false;
           setIsStreaming(false);
@@ -2086,6 +2779,7 @@ export function Chat({ sessionId }: ChatProps) {
             return next;
           });
           setCurrentResponse("");
+          currentResponseRef.current = "";
 
           // Trigger implicit memory indexing status display
           setIndexingStatus("indexing");
@@ -2146,6 +2840,7 @@ export function Chat({ sessionId }: ChatProps) {
       permissionMode: storePerm,
       composerAttachedPaths: storePaths,
       environment: storeEnv,
+      sshServer: storeSsh,
       sandboxBackend: storeSb,
       localVenvType: storeVenvType,
       localVenvName: storeVenvName,
@@ -2158,6 +2853,7 @@ export function Chat({ sessionId }: ChatProps) {
       ? flushPayload.permissionMode
       : storePerm;
     const environment = flushPayload ? flushPayload.environment : storeEnv;
+    const sshServer = flushPayload ? flushPayload.sshServer : storeSsh;
     const sandboxBackend = flushPayload ? flushPayload.sandboxBackend : storeSb;
     const localVenvType = storeVenvType;
     const localVenvName = storeVenvName;
@@ -2165,8 +2861,8 @@ export function Chat({ sessionId }: ChatProps) {
       ? [...flushPayload.composerAttachedPaths]
       : storePaths;
 
-    /** Prefer ref payload after queue flush — `input` in closure can still be stale even after `flushSync`. */
-    const trimmed = flushPayload ? flushPayload.body.trim() : input.trim();
+    /** Prefer ref payload after queue flush — `getValue` reads the latest composer state. */
+    const trimmed = flushPayload ? flushPayload.body.trim() : (composerRef.current?.getValue() ?? "").trim();
 
     if (!trimmed && composerAttachedPaths.length === 0) {
       if (flushPayload) restoreFlushToQueue(flushPayload);
@@ -2195,7 +2891,7 @@ export function Chat({ sessionId }: ChatProps) {
         composerAttachedPaths,
         trimmed,
       );
-      setInput("");
+      composerRef.current?.setValue("");
       useChatComposerStore.getState().clearComposerAttachedPaths();
       try {
         const response = await invoke<{
@@ -2212,6 +2908,7 @@ export function Chat({ sessionId }: ChatProps) {
             use_tools: true,
             inputTarget: `bg:${followUpTaskId}`,
             executionEnvironment: useChatComposerStore.getState().environment,
+            sshServer: useChatComposerStore.getState().sshServer,
             sandboxBackend: useChatComposerStore.getState().sandboxBackend,
             localVenvType: useChatComposerStore.getState().localVenvType,
             localVenvName: useChatComposerStore.getState().localVenvName,
@@ -2261,7 +2958,7 @@ export function Chat({ sessionId }: ChatProps) {
         sandboxBackend: useChatComposerStore.getState().sandboxBackend,
       });
       bumpQueueUi();
-      setInput("");
+      composerRef.current?.setValue("");
       useChatComposerStore.getState().clearComposerAttachedPaths();
       return;
     }
@@ -2312,7 +3009,7 @@ export function Chat({ sessionId }: ChatProps) {
       id: userMessage.id,
     });
 
-    setInput("");
+    composerRef.current?.setValue("");
     useChatComposerStore.getState().clearComposerAttachedPaths();
 
     try {
@@ -2322,22 +3019,12 @@ export function Chat({ sessionId }: ChatProps) {
       ) {
         const heuristicTitle = titleFromFirstUserMessage(messageContent);
         await renameSession(sessionId, heuristicTitle);
-        void (async () => {
-          try {
-            const llmTitle = await invoke<string>("suggest_session_title", {
-              userMessage: messageContent,
-            });
-            const next = (llmTitle ?? "").trim();
-            if (!next) return;
-            const st = useSessionStore.getState();
-            if (st.currentSession?.id !== sessionId) return;
-            if (st.currentSession.name !== heuristicTitle) return;
-            if (next === heuristicTitle) return;
-            await renameSession(sessionId, next);
-          } catch {
-            /* keep heuristic title */
-          }
-        })();
+        // Fire-and-forget: backend spawns an independent task that calls the LLM
+        // after a short delay, persists the result, and emits "session-title-updated".
+        void invoke("spawn_session_title_async", {
+          sessionId,
+          userMessage: messageContent,
+        });
       }
 
       // Call backend with new request structure
@@ -2358,9 +3045,11 @@ export function Chat({ sessionId }: ChatProps) {
           composerAgentType,
           permissionMode,
           executionEnvironment: environment,
+          sshServer,
           sandboxBackend,
           localVenvType,
           localVenvName,
+          activeProviderEntryName,
         },
       });
 
@@ -2495,6 +3184,10 @@ export function Chat({ sessionId }: ChatProps) {
       setMessages((prev) => [...prev, errorMsg]);
       queueMicrotask(() => {
         isStreamingRef.current = false;
+        setIsStreaming(false);
+        setPendingAskUser(null);
+        setAskUserSelections({});
+        pendingTokenUsageRef.current = null;
         flushQueuedMainSendIfAnyRef.current();
       });
     }
@@ -2506,38 +3199,6 @@ export function Chat({ sessionId }: ChatProps) {
     if (message.role !== "user") return;
     setUserMessageEdit({ id: message.id, draft: message.content });
   }, []);
-
-  const saveUserMessageEdit = useCallback(() => {
-    if (!userMessageEdit) return;
-    const { id, draft } = userMessageEdit;
-    const trimmed = draft.trim();
-    if (!trimmed) return;
-
-    setMessages((prev) => {
-      const idx = prev.findIndex((m) => m.id === id);
-      if (idx < 0) return prev;
-      const row = prev[idx];
-      if (row.role !== "user") return prev;
-      const paths = row.composerAttachedPaths ?? [];
-      const keepPaths = pathsStillMatchMergedContent(paths, trimmed)
-        ? paths
-        : undefined;
-      const attached =
-        keepPaths && keepPaths.length > 0 ? keepPaths : undefined;
-      const updated: Message = {
-        ...row,
-        content: trimmed,
-        composerAttachedPaths: attached,
-        timestamp: Date.now(),
-        schedulerPlan: undefined,
-        initialTodos: undefined,
-      };
-      const next = [...prev.slice(0, idx), updated];
-      replaceStoreMessagesSnapshot(next.map(chatMessageToStore));
-      return next;
-    });
-    setUserMessageEdit(null);
-  }, [userMessageEdit, replaceStoreMessagesSnapshot]);
 
   const copyUserMessageText = useCallback(async (message: Message) => {
     try {
@@ -2583,7 +3244,7 @@ export function Chat({ sessionId }: ChatProps) {
         .slice(0, idx + 1)
         .map((m, i) =>
           i === idx && m.role === "user"
-            ? { ...m, schedulerPlan: undefined, initialTodos: undefined }
+            ? { ...message, schedulerPlan: undefined, initialTodos: undefined }
             : m,
         );
 
@@ -2595,6 +3256,12 @@ export function Chat({ sessionId }: ChatProps) {
       setMessages(truncated);
       replaceStoreMessagesSnapshot(truncated.map(chatMessageToStore));
       setCurrentResponse("");
+      currentResponseRef.current = "";
+      pendingTextBufferRef.current = "";
+      if (textFlushRafRef.current !== null) {
+        cancelAnimationFrame(textFlushRafRef.current);
+        textFlushRafRef.current = null;
+      }
       setAwaitingResumeAfterCancel(false);
 
       setIndexingStatus("idle");
@@ -2628,9 +3295,11 @@ export function Chat({ sessionId }: ChatProps) {
             composerAgentType: composeAgent,
             permissionMode,
             executionEnvironment: useChatComposerStore.getState().environment,
+            sshServer: useChatComposerStore.getState().sshServer,
             sandboxBackend: useChatComposerStore.getState().sandboxBackend,
             localVenvType: useChatComposerStore.getState().localVenvType,
             localVenvName: useChatComposerStore.getState().localVenvName,
+            activeProviderEntryName,
             ...(isPersistedMessageIdForRetry(message.id)
               ? { retryFromUserMessageId: message.id }
               : {}),
@@ -2740,6 +3409,10 @@ export function Chat({ sessionId }: ChatProps) {
         setMessages((prev) => [...prev, errorMsg]);
         queueMicrotask(() => {
           isStreamingRef.current = false;
+          setIsStreaming(false);
+          setPendingAskUser(null);
+          setAskUserSelections({});
+          pendingTokenUsageRef.current = null;
           flushQueuedMainSendIfAnyRef.current();
         });
       } finally {
@@ -2757,6 +3430,43 @@ export function Chat({ sessionId }: ChatProps) {
       bumpQueueUi,
     ],
   );
+
+  retryUserMessageRef.current = retryUserMessage;
+
+  const saveUserMessageEdit = useCallback(() => {
+    if (!userMessageEdit) return;
+    const { id, draft } = userMessageEdit;
+    const trimmed = draft.trim();
+    if (!trimmed) return;
+
+    const idx = messages.findIndex((m) => m.id === id);
+    if (idx < 0) {
+      setUserMessageEdit(null);
+      return;
+    }
+    const row = messages[idx];
+    if (row.role !== "user") {
+      setUserMessageEdit(null);
+      return;
+    }
+
+    const paths = row.composerAttachedPaths ?? [];
+    const keepPaths = pathsStillMatchMergedContent(paths, trimmed)
+      ? paths
+      : undefined;
+    const attached = keepPaths && keepPaths.length > 0 ? keepPaths : undefined;
+    const updated: Message = {
+      ...row,
+      content: trimmed,
+      composerAttachedPaths: attached,
+      timestamp: Date.now(),
+      schedulerPlan: undefined,
+      initialTodos: undefined,
+    };
+
+    setUserMessageEdit(null);
+    void retryUserMessageRef.current(updated);
+  }, [messages, userMessageEdit]);
 
   const requestRetryUserMessage = useCallback(
     (message: Message) => {
@@ -2803,7 +3513,7 @@ export function Chat({ sessionId }: ChatProps) {
     bumpQueueUi();
     mainQueueFlushPayloadRef.current = next;
     flushSync(() => {
-      setInput(next.body);
+      composerRef.current?.setValue(next.body);
       const st = useChatComposerStore.getState();
       st.clearComposerAttachedPaths();
       for (const p of next.composerAttachedPaths) {
@@ -2839,10 +3549,12 @@ export function Chat({ sessionId }: ChatProps) {
     if (streamId) {
       try {
         await invoke("cancel_stream", { messageId: streamId });
+        // On success, wait for the stream `cancelled` event to clean up state
+        return;
       } catch (error) {
         console.error("Failed to cancel stream:", error);
+        // Fall through to local cleanup so the UI doesn’t stay stuck
       }
-      return;
     }
 
     const act = useActivityStore.getState();
@@ -2862,6 +3574,12 @@ export function Chat({ sessionId }: ChatProps) {
     setIsStreaming(false);
     isStreamingRef.current = false;
     setCurrentResponse("");
+    currentResponseRef.current = "";
+    pendingTextBufferRef.current = "";
+    if (textFlushRafRef.current !== null) {
+      cancelAnimationFrame(textFlushRafRef.current);
+      textFlushRafRef.current = null;
+    }
     setAwaitingResumeAfterCancel(false);
     act.clearTransient();
     act.resetExecutionState();
@@ -2894,7 +3612,7 @@ export function Chat({ sessionId }: ChatProps) {
 
     e.preventDefault();
     if (needsWorkspacePath) {
-      if (input.trim()) {
+      if ((composerRef.current?.getValue() ?? "").trim()) {
         showPathRequiredWarning();
       }
       return;
@@ -2917,7 +3635,7 @@ export function Chat({ sessionId }: ChatProps) {
     setFollowUpTaskId(null);
     setBgTranscriptTaskId(null);
     setIndexingStatus("idle");
-    setInput("");
+    composerRef.current?.setValue("");
     setBgToast(null);
     setPathRequiredToast(null);
     setCopySuccessToast(false);
@@ -2945,6 +3663,12 @@ export function Chat({ sessionId }: ChatProps) {
     setIsStreaming(false);
     isStreamingRef.current = false;
     setCurrentResponse("");
+    currentResponseRef.current = "";
+    pendingTextBufferRef.current = "";
+    if (textFlushRafRef.current !== null) {
+      cancelAnimationFrame(textFlushRafRef.current);
+      textFlushRafRef.current = null;
+    }
     setAwaitingResumeAfterCancel(false);
     const act = useActivityStore.getState();
     act.clearTransient();
@@ -2991,7 +3715,7 @@ export function Chat({ sessionId }: ChatProps) {
       return next;
     });
 
-    const { composerAgentType, permissionMode, environment, sandboxBackend } =
+    const { composerAgentType, permissionMode, environment, sshServer, sandboxBackend } =
       useChatComposerStore.getState();
 
     try {
@@ -3011,9 +3735,11 @@ export function Chat({ sessionId }: ChatProps) {
           composerAgentType,
           permissionMode,
           executionEnvironment: environment,
+          sshServer,
           sandboxBackend,
           localVenvType: useChatComposerStore.getState().localVenvType,
           localVenvName: useChatComposerStore.getState().localVenvName,
+          activeProviderEntryName,
         },
       });
 
@@ -3081,28 +3807,32 @@ export function Chat({ sessionId }: ChatProps) {
     }
   };
 
-  const renderMessageContent = (
+  const handleMarkdownImageClick = useCallback((src: string, alt: string) => {
+    setImageLightbox({ open: true, src, alt });
+  }, []);
+
+  const agentComponents = useMemo(
+    () => buildMarkdownComponents(true, theme, CHAT, handleMarkdownImageClick),
+    [theme, CHAT, handleMarkdownImageClick],
+  );
+  const defaultComponents = useMemo(
+    () => buildMarkdownComponents(false, theme, CHAT, handleMarkdownImageClick),
+    [theme, CHAT, handleMarkdownImageClick],
+  );
+
+  const renderMessageContent = useCallback((
     content: string,
     tone: "default" | "agent" = "default",
   ) => {
     const isAgent = tone === "agent";
-    const prismStyleRaw = theme.palette.mode === "dark" ? oneDark : oneLight;
-    const prismStyleFenced = prismStyleTransparentCodeSurface(
-      prismStyleRaw as Record<string, CSSProperties>,
-    );
-    // Handle empty or undefined content
+    const components = isAgent ? agentComponents : defaultComponents;
     if (!content || content.trim() === "") {
       return (
-        <Typography
-          variant="body1"
-          color="text.secondary"
-          sx={{ fontStyle: "italic" }}
-        >
+        <Typography variant="body1" color="text.secondary" sx={{ fontStyle: "italic" }}>
           (Empty response)
         </Typography>
       );
     }
-
     return (
       <Box
         sx={{
@@ -3116,381 +3846,16 @@ export function Chat({ sessionId }: ChatProps) {
         }}
       >
         <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          components={{
-            code({
-              className,
-              children,
-            }: {
-              className?: string;
-              children?: React.ReactNode;
-            }) {
-              const match = /language-(\w+)/.exec(className || "");
-              const language = match ? match[1] : "";
-              const isInline = !className?.includes("language-");
-
-              if (!isInline && language) {
-                const blockBody = String(children).replace(/\n$/, "");
-                const lang = language || "text";
-                const fencedScrollStyle = {
-                  margin: 0,
-                  borderRadius: 0,
-                  background: "transparent",
-                  whiteSpace: "pre" as const,
-                  wordBreak: "normal" as const,
-                  overflowWrap: "normal" as const,
-                  minWidth: "min-content",
-                };
-                if (isAgent) {
-                  return (
-                    <Box sx={{ my: 1.25 }}>
-                      <Typography
-                        sx={{
-                          fontSize: 10,
-                          color: CHAT.labelMuted,
-                          fontWeight: 400,
-                          mb: 0.5,
-                          display: "block",
-                        }}
-                      >
-                        {lang}
-                      </Typography>
-                      <Box
-                        sx={{
-                          borderRadius: `${MD_BLOCK_RADIUS_PX}px`,
-                          border: `1px solid ${CHAT.agentBubbleBorder}`,
-                          bgcolor: CHAT.codeBg,
-                          maxHeight: 320,
-                          maxWidth: "100%",
-                          overflow: "auto",
-                          [`& ${PRISM_PRE_SEL}, & ${PRISM_CODE_SEL}`]: {
-                            background: "transparent !important",
-                            backgroundColor: "transparent !important",
-                          },
-                        }}
-                      >
-                        <SyntaxHighlighter
-                          style={prismStyleFenced}
-                          language={lang}
-                          PreTag="div"
-                          customStyle={{
-                            ...fencedScrollStyle,
-                            padding: "8px 12px",
-                            fontSize: 11,
-                            lineHeight: 1.45,
-                          }}
-                        >
-                          {blockBody}
-                        </SyntaxHighlighter>
-                      </Box>
-                    </Box>
-                  );
-                }
-                return (
-                  <Box
-                    component="div"
-                    sx={{
-                      my: 1.5,
-                      borderRadius: `${MD_BLOCK_RADIUS_PX}px`,
-                      overflow: "hidden",
-                      border: 1,
-                      borderColor: alpha(theme.palette.divider, 0.5),
-                    }}
-                  >
-                    <Box
-                      sx={{
-                        px: 2,
-                        py: 0.5,
-                        bgcolor: alpha(theme.palette.background.paper, 0.5),
-                        borderBottom: 1,
-                        borderColor: alpha(theme.palette.divider, 0.3),
-                      }}
-                    >
-                      <Typography variant="caption" color="text.secondary">
-                        {lang}
-                      </Typography>
-                    </Box>
-                    <Box
-                      sx={{
-                        bgcolor: CHAT.codeBg,
-                        maxHeight: 360,
-                        maxWidth: "100%",
-                        overflow: "auto",
-                        [`& ${PRISM_PRE_SEL}, & ${PRISM_CODE_SEL}`]: {
-                          background: "transparent !important",
-                          backgroundColor: "transparent !important",
-                        },
-                      }}
-                    >
-                      <SyntaxHighlighter
-                        style={prismStyleFenced}
-                        language={lang}
-                        PreTag="div"
-                        customStyle={{
-                          ...fencedScrollStyle,
-                          padding: "12px 16px",
-                          fontSize: "0.8125rem",
-                          lineHeight: 1.6,
-                        }}
-                      >
-                        {blockBody}
-                      </SyntaxHighlighter>
-                    </Box>
-                  </Box>
-                );
-              }
-              const inlineRaw = String(children);
-              const longInline = inlineRaw.length > INLINE_CODE_LONG_LEN;
-              return (
-                <Box
-                  component="code"
-                  className={className}
-                  sx={{
-                    fontFamily: "Menlo, Monaco, Consolas, monospace",
-                    fontSize: isAgent ? 12 : "0.875em",
-                    lineHeight: 1.45,
-                    background: "transparent",
-                    ...(longInline
-                      ? {
-                          padding: 0,
-                          borderRadius: 0,
-                          boxDecorationBreak: "unset",
-                          WebkitBoxDecorationBreak: "unset",
-                          color: isAgent ? CHAT.textPrimary : "inherit",
-                        }
-                      : {
-                          padding: isAgent ? "2px 5px" : "0.1em 0.35em",
-                          borderRadius: `${MD_BLOCK_RADIUS_PX}px`,
-                          boxDecorationBreak: "clone",
-                          WebkitBoxDecorationBreak: "clone",
-                          color: isAgent ? CHAT.textPrimary : "inherit",
-                        }),
-                    display: "inline-block",
-                    maxWidth: "100%",
-                    verticalAlign: "baseline",
-                    boxSizing: "border-box",
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-all",
-                    overflowWrap: "anywhere",
-                  }}
-                >
-                  {children}
-                </Box>
-              );
-            },
-            p({ children }) {
-              return (
-                <Typography
-                  variant="body1"
-                  sx={{
-                    my: 1,
-                    lineHeight: isAgent ? 1.45 : 1.7,
-                    fontSize: isAgent ? 13 : undefined,
-                    color: isAgent ? CHAT.textPrimary : undefined,
-                    maxWidth: "100%",
-                    // 无空格超长串（如蛋白序列）也可在容器内折行
-                    overflowWrap: "anywhere",
-                    wordBreak: "break-word",
-                  }}
-                >
-                  {children}
-                </Typography>
-              );
-            },
-            a({ href, children }) {
-              return (
-                <Typography
-                  component="a"
-                  href={href ?? "#"}
-                  sx={{
-                    color: isAgent ? CHAT.accent : "primary.main",
-                    overflowWrap: "anywhere",
-                    wordBreak: "break-all",
-                  }}
-                >
-                  {children}
-                </Typography>
-              );
-            },
-            table({ children }) {
-              return (
-                <Box
-                  component="table"
-                  sx={{
-                    width: "100%",
-                    maxWidth: "100%",
-                    tableLayout: "fixed",
-                    borderCollapse: "collapse",
-                    my: 1,
-                    fontSize: isAgent ? 12 : undefined,
-                    "& th, & td": {
-                      border: `1px solid ${alpha(theme.palette.divider, 0.6)}`,
-                      px: 0.75,
-                      py: 0.5,
-                      wordBreak: "break-word",
-                      overflowWrap: "anywhere",
-                      verticalAlign: "top",
-                    },
-                  }}
-                >
-                  {children}
-                </Box>
-              );
-            },
-            img({ src, alt }) {
-              return (
-                <Box
-                  component="img"
-                  src={src}
-                  alt={alt ?? ""}
-                  sx={{
-                    display: "block",
-                    maxWidth: "100%",
-                    height: "auto",
-                    borderRadius: 1,
-                    my: 1,
-                  }}
-                />
-              );
-            },
-            ul({ children }) {
-              return (
-                <Box
-                  component="ul"
-                  sx={{
-                    my: 1,
-                    // 为默认 outside 序号/圆点留出左侧空间，避免被气泡 overflow 裁切
-                    pl: 3.5,
-                    ...(isAgent
-                      ? { color: CHAT.textPrimary, fontSize: 13 }
-                      : {}),
-                  }}
-                >
-                  {children}
-                </Box>
-              );
-            },
-            ol({ children }) {
-              return (
-                <Box
-                  component="ol"
-                  sx={{
-                    my: 1,
-                    pl: 3.5,
-                    ...(isAgent
-                      ? { color: CHAT.textPrimary, fontSize: 13 }
-                      : {}),
-                  }}
-                >
-                  {children}
-                </Box>
-              );
-            },
-            li({ children }) {
-              return (
-                <Box
-                  component="li"
-                  sx={{
-                    display: "list-item",
-                    my: 0.5,
-                    maxWidth: "100%",
-                  }}
-                >
-                  <Typography
-                    variant="body1"
-                    sx={{
-                      maxWidth: "100%",
-                      overflowWrap: "anywhere",
-                      wordBreak: "break-word",
-                      ...(isAgent ? { fontSize: 13, lineHeight: 1.45 } : {}),
-                    }}
-                  >
-                    {children}
-                  </Typography>
-                </Box>
-              );
-            },
-            h1({ children }) {
-              return (
-                <Typography
-                  variant="h4"
-                  sx={{
-                    mt: 3,
-                    mb: 1,
-                    fontWeight: 600,
-                    ...(isAgent
-                      ? { color: CHAT.textPrimary, fontSize: 15 }
-                      : {}),
-                  }}
-                >
-                  {children}
-                </Typography>
-              );
-            },
-            h2({ children }) {
-              return (
-                <Typography
-                  variant="h5"
-                  sx={{
-                    mt: 2.5,
-                    mb: 1,
-                    fontWeight: 600,
-                    ...(isAgent
-                      ? { color: CHAT.textPrimary, fontSize: 15 }
-                      : {}),
-                  }}
-                >
-                  {children}
-                </Typography>
-              );
-            },
-            h3({ children }) {
-              return (
-                <Typography
-                  variant="h6"
-                  sx={{
-                    mt: 2,
-                    mb: 1,
-                    fontWeight: 600,
-                    ...(isAgent
-                      ? { color: CHAT.textPrimary, fontSize: 15 }
-                      : {}),
-                  }}
-                >
-                  {children}
-                </Typography>
-              );
-            },
-            blockquote({ children }) {
-              return (
-                <Box
-                  component="blockquote"
-                  sx={{
-                    my: 1.5,
-                    pl: 2,
-                    borderLeft: 3,
-                    borderColor: isAgent
-                      ? CHAT.agentBubbleBorder
-                      : "primary.main",
-                    bgcolor: isAgent
-                      ? "transparent"
-                      : alpha(theme.palette.primary.main, 0.05),
-                    py: 1,
-                    borderRadius: `0 ${MD_BLOCK_RADIUS_PX}px ${MD_BLOCK_RADIUS_PX}px 0`,
-                    ...(isAgent ? { color: CHAT.textMuted, fontSize: 13 } : {}),
-                  }}
-                >
-                  {children}
-                </Box>
-              );
-            },
-          }}
+          remarkPlugins={[remarkGfm, remarkMath]}
+          rehypePlugins={[rehypeKatex]}
+          components={components}
         >
           {content}
         </ReactMarkdown>
       </Box>
     );
-  };
+  }, [agentComponents, defaultComponents, CHAT]);
+
 
   return (
     <Box
@@ -3638,7 +4003,6 @@ export function Chat({ sessionId }: ChatProps) {
               p: 3,
               display: "flex",
               flexDirection: "column",
-              /* 统一：仅由 gap 控制气泡之间的间距（用户消息不再额外 pb 撑高） */
               gap: 2,
               position: "relative",
             }}
@@ -3655,7 +4019,6 @@ export function Chat({ sessionId }: ChatProps) {
                   alignItems: "center",
                   justifyContent: "center",
                   bgcolor: (t) => alpha(t.palette.background.default, 0.6),
-                  backdropFilter: "blur(2px)",
                   pointerEvents: "none",
                 }}
               >
@@ -3701,8 +4064,13 @@ export function Chat({ sessionId }: ChatProps) {
               </Box>
             )}
 
-            {messageRenderItems.map((item, itemIndex) => {
-              if (item.kind === "react_fold") {
+            {displayedItems.map((item, itemIndex) => {
+              const itemKey =
+                item.kind === "react_fold" ? item.id : item.message.id;
+              return (
+                <Box key={itemKey} sx={{ width: "100%" }}>
+                  {(() => {
+                    if (item.kind === "react_fold") {
                 const { id, fold } = item;
                 const toolMsgs = fold.filter(
                   (m) => m.role === "tool" && m.toolCall,
@@ -3714,14 +4082,14 @@ export function Chat({ sessionId }: ChatProps) {
                 const isLastFold = id === lastReactFoldId;
 
                 return (
-                  <Fade in key={id} timeout={300}>
-                    <Box
-                      sx={{
-                        width: "100%",
-                        minWidth: 0,
-                        maxWidth: "100%",
-                      }}
-                    >
+                  <Box
+                    key={id}
+                    sx={{
+                      width: "100%",
+                      minWidth: 0,
+                      maxWidth: "100%",
+                    }}
+                  >
                       <Box
                         sx={{
                           width: "100%",
@@ -4135,13 +4503,12 @@ export function Chat({ sessionId }: ChatProps) {
                         </Collapse>
                       </Box>
                     </Box>
-                  </Fade>
                 );
               }
 
               const message = item.message;
               const dividerBefore = item.dividerBefore === true;
-              const nextItem = messageRenderItems[itemIndex + 1];
+              const nextItem = displayedItems[itemIndex + 1];
               const nextRowIsUser =
                 nextItem?.kind === "row" && nextItem.message.role === "user";
               const userRowPb =
@@ -4157,14 +4524,14 @@ export function Chat({ sessionId }: ChatProps) {
               const isEditingUser =
                 message.role === "user" && userMessageEdit?.id === message.id;
               return (
-                <Fade in key={message.id} timeout={300}>
-                  <Box
-                    sx={{
-                      display: "flex",
-                      flexDirection: "column",
-                      width: "100%",
-                      maxWidth: "100%",
-                      gap: dividerBefore ? 1.5 : 0,
+                <Box
+                  key={message.id}
+                  sx={{
+                    display: "flex",
+                    flexDirection: "column",
+                    width: "100%",
+                    maxWidth: "100%",
+                    gap: dividerBefore ? 1.5 : 0,
                     }}
                   >
                     {dividerBefore && (
@@ -4420,8 +4787,8 @@ export function Chat({ sessionId }: ChatProps) {
                                         lineHeight: 1.45,
                                       }}
                                     >
-                                      保存后将更新本条消息。可按 Esc
-                                      取消，或使用 Ctrl/⌘ + Enter 保存。
+                                      保存后将截断后续消息并重新分析。可按 Esc
+                                      取消，或使用 Ctrl/⌘ + Enter 保存并重发。
                                     </Typography>
                                   </Stack>
                                   <Stack
@@ -4639,45 +5006,45 @@ export function Chat({ sessionId }: ChatProps) {
                         </Box>
                       )}
                   </Box>
-                </Fade>
+              );
+            })()}
+                </Box>
               );
             })}
 
             {/* Streaming: final summary text only — divider appears on the persisted assistant row after complete */}
             {isStreaming && currentResponse && (
-              <Fade in timeout={200}>
+              <Box
+                sx={{
+                  width: "100%",
+                  minWidth: 0,
+                  maxWidth: "100%",
+                  px: 1.75,
+                  py: 1.5,
+                  borderRadius: `${BUBBLE_RADIUS_PX}px`,
+                  bgcolor: CHAT.agentBubbleBg,
+                  border: `1px solid ${CHAT.agentBubbleBorder}`,
+                  fontFamily: CHAT.font,
+                  overflow: "visible",
+                }}
+              >
+                {renderMessageContent(currentResponse, "agent")}
                 <Box
+                  component="span"
                   sx={{
-                    width: "100%",
-                    minWidth: 0,
-                    maxWidth: "100%",
-                    px: 1.75,
-                    py: 1.5,
-                    borderRadius: `${BUBBLE_RADIUS_PX}px`,
-                    bgcolor: CHAT.agentBubbleBg,
-                    border: `1px solid ${CHAT.agentBubbleBorder}`,
-                    fontFamily: CHAT.font,
-                    overflow: "visible",
+                    display: "inline-block",
+                    width: 8,
+                    height: 16,
+                    bgcolor: CHAT.accent,
+                    ml: 0.5,
+                    animation: "pulse 1s ease-in-out infinite",
+                    "@keyframes pulse": {
+                      "0%, 100%": { opacity: 1 },
+                      "50%": { opacity: 0.3 },
+                    },
                   }}
-                >
-                  {renderMessageContent(currentResponse, "agent")}
-                  <Box
-                    component="span"
-                    sx={{
-                      display: "inline-block",
-                      width: 8,
-                      height: 16,
-                      bgcolor: CHAT.accent,
-                      ml: 0.5,
-                      animation: "pulse 1s ease-in-out infinite",
-                      "@keyframes pulse": {
-                        "0%, 100%": { opacity: 1 },
-                        "50%": { opacity: 0.3 },
-                      },
-                    }}
-                  />
-                </Box>
-              </Fade>
+                />
+              </Box>
             )}
 
             {/* Implicit Memory Indexing Status */}
@@ -4810,6 +5177,25 @@ export function Chat({ sessionId }: ChatProps) {
               </Fade>
             )}
 
+            {suggestionsGenerating && !showNextStepSuggestions && (
+              <Fade in timeout={200}>
+                <Box sx={{ width: "100%", pt: 0.5, pb: 0.5 }}>
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: "text.disabled",
+                      fontStyle: "italic",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 0.5,
+                    }}
+                  >
+                    正在生成下一步建议…
+                  </Typography>
+                </Box>
+              </Fade>
+            )}
+
             {showNextStepSuggestions && (
               <Fade in timeout={200}>
                 <Box
@@ -4865,7 +5251,7 @@ export function Chat({ sessionId }: ChatProps) {
                           variant="outlined"
                           color="primary"
                           onClick={() => {
-                            setInput(s.text);
+                            composerRef.current?.setValue(s.text);
                             queueMicrotask(() => inputRef.current?.focus());
                           }}
                           sx={{
@@ -4888,6 +5274,39 @@ export function Chat({ sessionId }: ChatProps) {
 
             <div ref={messagesEndRef} />
           </Box>
+
+          {/* Image Lightbox */}
+          <Dialog
+            open={imageLightbox.open}
+            onClose={() => setImageLightbox((s) => ({ ...s, open: false }))}
+            maxWidth="xl"
+            PaperProps={{
+              sx: {
+                bgcolor: "transparent",
+                boxShadow: "none",
+                m: 2,
+                maxWidth: "calc(100% - 32px)",
+                maxHeight: "calc(100% - 32px)",
+                overflow: "hidden",
+              },
+            }}
+          >
+            <Box
+              component="img"
+              src={imageLightbox.src}
+              alt={imageLightbox.alt}
+              onClick={() => setImageLightbox((s) => ({ ...s, open: false }))}
+              sx={{
+                maxWidth: "100%",
+                maxHeight: "calc(100vh - 32px)",
+                objectFit: "contain",
+                borderRadius: 1,
+                cursor: "pointer",
+                display: "block",
+                mx: "auto",
+              }}
+            />
+          </Dialog>
 
           {/* Input Area - Matching pencil design */}
           <Box
@@ -4949,8 +5368,7 @@ export function Chat({ sessionId }: ChatProps) {
                 }
                 needsWorkspacePath={needsWorkspacePath}
                 onPickWorkspace={handlePickProjectFolder}
-                input={input}
-                onInputChange={setInput}
+                composerRef={composerRef}
                 onKeyDown={handleKeyDown}
                 inputRef={inputRef}
                 isStreaming={isStreaming}
@@ -4985,47 +5403,19 @@ export function Chat({ sessionId }: ChatProps) {
         </Box>
       )}
 
-      <Dialog
+      <SshDirectoryTreeDialog
         open={sshWorkspaceDialogOpen}
         onClose={() => setSshWorkspaceDialogOpen(false)}
-        maxWidth="sm"
-        fullWidth
-      >
-        <DialogTitle>远程工作目录</DialogTitle>
-        <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-            在 SSH 执行环境下，工作区为远端服务器上的目录。请输入绝对路径（POSIX，以 /
-            开头），与终端中 <code>cd</code> 的目标一致。
-          </Typography>
-          <TextField
-            autoFocus
-            fullWidth
-            label="远程路径"
-            placeholder="/home/ubuntu/myproject"
-            value={sshWorkspacePathDraft}
-            onChange={(e) => setSshWorkspacePathDraft(e.target.value)}
-            variant="outlined"
-            margin="dense"
-          />
-        </DialogContent>
-        <DialogActions>
-          <Button
-            type="button"
-            variant="outlined"
-            color="inherit"
-            onClick={() => setSshWorkspaceDialogOpen(false)}
-          >
-            取消
-          </Button>
-          <Button
-            type="button"
-            variant="contained"
-            onClick={() => void confirmSshWorkspaceFolder()}
-          >
-            确定
-          </Button>
-        </DialogActions>
-      </Dialog>
+        sshProfileName={useChatComposerStore.getState().sshServer ?? ""}
+        defaultPath={
+          (
+            currentSession?.workingDirectory ??
+            currentSession?.projectPath ??
+            ""
+          ).trim() || undefined
+        }
+        onConfirm={handleSshWorkspaceConfirm}
+      />
 
       <Dialog
         open={retryConfirmForMessage !== null}

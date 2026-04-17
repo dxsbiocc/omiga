@@ -27,7 +27,11 @@ pub fn fallback_title_from_message(raw: &str) -> String {
         .lines()
         .find_map(|line| {
             let t = line.trim();
-            if t.is_empty() { None } else { Some(t) }
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
         })
         .unwrap_or("");
     let collapsed = first_non_empty
@@ -153,10 +157,7 @@ mod tests {
 
     #[test]
     fn sanitize_strips_prefix_and_quotes() {
-        assert_eq!(
-            sanitize_session_title("标题：「测试一下」"),
-            "测试一下"
-        );
+        assert_eq!(sanitize_session_title("标题：「测试一下」"), "测试一下");
         assert_eq!(sanitize_session_title("\"Foo bar\"\n"), "Foo bar");
     }
 }

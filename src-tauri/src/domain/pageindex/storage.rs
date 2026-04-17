@@ -71,7 +71,10 @@ impl IndexStorage {
         let tree: DocumentTree = serde_json::from_str(&content)
             .map_err(|e| AppError::Unknown(format!("Failed to parse tree: {}", e)))?;
 
-        info!("Loaded document tree with {} documents", tree.document_count());
+        info!(
+            "Loaded document tree with {} documents",
+            tree.document_count()
+        );
         Ok(Some(tree))
     }
 
@@ -238,10 +241,10 @@ impl IndexStorage {
     /// Export the entire index to a portable format.
     pub async fn export(&self, export_path: impl AsRef<Path>) -> Result<(), AppError> {
         let export_path = export_path.as_ref();
-        
+
         // Load tree
         let tree = self.load_tree().await?.unwrap_or_default();
-        
+
         // Create export structure
         let export = ExportData {
             version: 1,
@@ -264,7 +267,7 @@ impl IndexStorage {
     /// Import an index from a portable format.
     pub async fn import(&self, import_path: impl AsRef<Path>) -> Result<DocumentTree, AppError> {
         let import_path = import_path.as_ref();
-        
+
         let content = fs::read_to_string(import_path)
             .await
             .map_err(|e| AppError::Unknown(format!("Failed to read import: {}", e)))?;

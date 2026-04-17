@@ -70,11 +70,7 @@ fn parse_server_entry(v: &Json) -> Option<McpServerConfig> {
         .map(parse_env)
         .unwrap_or_default();
 
-    Some(McpServerConfig::Stdio {
-        command,
-        args,
-        env,
-    })
+    Some(McpServerConfig::Stdio { command, args, env })
 }
 
 fn servers_from_mcp_json(raw: &str) -> HashMap<String, McpServerConfig> {
@@ -134,7 +130,9 @@ mod tests {
 
     #[test]
     fn merged_loads_project_omiga_mcp_json() {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("_mcp_cfg_tests");
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("_mcp_cfg_tests");
         std::fs::create_dir_all(&base).expect("mkdir target/_mcp_cfg_tests");
         let tmp = tempfile::TempDir::new_in(&base).expect("tempdir in target/");
         let proj = tmp.path();

@@ -2,11 +2,15 @@
 
 use super::CommandResult;
 use crate::app_state::OmigaAppState;
+use crate::domain::persistence::MessageRecord;
+use crate::domain::persistence::RuntimeConstraintEventRecord;
+use crate::domain::persistence::RuntimeConstraintRoundTraceRecord;
+use crate::domain::session::{
+    delete_session_config, load_session_config, save_session_config, SessionCodec, SessionConfig,
+};
 use crate::domain::session::{
     Message as DomainMessage, MessageTokenUsage, ToolCall as DomainToolCall,
 };
-use crate::domain::persistence::MessageRecord;
-use crate::domain::session::SessionCodec;
 use crate::errors::OmigaError;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -51,9 +55,7 @@ fn message_record_to_api(rec: MessageRecord) -> Message {
 
 /// List all sessions
 #[tauri::command]
-pub async fn list_sessions(
-    state: State<'_, OmigaAppState>,
-) -> CommandResult<Vec<SessionSummary>> {
+pub async fn list_sessions(state: State<'_, OmigaAppState>) -> CommandResult<Vec<SessionSummary>> {
     let repo = &*state.repo;
 
     let sessions = repo
@@ -75,7 +77,11 @@ pub async fn list_sessions(
 
 /// Default page size for initial session load.  Older messages are fetched on demand
 /// via `load_more_messages` when the user scrolls to the top.
-const DEFAULT_MSG_PAGE_SIZE: i64 = 100;
+///
+/// 30 is enough to fill the viewport and gives context for the conversation.
+/// Reducing from 100 cuts IPC payload size by ~3x, which is the main source of
+/// session-switch latency (JSON serialisation through the WebView bridge).
+const DEFAULT_MSG_PAGE_SIZE: i64 = 30;
 
 /// Load a session by ID.
 ///
@@ -91,10 +97,16 @@ pub async fn load_session(
     tracing::info!(target: "omiga::perf", "load_session started: {}", session_id);
 
     let repo = &*state.repo;
+    let page = limit.unwrap_or(DEFAULT_MSG_PAGE_SIZE).max(1);
 
-    let session = repo
-        .get_session_meta(&session_id)
-        .await
+    // Run session meta and message queries in parallel — both are independent reads.
+    // WAL mode + pool of 4 connections supports concurrent reads without contention.
+    let (session_result, raw_messages_result) = tokio::join!(
+        repo.get_session_meta(&session_id),
+        repo.get_session_messages_paged(&session_id, page + 1, 0)
+    );
+
+    let session = session_result
         .map_err(|e| OmigaError::Persistence(format!("Failed to load session: {}", e)))?;
 
     let Some(session) = session else {
@@ -103,13 +115,12 @@ pub async fn load_session(
         });
     };
 
-    let restore_provider = session.active_provider_entry_name.clone();
-    let page = limit.unwrap_or(DEFAULT_MSG_PAGE_SIZE).max(1);
+    let active_provider_entry_name = session.active_provider_entry_name.clone();
 
-    // Load one extra row to know whether older messages exist, without fetching them.
-    let raw_messages = repo
-        .get_session_messages_paged(&session_id, page + 1, 0)
-        .await
+    // Load messages only — provider restoration is done lazily in send_message so it
+    // never blocks the session switch UI.  The active_provider_entry_name is returned
+    // to the frontend so the ProviderSwitcher chip can update immediately.
+    let raw_messages = raw_messages_result
         .map_err(|e| OmigaError::Persistence(format!("Failed to load messages: {}", e)))?;
 
     let has_more_messages = raw_messages.len() as i64 > page;
@@ -130,19 +141,9 @@ pub async fn load_session(
         .into_iter()
         .map(message_record_to_api)
         .collect();
-    let converted = start.elapsed();
-    tracing::info!(target: "omiga::perf", "messages converted: {:?}", converted);
 
-    let provider_changed = crate::commands::chat::restore_session_llm_after_load(
-        &state,
-        restore_provider,
-    )
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!(target: "omiga::llm",
-            "Failed to restore LLM provider for session {}: {}", session_id, e);
-        false
-    });
+    let session_config = load_session_config(&session_id);
+    let config_response = SessionConfigResponse::from(session_config);
 
     let total = start.elapsed();
     tracing::info!(target: "omiga::perf", "load_session completed: {:?}", total);
@@ -154,8 +155,9 @@ pub async fn load_session(
         project_path: session.project_path,
         created_at: session.created_at,
         updated_at: session.updated_at,
-        provider_changed,
+        active_provider_entry_name,
         has_more_messages,
+        session_config: config_response,
     })
 }
 
@@ -184,10 +186,7 @@ pub async fn load_more_messages(
 
 /// Save a session (upsert)
 #[tauri::command]
-pub async fn save_session(
-    state: State<'_, AppState>,
-    session: SessionData,
-) -> CommandResult<()> {
+pub async fn save_session(state: State<'_, AppState>, session: SessionData) -> CommandResult<()> {
     let repo = &*state.repo;
 
     // Check if session exists
@@ -219,7 +218,9 @@ pub async fn save_session(
 
         // Convert command Message to domain Message for codec
         let domain_msg = match message {
-            Message::User { content, .. } => DomainMessage::User { content: content.clone() },
+            Message::User { content, .. } => DomainMessage::User {
+                content: content.clone(),
+            },
             Message::Assistant {
                 content,
                 tool_calls,
@@ -241,7 +242,11 @@ pub async fn save_session(
                 reasoning_content: reasoning_content.clone(),
                 follow_up_suggestions: None, // Not used in this path
             },
-            Message::Tool { tool_call_id, output, .. } => DomainMessage::Tool {
+            Message::Tool {
+                tool_call_id,
+                output,
+                ..
+            } => DomainMessage::Tool {
                 tool_call_id: tool_call_id.clone(),
                 output: output.clone(),
             },
@@ -294,6 +299,9 @@ pub async fn create_session(
         .await
         .map_err(|e| OmigaError::Persistence(format!("Failed to create session: {}", e)))?;
 
+    let session_config = SessionConfig::default_for_new();
+    let _ = save_session_config(&id, &session_config);
+
     Ok(SessionData {
         id,
         name,
@@ -301,22 +309,22 @@ pub async fn create_session(
         project_path,
         created_at: now.clone(),
         updated_at: now,
-        provider_changed: false,
+        active_provider_entry_name: None,
         has_more_messages: false,
+        session_config: session_config.into(),
     })
 }
 
 /// Delete a session
 #[tauri::command]
-pub async fn delete_session(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> CommandResult<()> {
+pub async fn delete_session(state: State<'_, AppState>, session_id: String) -> CommandResult<()> {
     let repo = &*state.repo;
 
     repo.delete_session(&session_id)
         .await
         .map_err(|e| OmigaError::Persistence(format!("Failed to delete session: {}", e)))?;
+
+    delete_session_config(&session_id);
 
     Ok(())
 }
@@ -394,7 +402,11 @@ pub async fn save_message(
             reasoning_content,
             follow_up_suggestions: None, // Not used in this path
         },
-        Message::Tool { tool_call_id, output, .. } => DomainMessage::Tool {
+        Message::Tool {
+            tool_call_id,
+            output,
+            ..
+        } => DomainMessage::Tool {
             tool_call_id,
             output,
         },
@@ -451,7 +463,7 @@ pub async fn clear_session_messages(
 }
 
 /// Refresh MCP connections for a new session or after /clear
-/// 
+///
 /// This triggers session boundary detection in the MCP connection manager:
 /// - Stale connections (> 5 min idle) are closed
 /// - stdio connections from different sessions are reconnected (avoiding zombie processes)
@@ -466,7 +478,7 @@ pub async fn refresh_session_mcp_connections(
     use std::path::PathBuf;
 
     let project_root = PathBuf::from(project_path);
-    
+
     // Get the manager for this project, which will trigger session refresh
     let manager = state
         .chat
@@ -525,10 +537,7 @@ pub async fn get_mcp_connection_stats(
 
 /// Get or create settings value
 #[tauri::command]
-pub async fn get_setting(
-    state: State<'_, AppState>,
-    key: String,
-) -> CommandResult<Option<String>> {
+pub async fn get_setting(state: State<'_, AppState>, key: String) -> CommandResult<Option<String>> {
     let repo = &*state.repo;
 
     let value = repo
@@ -552,6 +561,489 @@ pub async fn set_setting(
         .await
         .map_err(|e| OmigaError::Persistence(format!("Failed to set setting: {}", e)))?;
 
+    Ok(())
+}
+
+/// Serializable per-session config for the frontend.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionConfigResponse {
+    pub active_provider_entry_name: Option<String>,
+    pub permission_mode: String,
+    pub composer_agent_type: String,
+    pub execution_environment: String,
+    pub ssh_server: Option<String>,
+    pub sandbox_backend: String,
+    pub local_venv_type: String,
+    pub local_venv_name: String,
+    pub use_worktree: bool,
+    pub runtime_constraints: Option<crate::domain::runtime_constraints::RuntimeConstraintConfig>,
+}
+
+impl From<SessionConfig> for SessionConfigResponse {
+    fn from(cfg: SessionConfig) -> Self {
+        Self {
+            active_provider_entry_name: cfg.active_provider_entry_name,
+            permission_mode: cfg.permission_mode,
+            composer_agent_type: cfg.composer_agent_type,
+            execution_environment: cfg.execution_environment,
+            ssh_server: cfg.ssh_server,
+            sandbox_backend: cfg.sandbox_backend,
+            local_venv_type: cfg.local_venv_type,
+            local_venv_name: cfg.local_venv_name,
+            use_worktree: cfg.use_worktree,
+            runtime_constraints: cfg.runtime_constraints,
+        }
+    }
+}
+
+/// Load per-session config from `~/.omiga/sessions/<session_id>.yaml`.
+#[tauri::command]
+pub async fn get_session_config(session_id: String) -> CommandResult<SessionConfigResponse> {
+    let cfg = load_session_config(&session_id);
+    Ok(cfg.into())
+}
+
+/// Save per-session config to `~/.omiga/sessions/<session_id>.yaml`.
+#[tauri::command]
+pub async fn save_session_config_command(
+    session_id: String,
+    config: SessionConfigResponse,
+) -> CommandResult<()> {
+    let existing = load_session_config(&session_id);
+    let cfg = SessionConfig {
+        active_provider_entry_name: config.active_provider_entry_name,
+        permission_mode: config.permission_mode,
+        composer_agent_type: config.composer_agent_type,
+        execution_environment: config.execution_environment,
+        ssh_server: config.ssh_server,
+        sandbox_backend: config.sandbox_backend,
+        local_venv_type: config.local_venv_type,
+        local_venv_name: config.local_venv_name,
+        use_worktree: config.use_worktree,
+        runtime_constraints: config.runtime_constraints.or(existing.runtime_constraints),
+    };
+    save_session_config(&session_id, &cfg)
+        .map_err(|e| OmigaError::Persistence(format!("Failed to save session config: {}", e)))?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RuntimeConstraintConfigSnapshot {
+    pub project_config: crate::domain::runtime_constraints::RuntimeConstraintConfig,
+    pub session_config: Option<crate::domain::runtime_constraints::RuntimeConstraintConfig>,
+    pub resolved_enabled: bool,
+    pub resolved_buffer_responses: bool,
+    pub resolved_policy_pack: crate::domain::runtime_constraints::ConstraintPolicyPack,
+    pub registry: Vec<RuntimeConstraintRuleStatus>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RuntimeConstraintRuleStatus {
+    pub id: String,
+    pub description: String,
+    pub severity: crate::domain::runtime_constraints::ConstraintSeverity,
+    pub enabled: bool,
+    pub phases: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RuntimeConstraintTraceEventResponse {
+    pub id: String,
+    pub session_id: String,
+    pub round_id: String,
+    pub message_id: String,
+    pub event_type: String,
+    pub constraint_id: Option<String>,
+    pub payload_json: String,
+    pub created_at: String,
+}
+
+impl From<RuntimeConstraintEventRecord> for RuntimeConstraintTraceEventResponse {
+    fn from(v: RuntimeConstraintEventRecord) -> Self {
+        Self {
+            id: v.id,
+            session_id: v.session_id,
+            round_id: v.round_id,
+            message_id: v.message_id,
+            event_type: v.event_type,
+            constraint_id: v.constraint_id,
+            payload_json: v.payload_json,
+            created_at: v.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RuntimeConstraintTraceRoundResponse {
+    pub round_id: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub event_count: usize,
+    pub first_event_at: String,
+    pub last_event_at: String,
+}
+
+impl From<RuntimeConstraintRoundTraceRecord> for RuntimeConstraintTraceRoundResponse {
+    fn from(v: RuntimeConstraintRoundTraceRecord) -> Self {
+        Self {
+            round_id: v.round_id,
+            session_id: v.session_id,
+            message_id: v.message_id,
+            event_count: v.event_count.max(0) as usize,
+            first_event_at: v.first_event_at,
+            last_event_at: v.last_event_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RuntimeConstraintTraceSummary {
+    pub round_id: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub total_events: usize,
+    pub first_event_at: Option<String>,
+    pub last_event_at: Option<String>,
+    pub event_type_counts: std::collections::BTreeMap<String, usize>,
+    pub constraint_counts: std::collections::BTreeMap<String, usize>,
+    pub noticed_constraints: Vec<String>,
+    pub gate_constraints: Vec<String>,
+    pub retry_constraints: Vec<String>,
+    pub commit_phases: Vec<String>,
+    pub config_payload: Option<serde_json::Value>,
+}
+
+fn summarize_runtime_constraint_events(
+    rows: &[RuntimeConstraintEventRecord],
+) -> Option<RuntimeConstraintTraceSummary> {
+    let first = rows.first()?;
+    let mut event_type_counts = std::collections::BTreeMap::<String, usize>::new();
+    let mut constraint_counts = std::collections::BTreeMap::<String, usize>::new();
+    let mut noticed = std::collections::BTreeSet::<String>::new();
+    let mut gated = std::collections::BTreeSet::<String>::new();
+    let mut retried = std::collections::BTreeSet::<String>::new();
+    let mut commit_phases = std::collections::BTreeSet::<String>::new();
+    let mut config_payload = None;
+
+    for row in rows {
+        *event_type_counts.entry(row.event_type.clone()).or_insert(0) += 1;
+        if let Some(ref cid) = row.constraint_id {
+            *constraint_counts.entry(cid.clone()).or_insert(0) += 1;
+        }
+
+        let parsed = serde_json::from_str::<serde_json::Value>(&row.payload_json).ok();
+        match row.event_type.as_str() {
+            "runtime_constraints.notices" => {
+                if let Some(ids) = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("ids"))
+                    .and_then(|v| v.as_array())
+                {
+                    for id in ids.iter().filter_map(|v| v.as_str()) {
+                        noticed.insert(id.to_string());
+                    }
+                }
+            }
+            "runtime_constraints.gate" => {
+                if let Some(id) = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("id"))
+                    .and_then(|v| v.as_str())
+                {
+                    gated.insert(id.to_string());
+                }
+            }
+            "runtime_constraint_retry" => {
+                if let Some(id) = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("id"))
+                    .and_then(|v| v.as_str())
+                {
+                    retried.insert(id.to_string());
+                }
+            }
+            "runtime_constraints.commit" => {
+                if let Some(phase) = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("phase"))
+                    .and_then(|v| v.as_str())
+                {
+                    commit_phases.insert(phase.to_string());
+                }
+            }
+            "runtime_constraints.config" => {
+                if config_payload.is_none() {
+                    config_payload = parsed;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(RuntimeConstraintTraceSummary {
+        round_id: first.round_id.clone(),
+        session_id: first.session_id.clone(),
+        message_id: first.message_id.clone(),
+        total_events: rows.len(),
+        first_event_at: rows.first().map(|r| r.created_at.clone()),
+        last_event_at: rows.last().map(|r| r.created_at.clone()),
+        event_type_counts,
+        constraint_counts,
+        noticed_constraints: noticed.into_iter().collect(),
+        gate_constraints: gated.into_iter().collect(),
+        retry_constraints: retried.into_iter().collect(),
+        commit_phases: commit_phases.into_iter().collect(),
+        config_payload,
+    })
+}
+
+#[tauri::command]
+pub async fn get_runtime_constraints_config(
+    session_id: Option<String>,
+    project_path: String,
+) -> CommandResult<RuntimeConstraintConfigSnapshot> {
+    let project_root = std::path::PathBuf::from(project_path);
+    let project_cfg =
+        crate::domain::runtime_constraints::load_project_runtime_constraint_config(&project_root);
+    let session_cfg = session_id
+        .as_deref()
+        .map(load_session_config)
+        .and_then(|cfg| cfg.runtime_constraints);
+    let resolved = crate::domain::runtime_constraints::resolve_runtime_constraint_config(
+        &project_root,
+        session_cfg.as_ref(),
+    );
+    let harness =
+        crate::domain::runtime_constraints::RuntimeConstraintHarness::from_config(resolved.clone());
+
+    Ok(RuntimeConstraintConfigSnapshot {
+        project_config: project_cfg,
+        session_config: session_cfg,
+        resolved_enabled: resolved.enabled,
+        resolved_buffer_responses: resolved.buffer_responses,
+        resolved_policy_pack: resolved.policy_pack,
+        registry: harness
+            .registry()
+            .into_iter()
+            .map(|m| RuntimeConstraintRuleStatus {
+                id: m.id.to_string(),
+                description: m.description.to_string(),
+                severity: m.severity,
+                enabled: m.enabled,
+                phases: m.phases.iter().map(|p| format!("{:?}", p)).collect(),
+            })
+            .collect(),
+    })
+}
+
+#[tauri::command]
+pub async fn save_project_runtime_constraints_config(
+    project_path: String,
+    config: crate::domain::runtime_constraints::RuntimeConstraintConfig,
+) -> CommandResult<()> {
+    crate::domain::runtime_constraints::save_project_runtime_constraint_config(
+        std::path::Path::new(&project_path),
+        &config,
+    )
+    .map_err(|e| {
+        OmigaError::Persistence(format!("Failed to save project runtime constraints: {}", e))
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn save_session_runtime_constraints_config(
+    session_id: String,
+    config: Option<crate::domain::runtime_constraints::RuntimeConstraintConfig>,
+) -> CommandResult<()> {
+    let mut session_cfg = load_session_config(&session_id);
+    session_cfg.runtime_constraints = config;
+    save_session_config(&session_id, &session_cfg).map_err(|e| {
+        OmigaError::Persistence(format!("Failed to save session runtime constraints: {}", e))
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_runtime_constraint_trace(
+    state: State<'_, AppState>,
+    round_id: String,
+) -> CommandResult<Vec<RuntimeConstraintTraceEventResponse>> {
+    let repo = &*state.repo;
+    let rows = repo
+        .list_runtime_constraint_events_for_round(&round_id)
+        .await
+        .map_err(|e| {
+            OmigaError::Persistence(format!("Failed to load runtime constraint trace: {}", e))
+        })?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+#[tauri::command]
+pub async fn list_runtime_constraint_trace_rounds(
+    state: State<'_, AppState>,
+    session_id: String,
+    limit: Option<usize>,
+) -> CommandResult<Vec<RuntimeConstraintTraceRoundResponse>> {
+    let repo = &*state.repo;
+    let rows = repo
+        .list_runtime_constraint_rounds_for_session(&session_id, limit.unwrap_or(20) as i64)
+        .await
+        .map_err(|e| {
+            OmigaError::Persistence(format!(
+                "Failed to list runtime constraint trace rounds: {}",
+                e
+            ))
+        })?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+#[tauri::command]
+pub async fn summarize_runtime_constraint_trace(
+    state: State<'_, AppState>,
+    round_id: String,
+) -> CommandResult<Option<RuntimeConstraintTraceSummary>> {
+    let repo = &*state.repo;
+    let rows = repo
+        .list_runtime_constraint_events_for_round(&round_id)
+        .await
+        .map_err(|e| {
+            OmigaError::Persistence(format!(
+                "Failed to summarize runtime constraint trace: {}",
+                e
+            ))
+        })?;
+    Ok(summarize_runtime_constraint_events(&rows))
+}
+
+/// Pre-warm LLM config and MCP/integrations/permission caches immediately after a session
+/// switch — before the user sends their first message.
+///
+/// Inspired by codex's `session_startup_prewarm` pattern: start expensive async I/O the
+/// moment the user switches sessions so the cold-cache penalty is paid in the background,
+/// not at the start of the first `send_message` call.
+///
+/// This command is fire-and-forget from the frontend; errors are logged but not surfaced.
+#[tauri::command]
+pub async fn prewarm_session(
+    state: State<'_, AppState>,
+    project_path: String,
+    active_provider_entry_name: Option<String>,
+) -> CommandResult<()> {
+    use crate::app_state::IntegrationsConfigCacheSlot;
+    use crate::domain::chat_state::{
+        McpToolCache, PermissionDenyCache, MCP_TOOL_CACHE_TTL, PERMISSION_DENY_CACHE_TTL,
+    };
+    use std::path::PathBuf;
+
+    let project_root = PathBuf::from(&project_path);
+
+    // 1. Pre-warm provider config and cached_config_file.
+    //    apply_named_provider_runtime also warms the config file cache as a side-effect.
+    if let Some(ref provider_name) = active_provider_entry_name {
+        let name = provider_name.trim();
+        if !name.is_empty() {
+            let current = state.chat.active_provider_entry_name.lock().await.clone();
+            let already_active = current.as_deref().map(str::trim) == Some(name);
+            drop(current);
+            if !already_active {
+                if let Err(e) =
+                    crate::commands::chat::apply_named_provider_runtime(&*state, name).await
+                {
+                    tracing::debug!(target: "omiga::prewarm", "provider warm skipped: {}", e);
+                }
+            } else {
+                // Provider already matches — still warm the config file cache.
+                let _ = crate::commands::chat::get_config_file(&*state).await;
+            }
+        }
+    } else {
+        let _ = crate::commands::chat::get_config_file(&*state).await;
+    }
+
+    // 2. Pre-warm integrations config cache (file read, synchronous but fast).
+    {
+        let hit = state
+            .integrations_config_cache
+            .lock()
+            .expect("integrations config cache poisoned")
+            .get(&project_root)
+            .filter(|s| s.cached_at.elapsed() < crate::app_state::INTEGRATIONS_CONFIG_CACHE_TTL)
+            .is_some();
+
+        if !hit {
+            let cfg = crate::domain::integrations_config::load_integrations_config(&project_root);
+            state
+                .integrations_config_cache
+                .lock()
+                .expect("integrations config cache poisoned")
+                .insert(
+                    project_root.clone(),
+                    IntegrationsConfigCacheSlot {
+                        config: cfg,
+                        cached_at: std::time::Instant::now(),
+                    },
+                );
+        }
+    }
+
+    // 3. Pre-warm permission deny rules cache (reads up to 4 settings files).
+    {
+        let hit = state
+            .chat
+            .permission_deny_cache
+            .lock()
+            .await
+            .get(&project_root)
+            .filter(|c| c.cached_at.elapsed() < PERMISSION_DENY_CACHE_TTL)
+            .is_some();
+
+        if !hit {
+            let entries =
+                crate::domain::permissions::load_merged_permission_deny_rule_entries(&project_root);
+            state.chat.permission_deny_cache.lock().await.insert(
+                project_root.clone(),
+                PermissionDenyCache {
+                    entries,
+                    cached_at: std::time::Instant::now(),
+                },
+            );
+        }
+    }
+
+    // 4. Pre-warm MCP tool schema cache as a background task — discovery can take seconds
+    //    when stdio servers start cold.  We spawn and forget; send_message will reuse the
+    //    warm cache if it completes in time, or re-discover if not.
+    {
+        let hit = state
+            .chat
+            .mcp_tool_cache
+            .lock()
+            .await
+            .get(&project_root)
+            .filter(|c| c.cached_at.elapsed() < MCP_TOOL_CACHE_TTL)
+            .is_some();
+
+        if !hit {
+            let mcp_tool_cache = state.chat.mcp_tool_cache.clone();
+            let root = project_root.clone();
+            tokio::spawn(async move {
+                let mcp_timeout = std::time::Duration::from_secs(10);
+                let schemas =
+                    crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(&root, mcp_timeout)
+                        .await;
+                mcp_tool_cache.lock().await.insert(
+                    root,
+                    McpToolCache {
+                        schemas,
+                        cached_at: std::time::Instant::now(),
+                    },
+                );
+            });
+        }
+    }
+
+    tracing::debug!(target: "omiga::prewarm", "session prewarm enqueued for {}", project_path);
     Ok(())
 }
 
@@ -622,9 +1114,86 @@ pub struct SessionData {
     pub project_path: String,
     pub created_at: String,
     pub updated_at: String,
-    /// True when the LLM provider was switched as part of loading this session.
-    /// Frontend should call notifyProviderChanged only when this is true.
-    pub provider_changed: bool,
+    /// The provider entry name stored for this session (from DB).
+    /// Frontend uses this to update the ProviderSwitcher chip without a round-trip.
+    pub active_provider_entry_name: Option<String>,
     /// True when there are older messages not included in this response (pagination).
     pub has_more_messages: bool,
+    /// Per-session composer/runtime config read from `~/.omiga/sessions/<id>.yaml`.
+    pub session_config: SessionConfigResponse,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summarize_runtime_constraint_events_collects_core_signals() {
+        let rows = vec![
+            RuntimeConstraintEventRecord {
+                id: "1".into(),
+                session_id: "s".into(),
+                round_id: "r".into(),
+                message_id: "m".into(),
+                event_type: "runtime_constraints.config".into(),
+                constraint_id: None,
+                payload_json: serde_json::json!({
+                    "enabled": true,
+                    "buffer_responses": true,
+                    "policy_pack": "balanced"
+                })
+                .to_string(),
+                created_at: "2026-04-17T00:00:00Z".into(),
+            },
+            RuntimeConstraintEventRecord {
+                id: "2".into(),
+                session_id: "s".into(),
+                round_id: "r".into(),
+                message_id: "m".into(),
+                event_type: "runtime_constraints.notices".into(),
+                constraint_id: None,
+                payload_json: serde_json::json!({ "ids": ["evidence_first"] }).to_string(),
+                created_at: "2026-04-17T00:00:01Z".into(),
+            },
+            RuntimeConstraintEventRecord {
+                id: "3".into(),
+                session_id: "s".into(),
+                round_id: "r".into(),
+                message_id: "m".into(),
+                event_type: "runtime_constraint_retry".into(),
+                constraint_id: Some("evidence_first".into()),
+                payload_json: serde_json::json!({ "id": "evidence_first" }).to_string(),
+                created_at: "2026-04-17T00:00:02Z".into(),
+            },
+            RuntimeConstraintEventRecord {
+                id: "4".into(),
+                session_id: "s".into(),
+                round_id: "r".into(),
+                message_id: "m".into(),
+                event_type: "runtime_constraints.commit".into(),
+                constraint_id: None,
+                payload_json: serde_json::json!({ "phase": "final" }).to_string(),
+                created_at: "2026-04-17T00:00:03Z".into(),
+            },
+        ];
+
+        let summary = summarize_runtime_constraint_events(&rows).expect("summary");
+        assert_eq!(summary.round_id, "r");
+        assert_eq!(summary.total_events, 4);
+        assert_eq!(
+            summary.event_type_counts.get("runtime_constraint_retry"),
+            Some(&1)
+        );
+        assert_eq!(summary.constraint_counts.get("evidence_first"), Some(&1));
+        assert_eq!(
+            summary.noticed_constraints,
+            vec!["evidence_first".to_string()]
+        );
+        assert_eq!(
+            summary.retry_constraints,
+            vec!["evidence_first".to_string()]
+        );
+        assert_eq!(summary.commit_phases, vec!["final".to_string()]);
+        assert!(summary.config_payload.is_some());
+    }
 }

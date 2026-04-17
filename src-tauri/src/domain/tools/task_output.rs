@@ -48,14 +48,16 @@ impl super::ToolImpl for TaskOutputTool {
             });
         }
 
-        use crate::domain::agents::background::{get_background_agent_manager, BackgroundAgentStatus};
+        use crate::domain::agents::background::{
+            get_background_agent_manager, BackgroundAgentStatus,
+        };
 
         let manager = get_background_agent_manager();
         let timeout_ms = args.timeout.min(600_000);
 
         if args.block {
-            let deadline = tokio::time::Instant::now()
-                + tokio::time::Duration::from_millis(timeout_ms);
+            let deadline =
+                tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
             loop {
                 match manager.get_task(&args.task_id).await {

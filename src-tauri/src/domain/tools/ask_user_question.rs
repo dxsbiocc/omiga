@@ -165,20 +165,18 @@ impl super::ToolImpl for AskUserQuestionTool {
             ),
         );
 
-        let json = serde_json::to_string_pretty(&serde_json::Value::Object(body)).map_err(
-            |e| ToolError::ExecutionFailed {
+        let json = serde_json::to_string_pretty(&serde_json::Value::Object(body)).map_err(|e| {
+            ToolError::ExecutionFailed {
                 message: format!("Failed to serialize result: {}", e),
-            },
-        )?;
+            }
+        })?;
 
         let preamble = "User has not answered yet (Omiga interactive picker is not connected). Treat the JSON below as the question set; ask the user in natural language or wait for their reply.\n\n";
 
-        Ok(
-            AskUserQuestionOutput {
-                text: format!("{}{}", preamble, json),
-            }
-            .into_stream(),
-        )
+        Ok(AskUserQuestionOutput {
+            text: format!("{}{}", preamble, json),
+        }
+        .into_stream())
     }
 }
 

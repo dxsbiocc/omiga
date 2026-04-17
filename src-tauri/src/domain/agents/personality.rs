@@ -140,13 +140,11 @@ mod tests {
     #[test]
     fn custom_personality_overrides_builtin_name() {
         let mut m = HashMap::new();
-        m.insert("concise".to_string(), "Custom concise override.".to_string());
-        let out = compose_prompt_layers(
-            "BODY".to_string(),
-            None,
-            Some("concise"),
-            &m,
+        m.insert(
+            "concise".to_string(),
+            "Custom concise override.".to_string(),
         );
+        let out = compose_prompt_layers("BODY".to_string(), None, Some("concise"), &m);
         assert!(out.contains("Custom concise override."));
     }
 }

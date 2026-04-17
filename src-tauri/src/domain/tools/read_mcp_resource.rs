@@ -73,12 +73,9 @@ impl super::ToolImpl for ReadMcpResourceTool {
                     message: format!("HTTP fetch failed: {e}"),
                 })?;
             let status = resp.status();
-            let mut text = resp
-                .text()
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("HTTP body: {e}"),
-                })?;
+            let mut text = resp.text().await.map_err(|e| ToolError::ExecutionFailed {
+                message: format!("HTTP body: {e}"),
+            })?;
             let truncated = text.len() > DEFAULT_MAX_RESULT_SIZE_CHARS;
             if truncated {
                 text.truncate(DEFAULT_MAX_RESULT_SIZE_CHARS);
@@ -93,9 +90,10 @@ impl super::ToolImpl for ReadMcpResourceTool {
                 "httpStatus": status.as_u16(),
                 "_omigaNote": if truncated { "Response truncated for size." } else { "Fetched via HTTP (not MCP protocol)." }
             });
-            let s = serde_json::to_string_pretty(&payload).map_err(|e| ToolError::ExecutionFailed {
-                message: e.to_string(),
-            })?;
+            let s =
+                serde_json::to_string_pretty(&payload).map_err(|e| ToolError::ExecutionFailed {
+                    message: e.to_string(),
+                })?;
             return Ok(JsonOut { text: s }.into_stream());
         }
 
@@ -110,12 +108,17 @@ impl super::ToolImpl for ReadMcpResourceTool {
 
         let merged = merged_mcp_servers(&ctx.project_root);
         if !merged.contains_key(server) {
-            let hint = if crate::domain::mcp::discovery::collect_mcp_server_names(&ctx.project_root).is_empty() {
+            let hint = if crate::domain::mcp::discovery::collect_mcp_server_names(&ctx.project_root)
+                .is_empty()
+            {
                 "No MCP servers listed in Omiga MCP config (~/.omiga/mcp.json or project .omiga/mcp.json).".to_string()
             } else {
                 let mut names: Vec<String> = merged.keys().cloned().collect();
                 names.sort();
-                format!("Configured MCP server names (merged Omiga MCP): {}", names.join(", "))
+                format!(
+                    "Configured MCP server names (merged Omiga MCP): {}",
+                    names.join(", ")
+                )
             };
             return Err(ToolError::ExecutionFailed {
                 message: format!(

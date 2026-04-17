@@ -35,11 +35,11 @@ pub async fn init_db(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
-        .pragma("busy_timeout",       "5000")
-        .pragma("cache_size",         "-32000")
-        .pragma("temp_store",         "MEMORY")
-        .pragma("mmap_size",          "268435456")
-        .pragma("foreign_keys",       "ON")
+        .pragma("busy_timeout", "5000")
+        .pragma("cache_size", "-32000")
+        .pragma("temp_store", "MEMORY")
+        .pragma("mmap_size", "268435456")
+        .pragma("foreign_keys", "ON")
         .pragma("wal_autocheckpoint", "1000");
 
     let pool = SqlitePoolOptions::new()
@@ -115,6 +115,15 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    // Index to satisfy ORDER BY s.updated_at DESC in list_sessions without a sort pass.
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at DESC)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     // Migration: assistant token usage JSON (reload in UI)
     let _ = sqlx::query("ALTER TABLE messages ADD COLUMN token_usage_json TEXT")
         .execute(pool)
@@ -126,11 +135,9 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .await;
 
     // Migration: per-session active provider (omiga.yaml entry name), independent of global default
-    let _ = sqlx::query(
-        "ALTER TABLE sessions ADD COLUMN active_provider_entry_name TEXT",
-    )
-    .execute(pool)
-    .await;
+    let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN active_provider_entry_name TEXT")
+        .execute(pool)
+        .await;
 
     // Migration: follow-up suggestions JSON (persist LLM-generated next step suggestions)
     let _ = sqlx::query("ALTER TABLE messages ADD COLUMN follow_up_suggestions_json TEXT")
@@ -175,6 +182,42 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
     sqlx::query(
         r#"
+        CREATE TABLE IF NOT EXISTS runtime_constraint_events (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            round_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            constraint_id TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_runtime_constraint_events_round
+        ON runtime_constraint_events(round_id, created_at ASC)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_runtime_constraint_events_session
+        ON runtime_constraint_events(session_id, created_at DESC)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
         CREATE INDEX IF NOT EXISTS idx_rounds_session_id ON conversation_rounds(session_id)
         "#,
     )
@@ -202,7 +245,8 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .fetch_one(pool)
     .await
     .map(|row: sqlx::sqlite::SqliteRow| row.get::<i64, _>(0))
-    .unwrap_or(0) > 0;
+    .unwrap_or(0)
+        > 0;
 
     if needs_migration {
         tracing::info!("Migrating conversation_rounds table to remove message_id FK constraint");
@@ -265,7 +309,9 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .await?;
 
         // Drop old table
-        let _ = sqlx::query("DROP TABLE conversation_rounds_old").execute(pool).await;
+        let _ = sqlx::query("DROP TABLE conversation_rounds_old")
+            .execute(pool)
+            .await;
 
         tracing::info!("Migration completed successfully");
     }
@@ -413,6 +459,9 @@ impl SessionRepository {
 
     /// List all sessions with message counts
     pub async fn list_sessions(&self) -> Result<Vec<SessionWithCount>, sqlx::Error> {
+        // Correlated subquery is faster than LEFT JOIN + GROUP BY for SQLite when sessions
+        // are few but messages are many: the index idx_messages_session_id satisfies each
+        // COUNT(*) without a sort pass, and we avoid producing a large intermediate result.
         let sessions = sqlx::query_as::<_, SessionWithCount>(
             r#"
             SELECT
@@ -421,12 +470,10 @@ impl SessionRepository {
                 s.project_path,
                 s.created_at,
                 s.updated_at,
-                COUNT(m.id) as message_count
+                (SELECT COUNT(*) FROM messages WHERE session_id = s.id) as message_count
             FROM sessions s
-            LEFT JOIN messages m ON s.id = m.session_id
-            GROUP BY s.id
             ORDER BY s.updated_at DESC
-            "#
+            "#,
         )
         .fetch_all(&self.pool)
         .await?;
@@ -446,6 +493,11 @@ impl SessionRepository {
 
     /// Return at most `limit` messages for `session_id`, ordered newest-first.
     /// The caller takes `limit` rows and checks `len > limit - 1` to detect older pages.
+    ///
+    /// `reasoning_content` (extended-thinking chain-of-thought) is excluded here — it can be
+    /// several KB per assistant message and the frontend `RawMessage` interface does not use it
+    /// on load.  Sending it over the Tauri WebView bridge was the primary cause of the
+    /// ~200 ms session-switch IPC latency.  Use `get_message_reasoning` if you need it later.
     pub async fn get_session_messages_paged(
         &self,
         session_id: &str,
@@ -455,7 +507,7 @@ impl SessionRepository {
         sqlx::query_as::<_, MessageRecord>(
             r#"
             SELECT id, session_id, role, content, tool_calls, tool_call_id,
-                   token_usage_json, reasoning_content, follow_up_suggestions_json, created_at
+                   token_usage_json, NULL as reasoning_content, follow_up_suggestions_json, created_at
             FROM messages
             WHERE session_id = ?
             ORDER BY created_at DESC, id DESC
@@ -470,6 +522,7 @@ impl SessionRepository {
 
     /// Return at most `limit` messages older than `before_id`, newest-first.
     /// The caller reverses the result to get chronological order.
+    /// `reasoning_content` excluded for the same reason as `get_session_messages_paged`.
     pub async fn get_messages_before(
         &self,
         session_id: &str,
@@ -479,7 +532,7 @@ impl SessionRepository {
         sqlx::query_as::<_, MessageRecord>(
             r#"
             SELECT id, session_id, role, content, tool_calls, tool_call_id,
-                   token_usage_json, reasoning_content, follow_up_suggestions_json, created_at
+                   token_usage_json, NULL as reasoning_content, follow_up_suggestions_json, created_at
             FROM messages
             WHERE session_id = ?
               AND (created_at, id) < (
@@ -820,7 +873,7 @@ impl SessionRepository {
             ON CONFLICT(key) DO UPDATE SET
                 value = excluded.value,
                 updated_at = excluded.updated_at
-            "#
+            "#,
         )
         .bind(key)
         .bind(value)
@@ -881,6 +934,80 @@ impl SessionRepository {
         Ok(())
     }
 
+    pub async fn append_runtime_constraint_event(
+        &self,
+        session_id: &str,
+        round_id: &str,
+        message_id: &str,
+        event_type: &str,
+        constraint_id: Option<&str>,
+        payload_json: &str,
+    ) -> Result<(), sqlx::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO runtime_constraint_events
+                (id, session_id, round_id, message_id, event_type, constraint_id, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(session_id)
+        .bind(round_id)
+        .bind(message_id)
+        .bind(event_type)
+        .bind(constraint_id)
+        .bind(payload_json)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_runtime_constraint_events_for_round(
+        &self,
+        round_id: &str,
+    ) -> Result<Vec<RuntimeConstraintEventRecord>, sqlx::Error> {
+        sqlx::query_as::<_, RuntimeConstraintEventRecord>(
+            r#"
+            SELECT id, session_id, round_id, message_id, event_type, constraint_id, payload_json, created_at
+            FROM runtime_constraint_events
+            WHERE round_id = ?
+            ORDER BY created_at ASC, id ASC
+            "#,
+        )
+        .bind(round_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn list_runtime_constraint_rounds_for_session(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<RuntimeConstraintRoundTraceRecord>, sqlx::Error> {
+        sqlx::query_as::<_, RuntimeConstraintRoundTraceRecord>(
+            r#"
+            SELECT
+                round_id,
+                session_id,
+                MIN(message_id) AS message_id,
+                COUNT(*) AS event_count,
+                MIN(created_at) AS first_event_at,
+                MAX(created_at) AS last_event_at
+            FROM runtime_constraint_events
+            WHERE session_id = ?
+            GROUP BY round_id, session_id
+            ORDER BY last_event_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(session_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     /// Get round by message ID
     pub async fn get_round_by_message_id(
         &self,
@@ -892,7 +1019,7 @@ impl SessionRepository {
                    cancelled_at, completed_at, error_message, created_at, updated_at
             FROM conversation_rounds
             WHERE message_id = ?
-            "#
+            "#,
         )
         .bind(message_id)
         .fetch_optional(&self.pool)
@@ -913,7 +1040,7 @@ impl SessionRepository {
             FROM conversation_rounds
             WHERE session_id = ? AND status IN ('running', 'partial')
             ORDER BY created_at DESC
-            "#
+            "#,
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -935,7 +1062,7 @@ impl SessionRepository {
             UPDATE conversation_rounds
             SET status = 'partial', assistant_message_id = ?, updated_at = ?
             WHERE id = ?
-            "#
+            "#,
         )
         .bind(assistant_message_id)
         .bind(&now)
@@ -960,7 +1087,7 @@ impl SessionRepository {
             UPDATE conversation_rounds
             SET status = 'cancelled', cancelled_at = ?, error_message = ?, updated_at = ?
             WHERE id = ?
-            "#
+            "#,
         )
         .bind(&cancelled_at)
         .bind(error_message)
@@ -986,7 +1113,7 @@ impl SessionRepository {
             UPDATE conversation_rounds
             SET status = 'completed', assistant_message_id = ?, completed_at = ?, updated_at = ?
             WHERE id = ?
-            "#
+            "#,
         )
         .bind(assistant_message_id)
         .bind(&completed_at)
@@ -1115,8 +1242,7 @@ impl SessionRepository {
         session_id: &str,
         message: &Message,
     ) -> Result<(), sqlx::Error> {
-        let payload_json =
-            serde_json::to_string(message).unwrap_or_else(|_| "{}".to_string());
+        let payload_json = serde_json::to_string(message).unwrap_or_else(|_| "{}".to_string());
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -1167,8 +1293,7 @@ impl SessionRepository {
         .await?;
 
         for (i, message) in messages.iter().enumerate() {
-            let payload_json =
-                serde_json::to_string(message).unwrap_or_else(|_| "{}".to_string());
+            let payload_json = serde_json::to_string(message).unwrap_or_else(|_| "{}".to_string());
             let id = uuid::Uuid::new_v4().to_string();
             let seq = base_seq + 1 + i as i64;
             sqlx::query(
@@ -1263,7 +1388,7 @@ impl SessionRepository {
             FROM conversation_rounds
             WHERE session_id = ?
             ORDER BY created_at ASC
-            "#
+            "#,
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -1372,6 +1497,31 @@ impl ConversationRoundRecord {
 
     /// Check if round is active (running or partial)
     pub fn is_active(&self) -> bool {
-        matches!(self.status_enum(), RoundStatus::Running | RoundStatus::Partial)
+        matches!(
+            self.status_enum(),
+            RoundStatus::Running | RoundStatus::Partial
+        )
     }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RuntimeConstraintEventRecord {
+    pub id: String,
+    pub session_id: String,
+    pub round_id: String,
+    pub message_id: String,
+    pub event_type: String,
+    pub constraint_id: Option<String>,
+    pub payload_json: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RuntimeConstraintRoundTraceRecord {
+    pub round_id: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub event_count: i64,
+    pub first_event_at: String,
+    pub last_event_at: String,
 }

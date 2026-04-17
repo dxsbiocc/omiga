@@ -7,9 +7,7 @@ use crate::domain::memory::{
     config::{MemoryConfig, MemoryMode},
     load_resolved_config,
     migration::{detect_structure_version, MemoryStructureVersion},
-    permanent_wiki_path,
-    registry,
-    MemorySystem,
+    permanent_wiki_path, registry, MemorySystem,
 };
 use crate::domain::pageindex::{IndexConfig, IndexStorage, PageIndex, QueryEngine, QueryResult};
 use crate::errors::AppError;
@@ -32,7 +30,7 @@ impl MemoryLevel {
             .map(|h| h.join(".omiga"))
             .unwrap_or_else(|| PathBuf::from(".omiga"))
     }
-    
+
     /// Get the wiki path for this memory level
     pub async fn wiki_path(&self, project_path: &PathBuf) -> PathBuf {
         match self {
@@ -40,9 +38,7 @@ impl MemoryLevel {
                 let config = load_resolved_config(project_path).await.unwrap_or_default();
                 config.wiki_path(project_path)
             }
-            MemoryLevel::User => {
-                permanent_wiki_path()
-            }
+            MemoryLevel::User => permanent_wiki_path(),
         }
     }
 }
@@ -57,6 +53,9 @@ pub struct MemoryConfigResponse {
     pub root_dir: String,
     pub wiki_dir: String,
     pub implicit_dir: String,
+    /// Absolute path where raw original files are stored on wiki import.
+    /// Defaults to `~/.omiga/memory/raw` when not configured.
+    pub raw_dir: String,
     pub memory_mode: String,
     pub auto_build_index: bool,
     pub index_extensions: Vec<String>,
@@ -66,10 +65,12 @@ pub struct MemoryConfigResponse {
 
 impl From<MemoryConfig> for MemoryConfigResponse {
     fn from(c: MemoryConfig) -> Self {
+        let raw_dir = c.raw_path().to_string_lossy().to_string();
         Self {
             root_dir: c.root_dir.to_string_lossy().to_string(),
             wiki_dir: c.wiki_dir,
             implicit_dir: c.implicit_dir,
+            raw_dir,
             memory_mode: match c.memory_mode {
                 MemoryMode::UserHome => "user_home".to_string(),
                 MemoryMode::ProjectRelative => "project_relative".to_string(),
@@ -88,6 +89,8 @@ pub struct SetMemoryConfigRequest {
     pub root_dir: Option<String>,
     pub wiki_dir: Option<String>,
     pub implicit_dir: Option<String>,
+    /// Absolute path for raw file storage. Empty string resets to default.
+    pub raw_dir: Option<String>,
     /// `user_home` | `project_relative`
     pub memory_mode: Option<String>,
     pub auto_build_index: Option<bool>,
@@ -129,6 +132,8 @@ pub struct MemoryPaths {
     pub implicit: String,
     /// User-level permanent wiki (`~/.omiga/memory/permanent/wiki`)
     pub permanent_wiki: String,
+    /// Raw original file storage (`~/.omiga/memory/raw` by default)
+    pub raw: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -145,15 +150,17 @@ pub async fn memory_get_config(project_path: String) -> Result<MemoryConfigRespo
 
 /// Set memory configuration
 #[tauri::command]
-pub async fn memory_set_config(req: SetMemoryConfigRequest) -> Result<MemoryConfigResponse, AppError> {
+pub async fn memory_set_config(
+    req: SetMemoryConfigRequest,
+) -> Result<MemoryConfigResponse, AppError> {
     let root = project_root(&req.project_path);
-    
+
     let mut config = if let Some(c) = MemorySystem::load_config(&root).await {
         c
     } else {
         load_resolved_config(&root).await.unwrap_or_default()
     };
-    
+
     if let Some(root_dir) = req.root_dir {
         config.root_dir = PathBuf::from(root_dir);
     }
@@ -181,14 +188,24 @@ pub async fn memory_set_config(req: SetMemoryConfigRequest) -> Result<MemoryConf
     if let Some(max_size) = req.max_file_size {
         config.max_file_size = max_size;
     }
-    
+    if let Some(raw) = req.raw_dir {
+        if raw.is_empty() {
+            config.raw_dir = None; // reset to default
+        } else {
+            config.raw_dir = Some(PathBuf::from(raw));
+        }
+    }
+
     config.validate()?;
-    
+
     let memory = MemorySystem::with_config(&root, config);
     memory.save_config().await?;
-    memory.init().await.map_err(|e| AppError::Unknown(e.to_string()))?;
+    memory
+        .init()
+        .await
+        .map_err(|e| AppError::Unknown(e.to_string()))?;
     register_project_memory(&root, memory.config()).await;
-    
+
     Ok(memory.config().clone().into())
 }
 
@@ -205,7 +222,7 @@ pub async fn memory_detect_version(project_path: String) -> Result<String, AppEr
 pub async fn memory_migrate(project_path: String) -> Result<bool, AppError> {
     let root = project_root(&project_path);
     let version = detect_structure_version(&root).await;
-    
+
     if version.needs_migration() {
         crate::domain::memory::migration::migrate_if_needed(&root).await?;
         Ok(true)
@@ -220,19 +237,21 @@ pub async fn memory_migrate(project_path: String) -> Result<bool, AppError> {
 
 /// Get unified memory status
 #[tauri::command]
-pub async fn memory_get_unified_status(project_path: String) -> Result<UnifiedMemoryStatus, AppError> {
+pub async fn memory_get_unified_status(
+    project_path: String,
+) -> Result<UnifiedMemoryStatus, AppError> {
     let root = project_root(&project_path);
     let version = detect_structure_version(&root).await;
-    
+
     let config = load_resolved_config(&root).await.unwrap_or_default();
     let memory = MemorySystem::with_config(&root, config.clone());
     let stats = memory.stats().await;
-    
+
     // Get implicit memory details
     let implicit_status = get_implicit_status(&root, &config).await?;
-    
+
     register_project_memory(&root, memory.config()).await;
-    
+
     Ok(UnifiedMemoryStatus {
         exists: version != MemoryStructureVersion::None,
         version: format!("{:?}", version),
@@ -247,6 +266,7 @@ pub async fn memory_get_unified_status(project_path: String) -> Result<UnifiedMe
             wiki: memory.wiki_path().to_string_lossy().to_string(),
             implicit: memory.implicit_path().to_string_lossy().to_string(),
             permanent_wiki: permanent_wiki_path().to_string_lossy().to_string(),
+            raw: config.raw_path().to_string_lossy().to_string(),
         },
     })
 }
@@ -257,7 +277,7 @@ async fn get_implicit_status(
 ) -> Result<ImplicitMemoryStatus, AppError> {
     let implicit_path = config.implicit_path(root);
     let tree_path = implicit_path.join("tree.json");
-    
+
     if !tree_path.exists() {
         return Ok(ImplicitMemoryStatus {
             enabled: config.auto_build_index,
@@ -267,20 +287,22 @@ async fn get_implicit_status(
             last_build_time: None,
         });
     }
-    
+
     // Load tree.json to get stats
-    let content = tokio::fs::read_to_string(&tree_path).await
+    let content = tokio::fs::read_to_string(&tree_path)
+        .await
         .map_err(|e| AppError::Unknown(e.to_string()))?;
-    
-    let tree: crate::domain::pageindex::DocumentTree = serde_json::from_str(&content)
-        .map_err(|e| AppError::Unknown(e.to_string()))?;
-    
+
+    let tree: crate::domain::pageindex::DocumentTree =
+        serde_json::from_str(&content).map_err(|e| AppError::Unknown(e.to_string()))?;
+
     // Get modification time
-    let last_build = tokio::fs::metadata(&tree_path).await
+    let last_build = tokio::fs::metadata(&tree_path)
+        .await
         .ok()
         .and_then(|m| m.modified().ok())
         .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64);
-    
+
     Ok(ImplicitMemoryStatus {
         enabled: config.auto_build_index,
         document_count: tree.document_count(),
@@ -318,189 +340,204 @@ fn project_root(project_path: &str) -> PathBuf {
 }
 
 // Legacy commands for implicit memory (pageindex)
-    
-    #[derive(Debug, Serialize)]
-    pub struct MemoryStatus {
-        pub exists: bool,
-        pub document_count: usize,
-        pub section_count: usize,
-        pub total_bytes: usize,
-        pub memory_dir: String,
-        pub last_build_time: Option<i64>,
-    }
 
-    #[derive(Debug, Deserialize)]
-    pub struct BuildIndexRequest {
-        pub project_path: String,
-        pub max_file_size: Option<usize>,
-        pub extra_extensions: Option<Vec<String>>,
-        pub exclude_dirs: Option<Vec<String>>,
-    }
+#[derive(Debug, Serialize)]
+pub struct MemoryStatus {
+    pub exists: bool,
+    pub document_count: usize,
+    pub section_count: usize,
+    pub total_bytes: usize,
+    pub memory_dir: String,
+    pub last_build_time: Option<i64>,
+}
 
-    #[derive(Debug, Deserialize)]
-    pub struct QueryRequest {
-        pub project_path: String,
-        pub query: String,
-        pub limit: Option<usize>,
-    }
+#[derive(Debug, Deserialize)]
+pub struct BuildIndexRequest {
+    pub project_path: String,
+    pub max_file_size: Option<usize>,
+    pub extra_extensions: Option<Vec<String>>,
+    pub exclude_dirs: Option<Vec<String>>,
+}
 
-    #[derive(Debug, Serialize)]
-    pub struct QueryResponse {
-        pub results: Vec<QueryResultItem>,
-        pub query: String,
-        pub total_matches: usize,
-    }
+#[derive(Debug, Deserialize)]
+pub struct QueryRequest {
+    pub project_path: String,
+    pub query: String,
+    pub limit: Option<usize>,
+}
 
-    #[derive(Debug, Serialize)]
-    pub struct QueryResultItem {
-        pub title: String,
-        pub path: String,
-        pub breadcrumb: Vec<String>,
-        pub excerpt: String,
-        pub score: f64,
-        pub match_type: String,
-    }
+#[derive(Debug, Serialize)]
+pub struct QueryResponse {
+    pub results: Vec<QueryResultItem>,
+    pub query: String,
+    pub total_matches: usize,
+}
 
-    impl From<QueryResult> for QueryResultItem {
-        fn from(r: QueryResult) -> Self {
-            Self {
-                title: r.title,
-                path: r.path,
-                breadcrumb: r.breadcrumb,
-                excerpt: r.excerpt,
-                score: r.score,
-                match_type: format!("{:?}", r.match_type),
-            }
+#[derive(Debug, Serialize)]
+pub struct QueryResultItem {
+    pub title: String,
+    pub path: String,
+    pub breadcrumb: Vec<String>,
+    pub excerpt: String,
+    pub score: f64,
+    pub match_type: String,
+}
+
+impl From<QueryResult> for QueryResultItem {
+    fn from(r: QueryResult) -> Self {
+        Self {
+            title: r.title,
+            path: r.path,
+            breadcrumb: r.breadcrumb,
+            excerpt: r.excerpt,
+            score: r.score,
+            match_type: format!("{:?}", r.match_type),
         }
     }
+}
 
-    #[tauri::command]
-    pub async fn memory_get_status(project_path: String) -> Result<MemoryStatus, AppError> {
-        let root = project_root(&project_path);
-        let config = load_resolved_config(&root).await.unwrap_or_default();
-        let memory = MemorySystem::with_config(&root, config);
-        let implicit_path = memory.implicit_path();
-        
-        let tree_path = implicit_path.join("tree.json");
-        let exists = tree_path.exists();
-        
-        let (doc_count, sec_count, bytes, last_build) = if exists {
-            let content = tokio::fs::read_to_string(&tree_path).await
-                .map_err(|e| AppError::Unknown(e.to_string()))?;
-            let tree: crate::domain::pageindex::DocumentTree = serde_json::from_str(&content)
-                .map_err(|e| AppError::Unknown(e.to_string()))?;
-            
-            let last_build = tokio::fs::metadata(&tree_path).await
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64);
-            
-            (tree.document_count(), tree.section_count(), tree.total_bytes(), last_build)
-        } else {
-            (0, 0, 0, None)
-        };
-        
-        Ok(MemoryStatus {
-            exists,
-            document_count: doc_count,
-            section_count: sec_count,
-            total_bytes: bytes,
-            memory_dir: implicit_path.to_string_lossy().to_string(),
-            last_build_time: last_build,
-        })
-    }
+#[tauri::command]
+pub async fn memory_get_status(project_path: String) -> Result<MemoryStatus, AppError> {
+    let root = project_root(&project_path);
+    let config = load_resolved_config(&root).await.unwrap_or_default();
+    let memory = MemorySystem::with_config(&root, config);
+    let implicit_path = memory.implicit_path();
 
-    #[tauri::command]
-    pub async fn memory_build_index(req: BuildIndexRequest) -> Result<MemoryStatus, AppError> {
-        let root = project_root(&req.project_path);
-        let config = load_resolved_config(&root).await.unwrap_or_default();
-        let memory = MemorySystem::with_config(&root, config.clone());
-        
-        memory.init().await.map_err(|e| AppError::Unknown(e.to_string()))?;
-        
-        let mut index_config = IndexConfig::default();
-        if let Some(max_size) = req.max_file_size {
-            index_config.max_file_size = max_size;
-        }
-        if let Some(extensions) = req.extra_extensions {
-            index_config.include_extensions.extend(extensions);
-        }
-        if let Some(exclude) = req.exclude_dirs {
-            index_config.exclude_dirs.extend(exclude);
-        }
-        
-        let implicit_dir = memory.implicit_path();
-        let mut pageindex = PageIndex::with_memory_dir(&root, &implicit_dir, index_config);
-        pageindex.build().await.map_err(|e| AppError::Unknown(e.to_string()))?;
-        
-        register_project_memory(&root, memory.config()).await;
-        
-        memory_get_status(req.project_path).await
-    }
+    let tree_path = implicit_path.join("tree.json");
+    let exists = tree_path.exists();
 
-    #[tauri::command]
-    pub async fn memory_update_index(project_path: String) -> Result<MemoryStatus, AppError> {
-        memory_build_index(BuildIndexRequest {
-            project_path,
-            max_file_size: None,
-            extra_extensions: None,
-            exclude_dirs: None,
-        }).await
-    }
-
-    #[tauri::command]
-    pub async fn memory_query(req: QueryRequest) -> Result<QueryResponse, AppError> {
-        let root = project_root(&req.project_path);
-        let config = load_resolved_config(&root).await.unwrap_or_default();
-        let implicit_path = config.implicit_path(&root);
-        let tree_path = implicit_path.join("tree.json");
-        
-        if !tree_path.exists() {
-            return Err(AppError::Unknown("Memory index not found".to_string()));
-        }
-        
-        let limit = req.limit.unwrap_or(5);
-        let storage = IndexStorage::new(&implicit_path);
-        let tree = match storage.load_tree().await {
-            Ok(Some(t)) => t,
-            Ok(None) => {
-                return Err(AppError::Unknown("Memory index not found".to_string()));
-            }
-            Err(e) => return Err(AppError::Unknown(e.to_string())),
-        };
-        let engine = QueryEngine::new();
-        let results = engine
-            .search(&tree, &req.query, limit)
+    let (doc_count, sec_count, bytes, last_build) = if exists {
+        let content = tokio::fs::read_to_string(&tree_path)
             .await
             .map_err(|e| AppError::Unknown(e.to_string()))?;
-        
-        Ok(QueryResponse {
-            total_matches: results.len(),
-            query: req.query,
-            results: results.into_iter().map(Into::into).collect(),
-        })
+        let tree: crate::domain::pageindex::DocumentTree =
+            serde_json::from_str(&content).map_err(|e| AppError::Unknown(e.to_string()))?;
+
+        let last_build = tokio::fs::metadata(&tree_path)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64);
+
+        (
+            tree.document_count(),
+            tree.section_count(),
+            tree.total_bytes(),
+            last_build,
+        )
+    } else {
+        (0, 0, 0, None)
+    };
+
+    Ok(MemoryStatus {
+        exists,
+        document_count: doc_count,
+        section_count: sec_count,
+        total_bytes: bytes,
+        memory_dir: implicit_path.to_string_lossy().to_string(),
+        last_build_time: last_build,
+    })
+}
+
+#[tauri::command]
+pub async fn memory_build_index(req: BuildIndexRequest) -> Result<MemoryStatus, AppError> {
+    let root = project_root(&req.project_path);
+    let config = load_resolved_config(&root).await.unwrap_or_default();
+    let memory = MemorySystem::with_config(&root, config.clone());
+
+    memory
+        .init()
+        .await
+        .map_err(|e| AppError::Unknown(e.to_string()))?;
+
+    let mut index_config = IndexConfig::default();
+    if let Some(max_size) = req.max_file_size {
+        index_config.max_file_size = max_size;
+    }
+    if let Some(extensions) = req.extra_extensions {
+        index_config.include_extensions.extend(extensions);
+    }
+    if let Some(exclude) = req.exclude_dirs {
+        index_config.exclude_dirs.extend(exclude);
     }
 
-    #[tauri::command]
-    pub async fn memory_clear_index(project_path: String) -> Result<(), AppError> {
-        let root = project_root(&project_path);
-        let config = load_resolved_config(&root).await.unwrap_or_default();
-        let implicit_path = config.implicit_path(&root);
-        
-        if implicit_path.exists() {
-            tokio::fs::remove_dir_all(&implicit_path).await
-                .map_err(|e| AppError::Unknown(e.to_string()))?;
+    let implicit_dir = memory.implicit_path();
+    let mut pageindex = PageIndex::with_memory_dir(&root, &implicit_dir, index_config);
+    pageindex
+        .build()
+        .await
+        .map_err(|e| AppError::Unknown(e.to_string()))?;
+
+    register_project_memory(&root, memory.config()).await;
+
+    memory_get_status(req.project_path).await
+}
+
+#[tauri::command]
+pub async fn memory_update_index(project_path: String) -> Result<MemoryStatus, AppError> {
+    memory_build_index(BuildIndexRequest {
+        project_path,
+        max_file_size: None,
+        extra_extensions: None,
+        exclude_dirs: None,
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn memory_query(req: QueryRequest) -> Result<QueryResponse, AppError> {
+    let root = project_root(&req.project_path);
+    let config = load_resolved_config(&root).await.unwrap_or_default();
+    let implicit_path = config.implicit_path(&root);
+    let tree_path = implicit_path.join("tree.json");
+
+    if !tree_path.exists() {
+        return Err(AppError::Unknown("Memory index not found".to_string()));
+    }
+
+    let limit = req.limit.unwrap_or(5);
+    let storage = IndexStorage::new(&implicit_path);
+    let tree = match storage.load_tree().await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return Err(AppError::Unknown("Memory index not found".to_string()));
         }
-        
-        Ok(())
+        Err(e) => return Err(AppError::Unknown(e.to_string())),
+    };
+    let engine = QueryEngine::new();
+    let results = engine
+        .search(&tree, &req.query, limit)
+        .await
+        .map_err(|e| AppError::Unknown(e.to_string()))?;
+
+    Ok(QueryResponse {
+        total_matches: results.len(),
+        query: req.query,
+        results: results.into_iter().map(Into::into).collect(),
+    })
+}
+
+#[tauri::command]
+pub async fn memory_clear_index(project_path: String) -> Result<(), AppError> {
+    let root = project_root(&project_path);
+    let config = load_resolved_config(&root).await.unwrap_or_default();
+    let implicit_path = config.implicit_path(&root);
+
+    if implicit_path.exists() {
+        tokio::fs::remove_dir_all(&implicit_path)
+            .await
+            .map_err(|e| AppError::Unknown(e.to_string()))?;
     }
 
-    #[tauri::command]
-    pub async fn memory_get_dir(project_path: String) -> String {
-        let root = project_root(&project_path);
-        let config = load_resolved_config(&root).await.unwrap_or_default();
-        let memory = MemorySystem::with_config(&root, config);
-        memory.implicit_path().to_string_lossy().to_string()
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn memory_get_dir(project_path: String) -> String {
+    let root = project_root(&project_path);
+    let config = load_resolved_config(&root).await.unwrap_or_default();
+    let memory = MemorySystem::with_config(&root, config);
+    memory.implicit_path().to_string_lossy().to_string()
 }
 
 /// Get relevant context for chat (internal use)
@@ -572,7 +609,8 @@ pub async fn memory_navigation_section(project_root: &std::path::Path) -> String
     lines.push(String::new());
     lines.push("### How to retrieve memory".to_string());
     lines.push(
-        "When the user references past work, past conversations, or asks what you remember:".to_string(),
+        "When the user references past work, past conversations, or asks what you remember:"
+            .to_string(),
     );
     lines.push(
         "1. Check the **Relevant memory excerpts** section below (auto-injected from implicit index).".to_string(),
@@ -648,7 +686,9 @@ fn list_wiki_pages(wiki_dir: &std::path::Path) -> Vec<String> {
 // Import to Explicit Memory (Wiki)
 // ---------------------------------------------------------------------------
 
-use crate::domain::memory::explicit_importer::{ExplicitImporter, ImportOptions, ImportResult, ImportSource};
+use crate::domain::memory::explicit_importer::{
+    ExplicitImporter, ImportOptions, ImportResult, ImportSource,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct ImportToWikiRequest {
@@ -687,13 +727,15 @@ impl From<ImportResult> for ImportToWikiResponse {
 
 /// Import files or text to explicit memory (wiki) using PageIndex parsing
 #[tauri::command]
-pub async fn memory_import_to_wiki(req: ImportToWikiRequest) -> Result<ImportToWikiResponse, AppError> {
+pub async fn memory_import_to_wiki(
+    req: ImportToWikiRequest,
+) -> Result<ImportToWikiResponse, AppError> {
     // Determine memory level
     let memory_level = match req.memory_level.as_deref() {
         Some("user") => MemoryLevel::User,
         _ => MemoryLevel::Project,
     };
-    
+
     // Get the appropriate root and wiki directory based on memory level
     let (root, wiki_dir) = match memory_level {
         MemoryLevel::Project => {
@@ -709,11 +751,12 @@ pub async fn memory_import_to_wiki(req: ImportToWikiRequest) -> Result<ImportToW
             (user_root, wiki_dir)
         }
     };
-    
+
     // Ensure wiki directory exists
-    tokio::fs::create_dir_all(&wiki_dir).await
+    tokio::fs::create_dir_all(&wiki_dir)
+        .await
         .map_err(|e| AppError::Unknown(format!("Failed to create wiki dir: {}", e)))?;
-    
+
     // Build import options
     let options = ImportOptions {
         include_content: req.include_content.unwrap_or(true),
@@ -722,10 +765,18 @@ pub async fn memory_import_to_wiki(req: ImportToWikiRequest) -> Result<ImportToW
         tags: req.tags.unwrap_or_default(),
         source_ref: None,
     };
-    
+
+    // Resolve raw_dir from project config (falls back to ~/.omiga/memory/raw)
+    let raw_dir = {
+        let cfg = load_resolved_config(&project_root(&req.project_path))
+            .await
+            .unwrap_or_default();
+        cfg.raw_path()
+    };
+
     // Create importer
-    let importer = ExplicitImporter::new(&root, &wiki_dir, options);
-    
+    let importer = ExplicitImporter::new(&root, &wiki_dir, &raw_dir, options);
+
     // Determine source
     let source = match req.source_type.as_str() {
         "file" => {
@@ -760,14 +811,17 @@ pub async fn memory_import_to_wiki(req: ImportToWikiRequest) -> Result<ImportToW
             })?;
             ImportSource::Text { title, content }
         }
-        _ => return Err(AppError::Unknown(
-            format!("Unknown source_type: {}", req.source_type)
-        )),
+        _ => {
+            return Err(AppError::Unknown(format!(
+                "Unknown source_type: {}",
+                req.source_type
+            )))
+        }
     };
-    
+
     // Execute import
     let result = importer.import(source).await?;
-    
+
     Ok(result.into())
 }
 
@@ -779,7 +833,12 @@ pub async fn memory_import_to_wiki(req: ImportToWikiRequest) -> Result<ImportToW
 pub fn write_user_omiga_file(filename: String, content: String) -> Result<(), String> {
     // Validate: only simple filename, no path separators
     let name = filename.trim();
-    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('\0') {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains('\0')
+    {
         return Err("Invalid filename".to_string());
     }
     // Only allow markdown/text files
@@ -836,8 +895,11 @@ pub fn init_user_context_files() -> Result<(), String> {
     }
 
     // BOOTSTRAP.md — 每次 onboarding 都写入，Agent 看到后执行引导并自行删除
-    std::fs::write(omiga_dir.join("BOOTSTRAP.md"), TEMPLATE_BOOTSTRAP_MD.as_bytes())
-        .map_err(|e| format!("Failed to write BOOTSTRAP.md: {e}"))?;
+    std::fs::write(
+        omiga_dir.join("BOOTSTRAP.md"),
+        TEMPLATE_BOOTSTRAP_MD.as_bytes(),
+    )
+    .map_err(|e| format!("Failed to write BOOTSTRAP.md: {e}"))?;
 
     Ok(())
 }
@@ -850,10 +912,10 @@ pub fn init_user_context_files() -> Result<(), String> {
 pub fn memory_get_import_extensions() -> Vec<String> {
     vec![
         // Document formats
-        "md".to_string(),    // Markdown
-        "txt".to_string(),   // Plain text
-        "rtf".to_string(),   // Rich text
-        "pdf".to_string(),   // PDF documents
+        "md".to_string(),  // Markdown
+        "txt".to_string(), // Plain text
+        "rtf".to_string(), // Rich text
+        "pdf".to_string(), // PDF documents
         // Data/Config formats (for knowledge import)
         "json".to_string(),
         "yaml".to_string(),

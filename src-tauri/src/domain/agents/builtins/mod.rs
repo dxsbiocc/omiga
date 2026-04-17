@@ -11,24 +11,27 @@ use super::router::AgentRouter;
 pub fn register_built_in_agents(router: &mut AgentRouter) {
     // Explore Agent - 代码探索
     router.register(Box::new(explore::ExploreAgent));
-    
+
     // Plan Agent - 架构设计
     router.register(Box::new(plan::PlanAgent));
-    
+
     // General-Purpose Agent - 通用任务
     router.register(Box::new(general::GeneralPurposeAgent));
-    
+
     // Verification Agent - 代码验证（对抗性测试）
     router.register(Box::new(verification::VerificationAgent));
 }
 
 /// 检查是否为内置 Agent
 pub fn is_built_in_agent(agent_type: &str) -> bool {
-    matches!(agent_type, "Explore" | "Plan" | "general-purpose" | "verification")
+    matches!(
+        agent_type,
+        "Explore" | "Plan" | "general-purpose" | "verification"
+    )
 }
 
 /// 获取内置 Agent 的模型配置
-/// 
+///
 /// 规则：
 /// - "inherit" → 继承父会话模型
 /// - None → 使用默认策略
@@ -44,7 +47,7 @@ pub fn resolve_agent_model(agent_model: Option<&str>, parent_model: &str) -> Str
 }
 
 /// 获取 Agent 的工具集
-/// 
+///
 /// 根据 Agent 的 allowlist/denylist 过滤工具
 pub fn get_agent_tool_set(
     all_tools: &[String],

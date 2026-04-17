@@ -74,9 +74,10 @@ impl super::ToolImpl for TaskUpdateTool {
                 "updatedFields": [],
                 "error": "Task not found"
             });
-            let s = serde_json::to_string_pretty(&text).map_err(|e| ToolError::ExecutionFailed {
-                message: e.to_string(),
-            })?;
+            let s =
+                serde_json::to_string_pretty(&text).map_err(|e| ToolError::ExecutionFailed {
+                    message: e.to_string(),
+                })?;
             return Ok(JsonOut { text: s }.into_stream());
         };
 

@@ -4,13 +4,13 @@
 //! (`SessionRepository`) and chat/runtime (`ChatState`) live together so Tauri commands,
 //! logging, and future observability read one managed struct.
 
+use crate::commands::CommandResult;
 use crate::domain::chat_state::ChatState;
 use crate::domain::integrations_catalog::IntegrationsCatalog;
 use crate::domain::integrations_config::IntegrationsConfig;
 use crate::domain::permissions::PermissionManager;
-use crate::domain::skills::SkillCacheMap;
-use crate::commands::CommandResult;
 use crate::domain::persistence::SessionRepository;
+use crate::domain::skills::SkillCacheMap;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;

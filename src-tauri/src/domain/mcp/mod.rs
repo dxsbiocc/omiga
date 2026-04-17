@@ -20,9 +20,11 @@ pub mod tool_dispatch;
 pub mod tool_pool;
 
 // Re-export commonly used types for convenience
-pub use client::{McpConnectionType, McpLiveConnection, connect_mcp_server, connect_mcp_server_legacy};
-pub use config::{McpServerConfig, merged_mcp_servers};
-pub use connection_manager::{McpConnectionManager, GlobalMcpManager, ConnectionStats};
+pub use client::{
+    connect_mcp_server, connect_mcp_server_legacy, McpConnectionType, McpLiveConnection,
+};
+pub use config::{merged_mcp_servers, McpServerConfig};
+pub use connection_manager::{ConnectionStats, GlobalMcpManager, McpConnectionManager};
 pub use discovery::collect_mcp_server_names;
 pub use names::{normalize_name_for_mcp, parse_mcp_tool_name};
 pub use tool_dispatch::execute_mcp_tool_call;

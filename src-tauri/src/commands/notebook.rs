@@ -13,11 +13,7 @@ const EXEC_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_IO_CHARS: usize = 512 * 1024;
 
 fn normalize_language(raw: Option<String>) -> String {
-    let s = raw
-        .as_deref()
-        .unwrap_or("python")
-        .trim()
-        .to_lowercase();
+    let s = raw.as_deref().unwrap_or("python").trim().to_lowercase();
     match s.as_str() {
         "r" | "ir" => "r".to_string(),
         "python" | "ipython" | "py" => "python".to_string(),
@@ -136,9 +132,11 @@ pub async fn execute_ipynb_cell(
         }));
     }
 
-    let cwd = canonical.parent().ok_or_else(|| AppError::Fs(FsError::InvalidPath {
-        path: notebook_path.clone(),
-    }))?;
+    let cwd = canonical.parent().ok_or_else(|| {
+        AppError::Fs(FsError::InvalidPath {
+            path: notebook_path.clone(),
+        })
+    })?;
 
     let (tmp_path, exe, err_hint): (PathBuf, &str, &'static str) = if lang == "r" {
         (

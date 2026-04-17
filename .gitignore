@@ -26,3 +26,11 @@ npm-debug.log*
 
 # Rust
 **/*.rs.bk
+
+# codex
+.codex/
+.omx/
+
+# claude
+.claude/
+CLAUDE.md

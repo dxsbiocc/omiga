@@ -5,48 +5,50 @@
 //! - Each tool implements the Tool trait with associated types for arguments/results
 //! - Tool execution produces StreamOutput for unified streaming interface
 
+pub mod agent;
+pub mod ask_user_question;
 pub mod bash;
+pub mod enter_plan_mode;
 pub mod env_store;
+pub mod exit_plan_mode;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
 pub mod glob;
 pub mod grep;
-pub mod shell_file_ops;
-pub mod web_fetch;
-pub mod web_search;
-pub mod todo_write;
-pub mod notebook_edit;
-pub mod sleep;
-pub mod ask_user_question;
 pub mod list_mcp_resources;
+pub mod list_skills;
+pub mod notebook_edit;
+pub mod omiga_viz;
 pub mod read_mcp_resource;
-pub mod agent;
+pub mod recall;
 pub mod send_user_message;
-pub mod exit_plan_mode;
-pub mod enter_plan_mode;
-pub mod task_stop;
-pub mod task_output;
-pub mod tool_search;
+pub mod shell_file_ops;
 pub mod skill_config;
 pub mod skill_invoke;
-pub mod list_skills;
 pub mod skill_manage;
 pub mod skill_view;
+pub mod sleep;
 pub mod ssh_paths;
 pub mod task_create;
 pub mod task_get;
 pub mod task_list;
+pub mod task_output;
+pub mod task_stop;
 pub mod task_update;
+pub mod todo_write;
+pub mod tool_search;
+pub mod web_fetch;
+pub mod web_search;
 pub mod workflow;
 
-use crate::domain::background_shell::BackgroundShellHandle;
 use crate::domain::agents::subagent_tool_filter::env_workflow_scripts_enabled;
+use crate::domain::background_shell::BackgroundShellHandle;
 use crate::domain::session::AgentTask;
 use crate::errors::ToolError;
-use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Unique identifier for a tool type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +66,7 @@ pub enum ToolKind {
     WebSearch,
     TodoWrite,
     NotebookEdit,
+    OmigaViz,
     Sleep,
     AskUserQuestion,
     ListMcpResources,
@@ -95,6 +98,7 @@ pub enum ToolKind {
     #[serde(rename = "TaskUpdate")]
     TaskUpdate,
     Workflow,
+    Recall,
 }
 
 impl fmt::Display for ToolKind {
@@ -110,6 +114,7 @@ impl fmt::Display for ToolKind {
             ToolKind::WebSearch => write!(f, "web_search"),
             ToolKind::TodoWrite => write!(f, "todo_write"),
             ToolKind::NotebookEdit => write!(f, "notebook_edit"),
+            ToolKind::OmigaViz => write!(f, "omiga_viz"),
             ToolKind::Sleep => write!(f, "sleep"),
             ToolKind::AskUserQuestion => write!(f, "ask_user_question"),
             ToolKind::ListMcpResources => write!(f, "list_mcp_resources"),
@@ -128,6 +133,7 @@ impl fmt::Display for ToolKind {
             ToolKind::TaskList => write!(f, "TaskList"),
             ToolKind::TaskUpdate => write!(f, "TaskUpdate"),
             ToolKind::Workflow => write!(f, "workflow"),
+            ToolKind::Recall => write!(f, "recall"),
         }
     }
 }
@@ -146,6 +152,7 @@ pub enum Tool {
     WebSearch(web_search::WebSearchArgs),
     TodoWrite(todo_write::TodoWriteArgs),
     NotebookEdit(notebook_edit::NotebookEditArgs),
+    OmigaViz(omiga_viz::OmigaVizArgs),
     Sleep(sleep::SleepArgs),
     AskUserQuestion(ask_user_question::AskUserQuestionArgs),
     ListMcpResources(list_mcp_resources::ListMcpResourcesArgs),
@@ -167,6 +174,7 @@ pub enum Tool {
     TaskUpdate(task_update::TaskUpdateArgs),
     #[serde(rename = "workflow")]
     Workflow(workflow::WorkflowArgs),
+    Recall(recall::RecallArgs),
 }
 
 impl Tool {
@@ -183,6 +191,7 @@ impl Tool {
             Tool::WebSearch(_) => ToolKind::WebSearch,
             Tool::TodoWrite(_) => ToolKind::TodoWrite,
             Tool::NotebookEdit(_) => ToolKind::NotebookEdit,
+            Tool::OmigaViz(_) => ToolKind::OmigaViz,
             Tool::Sleep(_) => ToolKind::Sleep,
             Tool::AskUserQuestion(_) => ToolKind::AskUserQuestion,
             Tool::ListMcpResources(_) => ToolKind::ListMcpResources,
@@ -201,6 +210,7 @@ impl Tool {
             Tool::TaskList(_) => ToolKind::TaskList,
             Tool::TaskUpdate(_) => ToolKind::TaskUpdate,
             Tool::Workflow(_) => ToolKind::Workflow,
+            Tool::Recall(_) => ToolKind::Recall,
         }
     }
 
@@ -217,6 +227,7 @@ impl Tool {
             Tool::WebSearch(_) => "WebSearch",
             Tool::TodoWrite(_) => "TodoWrite",
             Tool::NotebookEdit(_) => "NotebookEdit",
+            Tool::OmigaViz(_) => "OmigaViz",
             Tool::Sleep(_) => "Sleep",
             Tool::AskUserQuestion(_) => "AskUserQuestion",
             Tool::ListMcpResources(_) => "ListMcpResources",
@@ -235,6 +246,7 @@ impl Tool {
             Tool::TaskList(_) => "TaskList",
             Tool::TaskUpdate(_) => "TaskUpdate",
             Tool::Workflow(_) => "workflow",
+            Tool::Recall(_) => "recall",
         }
     }
 
@@ -251,6 +263,7 @@ impl Tool {
             Tool::WebSearch(_) => web_search::DESCRIPTION,
             Tool::TodoWrite(_) => todo_write::DESCRIPTION,
             Tool::NotebookEdit(_) => notebook_edit::DESCRIPTION,
+            Tool::OmigaViz(_) => omiga_viz::DESCRIPTION,
             Tool::Sleep(_) => sleep::DESCRIPTION,
             Tool::AskUserQuestion(_) => ask_user_question::DESCRIPTION,
             Tool::ListMcpResources(_) => list_mcp_resources::DESCRIPTION,
@@ -269,6 +282,7 @@ impl Tool {
             Tool::TaskList(_) => task_list::DESCRIPTION,
             Tool::TaskUpdate(_) => task_update::DESCRIPTION,
             Tool::Workflow(_) => workflow::DESCRIPTION,
+            Tool::Recall(_) => recall::DESCRIPTION,
         }
     }
 
@@ -288,10 +302,17 @@ impl Tool {
             Tool::WebSearch(args) => web_search::WebSearchTool::execute(ctx, args).await?,
             Tool::TodoWrite(args) => todo_write::TodoWriteTool::execute(ctx, args).await?,
             Tool::NotebookEdit(args) => notebook_edit::NotebookEditTool::execute(ctx, args).await?,
+            Tool::OmigaViz(args) => omiga_viz::OmigaVizTool::execute(ctx, args).await?,
             Tool::Sleep(args) => sleep::SleepTool::execute(ctx, args).await?,
-            Tool::AskUserQuestion(args) => ask_user_question::AskUserQuestionTool::execute(ctx, args).await?,
-            Tool::ListMcpResources(args) => list_mcp_resources::ListMcpResourcesTool::execute(ctx, args).await?,
-            Tool::ReadMcpResource(args) => read_mcp_resource::ReadMcpResourceTool::execute(ctx, args).await?,
+            Tool::AskUserQuestion(args) => {
+                ask_user_question::AskUserQuestionTool::execute(ctx, args).await?
+            }
+            Tool::ListMcpResources(args) => {
+                list_mcp_resources::ListMcpResourcesTool::execute(ctx, args).await?
+            }
+            Tool::ReadMcpResource(args) => {
+                read_mcp_resource::ReadMcpResourceTool::execute(ctx, args).await?
+            }
             Tool::ListSkills(_) => {
                 return Err(ToolError::ExecutionFailed {
                     message: "ListSkills execution not yet implemented".to_string(),
@@ -303,9 +324,15 @@ impl Tool {
                 });
             }
             Tool::Agent(args) => agent::AgentTool::execute(ctx, args).await?,
-            Tool::SendUserMessage(args) => send_user_message::SendUserMessageTool::execute(ctx, args).await?,
-            Tool::ExitPlanMode(args) => exit_plan_mode::ExitPlanModeTool::execute(ctx, args).await?,
-            Tool::EnterPlanMode(args) => enter_plan_mode::EnterPlanModeTool::execute(ctx, args).await?,
+            Tool::SendUserMessage(args) => {
+                send_user_message::SendUserMessageTool::execute(ctx, args).await?
+            }
+            Tool::ExitPlanMode(args) => {
+                exit_plan_mode::ExitPlanModeTool::execute(ctx, args).await?
+            }
+            Tool::EnterPlanMode(args) => {
+                enter_plan_mode::EnterPlanModeTool::execute(ctx, args).await?
+            }
             Tool::TaskStop(args) => task_stop::TaskStopTool::execute(ctx, args).await?,
             Tool::TaskOutput(args) => task_output::TaskOutputTool::execute(ctx, args).await?,
             Tool::ToolSearch(args) => tool_search::ToolSearchTool::execute(ctx, args).await?,
@@ -314,6 +341,7 @@ impl Tool {
             Tool::TaskList(args) => task_list::TaskListTool::execute(ctx, args).await?,
             Tool::TaskUpdate(args) => task_update::TaskUpdateTool::execute(ctx, args).await?,
             Tool::Workflow(args) => workflow::WorkflowTool::execute(ctx, args).await?,
+            Tool::Recall(args) => recall::RecallTool::execute(ctx, args).await?,
         };
         Ok(result)
     }
@@ -322,200 +350,184 @@ impl Tool {
     pub fn from_json(kind: ToolKind, json: &str) -> Result<Self, ToolError> {
         match kind {
             ToolKind::Bash => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid bash arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid bash arguments: {}", e),
+                })?;
                 Ok(Tool::Bash(args))
             }
             ToolKind::FileEdit => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid file_edit arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid file_edit arguments: {}", e),
+                })?;
                 Ok(Tool::FileEdit(args))
             }
             ToolKind::FileRead => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid file_read arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid file_read arguments: {}", e),
+                })?;
                 Ok(Tool::FileRead(args))
             }
             ToolKind::FileWrite => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid file_write arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid file_write arguments: {}", e),
+                })?;
                 Ok(Tool::FileWrite(args))
             }
             ToolKind::Grep => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid ripgrep arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid ripgrep arguments: {}", e),
+                })?;
                 Ok(Tool::Grep(args))
             }
             ToolKind::Glob => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid glob arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid glob arguments: {}", e),
+                })?;
                 Ok(Tool::Glob(args))
             }
             ToolKind::WebFetch => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid web_fetch arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid web_fetch arguments: {}", e),
+                })?;
                 Ok(Tool::WebFetch(args))
             }
             ToolKind::WebSearch => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid web_search arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid web_search arguments: {}", e),
+                })?;
                 Ok(Tool::WebSearch(args))
             }
             ToolKind::TodoWrite => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid todo_write arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid todo_write arguments: {}", e),
+                })?;
                 Ok(Tool::TodoWrite(args))
             }
             ToolKind::NotebookEdit => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid notebook_edit arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid notebook_edit arguments: {}", e),
+                })?;
                 Ok(Tool::NotebookEdit(args))
             }
+            ToolKind::OmigaViz => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid omiga_viz arguments: {}", e),
+                })?;
+                Ok(Tool::OmigaViz(args))
+            }
             ToolKind::Sleep => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid sleep arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid sleep arguments: {}", e),
+                })?;
                 Ok(Tool::Sleep(args))
             }
             ToolKind::AskUserQuestion => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid ask_user_question arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid ask_user_question arguments: {}", e),
+                })?;
                 Ok(Tool::AskUserQuestion(args))
             }
             ToolKind::ListMcpResources => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid list_mcp_resources arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid list_mcp_resources arguments: {}", e),
+                })?;
                 Ok(Tool::ListMcpResources(args))
             }
             ToolKind::ReadMcpResource => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid read_mcp_resource arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid read_mcp_resource arguments: {}", e),
+                })?;
                 Ok(Tool::ReadMcpResource(args))
             }
             ToolKind::ListSkills => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid ListSkills arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid ListSkills arguments: {}", e),
+                })?;
                 Ok(Tool::ListSkills(args))
             }
             ToolKind::SkillInvoke => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid SkillInvoke arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid SkillInvoke arguments: {}", e),
+                })?;
                 Ok(Tool::SkillInvoke(args))
             }
             ToolKind::Agent => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid Agent arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid Agent arguments: {}", e),
+                })?;
                 Ok(Tool::Agent(args))
             }
             ToolKind::SendUserMessage => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid SendUserMessage arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid SendUserMessage arguments: {}", e),
+                })?;
                 Ok(Tool::SendUserMessage(args))
             }
             ToolKind::ExitPlanMode => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid ExitPlanMode arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid ExitPlanMode arguments: {}", e),
+                })?;
                 Ok(Tool::ExitPlanMode(args))
             }
             ToolKind::EnterPlanMode => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid EnterPlanMode arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid EnterPlanMode arguments: {}", e),
+                })?;
                 Ok(Tool::EnterPlanMode(args))
             }
             ToolKind::TaskStop => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid TaskStop arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid TaskStop arguments: {}", e),
+                })?;
                 Ok(Tool::TaskStop(args))
             }
             ToolKind::TaskOutput => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid TaskOutput arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid TaskOutput arguments: {}", e),
+                })?;
                 Ok(Tool::TaskOutput(args))
             }
             ToolKind::ToolSearch => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid ToolSearch arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid ToolSearch arguments: {}", e),
+                })?;
                 Ok(Tool::ToolSearch(args))
             }
             ToolKind::TaskCreate => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid TaskCreate arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid TaskCreate arguments: {}", e),
+                })?;
                 Ok(Tool::TaskCreate(args))
             }
             ToolKind::TaskGet => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid TaskGet arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid TaskGet arguments: {}", e),
+                })?;
                 Ok(Tool::TaskGet(args))
             }
             ToolKind::TaskList => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid TaskList arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid TaskList arguments: {}", e),
+                })?;
                 Ok(Tool::TaskList(args))
             }
             ToolKind::TaskUpdate => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid TaskUpdate arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid TaskUpdate arguments: {}", e),
+                })?;
                 Ok(Tool::TaskUpdate(args))
             }
             ToolKind::Workflow => {
-                let args = serde_json::from_str(json)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid workflow arguments: {}", e),
-                    })?;
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid workflow arguments: {}", e),
+                })?;
                 Ok(Tool::Workflow(args))
+            }
+            ToolKind::Recall => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid recall arguments: {}", e),
+                })?;
+                Ok(Tool::Recall(args))
             }
         }
     }
@@ -533,6 +545,7 @@ impl Tool {
             "web_search" => ToolKind::WebSearch,
             "todo_write" => ToolKind::TodoWrite,
             "notebook_edit" => ToolKind::NotebookEdit,
+            "omiga_viz" => ToolKind::OmigaViz,
             "sleep" => ToolKind::Sleep,
             "ask_user_question" | "AskUserQuestion" => ToolKind::AskUserQuestion,
             "list_mcp_resources" | "ListMcpResourcesTool" => ToolKind::ListMcpResources,
@@ -551,6 +564,7 @@ impl Tool {
             "TaskList" | "task_list" => ToolKind::TaskList,
             "TaskUpdate" | "task_update" => ToolKind::TaskUpdate,
             "workflow" | "Workflow" => ToolKind::Workflow,
+            "recall" | "Recall" => ToolKind::Recall,
             _ => {
                 return Err(ToolError::UnknownTool {
                     name: tool_name.to_string(),
@@ -715,7 +729,11 @@ impl ToolContext {
     }
 
     /// Local virtual environment (conda env name, venv path, pyenv version).
-    pub fn with_local_venv(mut self, venv_type: impl Into<String>, venv_name: impl Into<String>) -> Self {
+    pub fn with_local_venv(
+        mut self,
+        venv_type: impl Into<String>,
+        venv_name: impl Into<String>,
+    ) -> Self {
         self.local_venv_type = venv_type.into();
         self.local_venv_name = venv_name.into();
         self
@@ -768,7 +786,7 @@ pub enum ToolResult {
 }
 
 /// All tool schemas for LLM. Always appends `skill_manage` (project skills CRUD).
-/// When `include_skill` is true, also appends `list_skills`, `skills_list` (alias), `skill_view`, and `skill`
+/// When `include_skill` is true, also appends `list_skills`, `skill_view`, and `skill`
 /// (only when the project has at least one `SKILL.md` — see `domain::skills`).
 pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
     let mut v = vec![
@@ -782,6 +800,7 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         web_fetch::schema(),
         web_search::schema(),
         todo_write::schema(),
+        omiga_viz::schema(),
         sleep::schema(),
         ask_user_question::schema(),
         list_mcp_resources::schema(),
@@ -798,6 +817,7 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         task_list::schema(),
         task_update::schema(),
     ];
+    v.push(recall::schema());
     if env_workflow_scripts_enabled() {
         v.push(workflow::schema());
     }
@@ -806,7 +826,6 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
     v.push(skill_config::schema());
     if include_skill {
         v.push(list_skills::schema());
-        v.push(list_skills::skills_list_schema());
         v.push(skill_view::schema());
         v.push(skill_invoke::schema());
     }
@@ -853,9 +872,10 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
             | "web_search"
             | "ToolSearch"
             | "tool_search"
+            | "omiga_viz"
             | "list_skills"  // read-only metadata scan
-            | "skills_list"
             | "skill_view"
+            | "recall"
     )
 }
 
@@ -885,39 +905,20 @@ mod tool_enum_tests {
         let t = Tool::from_json_str("ListMcpResourcesTool", "{}").unwrap();
         assert!(matches!(t, Tool::ListMcpResources(_)));
 
-        let t = Tool::from_json_str(
-            "ReadMcpResourceTool",
-            r#"{"server":"s","uri":"u"}"#,
-        )
-        .unwrap();
+        let t = Tool::from_json_str("ReadMcpResourceTool", r#"{"server":"s","uri":"u"}"#).unwrap();
         assert!(matches!(t, Tool::ReadMcpResource(_)));
 
-        let t = Tool::from_json_str(
-            "Agent",
-            r#"{"description":"test","prompt":"do thing"}"#,
-        )
-        .unwrap();
+        let t =
+            Tool::from_json_str("Agent", r#"{"description":"test","prompt":"do thing"}"#).unwrap();
         assert!(matches!(t, Tool::Agent(_)));
 
-        let t = Tool::from_json_str(
-            "SendUserMessage",
-            r#"{"message":"Hello"}"#,
-        )
-        .unwrap();
+        let t = Tool::from_json_str("SendUserMessage", r#"{"message":"Hello"}"#).unwrap();
         assert!(matches!(t, Tool::SendUserMessage(_)));
 
-        let t = Tool::from_json_str(
-            "TaskCreate",
-            r#"{"subject":"T","description":"D"}"#,
-        )
-        .unwrap();
+        let t = Tool::from_json_str("TaskCreate", r#"{"subject":"T","description":"D"}"#).unwrap();
         assert!(matches!(t, Tool::TaskCreate(_)));
 
-        let t = Tool::from_json_str(
-            "ripgrep",
-            r#"{"pattern":"fn main"}"#,
-        )
-        .unwrap();
+        let t = Tool::from_json_str("ripgrep", r#"{"pattern":"fn main"}"#).unwrap();
         assert!(matches!(t, Tool::Grep(_)));
 
         let t = Tool::from_json_str("grep", r#"{"pattern":"x"}"#).unwrap();

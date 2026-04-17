@@ -60,10 +60,13 @@ impl super::ToolImpl for TodoWriteTool {
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
         validate_todos(&args.todos)?;
 
-        let store = ctx.todos.as_ref().ok_or_else(|| ToolError::ExecutionFailed {
-            message: "Todo list is not available in this context (no active chat session)."
-                .to_string(),
-        })?;
+        let store = ctx
+            .todos
+            .as_ref()
+            .ok_or_else(|| ToolError::ExecutionFailed {
+                message: "Todo list is not available in this context (no active chat session)."
+                    .to_string(),
+            })?;
 
         let input = args.todos;
         let all_done = input
@@ -71,11 +74,7 @@ impl super::ToolImpl for TodoWriteTool {
             .all(|t| matches!(t.status, TodoStatus::Completed));
 
         // Match TS: when all completed (including empty input), clear stored list
-        let stored: Vec<TodoItem> = if all_done {
-            vec![]
-        } else {
-            input.clone()
-        };
+        let stored: Vec<TodoItem> = if all_done { vec![] } else { input.clone() };
 
         let old = {
             let mut g = store.lock().await;
@@ -117,10 +116,7 @@ impl super::ToolImpl for TodoWriteTool {
                     TodoStatus::InProgress => "in_progress",
                     TodoStatus::Completed => "completed",
                 };
-                text.push_str(&format!(
-                    "- [{}] {} — {}\n",
-                    st, t.content, t.active_form
-                ));
+                text.push_str(&format!("- [{}] {} — {}\n", st, t.content, t.active_form));
             }
         }
 

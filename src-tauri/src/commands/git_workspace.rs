@@ -57,18 +57,18 @@ pub fn git_workspace_info(path: String) -> CommandResult<GitWorkspaceInfo> {
         }
     };
 
-    let head = repo.head().map_err(|e| {
-        AppError::Unknown(format!("git head: {}", e))
-    })?;
+    let head = repo
+        .head()
+        .map_err(|e| AppError::Unknown(format!("git head: {}", e)))?;
     let current_branch = head
         .shorthand()
         .map(|s| s.to_string())
         .unwrap_or_else(|| "HEAD".to_string());
 
     let mut branches = Vec::new();
-    let br_iter = repo.branches(Some(BranchType::Local)).map_err(|e| {
-        AppError::Unknown(format!("git branches: {}", e))
-    })?;
+    let br_iter = repo
+        .branches(Some(BranchType::Local))
+        .map_err(|e| AppError::Unknown(format!("git branches: {}", e)))?;
     for br in br_iter {
         let (branch, _) = br.map_err(|e| AppError::Unknown(format!("git branch: {}", e)))?;
         if let Ok(Some(name)) = branch.name() {

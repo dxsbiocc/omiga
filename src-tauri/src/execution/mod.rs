@@ -16,7 +16,7 @@ pub mod singularity;
 pub mod ssh;
 pub mod types;
 
-pub use base::{BaseEnvironment, generate_session_id};
+pub use base::{generate_session_id, BaseEnvironment};
 pub use types::*;
 
 use daytona::DaytonaEnvironment;
@@ -42,19 +42,16 @@ pub async fn create_environment(
 ) -> Result<Arc<Mutex<dyn BaseEnvironment>>, ExecutionError> {
     match config.r#type {
         EnvironmentType::Local => {
-            let env = LocalEnvironment::new(
-                Some(config.cwd),
-                Some(config.timeout),
-                Some(config.env),
-            )
-            .await?;
+            let env =
+                LocalEnvironment::new(Some(config.cwd), Some(config.timeout), Some(config.env))
+                    .await?;
             Ok(Arc::new(Mutex::new(env)))
         }
         EnvironmentType::Docker => {
-            let image = config.image.ok_or_else(|| 
+            let image = config.image.ok_or_else(|| {
                 ExecutionError::InvalidConfig("Docker image is required".to_string())
-            )?;
-            
+            })?;
+
             let env = DockerEnvironment::new(
                 image,
                 Some(config.cwd),
@@ -68,14 +65,15 @@ pub async fn create_environment(
                 config.forward_env,
                 config.env,
                 config.network,
-            ).await?;
+            )
+            .await?;
             Ok(Arc::new(Mutex::new(env)))
         }
         EnvironmentType::Modal => {
-            let image = config.image.ok_or_else(|| 
+            let image = config.image.ok_or_else(|| {
                 ExecutionError::InvalidConfig("Modal image is required".to_string())
-            )?;
-            
+            })?;
+
             let env = ModalEnvironment::new(
                 image,
                 Some(config.cwd),
@@ -83,32 +81,37 @@ pub async fn create_environment(
                 config.modal_sandbox_kwargs,
                 config.persistent_filesystem,
                 config.task_id,
-            ).await?;
+            )
+            .await?;
             Ok(Arc::new(Mutex::new(env)))
         }
         EnvironmentType::Daytona => {
-            let image = config.image.clone().unwrap_or_else(|| "ubuntu:22.04".to_string());
+            let image = config
+                .image
+                .clone()
+                .unwrap_or_else(|| "ubuntu:22.04".to_string());
             let workspace_id = format!("{}-{}", config.task_id, generate_session_id());
-            
+
             let env = DaytonaEnvironment::new(
                 image,
                 Some(config.cwd),
                 Some(config.timeout),
                 config.persistent_filesystem,
                 workspace_id,
-                None,  // daytona_url from env
-                None,  // api_key from env
-            ).await?;
+                None, // daytona_url from env
+                None, // api_key from env
+            )
+            .await?;
             Ok(Arc::new(Mutex::new(env)))
         }
         EnvironmentType::Ssh => {
-            let host = config.ssh_host.ok_or_else(|| 
-                ExecutionError::InvalidConfig("SSH host is required".to_string())
-            )?;
-            let user = config.ssh_user.ok_or_else(|| 
-                ExecutionError::InvalidConfig("SSH user is required".to_string())
-            )?;
-            
+            let host = config
+                .ssh_host
+                .ok_or_else(|| ExecutionError::InvalidConfig("SSH host is required".to_string()))?;
+            let user = config
+                .ssh_user
+                .ok_or_else(|| ExecutionError::InvalidConfig("SSH user is required".to_string()))?;
+
             let env = SshEnvironment::new(
                 host,
                 user,
@@ -117,14 +120,15 @@ pub async fn create_environment(
                 config.ssh_port,
                 config.ssh_key_path,
                 config.ssh_project_root.clone(),
-            ).await?;
+            )
+            .await?;
             Ok(Arc::new(Mutex::new(env)))
         }
         EnvironmentType::Singularity => {
-            let image = config.image.ok_or_else(|| 
+            let image = config.image.ok_or_else(|| {
                 ExecutionError::InvalidConfig("Singularity image is required".to_string())
-            )?;
-            
+            })?;
+
             let env = SingularityEnvironment::new(
                 image,
                 Some(config.cwd),
@@ -132,7 +136,8 @@ pub async fn create_environment(
                 config.volumes,
                 config.network,
                 config.task_id,
-            ).await?;
+            )
+            .await?;
             Ok(Arc::new(Mutex::new(env)))
         }
     }

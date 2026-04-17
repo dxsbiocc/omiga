@@ -103,7 +103,9 @@ pub enum RuleValidity {
     Until(DateTime<Utc>),
     UseLimit(u64),
     /// 仅对创建该规则时所在的会话有效
-    CurrentSession { session_id: String },
+    CurrentSession {
+        session_id: String,
+    },
 }
 
 /// 权限规则
@@ -149,7 +151,9 @@ impl PermissionRule {
                 }
                 let regex_str = format!(
                     "^{}$",
-                    regex::escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
+                    regex::escape(pattern)
+                        .replace(r"\*", ".*")
+                        .replace(r"\?", ".")
                 );
                 regex::RegexBuilder::new(&regex_str)
                     .size_limit(1_000_000)

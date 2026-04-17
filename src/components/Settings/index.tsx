@@ -34,11 +34,12 @@ import { UnifiedMemoryTab } from "./UnifiedMemoryTab";
 import { ThemeAppearancePanel } from "./ThemeAppearancePanel";
 import { ProviderManager } from "./ProviderManager";
 import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
+import { RuntimeConstraintsPanel } from "./RuntimeConstraintsPanel";
 
 interface SettingsProps {
   open: boolean;
   onClose: () => void;
-  /** See `openSettingsTabMap.ts`: 0–9 */
+  /** See `openSettingsTabMap.ts`: 0–10 */
   initialTab?: number;
   /** When `initialTab` is Execution (9): inner tab 0 Modal / 1 Daytona / 2 SSH */
   initialExecutionSubTab?: number;
@@ -59,6 +60,7 @@ const SETTINGS_SECTIONS: {
       { index: 1, label: "Advanced" },
       { index: 2, label: "Permissions" },
       { index: 3, label: "Theme" },
+      { index: 10, label: "Harness" },
       { index: 7, label: "Notebook" },
     ],
   },
@@ -78,7 +80,7 @@ const SETTINGS_SECTIONS: {
 ];
 
 const SETTINGS_NAV_FLAT = SETTINGS_SECTIONS.flatMap((s) => s.items);
-const SETTINGS_TAB_MAX = 9;
+const SETTINGS_TAB_MAX = 10;
 
 function clampSettingsTab(i: number): number {
   return Math.min(
@@ -242,6 +244,8 @@ export function Settings({
   /** 回合结束后第二次模型调用：输入框上方「下一步」建议 */
   const [followUpSuggestionsEnabled, setFollowUpSuggestionsEnabled] =
     useState(true);
+  /** LLM 请求超时（秒）——长对话 / 复杂任务需要更大值 */
+  const [requestTimeoutSecs, setRequestTimeoutSecs] = useState(600);
 
   // UI state
   const [isLoading, setIsLoading] = useState(false);
@@ -406,6 +410,17 @@ export function Settings({
       } catch {
         /* ignore */
       }
+
+      try {
+        const gs = await invoke<{
+          timeout?: number;
+        }>("get_global_settings", {});
+        if (gs.timeout != null && gs.timeout > 0) {
+          setRequestTimeoutSecs(gs.timeout);
+        }
+      } catch {
+        /* ignore */
+      }
     } catch (error) {
       console.log("No saved config found");
     }
@@ -452,13 +467,14 @@ export function Settings({
           appId: config.appId,
           model: config.model,
           baseUrl: config.baseUrl,
+          timeout: Math.max(30, requestTimeoutSecs),
         });
         localStorage.setItem("omiga_llm_config", JSON.stringify(config));
       }
 
       setMessage({
         type: "success",
-        text: "Advanced settings saved (web search keys, post-turn summary & follow-up suggestions)",
+        text: "Advanced settings saved (request timeout, web search keys, post-turn summary & follow-up suggestions)",
       });
     } catch (error) {
       console.error("Failed to save advanced settings:", error);
@@ -707,6 +723,28 @@ export function Settings({
                   }}
                 />
 
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "block", mb: 1, fontWeight: 600 }}
+                >
+                  长对话 / 复杂任务
+                </Typography>
+                <TextField
+                  fullWidth
+                  type="number"
+                  label="请求超时（秒）"
+                  value={requestTimeoutSecs}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    setRequestTimeoutSecs(Number.isFinite(v) ? Math.max(30, v) : 600);
+                  }}
+                  disabled={isLoading}
+                  helperText="流式响应的总超时。长对话、代码生成、测序/数据分析等复杂任务建议设为 1800–3600 秒。"
+                  inputProps={{ min: 30, step: 60 }}
+                  sx={{ mb: 3 }}
+                />
+
                 <Divider sx={{ mb: 3 }} />
 
                 <TextField
@@ -886,6 +924,13 @@ export function Settings({
                 onColorModeChange={setColorMode}
                 accentPreset={accentPreset}
                 onAccentPresetChange={setAccentPreset}
+              />
+            )}
+
+            {activeTab === 10 && (
+              <RuntimeConstraintsPanel
+                projectPath={projectPath}
+                sessionId={currentSessionId}
               />
             )}
 

@@ -6,7 +6,7 @@
 //! 3. Cleans up idle connections to free resources
 //! 4. Handles configuration hot-reloading
 
-use crate::domain::mcp::client::{McpConnectionType, McpLiveConnection, connect_mcp_server};
+use crate::domain::mcp::client::{connect_mcp_server, McpConnectionType, McpLiveConnection};
 use crate::domain::mcp::config::merged_mcp_servers;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -36,9 +36,10 @@ pub struct McpConnectionManager {
 impl McpConnectionManager {
     /// Create a new connection manager for a project
     pub fn new(project_root: PathBuf, initial_session: String) -> Self {
-        let connections: Arc<Mutex<HashMap<String, Arc<McpLiveConnection>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let connections: Arc<Mutex<HashMap<String, Arc<McpLiveConnection>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let current_session = Arc::new(Mutex::new(initial_session));
-        
+
         // Spawn background cleanup task
         let cleanup_connections = connections.clone();
         let cleanup_session = current_session.clone();
@@ -59,7 +60,7 @@ impl McpConnectionManager {
     }
 
     /// Get or create a connection for the given server
-    /// 
+    ///
     /// If the connection doesn't exist, is closed, or was created in a different session,
     /// a new connection will be established.
     pub async fn get_connection(
@@ -73,17 +74,24 @@ impl McpConnectionManager {
         // Try to reuse existing connection
         {
             let mut pool = self.connections.lock().await;
-            
+
             if let Some(conn) = pool.get(&pool_key) {
                 // Check if connection is still valid
                 if conn.is_closed() {
                     debug!("MCP connection closed, will reconnect: {}", server_name);
                     pool.remove(&pool_key);
-                } else if conn.is_from_different_session(&session_id) && conn.connection_type == McpConnectionType::Stdio {
+                } else if conn.is_from_different_session(&session_id)
+                    && conn.connection_type == McpConnectionType::Stdio
+                {
                     // For stdio connections, force reconnect on session change to avoid zombie processes
-                    debug!("MCP stdio connection from different session, reconnecting: {}", server_name);
+                    debug!(
+                        "MCP stdio connection from different session, reconnecting: {}",
+                        server_name
+                    );
                     pool.remove(&pool_key);
-                } else if conn.connection_type == McpConnectionType::Stdio && !conn.is_process_alive() {
+                } else if conn.connection_type == McpConnectionType::Stdio
+                    && !conn.is_process_alive()
+                {
                     // Check if stdio process is still alive
                     warn!("MCP stdio process dead, reconnecting: {}", server_name);
                     pool.remove(&pool_key);
@@ -98,42 +106,46 @@ impl McpConnectionManager {
 
         // Need to establish new connection
         debug!("Establishing new MCP connection: {}", server_name);
-        let conn = connect_mcp_server(&self.project_root, server_name, timeout, &session_id).await?;
+        let conn =
+            connect_mcp_server(&self.project_root, server_name, timeout, &session_id).await?;
         let conn_arc = Arc::new(conn);
-        
+
         let mut pool = self.connections.lock().await;
         pool.insert(pool_key, conn_arc.clone());
-        
+
         Ok(conn_arc)
     }
 
     /// Refresh all connections for a new session
-    /// 
+    ///
     /// This should be called when a new conversation/session starts.
     /// - Stale connections (idle > threshold) are closed
     /// - stdio connections from different sessions are reconnected
     /// - Remote connections are health-checked
     /// - Configuration is reloaded to pick up changes
     pub async fn refresh_for_new_session(&self, new_session_id: String) {
-        info!("Refreshing MCP connections for new session: {}", new_session_id);
-        
+        info!(
+            "Refreshing MCP connections for new session: {}",
+            new_session_id
+        );
+
         let mut session_guard = self.current_session.lock().await;
         let _old_session = session_guard.clone();
         *session_guard = new_session_id.clone();
         drop(session_guard); // Release lock before async operations
 
         let mut pool = self.connections.lock().await;
-        
+
         // Reload config to detect changes
         let fresh_config = merged_mcp_servers(&self.project_root);
-        
+
         // Collect keys to remove/reconnect
         let mut to_remove = Vec::new();
         let mut to_reconnect = Vec::new();
-        
+
         for (key, conn) in pool.iter() {
             let idle_duration = Instant::now().duration_since(conn.last_used);
-            
+
             if idle_duration > MAX_IDLE_DURATION {
                 // Connection idle too long
                 debug!("MCP connection idle, closing: {}", key);
@@ -176,23 +188,29 @@ impl McpConnectionManager {
         for server_name in fresh_config.keys() {
             let pool_key = format!("{}::{}", self.project_root.display(), server_name);
             if !pool.contains_key(&pool_key) {
-                debug!("New MCP server in config (not yet connected): {}", server_name);
+                debug!(
+                    "New MCP server in config (not yet connected): {}",
+                    server_name
+                );
             }
         }
 
-        info!("MCP connection refresh complete. Removed: {}, To reconnect: {}", 
-              to_remove.len(), to_reconnect.len());
+        info!(
+            "MCP connection refresh complete. Removed: {}, To reconnect: {}",
+            to_remove.len(),
+            to_reconnect.len()
+        );
     }
 
     /// Force reconnection of a specific server
     pub async fn reconnect_server(&self, server_name: &str) -> Result<(), String> {
         let pool_key = format!("{}::{}", self.project_root.display(), server_name);
-        
+
         let mut pool = self.connections.lock().await;
         if pool.remove(&pool_key).is_some() {
             debug!("Removed MCP connection for reconnection: {}", server_name);
         }
-        
+
         // Connection will be re-established on next get_connection call
         Ok(())
     }
@@ -209,17 +227,17 @@ impl McpConnectionManager {
     pub async fn stats(&self) -> ConnectionStats {
         let pool = self.connections.lock().await;
         let session_id = self.current_session.lock().await.clone();
-        
+
         let mut stdio_count = 0;
         let mut remote_count = 0;
         let mut idle_count = 0;
-        
+
         for conn in pool.values() {
             match conn.connection_type {
                 McpConnectionType::Stdio => stdio_count += 1,
                 McpConnectionType::Remote => remote_count += 1,
             }
-            
+
             let idle_duration = Instant::now().duration_since(conn.last_used);
             if idle_duration > MAX_IDLE_DURATION {
                 idle_count += 1;
@@ -260,7 +278,10 @@ impl McpConnectionManager {
         }
 
         if removed > 0 {
-            debug!("Background cleanup removed {} idle MCP connections", removed);
+            debug!(
+                "Background cleanup removed {} idle MCP connections",
+                removed
+            );
         }
     }
 }
@@ -302,7 +323,7 @@ impl GlobalMcpManager {
         session_id: String,
     ) -> Arc<McpConnectionManager> {
         let mut managers = self.managers.lock().await;
-        
+
         if let Some(manager) = managers.get(&project_root) {
             // Check if session ID matches
             let stats = manager.stats().await;
@@ -339,11 +360,11 @@ impl GlobalMcpManager {
     pub async fn all_stats(&self) -> Vec<(PathBuf, ConnectionStats)> {
         let managers = self.managers.lock().await;
         let mut stats = Vec::new();
-        
+
         for (path, manager) in managers.iter() {
             stats.push((path.clone(), manager.stats().await));
         }
-        
+
         stats
     }
 }

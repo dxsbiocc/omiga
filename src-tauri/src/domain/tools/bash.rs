@@ -11,14 +11,12 @@
 
 use super::ssh_paths::resolve_bash_cwd_ssh;
 use super::{ToolContext, ToolError, ToolSchema};
-use crate::llm::config::merged_ssh_configs;
 use crate::errors::{BashError, FsError};
-use crate::utils::shell::shell_single_quote;
-use crate::execution::{
-    create_environment, EnvironmentConfig, EnvironmentType, ExecOptions,
-};
+use crate::execution::{create_environment, EnvironmentConfig, EnvironmentType, ExecOptions};
 use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
+use crate::llm::config::merged_ssh_configs;
 use crate::llm::config::{load_config_file, LlmConfigFile, SshExecConfig};
+use crate::utils::shell::shell_single_quote;
 use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -221,11 +219,7 @@ fn destructive_command_warning(command: &str) -> Option<&'static str> {
 
 impl BashArgs {
     pub fn validate(&self) -> Result<(), BashError> {
-        let dangerous_patterns = [
-            ":(){ :|:& };:",
-            "> /dev/sda",
-            "dd if=/dev/zero of=/dev",
-        ];
+        let dangerous_patterns = [":(){ :|:& };:", "> /dev/sda", "dd if=/dev/zero of=/dev"];
 
         let cmd_lower = self.command.to_lowercase();
         if self.command.trim().is_empty() {
@@ -246,10 +240,9 @@ impl BashArgs {
             }
         }
 
-        if let Some(detail) = detect_blocked_sleep_pattern(
-            &self.command,
-            self.run_in_background == Some(true),
-        ) {
+        if let Some(detail) =
+            detect_blocked_sleep_pattern(&self.command, self.run_in_background == Some(true))
+        {
             return Err(BashError::ExecutionFailed {
                 message: format!(
                     "Blocked: {}. Run long-running work without polling sleep, use a sub-second sleep only for pacing, or set `run_in_background: true` for long waits.",
@@ -269,8 +262,7 @@ impl BashArgs {
         let secs = self
             .timeout_secs
             .unwrap_or_else(|| default_timeout_ms().div_ceil(1000));
-        secs
-            .max(1)
+        secs.max(1)
             .min(max_timeout_secs())
             .saturating_mul(1000)
             .min(cap)
@@ -398,12 +390,9 @@ fn ssh_config_for_context(ctx: &ToolContext) -> Result<SshExecConfig, ToolError>
         .as_ref()
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| ToolError::ExecutionFailed {
-            message: "未选择 SSH 服务器：请在执行环境菜单中选择 SSH 主机。"
-                .to_string(),
+            message: "未选择 SSH 服务器：请在执行环境菜单中选择 SSH 主机。".to_string(),
         })?;
-    let merged = merged_ssh_configs().map_err(|e| ToolError::ExecutionFailed {
-        message: e,
-    })?;
+    let merged = merged_ssh_configs().map_err(|e| ToolError::ExecutionFailed { message: e })?;
     merged
         .get(name)
         .cloned()
@@ -419,12 +408,17 @@ async fn run_remote_bash_ssh(
     command: &str,
     timeout_ms: u64,
 ) -> Result<BashRawOutput, ToolError> {
-    let host = ssh_cfg.effective_hostname().ok_or_else(|| ToolError::ExecutionFailed {
-        message: "SSH: 配置缺少 HostName 或 Host".to_string(),
-    })?;
-    let user = ssh_cfg.user.as_ref().ok_or_else(|| ToolError::ExecutionFailed {
-        message: "SSH: 配置缺少 User".to_string(),
-    })?;
+    let host = ssh_cfg
+        .effective_hostname()
+        .ok_or_else(|| ToolError::ExecutionFailed {
+            message: "SSH: 配置缺少 HostName 或 Host".to_string(),
+        })?;
+    let user = ssh_cfg
+        .user
+        .as_ref()
+        .ok_or_else(|| ToolError::ExecutionFailed {
+            message: "SSH: 配置缺少 User".to_string(),
+        })?;
     let config = EnvironmentConfig {
         r#type: EnvironmentType::Ssh,
         cwd: remote_cwd.clone(),
@@ -437,9 +431,11 @@ async fn run_remote_bash_ssh(
         task_id: format!("omiga-{}", uuid::Uuid::new_v4()),
         ..Default::default()
     };
-    let env = create_environment(config).await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("远程 SSH 环境: {}", e),
-    })?;
+    let env = create_environment(config)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("远程 SSH 环境: {}", e),
+        })?;
     let exec_opts = ExecOptions {
         timeout: Some(timeout_ms),
         cwd: Some(remote_cwd),
@@ -477,9 +473,11 @@ async fn run_remote_bash_modal(
         task_id: format!("omiga-{}", uuid::Uuid::new_v4()),
         ..Default::default()
     };
-    let env = create_environment(config).await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Modal 远程: {}", e),
-    })?;
+    let env = create_environment(config)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Modal 远程: {}", e),
+        })?;
     let exec_opts = ExecOptions {
         timeout: Some(timeout_ms),
         cwd: Some(cwd),
@@ -512,9 +510,11 @@ async fn run_remote_bash_docker(
         task_id: format!("omiga-{}", uuid::Uuid::new_v4()),
         ..Default::default()
     };
-    let env = create_environment(config).await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Docker 远程: {}", e),
-    })?;
+    let env = create_environment(config)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Docker 远程: {}", e),
+        })?;
     let exec_opts = ExecOptions {
         timeout: Some(timeout_ms),
         cwd: Some(cwd),
@@ -549,9 +549,11 @@ async fn run_remote_bash_singularity(
         network: true,
         ..Default::default()
     };
-    let env = create_environment(config).await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Singularity 远程: {}", e),
-    })?;
+    let env = create_environment(config)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Singularity 远程: {}", e),
+        })?;
     let exec_opts = ExecOptions {
         timeout: Some(timeout_ms),
         cwd: Some(cwd),
@@ -589,9 +591,11 @@ async fn run_remote_bash_daytona(
         task_id: format!("omiga-{}", uuid::Uuid::new_v4()),
         ..Default::default()
     };
-    let env = create_environment(config).await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Daytona 远程: {}", e),
-    })?;
+    let env = create_environment(config)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Daytona 远程: {}", e),
+        })?;
     let exec_opts = ExecOptions {
         timeout: Some(timeout_ms),
         cwd: Some(cwd),
@@ -621,8 +625,9 @@ async fn run_remote_bash(
     match backend {
         RemoteBackend::Ssh => {
             let profile = pick_ssh_profile(cfg).ok_or_else(|| ToolError::ExecutionFailed {
-                message: "未找到可用的 SSH 配置（execution_envs.ssh：enabled，且设置 HostName/User）。"
-                    .to_string(),
+                message:
+                    "未找到可用的 SSH 配置（execution_envs.ssh：enabled，且设置 HostName/User）。"
+                        .to_string(),
             })?;
             let remote_cwd = ssh_remote_cwd(&ctx.project_root, local_cwd);
             run_remote_bash_ssh(ctx, profile.1, remote_cwd, command, timeout_ms).await
@@ -662,8 +667,9 @@ impl super::ToolImpl for BashTool {
         if ctx.execution_environment == "ssh" {
             if args.run_in_background == Some(true) {
                 return Err(ToolError::InvalidArguments {
-                    message: "run_in_background is not supported when execution environment is SSH."
-                        .to_string(),
+                    message:
+                        "run_in_background is not supported when execution environment is SSH."
+                            .to_string(),
                 });
             }
             let remote_cwd = resolve_bash_cwd_ssh(&ctx.project_root, &ctx.cwd, args.cwd.as_deref())
@@ -679,7 +685,10 @@ impl super::ToolImpl for BashTool {
                 let exec_result = {
                     let mut guard = env_arc.lock().await;
                     guard.execute(&command, exec_opts).await
-                }.map_err(|e| ToolError::ExecutionFailed { message: format!("远程 SSH 执行: {}", e) })?;
+                }
+                .map_err(|e| ToolError::ExecutionFailed {
+                    message: format!("远程 SSH 执行: {}", e),
+                })?;
                 exec_result_to_bash_raw(exec_result)
             } else {
                 // Fallback: legacy per-call path
@@ -724,7 +733,10 @@ impl super::ToolImpl for BashTool {
                 let exec_result = {
                     let mut guard = env_arc.lock().await;
                     guard.execute(&command, exec_opts).await
-                }.map_err(|e| ToolError::ExecutionFailed { message: format!("远程执行: {}", e) })?;
+                }
+                .map_err(|e| ToolError::ExecutionFailed {
+                    message: format!("远程执行: {}", e),
+                })?;
                 exec_result_to_bash_raw(exec_result)
             } else {
                 // Fallback: legacy per-call path
@@ -807,14 +819,7 @@ impl super::ToolImpl for BashTool {
         }
 
         let cancel = ctx.cancel.clone();
-        let output = run_bash_command(
-            &cwd,
-            &command,
-            cancel,
-            timeout_ms,
-            args.stream,
-        )
-        .await?;
+        let output = run_bash_command(&cwd, &command, cancel, timeout_ms, args.stream).await?;
 
         Ok(BashOutput {
             command,
@@ -848,10 +853,7 @@ fn prepend_venv_activation(venv_type: &str, venv_name: &str, command: &str) -> S
             "source {path}/bin/activate; ",
             path = shell_escape_arg(name),
         ),
-        "pyenv" => format!(
-            "export PYENV_VERSION={ver}; ",
-            ver = shell_escape_arg(name),
-        ),
+        "pyenv" => format!("export PYENV_VERSION={ver}; ", ver = shell_escape_arg(name),),
         _ => return command.to_string(),
     };
     format!("{}{}", preamble, command)
@@ -890,8 +892,9 @@ fn truncate_command_summary(cmd: &str) -> String {
 fn resolve_path(project_root: &Path, path: &str) -> Result<PathBuf, FsError> {
     let path_buf = if path.starts_with('/') || path.starts_with("~/") {
         if path.starts_with("~/") {
-            let home = std::env::var("HOME")
-                .map_err(|_| FsError::InvalidPath { path: path.to_string() })?;
+            let home = std::env::var("HOME").map_err(|_| FsError::InvalidPath {
+                path: path.to_string(),
+            })?;
             PathBuf::from(path.replacen("~", &home, 1))
         } else {
             PathBuf::from(path)
@@ -941,12 +944,18 @@ pub(crate) async fn run_bash_command(
 
     let pid = child.id();
 
-    let stdout = child.stdout.take().ok_or_else(|| ToolError::ExecutionFailed {
-        message: "Failed to capture stdout".to_string(),
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| ToolError::ExecutionFailed {
-        message: "Failed to capture stderr".to_string(),
-    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ToolError::ExecutionFailed {
+            message: "Failed to capture stdout".to_string(),
+        })?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ToolError::ExecutionFailed {
+            message: "Failed to capture stderr".to_string(),
+        })?;
 
     let counter = Arc::new(AtomicUsize::new(0));
     let c_out = counter.clone();
@@ -956,9 +965,7 @@ pub(crate) async fn run_bash_command(
     let read_err = read_lines_capped(BufReader::new(stderr), c_err);
     let wait_child = async move { child.wait().await };
 
-    let work = async move {
-        tokio::try_join!(read_out, read_err, wait_child)
-    };
+    let work = async move { tokio::try_join!(read_out, read_err, wait_child) };
 
     let timeout_secs = (timeout_ms + 999) / 1000;
     let outcome = tokio::select! {
@@ -1262,7 +1269,10 @@ mod tests {
     fn conda_env_prepends_source_and_activate() {
         let cmd = prepend_venv_activation("conda", "myenv", "python main.py");
         assert!(cmd.contains("conda.sh"), "should source conda init");
-        assert!(cmd.contains("conda activate 'myenv'"), "should activate env");
+        assert!(
+            cmd.contains("conda activate 'myenv'"),
+            "should activate env"
+        );
         assert!(cmd.ends_with("python main.py"), "original command appended");
     }
 
@@ -1272,14 +1282,21 @@ mod tests {
         // semicolon is inert — it must NOT appear as a bare unquoted token.
         let cmd = prepend_venv_activation("conda", "env; rm -rf /", "ls");
         // The entire name must be single-quoted
-        assert!(cmd.contains("'env; rm -rf /'"), "name must be single-quoted");
+        assert!(
+            cmd.contains("'env; rm -rf /'"),
+            "name must be single-quoted"
+        );
         // The activate call must end with the quoted name (no bare semicolon after it
         // that would let the shell treat "; rm -rf /" as a separate command segment)
         let activate_pos = cmd.find("conda activate").expect("activate missing");
         let after_activate = &cmd[activate_pos..];
         // After "conda activate " the very next char must be a single quote
         let name_start = after_activate.find("activate ").unwrap() + "activate ".len();
-        assert_eq!(&after_activate[name_start..name_start + 1], "'", "name must start with single quote");
+        assert_eq!(
+            &after_activate[name_start..name_start + 1],
+            "'",
+            "name must start with single quote"
+        );
     }
 
     #[test]
@@ -1295,20 +1312,29 @@ mod tests {
     #[test]
     fn venv_path_with_spaces_is_safely_quoted() {
         let cmd = prepend_venv_activation("venv", "/home/my user/proj/.venv", "ls");
-        assert!(cmd.contains("'/home/my user/proj/.venv'"), "path must be single-quoted");
+        assert!(
+            cmd.contains("'/home/my user/proj/.venv'"),
+            "path must be single-quoted"
+        );
     }
 
     #[test]
     fn pyenv_version_sets_env_var() {
         let cmd = prepend_venv_activation("pyenv", "3.11.5", "python --version");
-        assert!(cmd.contains("PYENV_VERSION='3.11.5'"), "should set PYENV_VERSION");
+        assert!(
+            cmd.contains("PYENV_VERSION='3.11.5'"),
+            "should set PYENV_VERSION"
+        );
         assert!(cmd.ends_with("python --version"));
     }
 
     #[test]
     fn pyenv_version_with_shell_special_chars_quoted() {
         let cmd = prepend_venv_activation("pyenv", "3.11; malicious", "ls");
-        assert!(!cmd.contains("malicious;"), "must not execute injected code bare");
+        assert!(
+            !cmd.contains("malicious;"),
+            "must not execute injected code bare"
+        );
         assert!(cmd.contains("'3.11; malicious'"), "version must be quoted");
     }
 

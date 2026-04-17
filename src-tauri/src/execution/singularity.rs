@@ -19,13 +19,13 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
 
 /// Singularity 安全参数
-/// 
+///
 /// 对应 hermes-agent 中的 singularity_security_args
 fn singularity_security_args() -> Vec<&'static str> {
     vec![
-        "--cleanenv",      // 清理环境变量
-        "--no-home",       // 不挂载 $HOME
-        "--contain",       // 限制容器环境
+        "--cleanenv", // 清理环境变量
+        "--no-home",  // 不挂载 $HOME
+        "--contain",  // 限制容器环境
     ]
 }
 
@@ -34,12 +34,22 @@ pub struct SingularityProcessHandle;
 
 #[async_trait]
 impl ProcessHandle for SingularityProcessHandle {
-    fn poll(&self) -> Option<i32> { None }
+    fn poll(&self) -> Option<i32> {
+        None
+    }
     fn kill(&self) {}
-    async fn wait(&self) -> i32 { -1 }
-    fn stdout(&mut self) -> Option<Pin<Box<dyn AsyncRead + Send + '_>>> { None }
-    fn stderr(&mut self) -> Option<Pin<Box<dyn AsyncRead + Send + '_>>> { None }
-    fn returncode(&self) -> Option<i32> { None }
+    async fn wait(&self) -> i32 {
+        -1
+    }
+    fn stdout(&mut self) -> Option<Pin<Box<dyn AsyncRead + Send + '_>>> {
+        None
+    }
+    fn stderr(&mut self) -> Option<Pin<Box<dyn AsyncRead + Send + '_>>> {
+        None
+    }
+    fn returncode(&self) -> Option<i32> {
+        None
+    }
 }
 
 /// Singularity 执行环境
@@ -53,7 +63,7 @@ pub struct SingularityEnvironment {
     cwd_marker: String,
     snapshot_ready: bool,
     last_sync_time: Option<f64>,
-    
+
     // Singularity 特定配置
     image: String,
     singularity_exe: String,
@@ -75,7 +85,7 @@ impl SingularityEnvironment {
         let singularity_exe = Self::find_singularity().await?;
 
         let cwd = cwd.unwrap_or_else(|| "/workspace".to_string());
-        
+
         let session_id = generate_session_id();
         let snapshot_path = format!("/tmp/hermes-snap-{}.sh", session_id);
         let cwd_file = format!("/tmp/hermes-cwd-{}.txt", session_id);
@@ -117,46 +127,46 @@ impl SingularityEnvironment {
             }
         }
         Err(ExecutionError::SingularityError(
-            "Neither singularity nor apptainer found in PATH".to_string()
+            "Neither singularity nor apptainer found in PATH".to_string(),
         ))
     }
 
     /// 构建 singularity exec 命令参数
     fn build_exec_args(&self, cmd: &str) -> Vec<String> {
         let mut args = vec!["exec".to_string()];
-        
+
         // 添加安全参数
         args.extend(singularity_security_args().into_iter().map(String::from));
-        
+
         // 挂载 volumes
         for vol in &self.volumes {
             args.push("--bind".to_string());
             args.push(vol.clone());
         }
-        
+
         // 网络选项
         if !self.network {
             args.push("--net".to_string());
             args.push("--network".to_string());
             args.push("none".to_string());
         }
-        
+
         // 工作目录
         args.push("--pwd".to_string());
         args.push(self.cwd.clone());
-        
+
         // 环境变量
         for (key, value) in &self.env {
             args.push("--env".to_string());
             args.push(format!("{}={}", key, value));
         }
-        
+
         // 镜像和命令
         args.push(self.image.clone());
         args.push("bash".to_string());
         args.push("-c".to_string());
         args.push(cmd.to_string());
-        
+
         args
     }
 
@@ -172,41 +182,39 @@ impl SingularityEnvironment {
 
         let args = self.build_exec_args(cmd_string);
 
-        let result = timeout(
-            Duration::from_millis(timeout_ms),
-            async {
-                let mut child = Command::new(&self.singularity_exe)
-                    .args(&args)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| ExecutionError::SpawnError(e.to_string()))?;
+        let result = timeout(Duration::from_millis(timeout_ms), async {
+            let mut child = Command::new(&self.singularity_exe)
+                .args(&args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| ExecutionError::SpawnError(e.to_string()))?;
 
-                // 排空 stderr 防止管道阻塞
-                if let Some(stderr) = child.stderr.take() {
-                    tokio::spawn(async move {
-                        let reader = BufReader::new(stderr);
-                        let mut lines = reader.lines();
-                        while let Ok(Some(_)) = lines.next_line().await {}
-                    });
-                }
-
-                let mut stdout_lines: Vec<String> = Vec::new();
-                if let Some(stdout) = child.stdout.take() {
-                    let reader = BufReader::new(stdout);
+            // 排空 stderr 防止管道阻塞
+            if let Some(stderr) = child.stderr.take() {
+                tokio::spawn(async move {
+                    let reader = BufReader::new(stderr);
                     let mut lines = reader.lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        stdout_lines.push(line);
-                    }
-                }
+                    while let Ok(Some(_)) = lines.next_line().await {}
+                });
+            }
 
-                match child.wait().await {
-                    Ok(status) => Ok((stdout_lines.join("\n"), status.code().unwrap_or(-1))),
-                    Err(e) => Err(ExecutionError::IoError(e)),
+            let mut stdout_lines: Vec<String> = Vec::new();
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    stdout_lines.push(line);
                 }
             }
-        ).await;
+
+            match child.wait().await {
+                Ok(status) => Ok((stdout_lines.join("\n"), status.code().unwrap_or(-1))),
+                Err(e) => Err(ExecutionError::IoError(e)),
+            }
+        })
+        .await;
 
         match result {
             Ok(Ok((output, code))) => Ok((output, code)),
@@ -267,11 +275,11 @@ impl BaseEnvironment for SingularityEnvironment {
     }
 
     fn stdin_mode(&self) -> &'static str {
-        "pipe"  // Singularity 使用管道模式
+        "pipe" // Singularity 使用管道模式
     }
 
     fn snapshot_timeout_secs(&self) -> u64 {
-        30  // Singularity 冷启动比 Docker 快
+        30 // Singularity 冷启动比 Docker 快
     }
 
     /// Singularity 使用无状态容器（--contain），快照无法在运行间持久化，跳过 init_session
@@ -316,7 +324,9 @@ impl BaseEnvironment for SingularityEnvironment {
 
         let wrapped = self.wrap_command(&exec_command, &effective_cwd);
 
-        let (output, returncode) = self.execute_in_container(&wrapped, effective_timeout).await?;
+        let (output, returncode) = self
+            .execute_in_container(&wrapped, effective_timeout)
+            .await?;
 
         let mut result = ExecResult { output, returncode };
         self.update_cwd_from_output(&mut result).await;
@@ -364,31 +374,32 @@ mod tests {
             Some("/workspace".to_string()),
             Some(60_000),
             vec!["/host/data:/data".to_string()],
-            false,  // no network
+            false, // no network
             "test-task".to_string(),
-        ).await;
+        )
+        .await;
 
         // 如果 singularity 未安装会失败
         match result {
             Ok(env) => {
                 let args = env.build_exec_args("echo hello");
-                
+
                 // 检查安全参数
                 assert!(args.contains(&"--cleanenv".to_string()));
                 assert!(args.contains(&"--no-home".to_string()));
                 assert!(args.contains(&"--contain".to_string()));
-                
+
                 // 检查 volume
                 assert!(args.contains(&"--bind".to_string()));
                 assert!(args.contains(&"/host/data:/data".to_string()));
-                
+
                 // 检查网络禁用
                 assert!(args.contains(&"--net".to_string()));
                 assert!(args.contains(&"none".to_string()));
-                
+
                 // 检查镜像
                 assert!(args.contains(&"docker://ubuntu:22.04".to_string()));
-                
+
                 // 检查命令
                 assert!(args.contains(&"bash".to_string()));
                 assert!(args.contains(&"-c".to_string()));
@@ -399,5 +410,4 @@ mod tests {
             }
         }
     }
-
 }

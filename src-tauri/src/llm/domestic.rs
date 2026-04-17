@@ -29,6 +29,7 @@ pub struct BaiduClient {
 impl BaiduClient {
     pub fn new(config: LlmConfig) -> Self {
         let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(60))
             .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .build()
             .expect("Failed to create HTTP client");
@@ -66,14 +67,15 @@ impl BaiduClient {
             .post(&url)
             .send()
             .await
-            .map_err(|e| ApiError::Network { message: e.to_string() })?;
+            .map_err(|e| ApiError::Network {
+                message: e.to_string(),
+            })?;
 
-        let token_response: BaiduTokenResponse = response.json().await.map_err(|e| {
-            ApiError::Http {
+        let token_response: BaiduTokenResponse =
+            response.json().await.map_err(|e| ApiError::Http {
                 status: 500,
                 message: format!("Failed to parse token response: {}", e),
-            }
-        })?;
+            })?;
 
         Ok(token_response.access_token)
     }
@@ -111,17 +113,14 @@ impl LlmClient for BaiduClient {
         &self,
         messages: Vec<LlmMessage>,
         _tools: Vec<ToolSchema>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError>
+    {
         let access_token = self.get_access_token().await?;
         let baidu_messages = self.convert_messages(messages);
 
         // For non-streaming, we'll simulate streaming by returning complete response
         // Baidu's streaming API is WebSocket-based and more complex
-        let url = format!(
-            "{}?access_token={}",
-            self.config.api_url(),
-            access_token
-        );
+        let url = format!("{}?access_token={}", self.config.api_url(), access_token);
 
         let request = BaiduRequest {
             messages: baidu_messages,
@@ -136,7 +135,9 @@ impl LlmClient for BaiduClient {
             .json(&request)
             .send()
             .await
-            .map_err(|e| ApiError::Network { message: e.to_string() })?;
+            .map_err(|e| ApiError::Network {
+                message: e.to_string(),
+            })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -154,7 +155,11 @@ impl LlmClient for BaiduClient {
 
         if let Some(error) = baidu_response.error_code {
             return Err(ApiError::Server {
-                message: format!("Baidu API error {}: {}", error, baidu_response.error_msg.unwrap_or_default()),
+                message: format!(
+                    "Baidu API error {}: {}",
+                    error,
+                    baidu_response.error_msg.unwrap_or_default()
+                ),
             });
         }
 
@@ -172,7 +177,9 @@ impl LlmClient for BaiduClient {
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
             }
-            let _ = tx.send(Ok(LlmStreamChunk::Stop { stop_reason: None })).await;
+            let _ = tx
+                .send(Ok(LlmStreamChunk::Stop { stop_reason: None }))
+                .await;
         });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -234,6 +241,7 @@ pub struct AlibabaClient {
 impl AlibabaClient {
     pub fn new(config: LlmConfig) -> Self {
         let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(60))
             .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .build()
             .expect("Failed to create HTTP client");
@@ -271,10 +279,7 @@ impl AlibabaClient {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                AlibabaMessage {
-                    role,
-                    content,
-                }
+                AlibabaMessage { role, content }
             })
             .collect()
     }
@@ -286,7 +291,8 @@ impl LlmClient for AlibabaClient {
         &self,
         messages: Vec<LlmMessage>,
         _tools: Vec<ToolSchema>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError>
+    {
         let alibaba_messages = self.convert_messages(messages);
 
         let request = AlibabaRequest {
@@ -308,7 +314,9 @@ impl LlmClient for AlibabaClient {
             .json(&request)
             .send()
             .await
-            .map_err(|e| ApiError::Network { message: e.to_string() })?;
+            .map_err(|e| ApiError::Network {
+                message: e.to_string(),
+            })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -319,14 +327,19 @@ impl LlmClient for AlibabaClient {
             });
         }
 
-        let alibaba_response: AlibabaResponse = response.json().await.map_err(|e| ApiError::Http {
-            status: 500,
-            message: format!("Failed to parse response: {}", e),
-        })?;
+        let alibaba_response: AlibabaResponse =
+            response.json().await.map_err(|e| ApiError::Http {
+                status: 500,
+                message: format!("Failed to parse response: {}", e),
+            })?;
 
         if let Some(error) = alibaba_response.code {
             return Err(ApiError::Server {
-                message: format!("Alibaba API error {}: {}", error, alibaba_response.message.unwrap_or_default()),
+                message: format!(
+                    "Alibaba API error {}: {}",
+                    error,
+                    alibaba_response.message.unwrap_or_default()
+                ),
             });
         }
 
@@ -347,7 +360,9 @@ impl LlmClient for AlibabaClient {
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
             }
-            let _ = tx.send(Ok(LlmStreamChunk::Stop { stop_reason: None })).await;
+            let _ = tx
+                .send(Ok(LlmStreamChunk::Stop { stop_reason: None }))
+                .await;
         });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -361,7 +376,7 @@ impl LlmClient for AlibabaClient {
             .head("https://dashscope.aliyuncs.com")
             .send()
             .await;
-        
+
         match response {
             Ok(resp) => Ok(resp.status().is_success() || resp.status().as_u16() == 405), // 405 is ok, means auth required
             Err(_) => Ok(false),
@@ -450,7 +465,8 @@ impl LlmClient for XunfeiClient {
         &self,
         messages: Vec<LlmMessage>,
         tools: Vec<ToolSchema>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError>
+    {
         let bearer = match &self.config.secret_key {
             Some(sk) if !sk.is_empty() => format!("{}:{}", self.config.api_key, sk),
             _ => self.config.api_key.clone(),
@@ -514,7 +530,8 @@ impl LlmClient for GoogleClient {
         &self,
         messages: Vec<LlmMessage>,
         tools: Vec<ToolSchema>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError>
+    {
         self.inner.send_message_streaming(messages, tools).await
     }
 
@@ -550,7 +567,8 @@ impl LlmClient for ZhipuClient {
         &self,
         messages: Vec<LlmMessage>,
         tools: Vec<ToolSchema>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError>
+    {
         self.inner.send_message_streaming(messages, tools).await
     }
 

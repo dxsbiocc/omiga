@@ -1,15 +1,12 @@
 //! Permission tool rules tests
 
+use omiga_lib::domain::permissions::{
+    blanket_deny_rule_matches, canonical_permission_tool_name,
+    load_merged_permission_deny_rule_entries, matching_deny_entry,
+    permission_rule_value_from_string, DenyRuleEntry,
+};
 use std::fs;
 use std::path::PathBuf;
-use omiga_lib::domain::permissions::{
-    permission_rule_value_from_string,
-    blanket_deny_rule_matches,
-    matching_deny_entry,
-    canonical_permission_tool_name,
-    load_merged_permission_deny_rule_entries,
-    DenyRuleEntry,
-};
 
 #[test]
 fn parser_plain_and_parens() {
@@ -55,12 +52,10 @@ fn mcp_server_wildcard_rule() {
 
 #[test]
 fn matching_deny_entry_finds_source() {
-    let entries = vec![
-        DenyRuleEntry {
-            source: PathBuf::from("/tmp/settings.json"),
-            rule: "Bash".to_string(),
-        },
-    ];
+    let entries = vec![DenyRuleEntry {
+        source: PathBuf::from("/tmp/settings.json"),
+        rule: "Bash".to_string(),
+    }];
     let hit = matching_deny_entry("bash", &entries).unwrap();
     assert_eq!(hit.rule, "Bash");
     assert_eq!(hit.source, PathBuf::from("/tmp/settings.json"));
@@ -69,7 +64,10 @@ fn matching_deny_entry_finds_source() {
 #[test]
 fn canonical_maps_tool_enum_display_names() {
     assert_eq!(canonical_permission_tool_name("FileRead"), "file_read");
-    assert_eq!(canonical_permission_tool_name("ListMcpResources"), "list_mcp_resources");
+    assert_eq!(
+        canonical_permission_tool_name("ListMcpResources"),
+        "list_mcp_resources"
+    );
 }
 
 // File-backed loader tests (unique rule markers so real `~/.claude` merge does not break assertions).
@@ -87,9 +85,9 @@ fn load_merged_entries_from_project_settings_json() {
     .expect("write");
     let entries = load_merged_permission_deny_rule_entries(dir.path());
     assert!(
-        entries.iter().any(|e| {
-            e.rule == "__OMIGA_LOADER_A__" && e.source == path
-        }),
+        entries
+            .iter()
+            .any(|e| { e.rule == "__OMIGA_LOADER_A__" && e.source == path }),
         "expected project rule with source path, got {:?}",
         entries
     );
@@ -157,16 +155,12 @@ fn load_includes_omiga_permissions_json() {
     let omiga = dir.path().join(".omiga");
     fs::create_dir_all(&omiga).expect("mkdir");
     let omiga_path = omiga.join("permissions.json");
-    fs::write(
-        &omiga_path,
-        r#"{"deny":["__OMIGA_FILE_ONLY__"]}"#,
-    )
-    .expect("write");
+    fs::write(&omiga_path, r#"{"deny":["__OMIGA_FILE_ONLY__"]}"#).expect("write");
     let entries = load_merged_permission_deny_rule_entries(dir.path());
     assert!(
-        entries.iter().any(|e| {
-            e.rule == "__OMIGA_FILE_ONLY__" && e.source == omiga_path
-        }),
+        entries
+            .iter()
+            .any(|e| { e.rule == "__OMIGA_FILE_ONLY__" && e.source == omiga_path }),
         "expected .omiga/permissions.json rule with source path, got {:?}",
         entries
     );
@@ -186,23 +180,19 @@ fn load_merges_claude_settings_and_omiga_permissions_json() {
     let omiga = dir.path().join(".omiga");
     fs::create_dir_all(&omiga).expect("mkdir");
     let omiga_path = omiga.join("permissions.json");
-    fs::write(
-        &omiga_path,
-        r#"{"deny":["__OMIGA_FROM_OMIGA_FILE__"]}"#,
-    )
-    .expect("write");
+    fs::write(&omiga_path, r#"{"deny":["__OMIGA_FROM_OMIGA_FILE__"]}"#).expect("write");
     let entries = load_merged_permission_deny_rule_entries(dir.path());
     assert!(
-        entries.iter().any(|e| {
-            e.rule == "__OMIGA_FROM_CLAUDE__" && e.source == settings_path
-        }),
+        entries
+            .iter()
+            .any(|e| { e.rule == "__OMIGA_FROM_CLAUDE__" && e.source == settings_path }),
         "expected .claude rule, got {:?}",
         entries
     );
     assert!(
-        entries.iter().any(|e| {
-            e.rule == "__OMIGA_FROM_OMIGA_FILE__" && e.source == omiga_path
-        }),
+        entries
+            .iter()
+            .any(|e| { e.rule == "__OMIGA_FROM_OMIGA_FILE__" && e.source == omiga_path }),
         "expected .omiga rule, got {:?}",
         entries
     );

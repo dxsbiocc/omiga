@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
-pub const DESCRIPTION: &str = r#"Retrieve one task by id from the session task list. Returns `null` if missing."#;
+pub const DESCRIPTION: &str =
+    r#"Retrieve one task by id from the session task list. Returns `null` if missing."#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskGetArgs {

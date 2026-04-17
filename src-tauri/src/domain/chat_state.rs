@@ -1,15 +1,19 @@
 //! In-memory chat runtime state (LLM config, session cache, rounds, pending tools).
 //! Lives in `OmigaAppState` alongside the DB repo — backend analogue of chat runtime in AppStateStore.
 
+use crate::domain::mcp::connection_manager::GlobalMcpManager;
 use crate::domain::session::{AgentTask, Session, TodoItem};
 use crate::domain::tools::{env_store::EnvStore, ToolSchema, WebSearchApiKeys};
-use crate::domain::mcp::connection_manager::GlobalMcpManager;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock, oneshot};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
+
+/// Cached `omiga.yaml` content.  Loaded once on first use, invalidated whenever
+/// the config file is written so callers never see stale data.
+pub type CachedConfigFile = Arc<Mutex<Option<Arc<crate::llm::config::LlmConfigFile>>>>;
 
 /// Cached permission deny entries for one project root.
 pub struct PermissionDenyCache {
@@ -65,7 +69,7 @@ pub struct ChatState {
     /// processes on every `send_message` call (primary cause of slow first response).
     pub mcp_tool_cache: Arc<Mutex<HashMap<PathBuf, McpToolCache>>>,
     /// Managed MCP connection pool with session boundaries and lifecycle management.
-    /// 
+    ///
     /// Features:
     /// - Session tracking: connections are tagged with session ID, stdio connections
     ///   are refreshed on session change to avoid zombie processes
@@ -76,6 +80,11 @@ pub struct ChatState {
     /// Cached permission deny rules keyed by project root. Avoids re-reading 4 settings
     /// files synchronously on every `send_message` call.
     pub permission_deny_cache: Arc<Mutex<HashMap<PathBuf, PermissionDenyCache>>>,
+    /// In-memory cache for the parsed `omiga.yaml` config file.
+    /// Eliminates 12+ blocking stat() calls + file read + YAML parse on every session
+    /// switch that hits the provider-restore code path.  Cleared whenever the config
+    /// file is written so callers never see stale data.
+    pub cached_config_file: CachedConfigFile,
 }
 
 /// Runtime state for an active session. Chat transcript is persisted via messages;
@@ -139,6 +148,7 @@ impl Default for ChatState {
             mcp_tool_cache: Arc::new(Mutex::new(HashMap::new())),
             mcp_manager: Arc::new(GlobalMcpManager::new()),
             permission_deny_cache: Arc::new(Mutex::new(HashMap::new())),
+            cached_config_file: Arc::new(Mutex::new(None)),
         }
     }
 }

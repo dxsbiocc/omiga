@@ -71,7 +71,10 @@ pub enum StreamOutputItem {
     Thinking(String),
     /// Error occurred
     #[serde(rename = "error")]
-    Error { message: String, code: Option<String> },
+    Error {
+        message: String,
+        code: Option<String>,
+    },
     /// Stream was cancelled by user
     #[serde(rename = "cancelled")]
     Cancelled,
@@ -81,6 +84,9 @@ pub enum StreamOutputItem {
     /// Suggested follow-up prompts for the composer (independent LLM; emitted before [`Complete`] when generation succeeds)
     #[serde(rename = "follow_up_suggestions")]
     FollowUpSuggestions(Vec<FollowUpSuggestion>),
+    /// Indicator that follow-up suggestions are being generated in the background
+    #[serde(rename = "suggestions_generating")]
+    SuggestionsGenerating,
     /// Aggregated LLM token usage for this user turn (main agent only; excludes post-turn summary / follow-up LLM calls)
     #[serde(rename = "token_usage")]
     TokenUsage {
@@ -193,9 +199,7 @@ pub mod sse {
     use futures::Stream;
 
     /// Parse SSE events into stream items
-    pub fn parse_sse_stream<S>(
-        stream: S,
-    ) -> impl Stream<Item = Result<StreamOutputItem, String>>
+    pub fn parse_sse_stream<S>(stream: S) -> impl Stream<Item = Result<StreamOutputItem, String>>
     where
         S: Stream<Item = Result<Event, reqwest::Error>> + Send + 'static,
     {
@@ -204,13 +208,11 @@ pub mod sse {
             .map(|event| event.map_err(|e| e.to_string()))
             .filter_map(|event| async move {
                 match event {
-                    Ok(e) if !e.data.is_empty() => {
-                        match parse_sse_event(&e.data) {
-                            Ok(Some(item)) => Some(Ok(item)),
-                            Ok(None) => None,
-                            Err(err) => Some(Err(err)),
-                        }
-                    }
+                    Ok(e) if !e.data.is_empty() => match parse_sse_event(&e.data) {
+                        Ok(Some(item)) => Some(Ok(item)),
+                        Ok(None) => None,
+                        Err(err) => Some(Err(err)),
+                    },
                     _ => None,
                 }
             })
@@ -256,8 +258,8 @@ pub mod sse {
 
     /// Parse content delta event
     fn parse_content_delta(data: &str) -> Result<Option<StreamOutputItem>, String> {
-        let value: serde_json::Value = serde_json::from_str(data)
-            .map_err(|e| format!("Failed to parse delta: {}", e))?;
+        let value: serde_json::Value =
+            serde_json::from_str(data).map_err(|e| format!("Failed to parse delta: {}", e))?;
 
         parse_content_delta_value(&value)
     }

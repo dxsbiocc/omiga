@@ -1,16 +1,16 @@
 //! Connect to MCP servers via **rmcp** (stdio or streamable HTTP) and run `resources/*` calls.
 
-use crate::domain::mcp::config::{McpServerConfig, merged_mcp_servers};
-use rmcp::ServiceExt;
+use crate::domain::mcp::config::{merged_mcp_servers, McpServerConfig};
+use rmcp::model::Tool as McpTool;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ReadResourceRequestParams, ReadResourceResult,
 };
-use rmcp::model::Tool as McpTool;
 use rmcp::service::{Peer, RoleClient, RunningService};
 use rmcp::transport::{
-    ConfigureCommandExt, TokioChildProcess,
     streamable_http_client::{StreamableHttpClientTransportConfig, StreamableHttpClientWorker},
+    ConfigureCommandExt, TokioChildProcess,
 };
+use rmcp::ServiceExt;
 use serde_json::json;
 use std::path::Path;
 use std::time::Duration;
@@ -96,7 +96,7 @@ impl McpLiveConnection {
                 use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
                 use windows_sys::Win32::System::Threading::OpenProcess;
                 use windows_sys::Win32::System::Threading::PROCESS_QUERY_INFORMATION;
-                
+
                 unsafe {
                     let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);
                     if handle == INVALID_HANDLE_VALUE {
@@ -123,7 +123,7 @@ pub struct ConnectionMeta {
 /// Returns an [`McpLiveConnection`] whose lifetime controls the underlying process / HTTP session.
 /// The embedded `tool_name_map` lets callers resolve normalized → original tool names without
 /// a second round-trip.
-/// 
+///
 /// # Arguments
 /// * `project_root` - Project root path for config resolution and working directory
 /// * `server_name` - Name of the MCP server to connect to
@@ -135,8 +135,8 @@ pub async fn connect_mcp_server(
     timeout: Duration,
     session_id: &str,
 ) -> Result<McpLiveConnection, String> {
-    use crate::domain::mcp::names::normalize_name_for_mcp;
     use crate::domain::mcp::config::McpServerConfig;
+    use crate::domain::mcp::names::normalize_name_for_mcp;
 
     let cfg = merged_mcp_servers(project_root)
         .remove(server_name)
@@ -156,7 +156,9 @@ pub async fn connect_mcp_server(
     let peer = running.peer().clone();
 
     // Eagerly fetch tool list so every subsequent call can resolve names without a round-trip.
-    let tools = list_tools_via_peer(&peer, timeout).await.unwrap_or_default();
+    let tools = list_tools_via_peer(&peer, timeout)
+        .await
+        .unwrap_or_default();
     let tool_name_map: std::collections::HashMap<String, String> = tools
         .into_iter()
         .map(|t| (normalize_name_for_mcp(t.name.as_ref()), t.name.to_string()))
@@ -167,9 +169,9 @@ pub async fn connect_mcp_server(
     // `pid` is None, which is sufficient for health-check purposes.
     let pid = None;
 
-    Ok(McpLiveConnection { 
-        peer, 
-        _running: running, 
+    Ok(McpLiveConnection {
+        peer,
+        _running: running,
         tool_name_map,
         connection_type,
         last_used: Instant::now(),
@@ -247,7 +249,8 @@ pub async fn list_resources_for_server(
             .map_err(|e| format!("resources/list: {e}"))?;
         let mut out = Vec::with_capacity(resources.len());
         for r in resources {
-            let mut v = serde_json::to_value(&r).unwrap_or_else(|_| json!({ "error": "serialize Resource" }));
+            let mut v = serde_json::to_value(&r)
+                .unwrap_or_else(|_| json!({ "error": "serialize Resource" }));
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("server".to_string(), json!(server_name));
             }
@@ -343,16 +346,14 @@ async fn create_running_service(
 ) -> Result<RunningService<RoleClient, ()>, String> {
     match config {
         McpServerConfig::Stdio { command, args, env } => {
-            let transport = TokioChildProcess::new(
-                Command::new(&command).configure(|cmd| {
-                    cmd.args(&args);
-                    cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-                    cmd.current_dir(project_root);
-                    cmd.stdin(std::process::Stdio::piped());
-                    cmd.stdout(std::process::Stdio::piped());
-                    cmd.stderr(std::process::Stdio::piped());
-                }),
-            )
+            let transport = TokioChildProcess::new(Command::new(&command).configure(|cmd| {
+                cmd.args(&args);
+                cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+                cmd.current_dir(project_root);
+                cmd.stdin(std::process::Stdio::piped());
+                cmd.stdout(std::process::Stdio::piped());
+                cmd.stderr(std::process::Stdio::piped());
+            }))
             .map_err(|e| format!("MCP stdio spawn: {e}"))?;
 
             tokio::time::timeout(timeout, ().serve(transport))

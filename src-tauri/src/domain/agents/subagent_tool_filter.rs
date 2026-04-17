@@ -62,10 +62,7 @@ pub fn env_workflow_scripts_enabled() -> bool {
 
 /// Whether a built-in tool call should be blocked inside a sub-agent (`subagent_depth > 0`).
 #[must_use]
-pub fn should_block_subagent_builtin_call(
-    canonical: &str,
-    opts: SubagentFilterOptions,
-) -> bool {
+pub fn should_block_subagent_builtin_call(canonical: &str, opts: SubagentFilterOptions) -> bool {
     if canonical == "exit_plan_mode" && opts.parent_in_plan_mode {
         return false;
     }
@@ -170,7 +167,11 @@ mod tests {
     fn workflow_schema_filter_follows_workflow_scripts_env() {
         let _g = WORKFLOW_ENV_LOCK.lock().expect("lock");
         let v = vec![ToolSchema::new("workflow", "x", serde_json::json!({}))];
-        for k in ["OMIGA_WORKFLOW_SCRIPTS", "WORKFLOW_SCRIPTS", "CLAUDE_CODE_WORKFLOW_SCRIPTS"] {
+        for k in [
+            "OMIGA_WORKFLOW_SCRIPTS",
+            "WORKFLOW_SCRIPTS",
+            "CLAUDE_CODE_WORKFLOW_SCRIPTS",
+        ] {
             std::env::remove_var(k);
         }
         assert_eq!(

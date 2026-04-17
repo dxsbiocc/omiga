@@ -42,36 +42,34 @@ pub fn prepare_agent_session_config(
     // 选择 Agent
     let agent = router.select_agent(subagent_type);
     let agent_type = agent.agent_type().to_string();
-    
+
     // 解析模型
     let model = resolve_agent_model(agent.model(), parent_model);
-    
+
     // 解析权限模式
-    let permission_mode = agent.permission_mode().unwrap_or(
-        if parent_in_plan_mode {
-            PermissionMode::Plan
-        } else {
-            PermissionMode::AcceptEdits
-        }
-    );
-    
+    let permission_mode = agent.permission_mode().unwrap_or(if parent_in_plan_mode {
+        PermissionMode::Plan
+    } else {
+        PermissionMode::AcceptEdits
+    });
+
     // 构建系统提示词（这里只是 Agent 特定的部分，外层会添加基础提示词）
     let tool_ctx = ToolContext::new(project_root.to_path_buf());
     let agent_specific_prompt = compose_full_agent_system_prompt(agent, &tool_ctx);
-    
+
     // 构建子 Agent 模式说明
     let nested_agent_note = if allow_nested_agent {
         " Nested `Agent` is allowed."
     } else {
         ""
     };
-    
+
     let exit_plan_note = if parent_in_plan_mode {
         " `ExitPlanMode` is available while the parent session is in plan mode."
     } else {
         ""
     };
-    
+
     let subagent_mode_prompt = format!(
         "## Sub-agent mode ({})
 You are an isolated sub-agent running as '{}'. \
@@ -83,20 +81,17 @@ Use tools as needed. Disallowed tools: {}. \
         exit_plan_note,
         nested_agent_note
     );
-    
+
     // 合并提示词
-    let system_prompt = format!(
-        "{}\n\n{}",
-        agent_specific_prompt,
-        subagent_mode_prompt
-    );
-    
+    let system_prompt = format!("{}\n\n{}", agent_specific_prompt, subagent_mode_prompt);
+
     // 处理工具限制
     let allowed_tools = agent.allowed_tools().map(|t| t.to_vec());
-    let disallowed_tools = agent.disallowed_tools()
+    let disallowed_tools = agent
+        .disallowed_tools()
         .map(|t| t.iter().map(|s| s.to_string()).collect())
         .unwrap_or_default();
-    
+
     AgentSessionConfig {
         agent_type,
         system_prompt,
@@ -137,5 +132,3 @@ static AGENT_ROUTER: OnceLock<AgentRouter> = OnceLock::new();
 pub fn get_agent_router() -> &'static AgentRouter {
     AGENT_ROUTER.get_or_init(AgentRouter::new)
 }
-
-

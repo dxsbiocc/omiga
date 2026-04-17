@@ -2,14 +2,14 @@
 //!
 //! 提供自动 Agent 选择、任务分解和多 Agent 编排功能。
 
-pub mod selector;
-pub mod planner;
 pub mod orchestrator;
+pub mod planner;
+pub mod selector;
 pub mod strategy;
 
-pub use selector::{AgentSelector, select_agent_for_task};
-pub use planner::{TaskPlanner, TaskPlan, SubTask};
 pub use orchestrator::{AgentOrchestrator, OrchestrationResult};
+pub use planner::{SubTask, TaskPlan, TaskPlanner};
+pub use selector::{select_agent_for_task, AgentSelector};
 pub use strategy::{SchedulingStrategy, StrategyConfig};
 
 use serde::{Deserialize, Serialize};
@@ -112,17 +112,19 @@ impl AgentScheduler {
     /// 执行完整调度流程
     pub async fn schedule(&self, request: SchedulingRequest) -> Result<SchedulingResult, String> {
         // 1. 分析请求，确定是否需要分解
-        let needs_decomposition = request.auto_decompose 
-            && self.planner.should_decompose(&request.user_request);
+        let needs_decomposition =
+            request.auto_decompose && self.planner.should_decompose(&request.user_request);
 
         if needs_decomposition {
             // 2. 分解任务
             let plan = self.planner.decompose(&request).await?;
-            
+
             // 3. 为每个子任务选择 Agent
             let mut selected_agents = Vec::new();
             for subtask in &plan.subtasks {
-                let agent = self.selector.select(&subtask.description, &request.project_root);
+                let agent = self
+                    .selector
+                    .select(&subtask.description, &request.project_root);
                 selected_agents.push(agent.to_string());
             }
 
@@ -130,8 +132,8 @@ impl AgentScheduler {
             let estimated = self.estimate_duration(&plan, &selected_agents);
 
             // 5. 检查是否需要确认
-            let requires_confirmation = selected_agents.len() > 3 
-                || plan.subtasks.iter().any(|t| t.critical);
+            let requires_confirmation =
+                selected_agents.len() > 3 || plan.subtasks.iter().any(|t| t.critical);
 
             let confirmation_message = if requires_confirmation {
                 Some(self.generate_confirmation_message(&plan, &selected_agents))
@@ -148,9 +150,11 @@ impl AgentScheduler {
             })
         } else {
             // 单 Agent 执行
-            let agent = self.selector.select(&request.user_request, &request.project_root);
+            let agent = self
+                .selector
+                .select(&request.user_request, &request.project_root);
             let plan = TaskPlan::single_agent(&agent, &request.user_request);
-            
+
             Ok(SchedulingResult {
                 plan,
                 selected_agents: vec![agent.to_string()],
@@ -199,12 +203,16 @@ impl AgentScheduler {
         };
 
         // 根据 Agent 类型调整
-        let agent_multiplier: f64 = agents.iter().map(|a| match a.as_str() {
-            "Explore" => 0.8,
-            "Plan" => 1.5,
-            "verification" => 2.0,
-            _ => 1.0,
-        }).sum::<f64>() / agents.len().max(1) as f64;
+        let agent_multiplier: f64 = agents
+            .iter()
+            .map(|a| match a.as_str() {
+                "Explore" => 0.8,
+                "Plan" => 1.5,
+                "verification" => 2.0,
+                _ => 1.0,
+            })
+            .sum::<f64>()
+            / agents.len().max(1) as f64;
 
         (base_time as f64 * agent_multiplier) as u64
     }
@@ -212,7 +220,7 @@ impl AgentScheduler {
     fn generate_confirmation_message(&self, plan: &TaskPlan, agents: &[String]) -> String {
         let agent_list = agents.join(", ");
         let task_count = plan.subtasks.len();
-        
+
         format!(
             "此请求将分解为 {} 个子任务，使用以下 Agent: {}。\n\
              预计执行时间: ~{} 分钟。是否继续？",
@@ -235,9 +243,8 @@ pub async fn auto_schedule(
     project_root: impl Into<String>,
 ) -> Result<SchedulingResult, String> {
     let scheduler = AgentScheduler::new();
-    let request = SchedulingRequest::new(user_request)
-        .with_project_root(project_root);
-    
+    let request = SchedulingRequest::new(user_request).with_project_root(project_root);
+
     scheduler.schedule(request).await
 }
 
@@ -251,6 +258,6 @@ pub async fn schedule_with_strategy(
     let request = SchedulingRequest::new(user_request)
         .with_project_root(project_root)
         .with_strategy(strategy);
-    
+
     scheduler.schedule(request).await
 }

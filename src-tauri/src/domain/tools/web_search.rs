@@ -208,7 +208,9 @@ fn validate(args: &WebSearchArgs) -> Result<(), ToolError> {
             }
             if is_ssrf_blocked_url(t) {
                 return Err(ToolError::InvalidArguments {
-                    message: "search_url must not point to a loopback, link-local, or private address".to_string(),
+                    message:
+                        "search_url must not point to a loopback, link-local, or private address"
+                            .to_string(),
                 });
             }
         }
@@ -223,7 +225,10 @@ fn host_of_url(url: &str) -> Option<String> {
 }
 
 fn domain_matches(host: &str, pattern: &str) -> bool {
-    let p = pattern.trim().trim_start_matches("www.").to_ascii_lowercase();
+    let p = pattern
+        .trim()
+        .trim_start_matches("www.")
+        .to_ascii_lowercase();
     let h = host.trim().trim_start_matches("www.");
     h == p || h.ends_with(&format!(".{}", p))
 }
@@ -284,7 +289,12 @@ fn sanitize_search_text(s: &str, max_chars: usize) -> String {
     if t.len() <= max_chars {
         t.to_string()
     } else {
-        format!("{}…", t.chars().take(max_chars.saturating_sub(1)).collect::<String>())
+        format!(
+            "{}…",
+            t.chars()
+                .take(max_chars.saturating_sub(1))
+                .collect::<String>()
+        )
     }
 }
 
@@ -660,7 +670,9 @@ fn ddg_html_headers() -> reqwest::header::HeaderMap {
     );
     h.insert(
         reqwest::header::ACCEPT,
-        reqwest::header::HeaderValue::from_static("text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"),
+        reqwest::header::HeaderValue::from_static(
+            "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        ),
     );
     h.insert(
         reqwest::header::REFERER,
@@ -755,9 +767,10 @@ fn parse_ddg_instant_answer_json(body: &str, max: usize) -> Result<Vec<SearchHit
             message: "DuckDuckGo API returned non-JSON body (likely blocked or HTML).".to_string(),
         });
     }
-    let v: serde_json::Value = serde_json::from_str(body).map_err(|e| ToolError::ExecutionFailed {
-        message: format!("DuckDuckGo JSON parse: {}", e),
-    })?;
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| ToolError::ExecutionFailed {
+            message: format!("DuckDuckGo JSON parse: {}", e),
+        })?;
 
     let mut out = Vec::new();
 
@@ -805,10 +818,7 @@ lazy_static! {
 fn extract_ddg_snippets(body: &str) -> Vec<String> {
     RE_DDG_SNIPPET
         .captures_iter(body)
-        .filter_map(|c| {
-            c.name("snippet")
-                .map(|m| clean_html_fragment(m.as_str()))
-        })
+        .filter_map(|c| c.name("snippet").map(|m| clean_html_fragment(m.as_str())))
         .collect()
 }
 
@@ -1076,10 +1086,7 @@ mod ddg_tests {
         let hits = match search_ddg(&client, "rust programming language", 10, None).await {
             Ok(h) => h,
             Err(e) => {
-                eprintln!(
-                    "ddg_live_smoke: skipped (network or DDG blocked): {}",
-                    e
-                );
+                eprintln!("ddg_live_smoke: skipped (network or DDG blocked): {}", e);
                 return;
             }
         };
@@ -1154,14 +1161,8 @@ impl super::ToolImpl for WebSearchTool {
         let mut source = WebSearchSource::DuckDuckGo;
 
         if let Some(key) = resolve_tavily_api_key(ctx) {
-            let tavily_fut = search_tavily(
-                &client,
-                &key,
-                args.query.trim(),
-                allowed,
-                blocked,
-                max_u32,
-            );
+            let tavily_fut =
+                search_tavily(&client, &key, args.query.trim(), allowed, blocked, max_u32);
             let tavily_res = tokio::select! {
                 _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
                 r = tavily_fut => r,
@@ -1193,13 +1194,8 @@ impl super::ToolImpl for WebSearchTool {
         if raw.is_empty() {
             if let Some(key) = resolve_firecrawl_api_key(ctx) {
                 let base = resolve_firecrawl_base_url(ctx);
-                let fc_fut = search_firecrawl_once(
-                    &client,
-                    &key,
-                    &base,
-                    args.query.trim(),
-                    max_u32,
-                );
+                let fc_fut =
+                    search_firecrawl_once(&client, &key, &base, args.query.trim(), max_u32);
                 let fc_res = tokio::select! {
                     _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
                     r = fc_fut => r,

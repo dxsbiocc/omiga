@@ -66,6 +66,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
   const [toast, setToast] = useState<string | null>(null);
   const [showPathDialog, setShowPathDialog] = useState(false);
   const [newPath, setNewPath] = useState("");
+  const [rawDirInput, setRawDirInput] = useState("");
   
   // Import states
   const [importSourcePath, setImportSourcePath] = useState("");
@@ -922,6 +923,30 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                   label="隐性记忆子目录"
                   value={memory.config?.implicit_dir || "implicit"}
                   disabled
+                  sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }}
+                />
+                <TextField
+                  size="small"
+                  label="原始文件存储目录"
+                  value={rawDirInput || memory.config?.raw_dir || ""}
+                  onChange={(e) => setRawDirInput(e.target.value)}
+                  placeholder={memory.config?.raw_dir || "~/.omiga/memory/raw"}
+                  helperText="导入到知识库时原始文件的备份目录（绝对路径）。留空使用默认值 ~/.omiga/memory/raw"
+                  InputProps={{
+                    endAdornment: (
+                      <Button
+                        size="small"
+                        sx={{ ml: 0.5, whiteSpace: "nowrap", textTransform: "none" }}
+                        onClick={async () => {
+                          await memory.updateConfig({ raw_dir: rawDirInput });
+                          setRawDirInput("");
+                        }}
+                        disabled={!rawDirInput}
+                      >
+                        保存
+                      </Button>
+                    ),
+                  }}
                   sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }}
                 />
               </Stack>

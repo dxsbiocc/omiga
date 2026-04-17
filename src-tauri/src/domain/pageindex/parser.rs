@@ -114,7 +114,10 @@ impl DocumentParser {
     }
 
     /// Extract YAML frontmatter from markdown content.
-    fn extract_frontmatter<'a>(&self, content: &'a str) -> (Option<HashMap<String, serde_json::Value>>, &'a str) {
+    fn extract_frontmatter<'a>(
+        &self,
+        content: &'a str,
+    ) -> (Option<HashMap<String, serde_json::Value>>, &'a str) {
         // Use a dotall-capable regex to match multiline YAML frontmatter
         let fm_regex = Regex::new(r"(?s)^---\s*\n(.*?)\n---\s*\n(.*)$").unwrap();
         if let Some(captures) = fm_regex.captures(content) {
@@ -160,7 +163,8 @@ impl DocumentParser {
                         match chars.next() {
                             None => String::new(),
                             Some(first) => {
-                                first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                                first.to_uppercase().collect::<String>()
+                                    + &chars.as_str().to_lowercase()
                             }
                         }
                     })

@@ -226,7 +226,7 @@ impl LocalEnvironment {
         options: super::types::ExecOptions,
     ) -> Result<ExecResult, ExecutionError> {
         use tokio::time::{timeout, Duration};
-        
+
         self.before_execute().await?;
 
         let effective_timeout = options.timeout.unwrap_or(self.timeout_ms);
@@ -279,25 +279,23 @@ impl LocalEnvironment {
         }
 
         // 读取 stdout 并等待进程完成（带超时）
-        let timeout_result = timeout(
-            Duration::from_millis(effective_timeout),
-            async {
-                let mut stdout_lines: Vec<String> = Vec::new();
+        let timeout_result = timeout(Duration::from_millis(effective_timeout), async {
+            let mut stdout_lines: Vec<String> = Vec::new();
 
-                if let Some(stdout) = child.stdout.take() {
-                    let reader = BufReader::new(stdout);
-                    let mut lines = reader.lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        stdout_lines.push(line);
-                    }
-                }
-
-                match child.wait().await {
-                    Ok(status) => (stdout_lines, status.code().unwrap_or(-1)),
-                    Err(_) => (stdout_lines, -1),
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    stdout_lines.push(line);
                 }
             }
-        ).await;
+
+            match child.wait().await {
+                Ok(status) => (stdout_lines, status.code().unwrap_or(-1)),
+                Err(_) => (stdout_lines, -1),
+            }
+        })
+        .await;
 
         let (output, returncode) = match timeout_result {
             Ok((lines, code)) => (lines.join("\n"), code),
@@ -314,7 +312,10 @@ impl LocalEnvironment {
                 #[cfg(not(unix))]
                 child.kill().await.ok();
 
-                (format!("\n[Command timed out after {}ms]", effective_timeout), 124)
+                (
+                    format!("\n[Command timed out after {}ms]", effective_timeout),
+                    124,
+                )
             }
         };
 
@@ -401,7 +402,7 @@ impl BaseEnvironment for LocalEnvironment {
         // 这个方法在 execute_direct 中不直接使用
         // 为了保持 trait 兼容性，返回一个空的 handle
         Err(ExecutionError::NotAvailable(
-            "LocalEnvironment uses execute_direct instead".to_string()
+            "LocalEnvironment uses execute_direct instead".to_string(),
         ))
     }
 
@@ -422,7 +423,6 @@ impl BaseEnvironment for LocalEnvironment {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,7 +430,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_local_env_basic() {
-        let config = super::super::EnvironmentConfig::local(std::env::current_dir().unwrap().to_string_lossy());
+        let config = super::super::EnvironmentConfig::local(
+            std::env::current_dir().unwrap().to_string_lossy(),
+        );
         let env = create_environment(config).await;
         assert!(env.is_ok());
 
@@ -442,8 +444,16 @@ mod tests {
         assert!(result.is_ok(), "Execute failed: {:?}", result.err());
 
         let result = result.unwrap();
-        assert!(result.success(), "Command failed with exit code: {}", result.returncode);
-        assert!(result.output.contains("hello"), "Output doesn't contain 'hello': {}", result.output);
+        assert!(
+            result.success(),
+            "Command failed with exit code: {}",
+            result.returncode
+        );
+        assert!(
+            result.output.contains("hello"),
+            "Output doesn't contain 'hello': {}",
+            result.output
+        );
 
         {
             let mut guard = env.lock().await;
@@ -466,7 +476,11 @@ mod tests {
         };
         let result = result.unwrap();
         assert!(result.success(), "Command failed: {}", result.output);
-        assert!(result.output.contains("/tmp"), "Output doesn't contain /tmp: {}", result.output);
+        assert!(
+            result.output.contains("/tmp"),
+            "Output doesn't contain /tmp: {}",
+            result.output
+        );
 
         {
             let mut guard = env.lock().await;
@@ -487,11 +501,17 @@ mod tests {
 
         let result = {
             let mut guard = env.lock().await;
-            guard.execute("echo $TEST_VAR", ExecOptions::default()).await
+            guard
+                .execute("echo $TEST_VAR", ExecOptions::default())
+                .await
         };
         let result = result.unwrap();
         assert!(result.success(), "Command failed: {}", result.output);
-        assert!(result.output.contains("test_value"), "Output doesn't contain test_value: {}", result.output);
+        assert!(
+            result.output.contains("test_value"),
+            "Output doesn't contain test_value: {}",
+            result.output
+        );
 
         {
             let mut guard = env.lock().await;
@@ -507,13 +527,19 @@ mod tests {
         // 执行一个会超时的命令
         let result = {
             let mut guard = env.lock().await;
-            guard.execute("sleep 10", ExecOptions::with_timeout(500)).await
+            guard
+                .execute("sleep 10", ExecOptions::with_timeout(500))
+                .await
         };
         let result = result.unwrap();
 
         // 检查是否超时
-        assert!(result.returncode == 124 || result.output.contains("timed out"), 
-            "Expected timeout but got exit code {} with output: {}", result.returncode, result.output);
+        assert!(
+            result.returncode == 124 || result.output.contains("timed out"),
+            "Expected timeout but got exit code {} with output: {}",
+            result.returncode,
+            result.output
+        );
 
         {
             let mut guard = env.lock().await;
@@ -533,7 +559,12 @@ mod tests {
         // 先切换到临时目录
         let result = {
             let mut guard = env.lock().await;
-            guard.execute(&format!("cd {}", temp_dir.to_string_lossy()), ExecOptions::default()).await
+            guard
+                .execute(
+                    &format!("cd {}", temp_dir.to_string_lossy()),
+                    ExecOptions::default(),
+                )
+                .await
         };
         let result = result.unwrap();
         assert!(result.success(), "Command failed: {}", result.output);
@@ -541,7 +572,9 @@ mod tests {
         // 检查 cwd 是否被跟踪（使用规范化后的路径）
         {
             let guard = env.lock().await;
-            let actual_cwd = std::path::Path::new(guard.cwd()).canonicalize().unwrap_or_else(|_| std::path::PathBuf::from(guard.cwd()));
+            let actual_cwd = std::path::Path::new(guard.cwd())
+                .canonicalize()
+                .unwrap_or_else(|_| std::path::PathBuf::from(guard.cwd()));
             assert_eq!(actual_cwd, temp_dir);
         }
 

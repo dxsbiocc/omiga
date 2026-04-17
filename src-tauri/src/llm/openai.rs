@@ -9,9 +9,9 @@ use crate::domain::tools::ToolSchema;
 use crate::errors::ApiError;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
-use reqwest::Client;
 
 /// OpenAI-compatible client
 pub struct OpenAiCompatibleClient {
@@ -79,6 +79,7 @@ fn maybe_attach_kimi_thinking_body(body: &mut serde_json::Value, config: &LlmCon
 impl OpenAiCompatibleClient {
     pub fn new(config: LlmConfig) -> Self {
         let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(60))
             .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .build()
             .unwrap_or_else(|_| Client::new());
@@ -136,7 +137,7 @@ impl OpenAiCompatibleClient {
     fn convert_messages(&self, messages: Vec<LlmMessage>) -> Vec<OpenAiMessage> {
         // Pre-validate: ensure tool_calls/tool message pairing is correct
         let messages = Self::validate_message_history(messages);
-        
+
         let mut out = Vec::new();
 
         for msg in messages {
@@ -292,7 +293,7 @@ impl OpenAiCompatibleClient {
     /// - Remove orphaned tool messages that don't have a matching assistant tool_call
     fn validate_message_history(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
         use std::collections::HashSet;
-        
+
         // Collect all expected tool_call_ids from assistant messages
         let mut expected_tool_ids: HashSet<String> = HashSet::new();
         for msg in &messages {
@@ -304,16 +305,19 @@ impl OpenAiCompatibleClient {
                 }
             }
         }
-        
+
         // Filter messages: remove orphaned tool results and extra tool results
         let mut result = Vec::new();
         let mut pending_tool_ids: HashSet<String> = HashSet::new();
-        
+
         for msg in messages {
             match msg.role {
                 LlmRole::Assistant => {
                     // Check if this assistant has tool_calls
-                    let has_tool_calls = msg.content.iter().any(|c| matches!(c, LlmContent::ToolUse { .. }));
+                    let has_tool_calls = msg
+                        .content
+                        .iter()
+                        .any(|c| matches!(c, LlmContent::ToolUse { .. }));
                     if has_tool_calls {
                         // Add tool_call_ids to pending set
                         for content in &msg.content {
@@ -336,7 +340,10 @@ impl OpenAiCompatibleClient {
                 }
                 LlmRole::User => {
                     // Check if this user message contains tool results (LlmContent::ToolResult)
-                    let is_tool_result_msg = msg.content.iter().all(|c| matches!(c, LlmContent::ToolResult { .. }));
+                    let is_tool_result_msg = msg
+                        .content
+                        .iter()
+                        .all(|c| matches!(c, LlmContent::ToolResult { .. }));
                     if is_tool_result_msg {
                         // This is a tool result message in User role - convert to Tool role logic
                         let mut keep = false;
@@ -361,7 +368,7 @@ impl OpenAiCompatibleClient {
                 }
             }
         }
-        
+
         // If there are still pending tool_ids, we have assistant messages without tool results
         // This is also an error condition - remove those assistant tool_calls
         if !pending_tool_ids.is_empty() {
@@ -370,22 +377,25 @@ impl OpenAiCompatibleClient {
                 pending_tool_ids = ?pending_tool_ids,
                 "Assistant tool_calls without matching tool results, removing tool_calls"
             );
-            
+
             // Remove tool_calls from assistant messages that don't have matching tool results
-            result = result.into_iter().map(|mut msg| {
-                if let LlmRole::Assistant = msg.role {
-                    msg.content.retain(|c| {
-                        if let LlmContent::ToolUse { id, .. } = c {
-                            !pending_tool_ids.contains(id)
-                        } else {
-                            true
-                        }
-                    });
-                }
-                msg
-            }).collect();
+            result = result
+                .into_iter()
+                .map(|mut msg| {
+                    if let LlmRole::Assistant = msg.role {
+                        msg.content.retain(|c| {
+                            if let LlmContent::ToolUse { id, .. } = c {
+                                !pending_tool_ids.contains(id)
+                            } else {
+                                true
+                            }
+                        });
+                    }
+                    msg
+                })
+                .collect();
         }
-        
+
         result
     }
 
@@ -411,7 +421,8 @@ impl LlmClient for OpenAiCompatibleClient {
         &self,
         messages: Vec<LlmMessage>,
         tools: Vec<ToolSchema>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError>
+    {
         let url = self.config.api_url();
         let headers = self.build_headers();
 
@@ -516,7 +527,9 @@ fn parse_sse_events(text: &str) -> Vec<Result<LlmStreamChunk, ApiError>> {
         let data = &line[6..]; // Remove "data: " prefix
 
         if data == "[DONE]" {
-            results.push(Ok(LlmStreamChunk::Stop { stop_reason: Some("complete".to_string()) }));
+            results.push(Ok(LlmStreamChunk::Stop {
+                stop_reason: Some("complete".to_string()),
+            }));
             continue;
         }
 
@@ -526,10 +539,9 @@ fn parse_sse_events(text: &str) -> Vec<Result<LlmStreamChunk, ApiError>> {
                     let mut tu = TokenUsage::default();
                     tu.prompt_tokens = u.prompt_tokens.unwrap_or(0);
                     tu.completion_tokens = u.completion_tokens.unwrap_or(0);
-                    tu.total_tokens = u.total_tokens.unwrap_or(
-                        tu.prompt_tokens
-                            .saturating_add(tu.completion_tokens),
-                    );
+                    tu.total_tokens = u
+                        .total_tokens
+                        .unwrap_or(tu.prompt_tokens.saturating_add(tu.completion_tokens));
                     if tu.prompt_tokens > 0 || tu.completion_tokens > 0 {
                         results.push(Ok(LlmStreamChunk::Usage(tu)));
                     }
@@ -548,12 +560,17 @@ fn parse_sse_events(text: &str) -> Vec<Result<LlmStreamChunk, ApiError>> {
                                 if let Some(id) = &tool_call.id {
                                     results.push(Ok(LlmStreamChunk::ToolStart {
                                         id: id.clone(),
-                                        name: tool_call.function.as_ref().and_then(|f| f.name.clone()).unwrap_or_default(),
+                                        name: tool_call
+                                            .function
+                                            .as_ref()
+                                            .and_then(|f| f.name.clone())
+                                            .unwrap_or_default(),
                                     }));
                                 }
                                 if let Some(func) = &tool_call.function {
                                     if let Some(args) = &func.arguments {
-                                        results.push(Ok(LlmStreamChunk::ToolArguments(args.clone())));
+                                        results
+                                            .push(Ok(LlmStreamChunk::ToolArguments(args.clone())));
                                     }
                                 }
                             }

@@ -4,7 +4,8 @@
 
 use super::{ToolContext, ToolError, ToolSchema};
 use crate::constants::plan_mode_prompt::{
-    ENTER_PLAN_MODE_SUCCESS_MESSAGE, ENTER_PLAN_MODE_TOOL_PROMPT, ENTER_PLAN_MODE_TOOL_RESULT_FOLLOWUP,
+    ENTER_PLAN_MODE_SUCCESS_MESSAGE, ENTER_PLAN_MODE_TOOL_PROMPT,
+    ENTER_PLAN_MODE_TOOL_RESULT_FOLLOWUP,
 };
 use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
 use async_trait::async_trait;

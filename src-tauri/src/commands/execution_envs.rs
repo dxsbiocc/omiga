@@ -3,11 +3,11 @@
 //! Tauri commands for managing execution environment API settings
 //! All settings are stored in the unified config file (omiga.yaml)
 
-use crate::llm::{
-    DaytonaExecConfig, ExecutionEnvsConfig, ModalExecConfig, SshExecConfig,
-    load_config_file, LlmConfigFile
-};
 use crate::llm::config::find_config_file;
+use crate::llm::{
+    load_config_file, DaytonaExecConfig, ExecutionEnvsConfig, LlmConfigFile, ModalExecConfig,
+    SshExecConfig,
+};
 use std::collections::HashMap;
 
 /// Merge SSH configs from ~/.ssh/config with user-defined configs
@@ -212,7 +212,10 @@ mod tests {
         let json = serde_json::to_string(&daytona).unwrap();
         let deserialized: DaytonaExecConfig = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(deserialized.server_url, Some("https://api.daytona.io".to_string()));
+        assert_eq!(
+            deserialized.server_url,
+            Some("https://api.daytona.io".to_string())
+        );
         assert_eq!(deserialized.api_key, Some("test-key".to_string()));
     }
 
@@ -260,6 +263,9 @@ mod tests {
         assert!(config.is_modal_configured());
         assert!(config.is_daytona_configured());
         assert_eq!(config.modal_token_id(), Some("modal-id".to_string()));
-        assert_eq!(config.daytona_server_url(), Some("https://daytona.io".to_string()));
+        assert_eq!(
+            config.daytona_server_url(),
+            Some("https://daytona.io".to_string())
+        );
     }
 }

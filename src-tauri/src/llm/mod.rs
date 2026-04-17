@@ -19,15 +19,15 @@ use std::collections::HashMap;
 use std::pin::Pin;
 
 pub mod anthropic;
-pub mod openai;
-pub mod domestic;
 pub mod config;
+pub mod domestic;
+pub mod openai;
 pub mod types;
 
 pub use anthropic::AnthropicClient;
 pub use config::{
-    DaytonaExecConfig, ExecutionEnvsConfig, LlmConfigFile, ModalExecConfig, ProviderConfig, 
-    SshExecConfig, load_config_file, save_config_file
+    load_config_file, save_config_file, DaytonaExecConfig, ExecutionEnvsConfig, LlmConfigFile,
+    ModalExecConfig, ProviderConfig, SshExecConfig,
 };
 pub use domestic::{AlibabaClient, ZhipuClient};
 pub use openai::OpenAiCompatibleClient;
@@ -106,12 +106,8 @@ impl LlmProvider {
     /// Get default API base URL for this provider
     pub fn default_base_url(&self) -> Option<String> {
         match self {
-            LlmProvider::Anthropic => {
-                Some("https://api.anthropic.com/v1/messages".to_string())
-            }
-            LlmProvider::OpenAi => {
-                Some("https://api.openai.com/v1/chat/completions".to_string())
-            }
+            LlmProvider::Anthropic => Some("https://api.anthropic.com/v1/messages".to_string()),
+            LlmProvider::OpenAi => Some("https://api.openai.com/v1/chat/completions".to_string()),
             LlmProvider::Azure => None, // Must be provided
             LlmProvider::Google => {
                 Some("https://generativelanguage.googleapis.com/v1beta".to_string())
@@ -119,9 +115,10 @@ impl LlmProvider {
             LlmProvider::Minimax => {
                 Some("https://api.minimax.chat/v1/text/chatcompletion_v2".to_string())
             }
-            LlmProvider::Alibaba => {
-                Some("https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation".to_string())
-            }
+            LlmProvider::Alibaba => Some(
+                "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+                    .to_string(),
+            ),
             LlmProvider::Deepseek => {
                 Some("https://api.deepseek.com/v1/chat/completions".to_string())
             }
@@ -273,7 +270,7 @@ pub struct LlmConfig {
 }
 
 fn default_timeout() -> u64 {
-    120
+    600
 }
 
 impl LlmConfig {
@@ -291,7 +288,7 @@ impl LlmConfig {
             max_tokens: 4096,
             temperature: None,
             system_prompt: None,
-            timeout_secs: 120,
+            timeout_secs: 600,
             extra_headers: None,
             extra_query: None,
             thinking: None,
@@ -395,7 +392,7 @@ impl Default for LlmConfig {
             max_tokens: 4096,
             temperature: None,
             system_prompt: None,
-            timeout_secs: 120,
+            timeout_secs: 600,
             extra_headers: None,
             extra_query: None,
             thinking: None,
@@ -427,7 +424,9 @@ pub trait LlmClient: Send + Sync {
 
 /// Create appropriate client based on config
 pub fn create_client(config: LlmConfig) -> Result<Box<dyn LlmClient>, ApiError> {
-    config.validate().map_err(|e| ApiError::Config { message: e })?;
+    config
+        .validate()
+        .map_err(|e| ApiError::Config { message: e })?;
 
     match config.provider {
         LlmProvider::Anthropic => Ok(Box::new(AnthropicClient::new(config))),
@@ -440,7 +439,8 @@ pub fn create_client(config: LlmConfig) -> Result<Box<dyn LlmClient>, ApiError> 
         LlmProvider::Alibaba => Ok(Box::new(AlibabaClient::new(config))),
         LlmProvider::Zhipu => Ok(Box::new(ZhipuClient::new(config))),
         LlmProvider::Google => Err(ApiError::Config {
-            message: "Google Gemini provider not yet implemented. Use OpenAI-compatible providers.".to_string(),
+            message: "Google Gemini provider not yet implemented. Use OpenAI-compatible providers."
+                .to_string(),
         }),
     }
 }
@@ -548,7 +548,9 @@ pub fn load_config_from_env() -> Result<LlmConfig, ApiError> {
 
     // Optional settings
     let base_url = env::var("LLM_BASE_URL").ok();
-    let temperature = env::var("LLM_TEMPERATURE").ok().and_then(|s| s.parse().ok());
+    let temperature = env::var("LLM_TEMPERATURE")
+        .ok()
+        .and_then(|s| s.parse().ok());
     let max_tokens = env::var("LLM_MAX_TOKENS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -556,7 +558,7 @@ pub fn load_config_from_env() -> Result<LlmConfig, ApiError> {
     let timeout_secs = env::var("LLM_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(120u64);
+        .unwrap_or(600u64);
     let system_prompt = env::var("LLM_SYSTEM_PROMPT").ok();
 
     Ok(LlmConfig {
@@ -600,7 +602,10 @@ pub fn get_config_info() -> HashMap<String, String> {
 
     match load_config() {
         Ok(config) => {
-            info.insert("provider".to_string(), config.provider.display_name().to_string());
+            info.insert(
+                "provider".to_string(),
+                config.provider.display_name().to_string(),
+            );
             info.insert("model".to_string(), config.model.clone());
             info.insert("status".to_string(), "configured".to_string());
             if config.provider.is_domestic() {

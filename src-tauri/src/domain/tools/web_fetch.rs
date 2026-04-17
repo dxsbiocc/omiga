@@ -86,10 +86,7 @@ impl super::ToolImpl for WebFetchTool {
 
         let status = response.status();
         let code = status.as_u16();
-        let code_text = status
-            .canonical_reason()
-            .unwrap_or("Unknown")
-            .to_string();
+        let code_text = status.canonical_reason().unwrap_or("Unknown").to_string();
 
         let final_url = response.url().to_string();
         let content_type = response
@@ -129,11 +126,10 @@ impl super::ToolImpl for WebFetchTool {
                 }
             })?
         } else if ct_lower.contains("json") {
-            let s = String::from_utf8(body_bytes.to_vec()).map_err(|_| {
-                ToolError::ExecutionFailed {
+            let s =
+                String::from_utf8(body_bytes.to_vec()).map_err(|_| ToolError::ExecutionFailed {
                     message: "Response body is not valid UTF-8".to_string(),
-                }
-            })?;
+                })?;
             serde_json::from_str::<serde_json::Value>(&s)
                 .ok()
                 .and_then(|v| serde_json::to_string_pretty(&v).ok())
@@ -142,10 +138,8 @@ impl super::ToolImpl for WebFetchTool {
             || ct_lower.contains("javascript")
             || ct_lower.contains("xml")
         {
-            String::from_utf8(body_bytes.to_vec()).map_err(|_| {
-                ToolError::ExecutionFailed {
-                    message: "Text response is not valid UTF-8".to_string(),
-                }
+            String::from_utf8(body_bytes.to_vec()).map_err(|_| ToolError::ExecutionFailed {
+                message: "Text response is not valid UTF-8".to_string(),
             })?
         } else {
             return Err(ToolError::ExecutionFailed {
@@ -159,11 +153,7 @@ impl super::ToolImpl for WebFetchTool {
         let (truncated, truncated_note) = truncate_chars(&text, MAX_TEXT_CHARS);
 
         let mut result = String::new();
-        result.push_str(&format!(
-            "HTTP {} {}\n",
-            code,
-            code_text
-        ));
+        result.push_str(&format!("HTTP {} {}\n", code, code_text));
         result.push_str(&format!("Final URL: {}\n", final_url));
         if final_url != args.url {
             result.push_str(&format!("Requested URL: {}\n", args.url));

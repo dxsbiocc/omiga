@@ -40,27 +40,13 @@ impl SchedulingStrategy {
     /// 获取策略描述
     pub fn description(&self) -> &'static str {
         match self {
-            SchedulingStrategy::Auto => {
-                "根据任务复杂度自动选择最佳执行策略"
-            }
-            SchedulingStrategy::Single => {
-                "使用单个 Agent 完成任务，适用于简单直接的请求"
-            }
-            SchedulingStrategy::Sequential => {
-                "按顺序执行多个 Agent，每个 Agent 依赖前一个的结果"
-            }
-            SchedulingStrategy::Parallel => {
-                "同时启动多个 Agent，各自处理不同方面，最后合并结果"
-            }
-            SchedulingStrategy::Phased => {
-                "分阶段执行：探索→设计→实现→验证，适用于复杂功能开发"
-            }
-            SchedulingStrategy::Competitive => {
-                "多个 Agent 同时解决同一问题，选择最佳结果"
-            }
-            SchedulingStrategy::VerificationFirst => {
-                "先验证现有代码，再进行修改，适用于重构和优化"
-            }
+            SchedulingStrategy::Auto => "根据任务复杂度自动选择最佳执行策略",
+            SchedulingStrategy::Single => "使用单个 Agent 完成任务，适用于简单直接的请求",
+            SchedulingStrategy::Sequential => "按顺序执行多个 Agent，每个 Agent 依赖前一个的结果",
+            SchedulingStrategy::Parallel => "同时启动多个 Agent，各自处理不同方面，最后合并结果",
+            SchedulingStrategy::Phased => "分阶段执行：探索→设计→实现→验证，适用于复杂功能开发",
+            SchedulingStrategy::Competitive => "多个 Agent 同时解决同一问题，选择最佳结果",
+            SchedulingStrategy::VerificationFirst => "先验证现有代码，再进行修改，适用于重构和优化",
         }
     }
 
@@ -261,12 +247,12 @@ mod tests {
     #[test]
     fn test_strategy_selection() {
         let config = StrategyConfig::new();
-        
+
         assert_eq!(
             config.select_strategy(3, "test"),
             SchedulingStrategy::Single
         );
-        
+
         assert_eq!(
             config.select_strategy(6, "test"),
             SchedulingStrategy::Sequential

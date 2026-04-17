@@ -9,9 +9,7 @@ pub enum ChatInputTarget {
     /// Main chat session (default).
     Leader,
     /// Additional user text for a running background Agent task (`task_id` from `BackgroundAgentManager`).
-    BackgroundAgentFollowup {
-        task_id: String,
-    },
+    BackgroundAgentFollowup { task_id: String },
 }
 
 impl ChatInputTarget {
@@ -45,7 +43,10 @@ mod tests {
 
     #[test]
     fn parse_defaults() {
-        assert_eq!(ChatInputTarget::parse(None).unwrap(), ChatInputTarget::Leader);
+        assert_eq!(
+            ChatInputTarget::parse(None).unwrap(),
+            ChatInputTarget::Leader
+        );
         assert_eq!(
             ChatInputTarget::parse(Some("")).unwrap(),
             ChatInputTarget::Leader

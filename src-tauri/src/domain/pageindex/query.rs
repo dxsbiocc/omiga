@@ -179,7 +179,11 @@ impl QueryEngine {
                 section_id: Some(section.id.clone()),
                 title: section.title.clone(),
                 breadcrumb: breadcrumb.clone(),
-                excerpt: self.create_excerpt(&section.content, &keywords.iter().map(|s| s.to_string()).collect::<Vec<_>>(), 300),
+                excerpt: self.create_excerpt(
+                    &section.content,
+                    &keywords.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    300,
+                ),
                 content: section.full_text(),
                 score: title_score * 1.8, // Boost section title matches
                 match_type: MatchType::Heading,
@@ -195,7 +199,11 @@ impl QueryEngine {
                 section_id: Some(section.id.clone()),
                 title: section.title.clone(),
                 breadcrumb: breadcrumb.clone(),
-                excerpt: self.create_excerpt(&section.content, &keywords.iter().map(|s| s.to_string()).collect::<Vec<_>>(), 300),
+                excerpt: self.create_excerpt(
+                    &section.content,
+                    &keywords.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    300,
+                ),
                 content: section.full_text(),
                 score: content_score * 0.9, // Slight penalty for body matches
                 match_type: MatchType::Content,
@@ -278,7 +286,10 @@ impl QueryEngine {
 
         for idx in (0..max_start_idx).step_by(step) {
             let byte_start = char_positions[idx];
-            let byte_end = char_positions.get(idx + window_chars).copied().unwrap_or(content.len());
+            let byte_end = char_positions
+                .get(idx + window_chars)
+                .copied()
+                .unwrap_or(content.len());
             let window = &content_lower[byte_start..byte_end];
             let score = keywords
                 .iter()
@@ -368,10 +379,7 @@ impl QueryEngine {
             context.push_str(&format!("### {}. {}", i + 1, result.title));
 
             if !result.breadcrumb.is_empty() {
-                context.push_str(&format!(
-                    " (in: {})",
-                    result.breadcrumb.join(" > ")
-                ));
+                context.push_str(&format!(" (in: {})", result.breadcrumb.join(" > ")));
             }
 
             context.push_str(&format!("\n*Source: `{}`*\n\n", result.path));
@@ -391,17 +399,15 @@ impl Default for QueryEngine {
 
 /// Default stop words for keyword extraction.
 const DEFAULT_STOP_WORDS: &[&str] = &[
-    "the", "be", "to", "of", "and", "a", "in", "that", "have", "i",
-    "it", "for", "not", "on", "with", "he", "as", "you", "do", "at",
-    "this", "but", "his", "by", "from", "they", "we", "say", "her", "she",
-    "or", "an", "will", "my", "one", "all", "would", "there", "their", "what",
-    "so", "up", "out", "if", "about", "who", "get", "which", "go", "me",
-    "when", "make", "can", "like", "time", "no", "just", "him", "know", "take",
-    "people", "into", "year", "your", "good", "some", "could", "them", "see", "other",
-    "than", "then", "now", "look", "only", "come", "its", "over", "think", "also",
-    "back", "after", "use", "two", "how", "our", "first", "well", "way",
-    "even", "new", "want", "because", "any", "these", "give", "day", "most", "us",
-    "was", "were", "been", "has", "had", "did", "does", "doing", "done",
+    "the", "be", "to", "of", "and", "a", "in", "that", "have", "i", "it", "for", "not", "on",
+    "with", "he", "as", "you", "do", "at", "this", "but", "his", "by", "from", "they", "we", "say",
+    "her", "she", "or", "an", "will", "my", "one", "all", "would", "there", "their", "what", "so",
+    "up", "out", "if", "about", "who", "get", "which", "go", "me", "when", "make", "can", "like",
+    "time", "no", "just", "him", "know", "take", "people", "into", "year", "your", "good", "some",
+    "could", "them", "see", "other", "than", "then", "now", "look", "only", "come", "its", "over",
+    "think", "also", "back", "after", "use", "two", "how", "our", "first", "well", "way", "even",
+    "new", "want", "because", "any", "these", "give", "day", "most", "us", "was", "were", "been",
+    "has", "had", "did", "does", "doing", "done",
 ];
 
 #[cfg(test)]
@@ -412,7 +418,7 @@ mod tests {
     fn test_extract_keywords() {
         let engine = QueryEngine::new();
         let keywords = engine.extract_keywords("How does authentication work in Rust?");
-        
+
         assert!(keywords.contains(&"authentication".to_string()));
         assert!(keywords.contains(&"work".to_string()));
         assert!(keywords.contains(&"rust".to_string()));
@@ -424,14 +430,14 @@ mod tests {
     #[test]
     fn test_score_text() {
         let engine = QueryEngine::new();
-        
+
         let score1 = engine.score_text("Rust programming language", &["rust", "programming"]);
         assert!(score1 > 0.0);
-        
+
         let score2 = engine.score_text("Python programming", &["rust", "programming"]);
         assert!(score2 > 0.0);
         assert!(score2 < score1); // Should score lower since "rust" is missing
-        
+
         let score3 = engine.score_text("completely unrelated", &["rust", "programming"]);
         assert_eq!(score3, 0.0);
     }
@@ -443,9 +449,13 @@ mod tests {
                       Rust is a systems programming language. \
                       It has many features like ownership and borrowing. \
                       The language is designed for safety and performance.";
-        
-        let excerpt = engine.create_excerpt(content, &["rust".to_string(), "programming".to_string()], 100);
-        
+
+        let excerpt = engine.create_excerpt(
+            content,
+            &["rust".to_string(), "programming".to_string()],
+            100,
+        );
+
         assert!(excerpt.to_lowercase().contains("rust"));
         assert!(excerpt.len() <= 150); // Allow some margin
     }

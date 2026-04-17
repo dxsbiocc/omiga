@@ -31,11 +31,7 @@ pub async fn discover_mcp_tool_schemas(project_root: &Path, timeout: Duration) -
             Ok(tools) => {
                 for t in tools {
                     let fq = build_mcp_tool_name(&server_name, t.name.as_ref());
-                    let desc = t
-                        .description
-                        .as_deref()
-                        .unwrap_or("MCP tool")
-                        .to_string();
+                    let desc = t.description.as_deref().unwrap_or("MCP tool").to_string();
                     let params = serde_json::to_value(&*t.input_schema)
                         .unwrap_or_else(|_| json!({"type": "object"}));
                     out.push(ToolSchema::new(fq, desc, params));

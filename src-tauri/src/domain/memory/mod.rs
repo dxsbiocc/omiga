@@ -27,7 +27,9 @@ use tokio::fs;
 use tracing::{info, warn};
 
 pub use chat_indexer::{ChatIndexer, ChatMessage, ChatRole};
-pub use config::{MemoryConfig, MemoryMode, permanent_wiki_path, project_storage_key, user_omiga_root};
+pub use config::{
+    permanent_wiki_path, project_storage_key, user_omiga_root, MemoryConfig, MemoryMode,
+};
 
 /// Unified memory system handle
 pub struct MemorySystem {
@@ -40,7 +42,7 @@ impl MemorySystem {
     pub fn new(project_root: impl AsRef<Path>) -> Self {
         let project_root = project_root.as_ref().to_path_buf();
         let config = MemoryConfig::default();
-        
+
         Self {
             project_root,
             config,
@@ -97,7 +99,7 @@ impl MemorySystem {
         if !config_path.exists() {
             return None;
         }
-        
+
         match fs::read_to_string(&config_path).await {
             Ok(content) => match serde_json::from_str(&content) {
                 Ok(config) => Some(config),
@@ -116,7 +118,7 @@ impl MemorySystem {
     /// Save configuration to disk
     pub async fn save_config(&self) -> Result<(), crate::errors::AppError> {
         self.config.validate()?;
-        
+
         let config_path = MemoryConfig::project_config_path(&self.project_root);
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)
@@ -125,10 +127,11 @@ impl MemorySystem {
         }
         let content = serde_json::to_string_pretty(&self.config)
             .map_err(|e| crate::errors::AppError::Unknown(e.to_string()))?;
-        
-        fs::write(&config_path, content).await
+
+        fs::write(&config_path, content)
+            .await
             .map_err(|e| crate::errors::AppError::Unknown(e.to_string()))?;
-        
+
         info!("Saved memory config to {:?}", config_path);
         Ok(())
     }
@@ -136,7 +139,7 @@ impl MemorySystem {
     /// Get unified memory statistics
     pub async fn stats(&self) -> MemoryStats {
         let mut stats = MemoryStats::default();
-        
+
         // Check explicit memory (wiki): project + permanent
         for wiki_root in [self.wiki_path(), config::permanent_wiki_path()] {
             if wiki_root.exists() {
@@ -144,7 +147,9 @@ impl MemorySystem {
                     while let Ok(Some(entry)) = entries.next_entry().await {
                         let name = entry.file_name();
                         let name_str = name.to_string_lossy();
-                        if name_str.ends_with(".md") && name_str != "index.md" && name_str != "log.md"
+                        if name_str.ends_with(".md")
+                            && name_str != "index.md"
+                            && name_str != "log.md"
                         {
                             stats.explicit_documents += 1;
                         }
@@ -152,13 +157,13 @@ impl MemorySystem {
                 }
             }
         }
-        
+
         // Check implicit memory
         let implicit_path = self.implicit_path();
         if implicit_path.join("tree.json").exists() {
             stats.implicit_exists = true;
         }
-        
+
         stats
     }
 
@@ -327,8 +332,9 @@ fn finalize_config_for_existing_data(mut c: MemoryConfig, project_root: &Path) -
     let legacy_wiki = project_root.join(".omiga/memory/wiki");
     let legacy_implicit = project_root.join(".omiga/memory/implicit/tree.json");
     let legacy_tree = project_root.join(".omiga/memory/tree.json");
-    let has_legacy_only = (legacy_wiki.exists() || legacy_implicit.exists() || legacy_tree.exists())
-        && !has_user_data;
+    let has_legacy_only =
+        (legacy_wiki.exists() || legacy_implicit.exists() || legacy_tree.exists())
+            && !has_user_data;
 
     if has_legacy_only {
         c.memory_mode = MemoryMode::ProjectRelative;
@@ -338,7 +344,9 @@ fn finalize_config_for_existing_data(mut c: MemoryConfig, project_root: &Path) -
 }
 
 /// Load config with migration, legacy layout detection, and [`MemoryMode::UserHome`] default for new projects.
-pub async fn load_resolved_config(project_root: &Path) -> Result<MemoryConfig, crate::errors::AppError> {
+pub async fn load_resolved_config(
+    project_root: &Path,
+) -> Result<MemoryConfig, crate::errors::AppError> {
     migration::migrate_if_needed(project_root).await?;
     if let Some(c) = MemorySystem::load_config(project_root).await {
         return Ok(finalize_config_for_existing_data(c, project_root));
@@ -357,11 +365,16 @@ pub async fn load_resolved_config(project_root: &Path) -> Result<MemoryConfig, c
 }
 
 /// Initialize memory system with migration
-pub async fn init_memory_system(project_root: impl AsRef<Path>) -> Result<MemorySystem, crate::errors::AppError> {
+pub async fn init_memory_system(
+    project_root: impl AsRef<Path>,
+) -> Result<MemorySystem, crate::errors::AppError> {
     let project_root = project_root.as_ref();
     let config = load_resolved_config(project_root).await?;
     let memory = MemorySystem::with_config(project_root, config);
-    memory.init().await.map_err(|e| crate::errors::AppError::Unknown(e.to_string()))?;
+    memory
+        .init()
+        .await
+        .map_err(|e| crate::errors::AppError::Unknown(e.to_string()))?;
     Ok(memory)
 }
 
@@ -376,25 +389,19 @@ fn extract_excerpt(content: &str, query: &str, max_len: usize) -> String {
     // 窗口从锚点前 60 字符开始
     let start = anchor.saturating_sub(60);
     // 对齐到行首（避免从行中间截断）
-    let start = content[..start]
-        .rfind('\n')
-        .map(|p| p + 1)
-        .unwrap_or(start);
+    let start = content[..start].rfind('\n').map(|p| p + 1).unwrap_or(start);
 
     let end = (start + max_len).min(content.len());
     // 对齐到行尾
-    let end = content[end..]
-        .find('\n')
-        .map(|p| end + p)
-        .unwrap_or(end);
+    let end = content[end..].find('\n').map(|p| end + p).unwrap_or(end);
 
     let slice = content[start..end].trim().to_string();
 
     match (start > 0, end < content.len()) {
-        (true, true)  => format!("…{}…", slice),
+        (true, true) => format!("…{}…", slice),
         (true, false) => format!("…{}", slice),
         (false, true) => format!("{}…", slice),
-        _             => slice,
+        _ => slice,
     }
 }
 
@@ -403,7 +410,10 @@ pub mod explicit_importer;
 
 /// System prompt for memory-agent sub-agent
 /// Injected by `run_subagent_session` when subagent_type is memory-agent/wiki-agent
-pub fn memory_agent_system_prompt_with_config(project_root: &std::path::Path, config: &MemoryConfig) -> String {
+pub fn memory_agent_system_prompt_with_config(
+    project_root: &std::path::Path,
+    config: &MemoryConfig,
+) -> String {
     let wiki_pb = config.wiki_path(project_root);
     let wiki_path_str = wiki_pb.to_string_lossy();
     let perm_pb = config::permanent_wiki_path();
@@ -431,8 +441,6 @@ pub fn memory_agent_system_prompt_with_config(project_root: &std::path::Path, co
          Always check existing content first. Prefer editing existing \
          pages over creating duplicates. Keep page excerpts under 800 lines. Return a concise \
          summary of what was done.",
-        wiki_path_str,
-        perm_str,
-        imp_str
+        wiki_path_str, perm_str, imp_str
     )
 }

@@ -101,7 +101,8 @@ impl super::ToolImpl for ListMcpResourcesTool {
             }
         }
 
-        let mut servers = crate::domain::mcp::discovery::collect_mcp_server_names(&ctx.project_root);
+        let mut servers =
+            crate::domain::mcp::discovery::collect_mcp_server_names(&ctx.project_root);
         if let Some(name) = filter {
             servers.retain(|s| s == name);
         }
@@ -118,9 +119,10 @@ impl super::ToolImpl for ListMcpResourcesTool {
                 .insert("_errors".to_string(), serde_json::Value::Array(errors));
         }
 
-        let text = serde_json::to_string_pretty(&payload).map_err(|e| ToolError::ExecutionFailed {
-            message: e.to_string(),
-        })?;
+        let text =
+            serde_json::to_string_pretty(&payload).map_err(|e| ToolError::ExecutionFailed {
+                message: e.to_string(),
+            })?;
         Ok(JsonMcpOutput { text }.into_stream())
     }
 }

@@ -46,36 +46,39 @@ impl super::ToolImpl for FileEditTool {
         // Remote/SSH/sandbox: delegate to shell-based edit through the cached environment
         if ctx.execution_environment != "local" {
             if let Some(ref store) = ctx.env_store {
-                let remote_path = crate::domain::tools::env_store::remote_path(ctx, &args.file_path);
+                let remote_path =
+                    crate::domain::tools::env_store::remote_path(ctx, &args.file_path);
                 let env_arc = store.get_or_create(ctx, 30_000).await?;
                 {
                     let mut guard = env_arc.lock().await;
-                    let mut ops = crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
-                    ops.edit_file(&remote_path, &args.old_string, &args.new_string, args.replace_all).await?;
+                    let mut ops =
+                        crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
+                    ops.edit_file(
+                        &remote_path,
+                        &args.old_string,
+                        &args.new_string,
+                        args.replace_all,
+                    )
+                    .await?;
                 }
-                return Ok(
-                    FileEditOutput {
-                        path: args.file_path,
-                        replaced: 1,
-                        replace_all: args.replace_all,
-                        created: false,
-                        created_bytes: 0,
-                    }
-                    .into_stream(),
-                );
+                return Ok(FileEditOutput {
+                    path: args.file_path,
+                    replaced: 1,
+                    replace_all: args.replace_all,
+                    created: false,
+                    created_bytes: 0,
+                }
+                .into_stream());
             }
         }
 
         let path = resolve_path(&ctx.project_root, &args.file_path)?;
 
         if args.old_string == args.new_string {
-            return Err(
-                FsError::IoError {
-                    message: "No changes to make: old_string and new_string are identical."
-                        .to_string(),
-                }
-                .into(),
-            );
+            return Err(FsError::IoError {
+                message: "No changes to make: old_string and new_string are identical.".to_string(),
+            }
+            .into());
         }
 
         let meta = tokio::fs::metadata(&path).await;
@@ -83,33 +86,29 @@ impl super::ToolImpl for FileEditTool {
         match meta {
             Ok(m) => {
                 if !m.is_file() {
-                    return Err(
-                        FsError::InvalidPath {
-                            path: args.file_path.clone(),
-                        }
-                        .into(),
-                    );
+                    return Err(FsError::InvalidPath {
+                        path: args.file_path.clone(),
+                    }
+                    .into());
                 }
                 if m.len() > MAX_FILE_BYTES {
-                    return Err(
-                        FsError::FileTooLarge {
-                            path: args.file_path.clone(),
-                            size: m.len(),
-                            max: MAX_FILE_BYTES,
-                        }
-                        .into(),
-                    );
+                    return Err(FsError::FileTooLarge {
+                        path: args.file_path.clone(),
+                        size: m.len(),
+                        max: MAX_FILE_BYTES,
+                    }
+                    .into());
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // TS: empty old_string + missing file => create file
                 if args.old_string.is_empty() {
                     if let Some(parent) = path.parent() {
-                        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                            FsError::IoError {
+                        tokio::fs::create_dir_all(parent)
+                            .await
+                            .map_err(|e| FsError::IoError {
                                 message: format!("Failed to create parent directories: {}", e),
-                            }
-                        })?;
+                            })?;
                     }
                     let temp_path = path.with_extension("tmp");
                     tokio::fs::write(&temp_path, args.new_string.as_bytes())
@@ -117,29 +116,25 @@ impl super::ToolImpl for FileEditTool {
                         .map_err(|e| FsError::IoError {
                             message: format!("Failed to write temp file: {}", e),
                         })?;
-                    tokio::fs::rename(&temp_path, &path).await.map_err(|e| {
-                        FsError::IoError {
+                    tokio::fs::rename(&temp_path, &path)
+                        .await
+                        .map_err(|e| FsError::IoError {
                             message: format!("Failed to rename temp file: {}", e),
-                        }
-                    })?;
+                        })?;
                     let byte_len = args.new_string.len();
-                    return Ok(
-                        FileEditOutput {
-                            path: args.file_path,
-                            replaced: 0,
-                            replace_all: args.replace_all,
-                            created: true,
-                            created_bytes: byte_len,
-                        }
-                        .into_stream(),
-                    );
-                }
-                return Err(
-                    FsError::NotFound {
-                        path: args.file_path.clone(),
+                    return Ok(FileEditOutput {
+                        path: args.file_path,
+                        replaced: 0,
+                        replace_all: args.replace_all,
+                        created: true,
+                        created_bytes: byte_len,
                     }
-                    .into(),
-                );
+                    .into_stream());
+                }
+                return Err(FsError::NotFound {
+                    path: args.file_path.clone(),
+                }
+                .into());
             }
             Err(e) => return Err(FsError::from(e).into()),
         }
@@ -150,34 +145,28 @@ impl super::ToolImpl for FileEditTool {
             .map(|e| e.eq_ignore_ascii_case("ipynb"))
             == Some(true)
         {
-            return Err(
-                FsError::IoError {
-                    message: "Jupyter Notebook (.ipynb) files require a dedicated notebook editor; \
+            return Err(FsError::IoError {
+                message: "Jupyter Notebook (.ipynb) files require a dedicated notebook editor; \
                               avoid editing JSON with file_edit."
-                        .to_string(),
-                }
-                .into(),
-            );
+                    .to_string(),
+            }
+            .into());
         }
 
         let raw = tokio::fs::read(&path).await.map_err(FsError::from)?;
         if raw.len() > MAX_FILE_BYTES as usize {
-            return Err(
-                FsError::FileTooLarge {
-                    path: args.file_path.clone(),
-                    size: raw.len() as u64,
-                    max: MAX_FILE_BYTES,
-                }
-                .into(),
-            );
+            return Err(FsError::FileTooLarge {
+                path: args.file_path.clone(),
+                size: raw.len() as u64,
+                max: MAX_FILE_BYTES,
+            }
+            .into());
         }
         if raw.iter().take(8192).any(|&b| b == 0) {
-            return Err(
-                FsError::BinaryFile {
-                    path: args.file_path.clone(),
-                }
-                .into(),
-            );
+            return Err(FsError::BinaryFile {
+                path: args.file_path.clone(),
+            }
+            .into());
         }
 
         let mut content = String::from_utf8(raw).map_err(|_| FsError::BinaryFile {
@@ -191,27 +180,22 @@ impl super::ToolImpl for FileEditTool {
 
         if args.old_string.is_empty() {
             if !content.is_empty() {
-                return Err(
-                    FsError::IoError {
-                        message: "Cannot use empty old_string: file already has content."
-                            .to_string(),
-                    }
-                    .into(),
-                );
+                return Err(FsError::IoError {
+                    message: "Cannot use empty old_string: file already has content.".to_string(),
+                }
+                .into());
             }
             // empty file: write new_string
         } else {
             let count = content.matches(args.old_string.as_str()).count();
             if count == 0 {
-                return Err(
-                    FsError::IoError {
-                        message: format!(
-                            "String to replace not found in file.\nExpected snippet ({} bytes).",
-                            args.old_string.len()
-                        ),
-                    }
-                    .into(),
-                );
+                return Err(FsError::IoError {
+                    message: format!(
+                        "String to replace not found in file.\nExpected snippet ({} bytes).",
+                        args.old_string.len()
+                    ),
+                }
+                .into());
             }
             if count > 1 && !args.replace_all {
                 return Err(
@@ -248,20 +232,20 @@ impl super::ToolImpl for FileEditTool {
             .map_err(|e| FsError::IoError {
                 message: format!("Failed to write temp file: {}", e),
             })?;
-        tokio::fs::rename(&temp_path, &path).await.map_err(|e| FsError::IoError {
-            message: format!("Failed to rename temp file: {}", e),
-        })?;
+        tokio::fs::rename(&temp_path, &path)
+            .await
+            .map_err(|e| FsError::IoError {
+                message: format!("Failed to rename temp file: {}", e),
+            })?;
 
-        Ok(
-            FileEditOutput {
-                path: args.file_path,
-                replaced,
-                replace_all: args.replace_all,
-                created: false,
-                created_bytes: 0,
-            }
-            .into_stream(),
-        )
+        Ok(FileEditOutput {
+            path: args.file_path,
+            replaced,
+            replace_all: args.replace_all,
+            created: false,
+            created_bytes: 0,
+        }
+        .into_stream())
     }
 }
 
@@ -305,14 +289,12 @@ impl StreamOutput for FileEditOutput {
     }
 }
 
-fn resolve_path(
-    project_root: &std::path::Path,
-    path: &str,
-) -> Result<std::path::PathBuf, FsError> {
+fn resolve_path(project_root: &std::path::Path, path: &str) -> Result<std::path::PathBuf, FsError> {
     let path_buf = if path.starts_with('/') || path.starts_with("~/") {
         if path.starts_with("~/") {
-            let home = std::env::var("HOME")
-                .map_err(|_| FsError::InvalidPath { path: path.to_string() })?;
+            let home = std::env::var("HOME").map_err(|_| FsError::InvalidPath {
+                path: path.to_string(),
+            })?;
             std::path::PathBuf::from(path.replacen("~", &home, 1))
         } else {
             std::path::PathBuf::from(path)

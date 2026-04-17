@@ -46,9 +46,7 @@ impl super::ToolImpl for SleepTool {
         }
         if args.duration > MAX_DURATION_SECS {
             return Err(ToolError::InvalidArguments {
-                message: format!(
-                    "duration must not exceed {MAX_DURATION_SECS} seconds (1 hour)"
-                ),
+                message: format!("duration must not exceed {MAX_DURATION_SECS} seconds (1 hour)"),
             });
         }
 
@@ -60,7 +58,10 @@ impl super::ToolImpl for SleepTool {
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(millis)) => {}
         }
 
-        Ok(SleepOutput { duration: args.duration }.into_stream())
+        Ok(SleepOutput {
+            duration: args.duration,
+        }
+        .into_stream())
     }
 }
 

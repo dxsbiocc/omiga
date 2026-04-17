@@ -68,7 +68,8 @@ impl super::ToolImpl for FileReadTool {
                 let env_arc = store.get_or_create(ctx, 30_000).await?;
                 let result = {
                     let mut guard = env_arc.lock().await;
-                    let mut ops = crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
+                    let mut ops =
+                        crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
                     ops.read_file(&remote_path, args.offset, args.limit).await?
                 };
                 let output = FileReadOutput {
@@ -179,15 +180,13 @@ impl StreamOutput for FileReadOutput {
 }
 
 /// Resolve path (handle relative and absolute)
-fn resolve_path(
-    project_root: &std::path::Path,
-    path: &str,
-) -> Result<std::path::PathBuf, FsError> {
+fn resolve_path(project_root: &std::path::Path, path: &str) -> Result<std::path::PathBuf, FsError> {
     let path_buf = if path.starts_with('/') || path.starts_with("~/") {
         // Absolute path or home directory
         if path.starts_with("~/") {
-            let home = std::env::var("HOME")
-                .map_err(|_| FsError::InvalidPath { path: path.to_string() })?;
+            let home = std::env::var("HOME").map_err(|_| FsError::InvalidPath {
+                path: path.to_string(),
+            })?;
             std::path::PathBuf::from(path.replacen("~", &home, 1))
         } else {
             std::path::PathBuf::from(path)
@@ -198,12 +197,19 @@ fn resolve_path(
     };
 
     // Check for path traversal
-    let canonical_project = project_root.canonicalize().unwrap_or_else(|_| project_root.to_path_buf());
+    let canonical_project = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
     let canonical_path = path_buf.canonicalize().unwrap_or_else(|_| path_buf.clone());
 
-    if !canonical_path.starts_with(&canonical_project) && !path.starts_with('/') && !path.starts_with("~/") {
+    if !canonical_path.starts_with(&canonical_project)
+        && !path.starts_with('/')
+        && !path.starts_with("~/")
+    {
         // Allow paths outside project only if explicitly absolute
-        return Err(FsError::PathTraversal { path: path.to_string() });
+        return Err(FsError::PathTraversal {
+            path: path.to_string(),
+        });
     }
 
     Ok(path_buf)
@@ -212,9 +218,7 @@ fn resolve_path(
 /// Check if file is binary
 async fn is_binary_file(path: &std::path::Path) -> Result<bool, FsError> {
     // Read first 8KB to detect binary
-    let header = tokio::fs::read(&path)
-        .await
-        .map_err(FsError::from)?;
+    let header = tokio::fs::read(&path).await.map_err(FsError::from)?;
 
     // Check for null bytes (common in binary files)
     let sample_size = header.len().min(8192);

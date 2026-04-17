@@ -4,10 +4,10 @@ use super::CommandResult;
 use crate::app_state::OmigaAppState;
 use crate::commands::integrations_settings;
 use crate::errors::{AppError, FsError};
-use tauri::State;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use tauri::State;
 
 fn io_err(e: std::io::Error) -> AppError {
     AppError::Fs(FsError::IoError {
@@ -17,12 +17,7 @@ fn io_err(e: std::io::Error) -> AppError {
 
 fn validate_skill_directory_name(name: &str) -> CommandResult<&str> {
     let t = name.trim();
-    if t.is_empty()
-        || t.contains('/')
-        || t.contains('\\')
-        || t.contains("..")
-        || t.contains('\0')
-    {
+    if t.is_empty() || t.contains('/') || t.contains('\\') || t.contains("..") || t.contains('\0') {
         return Err(AppError::Config(
             "Invalid skill directory name (no path separators).".to_string(),
         ));
@@ -48,9 +43,8 @@ fn read_json_file(path: &Path) -> CommandResult<Value> {
             message: format!("read {}: {}", path.display(), e),
         })
     })?;
-    serde_json::from_str(&raw).map_err(|e| {
-        AppError::Config(format!("Invalid JSON in {}: {}", path.display(), e))
-    })
+    serde_json::from_str(&raw)
+        .map_err(|e| AppError::Config(format!("Invalid JSON in {}: {}", path.display(), e)))
 }
 
 /// Merge `mcpServers` from `incoming` into `base` (incoming keys overwrite).
@@ -125,24 +119,18 @@ pub async fn import_merge_project_mcp_json(
     }
 
     let existing_servers = if dest.exists() {
-        read_json_file(&dest)?
-            .get("mcpServers")
-            .cloned()
+        read_json_file(&dest)?.get("mcpServers").cloned()
     } else {
         None
     };
 
     let merged_servers = merge_mcp_servers_objects(existing_servers.as_ref(), &incoming_servers);
-    let n = merged_servers
-        .as_object()
-        .map(|o| o.len())
-        .unwrap_or(0);
+    let n = merged_servers.as_object().map(|o| o.len()).unwrap_or(0);
     out_obj.insert("mcpServers".to_string(), merged_servers);
 
     let out = Value::Object(out_obj);
-    let pretty = serde_json::to_string_pretty(&out).map_err(|e| {
-        AppError::Config(format!("serialize merged MCP JSON: {}", e))
-    })?;
+    let pretty = serde_json::to_string_pretty(&out)
+        .map_err(|e| AppError::Config(format!("serialize merged MCP JSON: {}", e)))?;
 
     tokio::fs::write(&dest, pretty.as_bytes())
         .await
@@ -170,9 +158,9 @@ fn copy_skill_tree_sync(src: &Path, dst: &Path) -> std::io::Result<()> {
     for e in walkdir::WalkDir::new(src).min_depth(1) {
         let e = e?;
         let p = e.path();
-        let rel = p.strip_prefix(src).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "strip_prefix")
-        })?;
+        let rel = p
+            .strip_prefix(src)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "strip_prefix"))?;
         let target = dst.join(rel);
         if e.file_type().is_dir() {
             fs::create_dir_all(&target)?;
@@ -194,11 +182,16 @@ pub enum SkillsImportTarget {
     ProjectOmiga,
 }
 
-fn resolve_dest_omiga_skills(project_root: &str, target: SkillsImportTarget) -> CommandResult<PathBuf> {
+fn resolve_dest_omiga_skills(
+    project_root: &str,
+    target: SkillsImportTarget,
+) -> CommandResult<PathBuf> {
     match target {
         SkillsImportTarget::UserOmiga => {
             let home = dirs::home_dir().ok_or_else(|| {
-                AppError::Config("Could not resolve home directory for ~/.omiga/skills.".to_string())
+                AppError::Config(
+                    "Could not resolve home directory for ~/.omiga/skills.".to_string(),
+                )
             })?;
             Ok(home.join(".omiga").join("skills"))
         }
@@ -226,7 +219,9 @@ pub async fn import_skills_from_directory(
     }
 
     let dest_root = resolve_dest_omiga_skills(&project_root, target)?;
-    tokio::fs::create_dir_all(&dest_root).await.map_err(io_err)?;
+    tokio::fs::create_dir_all(&dest_root)
+        .await
+        .map_err(io_err)?;
 
     let mut imported = Vec::new();
     let mut rd = tokio::fs::read_dir(&src_root).await.map_err(io_err)?;
@@ -282,13 +277,7 @@ pub async fn import_claude_default_user_skills(
             src.display()
         )));
     }
-    import_skills_from_directory(
-        app_state,
-        project_root,
-        src.display().to_string(),
-        target,
-    )
-    .await
+    import_skills_from_directory(app_state, project_root, src.display().to_string(), target).await
 }
 
 #[derive(Debug, Serialize)]
@@ -305,7 +294,9 @@ pub struct OmigaImportedSkillsList {
     pub project_skills: Vec<OmigaImportedSkillEntry>,
 }
 
-async fn list_skill_subdirs_with_skill_md(root: &Path) -> CommandResult<Vec<OmigaImportedSkillEntry>> {
+async fn list_skill_subdirs_with_skill_md(
+    root: &Path,
+) -> CommandResult<Vec<OmigaImportedSkillEntry>> {
     let mut out: Vec<OmigaImportedSkillEntry> = Vec::new();
     if !root.is_dir() {
         return Ok(out);
@@ -332,7 +323,9 @@ async fn list_skill_subdirs_with_skill_md(root: &Path) -> CommandResult<Vec<Omig
 
 /// List skill folders under `~/.omiga/skills` and `<project>/.omiga/skills` (each must contain `SKILL.md`).
 #[tauri::command]
-pub async fn list_omiga_imported_skills(project_root: String) -> CommandResult<OmigaImportedSkillsList> {
+pub async fn list_omiga_imported_skills(
+    project_root: String,
+) -> CommandResult<OmigaImportedSkillsList> {
     let user_root = resolve_dest_omiga_skills(&project_root, SkillsImportTarget::UserOmiga)?;
     let proj_root = resolve_dest_omiga_skills(&project_root, SkillsImportTarget::ProjectOmiga)?;
     let user_skills = list_skill_subdirs_with_skill_md(&user_root).await?;
@@ -402,7 +395,9 @@ pub fn get_claude_default_paths() -> CommandResult<ClaudeDefaultPaths> {
     let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
-        .ok_or_else(|| AppError::Config("Could not resolve home for Claude config path.".to_string()))?;
+        .ok_or_else(|| {
+            AppError::Config("Could not resolve home for Claude config path.".to_string())
+        })?;
 
     let env_set = std::env::var_os("CLAUDE_CONFIG_DIR").is_some();
     let skills = claude_home.join("skills");

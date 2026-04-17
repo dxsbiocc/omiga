@@ -64,11 +64,8 @@ pub(crate) async fn build_integrations_catalog(
                         list.into_iter()
                             .map(|t| {
                                 let wire = build_mcp_tool_name(&key, t.name.as_ref());
-                                let desc = t
-                                    .description
-                                    .as_deref()
-                                    .unwrap_or("MCP tool")
-                                    .to_string();
+                                let desc =
+                                    t.description.as_deref().unwrap_or("MCP tool").to_string();
                                 McpToolCatalogEntry {
                                     wire_name: wire,
                                     description: desc,
@@ -165,10 +162,7 @@ pub async fn get_integrations_catalog(
 }
 
 /// Invalidate cached catalog for this project root (call after integrations file or imports change).
-pub(crate) fn invalidate_integrations_catalog_cache(
-    app_state: &OmigaAppState,
-    root: &PathBuf,
-) {
+pub(crate) fn invalidate_integrations_catalog_cache(app_state: &OmigaAppState, root: &PathBuf) {
     if let Ok(mut guard) = app_state.integrations_catalog_cache.lock() {
         guard.remove(root);
     }
@@ -199,7 +193,11 @@ pub fn save_integrations_state(
     // Using the new connection manager for proper lifecycle management.
     let rt = tokio::runtime::Handle::current();
     rt.block_on(async {
-        app_state.chat.mcp_manager.close_project_connections(&root).await;
+        app_state
+            .chat
+            .mcp_manager
+            .close_project_connections(&root)
+            .await;
     });
     Ok(())
 }

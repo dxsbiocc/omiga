@@ -70,7 +70,8 @@ impl super::ToolImpl for FileWriteTool {
                 let env_arc = store.get_or_create(ctx, 30_000).await?;
                 let bytes_written = {
                     let mut guard = env_arc.lock().await;
-                    let mut ops = crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
+                    let mut ops =
+                        crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
                     ops.write_file(&remote_path, &args.content).await?
                 };
                 let new_hash = compute_hash(&args.content);
@@ -107,8 +108,9 @@ impl super::ToolImpl for FileWriteTool {
             if let Some(current) = &current_hash {
                 if current != expected {
                     // Conflict detected - generate diff
-                    let old_content =
-                        tokio::fs::read_to_string(&path).await.map_err(FsError::from)?;
+                    let old_content = tokio::fs::read_to_string(&path)
+                        .await
+                        .map_err(FsError::from)?;
                     let _diff = generate_diff(&old_content, &args.content);
 
                     return Err(FsError::ConflictDetected {
@@ -124,11 +126,11 @@ impl super::ToolImpl for FileWriteTool {
         // Create parent directories if needed
         if args.create_dirs {
             if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    FsError::IoError {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| FsError::IoError {
                         message: format!("Failed to create parent directories: {}", e),
-                    }
-                })?;
+                    })?;
             }
         }
 
@@ -143,9 +145,11 @@ impl super::ToolImpl for FileWriteTool {
             })?;
 
         // Atomic rename
-        tokio::fs::rename(&temp_path, &path).await.map_err(|e| FsError::IoError {
-            message: format!("Failed to rename temp file: {}", e),
-        })?;
+        tokio::fs::rename(&temp_path, &path)
+            .await
+            .map_err(|e| FsError::IoError {
+                message: format!("Failed to rename temp file: {}", e),
+            })?;
 
         // Compute new hash
         let new_hash = compute_hash(&args.content);
@@ -242,14 +246,12 @@ fn generate_diff(old: &str, new: &str) -> String {
 }
 
 /// Resolve path (same as file_read)
-fn resolve_path(
-    project_root: &std::path::Path,
-    path: &str,
-) -> Result<std::path::PathBuf, FsError> {
+fn resolve_path(project_root: &std::path::Path, path: &str) -> Result<std::path::PathBuf, FsError> {
     let path_buf = if path.starts_with('/') || path.starts_with("~/") {
         if path.starts_with("~/") {
-            let home = std::env::var("HOME")
-                .map_err(|_| FsError::InvalidPath { path: path.to_string() })?;
+            let home = std::env::var("HOME").map_err(|_| FsError::InvalidPath {
+                path: path.to_string(),
+            })?;
             std::path::PathBuf::from(path.replacen("~", &home, 1))
         } else {
             std::path::PathBuf::from(path)

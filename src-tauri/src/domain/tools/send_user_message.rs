@@ -67,8 +67,9 @@ fn resolve_attachment_path(
 ) -> Result<PathBuf, FsError> {
     let path_buf = if path.starts_with('/') || path.starts_with("~/") {
         if path.starts_with("~/") {
-            let home = std::env::var("HOME")
-                .map_err(|_| FsError::InvalidPath { path: path.to_string() })?;
+            let home = std::env::var("HOME").map_err(|_| FsError::InvalidPath {
+                path: path.to_string(),
+            })?;
             PathBuf::from(path.replacen("~", &home, 1))
         } else {
             PathBuf::from(path)
@@ -122,16 +123,18 @@ impl super::ToolImpl for SendUserMessageTool {
                 });
             }
             for raw in paths {
-                let p = resolve_attachment_path(&ctx.project_root, &ctx.cwd, raw.trim())
-                    .map_err(|e: FsError| ToolError::InvalidArguments {
+                let p = resolve_attachment_path(&ctx.project_root, &ctx.cwd, raw.trim()).map_err(
+                    |e: FsError| ToolError::InvalidArguments {
                         message: format!("Attachment \"{}\": {}", raw, e),
-                    })?;
+                    },
+                )?;
 
-                let meta = tokio::fs::metadata(&p).await.map_err(|e| {
-                    ToolError::InvalidArguments {
-                        message: format!("Attachment \"{}\": {}", raw, e),
-                    }
-                })?;
+                let meta =
+                    tokio::fs::metadata(&p)
+                        .await
+                        .map_err(|e| ToolError::InvalidArguments {
+                            message: format!("Attachment \"{}\": {}", raw, e),
+                        })?;
                 if !meta.is_file() {
                     return Err(ToolError::InvalidArguments {
                         message: format!("Attachment \"{}\" is not a regular file.", raw),
@@ -173,18 +176,13 @@ impl super::ToolImpl for SendUserMessageTool {
         let summary = if n_attach == 0 {
             "Message delivered to user.".to_string()
         } else {
-            format!(
-                "Message delivered to user ({} attachment(s)).",
-                n_attach
-            )
+            format!("Message delivered to user ({} attachment(s)).", n_attach)
         };
 
-        Ok(
-            SendUserMessageOutput {
-                text: format!("{}\n\n{}", summary, text),
-            }
-            .into_stream(),
-        )
+        Ok(SendUserMessageOutput {
+            text: format!("{}\n\n{}", summary, text),
+        }
+        .into_stream())
     }
 }
 

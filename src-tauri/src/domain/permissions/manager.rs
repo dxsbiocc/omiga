@@ -1,8 +1,8 @@
 //! 权限管理器核心实现
 
 use super::patterns::DangerousPatternDB;
-use super::types::*;
 use super::tool_rules::canonical_permission_tool_name;
+use super::types::*;
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -76,7 +76,10 @@ impl PermissionManager {
 
         // 1. 用户已选择「本会话 / 时间窗口 / 单次」记住的批准优先于风险等级与规则
         //    （否则 Critical 短路、AskEveryTime 规则等会跳过缓存，导致每次都弹窗）
-        if self.is_remembered_tool_allowed(&context.session_id, &tool_key).await {
+        if self
+            .is_remembered_tool_allowed(&context.session_id, &tool_key)
+            .await
+        {
             return PermissionDecision::Allow;
         }
 
@@ -170,8 +173,7 @@ impl PermissionManager {
             }
             PermissionMode::TimeWindow { minutes } => {
                 // 已经在 validate_user_mode 中校验了最大值和非零
-                let expire_at = chrono::Utc::now()
-                    + chrono::Duration::minutes(minutes as i64);
+                let expire_at = chrono::Utc::now() + chrono::Duration::minutes(minutes as i64);
                 let mut windows = self.window_approvals.write().await;
                 let session_key = format!("{}:{}", session_id, tool_key);
                 windows.insert(session_key, expire_at);
@@ -197,7 +199,11 @@ impl PermissionManager {
     }
 
     /// 拒绝请求（记录审计日志，并在本会话中不再询问该工具——与参数无关）
-    pub async fn deny_request(&self, context: &PermissionContext, reason: &str) -> Result<(), String> {
+    pub async fn deny_request(
+        &self,
+        context: &PermissionContext,
+        reason: &str,
+    ) -> Result<(), String> {
         let tool_key = Self::approval_cache_key(&context.tool_name);
 
         {
@@ -272,13 +278,15 @@ impl PermissionManager {
     }
 
     /// 会话级别批准（按工具名，忽略参数）
-    pub async fn approve_session(&self, session_id: String, tool_name: String, _arguments: &serde_json::Value) {
+    pub async fn approve_session(
+        &self,
+        session_id: String,
+        tool_name: String,
+        _arguments: &serde_json::Value,
+    ) {
         let tool_key = Self::approval_cache_key(&tool_name);
         let mut approvals = self.session_approvals.write().await;
-        approvals
-            .entry(session_id)
-            .or_default()
-            .insert(tool_key);
+        approvals.entry(session_id).or_default().insert(tool_key);
     }
 
     /// 时间窗口批准（按工具名，绑定到 session）
@@ -298,13 +306,15 @@ impl PermissionManager {
 
     /// 按 `tool_name` 记入本会话批准（与 `approve_session` 相同语义）。
     /// `_legacy_hash` 已废弃：旧调用方传入 SHA-256(tool+args)，现在只按工具名缓存，不再区分参数。
-    pub async fn approve_with_hash(&self, session_id: String, tool_name: String, _legacy_hash: String) {
+    pub async fn approve_with_hash(
+        &self,
+        session_id: String,
+        tool_name: String,
+        _legacy_hash: String,
+    ) {
         let tool_key = Self::approval_cache_key(&tool_name);
         let mut approvals = self.session_approvals.write().await;
-        approvals
-            .entry(session_id)
-            .or_default()
-            .insert(tool_key);
+        approvals.entry(session_id).or_default().insert(tool_key);
     }
 
     /// 单次批准（仅这次允许，不持久化）
@@ -314,7 +324,13 @@ impl PermissionManager {
     }
 
     /// 拒绝工具（按工具名记入本会话拒绝列表，`hash` 参数已忽略）
-    pub async fn deny_tool(&self, session_id: String, tool_name: String, _hash: String, reason: String) {
+    pub async fn deny_tool(
+        &self,
+        session_id: String,
+        tool_name: String,
+        _hash: String,
+        reason: String,
+    ) {
         let tool_key = Self::approval_cache_key(&tool_name);
         {
             let mut denials = self.session_denials.write().await;
@@ -343,7 +359,10 @@ impl PermissionManager {
     }
 
     /// 设置默认模式
-    pub async fn set_default_mode(&self, mode: crate::domain::permissions::types::PermissionModeInput) {
+    pub async fn set_default_mode(
+        &self,
+        mode: crate::domain::permissions::types::PermissionModeInput,
+    ) {
         // 实际项目中应存储在配置中
         tracing::info!(?mode, "Setting default permission mode");
     }
@@ -385,10 +404,16 @@ impl PermissionManager {
     }
 
     /// 获取会话批准状态
-    pub async fn get_session_approvals(&self, session_id: &str) -> (std::collections::HashSet<String>, Option<chrono::DateTime<chrono::Utc>>) {
+    pub async fn get_session_approvals(
+        &self,
+        session_id: &str,
+    ) -> (
+        std::collections::HashSet<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) {
         let approvals = self.session_approvals.read().await;
         let approved_tools = approvals.get(session_id).cloned().unwrap_or_default();
-        
+
         // 获取该 session 的时间窗口批准中最早的过期时间
         let windows = self.window_approvals.read().await;
         let session_prefix = format!("{}:", session_id);
@@ -397,7 +422,7 @@ impl PermissionManager {
             .filter(|(key, _)| key.starts_with(&session_prefix))
             .map(|(_, expire_at)| *expire_at)
             .min();
-        
+
         (approved_tools, approved_until)
     }
 
@@ -405,16 +430,16 @@ impl PermissionManager {
     pub async fn clear_session_approvals(&self, session_id: &str) {
         let mut approvals = self.session_approvals.write().await;
         approvals.remove(session_id);
-        
+
         let mut denials = self.session_denials.write().await;
         denials.remove(session_id);
-        
+
         // 清除该 session 的时间窗口和单次批准
         let prefix = format!("{}:", session_id);
-        
+
         let mut windows = self.window_approvals.write().await;
         windows.retain(|key, _| !key.starts_with(&prefix));
-        
+
         let mut once = self.once_approvals.write().await;
         once.retain(|key, _| !key.starts_with(&prefix));
     }
@@ -501,7 +526,7 @@ impl PermissionManager {
 
             // 惰性清理：移除所有已过期的条目（retain 为 true 表示保留）
             windows.retain(|_key, expire_at| now < *expire_at);
-            
+
             if let Some(expire_at) = windows.get(&session_key) {
                 if now < *expire_at {
                     return true;
@@ -514,7 +539,7 @@ impl PermissionManager {
             let mut once = self.once_approvals.write().await;
 
             once.retain(|_key, expire_at| now < *expire_at);
-            
+
             if let Some(expire_at) = once.get(&session_key) {
                 if now < *expire_at {
                     // 使用后立即删除（真正的单次使用）
@@ -561,12 +586,14 @@ impl PermissionManager {
         let tool_key = Self::approval_cache_key(&context.tool_name);
 
         match rule.mode {
-            PermissionMode::AskEveryTime => PermissionDecision::RequireApproval(PermissionRequest {
-                request_id: uuid::Uuid::new_v4().to_string(),
-                context: context.clone(),
-                risk: risk.clone(),
-                suggested_mode: PermissionMode::Session,
-            }),
+            PermissionMode::AskEveryTime => {
+                PermissionDecision::RequireApproval(PermissionRequest {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    context: context.clone(),
+                    risk: risk.clone(),
+                    suggested_mode: PermissionMode::Session,
+                })
+            }
             PermissionMode::Session | PermissionMode::Plan => {
                 if self
                     .is_remembered_tool_allowed(&context.session_id, &tool_key)
@@ -614,7 +641,11 @@ impl PermissionManager {
     }
 
     /// 与规则引擎 `PermissionMode::Auto` 一致：仅 High 及以上需确认（Critical 已在 `check_permission` 前段单独处理）。
-    fn composer_auto_fallback(&self, context: &PermissionContext, risk: &RiskAssessment) -> PermissionDecision {
+    fn composer_auto_fallback(
+        &self,
+        context: &PermissionContext,
+        risk: &RiskAssessment,
+    ) -> PermissionDecision {
         if risk.level >= RiskLevel::High {
             PermissionDecision::RequireApproval(PermissionRequest {
                 request_id: uuid::Uuid::new_v4().to_string(),
@@ -649,12 +680,14 @@ impl PermissionManager {
                 suggested_mode: PermissionMode::Session,
             }),
             // High 和 Critical 风险（删除、系统命令）需要确认，建议使用更严格的模式
-            RiskLevel::High | RiskLevel::Critical => PermissionDecision::RequireApproval(PermissionRequest {
-                request_id: uuid::Uuid::new_v4().to_string(),
-                context: context.clone(),
-                risk: risk.clone(),
-                suggested_mode: PermissionMode::AskEveryTime,
-            }),
+            RiskLevel::High | RiskLevel::Critical => {
+                PermissionDecision::RequireApproval(PermissionRequest {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    context: context.clone(),
+                    risk: risk.clone(),
+                    suggested_mode: PermissionMode::AskEveryTime,
+                })
+            }
         }
     }
 
@@ -724,18 +757,16 @@ impl PermissionManager {
             PathMatcher::WithinProject => true,
             PathMatcher::Exact(expected) => path_str == expected.as_str(),
             PathMatcher::Prefix(prefix) => path_str.starts_with(prefix.as_str()),
-            PathMatcher::Glob(pattern) => {
-                globset::GlobBuilder::new(pattern)
-                    .case_insensitive(false)
-                    .build()
-                    .and_then(|g| {
-                        let mut builder = globset::GlobSetBuilder::new();
-                        builder.add(g);
-                        builder.build()
-                    })
-                    .map(|gs| gs.is_match(path))
-                    .unwrap_or(false)
-            }
+            PathMatcher::Glob(pattern) => globset::GlobBuilder::new(pattern)
+                .case_insensitive(false)
+                .build()
+                .and_then(|g| {
+                    let mut builder = globset::GlobSetBuilder::new();
+                    builder.add(g);
+                    builder.build()
+                })
+                .map(|gs| gs.is_match(path))
+                .unwrap_or(false),
             PathMatcher::Regex(pattern) => regex::RegexBuilder::new(pattern)
                 .size_limit(1_000_000)
                 .dfa_size_limit(1_000_000)
@@ -752,43 +783,39 @@ impl PermissionManager {
         }
     }
 
-    fn matches_condition(&self, condition: &ArgumentCondition, arguments: &serde_json::Value) -> bool {
+    fn matches_condition(
+        &self,
+        condition: &ArgumentCondition,
+        arguments: &serde_json::Value,
+    ) -> bool {
         let arg_value = arguments.get(&condition.key);
         match condition.operator {
             ConditionOperator::Eq => arg_value == Some(&condition.value),
             ConditionOperator::Ne => arg_value != Some(&condition.value),
-            ConditionOperator::Contains => {
-                match (arg_value, condition.value.as_str()) {
-                    (Some(serde_json::Value::String(s)), Some(pattern)) => s.contains(pattern),
-                    (Some(serde_json::Value::Array(arr)), _) => arr.contains(&condition.value),
-                    _ => false,
+            ConditionOperator::Contains => match (arg_value, condition.value.as_str()) {
+                (Some(serde_json::Value::String(s)), Some(pattern)) => s.contains(pattern),
+                (Some(serde_json::Value::Array(arr)), _) => arr.contains(&condition.value),
+                _ => false,
+            },
+            ConditionOperator::StartsWith => match (arg_value, condition.value.as_str()) {
+                (Some(serde_json::Value::String(s)), Some(prefix)) => s.starts_with(prefix),
+                _ => false,
+            },
+            ConditionOperator::Matches => match (arg_value, condition.value.as_str()) {
+                (Some(serde_json::Value::String(s)), Some(pattern)) => {
+                    regex::RegexBuilder::new(pattern)
+                        .size_limit(1_000_000)
+                        .dfa_size_limit(1_000_000)
+                        .build()
+                        .map(|re| re.is_match(s))
+                        .unwrap_or(false)
                 }
-            }
-            ConditionOperator::StartsWith => {
-                match (arg_value, condition.value.as_str()) {
-                    (Some(serde_json::Value::String(s)), Some(prefix)) => s.starts_with(prefix),
-                    _ => false,
-                }
-            }
-            ConditionOperator::Matches => {
-                match (arg_value, condition.value.as_str()) {
-                    (Some(serde_json::Value::String(s)), Some(pattern)) => {
-                        regex::RegexBuilder::new(pattern)
-                            .size_limit(1_000_000)
-                            .dfa_size_limit(1_000_000)
-                            .build()
-                            .map(|re| re.is_match(s))
-                            .unwrap_or(false)
-                    }
-                    _ => false,
-                }
-            }
-            ConditionOperator::In => {
-                match (arg_value, condition.value.as_array()) {
-                    (Some(val), Some(arr)) => arr.contains(val),
-                    _ => false,
-                }
-            }
+                _ => false,
+            },
+            ConditionOperator::In => match (arg_value, condition.value.as_array()) {
+                (Some(val), Some(arr)) => arr.contains(val),
+                _ => false,
+            },
         }
     }
 
@@ -829,7 +856,10 @@ impl PermissionManager {
                     });
                     categories.push(RiskCategory::System);
                 }
-                if path_str.contains(".env") || path_str.contains("secret") || path_str.contains("credential") {
+                if path_str.contains(".env")
+                    || path_str.contains("secret")
+                    || path_str.contains("credential")
+                {
                     detected_risks.push(DetectedRisk {
                         category: RiskCategory::Privacy,
                         severity: RiskLevel::Medium,
@@ -923,13 +953,8 @@ impl PermissionManager {
                 }],
             },
             // 其他常见安全工具
-            "list_skills"
-            | "skills_list"
-            | "skill_view"
-            | "search"
-            | "tool_search"
-            | "get_current_time"
-            | "get_system_info" => RiskAssessment {
+            "list_skills" | "skills_list" | "skill_view" | "search" | "tool_search"
+            | "get_current_time" | "get_system_info" => RiskAssessment {
                 level: RiskLevel::Safe,
                 categories: vec![],
                 description: format!("使用工具: {}", tool_name),
@@ -979,7 +1004,11 @@ impl PermissionManager {
             _ => {}
         }
 
-        if paths.is_empty() { None } else { Some(paths) }
+        if paths.is_empty() {
+            None
+        } else {
+            Some(paths)
+        }
     }
 }
 
@@ -1003,7 +1032,10 @@ mod tests {
         let dec = mgr
             .check_tool("s1", "file_read", &serde_json::json!({"path": "README.md"}))
             .await;
-        assert!(matches!(dec, PermissionDecision::Allow), "file_read should be Allow");
+        assert!(
+            matches!(dec, PermissionDecision::Allow),
+            "file_read should be Allow"
+        );
     }
 
     #[tokio::test]
@@ -1040,7 +1072,8 @@ mod tests {
         let dec = mgr.check_permission(&ctx).await;
         assert!(
             matches!(dec, PermissionDecision::Deny(_)),
-            "后续调用应返回 Deny，实际: {:?}", dec
+            "后续调用应返回 Deny，实际: {:?}",
+            dec
         );
         let ctx_other_cmd = PermissionContext {
             arguments: serde_json::json!({"command": "echo other"}),
@@ -1049,7 +1082,8 @@ mod tests {
         let dec2 = mgr.check_permission(&ctx_other_cmd).await;
         assert!(
             matches!(dec2, PermissionDecision::Deny(_)),
-            "同工具不同参数仍应 Deny，实际: {:?}", dec2
+            "同工具不同参数仍应 Deny，实际: {:?}",
+            dec2
         );
     }
 
@@ -1100,7 +1134,8 @@ mod tests {
         let dec = mgr.check_permission(&ctx).await;
         assert!(
             matches!(dec, PermissionDecision::Allow),
-            "批准后应 Allow，实际: {:?}", dec
+            "批准后应 Allow，实际: {:?}",
+            dec
         );
         let ctx_other = PermissionContext {
             arguments: serde_json::json!({"command": "cp a b"}),
@@ -1109,7 +1144,8 @@ mod tests {
         let dec2 = mgr.check_permission(&ctx_other).await;
         assert!(
             matches!(dec2, PermissionDecision::Allow),
-            "同工具不同参数也应 Allow，实际: {:?}", dec2
+            "同工具不同参数也应 Allow，实际: {:?}",
+            dec2
         );
     }
 
@@ -1161,7 +1197,8 @@ mod tests {
         let dec = mgr.check_permission(&ctx_b).await;
         assert!(
             matches!(dec, PermissionDecision::Allow),
-            "file_write 不同路径应共享会话批准，实际: {:?}", dec
+            "file_write 不同路径应共享会话批准，实际: {:?}",
+            dec
         );
     }
 
@@ -1191,7 +1228,8 @@ mod tests {
         let after = mgr.check_permission(&ctx).await;
         assert!(
             matches!(after, PermissionDecision::Allow),
-            "本会话记住后应 Allow，实际: {:?}", after
+            "本会话记住后应 Allow，实际: {:?}",
+            after
         );
         let ctx_other = PermissionContext {
             arguments: serde_json::json!({"command": "dd if=/dev/zero of=/dev/sda"}),
@@ -1251,7 +1289,10 @@ mod tests {
     #[tokio::test]
     async fn test_time_window_overflow_rejected() {
         let mode = PermissionMode::TimeWindow { minutes: u32::MAX };
-        assert!(mode.validate_user_mode().is_err(), "超大 TimeWindow 应被拒绝");
+        assert!(
+            mode.validate_user_mode().is_err(),
+            "超大 TimeWindow 应被拒绝"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -1334,7 +1375,10 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
         let dec_owner = mgr.check_permission(&ctx_owner).await;
-        assert!(matches!(dec_owner, PermissionDecision::Allow), "规则所有者 session 应 Allow");
+        assert!(
+            matches!(dec_owner, PermissionDecision::Allow),
+            "规则所有者 session 应 Allow"
+        );
 
         // 其他会话：规则无效，走 default_decision → RequireApproval
         let ctx_other = PermissionContext {
@@ -1356,7 +1400,9 @@ mod tests {
     async fn test_wildcard_matcher() {
         let mgr = PermissionManager::new();
         assert!(mgr.matches_tool_matcher(&ToolMatcher::Wildcard("file_*".to_string()), "file_read"));
-        assert!(mgr.matches_tool_matcher(&ToolMatcher::Wildcard("file_*".to_string()), "file_write"));
+        assert!(
+            mgr.matches_tool_matcher(&ToolMatcher::Wildcard("file_*".to_string()), "file_write")
+        );
         assert!(!mgr.matches_tool_matcher(&ToolMatcher::Wildcard("file_*".to_string()), "bash"));
     }
 
@@ -1376,10 +1422,9 @@ mod tests {
             &PathMatcher::FileExtension(vec!["rs".to_string(), "toml".to_string()]),
             path
         ));
-        assert!(!mgr.matches_path_matcher(
-            &PathMatcher::FileExtension(vec!["py".to_string()]),
-            path
-        ));
+        assert!(
+            !mgr.matches_path_matcher(&PathMatcher::FileExtension(vec!["py".to_string()]), path)
+        );
     }
 
     #[tokio::test]
@@ -1421,7 +1466,10 @@ mod tests {
         let args2 = serde_json::json!({"c": 3, "a": 1, "b": 2});
         let h1 = PermissionManager::compute_tool_hash("test", &args1);
         let h2 = PermissionManager::compute_tool_hash("test", &args2);
-        assert_eq!(h1, h2, "Canonical JSON should produce same hash regardless of key order");
+        assert_eq!(
+            h1, h2,
+            "Canonical JSON should produce same hash regardless of key order"
+        );
     }
 
     #[tokio::test]

@@ -3,49 +3,54 @@
 //! Multi-provider support: Anthropic, OpenAI, Azure, Google, and custom endpoints
 
 use super::CommandResult;
-use crate::app_state::{IntegrationsConfigCacheSlot, OmigaAppState, INTEGRATIONS_CONFIG_CACHE_TTL};
 use crate::api::{ContentBlock, Role};
+use crate::app_state::{IntegrationsConfigCacheSlot, OmigaAppState, INTEGRATIONS_CONFIG_CACHE_TTL};
 use crate::constants::agent_prompt;
 use crate::constants::tool_limits::{
     large_output_persist_failed_message, large_tool_output_files_enabled, truncate_utf8_prefix,
     DEFAULT_MAX_RESULT_SIZE_CHARS, PREVIEW_SIZE_BYTES, TOOL_DISPLAY_MAX_INPUT_CHARS,
 };
-use crate::domain::agents::ChatInputTarget;
 use crate::domain::agents::coordinator;
-use crate::domain::chat_state::{
-    AskUserWaiter, McpToolCache, MCP_TOOL_CACHE_TTL, PermissionDenyCache, PermissionToolWaiter,
-    PERMISSION_DENY_CACHE_TTL,
+use crate::domain::agents::scheduler::{
+    AgentScheduler, AgentSelector, SchedulingRequest, SchedulingStrategy,
 };
-use crate::domain::permissions::{
-    PermissionRequest,
-    canonical_permission_tool_name,
-    filter_tool_schemas_by_deny_rule_entries,
-    load_merged_permission_deny_rule_entries,
-    matching_deny_entry,
-    validate_permission_deny_entries,
-};
-use crate::domain::tools::ask_user_question;
-use crate::domain::session::{AgentTask, Message, MessageTokenUsage, Session, TodoItem, ToolCall};
-use crate::domain::session::SessionCodec;
-use crate::utils::large_output_instructions::get_large_output_instructions;
-use crate::domain::integrations_config;
-use crate::domain::skills;
 use crate::domain::agents::subagent_tool_filter::{
     env_allow_nested_agent, filter_tool_schemas_for_subagent, should_block_subagent_builtin_call,
     SubagentFilterOptions,
 };
-use crate::domain::agents::scheduler::{AgentSelector, AgentScheduler, SchedulingRequest, SchedulingStrategy};
+use crate::domain::agents::ChatInputTarget;
+use crate::domain::chat_state::{
+    AskUserWaiter, McpToolCache, PermissionDenyCache, PermissionToolWaiter, MCP_TOOL_CACHE_TTL,
+    PERMISSION_DENY_CACHE_TTL,
+};
+use crate::domain::integrations_config;
+use crate::domain::permissions::{
+    canonical_permission_tool_name, filter_tool_schemas_by_deny_rule_entries,
+    load_merged_permission_deny_rule_entries, matching_deny_entry,
+    validate_permission_deny_entries, PermissionRequest,
+};
+use crate::domain::runtime_constraints::{
+    ModelConstraintContext, RuntimeConstraintHarness, RuntimeConstraintState, ToolConstraintContext,
+};
+use crate::domain::session::SessionCodec;
+use crate::domain::session::{AgentTask, Message, MessageTokenUsage, Session, TodoItem, ToolCall};
+use crate::domain::skills;
+use crate::domain::tools::ask_user_question;
 use crate::domain::tools::{all_tool_schemas, Tool, ToolContext, ToolSchema, WebSearchApiKeys};
 use crate::errors::{ApiError, ChatError, OmigaError};
 use crate::infrastructure::streaming::StreamOutputItem;
-use crate::llm::{create_client, load_config_from_env, LlmClient, LlmConfig, LlmContent, LlmMessage, LlmRole, LlmStreamChunk, LlmProvider};
+use crate::llm::{
+    create_client, load_config_from_env, LlmClient, LlmConfig, LlmContent, LlmMessage, LlmProvider,
+    LlmRole, LlmStreamChunk,
+};
+use crate::utils::large_output_instructions::get_large_output_instructions;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{Mutex, RwLock};
-use regex::Regex;
 
 /// Arguments for the `skill` tool (JSON) — aligned with `SkillTool` input (`skill` + `args`).
 #[derive(Debug, Deserialize)]
@@ -77,11 +82,12 @@ struct SkillViewArgs {
     file_path: Option<String>,
 }
 
-/// Max assistant↔tool iterations per user send (safety valve; TS query loop is bounded similarly).
-const MAX_TOOL_ROUNDS: usize = 25;
+/// Max assistant↔tool iterations per user send (safety valve; raised to support
+/// longer evidence-first investigation and multi-step execution in the main agent).
+const MAX_TOOL_ROUNDS: usize = 100;
 
 /// Max tool rounds inside one `Agent` sub-session (nested Agent calls are blocked separately).
-const MAX_SUBAGENT_TOOL_ROUNDS: usize = 16;
+const MAX_SUBAGENT_TOOL_ROUNDS: usize = 50;
 
 /// Max `execute_tool_calls` depth for nested `Agent` (main session = 0). TS allows deep nesting when `USER_TYPE=ant`.
 const MAX_SUBAGENT_EXECUTE_DEPTH: u8 = 8;
@@ -112,6 +118,8 @@ pub(crate) struct AgentLlmRuntime {
     local_venv_name: String,
     /// Session-scoped environment cache — shared across all tool calls in this round.
     env_store: crate::domain::tools::env_store::EnvStore,
+    /// Resolved runtime constraint configuration (project + session overrides).
+    runtime_constraints_config: crate::domain::runtime_constraints::ResolvedRuntimeConstraintConfig,
 }
 
 pub use crate::domain::chat_state::{
@@ -155,7 +163,10 @@ async fn get_llm_config(chat_state: &ChatState) -> Result<LlmConfig, OmigaError>
     }
 }
 
-pub(crate) fn tool_results_dir_for_session(app: &AppHandle, session_id: &str) -> std::path::PathBuf {
+pub(crate) fn tool_results_dir_for_session(
+    app: &AppHandle,
+    session_id: &str,
+) -> std::path::PathBuf {
     app.path()
         .app_data_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -229,12 +240,431 @@ fn api_messages_to_llm(messages: &[crate::api::Message]) -> Vec<LlmMessage> {
         .collect()
 }
 
+fn augment_llm_messages_with_runtime_constraints(
+    base_messages: &[LlmMessage],
+    harness: &RuntimeConstraintHarness,
+    state: &mut RuntimeConstraintState,
+    request_text: &str,
+    project_root: &Path,
+    use_tools: bool,
+    is_subagent: bool,
+) -> (Vec<LlmMessage>, Vec<String>) {
+    let before = state
+        .emitted_notice_ids()
+        .into_iter()
+        .map(str::to_string)
+        .collect::<std::collections::HashSet<_>>();
+    let messages = harness.augment_model_messages(
+        base_messages,
+        &ModelConstraintContext {
+            request_text,
+            project_root,
+            use_tools,
+            is_subagent,
+        },
+        state,
+    );
+    let newly_emitted = state
+        .emitted_notice_ids()
+        .into_iter()
+        .map(str::to_string)
+        .filter(|id| !before.contains(id))
+        .collect();
+    (messages, newly_emitted)
+}
+
+fn emit_buffered_assistant_text(app: &AppHandle, message_id: &str, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let _ = app.emit(
+        &format!("chat-stream-{}", message_id),
+        &StreamOutputItem::Text(text.to_string()),
+    );
+}
+
+async fn emit_runtime_constraint_metadata(
+    app: &AppHandle,
+    repo: &Arc<crate::domain::persistence::SessionRepository>,
+    session_id: &str,
+    round_id: &str,
+    message_id: &str,
+    key: &str,
+    payload: serde_json::Value,
+) {
+    let payload_string = payload.to_string();
+    let _ = app.emit(
+        &format!("chat-stream-{}", message_id),
+        &StreamOutputItem::Metadata {
+            key: key.to_string(),
+            value: payload_string.clone(),
+        },
+    );
+    let constraint_id = payload
+        .get("id")
+        .and_then(|v| v.as_str())
+        .or_else(|| payload.get("constraint_id").and_then(|v| v.as_str()));
+    if let Err(e) = repo
+        .append_runtime_constraint_event(
+            session_id,
+            round_id,
+            message_id,
+            key,
+            constraint_id,
+            &payload_string,
+        )
+        .await
+    {
+        tracing::warn!("Failed to persist runtime constraint metadata: {}", e);
+    }
+}
+
+async fn handle_runtime_constraint_block_main(
+    app: &AppHandle,
+    client: &dyn LlmClient,
+    repo: Arc<crate::domain::persistence::SessionRepository>,
+    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    session_id: &str,
+    round_id: &str,
+    message_id: &str,
+    assistant_text: &str,
+    assistant_reasoning: &str,
+    tool_calls: &[(String, String, String)],
+    block: &crate::domain::runtime_constraints::ConstraintToolBlock,
+    tool_results_dir: &Path,
+    ask_user_waiters: Arc<Mutex<HashMap<String, AskUserWaiter>>>,
+    cancel_flag: Arc<RwLock<bool>>,
+    preflight_skip_turn_summary: bool,
+    turn_token_usage: &Option<crate::llm::TokenUsage>,
+    provider_name: &str,
+) {
+    let assistant_msg_id = uuid::Uuid::new_v4().to_string();
+    let tool_calls_json = tool_calls_json_opt(tool_calls);
+    let reasoning_save = (!assistant_reasoning.is_empty()).then_some(assistant_reasoning);
+    if let Err(e) = repo
+        .save_message(
+            &assistant_msg_id,
+            session_id,
+            "assistant",
+            assistant_text,
+            tool_calls_json.as_deref(),
+            None,
+            None,
+            reasoning_save,
+            None,
+        )
+        .await
+    {
+        tracing::warn!(
+            "Failed to save assistant message before runtime constraint block: {}",
+            e
+        );
+    }
+
+    {
+        let mut sessions_guard = sessions.write().await;
+        if let Some(runtime) = sessions_guard.get_mut(session_id) {
+            let tc = completed_to_tool_calls(tool_calls);
+            let rc = (!assistant_reasoning.is_empty()).then(|| assistant_reasoning.to_string());
+            runtime
+                .session
+                .add_assistant_message_with_tools(assistant_text, tc, rc);
+        }
+    }
+
+    let blocked_batch: Vec<(String, String, Option<String>)> = tool_calls
+        .iter()
+        .map(|(id, _name, _arguments)| (id.clone(), block.tool_result_message.to_string(), None))
+        .collect();
+    if let Err(e) = repo
+        .save_tool_results_batch(session_id, &blocked_batch)
+        .await
+    {
+        tracing::warn!(
+            "Failed to save runtime-constraint blocked tool results batch: {}",
+            e
+        );
+    }
+
+    {
+        let mut sessions_guard = sessions.write().await;
+        if let Some(runtime) = sessions_guard.get_mut(session_id) {
+            for (tool_use_id, tool_name, arguments) in tool_calls {
+                runtime
+                    .session
+                    .add_tool_result(tool_use_id.clone(), block.tool_result_message.to_string());
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: arguments.clone(),
+                        output: block.tool_result_message.to_string(),
+                        is_error: true,
+                    },
+                );
+            }
+        }
+    }
+
+    let mut last_assistant_id = assistant_msg_id;
+    let mut final_response = block.assistant_response.clone();
+
+    if let Some(ref question_args) = block.interactive_question {
+        let tool_use_id = format!("constraint-ask-user-{}", uuid::Uuid::new_v4());
+        let tool_name = "ask_user_question".to_string();
+        let ask_arguments = match serde_json::to_string(question_args) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to serialize runtime clarification question: {}", e);
+                String::new()
+            }
+        };
+
+        if !ask_arguments.is_empty() {
+            let ask_assistant_id = uuid::Uuid::new_v4().to_string();
+            let ask_tool_call = ToolCall {
+                id: tool_use_id.clone(),
+                name: tool_name.clone(),
+                arguments: ask_arguments.clone(),
+            };
+            let ask_tool_calls = vec![ask_tool_call.clone()];
+
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::Text(format!("\n\n{}", block.assistant_response)),
+            );
+
+            if let Err(e) = repo
+                .save_message(
+                    &ask_assistant_id,
+                    session_id,
+                    "assistant",
+                    &block.assistant_response,
+                    serde_json::to_string(&ask_tool_calls).ok().as_deref(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "Failed to save runtime clarification assistant message: {}",
+                    e
+                );
+            }
+            {
+                let mut sessions_guard = sessions.write().await;
+                if let Some(runtime) = sessions_guard.get_mut(session_id) {
+                    runtime.session.add_assistant_message_with_tools(
+                        block.assistant_response.clone(),
+                        Some(ask_tool_calls),
+                        None,
+                    );
+                }
+            }
+
+            let (returned_tool_id, output, is_error) = execute_ask_user_question_interactive(
+                tool_use_id.clone(),
+                tool_name,
+                ask_arguments,
+                app.clone(),
+                message_id.to_string(),
+                session_id.to_string(),
+                tool_results_dir,
+                ask_user_waiters,
+                Some(cancel_flag),
+            )
+            .await;
+
+            if let Err(e) = repo
+                .save_tool_results_batch(
+                    session_id,
+                    &[(returned_tool_id.clone(), output.clone(), None)],
+                )
+                .await
+            {
+                tracing::warn!("Failed to save runtime clarification tool result: {}", e);
+            }
+            {
+                let mut sessions_guard = sessions.write().await;
+                if let Some(runtime) = sessions_guard.get_mut(session_id) {
+                    runtime.session.add_tool_result(returned_tool_id, output);
+                }
+            }
+
+            last_assistant_id = ask_assistant_id;
+
+            if !is_error {
+                if let Some(ref post_answer_response) = block.post_answer_response {
+                    final_response = post_answer_response.clone();
+                    let follow_up_id = uuid::Uuid::new_v4().to_string();
+                    if let Err(e) = repo
+                        .save_message(
+                            &follow_up_id,
+                            session_id,
+                            "assistant",
+                            post_answer_response,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to save runtime clarification follow-up message: {}",
+                            e
+                        );
+                    }
+                    {
+                        let mut sessions_guard = sessions.write().await;
+                        if let Some(runtime) = sessions_guard.get_mut(session_id) {
+                            runtime
+                                .session
+                                .add_assistant_message(post_answer_response.clone());
+                        }
+                    }
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::Text(format!("\n\n{}", post_answer_response)),
+                    );
+                    last_assistant_id = follow_up_id;
+                }
+            }
+        }
+    } else {
+        let _ = app.emit(
+            &format!("chat-stream-{}", message_id),
+            &StreamOutputItem::Text(format!("\n\n{}", block.assistant_response)),
+        );
+        let clarification_id = uuid::Uuid::new_v4().to_string();
+        if let Err(e) = repo
+            .save_message(
+                &clarification_id,
+                session_id,
+                "assistant",
+                &block.assistant_response,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+        {
+            tracing::warn!(
+                "Failed to save runtime-constraint clarification message: {}",
+                e
+            );
+        }
+        {
+            let mut sessions_guard = sessions.write().await;
+            if let Some(runtime) = sessions_guard.get_mut(session_id) {
+                runtime
+                    .session
+                    .add_assistant_message(block.assistant_response.clone());
+            }
+        }
+        last_assistant_id = clarification_id;
+    }
+
+    persist_session_tool_state(sessions, &repo, session_id).await;
+
+    {
+        let (project_path, session_name) = {
+            let sessions_guard = sessions.read().await;
+            (
+                sessions_guard
+                    .get(session_id)
+                    .map(|r| r.session.project_path.clone())
+                    .unwrap_or_else(|| ".".to_string()),
+                sessions_guard
+                    .get(session_id)
+                    .map(|r| r.session.name.clone())
+                    .unwrap_or_else(|| "Unnamed".to_string()),
+            )
+        };
+        index_chat_to_implicit_memory(app, &project_path, session_id, &session_name, &repo).await;
+    }
+
+    if let Err(e) = repo
+        .complete_round(round_id, Some(&last_assistant_id))
+        .await
+    {
+        tracing::warn!(
+            "Failed to complete round after runtime constraint block: {}",
+            e
+        );
+    }
+
+    persist_and_emit_turn_token_usage(
+        app,
+        &repo,
+        &last_assistant_id,
+        message_id,
+        turn_token_usage,
+        provider_name,
+    )
+    .await;
+    emit_post_turn_meta_then_complete(
+        app,
+        message_id,
+        &last_assistant_id,
+        client,
+        &final_response,
+        preflight_skip_turn_summary,
+        &final_response,
+        repo,
+    )
+    .await;
+}
+
+async fn run_post_response_retry_text_only(
+    client: &dyn LlmClient,
+    app: &AppHandle,
+    message_id: &str,
+    round_id: &str,
+    base_messages: &[LlmMessage],
+    instruction: &str,
+    pending_tools: &Arc<Mutex<HashMap<String, PendingToolCall>>>,
+    cancel_flag: &Arc<RwLock<bool>>,
+    repo: Arc<crate::domain::persistence::SessionRepository>,
+) -> Result<(String, String, Option<crate::llm::TokenUsage>), OmigaError> {
+    let mut retry_messages = base_messages.to_vec();
+    retry_messages.push(LlmMessage::system(format!(
+        "## Runtime validator correction\n{}",
+        instruction
+    )));
+    let (tool_calls, text, reasoning, cancelled, usage) = stream_llm_response_with_cancel(
+        client,
+        app,
+        message_id,
+        round_id,
+        &retry_messages,
+        &[],
+        false,
+        pending_tools,
+        cancel_flag,
+        repo,
+    )
+    .await?;
+
+    if cancelled {
+        return Ok((String::new(), String::new(), usage));
+    }
+    if !tool_calls.is_empty() {
+        tracing::warn!(
+            "Runtime post-response retry unexpectedly produced tool calls; ignoring them."
+        );
+    }
+    Ok((text, reasoning, usage))
+}
+
 /// Large tool output: spill to disk + inject instructions, or truncate (TS parity).
-async fn process_tool_output_for_model(
-    raw: String,
-    tool_use_id: &str,
-    dir: &Path,
-) -> String {
+async fn process_tool_output_for_model(raw: String, tool_use_id: &str, dir: &Path) -> String {
     let size = raw.len();
     if size <= DEFAULT_MAX_RESULT_SIZE_CHARS {
         return raw;
@@ -251,12 +681,9 @@ async fn process_tool_output_for_model(
         return large_output_persist_failed_message(size, &e.to_string());
     }
     match tokio::fs::write(&path, raw.as_bytes()).await {
-        Ok(()) => get_large_output_instructions(
-            path.to_string_lossy().as_ref(),
-            size,
-            "Plain text",
-            None,
-        ),
+        Ok(()) => {
+            get_large_output_instructions(path.to_string_lossy().as_ref(), size, "Plain text", None)
+        }
         Err(e) => large_output_persist_failed_message(size, &e.to_string()),
     }
 }
@@ -330,6 +757,7 @@ fn fold_tool_stream_item_for_model(
         | StreamOutputItem::AskUserPending { .. }
         | StreamOutputItem::TurnSummary { .. }
         | StreamOutputItem::FollowUpSuggestions(_)
+        | StreamOutputItem::SuggestionsGenerating
         | StreamOutputItem::TokenUsage { .. } => {}
     }
 }
@@ -354,9 +782,7 @@ fn append_truncated_results_note(output: &mut String, truncated: bool) {
     if !output.is_empty() && !output.ends_with('\n') {
         output.push('\n');
     }
-    output.push_str(
-        "(Results are truncated. Consider using a more specific path or pattern.)",
-    );
+    output.push_str("(Results are truncated. Consider using a more specific path or pattern.)");
 }
 
 /// Persist `todo_write` + V2 task list so the next `send_message` turn reloads from SQLite.
@@ -384,7 +810,7 @@ async fn persist_session_tool_state(
 }
 
 /// Index chat messages into implicit memory (PageIndex)
-/// 
+///
 /// Emits events to notify frontend of indexing progress:
 /// - `chat-index-start`: When indexing begins
 /// - `chat-index-complete`: When indexing finishes successfully
@@ -397,19 +823,25 @@ async fn index_chat_to_implicit_memory(
     repo: &crate::domain::persistence::SessionRepository,
 ) {
     // Notify frontend that indexing has started
-    let _ = app.emit("chat-index-start", serde_json::json!({
-        "session_id": session_id,
-    }));
+    let _ = app.emit(
+        "chat-index-start",
+        serde_json::json!({
+            "session_id": session_id,
+        }),
+    );
 
     // Get session messages from database
     let session_with_messages = match repo.get_session(session_id).await {
         Ok(Some(s)) => s,
         _ => {
             tracing::debug!("Session {} not found for indexing", session_id);
-            let _ = app.emit("chat-index-error", serde_json::json!({
-                "session_id": session_id,
-                "error": "Session not found",
-            }));
+            let _ = app.emit(
+                "chat-index-error",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "error": "Session not found",
+                }),
+            );
             return;
         }
     };
@@ -436,10 +868,13 @@ async fn index_chat_to_implicit_memory(
         .collect();
 
     if messages.is_empty() {
-        let _ = app.emit("chat-index-complete", serde_json::json!({
-            "session_id": session_id,
-            "document_count": 0,
-        }));
+        let _ = app.emit(
+            "chat-index-complete",
+            serde_json::json!({
+                "session_id": session_id,
+                "document_count": 0,
+            }),
+        );
         return;
     }
 
@@ -454,37 +889,52 @@ async fn index_chat_to_implicit_memory(
     let mut indexer = crate::domain::memory::ChatIndexer::new(&memory_dir);
     if let Err(e) = indexer.init().await {
         tracing::warn!("Failed to init chat indexer: {}", e);
-        let _ = app.emit("chat-index-error", serde_json::json!({
-            "session_id": session_id,
-            "error": format!("Failed to init indexer: {}", e),
-        }));
+        let _ = app.emit(
+            "chat-index-error",
+            serde_json::json!({
+                "session_id": session_id,
+                "error": format!("Failed to init indexer: {}", e),
+            }),
+        );
         return;
     }
     if let Err(e) = indexer.load().await {
         tracing::warn!("Failed to load chat indexer: {}", e);
-        let _ = app.emit("chat-index-error", serde_json::json!({
-            "session_id": session_id,
-            "error": format!("Failed to load indexer: {}", e),
-        }));
+        let _ = app.emit(
+            "chat-index-error",
+            serde_json::json!({
+                "session_id": session_id,
+                "error": format!("Failed to load indexer: {}", e),
+            }),
+        );
         return;
     }
 
     // Index the session
-    match indexer.index_session(session_id, session_name, &messages).await {
+    match indexer
+        .index_session(session_id, session_name, &messages)
+        .await
+    {
         Ok(_) => {
             tracing::info!("Indexed chat session {} into implicit memory", session_id);
             crate::domain::memory::touch_project_registry(&project_root).await;
-            let _ = app.emit("chat-index-complete", serde_json::json!({
-                "session_id": session_id,
-                "document_count": indexer.document_count(),
-            }));
+            let _ = app.emit(
+                "chat-index-complete",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "document_count": indexer.document_count(),
+                }),
+            );
         }
         Err(e) => {
             tracing::warn!("Failed to index chat session: {}", e);
-            let _ = app.emit("chat-index-error", serde_json::json!({
-                "session_id": session_id,
-                "error": format!("Failed to index: {}", e),
-            }));
+            let _ = app.emit(
+                "chat-index-error",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "error": format!("Failed to index: {}", e),
+                }),
+            );
         }
     }
 }
@@ -509,13 +959,16 @@ pub fn list_available_agents() -> Vec<AvailableAgentInfo> {
         })
         .collect();
     out.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
-    
+
     // 在列表开头添加"自动"选项（调度模式）
-    out.insert(0, AvailableAgentInfo {
-        agent_type: "auto".to_string(),
-        description: "智能调度 - 根据任务自动选择最合适的 Agent".to_string(),
-    });
-    
+    out.insert(
+        0,
+        AvailableAgentInfo {
+            agent_type: "auto".to_string(),
+            description: "智能调度 - 根据任务自动选择最合适的 Agent".to_string(),
+        },
+    );
+
     out
 }
 
@@ -538,7 +991,7 @@ fn normalize_sandbox_backend(raw: Option<&String>) -> String {
 }
 
 /// Normalize composer `executionEnvironment` from the UI (`local` | `ssh` | `sandbox`).
-/// 
+///
 /// - `local`: Run tools and terminal on the local machine
 /// - `ssh`: Run tools and terminal on a remote SSH server
 /// - `sandbox`: Run tools and terminal in a remote sandbox (Modal, Daytona, Docker, Singularity)
@@ -572,35 +1025,37 @@ fn composer_execution_addendum(env: &str, ssh_server: Option<&str>) -> Option<St
 
 /// 格式化调度计划为 system prompt 的一部分
 fn format_scheduler_plan(result: &crate::domain::agents::scheduler::SchedulingResult) -> String {
-    let is_content_generation = result.plan.subtasks.iter().any(|t| {
-        t.id == "generate-content" || t.id == "gather-requirements"
-    });
-    
+    let is_content_generation = result
+        .plan
+        .subtasks
+        .iter()
+        .any(|t| t.id == "generate-content" || t.id == "gather-requirements");
+
     let mut plan_text = if is_content_generation {
         String::from("## 内容生成任务执行计划\n\n")
     } else {
         String::from("## 任务执行计划\n\n")
     };
-    
-    plan_text.push_str(&format!("此任务已自动分解为 **{}** 个子任务，将按以下顺序执行：\n\n", 
-        result.plan.subtasks.len()));
-    
+
+    plan_text.push_str(&format!(
+        "此任务已自动分解为 **{}** 个子任务，将按以下顺序执行：\n\n",
+        result.plan.subtasks.len()
+    ));
+
     // 获取并行执行组
     let groups = result.plan.get_parallel_groups();
     let mut task_idx = 1;
-    
+
     for (group_idx, group) in groups.iter().enumerate() {
         if groups.len() > 1 {
             plan_text.push_str(&format!("### 阶段 {}\n", group_idx + 1));
         }
-        
+
         for task_id in group {
             if let Some(task) = result.plan.subtasks.iter().find(|t| &t.id == task_id) {
                 plan_text.push_str(&format!(
                     "{}. **{}** - 使用 `{}` Agent\n",
-                    task_idx,
-                    task.description,
-                    task.agent_type
+                    task_idx, task.description, task.agent_type
                 ));
                 if !task.context.is_empty() {
                     plan_text.push_str(&format!("   - 要求: {}\n", task.context));
@@ -616,9 +1071,12 @@ fn format_scheduler_plan(result: &crate::domain::agents::scheduler::SchedulingRe
         }
         plan_text.push('\n');
     }
-    
-    plan_text.push_str(&format!("\n预估执行时间: ~{} 分钟\n", result.estimated_duration_secs / 60));
-    
+
+    plan_text.push_str(&format!(
+        "\n预估执行时间: ~{} 分钟\n",
+        result.estimated_duration_secs / 60
+    ));
+
     // 对于内容生成任务，添加重要提示
     if is_content_generation {
         plan_text.push_str("\n### ⚠️ 重要提示\n");
@@ -631,7 +1089,7 @@ fn format_scheduler_plan(result: &crate::domain::agents::scheduler::SchedulingRe
     } else {
         plan_text.push_str("\n你可以直接开始执行第一个子任务，或要求我调整计划。");
     }
-    
+
     plan_text
 }
 
@@ -676,10 +1134,15 @@ pub async fn send_message(
     let exec_env = normalize_execution_environment(request.execution_environment.as_ref());
     let sandbox_backend = normalize_sandbox_backend(request.sandbox_backend.as_ref());
 
-    let (session_id, mut session, user_message_id, project_path) = if let Some(ref id) = request.session_id {
+    let (session_id, mut session, user_message_id, project_path) = if let Some(ref id) =
+        request.session_id
+    {
         // Load existing session from database
         let db_session = repo.get_session(id).await.map_err(|e| {
-            OmigaError::Chat(ChatError::StreamError(format!("Failed to load session: {}", e)))
+            OmigaError::Chat(ChatError::StreamError(format!(
+                "Failed to load session: {}",
+                e
+            )))
         })?;
 
         if let Some(db_session) = db_session {
@@ -737,11 +1200,24 @@ pub async fn send_message(
                 session.add_user_message(&request.content);
 
                 msg_id = uuid::Uuid::new_v4().to_string();
-                repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None, None, None)
-                    .await
-                    .map_err(|e| {
-                        OmigaError::Chat(ChatError::StreamError(format!("Failed to save message: {}", e)))
-                    })?;
+                repo.save_message(
+                    &msg_id,
+                    &session.id,
+                    "user",
+                    &request.content,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(|e| {
+                    OmigaError::Chat(ChatError::StreamError(format!(
+                        "Failed to save message: {}",
+                        e
+                    )))
+                })?;
             }
 
             // Update session timestamp
@@ -751,7 +1227,7 @@ pub async fn send_message(
             {
                 let mut sessions = app_state.chat.sessions.write().await;
                 let ssh_server = request.ssh_server.clone();
-            if let Some(runtime) = sessions.get_mut(&session.id) {
+                if let Some(runtime) = sessions.get_mut(&session.id) {
                     runtime.session = session.clone();
                     runtime.active_round_ids.clear();
                     runtime.execution_environment = exec_env.clone();
@@ -760,14 +1236,15 @@ pub async fn send_message(
                     runtime.local_venv_type = request.local_venv_type.clone().unwrap_or_default();
                     runtime.local_venv_name = request.local_venv_name.clone().unwrap_or_default();
                 } else {
-                    let (todos_v, tasks_v) = repo.get_session_tool_state(&session.id).await.map_err(
-                        |e| {
+                    let (todos_v, tasks_v) = repo
+                        .get_session_tool_state(&session.id)
+                        .await
+                        .map_err(|e| {
                             OmigaError::Chat(ChatError::StreamError(format!(
                                 "Failed to load session tool state: {}",
                                 e
                             )))
-                        },
-                    )?;
+                        })?;
                     sessions.insert(
                         session.id.clone(),
                         SessionRuntimeState {
@@ -809,16 +1286,32 @@ pub async fn send_message(
         repo.create_session(&session.id, &session.name, &session.project_path)
             .await
             .map_err(|e| {
-                OmigaError::Chat(ChatError::StreamError(format!("Failed to create session: {}", e)))
+                OmigaError::Chat(ChatError::StreamError(format!(
+                    "Failed to create session: {}",
+                    e
+                )))
             })?;
 
         // Save user message
         let msg_id = uuid::Uuid::new_v4().to_string();
-        repo.save_message(&msg_id, &session.id, "user", &request.content, None, None, None, None, None)
-            .await
-            .map_err(|e| {
-                OmigaError::Chat(ChatError::StreamError(format!("Failed to save message: {}", e)))
-            })?;
+        repo.save_message(
+            &msg_id,
+            &session.id,
+            "user",
+            &request.content,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| {
+            OmigaError::Chat(ChatError::StreamError(format!(
+                "Failed to save message: {}",
+                e
+            )))
+        })?;
 
         // Cache in memory
         let ssh_server = request.ssh_server.clone();
@@ -852,61 +1345,107 @@ pub async fn send_message(
         .permission_manager
         .set_session_composer_stance(&session_id, request.permission_mode.as_deref())
         .await;
-    
+
     // 检测是否为 Plan mode
     let is_plan_mode = request.composer_agent_type.as_deref() == Some("Plan");
-    
+
     // ===== 智能调度系统集成 =====
     // 检测是否使用自动调度模式（用户选择 auto 或未指定特定 Agent）
-    let use_scheduler = request.composer_agent_type.as_deref().map(|t| {
-        t == "auto" || t == "general-purpose" || t.is_empty()
-    }).unwrap_or(true);
-    
+    let use_scheduler = request
+        .composer_agent_type
+        .as_deref()
+        .map(|t| t == "auto" || t == "general-purpose" || t.is_empty())
+        .unwrap_or(true);
+
     // 如果是自动模式，检测任务复杂度并可能进行任务分解
-    let scheduler_result: Option<crate::domain::agents::scheduler::SchedulingResult> = if use_scheduler && request.use_tools {
-        let scheduler = AgentScheduler::new();
-        let scheduling_req = SchedulingRequest::new(&request.content)
-            .with_project_root(project_root.to_string_lossy().as_ref())
-            .with_strategy(SchedulingStrategy::Auto)
-            .with_auto_decompose(true);
-        
-        match scheduler.schedule(scheduling_req).await {
-            Ok(result) => {
-                // 如果任务被分解为多个子任务，记录日志
-                if result.selected_agents.len() > 1 {
-                    tracing::info!(
-                        target: "omiga::scheduler",
-                        task_count = result.plan.subtasks.len(),
-                        agents = ?result.selected_agents,
-                        "Complex task decomposed into subtasks"
-                    );
-                    Some(result)
-                } else {
+    let scheduler_result: Option<crate::domain::agents::scheduler::SchedulingResult> =
+        if use_scheduler && request.use_tools {
+            let scheduler = AgentScheduler::new();
+            let scheduling_req = SchedulingRequest::new(&request.content)
+                .with_project_root(project_root.to_string_lossy().as_ref())
+                .with_strategy(SchedulingStrategy::Auto)
+                .with_auto_decompose(true);
+
+            match scheduler.schedule(scheduling_req).await {
+                Ok(result) => {
+                    // 如果任务被分解为多个子任务，记录日志
+                    if result.selected_agents.len() > 1 {
+                        tracing::info!(
+                            target: "omiga::scheduler",
+                            task_count = result.plan.subtasks.len(),
+                            agents = ?result.selected_agents,
+                            "Complex task decomposed into subtasks"
+                        );
+                        Some(result)
+                    } else {
+                        None
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(target: "omiga::scheduler", "Scheduling failed: {}", e);
                     None
                 }
             }
-            Err(e) => {
-                tracing::warn!(target: "omiga::scheduler", "Scheduling failed: {}", e);
-                None
+        } else {
+            None
+        };
+
+    // Lazy provider restoration: if this session has a stored provider that differs from the
+    // current global, restore it now (first message after session switch).  This moves the
+    // ~100 ms config-file read out of load_session (which blocks the UI) and into send_message
+    // (where the user is already waiting for the LLM response anyway).
+    if let Some(ref desired) = request.active_provider_entry_name {
+        let desired = desired.trim();
+        if !desired.is_empty() {
+            let current = app_state
+                .chat
+                .active_provider_entry_name
+                .lock()
+                .await
+                .clone();
+            let matches = current.as_deref().map(str::trim) == Some(desired);
+            drop(current);
+            if !matches {
+                if let Err(e) = apply_named_provider_runtime(&app_state, desired).await {
+                    tracing::warn!(
+                        target: "omiga::llm",
+                        "Lazy provider restore for session {} failed ({}), using current config",
+                        session_id, e
+                    );
+                }
             }
         }
-    } else {
-        None
-    };
-    
+    }
+
     let mut llm_config = get_llm_config(&app_state.chat).await?;
+    let session_runtime_cfg = crate::domain::session::load_session_config(&session_id);
+    let resolved_runtime_constraints =
+        crate::domain::runtime_constraints::resolve_runtime_constraint_config(
+            &project_root,
+            session_runtime_cfg.runtime_constraints.as_ref(),
+        );
     let integrations_cfg = {
-        let hit = app_state.integrations_config_cache
-            .lock().expect("integrations config cache poisoned")
+        let hit = app_state
+            .integrations_config_cache
+            .lock()
+            .expect("integrations config cache poisoned")
             .get(&project_root)
             .filter(|s| s.cached_at.elapsed() < INTEGRATIONS_CONFIG_CACHE_TTL)
             .map(|s| s.config.clone());
         hit.unwrap_or_else(|| {
             // Lock is released above; safe to do a blocking file read here.
             let cfg = integrations_config::load_integrations_config(&project_root);
-            app_state.integrations_config_cache
-                .lock().expect("integrations config cache poisoned")
-                .insert(project_root.clone(), IntegrationsConfigCacheSlot { config: cfg.clone(), cached_at: std::time::Instant::now() });
+            app_state
+                .integrations_config_cache
+                .lock()
+                .expect("integrations config cache poisoned")
+                .insert(
+                    project_root.clone(),
+                    IntegrationsConfigCacheSlot {
+                        config: cfg.clone(),
+                        cached_at: std::time::Instant::now(),
+                    },
+                );
             cfg
         })
     };
@@ -919,8 +1458,7 @@ pub async fn send_message(
     );
 
     let skills_system_section = if skills_exist {
-        let loaded = skills::load_skills_cached(&project_root, skill_cache_ref).await;
-        skills::format_skills_index_system_section(&project_root, &loaded)
+        "This project has skills available. For non-trivial tasks, use `list_skills` to discover specialized workflows before falling back to generic tools.".to_string()
     } else {
         String::new()
     };
@@ -959,13 +1497,13 @@ pub async fn send_message(
     if let Some(ctx) = memory_ctx {
         prompt_parts.push(ctx);
     }
-    
+
     // 如果有调度计划（任务分解），添加到 system prompt
     if let Some(ref schedule_result) = scheduler_result {
         let plan_description = format_scheduler_plan(schedule_result);
         prompt_parts.push(plan_description);
     }
-    
+
     if request.use_tools {
         if let Some(ref at) = request.composer_agent_type {
             let t = at.trim();
@@ -981,12 +1519,13 @@ pub async fn send_message(
                         request.local_venv_name.as_deref().unwrap_or(""),
                     );
                 prompt_parts.push(crate::domain::agents::compose_full_agent_system_prompt(
-                    agent,
-                    &tool_ctx,
+                    agent, &tool_ctx,
                 ));
             }
         }
-        if let Some(line) = composer_execution_addendum(exec_env.as_str(), request.ssh_server.as_deref()) {
+        if let Some(line) =
+            composer_execution_addendum(exec_env.as_str(), request.ssh_server.as_deref())
+        {
             prompt_parts.push(line);
         }
     }
@@ -1042,10 +1581,13 @@ pub async fn send_message(
         &message_id,
         Some(&user_message_id_for_round),
     )
-        .await
-        .map_err(|e| {
-            OmigaError::Chat(ChatError::StreamError(format!("Failed to create round: {}", e)))
-        })?;
+    .await
+    .map_err(|e| {
+        OmigaError::Chat(ChatError::StreamError(format!(
+            "Failed to create round: {}",
+            e
+        )))
+    })?;
 
     // Set up cancellation tracking
     let cancel_flag = Arc::new(RwLock::new(false));
@@ -1076,7 +1618,11 @@ pub async fn send_message(
     // Filter with `permissions.deny` from Claude-style settings (`filterToolsByDenyRules` parity).
     let tools: Vec<ToolSchema> = if request.use_tools {
         let deny_entries = {
-            let hit = app_state.chat.permission_deny_cache.lock().await
+            let hit = app_state
+                .chat
+                .permission_deny_cache
+                .lock()
+                .await
                 .get(&project_root)
                 .filter(|e| e.cached_at.elapsed() < PERMISSION_DENY_CACHE_TTL)
                 .map(|e| e.entries.clone());
@@ -1088,8 +1634,13 @@ pub async fn send_message(
                 None => {
                     // Lock released above; safe to do blocking file reads here.
                     let entries = load_merged_permission_deny_rule_entries(&project_root);
-                    app_state.chat.permission_deny_cache.lock().await
-                        .insert(project_root.clone(), PermissionDenyCache { entries: entries.clone(), cached_at: std::time::Instant::now() });
+                    app_state.chat.permission_deny_cache.lock().await.insert(
+                        project_root.clone(),
+                        PermissionDenyCache {
+                            entries: entries.clone(),
+                            cached_at: std::time::Instant::now(),
+                        },
+                    );
                     entries
                 }
             }
@@ -1097,10 +1648,7 @@ pub async fn send_message(
         validate_permission_deny_entries(&deny_entries);
         let all_schemas = all_tool_schemas(skills_exist);
         let n_builtin_before = all_schemas.len();
-        let mut built = filter_tool_schemas_by_deny_rule_entries(
-            all_schemas,
-            &deny_entries,
-        );
+        let mut built = filter_tool_schemas_by_deny_rule_entries(all_schemas, &deny_entries);
         let n_builtin_after = built.len();
         if n_builtin_after < n_builtin_before {
             tracing::debug!(
@@ -1114,7 +1662,11 @@ pub async fn send_message(
         let base_names: HashSet<String> = built.iter().map(|t| t.name.clone()).collect();
         let mcp_timeout = std::time::Duration::from_secs(45);
         let mcp_tools = {
-            let hit = app_state.chat.mcp_tool_cache.lock().await
+            let hit = app_state
+                .chat
+                .mcp_tool_cache
+                .lock()
+                .await
                 .get(&project_root)
                 .filter(|e| e.cached_at.elapsed() < MCP_TOOL_CACHE_TTL)
                 .map(|e| e.schemas.clone());
@@ -1129,17 +1681,19 @@ pub async fn send_message(
                         mcp_timeout,
                     )
                     .await;
-                    app_state.chat.mcp_tool_cache.lock().await
-                        .insert(project_root.clone(), McpToolCache { schemas: schemas.clone(), cached_at: std::time::Instant::now() });
+                    app_state.chat.mcp_tool_cache.lock().await.insert(
+                        project_root.clone(),
+                        McpToolCache {
+                            schemas: schemas.clone(),
+                            cached_at: std::time::Instant::now(),
+                        },
+                    );
                     schemas
                 }
             }
         };
         let n_mcp_before = mcp_tools.len();
-        let mcp_after_deny = filter_tool_schemas_by_deny_rule_entries(
-            mcp_tools,
-            &deny_entries,
-        );
+        let mcp_after_deny = filter_tool_schemas_by_deny_rule_entries(mcp_tools, &deny_entries);
         let n_mcp_after = mcp_after_deny.len();
         if n_mcp_after < n_mcp_before {
             tracing::debug!(
@@ -1153,10 +1707,8 @@ pub async fn send_message(
             .into_iter()
             .filter(|t| !base_names.contains(&t.name))
             .collect();
-        let mcp_filtered = integrations_config::filter_mcp_tools_by_integrations(
-            mcp_filtered,
-            &integrations_cfg,
-        );
+        let mcp_filtered =
+            integrations_config::filter_mcp_tools_by_integrations(mcp_filtered, &integrations_cfg);
         let mut combined: Vec<ToolSchema> = built.into_iter().chain(mcp_filtered).collect();
         if coordinator::is_coordinator_mode() {
             let before = combined.len();
@@ -1181,21 +1733,27 @@ pub async fn send_message(
                 Role::User => LlmRole::User,
                 Role::Assistant => LlmRole::Assistant,
             },
-            content: msg.content.iter().map(|block| {
-                match block {
+            content: msg
+                .content
+                .iter()
+                .map(|block| match block {
                     ContentBlock::Text { text } => LlmContent::Text { text: text.clone() },
                     ContentBlock::ToolUse { id, name, input } => LlmContent::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
                         arguments: input.clone(),
                     },
-                    ContentBlock::ToolResult { tool_use_id, content, is_error } => LlmContent::ToolResult {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => LlmContent::ToolResult {
                         tool_use_id: tool_use_id.clone(),
                         content: content.clone(),
                         is_error: *is_error,
                     },
-                }
-            }).collect(),
+                })
+                .collect(),
             name: None,
             tool_calls: None,
             reasoning_content: msg.reasoning_content.clone(),
@@ -1208,11 +1766,14 @@ pub async fn send_message(
     let round_id_clone = round_id.clone();
     let session_id_clone = session_id.clone();
     let pending_tools_clone = app_state.chat.pending_tools.clone();
+    let ask_user_waiters_clone = app_state.chat.ask_user_waiters.clone();
     let active_rounds_clone = app_state.chat.active_rounds.clone();
     let sessions_clone = app_state.chat.sessions.clone();
     let repo_clone = app_state.repo.clone();
     let llm_config_for_spawn = llm_config_for_agent;
     let skill_task_context = request.content.clone();
+    let request_text_for_constraints = request.content.clone();
+    let project_root_for_constraints = project_root.clone();
     let web_search_api_keys = app_state.chat.web_search_api_keys.lock().await.clone();
     let skill_cache_for_spawn = app_state.skill_cache.clone();
     // 回合开始前预判：短确认类输入可跳过回合结束后的 Output Formatter，加快到 Complete。
@@ -1238,7 +1799,15 @@ pub async fn send_message(
 
         let tool_results_dir = tool_results_dir_for_session(&app_clone, &session_id_clone);
 
-        let (plan_mode_flag, execution_environment, ssh_server_rt, sandbox_backend_rt, local_venv_type_rt, local_venv_name_rt, env_store_rt) = {
+        let (
+            plan_mode_flag,
+            execution_environment,
+            ssh_server_rt,
+            sandbox_backend_rt,
+            local_venv_type_rt,
+            local_venv_name_rt,
+            env_store_rt,
+        ) = {
             let sessions = sessions_clone.read().await;
             let s = sessions.get(&session_id_clone);
             (
@@ -1246,7 +1815,8 @@ pub async fn send_message(
                 s.map(|x| x.execution_environment.clone())
                     .unwrap_or_else(|| "local".to_string()),
                 s.and_then(|x| x.ssh_server.clone()),
-                s.map(|x| x.sandbox_backend.clone()).unwrap_or_else(|| "docker".to_string()),
+                s.map(|x| x.sandbox_backend.clone())
+                    .unwrap_or_else(|| "docker".to_string()),
                 s.map(|x| x.local_venv_type.clone()).unwrap_or_default(),
                 s.map(|x| x.local_venv_name.clone()).unwrap_or_default(),
                 s.map(|x| x.env_store.clone())
@@ -1269,18 +1839,69 @@ pub async fn send_message(
             local_venv_type: local_venv_type_rt,
             local_venv_name: local_venv_name_rt,
             env_store: env_store_rt,
+            runtime_constraints_config: resolved_runtime_constraints.clone(),
         };
 
         let mut turn_token_usage: Option<crate::llm::TokenUsage> = None;
+        let constraint_harness =
+            RuntimeConstraintHarness::from_config(agent_runtime.runtime_constraints_config.clone());
+        let mut constraint_state = RuntimeConstraintState::default();
+        let (initial_llm_messages, initial_notices) = augment_llm_messages_with_runtime_constraints(
+            &llm_messages,
+            &constraint_harness,
+            &mut constraint_state,
+            &request_text_for_constraints,
+            &project_root_for_constraints,
+            !tools.is_empty(),
+            false,
+        );
+        emit_runtime_constraint_metadata(
+            &app_clone,
+            &repo_clone,
+            &session_id_clone,
+            &round_id_clone,
+            &message_id_clone,
+            "runtime_constraints.config",
+            serde_json::json!({
+                "enabled": agent_runtime.runtime_constraints_config.enabled,
+                "buffer_responses": agent_runtime.runtime_constraints_config.buffer_responses,
+                "policy_pack": agent_runtime.runtime_constraints_config.policy_pack,
+                "registry": constraint_harness.registry().into_iter().map(|m| serde_json::json!({
+                    "id": m.id,
+                    "severity": m.severity,
+                    "enabled": m.enabled,
+                })).collect::<Vec<_>>(),
+            }),
+        )
+        .await;
+        if !initial_notices.is_empty() {
+            emit_runtime_constraint_metadata(
+                &app_clone,
+                &repo_clone,
+                &session_id_clone,
+                &round_id_clone,
+                &message_id_clone,
+                "runtime_constraints.notices",
+                serde_json::json!({ "ids": initial_notices }),
+            )
+            .await;
+        }
 
         // Stream the response with cancellation support
-        let (mut pending_tool_calls, assistant_text, assistant_reasoning, was_cancelled, usage_first) = match stream_llm_response_with_cancel(
+        let (
+            mut pending_tool_calls,
+            assistant_text,
+            assistant_reasoning,
+            was_cancelled,
+            usage_first,
+        ) = match stream_llm_response_with_cancel(
             client.as_ref(),
             &app_clone,
             &message_id_clone,
             &round_id_clone,
-            &llm_messages,
+            &initial_llm_messages,
             &tools,
+            !agent_runtime.runtime_constraints_config.buffer_responses,
             &pending_tools_clone,
             &cancel_flag,
             repo_clone.clone(),
@@ -1290,7 +1911,9 @@ pub async fn send_message(
             Ok(result) => result,
             Err(e) => {
                 let repo = &*repo_clone;
-                let _ = repo.cancel_round(&round_id_clone, Some(&e.to_string())).await;
+                let _ = repo
+                    .cancel_round(&round_id_clone, Some(&e.to_string()))
+                    .await;
 
                 let _ = app_clone.emit(
                     &format!("chat-stream-{}", message_id_clone),
@@ -1324,10 +1947,80 @@ pub async fn send_message(
 
         let mut final_reply_for_follow_up = assistant_text.clone();
 
+        let pending_tool_names: Vec<String> = pending_tool_calls
+            .iter()
+            .map(|(_, name, _)| name.clone())
+            .collect();
+        if let Some(block) = constraint_harness.tool_gate(
+            &ToolConstraintContext {
+                request_text: &request_text_for_constraints,
+                assistant_text: &assistant_text,
+                pending_tool_names: &pending_tool_names,
+                is_subagent: false,
+            },
+            &constraint_state,
+        ) {
+            constraint_state.mark_clarification_requested();
+            emit_runtime_constraint_metadata(
+                &app_clone,
+                &repo_clone,
+                &session_id_clone,
+                &round_id_clone,
+                &message_id_clone,
+                "runtime_constraints.gate",
+                serde_json::json!({
+                    "id": block.id,
+                    "assistant_response": block.assistant_response,
+                }),
+            )
+            .await;
+            handle_runtime_constraint_block_main(
+                &app_clone,
+                client.as_ref(),
+                repo_clone.clone(),
+                &sessions_clone,
+                &session_id_clone,
+                &round_id_clone,
+                &message_id_clone,
+                &assistant_text,
+                &assistant_reasoning,
+                &pending_tool_calls,
+                &block,
+                &tool_results_dir,
+                ask_user_waiters_clone.clone(),
+                cancel_flag.clone(),
+                preflight_skip_turn_summary,
+                &turn_token_usage,
+                &llm_config_for_spawn.provider.to_string(),
+            )
+            .await;
+            return;
+        }
+
+        if agent_runtime.runtime_constraints_config.buffer_responses
+            && !pending_tool_calls.is_empty()
+        {
+            emit_buffered_assistant_text(&app_clone, &message_id_clone, &assistant_text);
+            emit_runtime_constraint_metadata(
+                &app_clone,
+                &repo_clone,
+                &session_id_clone,
+                &round_id_clone,
+                &message_id_clone,
+                "runtime_constraints.commit",
+                serde_json::json!({
+                    "mode": "buffered",
+                    "phase": "pre_tool",
+                }),
+            )
+            .await;
+        }
+
         // First assistant turn: persist with tool_calls JSON for reload
         let assistant_msg_id = uuid::Uuid::new_v4().to_string();
         let tool_calls_json = tool_calls_json_opt(&pending_tool_calls);
-        let reasoning_save = (!assistant_reasoning.is_empty()).then_some(assistant_reasoning.as_str());
+        let reasoning_save =
+            (!assistant_reasoning.is_empty()).then_some(assistant_reasoning.as_str());
         {
             let repo = &*repo_clone;
             if let Err(e) = repo
@@ -1362,26 +2055,143 @@ pub async fn send_message(
         let mut last_assistant_id = assistant_msg_id.clone();
 
         if pending_tool_calls.is_empty() {
+            let no_pending_tool_names: Vec<String> = Vec::new();
+            if let Some(action) = constraint_harness.post_response_action(
+                &crate::domain::runtime_constraints::PostResponseConstraintContext {
+                    request_text: &request_text_for_constraints,
+                    assistant_text: &assistant_text,
+                    pending_tool_names: &no_pending_tool_names,
+                    is_subagent: false,
+                },
+                &constraint_state,
+            ) {
+                constraint_state.mark_post_action_attempted(action.id);
+                emit_runtime_constraint_metadata(
+                    &app_clone,
+                    &repo_clone,
+                    &session_id_clone,
+                    &round_id_clone,
+                    &message_id_clone,
+                    "runtime_constraint_retry",
+                    serde_json::json!({ "id": action.id }),
+                )
+                .await;
+                let updated_messages = {
+                    let sessions = sessions_clone.read().await;
+                    sessions
+                        .get(&session_id_clone)
+                        .map(|r| SessionCodec::to_api_messages(&r.session.messages))
+                        .unwrap_or_default()
+                };
+                let updated_llm_messages = api_messages_to_llm(&updated_messages);
+                match run_post_response_retry_text_only(
+                    client.as_ref(),
+                    &app_clone,
+                    &message_id_clone,
+                    &round_id_clone,
+                    &updated_llm_messages,
+                    &action.instruction,
+                    &pending_tools_clone,
+                    &cancel_flag,
+                    repo_clone.clone(),
+                )
+                .await
+                {
+                    Ok((retry_text, retry_reasoning, usage_retry))
+                        if !retry_text.trim().is_empty() =>
+                    {
+                        merge_turn_token_usage(&mut turn_token_usage, usage_retry);
+                        let retry_id = uuid::Uuid::new_v4().to_string();
+                        let retry_reasoning_save =
+                            (!retry_reasoning.is_empty()).then_some(retry_reasoning.as_str());
+                        if let Err(e) = repo_clone
+                            .save_message(
+                                &retry_id,
+                                &session_id_clone,
+                                "assistant",
+                                &retry_text,
+                                None,
+                                None,
+                                None,
+                                retry_reasoning_save,
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!("Failed to save runtime retry assistant message: {}", e);
+                        }
+                        {
+                            let mut sessions = sessions_clone.write().await;
+                            if let Some(runtime) = sessions.get_mut(&session_id_clone) {
+                                let rc =
+                                    (!retry_reasoning.is_empty()).then(|| retry_reasoning.clone());
+                                runtime.session.add_assistant_message_with_tools(
+                                    &retry_text,
+                                    None,
+                                    rc,
+                                );
+                            }
+                        }
+                        final_reply_for_follow_up = retry_text.clone();
+                        last_assistant_id = retry_id;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("Runtime post-response retry failed: {}", e);
+                    }
+                }
+            }
+
+            if agent_runtime.runtime_constraints_config.buffer_responses {
+                emit_buffered_assistant_text(
+                    &app_clone,
+                    &message_id_clone,
+                    &final_reply_for_follow_up,
+                );
+                emit_runtime_constraint_metadata(
+                    &app_clone,
+                    &repo_clone,
+                    &session_id_clone,
+                    &round_id_clone,
+                    &message_id_clone,
+                    "runtime_constraints.commit",
+                    serde_json::json!({
+                        "mode": "buffered",
+                        "phase": "final",
+                    }),
+                )
+                .await;
+            }
+
             persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
-            
+
             // Index chat to implicit memory
             {
                 let project_path = {
                     let sessions = sessions_clone.read().await;
-                    sessions.get(&session_id_clone)
+                    sessions
+                        .get(&session_id_clone)
                         .map(|r| r.session.project_path.clone())
                         .unwrap_or_else(|| ".".to_string())
                 };
                 let repo = &*repo_clone;
                 let session_name = {
                     let sessions = sessions_clone.read().await;
-                    sessions.get(&session_id_clone)
+                    sessions
+                        .get(&session_id_clone)
                         .map(|r| r.session.name.clone())
                         .unwrap_or_else(|| "Unnamed".to_string())
                 };
-                index_chat_to_implicit_memory(&app_clone, &project_path, &session_id_clone, &session_name, &repo).await;
+                index_chat_to_implicit_memory(
+                    &app_clone,
+                    &project_path,
+                    &session_id_clone,
+                    &session_name,
+                    &repo,
+                )
+                .await;
             }
-            
+
             {
                 let repo = &*repo_clone;
                 if let Err(e) = repo
@@ -1425,9 +2235,7 @@ pub async fn send_message(
                     .unwrap_or_else(|| {
                         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
                     });
-                let todos = sessions
-                    .get(&session_id_clone)
-                    .map(|r| r.todos.clone());
+                let todos = sessions.get(&session_id_clone).map(|r| r.todos.clone());
                 let agent_tasks = sessions
                     .get(&session_id_clone)
                     .map(|r| r.agent_tasks.clone());
@@ -1446,6 +2254,12 @@ pub async fn send_message(
                     }
                 }
             }
+
+            constraint_state.record_tool_names(
+                pending_tool_calls
+                    .iter()
+                    .map(|(_, tool_name, _)| tool_name.as_str()),
+            );
 
             let tool_results = execute_tool_calls(
                 &pending_tool_calls,
@@ -1536,37 +2350,128 @@ pub async fn send_message(
             };
 
             let updated_llm_messages: Vec<LlmMessage> = api_messages_to_llm(&updated_messages);
+            let (constrained_followup_messages, followup_notices) =
+                augment_llm_messages_with_runtime_constraints(
+                    &updated_llm_messages,
+                    &constraint_harness,
+                    &mut constraint_state,
+                    &request_text_for_constraints,
+                    &project_root_for_constraints,
+                    !tools.is_empty(),
+                    false,
+                );
+            if !followup_notices.is_empty() {
+                emit_runtime_constraint_metadata(
+                    &app_clone,
+                    &repo_clone,
+                    &session_id_clone,
+                    &round_id_clone,
+                    &message_id_clone,
+                    "runtime_constraints.notices",
+                    serde_json::json!({ "ids": followup_notices }),
+                )
+                .await;
+            }
 
-            let (next_tools, next_text, next_reasoning, follow_cancelled, usage_next) = match stream_llm_response_with_cancel(
-                client.as_ref(),
-                &app_clone,
-                &message_id_clone,
-                &round_id_clone,
-                &updated_llm_messages,
-                &tools,
-                &pending_tools_clone,
-                &cancel_flag,
-                repo_clone.clone(),
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    let repo = &*repo_clone;
-                    let _ = repo.cancel_round(&round_id_clone, Some(&e.to_string())).await;
-                    let _ = app_clone.emit(
-                        &format!("chat-stream-{}", message_id_clone),
-                        &StreamOutputItem::Error {
-                            message: e.to_string(),
-                            code: None,
-                        },
-                    );
-                    return;
-                }
-            };
+            let (next_tools, next_text, next_reasoning, follow_cancelled, usage_next) =
+                match stream_llm_response_with_cancel(
+                    client.as_ref(),
+                    &app_clone,
+                    &message_id_clone,
+                    &round_id_clone,
+                    &constrained_followup_messages,
+                    &tools,
+                    !agent_runtime.runtime_constraints_config.buffer_responses,
+                    &pending_tools_clone,
+                    &cancel_flag,
+                    repo_clone.clone(),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let repo = &*repo_clone;
+                        let _ = repo
+                            .cancel_round(&round_id_clone, Some(&e.to_string()))
+                            .await;
+                        let _ = app_clone.emit(
+                            &format!("chat-stream-{}", message_id_clone),
+                            &StreamOutputItem::Error {
+                                message: e.to_string(),
+                                code: None,
+                            },
+                        );
+                        return;
+                    }
+                };
             merge_turn_token_usage(&mut turn_token_usage, usage_next);
 
             final_reply_for_follow_up = next_text.clone();
+
+            let next_tool_names: Vec<String> =
+                next_tools.iter().map(|(_, name, _)| name.clone()).collect();
+            if let Some(block) = constraint_harness.tool_gate(
+                &ToolConstraintContext {
+                    request_text: &request_text_for_constraints,
+                    assistant_text: &next_text,
+                    pending_tool_names: &next_tool_names,
+                    is_subagent: false,
+                },
+                &constraint_state,
+            ) {
+                constraint_state.mark_clarification_requested();
+                emit_runtime_constraint_metadata(
+                    &app_clone,
+                    &repo_clone,
+                    &session_id_clone,
+                    &round_id_clone,
+                    &message_id_clone,
+                    "runtime_constraints.gate",
+                    serde_json::json!({
+                        "id": block.id,
+                        "assistant_response": block.assistant_response,
+                    }),
+                )
+                .await;
+                handle_runtime_constraint_block_main(
+                    &app_clone,
+                    client.as_ref(),
+                    repo_clone.clone(),
+                    &sessions_clone,
+                    &session_id_clone,
+                    &round_id_clone,
+                    &message_id_clone,
+                    &next_text,
+                    &next_reasoning,
+                    &next_tools,
+                    &block,
+                    &tool_results_dir,
+                    ask_user_waiters_clone.clone(),
+                    cancel_flag.clone(),
+                    preflight_skip_turn_summary || send_user_message_called,
+                    &turn_token_usage,
+                    &llm_config_for_spawn.provider.to_string(),
+                )
+                .await;
+                return;
+            }
+
+            if agent_runtime.runtime_constraints_config.buffer_responses && !next_tools.is_empty() {
+                emit_buffered_assistant_text(&app_clone, &message_id_clone, &next_text);
+                emit_runtime_constraint_metadata(
+                    &app_clone,
+                    &repo_clone,
+                    &session_id_clone,
+                    &round_id_clone,
+                    &message_id_clone,
+                    "runtime_constraints.commit",
+                    serde_json::json!({
+                        "mode": "buffered",
+                        "phase": "pre_tool",
+                    }),
+                )
+                .await;
+            }
 
             if follow_cancelled {
                 persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
@@ -1583,7 +2488,8 @@ pub async fn send_message(
 
             let next_assistant_id = uuid::Uuid::new_v4().to_string();
             let next_tc_json = tool_calls_json_opt(&next_tools);
-            let next_reasoning_save = (!next_reasoning.is_empty()).then_some(next_reasoning.as_str());
+            let next_reasoning_save =
+                (!next_reasoning.is_empty()).then_some(next_reasoning.as_str());
             {
                 let repo = &*repo_clone;
                 if let Err(e) = repo
@@ -1609,7 +2515,9 @@ pub async fn send_message(
                 if let Some(runtime) = sessions.get_mut(&session_id_clone) {
                     let tc = completed_to_tool_calls(&next_tools);
                     let rc = (!next_reasoning.is_empty()).then(|| next_reasoning.clone());
-                    runtime.session.add_assistant_message_with_tools(&next_text, tc, rc);
+                    runtime
+                        .session
+                        .add_assistant_message_with_tools(&next_text, tc, rc);
                 }
             }
 
@@ -1617,26 +2525,146 @@ pub async fn send_message(
             pending_tool_calls = next_tools;
 
             if pending_tool_calls.is_empty() {
+                let no_pending_tool_names: Vec<String> = Vec::new();
+                if let Some(action) = constraint_harness.post_response_action(
+                    &crate::domain::runtime_constraints::PostResponseConstraintContext {
+                        request_text: &request_text_for_constraints,
+                        assistant_text: &next_text,
+                        pending_tool_names: &no_pending_tool_names,
+                        is_subagent: false,
+                    },
+                    &constraint_state,
+                ) {
+                    constraint_state.mark_post_action_attempted(action.id);
+                    emit_runtime_constraint_metadata(
+                        &app_clone,
+                        &repo_clone,
+                        &session_id_clone,
+                        &round_id_clone,
+                        &message_id_clone,
+                        "runtime_constraint_retry",
+                        serde_json::json!({ "id": action.id }),
+                    )
+                    .await;
+                    let updated_messages = {
+                        let sessions = sessions_clone.read().await;
+                        sessions
+                            .get(&session_id_clone)
+                            .map(|r| SessionCodec::to_api_messages(&r.session.messages))
+                            .unwrap_or_default()
+                    };
+                    let updated_llm_messages = api_messages_to_llm(&updated_messages);
+                    match run_post_response_retry_text_only(
+                        client.as_ref(),
+                        &app_clone,
+                        &message_id_clone,
+                        &round_id_clone,
+                        &updated_llm_messages,
+                        &action.instruction,
+                        &pending_tools_clone,
+                        &cancel_flag,
+                        repo_clone.clone(),
+                    )
+                    .await
+                    {
+                        Ok((retry_text, retry_reasoning, usage_retry))
+                            if !retry_text.trim().is_empty() =>
+                        {
+                            merge_turn_token_usage(&mut turn_token_usage, usage_retry);
+                            let retry_id = uuid::Uuid::new_v4().to_string();
+                            let retry_reasoning_save =
+                                (!retry_reasoning.is_empty()).then_some(retry_reasoning.as_str());
+                            if let Err(e) = repo_clone
+                                .save_message(
+                                    &retry_id,
+                                    &session_id_clone,
+                                    "assistant",
+                                    &retry_text,
+                                    None,
+                                    None,
+                                    None,
+                                    retry_reasoning_save,
+                                    None,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to save runtime retry assistant message: {}",
+                                    e
+                                );
+                            }
+                            {
+                                let mut sessions = sessions_clone.write().await;
+                                if let Some(runtime) = sessions.get_mut(&session_id_clone) {
+                                    let rc = (!retry_reasoning.is_empty())
+                                        .then(|| retry_reasoning.clone());
+                                    runtime.session.add_assistant_message_with_tools(
+                                        &retry_text,
+                                        None,
+                                        rc,
+                                    );
+                                }
+                            }
+                            final_reply_for_follow_up = retry_text.clone();
+                            last_assistant_id = retry_id;
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("Runtime post-response retry failed: {}", e);
+                        }
+                    }
+                }
+
+                if agent_runtime.runtime_constraints_config.buffer_responses {
+                    emit_buffered_assistant_text(
+                        &app_clone,
+                        &message_id_clone,
+                        &final_reply_for_follow_up,
+                    );
+                    emit_runtime_constraint_metadata(
+                        &app_clone,
+                        &repo_clone,
+                        &session_id_clone,
+                        &round_id_clone,
+                        &message_id_clone,
+                        "runtime_constraints.commit",
+                        serde_json::json!({
+                            "mode": "buffered",
+                            "phase": "final",
+                        }),
+                    )
+                    .await;
+                }
+
                 persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
-                
+
                 // Index chat to implicit memory
                 {
                     let project_path = {
                         let sessions = sessions_clone.read().await;
-                        sessions.get(&session_id_clone)
+                        sessions
+                            .get(&session_id_clone)
                             .map(|r| r.session.project_path.clone())
                             .unwrap_or_else(|| ".".to_string())
                     };
                     let repo = &*repo_clone;
                     let session_name = {
                         let sessions = sessions_clone.read().await;
-                        sessions.get(&session_id_clone)
+                        sessions
+                            .get(&session_id_clone)
                             .map(|r| r.session.name.clone())
                             .unwrap_or_else(|| "Unnamed".to_string())
                     };
-                    index_chat_to_implicit_memory(&app_clone, &project_path, &session_id_clone, &session_name, &repo).await;
+                    index_chat_to_implicit_memory(
+                        &app_clone,
+                        &project_path,
+                        &session_id_clone,
+                        &session_name,
+                        &repo,
+                    )
+                    .await;
                 }
-                
+
                 {
                     let repo = &*repo_clone;
                     if let Err(e) = repo
@@ -1716,13 +2744,21 @@ pub async fn send_message(
     // 如果是 Plan mode，生成初始 todo items
     let initial_todos = if is_plan_mode {
         scheduler_result.as_ref().map(|result| {
-            result.plan.subtasks.iter().enumerate().map(|(idx, subtask)| {
-                InitialTodoItem {
+            result
+                .plan
+                .subtasks
+                .iter()
+                .enumerate()
+                .map(|(idx, subtask)| InitialTodoItem {
                     id: format!("plan-todo-{}", idx),
                     content: subtask.description.clone(),
-                    status: if idx == 0 { "in_progress".to_string() } else { "pending".to_string() },
-                }
-            }).collect()
+                    status: if idx == 0 {
+                        "in_progress".to_string()
+                    } else {
+                        "pending".to_string()
+                    },
+                })
+                .collect()
         })
     } else {
         None
@@ -1756,11 +2792,7 @@ async fn finalize_pending_tool_by_id(
         return false;
     };
     let args = tool.arguments.join("");
-    completed_tool_calls.push((
-        tool.id.clone(),
-        tool.name.clone(),
-        args.clone(),
-    ));
+    completed_tool_calls.push((tool.id.clone(), tool.name.clone(), args.clone()));
     let _ = app.emit(
         &format!("chat-stream-{}", message_id),
         &StreamOutputItem::ToolUse {
@@ -1795,10 +2827,20 @@ async fn stream_llm_response_with_cancel(
     round_id: &str,
     messages: &[LlmMessage],
     tools: &[ToolSchema],
+    emit_text_chunks: bool,
     pending_tools: &Arc<Mutex<HashMap<String, PendingToolCall>>>,
     cancel_flag: &Arc<RwLock<bool>>,
     repo: Arc<crate::domain::persistence::SessionRepository>,
-) -> Result<(Vec<(String, String, String)>, String, String, bool, Option<crate::llm::TokenUsage>), OmigaError> {
+) -> Result<
+    (
+        Vec<(String, String, String)>,
+        String,
+        String,
+        bool,
+        Option<crate::llm::TokenUsage>,
+    ),
+    OmigaError,
+> {
     use futures::StreamExt;
 
     let stream = client
@@ -1836,10 +2878,12 @@ async fn stream_llm_response_with_cancel(
                             marked_partial = true;
                         }
                         assistant_text.push_str(&text);
-                        let _ = app.emit(
-                            &format!("chat-stream-{}", message_id),
-                            &StreamOutputItem::Text(text),
-                        );
+                        if emit_text_chunks {
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", message_id),
+                                &StreamOutputItem::Text(text),
+                            );
+                        }
                     }
                     LlmStreamChunk::ReasoningContent(text) => {
                         reasoning_content.push_str(&text);
@@ -2016,24 +3060,17 @@ async fn emit_post_turn_meta_then_complete(
         .unwrap_or((true, true));
     let (summary_enabled, follow_enabled) = flags;
 
-    let (summary_res, follow_res) = tokio::join!(
-        async {
-            if skip_summary {
-                return Ok(None);
-            }
-            crate::domain::agents::output_formatter::run_turn_summary_pass(
-                client,
-                final_reply,
-                summary_enabled,
-            )
-            .await
-        },
-        crate::domain::suggestions::generate_follow_up_suggestions(
+    // Run summary synchronously (needed before Complete so the frontend can render it)
+    let summary_res = if skip_summary {
+        Ok(None)
+    } else {
+        crate::domain::agents::output_formatter::run_turn_summary_pass(
             client,
-            suggestions_reply,
-            follow_enabled,
-        ),
-    );
+            final_reply,
+            summary_enabled,
+        )
+        .await
+    };
 
     let summary_text = match summary_res {
         Ok(v) => v,
@@ -2044,34 +3081,65 @@ async fn emit_post_turn_meta_then_complete(
     };
     let _ = app.emit(
         &format!("chat-stream-{}", stream_message_id),
-        &StreamOutputItem::TurnSummary {
-            text: summary_text,
-        },
+        &StreamOutputItem::TurnSummary { text: summary_text },
     );
 
-    match follow_res {
-        Ok(items) if !items.is_empty() => {
-            let _ = app.emit(
-                &format!("chat-stream-{}", stream_message_id),
-                &StreamOutputItem::FollowUpSuggestions(items.clone()),
-            );
-            // Persist follow-up suggestions to database for reload
-            if let Ok(json) = serde_json::to_string(&items) {
-                if let Err(e) = repo
-                    .update_message_follow_up_suggestions(assistant_message_id, Some(&json))
-                    .await
-                {
-                    tracing::warn!("Failed to persist follow-up suggestions: {}", e);
-                }
-            }
-        }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(target: "omiga::follow_up", "follow-up suggestions: {}", e),
-    }
+    // Emit Complete immediately to unblock the frontend
     let _ = app.emit(
         &format!("chat-stream-{}", stream_message_id),
         &StreamOutputItem::Complete,
     );
+
+    // Emit indicator that suggestions are being generated in background
+    if follow_enabled {
+        let _ = app.emit(
+            &format!("chat-stream-{}", stream_message_id),
+            &StreamOutputItem::SuggestionsGenerating,
+        );
+    }
+
+    // Spawn background task for follow-up suggestions so they don't block the frontend
+    let app_bg = app.clone();
+    let stream_id = stream_message_id.to_string();
+    let assistant_id = assistant_message_id.to_string();
+    let suggestions_text = suggestions_reply.to_string();
+    // Clone client config for background use
+    let client_config = client.config().clone();
+    tokio::spawn(async move {
+        let bg_client = match crate::llm::create_client(client_config) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(target: "omiga::follow_up", "failed to create bg client: {}", e);
+                return;
+            }
+        };
+        let follow_res = crate::domain::suggestions::generate_follow_up_suggestions(
+            bg_client.as_ref(),
+            &suggestions_text,
+            follow_enabled,
+        )
+        .await;
+
+        match follow_res {
+            Ok(items) if !items.is_empty() => {
+                let _ = app_bg.emit(
+                    &format!("chat-stream-{}", stream_id),
+                    &StreamOutputItem::FollowUpSuggestions(items.clone()),
+                );
+                // Persist to database
+                if let Ok(json) = serde_json::to_string(&items) {
+                    if let Err(e) = repo
+                        .update_message_follow_up_suggestions(&assistant_id, Some(&json))
+                        .await
+                    {
+                        tracing::warn!("Failed to persist follow-up suggestions: {}", e);
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(target: "omiga::follow_up", "follow-up suggestions: {}", e),
+        }
+    });
 }
 
 fn is_agent_tool_name(name: &str) -> bool {
@@ -2155,34 +3223,23 @@ async fn build_subagent_tool_schemas(
     subagent_opts: SubagentFilterOptions,
 ) -> Vec<ToolSchema> {
     let integrations_cfg = integrations_config::load_integrations_config(project_root);
-    let deny_entries =
-        load_merged_permission_deny_rule_entries(
-            project_root,
-        );
+    let deny_entries = load_merged_permission_deny_rule_entries(project_root);
     validate_permission_deny_entries(&deny_entries);
-    let built = filter_tool_schemas_by_deny_rule_entries(
-        all_tool_schemas(include_skill),
-        &deny_entries,
-    );
-    let mut built =
-        filter_tool_schemas_for_subagent(built, subagent_opts);
+    let built =
+        filter_tool_schemas_by_deny_rule_entries(all_tool_schemas(include_skill), &deny_entries);
+    let mut built = filter_tool_schemas_for_subagent(built, subagent_opts);
     built.sort_by(|a, b| a.name.cmp(&b.name));
     let base_names: HashSet<String> = built.iter().map(|t| t.name.clone()).collect();
     let mcp_timeout = std::time::Duration::from_secs(45);
     let mcp_tools =
         crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(project_root, mcp_timeout).await;
-    let mcp_after_deny = filter_tool_schemas_by_deny_rule_entries(
-        mcp_tools,
-        &deny_entries,
-    );
+    let mcp_after_deny = filter_tool_schemas_by_deny_rule_entries(mcp_tools, &deny_entries);
     let mcp_filtered: Vec<_> = mcp_after_deny
         .into_iter()
         .filter(|t| !base_names.contains(&t.name))
         .collect();
-    let mcp_filtered = integrations_config::filter_mcp_tools_by_integrations(
-        mcp_filtered,
-        &integrations_cfg,
-    );
+    let mcp_filtered =
+        integrations_config::filter_mcp_tools_by_integrations(mcp_filtered, &integrations_cfg);
     built.into_iter().chain(mcp_filtered).collect()
 }
 
@@ -2239,7 +3296,10 @@ async fn run_skill_forked(
     }
     if skills_exist {
         let loaded = skills::load_skills_cached(project_root, &skill_cache).await;
-        prompt_parts.push(skills::format_skills_index_system_section(project_root, &loaded));
+        prompt_parts.push(skills::format_skills_index_system_section(
+            project_root,
+            &loaded,
+        ));
     }
     sub_cfg.system_prompt = Some(prompt_parts.join("\n\n"));
 
@@ -2258,12 +3318,7 @@ async fn run_skill_forked(
     };
 
     // Build tool schemas - respect skill's allowed_tools
-    let mut tools = build_subagent_tool_schemas(
-        project_root,
-        skills_exist,
-        subagent_opts,
-    )
-    .await;
+    let mut tools = build_subagent_tool_schemas(project_root, skills_exist, subagent_opts).await;
 
     // Filter tools based on skill's allowed_tools
     if let Some(ref allowed) = allowed_tools {
@@ -2280,6 +3335,9 @@ async fn run_skill_forked(
 
     let mut transcript: Vec<Message> = vec![Message::User { content: user_text }];
     let subagent_skill_task_context = format!("{} {}", skill_name, skill_args);
+    let constraint_harness =
+        RuntimeConstraintHarness::from_config(runtime.runtime_constraints_config.clone());
+    let mut constraint_state = RuntimeConstraintState::default();
 
     // Execute sub-agent loop (similar to run_subagent_session)
     for _round_idx in 0..MAX_SUBAGENT_TOOL_ROUNDS {
@@ -2289,23 +3347,70 @@ async fn run_skill_forked(
 
         let api_msgs = SessionCodec::to_api_messages(&transcript);
         let llm_messages = api_messages_to_llm(&api_msgs);
-
-        let (tool_calls, assistant_text, reasoning_text, cancelled, _) = stream_llm_response_with_cancel(
-            client.as_ref(),
-            app,
-            message_id,
-            &runtime.round_id,
+        let (constrained_messages, _notice_ids) = augment_llm_messages_with_runtime_constraints(
             &llm_messages,
-            &tools,
-            &runtime.pending_tools,
-            &runtime.cancel_flag,
-            runtime.repo.clone(),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+            &constraint_harness,
+            &mut constraint_state,
+            &subagent_skill_task_context,
+            project_root,
+            true,
+            true,
+        );
+
+        let (tool_calls, assistant_text, reasoning_text, cancelled, _) =
+            stream_llm_response_with_cancel(
+                client.as_ref(),
+                app,
+                message_id,
+                &runtime.round_id,
+                &constrained_messages,
+                &tools,
+                true,
+                &runtime.pending_tools,
+                &runtime.cancel_flag,
+                runtime.repo.clone(),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
 
         if cancelled {
             return Err("Skill execution cancelled.".to_string());
+        }
+
+        let pending_tool_names: Vec<String> =
+            tool_calls.iter().map(|(_, name, _)| name.clone()).collect();
+        if let Some(block) = constraint_harness.tool_gate(
+            &ToolConstraintContext {
+                request_text: &subagent_skill_task_context,
+                assistant_text: &assistant_text,
+                pending_tool_names: &pending_tool_names,
+                is_subagent: true,
+            },
+            &constraint_state,
+        ) {
+            constraint_state.mark_clarification_requested();
+            let tc = completed_to_tool_calls(&tool_calls);
+            transcript.push(Message::Assistant {
+                content: assistant_text,
+                tool_calls: tc,
+                token_usage: None,
+                reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text),
+                follow_up_suggestions: None,
+            });
+            for (tool_use_id, _name, _arguments) in &tool_calls {
+                transcript.push(Message::Tool {
+                    tool_call_id: tool_use_id.clone(),
+                    output: block.tool_result_message.clone(),
+                });
+            }
+            transcript.push(Message::Assistant {
+                content: block.assistant_response.clone(),
+                tool_calls: None,
+                token_usage: None,
+                reasoning_content: None,
+                follow_up_suggestions: None,
+            });
+            return Ok(block.assistant_response);
         }
 
         let tc = completed_to_tool_calls(&tool_calls);
@@ -2318,8 +3423,55 @@ async fn run_skill_forked(
         });
 
         if tool_calls.is_empty() {
+            let no_pending_tool_names: Vec<String> = Vec::new();
+            if let Some(action) = constraint_harness.post_response_action(
+                &crate::domain::runtime_constraints::PostResponseConstraintContext {
+                    request_text: &subagent_skill_task_context,
+                    assistant_text: &assistant_text,
+                    pending_tool_names: &no_pending_tool_names,
+                    is_subagent: true,
+                },
+                &constraint_state,
+            ) {
+                constraint_state.mark_post_action_attempted(action.id);
+                let (retry_messages, _retry_notice_ids) =
+                    augment_llm_messages_with_runtime_constraints(
+                        &api_messages_to_llm(&SessionCodec::to_api_messages(&transcript)),
+                        &constraint_harness,
+                        &mut constraint_state,
+                        &subagent_skill_task_context,
+                        project_root,
+                        true,
+                        true,
+                    );
+                let (retry_text, retry_reasoning, _) = run_post_response_retry_text_only(
+                    client.as_ref(),
+                    app,
+                    message_id,
+                    &runtime.round_id,
+                    &retry_messages,
+                    &action.instruction,
+                    &runtime.pending_tools,
+                    &runtime.cancel_flag,
+                    runtime.repo.clone(),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                if !retry_text.trim().is_empty() {
+                    transcript.push(Message::Assistant {
+                        content: retry_text.clone(),
+                        tool_calls: None,
+                        token_usage: None,
+                        reasoning_content: (!retry_reasoning.is_empty()).then(|| retry_reasoning),
+                        follow_up_suggestions: None,
+                    });
+                    return Ok(retry_text);
+                }
+            }
             return Ok(assistant_text);
         }
+
+        constraint_state.record_tool_names(tool_calls.iter().map(|(_, name, _)| name.as_str()));
 
         // Execute tool calls
         let results = execute_tool_calls(
@@ -2385,7 +3537,12 @@ async fn run_subagent_session_foreground_inner(
     };
 
     let agent_model_config = agent_def.model();
-    let resolved_agent_model = if args.model.as_deref().map(|m| !m.is_empty()).unwrap_or(false) {
+    let resolved_agent_model = if args
+        .model
+        .as_deref()
+        .map(|m| !m.is_empty())
+        .unwrap_or(false)
+    {
         resolve_subagent_model(&runtime.llm_config, args.model.as_deref())
     } else if agent_model_config.map(|m| m != "inherit").unwrap_or(false) {
         resolve_subagent_model(&runtime.llm_config, agent_model_config)
@@ -2419,16 +3576,18 @@ async fn run_subagent_session_foreground_inner(
         let mem_cfg = crate::domain::memory::load_resolved_config(effective_root)
             .await
             .unwrap_or_default();
-        prompt_parts.push(crate::domain::memory::memory_agent_system_prompt_with_config(
-            effective_root,
-            &mem_cfg,
-        ));
+        prompt_parts.push(
+            crate::domain::memory::memory_agent_system_prompt_with_config(effective_root, &mem_cfg),
+        );
     } else {
         let tool_ctx = ToolContext::new(effective_root)
             .with_execution_environment(runtime.execution_environment.clone())
             .with_ssh_server(runtime.ssh_server.clone())
             .with_sandbox_backend(runtime.sandbox_backend.clone())
-            .with_local_venv(runtime.local_venv_type.clone(), runtime.local_venv_name.clone());
+            .with_local_venv(
+                runtime.local_venv_type.clone(),
+                runtime.local_venv_name.clone(),
+            );
         let agent_specific_prompt =
             crate::domain::agents::compose_full_agent_system_prompt(agent_def, &tool_ctx);
 
@@ -2471,7 +3630,10 @@ async fn run_subagent_session_foreground_inner(
     }
     if skills_exist && !agent_def.omit_claude_md() {
         let loaded = skills::load_skills_cached(effective_root, &skill_cache).await;
-        prompt_parts.push(skills::format_skills_index_system_section(effective_root, &loaded));
+        prompt_parts.push(skills::format_skills_index_system_section(
+            effective_root,
+            &loaded,
+        ));
     }
     sub_cfg.system_prompt = Some(prompt_parts.join("\n\n"));
     let client = create_client(sub_cfg).map_err(|e| e.to_string())?;
@@ -2479,12 +3641,7 @@ async fn run_subagent_session_foreground_inner(
         parent_in_plan_mode: parent_in_plan,
         allow_nested_agent: runtime.allow_nested_agent,
     };
-    let mut tools = build_subagent_tool_schemas(
-        effective_root,
-        skills_exist,
-        subagent_opts,
-    )
-    .await;
+    let mut tools = build_subagent_tool_schemas(effective_root, skills_exist, subagent_opts).await;
 
     if let Some(ref allowed) = agent_def.allowed_tools() {
         let allowed_set: std::collections::HashSet<_> = allowed.iter().cloned().collect();
@@ -2501,6 +3658,9 @@ async fn run_subagent_session_foreground_inner(
     );
     let initial_user = Message::User { content: user_text };
     let mut transcript: Vec<Message> = vec![initial_user.clone()];
+    let constraint_harness =
+        RuntimeConstraintHarness::from_config(runtime.runtime_constraints_config.clone());
+    let mut constraint_state = RuntimeConstraintState::default();
     if let Some(tid) = background_task_id {
         persist_background_transcript_message(&runtime.repo, tid, session_id, &initial_user).await;
     }
@@ -2532,24 +3692,101 @@ async fn run_subagent_session_foreground_inner(
         }
         let api_msgs = SessionCodec::to_api_messages(&transcript);
         let llm_messages = api_messages_to_llm(&api_msgs);
-        let (tool_calls, assistant_text, reasoning_text, cancelled, _) = stream_llm_response_with_cancel(
-            client.as_ref(),
-            app,
-            message_id,
-            &runtime.round_id,
+        let (constrained_messages, _notice_ids) = augment_llm_messages_with_runtime_constraints(
             &llm_messages,
-            &tools,
-            &runtime.pending_tools,
-            &runtime.cancel_flag,
-            runtime.repo.clone(),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+            &constraint_harness,
+            &mut constraint_state,
+            &subagent_skill_task_context,
+            effective_root,
+            true,
+            true,
+        );
+        let (tool_calls, assistant_text, reasoning_text, cancelled, _) =
+            stream_llm_response_with_cancel(
+                client.as_ref(),
+                app,
+                message_id,
+                &runtime.round_id,
+                &constrained_messages,
+                &tools,
+                true,
+                &runtime.pending_tools,
+                &runtime.cancel_flag,
+                runtime.repo.clone(),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
         if cancelled {
             if let Some(tid) = background_task_id {
                 persist_background_cancel_notice(&runtime.repo, tid, session_id).await;
             }
             return Err("Sub-agent cancelled.".to_string());
+        }
+        let pending_tool_names: Vec<String> =
+            tool_calls.iter().map(|(_, name, _)| name.clone()).collect();
+        if let Some(block) = constraint_harness.tool_gate(
+            &ToolConstraintContext {
+                request_text: &subagent_skill_task_context,
+                assistant_text: &assistant_text,
+                pending_tool_names: &pending_tool_names,
+                is_subagent: true,
+            },
+            &constraint_state,
+        ) {
+            constraint_state.mark_clarification_requested();
+            let tc = completed_to_tool_calls(&tool_calls);
+            let blocked_asst = Message::Assistant {
+                content: assistant_text,
+                tool_calls: tc,
+                token_usage: None,
+                reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text),
+                follow_up_suggestions: None,
+            };
+            if let Some(tid) = background_task_id {
+                persist_background_transcript_message(
+                    &runtime.repo,
+                    tid,
+                    session_id,
+                    &blocked_asst,
+                )
+                .await;
+            }
+            transcript.push(blocked_asst);
+            let tool_messages: Vec<Message> = tool_calls
+                .iter()
+                .map(|(tool_use_id, _name, _arguments)| Message::Tool {
+                    tool_call_id: tool_use_id.clone(),
+                    output: block.tool_result_message.clone(),
+                })
+                .collect();
+            if let Some(tid) = background_task_id {
+                persist_background_transcript_messages(
+                    &runtime.repo,
+                    tid,
+                    session_id,
+                    &tool_messages,
+                )
+                .await;
+            }
+            transcript.extend(tool_messages);
+            let clarification = Message::Assistant {
+                content: block.assistant_response.clone(),
+                tool_calls: None,
+                token_usage: None,
+                reasoning_content: None,
+                follow_up_suggestions: None,
+            };
+            if let Some(tid) = background_task_id {
+                persist_background_transcript_message(
+                    &runtime.repo,
+                    tid,
+                    session_id,
+                    &clarification,
+                )
+                .await;
+            }
+            transcript.push(clarification);
+            return Ok(block.assistant_response);
         }
         let tc = completed_to_tool_calls(&tool_calls);
         let asst = Message::Assistant {
@@ -2564,8 +3801,64 @@ async fn run_subagent_session_foreground_inner(
         }
         transcript.push(asst);
         if tool_calls.is_empty() {
+            let no_pending_tool_names: Vec<String> = Vec::new();
+            if let Some(action) = constraint_harness.post_response_action(
+                &crate::domain::runtime_constraints::PostResponseConstraintContext {
+                    request_text: &subagent_skill_task_context,
+                    assistant_text: &assistant_text,
+                    pending_tool_names: &no_pending_tool_names,
+                    is_subagent: true,
+                },
+                &constraint_state,
+            ) {
+                constraint_state.mark_post_action_attempted(action.id);
+                let (retry_messages, _retry_notice_ids) =
+                    augment_llm_messages_with_runtime_constraints(
+                        &api_messages_to_llm(&SessionCodec::to_api_messages(&transcript)),
+                        &constraint_harness,
+                        &mut constraint_state,
+                        &subagent_skill_task_context,
+                        effective_root,
+                        true,
+                        true,
+                    );
+                let (retry_text, retry_reasoning, _) = run_post_response_retry_text_only(
+                    client.as_ref(),
+                    app,
+                    message_id,
+                    &runtime.round_id,
+                    &retry_messages,
+                    &action.instruction,
+                    &runtime.pending_tools,
+                    &runtime.cancel_flag,
+                    runtime.repo.clone(),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                if !retry_text.trim().is_empty() {
+                    let retry_asst = Message::Assistant {
+                        content: retry_text.clone(),
+                        tool_calls: None,
+                        token_usage: None,
+                        reasoning_content: (!retry_reasoning.is_empty()).then(|| retry_reasoning),
+                        follow_up_suggestions: None,
+                    };
+                    if let Some(tid) = background_task_id {
+                        persist_background_transcript_message(
+                            &runtime.repo,
+                            tid,
+                            session_id,
+                            &retry_asst,
+                        )
+                        .await;
+                    }
+                    transcript.push(retry_asst);
+                    return Ok(retry_text);
+                }
+            }
             return Ok(assistant_text);
         }
+        constraint_state.record_tool_names(tool_calls.iter().map(|(_, name, _)| name.as_str()));
         let results = execute_tool_calls(
             &tool_calls,
             app,
@@ -2624,27 +3917,31 @@ async fn run_subagent_session(
 ) -> Result<String, String> {
     // ===== Agent 路由系统集成（含自动调度）=====
     let router = crate::domain::agents::get_agent_router();
-    
+
     // 如果用户没有指定 subagent_type，使用调度器自动选择
-    let selected_agent_type = args.subagent_type.as_deref().map(|s| s.to_string()).unwrap_or_else(|| {
-        let selector = AgentSelector::new();
-        let agent_type = selector.select(&args.prompt, project_root.to_str().unwrap_or("."));
-        tracing::info!(
-            target: "omiga::scheduler",
-            prompt_preview = %args.prompt.chars().take(50).collect::<String>(),
-            selected_agent = %agent_type,
-            "Auto-selected agent via scheduler"
-        );
-        agent_type
-    });
-    
+    let selected_agent_type = args
+        .subagent_type
+        .as_deref()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            let selector = AgentSelector::new();
+            let agent_type = selector.select(&args.prompt, project_root.to_str().unwrap_or("."));
+            tracing::info!(
+                target: "omiga::scheduler",
+                prompt_preview = %args.prompt.chars().take(50).collect::<String>(),
+                selected_agent = %agent_type,
+                "Auto-selected agent via scheduler"
+            );
+            agent_type
+        });
+
     let agent_def = router.select_agent(Some(&selected_agent_type));
-    
+
     let effective_root = resolve_agent_cwd(project_root, args.cwd.as_deref());
-    
+
     // 检查是否需要后台执行
     let should_run_in_background = args.run_in_background == Some(true) || agent_def.background();
-    
+
     if should_run_in_background {
         // 启动后台 Agent 任务
         return spawn_background_agent(
@@ -2661,7 +3958,8 @@ async fn run_subagent_session(
             web_search_api_keys,
             skill_cache,
             agent_def,
-        ).await;
+        )
+        .await;
     }
 
     run_subagent_session_foreground_inner(
@@ -2731,8 +4029,7 @@ async fn persist_background_transcript_messages(
 }
 
 /// User-visible line in the sidechain when the background worker stops due to cancellation.
-const BG_SIDECHAIN_CANCEL_NOTICE: &str =
-    "[系统] 后台任务已取消（用户或系统终止了运行）。";
+const BG_SIDECHAIN_CANCEL_NOTICE: &str = "[系统] 后台任务已取消（用户或系统终止了运行）。";
 
 async fn persist_background_cancel_notice(
     repo: &Arc<crate::domain::persistence::SessionRepository>,
@@ -2762,7 +4059,7 @@ pub(crate) async fn spawn_background_agent(
     agent_def: &dyn crate::domain::agents::AgentDefinition,
 ) -> Result<String, String> {
     use crate::domain::agents::background::*;
-    
+
     // 注册后台任务
     let manager = crate::domain::agents::background::get_background_agent_manager();
     let task_id = manager
@@ -2778,21 +4075,25 @@ pub(crate) async fn spawn_background_agent(
     if let Some(task) = manager.get_task(&task_id).await {
         persist_background_agent_task_snapshot(&bg_repo, &task).await;
     }
-    
+
     // 获取输出文件路径
-    let output_path = crate::domain::agents::background::get_background_agent_output_path(app, session_id, &task_id)?;
-    
+    let output_path = crate::domain::agents::background::get_background_agent_output_path(
+        app, session_id, &task_id,
+    )?;
+
     // 更新任务状态为运行中
-    manager.update_task_status(&task_id, BackgroundAgentStatus::Running).await;
+    manager
+        .update_task_status(&task_id, BackgroundAgentStatus::Running)
+        .await;
     if let Some(task) = manager.get_task(&task_id).await {
         persist_background_agent_task_snapshot(&bg_repo, &task).await;
     }
-    
+
     // 发送更新事件
     if let Some(task) = manager.get_task(&task_id).await {
         let _ = emit_background_agent_update(app, &task);
     }
-    
+
     // 克隆需要的变量用于异步任务
     let app_clone = app.clone();
     let message_id_clone = message_id.to_string();
@@ -2806,13 +4107,13 @@ pub(crate) async fn spawn_background_agent(
     let skill_cache_clone = skill_cache.clone();
     let task_id_clone = task_id.clone();
     let output_path_clone = output_path.clone();
-    
+
     // 克隆 agent_def 的数据
     let agent_type_clone = agent_def.agent_type().to_string();
-    
+
     // 创建取消令牌
     let cancel_token = manager.create_cancel_token(&task_id);
-    
+
     // 在后台运行 Agent
     tokio::spawn(async move {
         // 构建运行时
@@ -2831,8 +4132,9 @@ pub(crate) async fn spawn_background_agent(
             env_store: runtime_clone.env_store.clone(),
             local_venv_type: runtime_clone.local_venv_type.clone(),
             local_venv_name: runtime_clone.local_venv_name.clone(),
+            runtime_constraints_config: runtime_clone.runtime_constraints_config.clone(),
         };
-        
+
         // 运行子 Agent 会话（同步等待结果）
         let result = run_subagent_session_internal(
             &app_clone,
@@ -2849,28 +4151,31 @@ pub(crate) async fn spawn_background_agent(
             skill_cache_clone,
             cancel_token,
             &task_id_clone,
-        ).await;
-        
+        )
+        .await;
+
         let manager = crate::domain::agents::background::get_background_agent_manager();
-        
+
         match result {
             Ok(output) => {
                 // 写入输出文件
                 let summary = format!(
                     "# Background Agent Task: {}\n\n## Agent Type\n{}\n\n## Result\n{}\n",
-                    args_clone.description,
-                    agent_type_clone,
-                    output
+                    args_clone.description, agent_type_clone, output
                 );
-                
+
                 if let Err(e) = std::fs::write(&output_path_clone, &summary) {
-                    let _ = manager.set_task_error(&task_id_clone, format!("Failed to write output: {}", e)).await;
+                    let _ = manager
+                        .set_task_error(&task_id_clone, format!("Failed to write output: {}", e))
+                        .await;
                 } else {
-                    let _ = manager.set_task_result(
-                        &task_id_clone,
-                        output,
-                        output_path_clone.to_string_lossy().to_string(),
-                    ).await;
+                    let _ = manager
+                        .set_task_result(
+                            &task_id_clone,
+                            output,
+                            output_path_clone.to_string_lossy().to_string(),
+                        )
+                        .await;
                 }
             }
             Err(e) => {
@@ -2881,13 +4186,13 @@ pub(crate) async fn spawn_background_agent(
         if let Some(task) = manager.get_task(&task_id_clone).await {
             persist_background_agent_task_snapshot(&bg_repo_spawn, &task).await;
         }
-        
+
         // 发送完成事件
         if let Some(task) = manager.get_task(&task_id_clone).await {
             let _ = emit_background_agent_complete(&app_clone, &task);
         }
     });
-    
+
     // 立即返回任务 ID
     Ok(format!(
         "Background agent '{}' started with task ID: {}. \
@@ -2944,15 +4249,26 @@ fn is_parallelizable_tool(tool_name: &str) -> bool {
     tool_name.starts_with("mcp__")
         || matches!(
             tool_name,
-            "web_search" | "WebSearch" | "web_fetch" | "WebFetch"
-            | "file_read" | "Read" | "glob" | "Glob" | "ripgrep" | "Ripgrep" | "grep" | "Grep"
+            "web_search"
+                | "WebSearch"
+                | "web_fetch"
+                | "WebFetch"
+                | "file_read"
+                | "Read"
+                | "glob"
+                | "Glob"
+                | "ripgrep"
+                | "Ripgrep"
+                | "grep"
+                | "Grep"
+                | "recall"
+                | "Recall"
         )
 }
 
 fn matches_ask_user_question_name(name: &str) -> bool {
     let n = name.trim();
-    n.eq_ignore_ascii_case("ask_user_question")
-        || n.eq_ignore_ascii_case("AskUserQuestion")
+    n.eq_ignore_ascii_case("ask_user_question") || n.eq_ignore_ascii_case("AskUserQuestion")
 }
 
 fn ask_user_waiter_key(session_id: &str, message_id: &str, tool_use_id: &str) -> String {
@@ -2973,7 +4289,8 @@ async fn cancel_ask_user_waiters_for_message(
         .collect();
     for k in keys {
         if let Some(w) = map.remove(&k) {
-            let _ = w.tx.send(Err("User cancelled before answering.".to_string()));
+            let _ =
+                w.tx.send(Err("User cancelled before answering.".to_string()));
         }
     }
 }
@@ -3085,9 +4402,7 @@ async fn wait_for_permission_tool_resolution(
 
     let pending_msg = format!(
         "⏳ 需要权限确认: {}\n\n风险级别: {:?}\n{}\n\n请在输入框上方批准或拒绝。",
-        tool_name_for_event,
-        req.risk.level,
-        req.risk.description
+        tool_name_for_event, req.risk.level, req.risk.description
     );
     let _ = app.emit(
         &format!("chat-stream-{}", message_id),
@@ -3345,12 +4660,8 @@ async fn execute_ask_user_question_interactive(
         },
     );
 
-    let model_output = process_tool_output_for_model(
-        output_text.clone(),
-        &tool_use_id,
-        tool_results_dir,
-    )
-    .await;
+    let model_output =
+        process_tool_output_for_model(output_text.clone(), &tool_use_id, tool_results_dir).await;
     (tool_use_id, model_output, false)
 }
 
@@ -3387,14 +4698,13 @@ async fn execute_tool_calls(
 
     // (tool_use_id, output, is_error)
     let mut results = Vec::new();
-    let deny_entries =
-        load_merged_permission_deny_rule_entries(project_root);
+    let deny_entries = load_merged_permission_deny_rule_entries(project_root);
 
     // Pre-compute permission + subagent-filter results for every call (fast, sequential).
     // Calls that pass become futures; blocked calls become immediate error results.
     enum CallPrep<'a> {
         Blocked(String, String, bool), // (tool_use_id, error_msg, is_error=true)
-        Ready(&'a str), // tool_name only (indices carry id+args via tool_calls[idx])
+        Ready(&'a str),                // tool_name only (indices carry id+args via tool_calls[idx])
     }
 
     let prepped: Vec<CallPrep<'_>> = tool_calls
@@ -3438,8 +4748,7 @@ async fn execute_tool_calls(
 
     // Emit ToolResult for every pre-blocked call and record it in results at correct index.
     // We need to maintain index alignment so we can merge parallel results back in order.
-    let mut ordered_results: Vec<Option<(String, String, bool)>> =
-        vec![None; tool_calls.len()];
+    let mut ordered_results: Vec<Option<(String, String, bool)>> = vec![None; tool_calls.len()];
 
     let mut parallel_indices: Vec<usize> = Vec::new();
     let mut sequential_indices: Vec<usize> = Vec::new();
@@ -3458,8 +4767,7 @@ async fn execute_tool_calls(
                         is_error: *is_error,
                     },
                 );
-                ordered_results[idx] =
-                    Some((tool_use_id.clone(), error_msg.clone(), *is_error));
+                ordered_results[idx] = Some((tool_use_id.clone(), error_msg.clone(), *is_error));
             }
             CallPrep::Ready(tool_name) => {
                 if is_parallelizable_tool(tool_name) {
@@ -3595,9 +4903,7 @@ async fn execute_one_tool(
         } else {
             false
         };
-        let allow_nested = agent_runtime
-            .map(|r| r.allow_nested_agent)
-            .unwrap_or(false);
+        let allow_nested = agent_runtime.map(|r| r.allow_nested_agent).unwrap_or(false);
         let sub_opts = SubagentFilterOptions {
             parent_in_plan_mode: parent_in_plan,
             allow_nested_agent: allow_nested,
@@ -3622,10 +4928,11 @@ async fn execute_one_tool(
 
     // === Permission Check for ALL tools (not just skill) ===
     // Skip permission check for certain safe tools
-    let needs_permission_check = !matches!(tool_name.as_str(),
+    let needs_permission_check = !matches!(
+        tool_name.as_str(),
         "list_skills" | "skills_list" | "skill_view" | "ask_user" | "ask_user_question"
     );
-    
+
     if needs_permission_check {
         let Some(app_state) = app.try_state::<OmigaAppState>() else {
             let error_msg = "内部错误：无法获取应用状态".to_string();
@@ -3724,77 +5031,86 @@ async fn execute_one_tool(
     let result = if tool_name.eq_ignore_ascii_case("list_skills")
         || tool_name.eq_ignore_ascii_case("skills_list")
     {
-            let args: ListSkillsArgs = if arguments.trim().is_empty() {
-                ListSkillsArgs::default()
-            } else {
-                serde_json::from_str(arguments).unwrap_or_default()
-            };
-            let icfg = integrations_config::load_integrations_config(project_root);
-            let mut all_skills =
-                skills::load_skills_cached(project_root, &skill_cache).await;
-            let total_skills_before_filter = all_skills.len();
-            all_skills = integrations_config::filter_skill_entries(all_skills, &icfg);
-            let filtered_count = all_skills.len();
-            
-            // Telemetry for list_skills / skills_list (aligned with SkillTool telemetry)
-            tracing::info!(
-                tool = %tool_name,
-                query = ?args.query,
-                has_task_context = skill_task_context.is_some(),
-                total_skills = total_skills_before_filter,
-                after_filter = filtered_count,
-                disabled_count = total_skills_before_filter - filtered_count,
-                "list skills tool invoked"
-            );
-            
-            let json = skills::list_skills_metadata_json(
-                &all_skills,
-                args.query.as_deref(),
-                skill_task_context,
-            );
-            let is_error = false;
-            let display_output = if json.len() > PREVIEW_SIZE_BYTES {
-                let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
-                format!(
-                    "{}\n\n[Output truncated... {} total characters]",
-                    prefix,
-                    json.len()
-                )
-            } else {
-                json.clone()
-            };
-            let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
-                let prefix =
-                    truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
-                format!(
-                    "{}\n\n[Input truncated... {} total characters]",
-                    prefix,
-                    arguments.len()
-                )
-            } else {
-                arguments.clone()
-            };
-            let _ = app.emit(
-                &format!("chat-stream-{}", message_id),
-                &StreamOutputItem::ToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    name: tool_name.clone(),
-                    input: display_input,
-                    output: display_output,
-                    is_error,
-                },
-            );
-            let model_output = process_tool_output_for_model(
-                json,
-                tool_use_id,
-                tool_results_dir,
+        let args: ListSkillsArgs = if arguments.trim().is_empty() {
+            ListSkillsArgs::default()
+        } else {
+            serde_json::from_str(arguments).unwrap_or_default()
+        };
+        let icfg = integrations_config::load_integrations_config(project_root);
+        let mut all_skills = skills::load_skills_cached(project_root, &skill_cache).await;
+        let total_skills_before_filter = all_skills.len();
+        all_skills = integrations_config::filter_skill_entries(all_skills, &icfg);
+        let filtered_count = all_skills.len();
+
+        // Telemetry for list_skills / skills_list (aligned with SkillTool telemetry)
+        tracing::info!(
+            tool = %tool_name,
+            query = ?args.query,
+            has_task_context = skill_task_context.is_some(),
+            total_skills = total_skills_before_filter,
+            after_filter = filtered_count,
+            disabled_count = total_skills_before_filter - filtered_count,
+            "list skills tool invoked"
+        );
+
+        let json = skills::list_skills_metadata_json(
+            &all_skills,
+            args.query.as_deref(),
+            skill_task_context,
+        );
+        let is_error = false;
+        let display_output = if json.len() > PREVIEW_SIZE_BYTES {
+            let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
+            format!(
+                "{}\n\n[Output truncated... {} total characters]",
+                prefix,
+                json.len()
             )
-            .await;
-            (tool_use_id.clone(), model_output, is_error)
-        } else if tool_name.eq_ignore_ascii_case("skill_view") {
-            match serde_json::from_str::<SkillViewArgs>(arguments) {
-                Err(e) => {
-                    let error_msg = format!("skill_view: invalid JSON: {e}");
+        } else {
+            json.clone()
+        };
+        let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+            let prefix = truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+            format!(
+                "{}\n\n[Input truncated... {} total characters]",
+                prefix,
+                arguments.len()
+            )
+        } else {
+            arguments.clone()
+        };
+        let _ = app.emit(
+            &format!("chat-stream-{}", message_id),
+            &StreamOutputItem::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                name: tool_name.clone(),
+                input: display_input,
+                output: display_output,
+                is_error,
+            },
+        );
+        let model_output = process_tool_output_for_model(json, tool_use_id, tool_results_dir).await;
+        (tool_use_id.clone(), model_output, is_error)
+    } else if tool_name.eq_ignore_ascii_case("skill_view") {
+        match serde_json::from_str::<SkillViewArgs>(arguments) {
+            Err(e) => {
+                let error_msg = format!("skill_view: invalid JSON: {e}");
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: arguments.clone(),
+                        output: error_msg.clone(),
+                        is_error: true,
+                    },
+                );
+                (tool_use_id.clone(), error_msg, true)
+            }
+            Ok(args) => {
+                if args.skill.trim().is_empty() {
+                    let error_msg =
+                        "skill_view: missing or empty `skill` (or `name`) field".to_string();
                     let _ = app.emit(
                         &format!("chat-stream-{}", message_id),
                         &StreamOutputItem::ToolResult {
@@ -3806,191 +5122,216 @@ async fn execute_one_tool(
                         },
                     );
                     (tool_use_id.clone(), error_msg, true)
-                }
-                Ok(args) => {
-                    if args.skill.trim().is_empty() {
-                        let error_msg =
-                            "skill_view: missing or empty `skill` (or `name`) field".to_string();
-                        let _ = app.emit(
-                            &format!("chat-stream-{}", message_id),
-                            &StreamOutputItem::ToolResult {
-                                tool_use_id: tool_use_id.clone(),
-                                name: tool_name.clone(),
-                                input: arguments.clone(),
-                                output: error_msg.clone(),
-                                is_error: true,
-                            },
-                        );
-                        (tool_use_id.clone(), error_msg, true)
-                    } else {
-                        let icfg = integrations_config::load_integrations_config(project_root);
-                        let mut all_skills =
-                            skills::load_skills_cached(project_root, &skill_cache).await;
-                        all_skills = integrations_config::filter_skill_entries(all_skills, &icfg);
-                        match skills::execute_skill_view(
-                            &all_skills,
-                            args.skill.trim(),
-                            args.file_path.as_deref(),
-                        )
-                        .await
-                        {
-                            Ok(json_val) => {
-                                let json = serde_json::to_string_pretty(&json_val)
-                                    .unwrap_or_else(|_| "{\"success\":false}".to_string());
-                                let is_error = false;
-                                let display_output = if json.len() > PREVIEW_SIZE_BYTES {
-                                    let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
-                                    format!(
-                                        "{}\n\n[Output truncated... {} total characters]",
-                                        prefix,
-                                        json.len()
-                                    )
-                                } else {
-                                    json.clone()
-                                };
-                                let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
-                                    let prefix = truncate_utf8_prefix(
-                                        arguments,
-                                        TOOL_DISPLAY_MAX_INPUT_CHARS,
-                                    );
-                                    format!(
-                                        "{}\n\n[Input truncated... {} total characters]",
-                                        prefix,
-                                        arguments.len()
-                                    )
-                                } else {
-                                    arguments.clone()
-                                };
-                                let _ = app.emit(
-                                    &format!("chat-stream-{}", message_id),
-                                    &StreamOutputItem::ToolResult {
-                                        tool_use_id: tool_use_id.clone(),
-                                        name: tool_name.clone(),
-                                        input: display_input,
-                                        output: display_output,
-                                        is_error,
-                                    },
-                                );
-                                let model_output = process_tool_output_for_model(
-                                    json,
-                                    tool_use_id,
-                                    tool_results_dir,
+                } else {
+                    let icfg = integrations_config::load_integrations_config(project_root);
+                    let mut all_skills =
+                        skills::load_skills_cached(project_root, &skill_cache).await;
+                    all_skills = integrations_config::filter_skill_entries(all_skills, &icfg);
+                    match skills::execute_skill_view(
+                        &all_skills,
+                        args.skill.trim(),
+                        args.file_path.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(json_val) => {
+                            let json = serde_json::to_string_pretty(&json_val)
+                                .unwrap_or_else(|_| "{\"success\":false}".to_string());
+                            let is_error = false;
+                            let display_output = if json.len() > PREVIEW_SIZE_BYTES {
+                                let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
+                                format!(
+                                    "{}\n\n[Output truncated... {} total characters]",
+                                    prefix,
+                                    json.len()
                                 )
-                                .await;
-                                (tool_use_id.clone(), model_output, is_error)
-                            }
-                            Err(e) => {
-                                tracing::warn!(tool = "skill_view", error = %e, "skill_view failed");
-                                let _ = app.emit(
-                                    &format!("chat-stream-{}", message_id),
-                                    &StreamOutputItem::ToolResult {
-                                        tool_use_id: tool_use_id.clone(),
-                                        name: tool_name.clone(),
-                                        input: arguments.clone(),
-                                        output: e.clone(),
-                                        is_error: true,
-                                    },
-                                );
-                                (tool_use_id.clone(), e, true)
-                            }
+                            } else {
+                                json.clone()
+                            };
+                            let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                                let prefix =
+                                    truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+                                format!(
+                                    "{}\n\n[Input truncated... {} total characters]",
+                                    prefix,
+                                    arguments.len()
+                                )
+                            } else {
+                                arguments.clone()
+                            };
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", message_id),
+                                &StreamOutputItem::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    name: tool_name.clone(),
+                                    input: display_input,
+                                    output: display_output,
+                                    is_error,
+                                },
+                            );
+                            let model_output =
+                                process_tool_output_for_model(json, tool_use_id, tool_results_dir)
+                                    .await;
+                            (tool_use_id.clone(), model_output, is_error)
+                        }
+                        Err(e) => {
+                            tracing::warn!(tool = "skill_view", error = %e, "skill_view failed");
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", message_id),
+                                &StreamOutputItem::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    name: tool_name.clone(),
+                                    input: arguments.clone(),
+                                    output: e.clone(),
+                                    is_error: true,
+                                },
+                            );
+                            (tool_use_id.clone(), e, true)
                         }
                     }
                 }
             }
-        } else if tool_name.eq_ignore_ascii_case("skill_manage") {
-            let out = skills::execute_skill_manage(project_root, arguments, &skill_cache).await;
-            match out {
-                Ok(json_val) => {
-                    let json = serde_json::to_string_pretty(&json_val)
-                        .unwrap_or_else(|_| "{\"success\":false}".to_string());
-                    let is_error = false;
-                    let display_output = if json.len() > PREVIEW_SIZE_BYTES {
-                        let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
-                        format!(
-                            "{}\n\n[Output truncated... {} total characters]",
-                            prefix,
-                            json.len()
-                        )
-                    } else {
-                        json.clone()
-                    };
-                    let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
-                        let prefix =
-                            truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
-                        format!(
-                            "{}\n\n[Input truncated... {} total characters]",
-                            prefix,
-                            arguments.len()
-                        )
-                    } else {
-                        arguments.clone()
-                    };
-                    let _ = app.emit(
-                        &format!("chat-stream-{}", message_id),
-                        &StreamOutputItem::ToolResult {
-                            tool_use_id: tool_use_id.clone(),
-                            name: tool_name.clone(),
-                            input: display_input,
-                            output: display_output,
-                            is_error,
-                        },
-                    );
-                    let model_output = process_tool_output_for_model(
-                        json,
-                        tool_use_id,
-                        tool_results_dir,
+        }
+    } else if tool_name.eq_ignore_ascii_case("skill_manage") {
+        let out = skills::execute_skill_manage(project_root, arguments, &skill_cache).await;
+        match out {
+            Ok(json_val) => {
+                let json = serde_json::to_string_pretty(&json_val)
+                    .unwrap_or_else(|_| "{\"success\":false}".to_string());
+                let is_error = false;
+                let display_output = if json.len() > PREVIEW_SIZE_BYTES {
+                    let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
+                    format!(
+                        "{}\n\n[Output truncated... {} total characters]",
+                        prefix,
+                        json.len()
                     )
-                    .await;
-                    (tool_use_id.clone(), model_output, is_error)
-                }
-                Err(e) => {
-                    tracing::warn!(tool = "skill_manage", error = %e, "skill_manage failed");
+                } else {
+                    json.clone()
+                };
+                let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                    let prefix = truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+                    format!(
+                        "{}\n\n[Input truncated... {} total characters]",
+                        prefix,
+                        arguments.len()
+                    )
+                } else {
+                    arguments.clone()
+                };
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: display_input,
+                        output: display_output,
+                        is_error,
+                    },
+                );
+                let model_output =
+                    process_tool_output_for_model(json, tool_use_id, tool_results_dir).await;
+                (tool_use_id.clone(), model_output, is_error)
+            }
+            Err(e) => {
+                tracing::warn!(tool = "skill_manage", error = %e, "skill_manage failed");
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: arguments.clone(),
+                        output: e.clone(),
+                        is_error: true,
+                    },
+                );
+                (tool_use_id.clone(), e, true)
+            }
+        }
+    } else if tool_name.eq_ignore_ascii_case("skill_config") {
+        let result = handle_skill_config(project_root, arguments, &skill_cache).await;
+        let (json, is_error) = match result {
+            Ok(v) => (
+                serde_json::to_string_pretty(&v)
+                    .unwrap_or_else(|_| "{\"success\":false}".to_string()),
+                false,
+            ),
+            Err(e) => {
+                tracing::warn!(tool = "skill_config", error = %e, "skill_config failed");
+                (e, true)
+            }
+        };
+        let display_output = if json.len() > PREVIEW_SIZE_BYTES {
+            let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
+            format!(
+                "{}\n\n[Output truncated... {} total characters]",
+                prefix,
+                json.len()
+            )
+        } else {
+            json.clone()
+        };
+        let _ = app.emit(
+            &format!("chat-stream-{}", message_id),
+            &StreamOutputItem::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                name: tool_name.clone(),
+                input: arguments.clone(),
+                output: display_output,
+                is_error,
+            },
+        );
+        let model_output = process_tool_output_for_model(json, tool_use_id, tool_results_dir).await;
+        (tool_use_id.clone(), model_output, is_error)
+    } else if tool_name.eq_ignore_ascii_case("skill") || tool_name == "Skill" {
+        match serde_json::from_str::<SkillToolArgs>(arguments) {
+            Ok(args) => {
+                if args.skill.trim().is_empty() {
+                    let error_msg = "skill tool: missing or empty `skill` field".to_string();
+                    tracing::warn!(
+                        tool = "skill",
+                        error = "empty_skill_name",
+                        "Skill tool called with empty skill name"
+                    );
                     let _ = app.emit(
                         &format!("chat-stream-{}", message_id),
                         &StreamOutputItem::ToolResult {
                             tool_use_id: tool_use_id.clone(),
                             name: tool_name.clone(),
                             input: arguments.clone(),
-                            output: e.clone(),
+                            output: error_msg.clone(),
                             is_error: true,
                         },
                     );
-                    (tool_use_id.clone(), e, true)
-                }
-            }
-        } else if tool_name.eq_ignore_ascii_case("skill_config") {
-            let result = handle_skill_config(project_root, arguments, &skill_cache).await;
-            let (json, is_error) = match result {
-                Ok(v) => (serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{\"success\":false}".to_string()), false),
-                Err(e) => {
-                    tracing::warn!(tool = "skill_config", error = %e, "skill_config failed");
-                    (e, true)
-                }
-            };
-            let display_output = if json.len() > PREVIEW_SIZE_BYTES {
-                let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
-                format!("{}\n\n[Output truncated... {} total characters]", prefix, json.len())
-            } else {
-                json.clone()
-            };
-            let _ = app.emit(
-                &format!("chat-stream-{}", message_id),
-                &StreamOutputItem::ToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    name: tool_name.clone(),
-                    input: arguments.clone(),
-                    output: display_output,
-                    is_error,
-                },
-            );
-            let model_output = process_tool_output_for_model(json, tool_use_id, tool_results_dir).await;
-            (tool_use_id.clone(), model_output, is_error)
-        } else if tool_name.eq_ignore_ascii_case("skill") || tool_name == "Skill" {
-            match serde_json::from_str::<SkillToolArgs>(arguments) {
-                Ok(args) => {
-                    if args.skill.trim().is_empty() {
-                        let error_msg = "skill tool: missing or empty `skill` field".to_string();
-                        tracing::warn!(tool = "skill", error = "empty_skill_name", "Skill tool called with empty skill name");
+                    (tool_use_id.clone(), error_msg, true)
+                } else {
+                    let icfg = integrations_config::load_integrations_config(project_root);
+                    let all_skills = skills::load_skills_cached(project_root, &skill_cache).await;
+                    let resolved_name =
+                        skills::resolve_skill_display_name(&all_skills, &args.skill);
+                    let blocked = resolved_name
+                        .as_ref()
+                        .map(|nm| integrations_config::is_skill_name_disabled(&icfg, nm))
+                        .unwrap_or(false);
+
+                    // Telemetry for skill invocation (aligned with SkillTool in TS)
+                    tracing::info!(
+                        tool = "skill",
+                        raw_skill = %args.skill,
+                        resolved_name = ?resolved_name,
+                        has_args = !args.args.is_empty(),
+                        total_available_skills = all_skills.len(),
+                        blocked_by_config = blocked,
+                        "Skill tool invoked"
+                    );
+
+                    if blocked {
+                        let skill_display =
+                            resolved_name.unwrap_or_else(|| args.skill.trim().to_string());
+                        let error_msg = format!(
+                                "Skill `{skill_display}` is disabled in Omiga Settings → Integrations (Skills)."
+                            );
+                        tracing::warn!(skill_name = %skill_display, "Skill invocation blocked by user config");
                         let _ = app.emit(
                             &format!("chat-stream-{}", message_id),
                             &StreamOutputItem::ToolResult {
@@ -4003,32 +5344,13 @@ async fn execute_one_tool(
                         );
                         (tool_use_id.clone(), error_msg, true)
                     } else {
-                        let icfg = integrations_config::load_integrations_config(project_root);
-                        let all_skills =
-                            skills::load_skills_cached(project_root, &skill_cache).await;
-                        let resolved_name = skills::resolve_skill_display_name(&all_skills, &args.skill);
-                        let blocked = resolved_name.as_ref()
-                            .map(|nm| integrations_config::is_skill_name_disabled(&icfg, nm))
-                            .unwrap_or(false);
-                        
-                        // Telemetry for skill invocation (aligned with SkillTool in TS)
-                        tracing::info!(
-                            tool = "skill",
-                            raw_skill = %args.skill,
-                            resolved_name = ?resolved_name,
-                            has_args = !args.args.is_empty(),
-                            total_available_skills = all_skills.len(),
-                            blocked_by_config = blocked,
-                            "Skill tool invoked"
-                        );
-                        
-                        if blocked {
-                            let skill_display = resolved_name
-                                .unwrap_or_else(|| args.skill.trim().to_string());
-                            let error_msg = format!(
-                                "Skill `{skill_display}` is disabled in Omiga Settings → Integrations (Skills)."
-                            );
-                            tracing::warn!(skill_name = %skill_display, "Skill invocation blocked by user config");
+                        // === Permission Check (New PermissionManager) ===
+                        let skill_display = resolved_name
+                            .clone()
+                            .unwrap_or_else(|| args.skill.trim().to_string());
+
+                        let Some(app_state_skill) = app.try_state::<OmigaAppState>() else {
+                            let error_msg = "内部错误：无法获取应用状态".to_string();
                             let _ = app.emit(
                                 &format!("chat-stream-{}", message_id),
                                 &StreamOutputItem::ToolResult {
@@ -4039,48 +5361,213 @@ async fn execute_one_tool(
                                     is_error: true,
                                 },
                             );
-                            (tool_use_id.clone(), error_msg, true)
-                        } else {
-                            // === Permission Check (New PermissionManager) ===
-                            let skill_display = resolved_name
-                                .clone()
-                                .unwrap_or_else(|| args.skill.trim().to_string());
+                            return (tool_use_id.clone(), error_msg, true);
+                        };
+                        let permission_manager = app_state_skill.permission_manager.clone();
 
-                            let Some(app_state_skill) = app.try_state::<OmigaAppState>() else {
-                                let error_msg = "内部错误：无法获取应用状态".to_string();
-                                let _ = app.emit(
-                                    &format!("chat-stream-{}", message_id),
-                                    &StreamOutputItem::ToolResult {
-                                        tool_use_id: tool_use_id.clone(),
-                                        name: tool_name.clone(),
-                                        input: arguments.clone(),
-                                        output: error_msg.clone(),
-                                        is_error: true,
-                                    },
-                                );
-                                return (tool_use_id.clone(), error_msg, true);
-                            };
-                            let permission_manager = app_state_skill.permission_manager.clone();
+                        let args_value = serde_json::json!({
+                            "skill": args.skill,
+                            "args": args.args,
+                            "execution_mode": args.execution_mode,
+                        });
 
-                            let args_value = serde_json::json!({
-                                "skill": args.skill,
-                                "args": args.args,
-                                "execution_mode": args.execution_mode,
-                            });
+                        loop {
+                            let perm_decision = permission_manager
+                                .check_tool(session_id, &skill_display, &args_value)
+                                .await;
 
-                            loop {
-                                let perm_decision = permission_manager
-                                    .check_tool(session_id, &skill_display, &args_value)
-                                    .await;
+                            match perm_decision {
+                                crate::domain::permissions::PermissionDecision::Deny(
+                                    ref reason,
+                                ) => {
+                                    tracing::warn!(
+                                        skill = %skill_display,
+                                        reason = %reason,
+                                        "Skill denied by permission manager"
+                                    );
+                                    let error_msg = format!("权限被拒绝: {}", reason);
+                                    let _ = app.emit(
+                                        &format!("chat-stream-{}", message_id),
+                                        &StreamOutputItem::ToolResult {
+                                            tool_use_id: tool_use_id.clone(),
+                                            name: tool_name.clone(),
+                                            input: arguments.clone(),
+                                            output: error_msg.clone(),
+                                            is_error: true,
+                                        },
+                                    );
+                                    return (tool_use_id.clone(), error_msg, true);
+                                }
+                                crate::domain::permissions::PermissionDecision::RequireApproval(
+                                    ref req,
+                                ) => {
+                                    tracing::info!(
+                                        skill = %skill_display,
+                                        risk_level = ?req.risk.level,
+                                        "Skill requires user approval — blocking until UI resolves"
+                                    );
+                                    match wait_for_permission_tool_resolution(
+                                        &app,
+                                        &app_state_skill,
+                                        session_id,
+                                        message_id,
+                                        tool_use_id,
+                                        tool_name,
+                                        skill_display.as_str(),
+                                        arguments,
+                                        &args_value,
+                                        req,
+                                        cancel_flag.clone(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => continue,
+                                        Err(e) => {
+                                            let _ = app.emit(
+                                                &format!("chat-stream-{}", message_id),
+                                                &StreamOutputItem::ToolResult {
+                                                    tool_use_id: tool_use_id.clone(),
+                                                    name: tool_name.clone(),
+                                                    input: arguments.clone(),
+                                                    output: e.clone(),
+                                                    is_error: true,
+                                                },
+                                            );
+                                            return (tool_use_id.clone(), e, true);
+                                        }
+                                    }
+                                }
+                                crate::domain::permissions::PermissionDecision::Allow => {
+                                    tracing::debug!(
+                                        skill = %skill_display,
+                                        "Skill allowed by permission manager"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        // === End permission check ===
 
-                                match perm_decision {
-                                    crate::domain::permissions::PermissionDecision::Deny(ref reason) => {
+                        // Determine execution mode
+                        let execution_mode = args.execution_mode.trim().to_lowercase();
+                        let is_forked = execution_mode == "forked";
+
+                        if is_forked {
+                            // === FORKED EXECUTION MODE ===
+                            // Execute skill in isolated sub-agent session
+                            tracing::info!(
+                                skill = %skill_display,
+                                "Executing skill in forked mode (isolated sub-agent)"
+                            );
+
+                            // Load skill content for forked execution
+                            let skill_content = resolved_name
+                                .as_ref()
+                                .and_then(|name| {
+                                    skills::find_skill_entry(&all_skills, name).map(|entry| {
+                                        let skill_path = entry.skill_dir.join("SKILL.md");
+                                        std::fs::read_to_string(&skill_path).unwrap_or_else(|_| {
+                                            format!(
+                                                "# {}\n\nSkill content not available",
+                                                entry.name
+                                            )
+                                        })
+                                    })
+                                })
+                                .unwrap_or_else(|| {
+                                    format!("Skill: {}\n\nArgs: {}", args.skill, args.args)
+                                });
+
+                            // Get allowed_tools for forked execution
+                            let skill_allowed_tools: Option<Vec<String>> =
+                                resolved_name.as_ref().and_then(|name| {
+                                    skills::find_skill_entry(&all_skills, name)
+                                        .map(|entry| entry.allowed_tools.clone())
+                                });
+
+                            // Need Agent runtime for forked execution
+                            if let Some(ref ar) = agent_runtime {
+                                match run_skill_forked(
+                                    &app,
+                                    message_id,
+                                    session_id,
+                                    tool_results_dir,
+                                    project_root,
+                                    session_todos.clone(),
+                                    session_agent_tasks.clone(),
+                                    &skill_display,
+                                    &args.args,
+                                    &skill_content,
+                                    skill_allowed_tools,
+                                    ar,
+                                    subagent_depth.saturating_add(1),
+                                    web_search_api_keys.clone(),
+                                    skill_cache.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(output_text) => {
+                                        let is_error = false;
+                                        tracing::info!(
+                                            skill = %skill_display,
+                                            output_len = output_text.len(),
+                                            "Skill forked execution completed"
+                                        );
+                                        // Process and return result (similar to existing inline result handling)
+                                        let display_output =
+                                            if output_text.len() > PREVIEW_SIZE_BYTES {
+                                                let prefix = truncate_utf8_prefix(
+                                                    &output_text,
+                                                    PREVIEW_SIZE_BYTES,
+                                                );
+                                                format!(
+                                                "{}\n\n[Output truncated... {} total characters]",
+                                                prefix,
+                                                output_text.len()
+                                            )
+                                            } else {
+                                                output_text.clone()
+                                            };
+                                        let display_input =
+                                            if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                                                let prefix = truncate_utf8_prefix(
+                                                    arguments,
+                                                    TOOL_DISPLAY_MAX_INPUT_CHARS,
+                                                );
+                                                format!(
+                                                "{}\n\n[Input truncated... {} total characters]",
+                                                prefix,
+                                                arguments.len()
+                                            )
+                                            } else {
+                                                arguments.clone()
+                                            };
+                                        let _ = app.emit(
+                                            &format!("chat-stream-{}", message_id),
+                                            &StreamOutputItem::ToolResult {
+                                                tool_use_id: tool_use_id.clone(),
+                                                name: tool_name.clone(),
+                                                input: display_input,
+                                                output: display_output,
+                                                is_error,
+                                            },
+                                        );
+                                        let model_output = process_tool_output_for_model(
+                                            output_text,
+                                            tool_use_id,
+                                            tool_results_dir,
+                                        )
+                                        .await;
+                                        return (tool_use_id.clone(), model_output, is_error);
+                                    }
+                                    Err(e) => {
+                                        let error_msg =
+                                            format!("Skill forked execution failed: {}", e);
                                         tracing::warn!(
                                             skill = %skill_display,
-                                            reason = %reason,
-                                            "Skill denied by permission manager"
+                                            error = %error_msg,
+                                            "Forked execution error"
                                         );
-                                        let error_msg = format!("权限被拒绝: {}", reason);
                                         let _ = app.emit(
                                             &format!("chat-stream-{}", message_id),
                                             &StreamOutputItem::ToolResult {
@@ -4093,201 +5580,27 @@ async fn execute_one_tool(
                                         );
                                         return (tool_use_id.clone(), error_msg, true);
                                     }
-                                    crate::domain::permissions::PermissionDecision::RequireApproval(
-                                        ref req,
-                                    ) => {
-                                        tracing::info!(
-                                            skill = %skill_display,
-                                            risk_level = ?req.risk.level,
-                                            "Skill requires user approval — blocking until UI resolves"
-                                        );
-                                        match wait_for_permission_tool_resolution(
-                                            &app,
-                                            &app_state_skill,
-                                            session_id,
-                                            message_id,
-                                            tool_use_id,
-                                            tool_name,
-                                            skill_display.as_str(),
-                                            arguments,
-                                            &args_value,
-                                            req,
-                                            cancel_flag.clone(),
-                                        )
-                                        .await
-                                        {
-                                            Ok(()) => continue,
-                                            Err(e) => {
-                                                let _ = app.emit(
-                                                    &format!("chat-stream-{}", message_id),
-                                                    &StreamOutputItem::ToolResult {
-                                                        tool_use_id: tool_use_id.clone(),
-                                                        name: tool_name.clone(),
-                                                        input: arguments.clone(),
-                                                        output: e.clone(),
-                                                        is_error: true,
-                                                    },
-                                                );
-                                                return (tool_use_id.clone(), e, true);
-                                            }
-                                        }
-                                    }
-                                    crate::domain::permissions::PermissionDecision::Allow => {
-                                        tracing::debug!(
-                                            skill = %skill_display,
-                                            "Skill allowed by permission manager"
-                                        );
-                                        break;
-                                    }
                                 }
-                            }
-                            // === End permission check ===
-
-                            // Determine execution mode
-                            let execution_mode = args.execution_mode.trim().to_lowercase();
-                            let is_forked = execution_mode == "forked";
-
-                            if is_forked {
-                                // === FORKED EXECUTION MODE ===
-                                // Execute skill in isolated sub-agent session
-                                tracing::info!(
+                            } else {
+                                // No agent runtime available - fall back to inline
+                                tracing::warn!(
                                     skill = %skill_display,
-                                    "Executing skill in forked mode (isolated sub-agent)"
+                                    "Forked mode requested but no agent runtime available, falling back to inline"
                                 );
-
-                                // Load skill content for forked execution
-                                let skill_content = resolved_name
-                                    .as_ref()
-                                    .and_then(|name| {
-                                        skills::find_skill_entry(&all_skills, name)
-                                            .map(|entry| {
-                                                let skill_path = entry.skill_dir.join("SKILL.md");
-                                                std::fs::read_to_string(&skill_path)
-                                                    .unwrap_or_else(|_| {
-                                                        format!("# {}\n\nSkill content not available", entry.name)
-                                                    })
-                                            })
-                                    })
-                                    .unwrap_or_else(|| {
-                                        format!("Skill: {}\n\nArgs: {}", args.skill, args.args)
-                                    });
-
-                                // Get allowed_tools for forked execution
-                                let skill_allowed_tools: Option<Vec<String>> = resolved_name
-                                    .as_ref()
-                                    .and_then(|name| {
-                                        skills::find_skill_entry(&all_skills, name)
-                                            .map(|entry| entry.allowed_tools.clone())
-                                    });
-
-                                // Need Agent runtime for forked execution
-                                if let Some(ref ar) = agent_runtime {
-                                    match run_skill_forked(
-                                        &app,
-                                        message_id,
-                                        session_id,
-                                        tool_results_dir,
-                                        project_root,
-                                        session_todos.clone(),
-                                        session_agent_tasks.clone(),
-                                        &skill_display,
-                                        &args.args,
-                                        &skill_content,
-                                        skill_allowed_tools,
-                                        ar,
-                                        subagent_depth.saturating_add(1),
-                                        web_search_api_keys.clone(),
-                                        skill_cache.clone(),
-                                    )
-                                    .await
-                                    {
-                                        Ok(output_text) => {
-                                            let is_error = false;
-                                            tracing::info!(
-                                                skill = %skill_display,
-                                                output_len = output_text.len(),
-                                                "Skill forked execution completed"
-                                            );
-                                            // Process and return result (similar to existing inline result handling)
-                                            let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
-                                                let prefix = truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
-                                                format!(
-                                                    "{}\n\n[Output truncated... {} total characters]",
-                                                    prefix,
-                                                    output_text.len()
-                                                )
-                                            } else {
-                                                output_text.clone()
-                                            };
-                                            let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
-                                                let prefix =
-                                                    truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
-                                                format!(
-                                                    "{}\n\n[Input truncated... {} total characters]",
-                                                    prefix,
-                                                    arguments.len()
-                                                )
-                                            } else {
-                                                arguments.clone()
-                                            };
-                                            let _ = app.emit(
-                                                &format!("chat-stream-{}", message_id),
-                                                &StreamOutputItem::ToolResult {
-                                                    tool_use_id: tool_use_id.clone(),
-                                                    name: tool_name.clone(),
-                                                    input: display_input,
-                                                    output: display_output,
-                                                    is_error,
-                                                },
-                                            );
-                                            let model_output = process_tool_output_for_model(
-                                                output_text,
-                                                tool_use_id,
-                                                tool_results_dir,
-                                            )
-                                            .await;
-                                            return (tool_use_id.clone(), model_output, is_error);
-                                        }
-                                        Err(e) => {
-                                            let error_msg = format!("Skill forked execution failed: {}", e);
-                                            tracing::warn!(
-                                                skill = %skill_display,
-                                                error = %error_msg,
-                                                "Forked execution error"
-                                            );
-                                            let _ = app.emit(
-                                                &format!("chat-stream-{}", message_id),
-                                                &StreamOutputItem::ToolResult {
-                                                    tool_use_id: tool_use_id.clone(),
-                                                    name: tool_name.clone(),
-                                                    input: arguments.clone(),
-                                                    output: error_msg.clone(),
-                                                    is_error: true,
-                                                },
-                                            );
-                                            return (tool_use_id.clone(), error_msg, true);
-                                        }
-                                    }
-                                } else {
-                                    // No agent runtime available - fall back to inline
-                                    tracing::warn!(
-                                        skill = %skill_display,
-                                        "Forked mode requested but no agent runtime available, falling back to inline"
-                                    );
-                                    // Continue to inline execution below
-                                }
+                                // Continue to inline execution below
                             }
+                        }
 
-                            // === INLINE EXECUTION MODE (default) ===
-                            // Original inline execution code continues...
-                            match skills::invoke_skill_with_cache(
-                                project_root,
-                                &args.skill,
-                                &args.args,
-                                &all_skills,
-                            )
-                            .await
-                            {
+                        // === INLINE EXECUTION MODE (default) ===
+                        // Original inline execution code continues...
+                        match skills::invoke_skill_with_cache(
+                            project_root,
+                            &args.skill,
+                            &args.args,
+                            &all_skills,
+                        )
+                        .await
+                        {
                             Ok(output_text) => {
                                 let is_error = false;
                                 tracing::info!(
@@ -4298,7 +5611,8 @@ async fn execute_one_tool(
                                     "Skill tool execution completed successfully"
                                 );
                                 let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
-                                    let prefix = truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
+                                    let prefix =
+                                        truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
                                     format!(
                                         "{}\n\n[Output truncated... {} total characters]",
                                         prefix,
@@ -4307,17 +5621,20 @@ async fn execute_one_tool(
                                 } else {
                                     output_text.clone()
                                 };
-                                let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
-                                    let prefix =
-                                        truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
-                                    format!(
-                                        "{}\n\n[Input truncated... {} total characters]",
-                                        prefix,
-                                        arguments.len()
-                                    )
-                                } else {
-                                    arguments.clone()
-                                };
+                                let display_input =
+                                    if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                                        let prefix = truncate_utf8_prefix(
+                                            arguments,
+                                            TOOL_DISPLAY_MAX_INPUT_CHARS,
+                                        );
+                                        format!(
+                                            "{}\n\n[Input truncated... {} total characters]",
+                                            prefix,
+                                            arguments.len()
+                                        )
+                                    } else {
+                                        arguments.clone()
+                                    };
                                 let _ = app.emit(
                                     &format!("chat-stream-{}", message_id),
                                     &StreamOutputItem::ToolResult {
@@ -4357,150 +5674,11 @@ async fn execute_one_tool(
                                 (tool_use_id.clone(), error_msg, true)
                             }
                         }
-                        }
                     }
-                }
-                Err(e) => {
-                    let error_msg = format!("skill tool: invalid JSON: {}", e);
-                    let _ = app.emit(
-                        &format!("chat-stream-{}", message_id),
-                        &StreamOutputItem::ToolResult {
-                            tool_use_id: tool_use_id.clone(),
-                            name: tool_name.clone(),
-                            input: arguments.clone(),
-                            output: error_msg.clone(),
-                            is_error: true,
-                        },
-                    );
-                    (tool_use_id.clone(), error_msg, true)
                 }
             }
-        } else if is_agent_tool_name(tool_name) {
-            let nested_allowed = agent_runtime.map(|r| r.allow_nested_agent).unwrap_or(false);
-            if subagent_depth >= MAX_SUBAGENT_EXECUTE_DEPTH {
-                let error_msg = format!(
-                    "Agent tool: maximum nested depth ({MAX_SUBAGENT_EXECUTE_DEPTH}) reached."
-                );
-                let _ = app.emit(
-                    &format!("chat-stream-{}", message_id),
-                    &StreamOutputItem::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        name: tool_name.clone(),
-                        input: arguments.clone(),
-                        output: error_msg.clone(),
-                        is_error: true,
-                    },
-                );
-                (tool_use_id.clone(), error_msg, true)
-            } else if subagent_depth > 0 && !nested_allowed {
-                let error_msg =
-                    "Nested Agent tool is not allowed (set `USER_TYPE=ant` for nested Agent parity)."
-                        .to_string();
-                let _ = app.emit(
-                    &format!("chat-stream-{}", message_id),
-                    &StreamOutputItem::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        name: tool_name.clone(),
-                        input: arguments.clone(),
-                        output: error_msg.clone(),
-                        is_error: true,
-                    },
-                );
-                (tool_use_id.clone(), error_msg, true)
-            } else if let Some(ar) = agent_runtime {
-                match serde_json::from_str::<crate::domain::tools::agent::AgentArgs>(arguments) {
-                    Ok(agent_args) => {
-                        match run_subagent_session(
-                            &app,
-                            message_id,
-                            session_id,
-                            tool_results_dir,
-                            project_root,
-                            session_todos.clone(),
-                            session_agent_tasks.clone(),
-                            &agent_args,
-                            ar,
-                            subagent_depth.saturating_add(1),
-                            web_search_api_keys.clone(),
-                            skill_cache.clone(),
-                        )
-                        .await
-                        {
-                            Ok(output_text) => {
-                                let is_error = false;
-                                let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
-                                    let prefix = truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
-                                    format!(
-                                        "{}\n\n[Output truncated... {} total characters]",
-                                        prefix,
-                                        output_text.len()
-                                    )
-                                } else {
-                                    output_text.clone()
-                                };
-                                let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
-                                    let prefix =
-                                        truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
-                                    format!(
-                                        "{}\n\n[Input truncated... {} total characters]",
-                                        prefix,
-                                        arguments.len()
-                                    )
-                                } else {
-                                    arguments.clone()
-                                };
-                                let _ = app.emit(
-                                    &format!("chat-stream-{}", message_id),
-                                    &StreamOutputItem::ToolResult {
-                                        tool_use_id: tool_use_id.clone(),
-                                        name: tool_name.clone(),
-                                        input: display_input,
-                                        output: display_output,
-                                        is_error,
-                                    },
-                                );
-                                let model_output = process_tool_output_for_model(
-                                    output_text.clone(),
-                                    tool_use_id,
-                                    tool_results_dir,
-                                )
-                                .await;
-                                (tool_use_id.clone(), model_output, is_error)
-                            }
-                            Err(e) => {
-                                let error_msg = format!("Agent tool: {}", e);
-                                let _ = app.emit(
-                                    &format!("chat-stream-{}", message_id),
-                                    &StreamOutputItem::ToolResult {
-                                        tool_use_id: tool_use_id.clone(),
-                                        name: tool_name.clone(),
-                                        input: arguments.clone(),
-                                        output: error_msg.clone(),
-                                        is_error: true,
-                                    },
-                                );
-                                (tool_use_id.clone(), error_msg, true)
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let error_msg = format!("Failed to parse Agent arguments: {}", e);
-                        let _ = app.emit(
-                            &format!("chat-stream-{}", message_id),
-                            &StreamOutputItem::ToolResult {
-                                tool_use_id: tool_use_id.clone(),
-                                name: tool_name.clone(),
-                                input: arguments.clone(),
-                                output: error_msg.clone(),
-                                is_error: true,
-                            },
-                        );
-                        (tool_use_id.clone(), error_msg, true)
-                    }
-                }
-            } else {
-                let error_msg =
-                    "Agent tool requires an active chat session (LLM runtime missing).".to_string();
+            Err(e) => {
+                let error_msg = format!("skill tool: invalid JSON: {}", e);
                 let _ = app.emit(
                     &format!("chat-stream-{}", message_id),
                     &StreamOutputItem::ToolResult {
@@ -4513,79 +5691,116 @@ async fn execute_one_tool(
                 );
                 (tool_use_id.clone(), error_msg, true)
             }
-        } else if tool_name.starts_with("mcp__") {
-            let timeout = std::time::Duration::from_secs(120);
-            // Use the session-aware MCP connection manager to avoid spawning new processes
-            // while properly handling session boundaries and stdio lifecycle.
-            let (mcp_manager, session_id_opt) = app
-                .try_state::<crate::app_state::OmigaAppState>()
-                .map(|s| {
-                    (
-                        Some(s.chat.mcp_manager.clone()),
-                        Some(session_id.to_string()),
-                    )
-                })
-                .unwrap_or((None, None));
-
-            // Legacy fallback (for backwards compatibility during migration)
-            // Note: This is a placeholder - the legacy pool is no longer used
-            // as all connections go through the new manager
-            let mcp_pool_legacy: Option<
-                std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, crate::domain::mcp::client::McpLiveConnection>>>
-            > = None;
-
-            match crate::domain::mcp::tool_dispatch::execute_mcp_tool_call(
-                project_root,
-                tool_name,
-                arguments,
-                timeout,
-                mcp_manager,
-                mcp_pool_legacy,
-                session_id_opt,
-            )
-            .await
-            {
-                Ok((output_text, mcp_is_error)) => {
-                    let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
-                        let prefix = truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
-                        format!(
-                            "{}\n\n[Output truncated... {} total characters]",
-                            prefix,
-                            output_text.len()
-                        )
-                    } else {
-                        output_text.clone()
-                    };
-                    let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
-                        let prefix = truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
-                        format!(
-                            "{}\n\n[Input truncated... {} total characters]",
-                            prefix,
-                            arguments.len()
-                        )
-                    } else {
-                        arguments.clone()
-                    };
-                    let _ = app.emit(
-                        &format!("chat-stream-{}", message_id),
-                        &StreamOutputItem::ToolResult {
-                            tool_use_id: tool_use_id.clone(),
-                            name: tool_name.clone(),
-                            input: display_input,
-                            output: display_output,
-                            is_error: mcp_is_error,
-                        },
-                    );
-                    let model_output = process_tool_output_for_model(
-                        output_text.clone(),
-                        tool_use_id,
+        }
+    } else if is_agent_tool_name(tool_name) {
+        let nested_allowed = agent_runtime.map(|r| r.allow_nested_agent).unwrap_or(false);
+        if subagent_depth >= MAX_SUBAGENT_EXECUTE_DEPTH {
+            let error_msg =
+                format!("Agent tool: maximum nested depth ({MAX_SUBAGENT_EXECUTE_DEPTH}) reached.");
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            (tool_use_id.clone(), error_msg, true)
+        } else if subagent_depth > 0 && !nested_allowed {
+            let error_msg =
+                "Nested Agent tool is not allowed (set `USER_TYPE=ant` for nested Agent parity)."
+                    .to_string();
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            (tool_use_id.clone(), error_msg, true)
+        } else if let Some(ar) = agent_runtime {
+            match serde_json::from_str::<crate::domain::tools::agent::AgentArgs>(arguments) {
+                Ok(agent_args) => {
+                    match run_subagent_session(
+                        &app,
+                        message_id,
+                        session_id,
                         tool_results_dir,
+                        project_root,
+                        session_todos.clone(),
+                        session_agent_tasks.clone(),
+                        &agent_args,
+                        ar,
+                        subagent_depth.saturating_add(1),
+                        web_search_api_keys.clone(),
+                        skill_cache.clone(),
                     )
-                    .await;
-                    (tool_use_id.clone(), model_output, mcp_is_error)
+                    .await
+                    {
+                        Ok(output_text) => {
+                            let is_error = false;
+                            let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
+                                let prefix = truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
+                                format!(
+                                    "{}\n\n[Output truncated... {} total characters]",
+                                    prefix,
+                                    output_text.len()
+                                )
+                            } else {
+                                output_text.clone()
+                            };
+                            let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                                let prefix =
+                                    truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+                                format!(
+                                    "{}\n\n[Input truncated... {} total characters]",
+                                    prefix,
+                                    arguments.len()
+                                )
+                            } else {
+                                arguments.clone()
+                            };
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", message_id),
+                                &StreamOutputItem::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    name: tool_name.clone(),
+                                    input: display_input,
+                                    output: display_output,
+                                    is_error,
+                                },
+                            );
+                            let model_output = process_tool_output_for_model(
+                                output_text.clone(),
+                                tool_use_id,
+                                tool_results_dir,
+                            )
+                            .await;
+                            (tool_use_id.clone(), model_output, is_error)
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Agent tool: {}", e);
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", message_id),
+                                &StreamOutputItem::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    name: tool_name.clone(),
+                                    input: arguments.clone(),
+                                    output: error_msg.clone(),
+                                    is_error: true,
+                                },
+                            );
+                            (tool_use_id.clone(), error_msg, true)
+                        }
+                    }
                 }
                 Err(e) => {
-                    let error_msg = format!("MCP tool error: {e}");
+                    let error_msg = format!("Failed to parse Agent arguments: {}", e);
                     let _ = app.emit(
                         &format!("chat-stream-{}", message_id),
                         &StreamOutputItem::ToolResult {
@@ -4600,49 +5815,188 @@ async fn execute_one_tool(
                 }
             }
         } else {
-            if matches_ask_user_question_name(tool_name) {
-                if let Some(state) = app.try_state::<OmigaAppState>() {
-                    return execute_ask_user_question_interactive(
-                        tool_use_id.to_string(),
-                        tool_name.to_string(),
-                        arguments.to_string(),
-                        app.clone(),
-                        message_id.to_string(),
-                        session_id.to_string(),
-                        tool_results_dir,
-                        state.chat.ask_user_waiters.clone(),
-                        cancel_flag.clone(),
+            let error_msg =
+                "Agent tool requires an active chat session (LLM runtime missing).".to_string();
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            (tool_use_id.clone(), error_msg, true)
+        }
+    } else if tool_name.starts_with("mcp__") {
+        let timeout = std::time::Duration::from_secs(120);
+        // Use the session-aware MCP connection manager to avoid spawning new processes
+        // while properly handling session boundaries and stdio lifecycle.
+        let (mcp_manager, session_id_opt) = app
+            .try_state::<crate::app_state::OmigaAppState>()
+            .map(|s| {
+                (
+                    Some(s.chat.mcp_manager.clone()),
+                    Some(session_id.to_string()),
+                )
+            })
+            .unwrap_or((None, None));
+
+        // Legacy fallback (for backwards compatibility during migration)
+        // Note: This is a placeholder - the legacy pool is no longer used
+        // as all connections go through the new manager
+        let mcp_pool_legacy: Option<
+            std::sync::Arc<
+                tokio::sync::Mutex<
+                    std::collections::HashMap<
+                        String,
+                        crate::domain::mcp::client::McpLiveConnection,
+                    >,
+                >,
+            >,
+        > = None;
+
+        match crate::domain::mcp::tool_dispatch::execute_mcp_tool_call(
+            project_root,
+            tool_name,
+            arguments,
+            timeout,
+            mcp_manager,
+            mcp_pool_legacy,
+            session_id_opt,
+        )
+        .await
+        {
+            Ok((output_text, mcp_is_error)) => {
+                let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
+                    let prefix = truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
+                    format!(
+                        "{}\n\n[Output truncated... {} total characters]",
+                        prefix,
+                        output_text.len()
                     )
-                    .await;
-                }
+                } else {
+                    output_text.clone()
+                };
+                let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                    let prefix = truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+                    format!(
+                        "{}\n\n[Input truncated... {} total characters]",
+                        prefix,
+                        arguments.len()
+                    )
+                } else {
+                    arguments.clone()
+                };
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: display_input,
+                        output: display_output,
+                        is_error: mcp_is_error,
+                    },
+                );
+                let model_output = process_tool_output_for_model(
+                    output_text.clone(),
+                    tool_use_id,
+                    tool_results_dir,
+                )
+                .await;
+                (tool_use_id.clone(), model_output, mcp_is_error)
             }
-            let ctx = {
-                let base = ToolContext::new(project_root.to_path_buf())
-                    .with_todos(session_todos.clone())
-                    .with_agent_tasks(session_agent_tasks.clone())
-                    .with_plan_mode(agent_runtime.and_then(|r| r.plan_mode_flag.clone()))
-                    .with_web_search_api_keys(web_search_api_keys.clone())
-                    .with_tool_results_dir(tool_results_dir.to_path_buf())
-                    .with_execution_environment(execution_environment.clone())
-                    .with_ssh_server(ssh_server.clone())
-                    .with_sandbox_backend(sandbox_backend.clone())
-                    .with_local_venv(local_venv_type.clone(), local_venv_name.clone())
-                    .with_env_store(Some(env_store.clone()))
-                    .with_background_shell(
-                        crate::domain::background_shell::BackgroundShellHandle {
-                            app: app.clone(),
-                            chat_stream_event: format!("chat-stream-{}", message_id),
-                            session_id: session_id.to_string(),
-                            tool_use_id: tool_use_id.clone(),
-                        },
-                        tool_results_dir.to_path_buf(),
-                    );
-                match &round_cancel {
-                    Some(t) => base.with_cancel_token(t.clone()),
-                    None => base,
-                }
-            };
-            match Tool::from_json_str(tool_name, arguments) {
+            Err(e) => {
+                let error_msg = format!("MCP tool error: {e}");
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: arguments.clone(),
+                        output: error_msg.clone(),
+                        is_error: true,
+                    },
+                );
+                (tool_use_id.clone(), error_msg, true)
+            }
+        }
+    } else {
+        if matches_ask_user_question_name(tool_name) {
+            if let Some(state) = app.try_state::<OmigaAppState>() {
+                return execute_ask_user_question_interactive(
+                    tool_use_id.to_string(),
+                    tool_name.to_string(),
+                    arguments.to_string(),
+                    app.clone(),
+                    message_id.to_string(),
+                    session_id.to_string(),
+                    tool_results_dir,
+                    state.chat.ask_user_waiters.clone(),
+                    cancel_flag.clone(),
+                )
+                .await;
+            }
+        }
+        let ctx = {
+            let base = ToolContext::new(project_root.to_path_buf())
+                .with_todos(session_todos.clone())
+                .with_agent_tasks(session_agent_tasks.clone())
+                .with_plan_mode(agent_runtime.and_then(|r| r.plan_mode_flag.clone()))
+                .with_web_search_api_keys(web_search_api_keys.clone())
+                .with_tool_results_dir(tool_results_dir.to_path_buf())
+                .with_execution_environment(execution_environment.clone())
+                .with_ssh_server(ssh_server.clone())
+                .with_sandbox_backend(sandbox_backend.clone())
+                .with_local_venv(local_venv_type.clone(), local_venv_name.clone())
+                .with_env_store(Some(env_store.clone()))
+                .with_background_shell(
+                    crate::domain::background_shell::BackgroundShellHandle {
+                        app: app.clone(),
+                        chat_stream_event: format!("chat-stream-{}", message_id),
+                        session_id: session_id.to_string(),
+                        tool_use_id: tool_use_id.clone(),
+                    },
+                    tool_results_dir.to_path_buf(),
+                );
+            match &round_cancel {
+                Some(t) => base.with_cancel_token(t.clone()),
+                None => base,
+            }
+        };
+        // ── Knowledge-base search harness ───────────────────────────────────────
+        // Every web_search call first queries the local knowledge base (wiki +
+        // implicit memory).  Results, if any, are prepended to the tool output so
+        // the model is forced to see KB content before the web results.
+        // This is a hard harness — it runs unconditionally regardless of what the
+        // system prompt says.
+        let kb_prefix: Option<String> = if matches!(tool_name.as_str(), "web_search" | "WebSearch") {
+            let query = serde_json::from_str::<serde_json::Value>(arguments)
+                .ok()
+                .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(str::to_owned))
+                .unwrap_or_default();
+            if !query.trim().is_empty() {
+                crate::commands::memory::get_memory_context(project_root, &query, 5)
+                    .await
+                    .map(|kb| {
+                        format!(
+                            "## Knowledge base results (searched before web)\n\
+                             > Query: {query}\n\n\
+                             {kb}\n\n\
+                             ---\n\
+                             ## Web search results\n"
+                        )
+                    })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        // ── End knowledge-base harness ──────────────────────────────────────────
+
+        match Tool::from_json_str(tool_name, arguments) {
             Ok(tool) => {
                 match tool.execute(&ctx).await {
                     Ok(mut output_stream) => {
@@ -4671,8 +6025,12 @@ async fn execute_one_tool(
                             stream_error || exit_code.map(|c| c != 0).unwrap_or(false),
                         );
 
-                        let is_error =
-                            stream_error || exit_code.map(|c| c != 0).unwrap_or(false);
+                        // Prepend KB harness prefix (web_search only).
+                        if let Some(prefix) = kb_prefix {
+                            output_text = format!("{prefix}{output_text}");
+                        }
+
+                        let is_error = stream_error || exit_code.map(|c| c != 0).unwrap_or(false);
 
                         // Truncate streamed UI preview — align with TS `PREVIEW_SIZE_BYTES` (2000 bytes).
                         // Full `output_text` is still returned for DB persistence; large-result
@@ -4690,7 +6048,8 @@ async fn execute_one_tool(
 
                         // Align with TS MCPTool UI `maxChars: 2000` (`TOOL_DISPLAY_MAX_INPUT_CHARS`).
                         let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
-                            let prefix = truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+                            let prefix =
+                                truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
                             format!(
                                 "{}\n\n[Input truncated... {} total characters]",
                                 prefix,
@@ -4751,7 +6110,7 @@ async fn execute_one_tool(
                 (tool_use_id.clone(), error_msg, true)
             }
         }
-        };
+    };
 
     result
 }
@@ -4797,12 +6156,8 @@ pub async fn cancel_stream(
         ar.get(&message_id).map(|r| r.session_id.clone())
     };
     if let Some(ref sid) = session_for_waiters {
-        cancel_ask_user_waiters_for_message(
-            &app_state.chat.ask_user_waiters,
-            sid,
-            &message_id,
-        )
-        .await;
+        cancel_ask_user_waiters_for_message(&app_state.chat.ask_user_waiters, sid, &message_id)
+            .await;
         cancel_permission_tool_waiters_for_message(
             &app_state.chat.permission_tool_waiters,
             sid,
@@ -4837,7 +6192,10 @@ pub async fn cancel_stream(
             repo.cancel_round(&round.id, Some("User requested cancellation"))
                 .await
                 .map_err(|e| {
-                    OmigaError::Chat(ChatError::StreamError(format!("Failed to cancel round: {}", e)))
+                    OmigaError::Chat(ChatError::StreamError(format!(
+                        "Failed to cancel round: {}",
+                        e
+                    )))
                 })?;
 
             // Set cancellation flag for in-memory tracking
@@ -4862,7 +6220,9 @@ pub async fn cancel_stream(
             drop(active_rounds);
 
             let repo = &*app_state.repo;
-            let _ = repo.cancel_round(&round_id, Some("User requested cancellation")).await;
+            let _ = repo
+                .cancel_round(&round_id, Some("User requested cancellation"))
+                .await;
         }
     }
 
@@ -4879,7 +6239,10 @@ pub async fn cancel_session_rounds(
 
     // Get all active rounds for this session
     let active_rounds_db = repo.get_active_rounds(&session_id).await.map_err(|e| {
-        OmigaError::Chat(ChatError::StreamError(format!("Failed to get active rounds: {}", e)))
+        OmigaError::Chat(ChatError::StreamError(format!(
+            "Failed to get active rounds: {}",
+            e
+        )))
     })?;
 
     let mut cancelled_round_ids = Vec::new();
@@ -4940,7 +6303,8 @@ pub async fn set_llm_config(
     base_url: Option<String>,
     thinking: Option<bool>,
 ) -> CommandResult<()> {
-    let provider_enum = provider.parse::<LlmProvider>()
+    let provider_enum = provider
+        .parse::<LlmProvider>()
         .map_err(|e| OmigaError::Config(format!("Invalid provider: {}", e)))?;
 
     let mut config = LlmConfig::new(provider_enum, api_key);
@@ -4989,6 +6353,7 @@ pub async fn save_llm_settings_to_config(
     model: Option<String>,
     base_url: Option<String>,
     thinking: Option<bool>,
+    timeout: Option<u64>,
 ) -> CommandResult<()> {
     let provider_enum = provider
         .parse::<LlmProvider>()
@@ -5066,8 +6431,15 @@ pub async fn save_llm_settings_to_config(
         let _ = std::fs::create_dir_all(parent);
     }
 
+    if let Some(t) = timeout {
+        let mut global = config_file.settings.unwrap_or_default();
+        global.timeout = Some(t);
+        config_file.settings = Some(global);
+    }
+
     crate::llm::config::save_config_file(&config_file, &config_path)
         .map_err(|e| OmigaError::Config(format!("Failed to save config: {}", e)))?;
+    invalidate_config_file_cache(&state).await;
 
     let mut config = LlmConfig::new(provider_enum, api_key);
     config.model = model_str;
@@ -5075,6 +6447,9 @@ pub async fn save_llm_settings_to_config(
     config.app_id = aid_opt;
     config.base_url = bu_opt;
     config.thinking = thinking_resolved;
+    if let Some(t) = timeout {
+        config.timeout_secs = t;
+    }
 
     let active_opt = state.chat.active_provider_entry_name.lock().await.clone();
     let should_apply_runtime = match active_opt.as_deref() {
@@ -5092,6 +6467,31 @@ pub async fn save_llm_settings_to_config(
         }
     }
     Ok(())
+}
+
+/// Get global settings from config file (for Settings UI)
+#[tauri::command]
+pub async fn get_global_settings(
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<GlobalSettingsResponse> {
+    let config_file = get_config_file(&state).await.unwrap_or_default();
+    let settings = config_file.settings.clone().unwrap_or_default();
+    Ok(GlobalSettingsResponse {
+        timeout: settings.timeout,
+        max_tokens: settings.max_tokens,
+        temperature: settings.temperature,
+        enable_tools: settings.enable_tools,
+    })
+}
+
+/// Global settings response for frontend
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalSettingsResponse {
+    pub timeout: Option<u64>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub enable_tools: Option<bool>,
 }
 
 /// Get current LLM configuration
@@ -5257,10 +6657,7 @@ pub async fn get_tavily_search_api_key_state(
 
 /// Legacy: Set API key (deprecated, use set_llm_config)
 #[tauri::command]
-pub async fn set_api_key(
-    state: State<'_, OmigaAppState>,
-    api_key: String,
-) -> CommandResult<()> {
+pub async fn set_api_key(state: State<'_, OmigaAppState>, api_key: String) -> CommandResult<()> {
     let mut config_guard = state.chat.llm_config.lock().await;
     let mut config = config_guard.clone().unwrap_or_default();
     config.api_key = api_key;
@@ -5270,9 +6667,7 @@ pub async fn set_api_key(
 
 /// Get API key status - checks if API key is configured via environment or state
 #[tauri::command]
-pub async fn get_api_key_status(
-    state: State<'_, OmigaAppState>,
-) -> CommandResult<ApiKeyStatus> {
+pub async fn get_api_key_status(state: State<'_, OmigaAppState>) -> CommandResult<ApiKeyStatus> {
     // First check if we have a stored config with API key
     let stored = state.chat.llm_config.lock().await;
     if let Some(config) = stored.as_ref() {
@@ -5352,11 +6747,9 @@ pub struct MessageResponse {
 
 /// Test if the LLM model is available and responding
 #[tauri::command]
-pub async fn test_model(
-    state: State<'_, OmigaAppState>,
-) -> CommandResult<ModelTestResult> {
+pub async fn test_model(state: State<'_, OmigaAppState>) -> CommandResult<ModelTestResult> {
     let config_guard = state.chat.llm_config.lock().await;
-    
+
     let config = match config_guard.as_ref() {
         Some(c) if !c.api_key.is_empty() => c.clone(),
         _ => {
@@ -5410,7 +6803,7 @@ pub async fn test_model(
                         ApiError::SseParse { message } => message.clone(),
                         ApiError::Config { message } => message.clone(),
                     }),
-                })
+                }),
             }
         }
         Err(e) => Ok(ModelTestResult {
@@ -5429,8 +6822,7 @@ pub async fn suggest_session_title(
     app_state: State<'_, OmigaAppState>,
     user_message: String,
 ) -> CommandResult<String> {
-    let fallback =
-        crate::domain::chat_session_title::fallback_title_from_message(&user_message);
+    let fallback = crate::domain::chat_session_title::fallback_title_from_message(&user_message);
     if std::env::var("OMIGA_DISABLE_SESSION_TITLE_LLM")
         .ok()
         .as_deref()
@@ -5452,8 +6844,11 @@ pub async fn suggest_session_title(
             return Ok(fallback);
         }
     };
-    match crate::domain::chat_session_title::suggest_session_title_llm(client.as_ref(), &user_message)
-        .await
+    match crate::domain::chat_session_title::suggest_session_title_llm(
+        client.as_ref(),
+        &user_message,
+    )
+    .await
     {
         Ok(t) if !t.trim().is_empty() => Ok(t),
         Ok(_) => Ok(fallback),
@@ -5462,6 +6857,86 @@ pub async fn suggest_session_title(
             Ok(fallback)
         }
     }
+}
+
+/// Event payload emitted to the frontend when a background title task finishes.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTitleUpdatedPayload {
+    pub session_id: String,
+    pub title: String,
+}
+
+/// Spawn an independent title-generation task and return immediately.
+///
+/// The spawned task waits briefly so the main `send_message` agent gets ahead in the
+/// request queue, then makes a cheap single-turn LLM call.  On success it:
+/// 1. Persists the new name via `SessionRepository::rename_session`.
+/// 2. Emits `session-title-updated` so the frontend can refresh the sidebar without
+///    making a second `rename_session` round-trip.
+#[tauri::command]
+pub async fn spawn_session_title_async(
+    app: AppHandle,
+    app_state: State<'_, OmigaAppState>,
+    session_id: String,
+    user_message: String,
+) -> CommandResult<()> {
+    // Snapshot the LLM config now (cheap clone) so the spawned task owns it.
+    let config_snapshot = app_state.chat.llm_config.lock().await.clone();
+    let repo = Arc::clone(&app_state.repo);
+
+    tokio::spawn(async move {
+        // Let send_message acquire its resources before we compete for the LLM endpoint.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let config = match config_snapshot {
+            Some(c) if !c.api_key.is_empty() => c,
+            _ => match crate::llm::load_config() {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(target: "omiga::session_title", "spawn: no llm config: {e}");
+                    return;
+                }
+            },
+        };
+
+        let client = match create_client(config) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(target: "omiga::session_title", "spawn: create_client: {e}");
+                return;
+            }
+        };
+
+        let title = match crate::domain::chat_session_title::suggest_session_title_llm(
+            client.as_ref(),
+            &user_message,
+        )
+        .await
+        {
+            Ok(t) if !t.trim().is_empty() => t,
+            Ok(_) => return,
+            Err(e) => {
+                tracing::warn!(target: "omiga::session_title", "spawn: llm failed: {e}");
+                return;
+            }
+        };
+
+        if let Err(e) = repo.rename_session(&session_id, &title).await {
+            tracing::warn!(target: "omiga::session_title", "spawn: rename_session: {e}");
+            return;
+        }
+
+        let _ = app.emit(
+            "session-title-updated",
+            SessionTitleUpdatedPayload {
+                session_id,
+                title,
+            },
+        );
+    });
+
+    Ok(())
 }
 
 /// Result of model test
@@ -5513,6 +6988,11 @@ pub struct SendMessageRequest {
     /// When set, truncate SQLite transcript after this user row and reuse it instead of inserting a new user message.
     #[serde(default, rename = "retryFromUserMessageId")]
     pub retry_from_user_message_id: Option<String>,
+    /// Session's stored provider entry name (from load_session → active_provider_entry_name).
+    /// Used for lazy LLM config restoration: ensures the correct provider is active for this
+    /// session without blocking the session-switch path.
+    #[serde(default, rename = "activeProviderEntryName")]
+    pub active_provider_entry_name: Option<String>,
 }
 
 /// Background Agent tasks for one session (Claude Code–style teammate follow-ups).
@@ -5580,8 +7060,8 @@ pub async fn cancel_background_agent_task(
     task_id: String,
 ) -> CommandResult<crate::domain::agents::background::BackgroundAgentTask> {
     use crate::domain::agents::background::{
-        emit_background_agent_complete, emit_background_agent_update,
-        get_background_agent_manager, BackgroundAgentStatus,
+        emit_background_agent_complete, emit_background_agent_update, get_background_agent_manager,
+        BackgroundAgentStatus,
     };
 
     let mgr = get_background_agent_manager();
@@ -5637,8 +7117,7 @@ pub async fn cancel_background_agent_task(
                     .unwrap()
                     .as_secs(),
             );
-            repo
-                .upsert_background_agent_task(&task)
+            repo.upsert_background_agent_task(&task)
                 .await
                 .map_err(|e| OmigaError::Persistence(e.to_string()))?;
             if let Err(e) = emit_background_agent_update(&app, &task) {
@@ -5683,17 +7162,15 @@ pub async fn list_provider_configs(
 
     let active_entry = state.chat.active_provider_entry_name.lock().await.clone();
 
-    // Try to load from config file
-    let config_file = match crate::llm::config::load_config_file() {
+    // Load from the in-memory config cache — avoids repeated disk reads when the
+    // ProviderSwitcher fires list_provider_configs on every session switch.
+    let config_file = match get_config_file(&state).await {
         Ok(cf) => cf,
-        Err(_) => {
-            // No config file exists, return empty list
-            return Ok(vec![]);
-        }
+        Err(_) => return Ok(vec![]),
     };
 
-    let providers = config_file.providers.unwrap_or_default();
-    let default_provider = config_file.default_provider.unwrap_or_default();
+    let providers = config_file.providers.clone().unwrap_or_default();
+    let default_provider = config_file.default_provider.clone().unwrap_or_default();
 
     let entries: Vec<ProviderConfigEntry> = providers
         .iter()
@@ -5778,7 +7255,9 @@ pub async fn switch_provider(
         .as_ref()
         .map(|k| expand_env_vars(k))
         .filter(|k| !k.is_empty())
-        .ok_or_else(|| OmigaError::Config(format!("API key not set for provider '{}'", provider_name)))?;
+        .ok_or_else(|| {
+            OmigaError::Config(format!("API key not set for provider '{}'", provider_name))
+        })?;
 
     // Build config
     let mut config = LlmConfig::new(provider_enum, api_key);
@@ -5849,7 +7328,9 @@ pub async fn save_provider_config(
 ) -> CommandResult<()> {
     // Validate required fields
     if name.trim().is_empty() {
-        return Err(OmigaError::Config("Configuration name is required".to_string()));
+        return Err(OmigaError::Config(
+            "Configuration name is required".to_string(),
+        ));
     }
     if provider_type.trim().is_empty() {
         return Err(OmigaError::Config("Provider type is required".to_string()));
@@ -5880,7 +7361,9 @@ pub async fn save_provider_config(
             .and_then(|p| p.api_key.clone())
             .filter(|k| !k.is_empty());
         if existing.is_none() {
-            return Err(OmigaError::Config("API key is required (existing key not found)".to_string()));
+            return Err(OmigaError::Config(
+                "API key is required (existing key not found)".to_string(),
+            ));
         }
         existing.unwrap()
     } else {
@@ -5922,11 +7405,9 @@ pub async fn save_provider_config(
 
         // Also update the active config in state
         let saved = providers.get(&name).unwrap();
-        let mut new_config = LlmConfig::new(
-            provider_enum,
-            saved.api_key.clone().unwrap_or_default(),
-        )
-        .with_model(saved.model.clone().unwrap_or_default());
+        let mut new_config =
+            LlmConfig::new(provider_enum, saved.api_key.clone().unwrap_or_default())
+                .with_model(saved.model.clone().unwrap_or_default());
         if let Some(url) = &saved.base_url {
             new_config.base_url = Some(expand_env_vars(url));
         }
@@ -5941,9 +7422,7 @@ pub async fn save_provider_config(
 
     // Save to config file - use standard location if not found
     let config_path = crate::llm::config::find_config_file()
-        .or_else(|| {
-            dirs::config_dir().map(|d| d.join("omiga").join("omiga.yaml"))
-        })
+        .or_else(|| dirs::config_dir().map(|d| d.join("omiga").join("omiga.yaml")))
         .ok_or_else(|| OmigaError::Config("Could not determine config file path".to_string()))?;
 
     // Ensure directory exists
@@ -5953,6 +7432,7 @@ pub async fn save_provider_config(
 
     crate::llm::config::save_config_file(&config_file, &config_path)
         .map_err(|e| OmigaError::Config(format!("Failed to save config: {}", e)))?;
+    invalidate_config_file_cache(&state).await;
 
     Ok(())
 }
@@ -5973,10 +7453,7 @@ pub async fn delete_provider_config(
         .ok_or_else(|| OmigaError::Config("No providers configured".to_string()))?;
 
     if providers.remove(&name).is_none() {
-        return Err(OmigaError::Config(format!(
-            "Provider '{}' not found",
-            name
-        )));
+        return Err(OmigaError::Config(format!("Provider '{}' not found", name)));
     }
 
     // If we removed the default, pick a new one
@@ -5996,12 +7473,36 @@ pub async fn delete_provider_config(
     if let Some(path) = crate::llm::config::find_config_file() {
         crate::llm::config::save_config_file(&config_file, &path)
             .map_err(|e| OmigaError::Config(format!("Failed to save config: {}", e)))?;
+        invalidate_config_file_cache(&state).await;
     }
 
     Ok(())
 }
 
 /// Apply a named `omiga.yaml` provider entry to in-memory chat state (no file write).
+/// Return the cached `LlmConfigFile`, loading from disk only on first access.
+/// The cache is invalidated by `invalidate_config_file_cache` whenever the file is written.
+pub(crate) async fn get_config_file(
+    state: &OmigaAppState,
+) -> Result<std::sync::Arc<crate::llm::config::LlmConfigFile>, OmigaError> {
+    let mut guard = state.chat.cached_config_file.lock().await;
+    if let Some(cached) = guard.as_ref() {
+        return Ok(std::sync::Arc::clone(cached));
+    }
+    // Cache miss — load from disk (blocking I/O, acceptable here because it is rare).
+    let cf = crate::llm::config::load_config_file()
+        .map_err(|e| OmigaError::Config(format!("Failed to load config file: {}", e)))?;
+    let arc = std::sync::Arc::new(cf);
+    *guard = Some(std::sync::Arc::clone(&arc));
+    Ok(arc)
+}
+
+/// Invalidate the in-memory config file cache.  Must be called after every `save_config_file`
+/// so the next session switch re-reads the updated file from disk.
+pub(crate) async fn invalidate_config_file_cache(state: &OmigaAppState) {
+    *state.chat.cached_config_file.lock().await = None;
+}
+
 pub(crate) async fn apply_named_provider_runtime(
     state: &OmigaAppState,
     provider_name: &str,
@@ -6011,11 +7512,11 @@ pub(crate) async fn apply_named_provider_runtime(
         return Err(OmigaError::Config("Provider name is required".to_string()));
     }
 
-    let config_file = crate::llm::config::load_config_file()
-        .map_err(|e| OmigaError::Config(format!("Failed to load config file: {}", e)))?;
+    let config_file = get_config_file(state).await?;
 
     let providers = config_file
         .providers
+        .as_ref()
         .ok_or_else(|| OmigaError::Config("No providers configured".to_string()))?;
 
     let provider_config = providers
@@ -6076,53 +7577,6 @@ pub(crate) async fn apply_named_provider_runtime(
     })
 }
 
-/// Same as app startup: `omiga.yaml` merged default (and env), plus `default_provider` key for UI.
-pub(crate) async fn apply_yaml_default_runtime(state: &OmigaAppState) -> Result<(), OmigaError> {
-    let cfg = crate::llm::load_config().map_err(OmigaError::from)?;
-    *state.chat.llm_config.lock().await = Some(cfg);
-    let cf = crate::llm::config::load_config_file()
-        .map_err(|e| OmigaError::Config(format!("Failed to load config file: {}", e)))?;
-    *state.chat.active_provider_entry_name.lock().await = cf.default_provider.clone();
-    Ok(())
-}
-
-/// When switching sessions, restore that session's quick-switched provider or yaml default.
-/// Returns `true` when the active provider was actually changed (UI needs refresh),
-/// `false` when the desired provider was already active (no-op, skip UI event).
-pub(crate) async fn restore_session_llm_after_load(
-    state: &OmigaAppState,
-    active_provider_entry_name: Option<String>,
-) -> Result<bool, OmigaError> {
-    // Skip re-initializing the provider when it hasn't changed — avoids redundant disk I/O on
-    // every session switch when the user stays on the same model.
-    let current_name = state.chat.active_provider_entry_name.lock().await.clone();
-    let desired_name = active_provider_entry_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    if current_name == desired_name {
-        return Ok(false); // unchanged — caller can skip notifyProviderChanged
-    }
-    drop(current_name);
-
-    match active_provider_entry_name {
-        Some(name) if !name.trim().is_empty() => {
-            if let Err(e) = apply_named_provider_runtime(state, name.trim()).await {
-                tracing::warn!(
-                    target: "omiga::llm",
-                    "Session provider {:?} unavailable ({}), falling back to yaml default",
-                    name,
-                    e
-                );
-                apply_yaml_default_runtime(state).await?;
-            }
-        }
-        _ => apply_yaml_default_runtime(state).await?,
-    }
-    Ok(true) // provider changed — caller should fire notifyProviderChanged
-}
-
 /// Quick switch provider - set active without saving to file (for UI quick-switch).
 /// Persists the choice on the given `session_id` when provided (per-session model).
 #[tauri::command]
@@ -6147,6 +7601,11 @@ pub async fn quick_switch_provider(
                 .map_err(|e| {
                     OmigaError::Persistence(format!("Failed to save session provider: {}", e))
                 })?;
+            // Also update the per-session config file so the provider choice survives restarts
+            // and is returned by `get_session_config`.
+            let mut cfg = crate::domain::session::load_session_config(sid);
+            cfg.active_provider_entry_name = Some(name.to_string());
+            let _ = crate::domain::session::save_session_config(sid, &cfg);
         }
     }
 
@@ -6158,7 +7617,7 @@ pub async fn quick_switch_provider(
 /// (use `quick_switch_provider` for the current session).
 #[tauri::command]
 pub async fn set_default_provider_config(
-    _state: State<'_, OmigaAppState>,
+    state: State<'_, OmigaAppState>,
     provider_name: String,
 ) -> CommandResult<()> {
     let name = provider_name.trim();
@@ -6197,6 +7656,7 @@ pub async fn set_default_provider_config(
 
     crate::llm::config::save_config_file(&config_file, &config_path)
         .map_err(|e| OmigaError::Config(format!("Failed to save config: {}", e)))?;
+    invalidate_config_file_cache(&state).await;
 
     Ok(())
 }
@@ -6221,7 +7681,9 @@ pub struct RunAgentScheduleRequest {
     pub auto_decompose: bool,
 }
 
-fn default_auto_decompose() -> bool { true }
+fn default_auto_decompose() -> bool {
+    true
+}
 
 /// Run the agent scheduler: decompose `user_request`, then execute subtasks in
 /// parallel using real LLM sub-agents backed by `spawn_background_agent`.
@@ -6240,7 +7702,9 @@ pub async fn run_agent_schedule(
     // Build LLM config from app state.
     let llm_config = {
         let guard = app_state.chat.llm_config.lock().await;
-        guard.clone().ok_or_else(|| OmigaError::Chat(ChatError::ApiKeyMissing))?
+        guard
+            .clone()
+            .ok_or_else(|| OmigaError::Chat(ChatError::ApiKeyMissing))?
     };
     if llm_config.api_key.is_empty() {
         return Err(OmigaError::Chat(ChatError::ApiKeyMissing));
@@ -6262,6 +7726,8 @@ pub async fn run_agent_schedule(
         local_venv_type: String::new(),
         local_venv_name: String::new(),
         env_store: crate::domain::tools::env_store::EnvStore::new(),
+        runtime_constraints_config:
+            crate::domain::runtime_constraints::ResolvedRuntimeConstraintConfig::default(),
     };
 
     let max_agents = request.max_agents.unwrap_or(5);
@@ -6291,8 +7757,7 @@ pub async fn run_agent_schedule(
     let orch_result = scheduler
         .execute_plan_with_runtime(
             &sched_result.plan,
-            &SchedulingRequest::new(request.user_request)
-                .with_project_root(request.project_root),
+            &SchedulingRequest::new(request.user_request).with_project_root(request.project_root),
             &app,
             &runtime,
             &request.session_id,
@@ -6311,8 +7776,8 @@ async fn handle_skill_config(
 ) -> Result<serde_json::Value, String> {
     use crate::domain::tools::skill_config::{ConfigAction, SkillConfigArgs};
 
-    let args: SkillConfigArgs = serde_json::from_str(arguments)
-        .map_err(|e| format!("skill_config: invalid JSON: {e}"))?;
+    let args: SkillConfigArgs =
+        serde_json::from_str(arguments).map_err(|e| format!("skill_config: invalid JSON: {e}"))?;
 
     match args.action {
         ConfigAction::List => {
@@ -6322,7 +7787,8 @@ async fn handle_skill_config(
                 if skill.config_vars.is_empty() {
                     continue;
                 }
-                let resolved = skills::skill_config::resolve_config_vars(&skill.config_vars, project_root);
+                let resolved =
+                    skills::skill_config::resolve_config_vars(&skill.config_vars, project_root);
                 entries.push(serde_json::json!({
                     "skill": skill.name,
                     "config_vars": resolved,
@@ -6331,7 +7797,8 @@ async fn handle_skill_config(
             Ok(serde_json::json!({ "success": true, "skills": entries, "count": entries.len() }))
         }
         ConfigAction::Get => {
-            let skill_name = args.skill
+            let skill_name = args
+                .skill
                 .as_deref()
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| "skill_config: `skill` is required for action `get`".to_string())?;
@@ -6346,7 +7813,8 @@ async fn handle_skill_config(
                     "message": "This skill declares no config variables."
                 }));
             }
-            let resolved = skills::skill_config::resolve_config_vars(&entry.config_vars, project_root);
+            let resolved =
+                skills::skill_config::resolve_config_vars(&entry.config_vars, project_root);
             Ok(serde_json::json!({
                 "success": true,
                 "skill": entry.name,
@@ -6355,15 +7823,18 @@ async fn handle_skill_config(
             }))
         }
         ConfigAction::Set => {
-            let skill_name = args.skill
+            let skill_name = args
+                .skill
                 .as_deref()
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| "skill_config: `skill` is required for action `set`".to_string())?;
-            let key = args.key
+            let key = args
+                .key
                 .as_deref()
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| "skill_config: `key` is required for action `set`".to_string())?;
-            let value = args.value
+            let value = args
+                .value
                 .as_deref()
                 .ok_or_else(|| "skill_config: `value` is required for action `set`".to_string())?;
 
@@ -6375,7 +7846,12 @@ async fn handle_skill_config(
                 return Err(format!(
                     "skill_config: key `{key}` is not declared by skill `{skill_name}`. \
                      Declared keys: {}",
-                    entry.config_vars.iter().map(|v| v.key.as_str()).collect::<Vec<_>>().join(", ")
+                    entry
+                        .config_vars
+                        .iter()
+                        .map(|v| v.key.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
 

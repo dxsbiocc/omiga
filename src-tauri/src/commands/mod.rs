@@ -8,18 +8,18 @@
 pub mod chat;
 pub mod claude_import;
 pub mod execution_envs;
-pub mod integrations_settings;
 pub mod fs;
-pub mod notebook;
 pub mod git_workspace;
+pub mod integrations_settings;
+pub mod local_envs;
 pub mod memory;
+pub mod notebook;
 pub mod permissions;
+pub mod sandbox_fs;
 pub mod search;
 pub mod session;
 pub mod shell;
 pub mod ssh_fs;
-pub mod sandbox_fs;
-pub mod local_envs;
 pub mod tools;
 
 use crate::errors::AppError;
@@ -94,7 +94,10 @@ pub async fn test_notification(app: tauri::AppHandle) -> Result<String, String> 
 
     #[cfg(target_os = "macos")]
     {
-        match send_notification_via_osascript("测试通知 (osascript)", "这是一条测试通知（开发模式备选）") {
+        match send_notification_via_osascript(
+            "测试通知 (osascript)",
+            "这是一条测试通知（开发模式备选）",
+        ) {
             Ok(_) => return Ok("osascript notification sent (dev mode fallback)".to_string()),
             Err(e) => tracing::warn!(?e, "osascript fallback failed"),
         }

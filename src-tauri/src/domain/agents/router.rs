@@ -19,7 +19,7 @@ impl AgentRouter {
             agents: HashMap::new(),
             default_agent: "general-purpose".to_string(),
         };
-        
+
         register_built_in_agents(&mut router);
         router
     }
@@ -43,9 +43,8 @@ impl AgentRouter {
 
     /// 清空所有非内置 Agent（用于热重载）
     pub fn clear_custom_agents(&mut self) {
-        self.agents.retain(|_, entry| {
-            entry.inner.source() == super::definition::AgentSource::BuiltIn
-        });
+        self.agents
+            .retain(|_, entry| entry.inner.source() == super::definition::AgentSource::BuiltIn);
     }
 
     /// 根据 subagent_type 选择 Agent
@@ -54,7 +53,7 @@ impl AgentRouter {
     /// - 未指定类型 → 返回默认 Agent
     pub fn select_agent(&self, subagent_type: Option<&str>) -> &dyn AgentDefinition {
         let agent_type = subagent_type.unwrap_or(&self.default_agent);
-        
+
         match self.agents.get(agent_type) {
             Some(entry) => &*entry.inner,
             None => {

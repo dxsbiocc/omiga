@@ -76,14 +76,25 @@ impl super::ToolImpl for GlobTool {
                 let env_arc = store.get_or_create(ctx, 30_000).await?;
                 let paths = {
                     let mut guard = env_arc.lock().await;
-                    let mut ops = crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
-                    ops.glob_find(&args.pattern, &base, args.max_results, args.include_hidden).await?
+                    let mut ops =
+                        crate::domain::tools::shell_file_ops::ShellFileOps::new(&mut *guard);
+                    ops.glob_find(&args.pattern, &base, args.max_results, args.include_hidden)
+                        .await?
                 };
                 let truncated = paths.len() >= args.max_results;
-                let matches: Vec<GlobMatch> = paths.into_iter()
-                    .map(|p| GlobMatch { path: p, is_file: true, size: 0 })
+                let matches: Vec<GlobMatch> = paths
+                    .into_iter()
+                    .map(|p| GlobMatch {
+                        path: p,
+                        is_file: true,
+                        size: 0,
+                    })
                     .collect();
-                let output = GlobOutput { pattern: args.pattern, matches, truncated };
+                let output = GlobOutput {
+                    pattern: args.pattern,
+                    matches,
+                    truncated,
+                };
                 return Ok(output.into_stream());
             }
         }
@@ -103,9 +114,7 @@ impl super::ToolImpl for GlobTool {
         };
 
         // Walk directory
-        let walker = WalkDir::new(&base_path)
-            .follow_links(false)
-            .max_depth(100);
+        let walker = WalkDir::new(&base_path).follow_links(false).max_depth(100);
 
         for entry in walker {
             let entry = match entry {

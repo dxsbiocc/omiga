@@ -67,6 +67,8 @@ pub struct ImportResult {
 pub struct ExplicitImporter {
     project_root: PathBuf,
     wiki_dir: PathBuf,
+    /// Directory where original raw files are copied on import.
+    raw_dir: PathBuf,
     parser: DocumentParser,
     options: ImportOptions,
 }
@@ -75,11 +77,13 @@ impl ExplicitImporter {
     pub fn new(
         project_root: impl AsRef<Path>,
         wiki_dir: impl AsRef<Path>,
+        raw_dir: impl AsRef<Path>,
         options: ImportOptions,
     ) -> Self {
         Self {
             project_root: project_root.as_ref().to_path_buf(),
             wiki_dir: wiki_dir.as_ref().to_path_buf(),
+            raw_dir: raw_dir.as_ref().to_path_buf(),
             parser: DocumentParser::new(6), // max 6 levels of headings
             options,
         }
@@ -90,9 +94,7 @@ impl ExplicitImporter {
         match source {
             ImportSource::File(path) => self.import_file(&path).await,
             ImportSource::Directory(path) => self.import_directory(&path).await,
-            ImportSource::Text { title, content } => {
-                self.import_text(&title, &content).await
-            }
+            ImportSource::Text { title, content } => self.import_text(&title, &content).await,
         }
     }
 
@@ -107,12 +109,15 @@ impl ExplicitImporter {
 
         // Check if file is readable
         if !path.exists() {
-            result.errors.push(format!("File not found: {}", path.display()));
+            result
+                .errors
+                .push(format!("File not found: {}", path.display()));
             return Ok(result);
         }
 
         // Get relative path for reference
-        let relative_path = path.strip_prefix(&self.project_root)
+        let relative_path = path
+            .strip_prefix(&self.project_root)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
@@ -121,7 +126,9 @@ impl ExplicitImporter {
         let content = match fs::read_to_string(path).await {
             Ok(c) => c,
             Err(e) => {
-                result.errors.push(format!("Failed to read {}: {}", path.display(), e));
+                result
+                    .errors
+                    .push(format!("Failed to read {}: {}", path.display(), e));
                 return Ok(result);
             }
         };
@@ -130,32 +137,44 @@ impl ExplicitImporter {
         let parse_result = match self.parser.parse(&relative_path, &content) {
             Ok(r) => r,
             Err(e) => {
-                result.errors.push(format!("Failed to parse {}: {}", path.display(), e));
+                result
+                    .errors
+                    .push(format!("Failed to parse {}: {}", path.display(), e));
                 return Ok(result);
             }
         };
 
-        // Generate wiki page
-        let file_name = path.file_stem()
+        // Generate wiki page slug
+        let file_name = path
+            .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("untitled");
         let slug = slugify(file_name);
-        
+
+        // Copy raw original file to raw_dir so it survives directory restructuring.
+        let raw_ref = self.copy_raw_file(path, &slug).await;
+
         let wiki_content = self.generate_wiki_content(
             &parse_result.title,
             &relative_path,
+            raw_ref.as_deref(),
             &parse_result,
         );
 
         // Write wiki page
         let wiki_path = self.wiki_dir.join(format!("{}.md", slug));
         if let Err(e) = fs::write(&wiki_path, &wiki_content).await {
-            result.errors.push(format!("Failed to write wiki page: {}", e));
+            result
+                .errors
+                .push(format!("Failed to write wiki page: {}", e));
             return Ok(result);
         }
 
         // Update wiki index
-        if let Err(e) = self.update_wiki_index(&slug, &parse_result.title, &relative_path).await {
+        if let Err(e) = self
+            .update_wiki_index(&slug, &parse_result.title, &relative_path)
+            .await
+        {
             result.errors.push(format!("Failed to update index: {}", e));
         }
 
@@ -165,6 +184,29 @@ impl ExplicitImporter {
         info!("Imported file {} to wiki page {}", path.display(), slug);
 
         Ok(result)
+    }
+
+    /// Copy the original file into `raw_dir/<slug>.<ext>` and return the destination path string.
+    /// Logs a warning but does not fail the import if the copy cannot be completed.
+    async fn copy_raw_file(&self, src: &Path, slug: &str) -> Option<String> {
+        let ext = src
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("bin");
+        let dest_name = format!("{}.{}", slug, ext);
+        let dest = self.raw_dir.join(&dest_name);
+
+        if let Err(e) = fs::create_dir_all(&self.raw_dir).await {
+            warn!("Cannot create raw_dir {}: {}", self.raw_dir.display(), e);
+            return None;
+        }
+
+        if let Err(e) = fs::copy(src, &dest).await {
+            warn!("Cannot copy raw file to {}: {}", dest.display(), e);
+            return None;
+        }
+
+        Some(dest.to_string_lossy().into_owned())
     }
 
     /// Import directory recursively
@@ -184,7 +226,9 @@ impl ExplicitImporter {
             let mut entries = match fs::read_dir(&current_dir).await {
                 Ok(e) => e,
                 Err(e) => {
-                    result.errors.push(format!("Failed to read directory: {}", e));
+                    result
+                        .errors
+                        .push(format!("Failed to read directory: {}", e));
                     continue;
                 }
             };
@@ -230,12 +274,13 @@ impl ExplicitImporter {
 
         // Create directory index page if enabled
         if self.options.create_index_pages && !all_created_pages.is_empty() {
-            let dir_name = path.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("index");
+            let dir_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("index");
             let index_slug = slugify(dir_name);
-            
-            if let Err(e) = self.create_directory_index(&index_slug, path, &all_created_pages).await {
+
+            if let Err(e) = self
+                .create_directory_index(&index_slug, path, &all_created_pages)
+                .await
+            {
                 warn!("Failed to create directory index: {}", e);
             }
         }
@@ -253,7 +298,7 @@ impl ExplicitImporter {
         };
 
         let slug = slugify(title);
-        
+
         // Parse as markdown
         let parse_result = match self.parser.parse(&format!("{}.md", slug), content) {
             Ok(r) => r,
@@ -261,30 +306,27 @@ impl ExplicitImporter {
                 // If parsing fails, create simple page with raw content
                 let wiki_content = format!(
                     "# {}\n\n{}\n\n---\n\n*Imported from text*\n",
-                    title,
-                    content
+                    title, content
                 );
-                
+
                 let wiki_path = self.wiki_dir.join(format!("{}.md", slug));
-                fs::write(&wiki_path, &wiki_content).await
+                fs::write(&wiki_path, &wiki_content)
+                    .await
                     .map_err(|e| AppError::Unknown(e.to_string()))?;
-                
+
                 self.update_wiki_index(&slug, title, "text import").await?;
-                
+
                 result.imported_count = 1;
                 result.created_pages.push(slug);
                 return Ok(result);
             }
         };
 
-        let wiki_content = self.generate_wiki_content(
-            title,
-            "text import",
-            &parse_result,
-        );
+        let wiki_content = self.generate_wiki_content(title, "text import", None, &parse_result);
 
         let wiki_path = self.wiki_dir.join(format!("{}.md", slug));
-        fs::write(&wiki_path, &wiki_content).await
+        fs::write(&wiki_path, &wiki_content)
+            .await
             .map_err(|e| AppError::Unknown(e.to_string()))?;
 
         self.update_wiki_index(&slug, title, "text import").await?;
@@ -302,6 +344,7 @@ impl ExplicitImporter {
         &self,
         title: &str,
         source_path: &str,
+        raw_path: Option<&str>,
         parse_result: &crate::domain::pageindex::ParseResult,
     ) -> String {
         let mut content = String::new();
@@ -309,18 +352,17 @@ impl ExplicitImporter {
         // Header
         content.push_str(&format!("# {}\n\n", title));
 
-        // Source reference
-        content.push_str(&format!(
-            "> **Source**: `{}`\n\n",
-            source_path
-        ));
+        // Source reference (original import path)
+        content.push_str(&format!("> **Source**: `{}`\n\n", source_path));
+
+        // Raw file reference (stable copy, survives directory moves)
+        if let Some(raw) = raw_path {
+            content.push_str(&format!("> **Raw**: `{}`\n\n", raw));
+        }
 
         // Tags if any
         if !self.options.tags.is_empty() {
-            content.push_str(&format!(
-                "> **Tags**: {}\n\n",
-                self.options.tags.join(", ")
-            ));
+            content.push_str(&format!("> **Tags**: {}\n\n", self.options.tags.join(", ")));
         }
 
         // Main content
@@ -343,8 +385,9 @@ impl ExplicitImporter {
             }
         } else {
             // No sections, just add content
-            let body = if self.options.max_section_length > 0 
-                && parse_result.content.len() > self.options.max_section_length {
+            let body = if self.options.max_section_length > 0
+                && parse_result.content.len() > self.options.max_section_length
+            {
                 format!(
                     "{}\n\n*[Content truncated...]*",
                     &parse_result.content[..self.options.max_section_length]
@@ -367,25 +410,18 @@ impl ExplicitImporter {
     }
 
     /// Format a section recursively
-    fn format_section(
-        &self,
-        section: &SectionNode,
-        level: usize,
-    ) -> String {
+    fn format_section(&self, section: &SectionNode, level: usize) -> String {
         let mut result = String::new();
 
         // Section heading
         let heading_prefix = "#".repeat(level);
-        result.push_str(&format!(
-            "{} {}\n\n",
-            heading_prefix,
-            section.title
-        ));
+        result.push_str(&format!("{} {}\n\n", heading_prefix, section.title));
 
         // Section content
         if !section.content.is_empty() {
             let body = if self.options.max_section_length > 0
-                && section.content.len() > self.options.max_section_length {
+                && section.content.len() > self.options.max_section_length
+            {
                 format!(
                     "{}\n\n*[Content truncated...]*",
                     &section.content[..self.options.max_section_length]
@@ -413,7 +449,7 @@ impl ExplicitImporter {
         source: &str,
     ) -> Result<(), AppError> {
         let index_path = self.wiki_dir.join("index.md");
-        
+
         // Read existing index or create new
         let mut index_content = if index_path.exists() {
             fs::read_to_string(&index_path).await.unwrap_or_default()
@@ -424,13 +460,11 @@ impl ExplicitImporter {
         // Check if entry already exists
         let entry_pattern = format!("({}.md)", slug);
         if !index_content.contains(&entry_pattern) {
-            let entry = format!(
-                "- [{}]({}.md) — Imported from `{}`\n",
-                title, slug, source
-            );
+            let entry = format!("- [{}]({}.md) — Imported from `{}`\n", title, slug, source);
             index_content.push_str(&entry);
-            
-            fs::write(&index_path, index_content).await
+
+            fs::write(&index_path, index_content)
+                .await
                 .map_err(|e| AppError::Unknown(e.to_string()))?;
         }
 
@@ -444,14 +478,12 @@ impl ExplicitImporter {
         dir_path: &Path,
         pages: &[String],
     ) -> Result<(), AppError> {
-        let dir_name = dir_path.file_name()
+        let dir_name = dir_path
+            .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("Index");
 
-        let mut content = format!(
-            "# {} Index\n\n",
-            dir_name
-        );
+        let mut content = format!("# {} Index\n\n", dir_name);
         content.push_str(&format!(
             "> Directory index for `{}`\n\n",
             dir_path.display()
@@ -469,12 +501,18 @@ impl ExplicitImporter {
         ));
 
         let index_path = self.wiki_dir.join(format!("{}.md", slug));
-        fs::write(&index_path, content).await
+        fs::write(&index_path, content)
+            .await
             .map_err(|e| AppError::Unknown(e.to_string()))?;
 
         // Add to main index
-        let _ = self.update_wiki_index(slug, &format!("{} Index", dir_name), 
-            &dir_path.to_string_lossy()).await;
+        let _ = self
+            .update_wiki_index(
+                slug,
+                &format!("{} Index", dir_name),
+                &dir_path.to_string_lossy(),
+            )
+            .await;
 
         Ok(())
     }
@@ -503,13 +541,13 @@ fn slugify(s: &str) -> String {
 }
 
 /// Check if file extension is supported for explicit memory import
-/// 
+///
 /// Explicit memory focuses on text-based content files:
 /// - Documents: Markdown, plain text, rich text
 /// - Structured data: JSON, YAML, TOML (for configuration knowledge)
 /// - Web content: HTML
 /// - Office documents: PDF (requires special handling)
-/// 
+///
 /// Note: Source code files should be indexed via implicit memory (PageIndex)
 /// rather than imported into explicit memory.
 fn is_supported_extension(ext: &str) -> bool {
@@ -545,23 +583,23 @@ mod tests {
         assert!(is_supported_extension("txt"));
         assert!(is_supported_extension("rtf"));
         assert!(is_supported_extension("pdf"));
-        
+
         // Data/Config formats
         assert!(is_supported_extension("json"));
         assert!(is_supported_extension("yaml"));
         assert!(is_supported_extension("yml"));
         assert!(is_supported_extension("toml"));
-        
+
         // Web content
         assert!(is_supported_extension("html"));
         assert!(is_supported_extension("htm"));
-        
+
         // Code files should NOT be supported (use implicit memory instead)
         assert!(!is_supported_extension("rs"));
         assert!(!is_supported_extension("py"));
         assert!(!is_supported_extension("js"));
         assert!(!is_supported_extension("ts"));
-        
+
         // Binary files should NOT be supported
         assert!(!is_supported_extension("exe"));
         assert!(!is_supported_extension("dll"));

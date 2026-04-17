@@ -39,8 +39,18 @@ pub fn preflight_skip_turn_summary(user_message: &str) -> bool {
 
     // ── 层 1：用户明确要求摘要/要点，必须走完整格式化通道 ────────────────────────
     const SUMMARY_KEYWORDS: &[&str] = &[
-        "总结", "摘要", "要点", "归纳", "概括", "recap", "summary", "summarize",
-        "highlight", "highlights", "takeaway", "takeaways",
+        "总结",
+        "摘要",
+        "要点",
+        "归纳",
+        "概括",
+        "recap",
+        "summary",
+        "summarize",
+        "highlight",
+        "highlights",
+        "takeaway",
+        "takeaways",
     ];
     if SUMMARY_KEYWORDS.iter().any(|kw| lower.contains(kw)) {
         return false;
@@ -148,8 +158,8 @@ pub fn preflight_skip_turn_summary(user_message: &str) -> bool {
     let count = t.chars().count();
     if count <= 8 {
         const SHORT_ACK: &[&str] = &[
-            "好的", "好", "ok", "okay", "行", "嗯", "噢", "哦", "是", "对", "嗯嗯", "继续",
-            "y", "yes", "no", "嗯好",
+            "好的", "好", "ok", "okay", "行", "嗯", "噢", "哦", "是", "对", "嗯嗯", "继续", "y",
+            "yes", "no", "嗯好",
         ];
         if SHORT_ACK.contains(&lower.as_str()) {
             return true;
@@ -242,7 +252,9 @@ fn clamp_summary(s: &str) -> String {
     }
     format!(
         "{}…",
-        t.chars().take(MAX_SUMMARY_CHARS.saturating_sub(1)).collect::<String>()
+        t.chars()
+            .take(MAX_SUMMARY_CHARS.saturating_sub(1))
+            .collect::<String>()
     )
 }
 
@@ -339,14 +351,18 @@ mod tests {
     fn preflight_skip_plan_generation() {
         assert!(preflight_skip_turn_summary("帮我制定一个项目计划"));
         assert!(preflight_skip_turn_summary("生成方案"));
-        assert!(preflight_skip_turn_summary("create a plan for the migration"));
+        assert!(preflight_skip_turn_summary(
+            "create a plan for the migration"
+        ));
         assert!(preflight_skip_turn_summary("给这个项目做一个roadmap"));
     }
 
     #[test]
     fn preflight_skip_code_generation() {
         assert!(preflight_skip_turn_summary("帮我写一个排序函数"));
-        assert!(preflight_skip_turn_summary("write a function to parse JSON"));
+        assert!(preflight_skip_turn_summary(
+            "write a function to parse JSON"
+        ));
         assert!(preflight_skip_turn_summary("实现一个二叉树"));
         assert!(preflight_skip_turn_summary("生成配置文件"));
     }

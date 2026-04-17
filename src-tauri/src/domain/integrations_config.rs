@@ -86,10 +86,7 @@ pub fn filter_mcp_tools_by_integrations(
 }
 
 /// Keep only skills not listed in `disabled_skills` (match `SkillEntry.name`).
-pub fn filter_skill_entries(
-    entries: Vec<SkillEntry>,
-    cfg: &IntegrationsConfig,
-) -> Vec<SkillEntry> {
+pub fn filter_skill_entries(entries: Vec<SkillEntry>, cfg: &IntegrationsConfig) -> Vec<SkillEntry> {
     let disabled = cfg.skill_disabled_set();
     if disabled.is_empty() {
         return entries;
@@ -106,7 +103,10 @@ pub fn is_skill_name_disabled(cfg: &IntegrationsConfig, skill_display_name: &str
 }
 
 /// Whether a merged Omiga MCP server key is disabled (compares normalized tokens).
-pub fn is_mcp_config_server_disabled(cfg: &IntegrationsConfig, server_key_from_merged: &str) -> bool {
+pub fn is_mcp_config_server_disabled(
+    cfg: &IntegrationsConfig,
+    server_key_from_merged: &str,
+) -> bool {
     cfg.mcp_disabled_set()
         .contains(&normalize_name_for_mcp(server_key_from_merged))
 }
@@ -122,16 +122,8 @@ mod tests {
             disabled_skills: vec![],
         };
         let tools = vec![
-            ToolSchema::new(
-                "mcp__figma__x",
-                "d",
-                serde_json::json!({}),
-            ),
-            ToolSchema::new(
-                "mcp__other__y",
-                "d",
-                serde_json::json!({}),
-            ),
+            ToolSchema::new("mcp__figma__x", "d", serde_json::json!({})),
+            ToolSchema::new("mcp__other__y", "d", serde_json::json!({})),
         ];
         let f = filter_mcp_tools_by_integrations(tools, &cfg);
         assert_eq!(f.len(), 1);

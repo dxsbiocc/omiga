@@ -16,14 +16,22 @@ use tokio::process::Command;
 /// Docker 安全参数
 /// 对应 hermes-agent 中的 _SECURITY_ARGS
 const SECURITY_ARGS: &[&str] = &[
-    "--cap-drop", "ALL",
-    "--cap-add", "DAC_OVERRIDE",
-    "--cap-add", "CHOWN",
-    "--cap-add", "FOWNER",
-    "--security-opt", "no-new-privileges",
-    "--pids-limit", "256",
-    "--tmpfs", "/tmp:rw,nosuid,size=512m",
-    "--tmpfs", "/var/tmp:rw,noexec,nosuid,size=256m",
+    "--cap-drop",
+    "ALL",
+    "--cap-add",
+    "DAC_OVERRIDE",
+    "--cap-add",
+    "CHOWN",
+    "--cap-add",
+    "FOWNER",
+    "--security-opt",
+    "no-new-privileges",
+    "--pids-limit",
+    "256",
+    "--tmpfs",
+    "/tmp:rw,nosuid,size=512m",
+    "--tmpfs",
+    "/var/tmp:rw,noexec,nosuid,size=256m",
 ];
 
 /// Docker 可执行文件搜索路径
@@ -46,7 +54,7 @@ pub struct DockerEnvironment {
     cwd_marker: String,
     snapshot_ready: bool,
     last_sync_time: Option<f64>,
-    
+
     // Docker 特定配置
     image: String,
     container_id: Option<String>,
@@ -76,7 +84,7 @@ impl DockerEnvironment {
     ) -> Result<Self, ExecutionError> {
         let docker_exe = Self::find_docker().await?;
         let cwd = cwd.unwrap_or_else(|| "/root".to_string());
-        
+
         // 验证 Docker 可用
         Self::ensure_docker_available(&docker_exe).await?;
 
@@ -106,8 +114,9 @@ impl DockerEnvironment {
         };
 
         // 初始化容器
-        me.init_container(cpu, memory, disk, &volumes, &forward_env, network).await?;
-        
+        me.init_container(cpu, memory, disk, &volumes, &forward_env, network)
+            .await?;
+
         // 初始化会话快照
         me.init_session().await?;
 
@@ -134,7 +143,7 @@ impl DockerEnvironment {
         }
 
         Err(ExecutionError::DockerError(
-            "Docker executable not found in PATH or common locations".to_string()
+            "Docker executable not found in PATH or common locations".to_string(),
         ))
     }
 
@@ -145,11 +154,13 @@ impl DockerEnvironment {
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 Err(ExecutionError::DockerError(format!(
-                    "Docker daemon not available: {}", stderr
+                    "Docker daemon not available: {}",
+                    stderr
                 )))
             }
             Err(e) => Err(ExecutionError::DockerError(format!(
-                "Failed to run docker: {}", e
+                "Failed to run docker: {}",
+                e
             ))),
         }
     }
@@ -184,17 +195,27 @@ impl DockerEnvironment {
             let sandbox_dir = super::types::get_sandbox_dir()
                 .join("docker")
                 .join(&self.task_id);
-            
+
             self.home_dir = Some(sandbox_dir.join("home"));
             self.workspace_dir = Some(sandbox_dir.join("workspace"));
-            
-            tokio::fs::create_dir_all(self.home_dir.as_ref().unwrap()).await.ok();
-            tokio::fs::create_dir_all(self.workspace_dir.as_ref().unwrap()).await.ok();
-            
+
+            tokio::fs::create_dir_all(self.home_dir.as_ref().unwrap())
+                .await
+                .ok();
+            tokio::fs::create_dir_all(self.workspace_dir.as_ref().unwrap())
+                .await
+                .ok();
+
             writable_args.push("-v".to_string());
-            writable_args.push(format!("{}:/root", self.home_dir.as_ref().unwrap().display()));
+            writable_args.push(format!(
+                "{}:/root",
+                self.home_dir.as_ref().unwrap().display()
+            ));
             writable_args.push("-v".to_string());
-            writable_args.push(format!("{}:/workspace", self.workspace_dir.as_ref().unwrap().display()));
+            writable_args.push(format!(
+                "{}:/workspace",
+                self.workspace_dir.as_ref().unwrap().display()
+            ));
         } else {
             writable_args.push("--tmpfs".to_string());
             writable_args.push("/workspace:rw,exec,size=10g".to_string());
@@ -221,7 +242,7 @@ impl DockerEnvironment {
         // 生成容器名称
         let container_name = format!("hermes-{}", &self.session_id[..8]);
         let container_name_for_log = container_name.clone();
-        
+
         // 构建运行命令
         let mut run_cmd: Vec<String> = vec![
             self.docker_exe.clone(),
@@ -232,32 +253,32 @@ impl DockerEnvironment {
             "-w".to_string(),
             self.cwd.clone(),
         ];
-        
+
         // 添加安全参数
         for arg in SECURITY_ARGS {
             run_cmd.push(arg.to_string());
         }
-        
+
         // 添加可写参数
         for arg in &writable_args {
             run_cmd.push(arg.clone());
         }
-        
+
         // 添加资源参数
         for arg in &resource_args {
             run_cmd.push(arg.clone());
         }
-        
+
         // 添加卷参数
         for arg in &volume_args {
             run_cmd.push(arg.clone());
         }
-        
+
         // 添加环境变量
         for arg in &env_args {
             run_cmd.push(arg.clone());
         }
-        
+
         // 添加镜像和命令
         run_cmd.push(self.image.clone());
         run_cmd.push("sleep".to_string());
@@ -269,12 +290,15 @@ impl DockerEnvironment {
             .args(&run_cmd[1..])
             .output()
             .await
-            .map_err(|e| ExecutionError::DockerError(format!("Failed to start container: {}", e)))?;
+            .map_err(|e| {
+                ExecutionError::DockerError(format!("Failed to start container: {}", e))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(ExecutionError::DockerError(format!(
-                "Failed to start container: {}", stderr
+                "Failed to start container: {}",
+                stderr
             )));
         }
 
@@ -308,14 +332,13 @@ impl DockerEnvironment {
         cmd_string: &str,
         timeout_ms: u64,
     ) -> Result<(String, i32), ExecutionError> {
-        let container_id = self.container_id.as_ref()
+        let container_id = self
+            .container_id
+            .as_ref()
             .ok_or_else(|| ExecutionError::DockerError("Container not started".to_string()))?;
 
         // 构建 docker exec 命令
-        let mut exec_cmd: Vec<String> = vec![
-            self.docker_exe.clone(),
-            "exec".to_string(),
-        ];
+        let mut exec_cmd: Vec<String> = vec![self.docker_exe.clone(), "exec".to_string()];
 
         // 添加环境变量参数
         for arg in &self.init_env_args {
@@ -329,42 +352,40 @@ impl DockerEnvironment {
 
         use tokio::time::{timeout, Duration};
 
-        let result = timeout(
-            Duration::from_millis(timeout_ms),
-            async {
-                let mut child = Command::new(&exec_cmd[0])
-                    .args(&exec_cmd[1..])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| ExecutionError::DockerError(format!("Failed to exec: {}", e)))?;
+        let result = timeout(Duration::from_millis(timeout_ms), async {
+            let mut child = Command::new(&exec_cmd[0])
+                .args(&exec_cmd[1..])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| ExecutionError::DockerError(format!("Failed to exec: {}", e)))?;
 
-                // 排空 stderr，防止管道缓冲区满导致容器进程阻塞
-                if let Some(stderr) = child.stderr.take() {
-                    tokio::spawn(async move {
-                        let reader = BufReader::new(stderr);
-                        let mut lines = reader.lines();
-                        while let Ok(Some(_)) = lines.next_line().await {}
-                    });
-                }
-
-                let mut stdout_lines: Vec<String> = Vec::new();
-
-                if let Some(stdout) = child.stdout.take() {
-                    let reader = BufReader::new(stdout);
+            // 排空 stderr，防止管道缓冲区满导致容器进程阻塞
+            if let Some(stderr) = child.stderr.take() {
+                tokio::spawn(async move {
+                    let reader = BufReader::new(stderr);
                     let mut lines = reader.lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        stdout_lines.push(line);
-                    }
-                }
+                    while let Ok(Some(_)) = lines.next_line().await {}
+                });
+            }
 
-                match child.wait().await {
-                    Ok(status) => Ok((stdout_lines.join("\n"), status.code().unwrap_or(-1))),
-                    Err(e) => Err(ExecutionError::IoError(e)),
+            let mut stdout_lines: Vec<String> = Vec::new();
+
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    stdout_lines.push(line);
                 }
             }
-        ).await;
+
+            match child.wait().await {
+                Ok(status) => Ok((stdout_lines.join("\n"), status.code().unwrap_or(-1))),
+                Err(e) => Err(ExecutionError::IoError(e)),
+            }
+        })
+        .await;
 
         match result {
             Ok(Ok((output, code))) => Ok((output, code)),
@@ -444,7 +465,7 @@ impl BaseEnvironment for DockerEnvironment {
     ) -> Result<Box<dyn ProcessHandle>, ExecutionError> {
         // 使用 execute_direct 方式
         Err(ExecutionError::NotAvailable(
-            "DockerEnvironment uses execute_direct".to_string()
+            "DockerEnvironment uses execute_direct".to_string(),
         ))
     }
 
@@ -469,8 +490,10 @@ impl BaseEnvironment for DockerEnvironment {
         let wrapped = self.wrap_command(&exec_command, &effective_cwd);
 
         // 在容器中执行
-        let (output, returncode) = self.execute_in_container(&wrapped, effective_timeout).await?;
-        
+        let (output, returncode) = self
+            .execute_in_container(&wrapped, effective_timeout)
+            .await?;
+
         let mut result = ExecResult { output, returncode };
 
         // 更新 CWD
@@ -482,7 +505,7 @@ impl BaseEnvironment for DockerEnvironment {
     async fn cleanup(&mut self) -> Result<(), ExecutionError> {
         if let Some(container_id) = &self.container_id {
             tracing::info!("Stopping container {}", container_id);
-            
+
             // 停止容器
             let _ = Command::new(&self.docker_exe)
                 .args(&["stop", "-t", "60", container_id])
@@ -528,12 +551,22 @@ pub struct DockerProcessHandle;
 
 #[async_trait]
 impl ProcessHandle for DockerProcessHandle {
-    fn poll(&self) -> Option<i32> { None }
+    fn poll(&self) -> Option<i32> {
+        None
+    }
     fn kill(&self) {}
-    async fn wait(&self) -> i32 { -1 }
-    fn stdout(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> { None }
-    fn stderr(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> { None }
-    fn returncode(&self) -> Option<i32> { None }
+    async fn wait(&self) -> i32 {
+        -1
+    }
+    fn stdout(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> {
+        None
+    }
+    fn stderr(&mut self) -> Option<Pin<Box<dyn tokio::io::AsyncRead + Send + '_>>> {
+        None
+    }
+    fn returncode(&self) -> Option<i32> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -575,11 +608,15 @@ mod tests {
             let mut guard = env.lock().await;
             guard.execute("echo hello", ExecOptions::default()).await
         };
-        
+
         assert!(result.is_ok(), "Execute failed: {:?}", result.err());
         let result = result.unwrap();
-        assert!(result.success() || result.output.contains("hello"), 
-            "Command failed: exit_code={}, output={}", result.returncode, result.output);
+        assert!(
+            result.success() || result.output.contains("hello"),
+            "Command failed: exit_code={}, output={}",
+            result.returncode,
+            result.output
+        );
 
         {
             let mut guard = env.lock().await;

@@ -46,9 +46,10 @@ impl super::ToolImpl for ExitPlanModeTool {
         let text = serde_json::to_string_pretty(&body).map_err(|e| ToolError::ExecutionFailed {
             message: format!("serialize: {}", e),
         })?;
-        Ok(
-            ExitPlanModeOutput { text: format!("Exit plan mode (review requested).\n\n{}", text) }.into_stream(),
-        )
+        Ok(ExitPlanModeOutput {
+            text: format!("Exit plan mode (review requested).\n\n{}", text),
+        }
+        .into_stream())
     }
 }
 

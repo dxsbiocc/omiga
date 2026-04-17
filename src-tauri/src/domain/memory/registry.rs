@@ -45,9 +45,9 @@ pub async fn upsert_project_paths(
     let key = canonical_project_key(project_root);
     let path = registry_file_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await.map_err(|e| {
-            AppError::Unknown(format!("Failed to create registry parent: {}", e))
-        })?;
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AppError::Unknown(format!("Failed to create registry parent: {}", e)))?;
     }
 
     let mut reg: MemoryRegistry = if path.exists() {

@@ -39,6 +39,12 @@ pub struct MemoryConfig {
     /// Default: "implicit"
     pub implicit_dir: String,
 
+    /// Directory for storing raw original files imported into wiki.
+    /// When None, defaults to `~/.omiga/memory/raw`.
+    /// Absolute path; set by the user in settings.
+    #[serde(default)]
+    pub raw_dir: Option<PathBuf>,
+
     /// Whether to auto-build implicit index
     /// Default: true
     pub auto_build_index: bool,
@@ -70,12 +76,18 @@ pub struct MemoryConfig {
     pub memory_mode: MemoryMode,
 }
 
+/// Default raw file storage: `~/.omiga/memory/raw`
+pub fn default_raw_path() -> PathBuf {
+    user_omiga_root().join("memory").join("raw")
+}
+
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             root_dir: PathBuf::from(".omiga/memory"),
             wiki_dir: "wiki".to_string(),
             implicit_dir: "implicit".to_string(),
+            raw_dir: None,
             auto_build_index: true,
             auto_build_interval: 3600,
             index_extensions: vec![
@@ -124,8 +136,8 @@ pub fn user_omiga_root() -> PathBuf {
 
 /// Stable directory name for a project: first 16 hex chars of SHA-256 of canonical path.
 pub fn project_storage_key(project_root: &Path) -> String {
-    let normalized = std::fs::canonicalize(project_root)
-        .unwrap_or_else(|_| project_root.to_path_buf());
+    let normalized =
+        std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(normalized.to_string_lossy().as_bytes());
@@ -156,10 +168,7 @@ impl MemoryConfig {
         match self.memory_mode {
             MemoryMode::UserHome => {
                 let key = project_storage_key(project_root.as_ref());
-                user_omiga_root()
-                    .join("memory")
-                    .join("projects")
-                    .join(key)
+                user_omiga_root().join("memory").join("projects").join(key)
             }
             MemoryMode::ProjectRelative => {
                 if self.root_dir.is_absolute() {
@@ -179,6 +188,13 @@ impl MemoryConfig {
     /// Get implicit index directory path
     pub fn implicit_path(&self, project_root: impl AsRef<Path>) -> PathBuf {
         self.effective_root(&project_root).join(&self.implicit_dir)
+    }
+
+    /// Get raw file storage path (absolute). Falls back to `~/.omiga/memory/raw`.
+    pub fn raw_path(&self) -> PathBuf {
+        self.raw_dir
+            .clone()
+            .unwrap_or_else(default_raw_path)
     }
 
     /// Legacy helper — use [`project_config_path`] instead.

@@ -38,9 +38,12 @@ pub fn canonical_permission_tool_name(name: &str) -> String {
         "bash" | "Bash" => "bash".to_string(),
         "file_read" | "Read" | "FileRead" => "file_read".to_string(),
         "file_write" | "Write" | "FileWriteTool" | "FileWrite" => "file_write".to_string(),
-        "file_edit" | "Edit" | "FileEditTool" | "FileEdit" | "MultiEdit" | "str_replace_based_edit_tool" => {
-            "file_edit".to_string()
-        }
+        "file_edit"
+        | "Edit"
+        | "FileEditTool"
+        | "FileEdit"
+        | "MultiEdit"
+        | "str_replace_based_edit_tool" => "file_edit".to_string(),
         "ripgrep" | "Ripgrep" | "grep" | "Grep" => "ripgrep".to_string(),
         "glob" | "Glob" => "glob".to_string(),
         "web_fetch" | "WebFetch" => "web_fetch".to_string(),
@@ -196,19 +199,14 @@ pub fn blanket_deny_rule_matches(rule: &PermissionRuleValue, actual_tool_name: &
     let tool_info = mcp_info_from_string(actual_tool_name);
     match (rule_info, tool_info) {
         (Some((rs, rtool)), Some((ts, ttool))) => {
-            rs == ts
-                && (rtool.is_none() || rtool.as_deref() == Some("*"))
-                && ttool.is_some()
+            rs == ts && (rtool.is_none() || rtool.as_deref() == Some("*")) && ttool.is_some()
         }
         _ => false,
     }
 }
 
 #[must_use]
-pub fn tool_denied_by_any_rule(
-    actual_tool_name: &str,
-    deny_rule_strings: &[String],
-) -> bool {
+pub fn tool_denied_by_any_rule(actual_tool_name: &str, deny_rule_strings: &[String]) -> bool {
     deny_rule_strings.iter().any(|s| {
         let v = permission_rule_value_from_string(s);
         blanket_deny_rule_matches(&v, actual_tool_name)
