@@ -679,17 +679,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Sync composer config so the latest per-session settings are applied.
       useChatComposerStore.getState().initForSession(sessionId, sessionData.session_config);
 
-      // Always notify so ProviderSwitcher refreshes its "active" chip for the new session.
-      notifyProviderChanged();
-
-      // Fire-and-forget: pre-warm LLM config / integrations / permission / MCP caches
-      // so the first send_message in this session doesn't pay cold-cache penalties.
-      // Inspired by codex's startup prewarm pattern.
-      void invoke("prewarm_session", {
+      // Pre-warm LLM config / integrations / permission / MCP caches so the first
+      // send_message in this session doesn't pay cold-cache penalties. Fire notifyProviderChanged
+      // AFTER prewarm completes so ProviderSwitcher reads the already-updated global provider
+      // state — firing it before prewarm causes the chip to show the stale (pre-switch) provider.
+      invoke("prewarm_session", {
         projectPath: session.projectPath,
         activeProviderEntryName: newActiveProvider,
+      }).then(() => {
+        notifyProviderChanged();
       }).catch(() => {
-        // Prewarm is best-effort — silently ignore errors.
+        // Prewarm is best-effort: still notify so the chip isn't stuck.
+        notifyProviderChanged();
       });
 
       const duration = Math.round(performance.now() - perfStart);
@@ -818,7 +819,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         isSwitchingSession: false,
       });
       useChatComposerStore.getState().initForSession(sessionId, cached.sessionConfig);
-      notifyProviderChanged();
+      // Restore the session's provider on the backend before notifying ProviderSwitcher,
+      // otherwise the chip shows the stale (previous session's) provider.
+      const cachedProvider = cached.activeProviderEntryName ?? null;
+      invoke("prewarm_session", {
+        projectPath: cached.session.projectPath,
+        activeProviderEntryName: cachedProvider,
+      }).then(() => {
+        notifyProviderChanged();
+      }).catch(() => {
+        notifyProviderChanged();
+      });
       const hitMs = Math.round(performance.now() - t0);
       console.info(
         `%c[SwPerf] ${sessionId.slice(0, 8)} | CACHE HIT ~${hitMs}ms | msgs: ${cached.messages.length} — background refresh…`,
