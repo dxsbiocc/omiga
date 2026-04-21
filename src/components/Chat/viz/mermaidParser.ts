@@ -38,7 +38,7 @@ function joinContinuationLines(source: string): string[] {
       if (buf) { joined.push(buf); buf = ""; }
       continue;
     }
-    buf = buf ? `${buf} ${trimmed}` : trimmed;
+    buf = buf ? `${buf}\\n${trimmed}` : trimmed;
     const opens  = (buf.match(/\[/g) ?? []).length;
     const closes = (buf.match(/]/g)  ?? []).length;
     if (opens <= closes) { joined.push(buf); buf = ""; }
@@ -49,13 +49,13 @@ function joinContinuationLines(source: string): string[] {
 
 function parseNodeDef(token: string): { id: string; label: string; shape: NodeShape } | null {
   const patterns: [RegExp, NodeShape][] = [
-    [/^([\w-]+)\[\[(.+?)]]$/, "stadium"],
-    [/^([\w-]+)\(\((.+?)\)\)$/, "circle"],
-    [/^([\w-]+)\(\[(.+?)]$/, "stadium"],
-    [/^([\w-]+)\[(.+?)]$/, "rect"],
-    [/^([\w-]+)\((.+?)\)$/, "round"],
-    [/^([\w-]+)\{(.+?)\}$/, "diamond"],
-    [/^([\w-]+)>(.+?)]$/, "flag"],
+    [/^([\w-]+)\[\[(.+?)]]$/s, "stadium"],
+    [/^([\w-]+)\(\((.+?)\)\)$/s, "circle"],
+    [/^([\w-]+)\(\[(.+?)]$/s, "stadium"],
+    [/^([\w-]+)\[(.+?)]$/s, "rect"],
+    [/^([\w-]+)\((.+?)\)$/s, "round"],
+    [/^([\w-]+)\{(.+?)\}$/s, "diamond"],
+    [/^([\w-]+)>(.+?)]$/s, "flag"],
   ];
   for (const [re, shape] of patterns) {
     const m = re.exec(token);

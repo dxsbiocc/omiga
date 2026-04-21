@@ -217,17 +217,24 @@ export function MermaidFlow({ source, onNodeClick }: MermaidFlowProps) {
     direction: toRankdir(parsed.direction),
   }), [nodesForLayout, parsed.edges, parsed.direction]);
 
-  const initialNodes: Node<MermaidNodeData>[] = useMemo(() => nodeList.map((n) => ({
-    id: n.id,
-    type: "mermaidNode",
-    position: positions.get(n.id) ?? { x: 0, y: 0 },
-    data: {
-      label: n.label,
-      shape: n.shape,
-      group: n.group,
-      onClick: () => onNodeClick?.(n.label),
-    },
-  })), [nodeList, positions, onNodeClick]);
+  const initialNodes: Node<MermaidNodeData>[] = useMemo(() => nodeList.map((n) => {
+    const lines = splitLabel(n.label);
+    const isCard = n.shape === "card";
+    const h = isCard ? cardHeight(Math.max(1, lines.length)) : GRAPH_NODE_H;
+    return {
+      id: n.id,
+      type: "mermaidNode",
+      position: positions.get(n.id) ?? { x: 0, y: 0 },
+      width: GRAPH_NODE_W,
+      height: h,
+      data: {
+        label: n.label,
+        shape: n.shape,
+        group: n.group,
+        onClick: () => onNodeClick?.(n.label),
+      },
+    };
+  }), [nodeList, positions, onNodeClick]);
 
   const initialEdges: Edge[] = useMemo(() => parsed.edges.map((e, i) => buildFlowEdge({
     id: `e-${i}`,
