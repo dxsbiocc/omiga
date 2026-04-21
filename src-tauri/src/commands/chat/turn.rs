@@ -65,10 +65,8 @@ async fn connect_with_retry(
     client: &dyn LlmClient,
     messages: Vec<LlmMessage>,
     tools: Vec<ToolSchema>,
-) -> Result<
-    Pin<Box<dyn futures::Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>,
-    OmigaError,
-> {
+) -> Result<Pin<Box<dyn futures::Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, OmigaError>
+{
     let mut attempt = 0u32;
     loop {
         match client
