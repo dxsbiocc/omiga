@@ -86,6 +86,8 @@ import type { BackgroundAgentTask } from "./backgroundAgentTypes";
 import { VisualizationRenderer } from "./viz/VisualizationRenderer";
 import { DagFlow, type OmigaDagPayload } from "./DagFlow";
 import { OmigaFlowchart, type OmigaFlowchartPayload } from "./OmigaFlowchart";
+import { MermaidFlow } from "./viz/MermaidFlow";
+import { DotFlow } from "./viz/DotFlow";
 import {
   canSendFollowUpToTask,
   shortBgTaskLabel,
@@ -1139,6 +1141,16 @@ function buildMarkdownComponents(
             onStepClick={onNodeClick ? (text) => onNodeClick(text) : undefined}
           />
         );
+      }
+
+      // Raw ```mermaid fenced block → React Flow
+      if (language === "mermaid") {
+        return <MermaidFlow source={blockBody} onNodeClick={onNodeClick} />;
+      }
+
+      // Raw ```dot / ```graphviz fenced block → React Flow
+      if (language === "dot" || language === "graphviz") {
+        return <DotFlow dot={blockBody} onNodeClick={onNodeClick} />;
       }
 
       const lang = language || "text";

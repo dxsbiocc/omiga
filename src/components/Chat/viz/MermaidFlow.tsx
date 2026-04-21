@@ -108,8 +108,32 @@ function splitEdgeLine(line: string): { source: string; target: string; edgeLabe
   return null;
 }
 
+/** Join lines where a bracket `[` is opened but not closed on the same line. */
+function joinContinuationLines(source: string): string[] {
+  const raw = source.split("\n");
+  const joined: string[] = [];
+  let buf = "";
+  for (const line of raw) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (buf) { joined.push(buf); buf = ""; }
+      continue;
+    }
+    buf = buf ? `${buf} ${trimmed}` : trimmed;
+    // Count unmatched brackets in the accumulated buffer
+    const opens = (buf.match(/\[/g) ?? []).length;
+    const closes = (buf.match(/]/g) ?? []).length;
+    if (opens <= closes) {
+      joined.push(buf);
+      buf = "";
+    }
+  }
+  if (buf) joined.push(buf);
+  return joined;
+}
+
 export function parseMermaid(source: string): ParsedGraph {
-  const lines = source.split("\n").map((l) => l.trim()).filter(Boolean);
+  const lines = joinContinuationLines(source);
 
   let direction: Direction = "TD";
   const nodeMap = new Map<string, ParsedNode>();
