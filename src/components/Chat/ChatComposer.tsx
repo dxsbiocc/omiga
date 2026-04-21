@@ -336,6 +336,8 @@ function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
 export interface ChatComposerRef {
   getValue: () => string;
   setValue: (value: string) => void;
+  /** Append text to the current input, with a newline separator when input is non-empty. */
+  appendValue: (text: string) => void;
   focus: () => void;
 }
 
@@ -426,6 +428,10 @@ export const ChatComposer = memo(function ChatComposer({
     () => ({
       getValue: () => inputValueRef.current,
       setValue: (v: string) => setInputValue(v),
+      appendValue: (text: string) => {
+        const cur = inputValueRef.current;
+        setInputValue(cur ? `${cur}\n${text}` : text);
+      },
       focus: () => textareaRef.current?.focus(),
     }),
     [setInputValue],

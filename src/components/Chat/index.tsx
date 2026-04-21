@@ -84,6 +84,8 @@ import type { AskUserQuestionItem } from "./AskUserQuestionWizard";
 import { getChatTokens } from "./chatTokens";
 import type { BackgroundAgentTask } from "./backgroundAgentTypes";
 import { VisualizationRenderer } from "./viz/VisualizationRenderer";
+import { DagFlow, type OmigaDagPayload } from "./DagFlow";
+import { OmigaFlowchart, type OmigaFlowchartPayload } from "./OmigaFlowchart";
 import {
   canSendFollowUpToTask,
   shortBgTaskLabel,
@@ -1067,6 +1069,7 @@ function buildMarkdownComponents(
   theme: Theme,
   CHAT: ReturnType<typeof getChatTokens>,
   onImageClick: (src: string, alt: string) => void,
+  onNodeClick?: (text: string) => void,
 ) {
   const prismStyleRaw = theme.palette.mode === "dark" ? oneDark : oneLight;
   const prismStyleFenced = prismStyleTransparentCodeSurface(
@@ -1100,6 +1103,42 @@ function buildMarkdownComponents(
         }
         if (!config) return null;
         return <VisualizationRenderer config={config} />;
+      }
+
+      if (language === "omiga-dag") {
+        let dag: OmigaDagPayload | null = null;
+        try {
+          dag = JSON.parse(blockBody) as OmigaDagPayload;
+        } catch {
+          return (
+            <Alert severity="error" sx={{ my: 1 }}>
+              无效的 DAG 配置
+            </Alert>
+          );
+        }
+        if (!dag?.nodes?.length) return null;
+        return <DagFlow data={dag} onNodeClick={onNodeClick} />;
+      }
+
+      if (language === "omiga-flowchart") {
+        let fc: OmigaFlowchartPayload | null = null;
+        try {
+          fc = JSON.parse(blockBody) as OmigaFlowchartPayload;
+        } catch {
+          return (
+            <Alert severity="error" sx={{ my: 1 }}>
+              无效的流程图配置
+            </Alert>
+          );
+        }
+        if (!fc?.stages?.length) return null;
+        return (
+          <OmigaFlowchart
+            data={fc}
+            isAgent={isAgent}
+            onStepClick={onNodeClick ? (text) => onNodeClick(text) : undefined}
+          />
+        );
       }
 
       const lang = language || "text";
@@ -4005,13 +4044,18 @@ export function Chat({ sessionId }: ChatProps) {
     setImageLightbox({ open: true, src, alt });
   }, []);
 
+  const handleNodeClick = useCallback((text: string) => {
+    composerRef.current?.appendValue(text);
+    queueMicrotask(() => composerRef.current?.focus());
+  }, []);
+
   const agentComponents = useMemo(
-    () => buildMarkdownComponents(true, theme, CHAT, handleMarkdownImageClick),
-    [theme, CHAT, handleMarkdownImageClick],
+    () => buildMarkdownComponents(true, theme, CHAT, handleMarkdownImageClick, handleNodeClick),
+    [theme, CHAT, handleMarkdownImageClick, handleNodeClick],
   );
   const defaultComponents = useMemo(
-    () => buildMarkdownComponents(false, theme, CHAT, handleMarkdownImageClick),
-    [theme, CHAT, handleMarkdownImageClick],
+    () => buildMarkdownComponents(false, theme, CHAT, handleMarkdownImageClick, handleNodeClick),
+    [theme, CHAT, handleMarkdownImageClick, handleNodeClick],
   );
 
   const renderMessageContent = useCallback((
