@@ -19,7 +19,7 @@ pub mod grep;
 pub mod list_mcp_resources;
 pub mod list_skills;
 pub mod notebook_edit;
-pub mod omiga_viz;
+pub mod visualization;
 pub mod read_mcp_resource;
 pub mod recall;
 pub mod send_user_message;
@@ -66,7 +66,7 @@ pub enum ToolKind {
     WebSearch,
     TodoWrite,
     NotebookEdit,
-    OmigaViz,
+    Visualization,
     Sleep,
     AskUserQuestion,
     ListMcpResources,
@@ -114,7 +114,7 @@ impl fmt::Display for ToolKind {
             ToolKind::WebSearch => write!(f, "web_search"),
             ToolKind::TodoWrite => write!(f, "todo_write"),
             ToolKind::NotebookEdit => write!(f, "notebook_edit"),
-            ToolKind::OmigaViz => write!(f, "omiga_viz"),
+            ToolKind::Visualization => write!(f, "visualization"),
             ToolKind::Sleep => write!(f, "sleep"),
             ToolKind::AskUserQuestion => write!(f, "ask_user_question"),
             ToolKind::ListMcpResources => write!(f, "list_mcp_resources"),
@@ -152,7 +152,7 @@ pub enum Tool {
     WebSearch(web_search::WebSearchArgs),
     TodoWrite(todo_write::TodoWriteArgs),
     NotebookEdit(notebook_edit::NotebookEditArgs),
-    OmigaViz(omiga_viz::OmigaVizArgs),
+    Visualization(visualization::VisualizationArgs),
     Sleep(sleep::SleepArgs),
     AskUserQuestion(ask_user_question::AskUserQuestionArgs),
     ListMcpResources(list_mcp_resources::ListMcpResourcesArgs),
@@ -191,7 +191,7 @@ impl Tool {
             Tool::WebSearch(_) => ToolKind::WebSearch,
             Tool::TodoWrite(_) => ToolKind::TodoWrite,
             Tool::NotebookEdit(_) => ToolKind::NotebookEdit,
-            Tool::OmigaViz(_) => ToolKind::OmigaViz,
+            Tool::Visualization(_) => ToolKind::Visualization,
             Tool::Sleep(_) => ToolKind::Sleep,
             Tool::AskUserQuestion(_) => ToolKind::AskUserQuestion,
             Tool::ListMcpResources(_) => ToolKind::ListMcpResources,
@@ -227,7 +227,7 @@ impl Tool {
             Tool::WebSearch(_) => "WebSearch",
             Tool::TodoWrite(_) => "TodoWrite",
             Tool::NotebookEdit(_) => "NotebookEdit",
-            Tool::OmigaViz(_) => "OmigaViz",
+            Tool::Visualization(_) => "Visualization",
             Tool::Sleep(_) => "Sleep",
             Tool::AskUserQuestion(_) => "AskUserQuestion",
             Tool::ListMcpResources(_) => "ListMcpResources",
@@ -263,7 +263,7 @@ impl Tool {
             Tool::WebSearch(_) => web_search::DESCRIPTION,
             Tool::TodoWrite(_) => todo_write::DESCRIPTION,
             Tool::NotebookEdit(_) => notebook_edit::DESCRIPTION,
-            Tool::OmigaViz(_) => omiga_viz::DESCRIPTION,
+            Tool::Visualization(_) => visualization::DESCRIPTION,
             Tool::Sleep(_) => sleep::DESCRIPTION,
             Tool::AskUserQuestion(_) => ask_user_question::DESCRIPTION,
             Tool::ListMcpResources(_) => list_mcp_resources::DESCRIPTION,
@@ -302,7 +302,7 @@ impl Tool {
             Tool::WebSearch(args) => web_search::WebSearchTool::execute(ctx, args).await?,
             Tool::TodoWrite(args) => todo_write::TodoWriteTool::execute(ctx, args).await?,
             Tool::NotebookEdit(args) => notebook_edit::NotebookEditTool::execute(ctx, args).await?,
-            Tool::OmigaViz(args) => omiga_viz::OmigaVizTool::execute(ctx, args).await?,
+            Tool::Visualization(args) => visualization::VisualizationTool::execute(ctx, args).await?,
             Tool::Sleep(args) => sleep::SleepTool::execute(ctx, args).await?,
             Tool::AskUserQuestion(args) => {
                 ask_user_question::AskUserQuestionTool::execute(ctx, args).await?
@@ -313,15 +313,41 @@ impl Tool {
             Tool::ReadMcpResource(args) => {
                 read_mcp_resource::ReadMcpResourceTool::execute(ctx, args).await?
             }
-            Tool::ListSkills(_) => {
-                return Err(ToolError::ExecutionFailed {
-                    message: "ListSkills execution not yet implemented".to_string(),
+            Tool::ListSkills(args) => {
+                use crate::domain::skills;
+                use crate::infrastructure::streaming::{stream_single, StreamOutputItem};
+                let cache = ctx.skill_cache.clone().unwrap_or_else(|| {
+                    Arc::new(std::sync::Mutex::new(skills::SkillCacheMap::default()))
                 });
+                let all_skills = skills::load_skills_cached(&ctx.project_root, &cache).await;
+                let task_ctx = ctx.skill_task_context.as_deref();
+                let json =
+                    skills::list_skills_metadata_json(&all_skills, args.query.as_deref(), task_ctx);
+                return Ok(stream_single(StreamOutputItem::Text(json)));
             }
-            Tool::SkillInvoke(_) => {
-                return Err(ToolError::ExecutionFailed {
-                    message: "Skill invoke execution not yet implemented".to_string(),
+            Tool::SkillInvoke(args) => {
+                use crate::domain::skills;
+                use crate::infrastructure::streaming::{stream_single, StreamOutputItem};
+                let skill_args = args.args.clone().or_else(|| args.arguments.clone());
+                let cache = ctx.skill_cache.clone().unwrap_or_else(|| {
+                    Arc::new(std::sync::Mutex::new(skills::SkillCacheMap::default()))
                 });
+                let all_skills = skills::load_skills_cached(&ctx.project_root, &cache).await;
+                match skills::invoke_skill_with_cache(
+                    &ctx.project_root,
+                    &args.skill,
+                    skill_args.as_deref().unwrap_or(""),
+                    &all_skills,
+                )
+                .await
+                {
+                    Ok(text) => return Ok(stream_single(StreamOutputItem::Text(text))),
+                    Err(e) => {
+                        return Err(ToolError::ExecutionFailed {
+                            message: e.to_string(),
+                        })
+                    }
+                }
             }
             Tool::Agent(args) => agent::AgentTool::execute(ctx, args).await?,
             Tool::SendUserMessage(args) => {
@@ -409,11 +435,11 @@ impl Tool {
                 })?;
                 Ok(Tool::NotebookEdit(args))
             }
-            ToolKind::OmigaViz => {
+            ToolKind::Visualization => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
-                    message: format!("Invalid omiga_viz arguments: {}", e),
+                    message: format!("Invalid visualization arguments: {}", e),
                 })?;
-                Ok(Tool::OmigaViz(args))
+                Ok(Tool::Visualization(args))
             }
             ToolKind::Sleep => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
@@ -545,7 +571,7 @@ impl Tool {
             "web_search" => ToolKind::WebSearch,
             "todo_write" => ToolKind::TodoWrite,
             "notebook_edit" => ToolKind::NotebookEdit,
-            "omiga_viz" => ToolKind::OmigaViz,
+            "visualization" => ToolKind::Visualization,
             "sleep" => ToolKind::Sleep,
             "ask_user_question" | "AskUserQuestion" => ToolKind::AskUserQuestion,
             "list_mcp_resources" | "ListMcpResourcesTool" => ToolKind::ListMcpResources,
@@ -587,7 +613,7 @@ pub struct WebSearchApiKeys {
 }
 
 /// Execution context passed to all tools
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolContext {
     /// Current working directory
     pub cwd: std::path::PathBuf,
@@ -624,6 +650,28 @@ pub struct ToolContext {
     pub plan_mode: Option<Arc<tokio::sync::Mutex<bool>>>,
     /// Search API keys from Omiga Settings (`web_search` tool).
     pub web_search_api_keys: WebSearchApiKeys,
+    /// Skill metadata cache shared across tool calls in a session.
+    #[allow(dead_code)]
+    pub skill_cache: Option<Arc<std::sync::Mutex<crate::domain::skills::SkillCacheMap>>>,
+    /// Task context string for `list_skills` relevance ranking (the user's current goal).
+    pub skill_task_context: Option<String>,
+}
+
+impl fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("cwd", &self.cwd)
+            .field("project_root", &self.project_root)
+            .field("execution_environment", &self.execution_environment)
+            .field("ssh_server", &self.ssh_server)
+            .field("sandbox_backend", &self.sandbox_backend)
+            .field("local_venv_type", &self.local_venv_type)
+            .field("local_venv_name", &self.local_venv_name)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("skill_cache", &self.skill_cache.as_ref().map(|_| "<cache>"))
+            .field("skill_task_context", &self.skill_task_context)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ToolContext {
@@ -648,7 +696,22 @@ impl ToolContext {
             plan_mode: None,
             web_search_api_keys: WebSearchApiKeys::default(),
             env_store: None,
+            skill_cache: None,
+            skill_task_context: None,
         }
+    }
+
+    pub fn with_skill_cache(
+        mut self,
+        cache: Arc<std::sync::Mutex<crate::domain::skills::SkillCacheMap>>,
+    ) -> Self {
+        self.skill_cache = Some(cache);
+        self
+    }
+
+    pub fn with_skill_task_context(mut self, ctx: impl Into<String>) -> Self {
+        self.skill_task_context = Some(ctx.into());
+        self
     }
 
     /// Attach session todo storage (for `todo_write`)
@@ -800,13 +863,12 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         web_fetch::schema(),
         web_search::schema(),
         todo_write::schema(),
-        omiga_viz::schema(),
+        visualization::schema(),
         sleep::schema(),
         ask_user_question::schema(),
         list_mcp_resources::schema(),
         read_mcp_resource::schema(),
         agent::schema(),
-        send_user_message::schema(),
         exit_plan_mode::schema(),
         enter_plan_mode::schema(),
         task_stop::schema(),
@@ -872,7 +934,7 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
             | "web_search"
             | "ToolSearch"
             | "tool_search"
-            | "omiga_viz"
+            | "visualization"
             | "list_skills"  // read-only metadata scan
             | "skill_view"
             | "recall"

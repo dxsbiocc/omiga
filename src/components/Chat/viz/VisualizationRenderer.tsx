@@ -418,7 +418,7 @@ function KatexView({ source, displayMode }: { source: string; displayMode?: bool
   );
 }
 
-export function OmigaVizRenderer({ config }: { config: VizConfig }) {
+export function VisualizationRenderer({ config }: { config: VizConfig }) {
   switch (config.type) {
     case "echarts":
       return <EChartView option={config.option} />;

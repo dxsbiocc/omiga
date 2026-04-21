@@ -83,7 +83,7 @@ import { ChatComposer, type ChatComposerRef } from "./ChatComposer";
 import type { AskUserQuestionItem } from "./AskUserQuestionWizard";
 import { getChatTokens } from "./chatTokens";
 import type { BackgroundAgentTask } from "./backgroundAgentTypes";
-import { OmigaVizRenderer } from "./viz/OmigaVizRenderer";
+import { VisualizationRenderer } from "./viz/VisualizationRenderer";
 import {
   canSendFollowUpToTask,
   shortBgTaskLabel,
@@ -93,6 +93,8 @@ import { AgentSessionStatus } from "./AgentSessionStatus";
 import { SshDirectoryTreeDialog } from "./SshDirectoryTreeDialog";
 import { formatToolDisplayName } from "../../utils/executionSurfaceLabel";
 import { parseNextStepSuggestionsFromMarkdown } from "../../utils/parseAssistantNextSteps";
+import { CitationLink } from "../CitationLink";
+import { useAgentStore } from "../../state/agentStore";
 
 /** SQLite `messages.id` shape — used to pass `retryFromUserMessageId` (not temp `user-…` ids). */
 function isPersistedMessageIdForRetry(id: string): boolean {
@@ -143,6 +145,7 @@ interface Message {
     status?: "pending" | "running" | "completed" | "error";
     input?: string; // Tool input arguments (JSON)
     output?: string; // Tool execution result
+    completedAt?: number; // Unix ms when tool finished (for duration display)
   };
   timestamp?: number;
   roundId?: string;
@@ -240,6 +243,7 @@ function chatMessageToStore(m: Message): StoreMessage {
     tokenUsage: m.tokenUsage,
     prefaceBeforeTools: m.prefaceBeforeTools,
     toolCallsList: m.toolCallsList,
+    ...(m.timestamp !== undefined ? { timestamp: m.timestamp } : {}),
     toolCall: m.toolCall
       ? {
           id: m.toolCall.id ?? `tc-${m.id}`,
@@ -247,6 +251,9 @@ function chatMessageToStore(m: Message): StoreMessage {
           arguments: m.toolCall.input ?? "",
           output: m.toolCall.output,
           status: m.toolCall.status,
+          ...(m.toolCall.completedAt !== undefined
+            ? { completedAt: m.toolCall.completedAt }
+            : {}),
         }
       : undefined,
   };
@@ -967,6 +974,91 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
   );
 }
 
+/**
+ * Repair common GFM table breakage caused by LLMs placing newlines inside
+ * table cells or embedding next-row markers mid-line.
+ *
+ * Two patterns handled:
+ * A) Continuation lines: after a table separator row, a non-pipe line is cell
+ *    continuation — join it into the previous row's last cell.
+ * B) Embedded row markers: " | | " or " || " mid-line while in table context
+ *    signals a new row — split the line there.
+ */
+function fixBrokenGfmTables(md: string): string {
+  const lines = md.split("\n");
+  const out: string[] = [];
+  let afterSeparator = false; // true once we've seen a |---|---| row
+
+  const isTableRow = (s: string) => s.trimStart().startsWith("|");
+  const isSeparatorRow = (s: string) => /^\s*\|[\s\-:|]+\|/.test(s);
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (isSeparatorRow(trimmed)) {
+      afterSeparator = true;
+      // Flush any pending non-pipe continuation first (shouldn't happen, but guard)
+      out.push(line);
+      continue;
+    }
+
+    if (!trimmed) {
+      afterSeparator = false;
+      out.push(line);
+      continue;
+    }
+
+    if (isTableRow(trimmed)) {
+      afterSeparator = afterSeparator || false; // keep existing state
+      out.push(line);
+      continue;
+    }
+
+    // Non-pipe line while we're inside a table
+    if (afterSeparator) {
+      // Pattern B: line contains embedded row markers " | | " or " || "
+      const embeddedRow = / \| \| | \|\| /;
+      if (embeddedRow.test(line)) {
+        const parts = line.split(/ \| \| | \|\| /);
+        // First part is continuation of the previous row's last cell
+        if (parts[0].trim() && out.length > 0 && isTableRow(out[out.length - 1])) {
+          const prev = out[out.length - 1].trimEnd();
+          out[out.length - 1] = prev.endsWith("|")
+            ? prev.slice(0, -1).trimEnd() + " " + parts[0].trim() + " |"
+            : prev + " " + parts[0].trim();
+        } else if (parts[0].trim()) {
+          out.push(parts[0].trim());
+        }
+        // Remaining parts become new table rows
+        for (let p = 1; p < parts.length; p++) {
+          if (parts[p].trim()) {
+            const rowContent = parts[p].trim();
+            out.push(rowContent.startsWith("|") ? rowContent : "| " + rowContent);
+          }
+        }
+        continue;
+      }
+
+      // Pattern A: plain continuation line — merge into previous row's last cell
+      if (out.length > 0 && isTableRow(out[out.length - 1])) {
+        const prev = out[out.length - 1].trimEnd();
+        out[out.length - 1] = prev.endsWith("|")
+          ? prev.slice(0, -1).trimEnd() + " " + trimmed + " |"
+          : prev + " " + trimmed;
+        continue;
+      }
+
+      // Can't repair — exit table context and emit as-is
+      afterSeparator = false;
+    }
+
+    out.push(line);
+  }
+
+  return out.join("\n");
+}
+
 /** How close to the bottom (px) before auto-scroll kicks in */
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 100;
 
@@ -995,7 +1087,7 @@ function buildMarkdownComponents(
     if (!isInline && language) {
       const blockBody = String(children).replace(/\n$/, "");
 
-      if (language === "omiga:viz") {
+      if (language === "visualization") {
         let config: { type: string } | null = null;
         try {
           config = JSON.parse(blockBody);
@@ -1007,7 +1099,7 @@ function buildMarkdownComponents(
           );
         }
         if (!config) return null;
-        return <OmigaVizRenderer config={config} />;
+        return <VisualizationRenderer config={config} />;
       }
 
       const lang = language || "text";
@@ -1178,41 +1270,76 @@ function buildMarkdownComponents(
   },
   a({ href, children }) {
     return (
-      <Typography
-        component="a"
-        href={href ?? "#"}
-        sx={{
-          color: isAgent ? CHAT.accent : "primary.main",
-          overflowWrap: "anywhere",
-          wordBreak: "break-all",
-        }}
-      >
+      <CitationLink href={href} accentColor={isAgent ? CHAT.accent : undefined}>
         {children}
-      </Typography>
+      </CitationLink>
     );
   },
   table({ children }) {
+    const isDark = theme.palette.mode === "dark";
+    const tableBorder = isDark
+      ? alpha(theme.palette.common.white, 0.12)
+      : alpha(theme.palette.common.black, 0.12);
+    const theadBg = isDark
+      ? alpha(theme.palette.common.white, 0.07)
+      : alpha(theme.palette.common.black, 0.04);
+    const tbodyRowHover = isDark
+      ? alpha(theme.palette.common.white, 0.04)
+      : alpha(theme.palette.common.black, 0.025);
+    const wrapperBg = isDark
+      ? alpha(theme.palette.common.white, 0.03)
+      : theme.palette.background.paper;
+
     return (
       <Box
-        component="table"
         sx={{
-          width: "100%",
-          maxWidth: "100%",
-          tableLayout: "fixed",
-          borderCollapse: "collapse",
-          my: 1,
-          fontSize: isAgent ? 12 : undefined,
-          "& th, & td": {
-            border: `1px solid ${alpha(theme.palette.divider, 0.6)}`,
-            px: 0.75,
-            py: 0.5,
-            wordBreak: "break-word",
-            overflowWrap: "anywhere",
-            verticalAlign: "top",
-          },
+          overflowX: "auto",
+          overflowY: "visible",
+          my: 1.5,
+          borderRadius: 1,
+          border: `1px solid ${tableBorder}`,
+          bgcolor: wrapperBg,
+          "& + *": { mt: 1 },
         }}
       >
-        {children}
+        <Box
+          component="table"
+          sx={{
+            minWidth: "100%",
+            tableLayout: "auto",
+            borderCollapse: "collapse",
+            fontSize: isAgent ? 12 : 13,
+            color: theme.palette.text.primary,
+            "& thead tr": {
+              bgcolor: theadBg,
+            },
+            "& th": {
+              border: `1px solid ${tableBorder}`,
+              px: 1.5,
+              py: 0.75,
+              fontWeight: 600,
+              whiteSpace: "nowrap",
+              verticalAlign: "middle",
+              textAlign: "left",
+              color: theme.palette.text.primary,
+            },
+            "& td": {
+              border: `1px solid ${tableBorder}`,
+              px: 1.5,
+              py: 0.75,
+              verticalAlign: "top",
+              wordBreak: "break-word",
+              overflowWrap: "anywhere",
+              minWidth: 80,
+              color: theme.palette.text.primary,
+            },
+            "& tbody tr:hover": {
+              bgcolor: tbodyRowHover,
+            },
+          }}
+        >
+          {children}
+        </Box>
       </Box>
     );
   },
@@ -1385,7 +1512,8 @@ function convertStoreMessages(storeMessages: StoreMessage[], sessionId: string):
     tokenUsage: msg.tokenUsage,
     prefaceBeforeTools: msg.prefaceBeforeTools,
     toolCallsList: msg.toolCallsList,
-    timestamp: Date.now() - (storeMessages.length - index) * 1000,
+    // Use stored DB timestamp; fall back to an estimated sequence offset if missing.
+    timestamp: msg.timestamp ?? (Date.now() - (storeMessages.length - index) * 1000),
     toolCall: msg.toolCall
       ? {
           id: msg.toolCall.id,
@@ -1395,6 +1523,7 @@ function convertStoreMessages(storeMessages: StoreMessage[], sessionId: string):
           output:
             msg.toolCall.output ??
             (msg.role === "tool" ? (msg.content ?? "") : undefined),
+          completedAt: msg.toolCall.completedAt,
         }
       : undefined,
   }));
@@ -2017,6 +2146,40 @@ export function Chat({ sessionId }: ChatProps) {
     scheduleScrollToBottom,
   ]);
 
+  // When an agent orchestration completes, force-scroll to bottom so the
+  // synthesized reply is immediately visible regardless of scroll position.
+  const scheduleCompleteSession = useAgentStore((s) => s.scheduleCompleteSession);
+  const setScheduleCompleteSession = useAgentStore((s) => s.setScheduleCompleteSession);
+  useEffect(() => {
+    if (scheduleCompleteSession === sessionId) {
+      setScheduleCompleteSession(null);
+      shouldAutoScrollRef.current = true;
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [scheduleCompleteSession, sessionId, setScheduleCompleteSession]);
+
+  // Subscribe to the synthesis stream before the first chunk arrives so the
+  // leader's reply streams inline instead of requiring a page refresh.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ sessionId: string; messageId: string }>(
+      "chat-synthesis-start",
+      (event) => {
+        if (event.payload.sessionId !== sessionId) return;
+        const { messageId } = event.payload;
+        setCurrentStreamId(messageId);
+        setCurrentResponse("");
+        useActivityStore.getState().resetExecutionState();
+        useActivityStore.getState().setConnecting(true);
+        void setupStreamListener(messageId);
+      },
+    ).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
   /** Blocked `ask_user_question` — show inline picker until user submits */
   const [pendingAskUser, setPendingAskUser] = useState<{
     toolUseId: string;
@@ -2402,6 +2565,8 @@ export function Chat({ sessionId }: ChatProps) {
               }
             }
             const thinkingChunk = currentResponseRef.current.trim();
+            // Clear immediately so parallel tool_use events don't capture the same thinking text twice.
+            currentResponseRef.current = "";
             queueMicrotask(() => setCurrentResponse(""));
             const newToolId = `tool-${Date.now()}`;
             const toolMsg: Message = {
@@ -2543,6 +2708,7 @@ export function Chat({ sessionId }: ChatProps) {
                 status: resultData?.is_error ? "error" : "completed",
                 input: nextInput,
                 output: resultData?.output,
+                completedAt: Date.now(),
               },
             };
             return updated;
@@ -2557,6 +2723,33 @@ export function Chat({ sessionId }: ChatProps) {
             );
           }
           segmentStartRef.current = true;
+          // Real-time todo sync: push todos to activityStore on every todo_write result
+          // so TaskStatus can display them during streaming (before storeMessages syncs).
+          if (resultData?.name === "todo_write" && resultData.input) {
+            try {
+              const j = JSON.parse(resultData.input) as {
+                todos?: Array<{
+                  id?: string;
+                  content: string;
+                  activeForm?: string;
+                  active_form?: string;
+                  status: string;
+                }>;
+              };
+              if (Array.isArray(j?.todos)) {
+                useActivityStore.getState().setActiveTodos(
+                  j.todos.map((t, i) => ({
+                    id: t.id ?? `todo-${i}`,
+                    content: t.content,
+                    activeForm: t.activeForm ?? t.active_form ?? t.content,
+                    status: String(t.status),
+                  })),
+                );
+              }
+            } catch {
+              // silently ignore malformed todo_write args
+            }
+          }
           if (resultData?.name === "bash" && resultData.tool_use_id) {
             const bg = tryParseBashBackground(resultData.input);
             if (bg) {
@@ -2969,6 +3162,7 @@ export function Chat({ sessionId }: ChatProps) {
     useActivityStore.getState().beginExecutionRun();
     useActivityStore.getState().setConnecting(true);
     useActivityStore.getState().setStreaming(false, false);
+    useActivityStore.getState().clearActiveTodos();
 
     const isFirstMessageInSession = storeMessages.length === 0;
 
@@ -3850,7 +4044,7 @@ export function Chat({ sessionId }: ChatProps) {
           rehypePlugins={[rehypeKatex]}
           components={components}
         >
-          {content}
+          {fixBrokenGfmTables(content.replace(/<br\s*\/?>/gi, "\n"))}
         </ReactMarkdown>
       </Box>
     );
@@ -4079,6 +4273,7 @@ export function Chat({ sessionId }: ChatProps) {
                 const anyRunning = toolGroupAnyRunning(toolMsgs);
                 const showGroupDone = toolGroupFlowComplete(toolMsgs);
                 const runningToolName = firstRunningToolName(toolMsgs);
+                const runningToolCount = toolMsgs.filter(m => m.toolCall?.status === "running").length;
                 const isLastFold = id === lastReactFoldId;
 
                 return (
@@ -4137,7 +4332,9 @@ export function Chat({ sessionId }: ChatProps) {
                             }}
                           >
                             {summary}
-                            {anyRunning && runningToolName
+                            {anyRunning && runningToolCount > 1
+                              ? ` · ${runningToolCount} 并行`
+                              : anyRunning && runningToolName
                               ? ` · ${formatToolDisplayName(runningToolName)}`
                               : ""}
                             {!anyRunning &&
@@ -4149,7 +4346,9 @@ export function Chat({ sessionId }: ChatProps) {
                             <Chip
                               size="small"
                               label={
-                                runningToolName
+                                runningToolCount > 1
+                                  ? `${runningToolCount} 并行运行中`
+                                  : runningToolName
                                   ? formatToolDisplayName(runningToolName)
                                   : "运行中"
                               }
@@ -4343,6 +4542,21 @@ export function Chat({ sessionId }: ChatProps) {
                                           }}
                                         />
                                       )}
+                                      {tc.completedAt != null &&
+                                        message.timestamp != null && (
+                                          <Typography
+                                            sx={{
+                                              fontSize: 10,
+                                              color: CHAT.labelMuted,
+                                              flexShrink: 0,
+                                              fontVariantNumeric: "tabular-nums",
+                                            }}
+                                          >
+                                            {tc.completedAt - message.timestamp >= 1000
+                                              ? `${((tc.completedAt - message.timestamp) / 1000).toFixed(1)}s`
+                                              : `${tc.completedAt - message.timestamp}ms`}
+                                          </Typography>
+                                        )}
                                     </Stack>
 
                                     <Collapse in={nestedOpen}>
@@ -4354,16 +4568,18 @@ export function Chat({ sessionId }: ChatProps) {
                                           borderTop: `1px solid ${alpha(CHAT.agentBubbleBorder, 0.85)}`,
                                         }}
                                       >
-                                        <Typography
-                                          sx={{
-                                            fontSize: 10,
-                                            color: CHAT.labelMuted,
-                                            mb: 0.75,
-                                            fontWeight: 500,
-                                          }}
-                                        >
-                                          {tc.name}
-                                        </Typography>
+                                        {panelTitle !== tc.name && (
+                                          <Typography
+                                            sx={{
+                                              fontSize: 10,
+                                              color: CHAT.labelMuted,
+                                              mb: 0.75,
+                                              fontWeight: 500,
+                                            }}
+                                          >
+                                            {tc.name}
+                                          </Typography>
+                                        )}
 
                                         {(hasInput || hasOutput) && (
                                           <Stack
@@ -4381,7 +4597,7 @@ export function Chat({ sessionId }: ChatProps) {
                                                     fontWeight: 400,
                                                   }}
                                                 >
-                                                  {commandSectionLabel}
+                                                  {isBash ? commandSectionLabel : "Input"}
                                                 </Typography>
                                                 <Box
                                                   sx={{

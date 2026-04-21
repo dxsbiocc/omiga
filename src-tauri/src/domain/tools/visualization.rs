@@ -1,11 +1,11 @@
-//! Omiga visualization tool - generates omiga:viz markdown blocks for the frontend.
+//! Visualization tool - generates visualization markdown blocks for the frontend.
 
 use super::{ToolContext, ToolError, ToolSchema};
 use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
-pub const DESCRIPTION: &str = r#"Generate an omiga:viz interactive visualization block.
+pub const DESCRIPTION: &str = r#"Generate an interactive visualization block.
 
 Use this tool when you need to present data visually (charts, graphs, flowcharts, protein structures, maps, 3D scenes, formulas, or custom HTML).
 Supported viz_type values:
@@ -20,11 +20,11 @@ Supported viz_type values:
 - "iframe": Embed an external URL. Config should have `config.url`.
 - "html": Render custom HTML in a sandboxed iframe. Config should have `config.html`.
 
-The tool returns a markdown code block that the Omiga frontend will render interactively.
+The tool returns a markdown code block that the frontend will render interactively.
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OmigaVizArgs {
+pub struct VisualizationArgs {
     /// Visualization type: echarts, plotly, mermaid, pdb, iframe, html
     pub viz_type: String,
     /// Human-readable title/caption for the visualization
@@ -35,11 +35,11 @@ pub struct OmigaVizArgs {
     pub config: serde_json::Value,
 }
 
-pub struct OmigaVizTool;
+pub struct VisualizationTool;
 
 #[async_trait::async_trait]
-impl super::ToolImpl for OmigaVizTool {
-    type Args = OmigaVizArgs;
+impl super::ToolImpl for VisualizationTool {
+    type Args = VisualizationArgs;
 
     const DESCRIPTION: &'static str = DESCRIPTION;
 
@@ -58,7 +58,7 @@ impl super::ToolImpl for OmigaVizTool {
             _ => {
                 return Err(ToolError::InvalidArguments {
                     message: format!(
-                        "omiga_viz: `config` must be a JSON object, got {}",
+                        "visualization: `config` must be a JSON object, got {}",
                         config.to_string().chars().take(80).collect::<String>()
                     ),
                 });
@@ -73,20 +73,20 @@ impl super::ToolImpl for OmigaVizTool {
             parts.push(desc);
         }
         parts.push(format!(
-            "```omiga:viz\n{}\n```",
+            "```visualization\n{}\n```",
             serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".to_string())
         ));
 
         let output = parts.join("\n\n");
-        Ok(OmigaVizOutput { content: output }.into_stream())
+        Ok(VisualizationOutput { content: output }.into_stream())
     }
 }
 
-pub struct OmigaVizOutput {
+pub struct VisualizationOutput {
     pub content: String,
 }
 
-impl StreamOutput for OmigaVizOutput {
+impl StreamOutput for VisualizationOutput {
     fn into_stream(self) -> Pin<Box<dyn futures::Stream<Item = StreamOutputItem> + Send>> {
         use futures::stream;
         Box::pin(stream::iter(vec![
@@ -99,7 +99,7 @@ impl StreamOutput for OmigaVizOutput {
 
 pub fn schema() -> ToolSchema {
     ToolSchema::new(
-        "omiga_viz",
+        "visualization",
         DESCRIPTION,
         serde_json::json!({
             "type": "object",
