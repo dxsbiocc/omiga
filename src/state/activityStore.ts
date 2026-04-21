@@ -29,6 +29,14 @@ export interface ToolResultStepDetail {
   failed?: boolean;
 }
 
+/** A single todo item mirroring the `todo_write` tool schema. */
+export interface ActiveTodoItem {
+  id: string;
+  content: string;
+  activeForm: string;
+  status: string; // "pending" | "in_progress" | "completed"
+}
+
 /** Right-panel + header hints: connection/streaming and background shell jobs. */
 export interface BackgroundJob {
   id: string;
@@ -82,6 +90,15 @@ interface ActivityState {
     detail?: ToolResultStepDetail,
   ) => void;
 
+  /**
+   * Live todos pushed by every `todo_write` tool result during streaming.
+   * Null means no call has happened yet this turn; TaskStatus falls back to
+   * scanning storeMessages (post-stream).
+   */
+  activeTodos: ActiveTodoItem[] | null;
+  setActiveTodos: (todos: ActiveTodoItem[]) => void;
+  clearActiveTodos: () => void;
+
   clearTransient: () => void;
   /** Clear execution trace (e.g. session switch or failed send before stream). */
   resetExecutionState: () => void;
@@ -99,6 +116,7 @@ export const useActivityStore = create<ActivityState>((set) => ({
   executionSteps: [],
   executionStartedAt: null,
   executionEndedAt: null,
+  activeTodos: null,
 
   setConnecting: (v) => set({ isConnecting: v }),
 
@@ -199,9 +217,8 @@ export const useActivityStore = create<ActivityState>((set) => ({
         if (st.id === "think" || st.id === "reply" || st.id.startsWith("reply-")) {
           return { ...st, status: "done" as const };
         }
-        if (st.id.startsWith("tool-") && st.id !== tid) {
-          return { ...st, status: "done" as const };
-        }
+        // Don't mark other tool steps as done here — parallel tools may still be running.
+        // onToolResultDone is responsible for marking each tool step done when its result arrives.
         return st;
       });
       const exists = next.some((x) => x.id === tid);
@@ -245,6 +262,9 @@ export const useActivityStore = create<ActivityState>((set) => ({
       ),
     })),
 
+  setActiveTodos: (todos) => set({ activeTodos: todos }),
+  clearActiveTodos: () => set({ activeTodos: null }),
+
   clearTransient: () =>
     set({
       isConnecting: false,
@@ -258,6 +278,7 @@ export const useActivityStore = create<ActivityState>((set) => ({
       executionSteps: [],
       executionStartedAt: null,
       executionEndedAt: null,
+      activeTodos: null,
     }),
 
   finalizeExecutionRun: () =>

@@ -1,32 +1,86 @@
 //! 内置 Agent 定义和注册
+//!
+//! ## Role-level Tool Tiers & Model Tiers
+//!
+//! | Agent              | Tool Tier | Model Tier | Model alias | Notes                       |
+//! |--------------------|-----------|------------|-------------|-----------------------------|
+//! | GeneralPurposeAgent| General   | Standard   | (inherit)   | Full access, orchestrator   |
+//! | ExecutorAgent      | Executor  | Standard   | sonnet      | Full code access            |
+//! | ArchitectAgent     | Reviewer  | Frontier   | opus        | Verification only, no edits |
+//! | ExploreAgent       | Explorer  | Spark      | haiku       | Read-only search            |
+//! | DebuggerAgent      | General   | Standard   | (inherit)   | Debug specialist            |
+//! | DeepResearchAgent  | Web       | Frontier   | opus        | Research review, citations  |
+//! | DataAnalysisAgent  | General   | Standard   | (inherit)   | Python/R statistical analysis|
+//! | DataVisualAgent    | General   | Standard   | (inherit)   | Scientific figures/plots    |
+//! | LiteratureSearchAgent| Web     | Standard   | (inherit)   | PubMed/arXiv/Scholar search |
 
+pub mod api_reviewer;
+pub mod architect;
+pub mod code_reviewer;
+pub mod critic;
+pub mod data_analysis;
+pub mod data_visual;
+pub mod debugger;
+pub mod deep_research;
+pub mod executor;
 pub mod explore;
 pub mod general;
+pub mod literature_search;
+pub mod performance_reviewer;
 pub mod plan;
+pub mod quality_reviewer;
+pub mod security_reviewer;
+pub mod test_engineer;
 pub mod verification;
 
 use super::router::AgentRouter;
 
 /// 注册所有内置 Agent
 pub fn register_built_in_agents(router: &mut AgentRouter) {
-    // Explore Agent - 代码探索
-    router.register(Box::new(explore::ExploreAgent));
-
-    // Plan Agent - 架构设计
-    router.register(Box::new(plan::PlanAgent));
-
-    // General-Purpose Agent - 通用任务
+    // Core agents
     router.register(Box::new(general::GeneralPurposeAgent));
-
-    // Verification Agent - 代码验证（对抗性测试）
+    router.register(Box::new(executor::ExecutorAgent));
+    router.register(Box::new(explore::ExploreAgent));
+    router.register(Box::new(plan::PlanAgent));
+    router.register(Box::new(architect::ArchitectAgent));
+    router.register(Box::new(api_reviewer::ApiReviewerAgent));
+    router.register(Box::new(code_reviewer::CodeReviewerAgent));
+    router.register(Box::new(critic::CriticAgent));
+    router.register(Box::new(debugger::DebuggerAgent));
+    router.register(Box::new(performance_reviewer::PerformanceReviewerAgent));
+    router.register(Box::new(security_reviewer::SecurityReviewerAgent));
+    router.register(Box::new(test_engineer::TestEngineerAgent));
+    router.register(Box::new(quality_reviewer::QualityReviewerAgent));
     router.register(Box::new(verification::VerificationAgent));
+    // Research sub-agents
+    router.register(Box::new(deep_research::DeepResearchAgent));
+    router.register(Box::new(data_analysis::DataAnalysisAgent));
+    router.register(Box::new(data_visual::DataVisualAgent));
+    router.register(Box::new(literature_search::LiteratureSearchAgent));
 }
 
 /// 检查是否为内置 Agent
 pub fn is_built_in_agent(agent_type: &str) -> bool {
     matches!(
         agent_type,
-        "Explore" | "Plan" | "general-purpose" | "verification"
+        "Explore"
+            | "Plan"
+            | "general-purpose"
+            | "verification"
+            | "executor"
+            | "architect"
+            | "api-reviewer"
+            | "code-reviewer"
+            | "critic"
+            | "debugger"
+            | "deep-research"
+            | "data-analysis"
+            | "data-visual"
+            | "literature-search"
+            | "performance-reviewer"
+            | "quality-reviewer"
+            | "security-reviewer"
+            | "test-engineer"
     )
 }
 

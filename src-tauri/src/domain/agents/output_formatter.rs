@@ -135,7 +135,36 @@ pub fn preflight_skip_turn_summary(user_message: &str) -> bool {
         return true;
     }
 
-    // 2d. 翻译 / 格式转换（输出即交付物）
+    // 2d. 研究现状 / 综述类查询（详细报告即交付物，不需要二次摘要）
+    const RESEARCH_KEYWORDS: &[&str] = &[
+        "研究现状",
+        "研究进展",
+        "综述",
+        "领域综述",
+        "研究综述",
+        "领域分析",
+        "领域研究",
+        "最新进展",
+        "研究动态",
+        "领域现状",
+        "现状分析",
+        "进展综述",
+        "分析领域",
+        "research review",
+        "state of the art",
+        "literature review",
+        "survey of",
+        "research landscape",
+        "research status",
+        "field overview",
+        "review of the field",
+        "overview of the field",
+    ];
+    if RESEARCH_KEYWORDS.iter().any(|kw| lower.contains(kw)) {
+        return true;
+    }
+
+    // 2e. 翻译 / 格式转换（输出即交付物）
     const TRANSFORM_KEYWORDS: &[&str] = &[
         "翻译",
         "translate",

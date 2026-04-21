@@ -133,12 +133,24 @@ impl PermissionManager {
         tool_name: &str,
         arguments: &serde_json::Value,
     ) -> PermissionDecision {
+        self.check_tool_with_root(session_id, tool_name, arguments, None)
+            .await
+    }
+
+    pub async fn check_tool_with_root(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        project_root: Option<&std::path::Path>,
+    ) -> PermissionDecision {
         let context = PermissionContext {
             tool_name: tool_name.to_string(),
             arguments: arguments.clone(),
             session_id: session_id.to_string(),
             file_paths: self.extract_file_paths(tool_name, arguments),
             timestamp: chrono::Utc::now(),
+            project_root: project_root.map(|p| p.to_path_buf()),
         };
         self.check_permission(&context).await
     }
@@ -841,9 +853,12 @@ impl PermissionManager {
         }
 
         // 3. 路径风险
+        let home_dir = dirs::home_dir();
         if let Some(ref paths) = context.file_paths {
             for path in paths {
                 let path_str = path.to_string_lossy();
+
+                // 3a. 系统路径
                 if path_str.starts_with("/etc/")
                     || path_str.starts_with("/boot/")
                     || path_str.starts_with("/sys/")
@@ -856,6 +871,8 @@ impl PermissionManager {
                     });
                     categories.push(RiskCategory::System);
                 }
+
+                // 3b. 敏感文件
                 if path_str.contains(".env")
                     || path_str.contains("secret")
                     || path_str.contains("credential")
@@ -867,6 +884,124 @@ impl PermissionManager {
                         mitigation: Some("确认是否需要修改此文件".to_string()),
                     });
                     categories.push(RiskCategory::Privacy);
+                }
+
+                // 3c. 项目根目录之外的写操作
+                if let Some(ref root) = context.project_root {
+                    let abs_path = if path.is_absolute() {
+                        path.clone()
+                    } else {
+                        root.join(path)
+                    };
+                    let canonical_root = std::fs::canonicalize(root).unwrap_or(root.clone());
+                    let canonical_path =
+                        std::fs::canonicalize(&abs_path).unwrap_or(abs_path.clone());
+
+                    if !canonical_path.starts_with(&canonical_root) {
+                        // 判断是否直接在 home 目录下（更危险）
+                        let is_home_level = home_dir
+                            .as_ref()
+                            .map(|h| {
+                                let canonical_home =
+                                    std::fs::canonicalize(h).unwrap_or(h.clone());
+                                // 直接子目录或文件（depth == home + 1）
+                                canonical_path.starts_with(&canonical_home)
+                                    && canonical_path
+                                        .strip_prefix(&canonical_home)
+                                        .map(|rel| rel.components().count() <= 1)
+                                        .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+
+                        let (severity, desc) = if is_home_level {
+                            (
+                                RiskLevel::High,
+                                format!(
+                                    "操作路径在 Home 目录根层级 (~/)，超出项目范围: {}",
+                                    path_str
+                                ),
+                            )
+                        } else {
+                            (
+                                RiskLevel::Medium,
+                                format!("操作路径超出项目目录: {}", path_str),
+                            )
+                        };
+                        detected_risks.push(DetectedRisk {
+                            category: RiskCategory::FileSystem,
+                            severity,
+                            description: desc,
+                            mitigation: Some(format!(
+                                "项目根目录为 {}，请确认是否允许访问外部路径",
+                                root.display()
+                            )),
+                        });
+                        categories.push(RiskCategory::FileSystem);
+                    }
+                }
+            }
+        }
+
+        // 3d. bash 命令中的路径越界检测（mkdir / touch / cp 等写入外部路径）
+        if let (Some(ref root), true) = (
+            &context.project_root,
+            context.tool_name == "bash" || context.tool_name == "shell",
+        ) {
+            if let Some(cmd) = context.arguments.get("command").and_then(|v| v.as_str()) {
+                for cap in bash_path_regex().captures_iter(cmd) {
+                    let raw = cap.get(1).map(|m| m.as_str()).unwrap_or_default();
+                    // Expand ~ to home dir
+                    let expanded = if let Some(stripped) = raw.strip_prefix("~/") {
+                        home_dir
+                            .as_ref()
+                            .map(|h| h.join(stripped))
+                            .unwrap_or_else(|| std::path::PathBuf::from(raw))
+                    } else if raw == "~" {
+                        home_dir
+                            .clone()
+                            .unwrap_or_else(|| std::path::PathBuf::from(raw))
+                    } else {
+                        std::path::PathBuf::from(raw)
+                    };
+
+                    if !expanded.is_absolute() {
+                        continue;
+                    }
+
+                    let canonical_root =
+                        std::fs::canonicalize(root).unwrap_or(root.clone());
+                    let canonical_path =
+                        std::fs::canonicalize(&expanded).unwrap_or(expanded.clone());
+
+                    if !canonical_path.starts_with(&canonical_root) {
+                        let is_home_level = home_dir
+                            .as_ref()
+                            .map(|h| {
+                                let ch = std::fs::canonicalize(h).unwrap_or(h.clone());
+                                canonical_path.starts_with(&ch)
+                                    && canonical_path
+                                        .strip_prefix(&ch)
+                                        .map(|rel| rel.components().count() <= 1)
+                                        .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+
+                        if is_home_level {
+                            detected_risks.push(DetectedRisk {
+                                category: RiskCategory::FileSystem,
+                                severity: RiskLevel::High,
+                                description: format!(
+                                    "命令中包含 Home 根层级路径 (~/)，超出项目范围: {}",
+                                    raw
+                                ),
+                                mitigation: Some(format!(
+                                    "项目根目录为 {}，该路径超出允许范围",
+                                    root.display()
+                                )),
+                            });
+                            categories.push(RiskCategory::FileSystem);
+                        }
+                    }
                 }
             }
         }
@@ -904,7 +1039,7 @@ impl PermissionManager {
     fn assess_tool_risk(&self, tool_name: &str) -> RiskAssessment {
         match tool_name {
             "bash" | "shell" => RiskAssessment {
-                level: RiskLevel::Medium,
+                level: RiskLevel::High,
                 categories: vec![RiskCategory::System],
                 description: "执行系统命令".to_string(),
                 recommendations: vec![
@@ -913,13 +1048,13 @@ impl PermissionManager {
                 ],
                 detected_risks: vec![DetectedRisk {
                     category: RiskCategory::System,
-                    severity: RiskLevel::Medium,
+                    severity: RiskLevel::High,
                     description: "允许执行任意系统命令".to_string(),
                     mitigation: Some("使用受限的 file_* 工具替代".to_string()),
                 }],
             },
             "file_write" | "file_edit" | "skill_manage" | "skill_config" => RiskAssessment {
-                level: RiskLevel::Low,
+                level: RiskLevel::Medium,
                 categories: vec![RiskCategory::FileSystem, RiskCategory::DataLoss],
                 description: "修改文件内容".to_string(),
                 recommendations: vec![
@@ -928,7 +1063,7 @@ impl PermissionManager {
                 ],
                 detected_risks: vec![DetectedRisk {
                     category: RiskCategory::FileSystem,
-                    severity: RiskLevel::Low,
+                    severity: RiskLevel::Medium,
                     description: "将修改文件内容".to_string(),
                     mitigation: Some("使用 file_read 先查看当前内容".to_string()),
                 }],

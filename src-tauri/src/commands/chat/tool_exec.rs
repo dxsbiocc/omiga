@@ -1,0 +1,1518 @@
+//! Tool execution dispatcher: `execute_tool_calls` and `execute_one_tool`.
+
+use super::permissions::{
+    execute_ask_user_question_interactive, matches_ask_user_question_name,
+    wait_for_permission_tool_resolution,
+};
+use super::subagent::{
+    is_agent_tool_name, is_parallelizable_tool, run_skill_forked, run_subagent_session,
+};
+use super::{
+    append_truncated_results_note, apply_empty_structured_tool_placeholder,
+    fold_tool_stream_item_for_model, handle_skill_config, process_tool_output_for_model,
+    AgentLlmRuntime, ListSkillsArgs, SkillToolArgs, SkillViewArgs, MAX_SUBAGENT_EXECUTE_DEPTH,
+};
+use crate::app_state::OmigaAppState;
+use crate::constants::tool_limits::{
+    truncate_utf8_prefix, PREVIEW_SIZE_BYTES, TOOL_DISPLAY_MAX_INPUT_CHARS,
+};
+use crate::domain::agents::subagent_tool_filter::{
+    should_block_subagent_builtin_call, SubagentFilterOptions,
+};
+use crate::domain::integrations_config;
+use crate::domain::permissions::{
+    canonical_permission_tool_name, load_merged_permission_deny_rule_entries, matching_deny_entry,
+};
+use crate::domain::session::{AgentTask, TodoItem};
+use crate::domain::skills;
+use crate::domain::tools::{Tool, ToolContext, WebSearchApiKeys};
+use crate::infrastructure::streaming::StreamOutputItem;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
+use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::RwLock;
+pub(super) async fn execute_tool_calls(
+    tool_calls: &[(String, String, String)], // (id, name, arguments)
+    app: &AppHandle,
+    message_id: &str,
+    session_id: &str,
+    tool_results_dir: &Path,
+    project_root: &std::path::Path,
+    session_todos: Option<Arc<tokio::sync::Mutex<Vec<TodoItem>>>>,
+    session_agent_tasks: Option<Arc<tokio::sync::Mutex<Vec<AgentTask>>>>,
+    agent_runtime: Option<&AgentLlmRuntime>,
+    subagent_depth: u8,
+    // Task text for `list_skills` ordering (main user message or sub-agent description+prompt).
+    skill_task_context: Option<&str>,
+    web_search_api_keys: WebSearchApiKeys,
+    skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+    execution_environment: String,
+    ssh_server: Option<String>,
+    sandbox_backend: String,
+    local_venv_type: String,
+    local_venv_name: String,
+    env_store: crate::domain::tools::env_store::EnvStore,
+) -> Vec<(String, String, bool)> {
+    use futures::future::join_all;
+
+    let cancel_flag = agent_runtime.map(|r| r.cancel_flag.clone());
+    let round_cancel = agent_runtime.map(|r| r.round_cancel.clone());
+
+    // (tool_use_id, output, is_error)
+    let mut results = Vec::new();
+    let deny_entries = load_merged_permission_deny_rule_entries(project_root);
+
+    // Pre-compute permission + subagent-filter results for every call (fast, sequential).
+    // Calls that pass become futures; blocked calls become immediate error results.
+    enum CallPrep<'a> {
+        Blocked(String, String, bool), // (tool_use_id, error_msg, is_error=true)
+        Ready(&'a str),                // tool_name only (indices carry id+args via tool_calls[idx])
+    }
+
+    let prepped: Vec<CallPrep<'_>> = tool_calls
+        .iter()
+        .map(|(tool_use_id, tool_name, _arguments)| {
+            if let Some(hit) = matching_deny_entry(
+                tool_name,
+                &deny_entries,
+            ) {
+                let error_msg = format!(
+                    "Tool `{tool_name}` is denied by `permissions.deny` (rule `{}` from {}).",
+                    hit.rule,
+                    hit.source.display()
+                );
+                return CallPrep::Blocked(tool_use_id.clone(), error_msg, true);
+            }
+            if subagent_depth > 0 {
+                let c = canonical_permission_tool_name(
+                    tool_name,
+                );
+                let parent_in_plan = false; // checked per-call below in execute_one_tool
+                let allow_nested = agent_runtime
+                    .map(|r| r.allow_nested_agent)
+                    .unwrap_or(false);
+                let sub_opts = SubagentFilterOptions {
+                    parent_in_plan_mode: parent_in_plan,
+                    allow_nested_agent: allow_nested,
+                };
+                if should_block_subagent_builtin_call(
+                    &c, sub_opts,
+                ) {
+                    let error_msg = format!(
+                        "Tool `{tool_name}` is not available to sub-agents (Claude Code `ALL_AGENT_DISALLOWED_TOOLS`)."
+                    );
+                    return CallPrep::Blocked(tool_use_id.clone(), error_msg, true);
+                }
+            }
+            CallPrep::Ready(tool_name)
+        })
+        .collect();
+
+    // Emit ToolResult for every pre-blocked call and record it in results at correct index.
+    // We need to maintain index alignment so we can merge parallel results back in order.
+    let mut ordered_results: Vec<Option<(String, String, bool)>> = vec![None; tool_calls.len()];
+
+    let mut parallel_indices: Vec<usize> = Vec::new();
+    let mut sequential_indices: Vec<usize> = Vec::new();
+
+    for (idx, prep) in prepped.iter().enumerate() {
+        match prep {
+            CallPrep::Blocked(tool_use_id, error_msg, is_error) => {
+                let (_, tool_name, arguments) = &tool_calls[idx];
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: arguments.clone(),
+                        output: error_msg.clone(),
+                        is_error: *is_error,
+                    },
+                );
+                ordered_results[idx] = Some((tool_use_id.clone(), error_msg.clone(), *is_error));
+            }
+            CallPrep::Ready(tool_name) => {
+                if is_parallelizable_tool(tool_name) {
+                    parallel_indices.push(idx);
+                } else {
+                    sequential_indices.push(idx);
+                }
+            }
+        }
+    }
+
+    // --- Parallel batch: spawn all parallelizable futures at once ---
+    if !parallel_indices.is_empty() {
+        let parallel_futures: Vec<_> = parallel_indices
+            .iter()
+            .map(|&idx| {
+                let (tool_use_id, tool_name, arguments) = &tool_calls[idx];
+                execute_one_tool(
+                    tool_use_id.clone(),
+                    tool_name.clone(),
+                    arguments.clone(),
+                    app.clone(),
+                    message_id.to_string(),
+                    session_id.to_string(),
+                    tool_results_dir.to_path_buf(),
+                    project_root.to_path_buf(),
+                    session_todos.clone(),
+                    session_agent_tasks.clone(),
+                    None, // parallelizable tools don't need agent_runtime
+                    subagent_depth,
+                    skill_task_context.map(str::to_owned),
+                    web_search_api_keys.clone(),
+                    skill_cache.clone(),
+                    cancel_flag.clone(),
+                    round_cancel.clone(),
+                    execution_environment.clone(),
+                    ssh_server.clone(),
+                    sandbox_backend.clone(),
+                    local_venv_type.clone(),
+                    local_venv_name.clone(),
+                    env_store.clone(),
+                )
+            })
+            .collect();
+
+        // Wrap each future with a 60 s timeout so one slow web_fetch can't stall
+        // the whole batch.  On timeout we return an error result for that tool slot
+        // instead of blocking every other tool indefinitely.
+        const PARALLEL_TOOL_TIMEOUT_SECS: u64 = 60;
+        let timed_futures: Vec<_> = parallel_futures
+            .into_iter()
+            .zip(parallel_indices.iter())
+            .map(|(fut, &idx)| {
+                let (tool_use_id, tool_name, _) = &tool_calls[idx];
+                let tuid = tool_use_id.clone();
+                let tname = tool_name.clone();
+                async move {
+                    match tokio::time::timeout(
+                        tokio::time::Duration::from_secs(PARALLEL_TOOL_TIMEOUT_SECS),
+                        fut,
+                    )
+                    .await
+                    {
+                        Ok(res) => res,
+                        Err(_) => (
+                            tuid.clone(),
+                            format!("Tool `{tname}` timed out after {PARALLEL_TOOL_TIMEOUT_SECS}s"),
+                            true,
+                        ),
+                    }
+                }
+            })
+            .collect();
+        let parallel_results = join_all(timed_futures).await;
+        for (&idx, res) in parallel_indices.iter().zip(parallel_results) {
+            ordered_results[idx] = Some(res);
+        }
+    }
+
+    // --- Sequential batch: stateful tools run one-by-one ---
+    for idx in sequential_indices {
+        let (tool_use_id, tool_name, arguments) = &tool_calls[idx];
+        let res = execute_one_tool(
+            tool_use_id.clone(),
+            tool_name.clone(),
+            arguments.clone(),
+            app.clone(),
+            message_id.to_string(),
+            session_id.to_string(),
+            tool_results_dir.to_path_buf(),
+            project_root.to_path_buf(),
+            session_todos.clone(),
+            session_agent_tasks.clone(),
+            agent_runtime,
+            subagent_depth,
+            skill_task_context.map(str::to_owned),
+            web_search_api_keys.clone(),
+            skill_cache.clone(),
+            cancel_flag.clone(),
+            round_cancel.clone(),
+            execution_environment.clone(),
+            ssh_server.clone(),
+            sandbox_backend.clone(),
+            local_venv_type.clone(),
+            local_venv_name.clone(),
+            env_store.clone(),
+        )
+        .await;
+        ordered_results[idx] = Some(res);
+    }
+
+    results.extend(ordered_results.into_iter().flatten());
+    results
+}
+
+/// Execute a single tool call. Called from both the parallel and sequential paths.
+#[async_recursion::async_recursion]
+pub(super) async fn execute_one_tool(
+    tool_use_id: String,
+    tool_name: String,
+    arguments: String,
+    app: AppHandle,
+    message_id: String,
+    session_id: String,
+    tool_results_dir: PathBuf,
+    project_root: PathBuf,
+    session_todos: Option<Arc<tokio::sync::Mutex<Vec<TodoItem>>>>,
+    session_agent_tasks: Option<Arc<tokio::sync::Mutex<Vec<AgentTask>>>>,
+    agent_runtime: Option<&AgentLlmRuntime>,
+    subagent_depth: u8,
+    skill_task_context: Option<String>,
+    web_search_api_keys: WebSearchApiKeys,
+    skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+    cancel_flag: Option<Arc<RwLock<bool>>>,
+    round_cancel: Option<tokio_util::sync::CancellationToken>,
+    execution_environment: String,
+    ssh_server: Option<String>,
+    sandbox_backend: String,
+    local_venv_type: String,
+    local_venv_name: String,
+    env_store: crate::domain::tools::env_store::EnvStore,
+) -> (String, String, bool) {
+    let tool_use_id = &tool_use_id;
+    let tool_name = &tool_name;
+    let arguments = &arguments;
+    let message_id = &message_id;
+    let session_id = &session_id;
+    let tool_results_dir = tool_results_dir.as_path();
+    let project_root = project_root.as_path();
+    let skill_task_context = skill_task_context.as_deref();
+
+    // Subagent plan-mode re-check (fast, per-call)
+    if subagent_depth > 0 {
+        let c = canonical_permission_tool_name(tool_name);
+        let parent_in_plan = if let Some(ar) = agent_runtime {
+            if let Some(ref pm) = ar.plan_mode_flag {
+                *pm.lock().await
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let allow_nested = agent_runtime.map(|r| r.allow_nested_agent).unwrap_or(false);
+        let sub_opts = SubagentFilterOptions {
+            parent_in_plan_mode: parent_in_plan,
+            allow_nested_agent: allow_nested,
+        };
+        if should_block_subagent_builtin_call(&c, sub_opts) {
+            let error_msg = format!(
+                "Tool `{tool_name}` is not available to sub-agents (Claude Code `ALL_AGENT_DISALLOWED_TOOLS`)."
+            );
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            return (tool_use_id.clone(), error_msg, true);
+        }
+    }
+
+    // === Permission Check for ALL tools (not just skill) ===
+    // Skip permission check for certain safe tools
+    let needs_permission_check = !matches!(
+        tool_name.as_str(),
+        "list_skills" | "skills_list" | "skill_view" | "ask_user" | "ask_user_question"
+    );
+
+    if needs_permission_check {
+        let Some(app_state) = app.try_state::<OmigaAppState>() else {
+            let error_msg = "内部错误：无法获取应用状态".to_string();
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            return (tool_use_id.clone(), error_msg, true);
+        };
+        let permission_manager = app_state.permission_manager.clone();
+
+        let args_value: serde_json::Value = serde_json::from_str(arguments)
+            .unwrap_or_else(|_| serde_json::json!({"raw": arguments}));
+
+        loop {
+            let perm_decision = permission_manager
+                .check_tool_with_root(session_id, &tool_name, &args_value, Some(project_root))
+                .await;
+
+            match perm_decision {
+                crate::domain::permissions::PermissionDecision::Deny(ref reason) => {
+                    tracing::warn!(
+                        tool = %tool_name,
+                        reason = %reason,
+                        "Tool denied by permission manager"
+                    );
+                    let error_msg = format!("权限被拒绝: {}", reason);
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: arguments.clone(),
+                            output: error_msg.clone(),
+                            is_error: true,
+                        },
+                    );
+                    return (tool_use_id.clone(), error_msg, true);
+                }
+                crate::domain::permissions::PermissionDecision::RequireApproval(ref req) => {
+                    tracing::info!(
+                        tool = %tool_name,
+                        risk_level = ?req.risk.level,
+                        "Tool requires user approval — blocking until UI resolves"
+                    );
+                    match wait_for_permission_tool_resolution(
+                        &app,
+                        &app_state,
+                        session_id,
+                        message_id,
+                        tool_use_id,
+                        tool_name,
+                        tool_name,
+                        arguments,
+                        &args_value,
+                        req,
+                        cancel_flag.clone(),
+                    )
+                    .await
+                    {
+                        Ok(()) => continue,
+                        Err(e) => {
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", message_id),
+                                &StreamOutputItem::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    name: tool_name.clone(),
+                                    input: arguments.clone(),
+                                    output: e.clone(),
+                                    is_error: true,
+                                },
+                            );
+                            return (tool_use_id.clone(), e, true);
+                        }
+                    }
+                }
+                crate::domain::permissions::PermissionDecision::Allow => {
+                    tracing::debug!(
+                        tool = %tool_name,
+                        "Tool allowed by permission manager"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    // === End permission check ===
+
+    // Parse and execute the tool
+    let result = if tool_name.eq_ignore_ascii_case("list_skills")
+        || tool_name.eq_ignore_ascii_case("skills_list")
+    {
+        let args: ListSkillsArgs = if arguments.trim().is_empty() {
+            ListSkillsArgs::default()
+        } else {
+            serde_json::from_str(arguments).unwrap_or_default()
+        };
+        let icfg = integrations_config::load_integrations_config(project_root);
+        let mut all_skills = skills::load_skills_cached(project_root, &skill_cache).await;
+        let total_skills_before_filter = all_skills.len();
+        all_skills = integrations_config::filter_skill_entries(all_skills, &icfg);
+        let filtered_count = all_skills.len();
+
+        // Telemetry for list_skills / skills_list (aligned with SkillTool telemetry)
+        tracing::info!(
+            tool = %tool_name,
+            query = ?args.query,
+            has_task_context = skill_task_context.is_some(),
+            total_skills = total_skills_before_filter,
+            after_filter = filtered_count,
+            disabled_count = total_skills_before_filter - filtered_count,
+            "list skills tool invoked"
+        );
+
+        let json = skills::list_skills_metadata_json(
+            &all_skills,
+            args.query.as_deref(),
+            skill_task_context,
+        );
+        let is_error = false;
+        let display_output = if json.len() > PREVIEW_SIZE_BYTES {
+            let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
+            format!(
+                "{}\n\n[Output truncated... {} total characters]",
+                prefix,
+                json.len()
+            )
+        } else {
+            json.clone()
+        };
+        let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+            let prefix = truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+            format!(
+                "{}\n\n[Input truncated... {} total characters]",
+                prefix,
+                arguments.len()
+            )
+        } else {
+            arguments.clone()
+        };
+        let _ = app.emit(
+            &format!("chat-stream-{}", message_id),
+            &StreamOutputItem::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                name: tool_name.clone(),
+                input: display_input,
+                output: display_output,
+                is_error,
+            },
+        );
+        let model_output = process_tool_output_for_model(json, tool_use_id, tool_results_dir).await;
+        (tool_use_id.clone(), model_output, is_error)
+    } else if tool_name.eq_ignore_ascii_case("skill_view") {
+        match serde_json::from_str::<SkillViewArgs>(arguments) {
+            Err(e) => {
+                let error_msg = format!("skill_view: invalid JSON: {e}");
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: arguments.clone(),
+                        output: error_msg.clone(),
+                        is_error: true,
+                    },
+                );
+                (tool_use_id.clone(), error_msg, true)
+            }
+            Ok(args) => {
+                if args.skill.trim().is_empty() {
+                    let error_msg =
+                        "skill_view: missing or empty `skill` (or `name`) field".to_string();
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: arguments.clone(),
+                            output: error_msg.clone(),
+                            is_error: true,
+                        },
+                    );
+                    (tool_use_id.clone(), error_msg, true)
+                } else {
+                    let icfg = integrations_config::load_integrations_config(project_root);
+                    let mut all_skills =
+                        skills::load_skills_cached(project_root, &skill_cache).await;
+                    all_skills = integrations_config::filter_skill_entries(all_skills, &icfg);
+                    match skills::execute_skill_view(
+                        &all_skills,
+                        args.skill.trim(),
+                        args.file_path.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(json_val) => {
+                            let json = serde_json::to_string_pretty(&json_val)
+                                .unwrap_or_else(|_| "{\"success\":false}".to_string());
+                            let is_error = false;
+                            let display_output = if json.len() > PREVIEW_SIZE_BYTES {
+                                let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
+                                format!(
+                                    "{}\n\n[Output truncated... {} total characters]",
+                                    prefix,
+                                    json.len()
+                                )
+                            } else {
+                                json.clone()
+                            };
+                            let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                                let prefix =
+                                    truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+                                format!(
+                                    "{}\n\n[Input truncated... {} total characters]",
+                                    prefix,
+                                    arguments.len()
+                                )
+                            } else {
+                                arguments.clone()
+                            };
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", message_id),
+                                &StreamOutputItem::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    name: tool_name.clone(),
+                                    input: display_input,
+                                    output: display_output,
+                                    is_error,
+                                },
+                            );
+                            let model_output =
+                                process_tool_output_for_model(json, tool_use_id, tool_results_dir)
+                                    .await;
+                            (tool_use_id.clone(), model_output, is_error)
+                        }
+                        Err(e) => {
+                            tracing::warn!(tool = "skill_view", error = %e, "skill_view failed");
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", message_id),
+                                &StreamOutputItem::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    name: tool_name.clone(),
+                                    input: arguments.clone(),
+                                    output: e.clone(),
+                                    is_error: true,
+                                },
+                            );
+                            (tool_use_id.clone(), e, true)
+                        }
+                    }
+                }
+            }
+        }
+    } else if tool_name.eq_ignore_ascii_case("skill_manage") {
+        let out = skills::execute_skill_manage(project_root, arguments, &skill_cache).await;
+        match out {
+            Ok(json_val) => {
+                let json = serde_json::to_string_pretty(&json_val)
+                    .unwrap_or_else(|_| "{\"success\":false}".to_string());
+                let is_error = false;
+                let display_output = if json.len() > PREVIEW_SIZE_BYTES {
+                    let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
+                    format!(
+                        "{}\n\n[Output truncated... {} total characters]",
+                        prefix,
+                        json.len()
+                    )
+                } else {
+                    json.clone()
+                };
+                let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                    let prefix = truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+                    format!(
+                        "{}\n\n[Input truncated... {} total characters]",
+                        prefix,
+                        arguments.len()
+                    )
+                } else {
+                    arguments.clone()
+                };
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: display_input,
+                        output: display_output,
+                        is_error,
+                    },
+                );
+                let model_output =
+                    process_tool_output_for_model(json, tool_use_id, tool_results_dir).await;
+                (tool_use_id.clone(), model_output, is_error)
+            }
+            Err(e) => {
+                tracing::warn!(tool = "skill_manage", error = %e, "skill_manage failed");
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: arguments.clone(),
+                        output: e.clone(),
+                        is_error: true,
+                    },
+                );
+                (tool_use_id.clone(), e, true)
+            }
+        }
+    } else if tool_name.eq_ignore_ascii_case("skill_config") {
+        let result = handle_skill_config(project_root, arguments, &skill_cache).await;
+        let (json, is_error) = match result {
+            Ok(v) => (
+                serde_json::to_string_pretty(&v)
+                    .unwrap_or_else(|_| "{\"success\":false}".to_string()),
+                false,
+            ),
+            Err(e) => {
+                tracing::warn!(tool = "skill_config", error = %e, "skill_config failed");
+                (e, true)
+            }
+        };
+        let display_output = if json.len() > PREVIEW_SIZE_BYTES {
+            let prefix = truncate_utf8_prefix(&json, PREVIEW_SIZE_BYTES);
+            format!(
+                "{}\n\n[Output truncated... {} total characters]",
+                prefix,
+                json.len()
+            )
+        } else {
+            json.clone()
+        };
+        let _ = app.emit(
+            &format!("chat-stream-{}", message_id),
+            &StreamOutputItem::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                name: tool_name.clone(),
+                input: arguments.clone(),
+                output: display_output,
+                is_error,
+            },
+        );
+        let model_output = process_tool_output_for_model(json, tool_use_id, tool_results_dir).await;
+        (tool_use_id.clone(), model_output, is_error)
+    } else if tool_name.eq_ignore_ascii_case("skill") || tool_name == "Skill" {
+        match serde_json::from_str::<SkillToolArgs>(arguments) {
+            Ok(args) => {
+                if args.skill.trim().is_empty() {
+                    let error_msg = "skill tool: missing or empty `skill` field".to_string();
+                    tracing::warn!(
+                        tool = "skill",
+                        error = "empty_skill_name",
+                        "Skill tool called with empty skill name"
+                    );
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: arguments.clone(),
+                            output: error_msg.clone(),
+                            is_error: true,
+                        },
+                    );
+                    (tool_use_id.clone(), error_msg, true)
+                } else {
+                    let icfg = integrations_config::load_integrations_config(project_root);
+                    let all_skills = skills::load_skills_cached(project_root, &skill_cache).await;
+                    let resolved_name =
+                        skills::resolve_skill_display_name(&all_skills, &args.skill);
+                    let blocked = resolved_name
+                        .as_ref()
+                        .map(|nm| integrations_config::is_skill_name_disabled(&icfg, nm))
+                        .unwrap_or(false);
+
+                    // Telemetry for skill invocation (aligned with SkillTool in TS)
+                    tracing::info!(
+                        tool = "skill",
+                        raw_skill = %args.skill,
+                        resolved_name = ?resolved_name,
+                        has_args = !args.args.is_empty(),
+                        total_available_skills = all_skills.len(),
+                        blocked_by_config = blocked,
+                        "Skill tool invoked"
+                    );
+
+                    if blocked {
+                        let skill_display =
+                            resolved_name.unwrap_or_else(|| args.skill.trim().to_string());
+                        let error_msg = format!(
+                                "Skill `{skill_display}` is disabled in Omiga Settings → Integrations (Skills)."
+                            );
+                        tracing::warn!(skill_name = %skill_display, "Skill invocation blocked by user config");
+                        let _ = app.emit(
+                            &format!("chat-stream-{}", message_id),
+                            &StreamOutputItem::ToolResult {
+                                tool_use_id: tool_use_id.clone(),
+                                name: tool_name.clone(),
+                                input: arguments.clone(),
+                                output: error_msg.clone(),
+                                is_error: true,
+                            },
+                        );
+                        (tool_use_id.clone(), error_msg, true)
+                    } else {
+                        // === Permission Check (New PermissionManager) ===
+                        let skill_display = resolved_name
+                            .clone()
+                            .unwrap_or_else(|| args.skill.trim().to_string());
+
+                        let Some(app_state_skill) = app.try_state::<OmigaAppState>() else {
+                            let error_msg = "内部错误：无法获取应用状态".to_string();
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", message_id),
+                                &StreamOutputItem::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    name: tool_name.clone(),
+                                    input: arguments.clone(),
+                                    output: error_msg.clone(),
+                                    is_error: true,
+                                },
+                            );
+                            return (tool_use_id.clone(), error_msg, true);
+                        };
+                        let permission_manager = app_state_skill.permission_manager.clone();
+
+                        let args_value = serde_json::json!({
+                            "skill": args.skill,
+                            "args": args.args,
+                            "execution_mode": args.execution_mode,
+                        });
+
+                        loop {
+                            let perm_decision = permission_manager
+                                .check_tool_with_root(
+                                    session_id,
+                                    &skill_display,
+                                    &args_value,
+                                    Some(project_root),
+                                )
+                                .await;
+
+                            match perm_decision {
+                                crate::domain::permissions::PermissionDecision::Deny(
+                                    ref reason,
+                                ) => {
+                                    tracing::warn!(
+                                        skill = %skill_display,
+                                        reason = %reason,
+                                        "Skill denied by permission manager"
+                                    );
+                                    let error_msg = format!("权限被拒绝: {}", reason);
+                                    let _ = app.emit(
+                                        &format!("chat-stream-{}", message_id),
+                                        &StreamOutputItem::ToolResult {
+                                            tool_use_id: tool_use_id.clone(),
+                                            name: tool_name.clone(),
+                                            input: arguments.clone(),
+                                            output: error_msg.clone(),
+                                            is_error: true,
+                                        },
+                                    );
+                                    return (tool_use_id.clone(), error_msg, true);
+                                }
+                                crate::domain::permissions::PermissionDecision::RequireApproval(
+                                    ref req,
+                                ) => {
+                                    tracing::info!(
+                                        skill = %skill_display,
+                                        risk_level = ?req.risk.level,
+                                        "Skill requires user approval — blocking until UI resolves"
+                                    );
+                                    match wait_for_permission_tool_resolution(
+                                        &app,
+                                        &app_state_skill,
+                                        session_id,
+                                        message_id,
+                                        tool_use_id,
+                                        tool_name,
+                                        skill_display.as_str(),
+                                        arguments,
+                                        &args_value,
+                                        req,
+                                        cancel_flag.clone(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => continue,
+                                        Err(e) => {
+                                            let _ = app.emit(
+                                                &format!("chat-stream-{}", message_id),
+                                                &StreamOutputItem::ToolResult {
+                                                    tool_use_id: tool_use_id.clone(),
+                                                    name: tool_name.clone(),
+                                                    input: arguments.clone(),
+                                                    output: e.clone(),
+                                                    is_error: true,
+                                                },
+                                            );
+                                            return (tool_use_id.clone(), e, true);
+                                        }
+                                    }
+                                }
+                                crate::domain::permissions::PermissionDecision::Allow => {
+                                    tracing::debug!(
+                                        skill = %skill_display,
+                                        "Skill allowed by permission manager"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        // === End permission check ===
+
+                        // Determine execution mode
+                        let execution_mode = args.execution_mode.trim().to_lowercase();
+                        let is_forked = execution_mode == "forked";
+
+                        if is_forked {
+                            // === FORKED EXECUTION MODE ===
+                            // Execute skill in isolated sub-agent session
+                            tracing::info!(
+                                skill = %skill_display,
+                                "Executing skill in forked mode (isolated sub-agent)"
+                            );
+
+                            // Load skill content for forked execution
+                            let skill_content = resolved_name
+                                .as_ref()
+                                .and_then(|name| {
+                                    skills::find_skill_entry(&all_skills, name).map(|entry| {
+                                        let skill_path = entry.skill_dir.join("SKILL.md");
+                                        std::fs::read_to_string(&skill_path).unwrap_or_else(|_| {
+                                            format!(
+                                                "# {}\n\nSkill content not available",
+                                                entry.name
+                                            )
+                                        })
+                                    })
+                                })
+                                .unwrap_or_else(|| {
+                                    format!("Skill: {}\n\nArgs: {}", args.skill, args.args)
+                                });
+
+                            // Get allowed_tools for forked execution
+                            let skill_allowed_tools: Option<Vec<String>> =
+                                resolved_name.as_ref().and_then(|name| {
+                                    skills::find_skill_entry(&all_skills, name)
+                                        .map(|entry| entry.allowed_tools.clone())
+                                });
+
+                            // Need Agent runtime for forked execution
+                            if let Some(ref ar) = agent_runtime {
+                                match run_skill_forked(
+                                    &app,
+                                    message_id,
+                                    session_id,
+                                    tool_results_dir,
+                                    project_root,
+                                    session_todos.clone(),
+                                    session_agent_tasks.clone(),
+                                    &skill_display,
+                                    &args.args,
+                                    &skill_content,
+                                    skill_allowed_tools,
+                                    ar,
+                                    subagent_depth.saturating_add(1),
+                                    web_search_api_keys.clone(),
+                                    skill_cache.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(output_text) => {
+                                        let is_error = false;
+                                        tracing::info!(
+                                            skill = %skill_display,
+                                            output_len = output_text.len(),
+                                            "Skill forked execution completed"
+                                        );
+                                        // Process and return result (similar to existing inline result handling)
+                                        let display_output =
+                                            if output_text.len() > PREVIEW_SIZE_BYTES {
+                                                let prefix = truncate_utf8_prefix(
+                                                    &output_text,
+                                                    PREVIEW_SIZE_BYTES,
+                                                );
+                                                format!(
+                                                "{}\n\n[Output truncated... {} total characters]",
+                                                prefix,
+                                                output_text.len()
+                                            )
+                                            } else {
+                                                output_text.clone()
+                                            };
+                                        let display_input =
+                                            if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                                                let prefix = truncate_utf8_prefix(
+                                                    arguments,
+                                                    TOOL_DISPLAY_MAX_INPUT_CHARS,
+                                                );
+                                                format!(
+                                                "{}\n\n[Input truncated... {} total characters]",
+                                                prefix,
+                                                arguments.len()
+                                            )
+                                            } else {
+                                                arguments.clone()
+                                            };
+                                        let _ = app.emit(
+                                            &format!("chat-stream-{}", message_id),
+                                            &StreamOutputItem::ToolResult {
+                                                tool_use_id: tool_use_id.clone(),
+                                                name: tool_name.clone(),
+                                                input: display_input,
+                                                output: display_output,
+                                                is_error,
+                                            },
+                                        );
+                                        let model_output = process_tool_output_for_model(
+                                            output_text,
+                                            tool_use_id,
+                                            tool_results_dir,
+                                        )
+                                        .await;
+                                        return (tool_use_id.clone(), model_output, is_error);
+                                    }
+                                    Err(e) => {
+                                        let error_msg =
+                                            format!("Skill forked execution failed: {}", e);
+                                        tracing::warn!(
+                                            skill = %skill_display,
+                                            error = %error_msg,
+                                            "Forked execution error"
+                                        );
+                                        let _ = app.emit(
+                                            &format!("chat-stream-{}", message_id),
+                                            &StreamOutputItem::ToolResult {
+                                                tool_use_id: tool_use_id.clone(),
+                                                name: tool_name.clone(),
+                                                input: arguments.clone(),
+                                                output: error_msg.clone(),
+                                                is_error: true,
+                                            },
+                                        );
+                                        return (tool_use_id.clone(), error_msg, true);
+                                    }
+                                }
+                            } else {
+                                // No agent runtime available - fall back to inline
+                                tracing::warn!(
+                                    skill = %skill_display,
+                                    "Forked mode requested but no agent runtime available, falling back to inline"
+                                );
+                                // Continue to inline execution below
+                            }
+                        }
+
+                        // === INLINE EXECUTION MODE (default) ===
+                        // Original inline execution code continues...
+                        match skills::invoke_skill_with_cache(
+                            project_root,
+                            &args.skill,
+                            &args.args,
+                            &all_skills,
+                        )
+                        .await
+                        {
+                            Ok(output_text) => {
+                                let is_error = false;
+                                tracing::info!(
+                                    tool = "skill",
+                                    skill = %args.skill,
+                                    output_len = output_text.len(),
+                                    success = true,
+                                    "Skill tool execution completed successfully"
+                                );
+                                let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
+                                    let prefix =
+                                        truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
+                                    format!(
+                                        "{}\n\n[Output truncated... {} total characters]",
+                                        prefix,
+                                        output_text.len()
+                                    )
+                                } else {
+                                    output_text.clone()
+                                };
+                                let display_input =
+                                    if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                                        let prefix = truncate_utf8_prefix(
+                                            arguments,
+                                            TOOL_DISPLAY_MAX_INPUT_CHARS,
+                                        );
+                                        format!(
+                                            "{}\n\n[Input truncated... {} total characters]",
+                                            prefix,
+                                            arguments.len()
+                                        )
+                                    } else {
+                                        arguments.clone()
+                                    };
+                                let _ = app.emit(
+                                    &format!("chat-stream-{}", message_id),
+                                    &StreamOutputItem::ToolResult {
+                                        tool_use_id: tool_use_id.clone(),
+                                        name: tool_name.clone(),
+                                        input: display_input,
+                                        output: display_output,
+                                        is_error,
+                                    },
+                                );
+                                let model_output = process_tool_output_for_model(
+                                    output_text.clone(),
+                                    tool_use_id,
+                                    tool_results_dir,
+                                )
+                                .await;
+                                (tool_use_id.clone(), model_output, is_error)
+                            }
+                            Err(e) => {
+                                let error_msg = e;
+                                tracing::warn!(
+                                    tool = "skill",
+                                    skill = %args.skill,
+                                    error = %error_msg,
+                                    "Skill tool execution failed"
+                                );
+                                let _ = app.emit(
+                                    &format!("chat-stream-{}", message_id),
+                                    &StreamOutputItem::ToolResult {
+                                        tool_use_id: tool_use_id.clone(),
+                                        name: tool_name.clone(),
+                                        input: arguments.clone(),
+                                        output: error_msg.clone(),
+                                        is_error: true,
+                                    },
+                                );
+                                (tool_use_id.clone(), error_msg, true)
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("skill tool: invalid JSON: {}", e);
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: arguments.clone(),
+                        output: error_msg.clone(),
+                        is_error: true,
+                    },
+                );
+                (tool_use_id.clone(), error_msg, true)
+            }
+        }
+    } else if is_agent_tool_name(tool_name) {
+        let nested_allowed = agent_runtime.map(|r| r.allow_nested_agent).unwrap_or(false);
+        if subagent_depth >= MAX_SUBAGENT_EXECUTE_DEPTH {
+            let error_msg =
+                format!("Agent tool: maximum nested depth ({MAX_SUBAGENT_EXECUTE_DEPTH}) reached.");
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            (tool_use_id.clone(), error_msg, true)
+        } else if subagent_depth > 0 && !nested_allowed {
+            let error_msg =
+                "Nested Agent tool is not allowed (set `USER_TYPE=ant` for nested Agent parity)."
+                    .to_string();
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            (tool_use_id.clone(), error_msg, true)
+        } else if let Some(ar) = agent_runtime {
+            match serde_json::from_str::<crate::domain::tools::agent::AgentArgs>(arguments) {
+                Ok(agent_args) => {
+                    match run_subagent_session(
+                        &app,
+                        message_id,
+                        session_id,
+                        tool_results_dir,
+                        project_root,
+                        session_todos.clone(),
+                        session_agent_tasks.clone(),
+                        &agent_args,
+                        ar,
+                        subagent_depth.saturating_add(1),
+                        web_search_api_keys.clone(),
+                        skill_cache.clone(),
+                    )
+                    .await
+                    {
+                        Ok(output_text) => {
+                            let is_error = false;
+                            let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
+                                let prefix = truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
+                                format!(
+                                    "{}\n\n[Output truncated... {} total characters]",
+                                    prefix,
+                                    output_text.len()
+                                )
+                            } else {
+                                output_text.clone()
+                            };
+                            let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                                let prefix =
+                                    truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+                                format!(
+                                    "{}\n\n[Input truncated... {} total characters]",
+                                    prefix,
+                                    arguments.len()
+                                )
+                            } else {
+                                arguments.clone()
+                            };
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", message_id),
+                                &StreamOutputItem::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    name: tool_name.clone(),
+                                    input: display_input,
+                                    output: display_output,
+                                    is_error,
+                                },
+                            );
+                            let model_output = process_tool_output_for_model(
+                                output_text.clone(),
+                                tool_use_id,
+                                tool_results_dir,
+                            )
+                            .await;
+                            (tool_use_id.clone(), model_output, is_error)
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Agent tool: {}", e);
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", message_id),
+                                &StreamOutputItem::ToolResult {
+                                    tool_use_id: tool_use_id.clone(),
+                                    name: tool_name.clone(),
+                                    input: arguments.clone(),
+                                    output: error_msg.clone(),
+                                    is_error: true,
+                                },
+                            );
+                            (tool_use_id.clone(), error_msg, true)
+                        }
+                    }
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to parse Agent arguments: {}", e);
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: arguments.clone(),
+                            output: error_msg.clone(),
+                            is_error: true,
+                        },
+                    );
+                    (tool_use_id.clone(), error_msg, true)
+                }
+            }
+        } else {
+            let error_msg =
+                "Agent tool requires an active chat session (LLM runtime missing).".to_string();
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            (tool_use_id.clone(), error_msg, true)
+        }
+    } else if tool_name.starts_with("mcp__") {
+        let timeout = std::time::Duration::from_secs(120);
+        // Use the session-aware MCP connection manager to avoid spawning new processes
+        // while properly handling session boundaries and stdio lifecycle.
+        let (mcp_manager, session_id_opt) = app
+            .try_state::<crate::app_state::OmigaAppState>()
+            .map(|s| {
+                (
+                    Some(s.chat.mcp_manager.clone()),
+                    Some(session_id.to_string()),
+                )
+            })
+            .unwrap_or((None, None));
+
+        // Legacy fallback (for backwards compatibility during migration)
+        // Note: This is a placeholder - the legacy pool is no longer used
+        // as all connections go through the new manager
+        let mcp_pool_legacy: Option<
+            std::sync::Arc<
+                tokio::sync::Mutex<
+                    std::collections::HashMap<
+                        String,
+                        crate::domain::mcp::client::McpLiveConnection,
+                    >,
+                >,
+            >,
+        > = None;
+
+        match crate::domain::mcp::tool_dispatch::execute_mcp_tool_call(
+            project_root,
+            tool_name,
+            arguments,
+            timeout,
+            mcp_manager,
+            mcp_pool_legacy,
+            session_id_opt,
+        )
+        .await
+        {
+            Ok((output_text, mcp_is_error)) => {
+                let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
+                    let prefix = truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
+                    format!(
+                        "{}\n\n[Output truncated... {} total characters]",
+                        prefix,
+                        output_text.len()
+                    )
+                } else {
+                    output_text.clone()
+                };
+                let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                    let prefix = truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+                    format!(
+                        "{}\n\n[Input truncated... {} total characters]",
+                        prefix,
+                        arguments.len()
+                    )
+                } else {
+                    arguments.clone()
+                };
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: display_input,
+                        output: display_output,
+                        is_error: mcp_is_error,
+                    },
+                );
+                let model_output = process_tool_output_for_model(
+                    output_text.clone(),
+                    tool_use_id,
+                    tool_results_dir,
+                )
+                .await;
+                (tool_use_id.clone(), model_output, mcp_is_error)
+            }
+            Err(e) => {
+                let error_msg = format!("MCP tool error: {e}");
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: arguments.clone(),
+                        output: error_msg.clone(),
+                        is_error: true,
+                    },
+                );
+                (tool_use_id.clone(), error_msg, true)
+            }
+        }
+    } else {
+        if matches_ask_user_question_name(tool_name) {
+            if let Some(state) = app.try_state::<OmigaAppState>() {
+                return execute_ask_user_question_interactive(
+                    tool_use_id.to_string(),
+                    tool_name.to_string(),
+                    arguments.to_string(),
+                    app.clone(),
+                    message_id.to_string(),
+                    session_id.to_string(),
+                    tool_results_dir,
+                    state.chat.ask_user_waiters.clone(),
+                    cancel_flag.clone(),
+                )
+                .await;
+            }
+        }
+        let ctx = {
+            let base = ToolContext::new(project_root.to_path_buf())
+                .with_todos(session_todos.clone())
+                .with_agent_tasks(session_agent_tasks.clone())
+                .with_plan_mode(agent_runtime.and_then(|r| r.plan_mode_flag.clone()))
+                .with_web_search_api_keys(web_search_api_keys.clone())
+                .with_tool_results_dir(tool_results_dir.to_path_buf())
+                .with_execution_environment(execution_environment.clone())
+                .with_ssh_server(ssh_server.clone())
+                .with_sandbox_backend(sandbox_backend.clone())
+                .with_local_venv(local_venv_type.clone(), local_venv_name.clone())
+                .with_env_store(Some(env_store.clone()))
+                .with_skill_cache(skill_cache.clone())
+                .with_background_shell(
+                    crate::domain::background_shell::BackgroundShellHandle {
+                        app: app.clone(),
+                        chat_stream_event: format!("chat-stream-{}", message_id),
+                        session_id: session_id.to_string(),
+                        tool_use_id: tool_use_id.clone(),
+                    },
+                    tool_results_dir.to_path_buf(),
+                );
+            let base = if let Some(ctx_str) = skill_task_context {
+                base.with_skill_task_context(ctx_str)
+            } else {
+                base
+            };
+            match &round_cancel {
+                Some(t) => base.with_cancel_token(t.clone()),
+                None => base,
+            }
+        };
+        // ── Knowledge-base search harness ───────────────────────────────────────
+        // Every web_search call first queries the local knowledge base (wiki +
+        // implicit memory).  Results, if any, are prepended to the tool output so
+        // the model is forced to see KB content before the web results.
+        // This is a hard harness — it runs unconditionally regardless of what the
+        // system prompt says.
+        let kb_prefix: Option<String> = if matches!(tool_name.as_str(), "web_search" | "WebSearch")
+        {
+            let query = serde_json::from_str::<serde_json::Value>(arguments)
+                .ok()
+                .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(str::to_owned))
+                .unwrap_or_default();
+            if !query.trim().is_empty() {
+                crate::commands::memory::get_memory_context(project_root, &query, 5)
+                    .await
+                    .map(|kb| {
+                        format!(
+                            "## Knowledge base results (searched before web)\n\
+                             > Query: {query}\n\n\
+                             {kb}\n\n\
+                             ---\n\
+                             ## Web search results\n"
+                        )
+                    })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        // ── End knowledge-base harness ──────────────────────────────────────────
+
+        match Tool::from_json_str(tool_name, arguments) {
+            Ok(tool) => {
+                match tool.execute(&ctx).await {
+                    Ok(mut output_stream) => {
+                        use futures::StreamExt;
+
+                        let mut output_text = String::new();
+                        let mut stream_error = false;
+                        let mut exit_code: Option<i32> = None;
+                        let mut truncated_note = false;
+
+                        // Collect output from the tool stream (see `fold_tool_stream_item_for_model`).
+                        while let Some(item) = output_stream.next().await {
+                            fold_tool_stream_item_for_model(
+                                &mut output_text,
+                                item,
+                                &mut stream_error,
+                                &mut exit_code,
+                                &mut truncated_note,
+                            );
+                        }
+
+                        append_truncated_results_note(&mut output_text, truncated_note);
+                        apply_empty_structured_tool_placeholder(
+                            &mut output_text,
+                            tool_name,
+                            stream_error || exit_code.map(|c| c != 0).unwrap_or(false),
+                        );
+
+                        // Prepend KB harness prefix (web_search only).
+                        if let Some(prefix) = kb_prefix {
+                            output_text = format!("{prefix}{output_text}");
+                        }
+
+                        let is_error = stream_error || exit_code.map(|c| c != 0).unwrap_or(false);
+
+                        // Truncate streamed UI preview — align with TS `PREVIEW_SIZE_BYTES` (2000 bytes).
+                        // Full `output_text` is still returned for DB persistence; large-result
+                        // file spill threshold is `DEFAULT_MAX_RESULT_SIZE_CHARS` in `tool_limits`.
+                        let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
+                            let prefix = truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
+                            format!(
+                                "{}\n\n[Output truncated... {} total characters]",
+                                prefix,
+                                output_text.len()
+                            )
+                        } else {
+                            output_text.clone()
+                        };
+
+                        // Align with TS MCPTool UI `maxChars: 2000` (`TOOL_DISPLAY_MAX_INPUT_CHARS`).
+                        let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                            let prefix =
+                                truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+                            format!(
+                                "{}\n\n[Input truncated... {} total characters]",
+                                prefix,
+                                arguments.len()
+                            )
+                        } else {
+                            arguments.clone()
+                        };
+
+                        let _ = app.emit(
+                            &format!("chat-stream-{}", message_id),
+                            &StreamOutputItem::ToolResult {
+                                tool_use_id: tool_use_id.clone(),
+                                name: tool_name.clone(),
+                                input: display_input,
+                                output: display_output,
+                                is_error,
+                            },
+                        );
+
+                        let model_output = process_tool_output_for_model(
+                            output_text.clone(),
+                            tool_use_id,
+                            tool_results_dir,
+                        )
+                        .await;
+
+                        (tool_use_id.clone(), model_output, is_error)
+                    }
+                    Err(e) => {
+                        let error_msg = format!("Tool execution failed: {}", e);
+                        let _ = app.emit(
+                            &format!("chat-stream-{}", message_id),
+                            &StreamOutputItem::ToolResult {
+                                tool_use_id: tool_use_id.clone(),
+                                name: tool_name.clone(),
+                                input: arguments.clone(),
+                                output: error_msg.clone(),
+                                is_error: true,
+                            },
+                        );
+                        (tool_use_id.clone(), error_msg, true)
+                    }
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("Failed to parse tool arguments: {}", e);
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: arguments.clone(),
+                        output: error_msg.clone(),
+                        is_error: true,
+                    },
+                );
+                (tool_use_id.clone(), error_msg, true)
+            }
+        }
+    };
+
+    result
+}

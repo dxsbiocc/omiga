@@ -35,6 +35,7 @@ import { ThemeAppearancePanel } from "./ThemeAppearancePanel";
 import { ProviderManager } from "./ProviderManager";
 import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 import { RuntimeConstraintsPanel } from "./RuntimeConstraintsPanel";
+import { AgentScheduleLauncher } from "../AgentSchedule/AgentScheduleLauncher";
 
 interface SettingsProps {
   open: boolean;
@@ -77,10 +78,14 @@ const SETTINGS_SECTIONS: {
     header: "Knowledge",
     items: [{ index: 8, label: "Memory" }],
   },
+  {
+    header: "Agents",
+    items: [{ index: 11, label: "Orchestration" }],
+  },
 ];
 
 const SETTINGS_NAV_FLAT = SETTINGS_SECTIONS.flatMap((s) => s.items);
-const SETTINGS_TAB_MAX = 10;
+const SETTINGS_TAB_MAX = 11;
 
 function clampSettingsTab(i: number): number {
   return Math.min(
@@ -1021,6 +1026,27 @@ export function Settings({
                     Math.min(2, Math.floor(Number(initialExecutionSubTab) || 0)),
                   )}
                 />
+              </Box>
+            )}
+
+            {activeTab === 11 && (
+              <Box>
+                <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 2 }}>
+                  Agent 编排
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  启动多 Agent 协作任务，由调度器自动分配子任务并并行执行。
+                </Typography>
+                {currentSessionId && projectPath ? (
+                  <AgentScheduleLauncher
+                    sessionId={currentSessionId}
+                    projectRoot={projectPath}
+                  />
+                ) : (
+                  <Alert severity="info" sx={{ borderRadius: 2 }}>
+                    请先打开一个会话
+                  </Alert>
+                )}
               </Box>
             )}
 

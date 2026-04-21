@@ -25,11 +25,16 @@ import {
   useChatComposerStore,
   type Message,
 } from "../../state";
+import type { ActiveTodoItem } from "../../state/activityStore";
+import { normalizeAgentDisplayName } from "../../state/agentStore";
 import { formatExecutionElapsedFixed } from "../ExecutionStepPanel";
 import { PlanTodoList, type PlanTodoItem } from "./PlanTodoList";
 import { ReactStepList } from "./ReactStepList";
 import { SchedulerPlanPanel } from "./SchedulerPlanPanel";
 import { RunningTaskCard, PendingTaskCard } from "./TaskCards";
+import { RalphTeamStatusPanel } from "./RalphTeamStatusPanel";
+
+import { AgentPanelButton } from "../AgentPanel";
 import { notifyTaskCompleted, notifyTaskFailed } from "../../utils/notifications";
 
 interface TodoLine {
@@ -78,6 +83,15 @@ function latestTodosFromMessages(messages: Message[]): TodoLine[] {
   return [];
 }
 
+function activeTodoToPlanItem(t: ActiveTodoItem): PlanTodoItem {
+  const s = t.status.toLowerCase();
+  let status: PlanTodoItem["status"] = "pending";
+  if (s.includes("progress")) status = "running";
+  else if (s.includes("complete")) status = "completed";
+  else if (s.includes("error") || s.includes("fail")) status = "error";
+  return { id: t.id, name: t.content || t.activeForm, status };
+}
+
 function todoToPlanItem(t: TodoLine): PlanTodoItem {
   const s = t.status.toLowerCase();
   let status: PlanTodoItem["status"] = "pending";
@@ -117,10 +131,14 @@ export function TaskStatus() {
   /** 与输入框底部「本地 / 沙箱」同一 store，发消息时随 `executionEnvironment` 同步到后端 */
   const executionEnvironment = useChatComposerStore((s) => s.environment);
   const storeMessages = useSessionStore((s) => s.storeMessages);
+  const currentSession = useSessionStore((s) => s.currentSession);
+  const projectRoot =
+    currentSession?.workingDirectory ?? currentSession?.projectPath;
   const executionSteps = useActivityStore((s) => s.executionSteps);
   const executionStartedAt = useActivityStore((s) => s.executionStartedAt);
   const executionEndedAt = useActivityStore((s) => s.executionEndedAt);
   const backgroundJobs = useActivityStore((s) => s.backgroundJobs);
+  const activeTodosLive = useActivityStore((s) => s.activeTodos);
   const isConnecting = useActivityStore((s) => s.isConnecting);
   const isStreaming = useActivityStore((s) => s.isStreaming);
   const waitingFirstChunk = useActivityStore((s) => s.waitingFirstChunk);
@@ -148,9 +166,14 @@ export function TaskStatus() {
   );
 
   const todoItems = useMemo(() => {
+    // Prefer live activeTodos (updated in real-time during streaming via tool_result events).
+    // Fall back to scanning storeMessages after the stream ends and storeMessages syncs.
+    if (activeTodosLive !== null) {
+      return activeTodosLive.map(activeTodoToPlanItem);
+    }
     const todos = latestTodosFromMessages(storeMessages);
     return todos.map(todoToPlanItem);
-  }, [storeMessages]);
+  }, [activeTodosLive, storeMessages]);
 
   const schedulerPlan = useMemo(() => {
     return getCurrentSchedulerPlan(storeMessages);
@@ -164,20 +187,11 @@ export function TaskStatus() {
   const prevTaskStatusRef = useRef(taskStatus);
   useEffect(() => {
     const prev = prevTaskStatusRef.current;
-    console.log("[TaskStatus] Task status changed:", {
-      prev: { pending: prev.pending.length, running: prev.running.length },
-      current: { pending: taskStatus.pending.length, running: taskStatus.running.length, completed: taskStatus.completed.length, error: taskStatus.error.length },
-    });
-
-    // 检测从有进行中任务到全部完成的变化
     const wasActive = prev.pending.length + prev.running.length > 0;
     const isNowInactive = taskStatus.pending.length + taskStatus.running.length === 0;
     const hasCompleted = taskStatus.completed.length > 0 || taskStatus.error.length > 0;
 
-    console.log("[TaskStatus] Notification check:", { wasActive, isNowInactive, hasCompleted });
-
     if (wasActive && isNowInactive && hasCompleted) {
-      console.log("[TaskStatus] Triggering task completion notification");
       if (taskStatus.error.length > 0) {
         void notifyTaskFailed();
       } else {
@@ -211,21 +225,32 @@ export function TaskStatus() {
   const getModeInfo = () => {
     if (isPlanMode)
       return {
-        label: "计划模式",
+        label: "Plan",
         icon: <Assignment fontSize="small" />,
         color: "warning" as const,
       };
     if (isExploreMode)
       return {
-        label: "探索模式",
+        label: "Explore",
         icon: <Route fontSize="small" />,
         color: "info" as const,
       };
     if (isAutoMode)
       return {
-        label: "智能调度",
+        label: "Auto",
         icon: <SmartToy fontSize="small" />,
         color: "primary" as const,
+      };
+    // Named non-background agent (e.g. Executor, Architect, Debugger)
+    if (
+      composerAgentType &&
+      composerAgentType !== "general-purpose" &&
+      composerAgentType !== "auto"
+    )
+      return {
+        label: normalizeAgentDisplayName(composerAgentType),
+        icon: <SmartToy fontSize="small" />,
+        color: "secondary" as const,
       };
     if (hasExecution)
       return {
@@ -303,6 +328,9 @@ export function TaskStatus() {
               />
             </Tooltip>
           </Stack>
+
+          {/* Agent 任务面板入口 */}
+          <AgentPanelButton />
 
           {/* 统计显示 */}
           {(hasTodos || hasExecution) && (
@@ -637,6 +665,9 @@ export function TaskStatus() {
           </Box>
         </Box>
       )}
+
+      {/* Ralph / Team persistent task status */}
+      <RalphTeamStatusPanel projectRoot={projectRoot} />
     </Box>
   );
 }

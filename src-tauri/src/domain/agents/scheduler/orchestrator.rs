@@ -59,6 +59,7 @@ pub enum ExecutionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubTaskResult {
     pub subtask_id: String,
+    pub agent_type: Option<String>,
     pub status: ExecutionStatus,
     pub output: Option<String>,
     pub error: Option<String>,
@@ -80,6 +81,74 @@ pub enum LogLevel {
     Info,
     Warning,
     Error,
+}
+
+fn is_reviewer_agent(agent_type: &str) -> bool {
+    matches!(
+        agent_type,
+        "verification"
+            | "code-reviewer"
+            | "security-reviewer"
+            | "performance-reviewer"
+            | "quality-reviewer"
+            | "api-reviewer"
+            | "critic"
+            | "test-engineer"
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewerBlockingLevel {
+    None,
+    Soft,
+    Hard,
+}
+
+fn reviewer_blocking_level(results: &HashMap<String, SubTaskResult>) -> ReviewerBlockingLevel {
+    let mut level = ReviewerBlockingLevel::None;
+
+    for result in results.values() {
+        let Some(agent_type) = result.agent_type.as_deref() else {
+            continue;
+        };
+        if !is_reviewer_agent(agent_type) {
+            continue;
+        }
+
+        let mut haystack = String::new();
+        if let Some(output) = &result.output {
+            haystack.push_str(output);
+            haystack.push('\n');
+        }
+        if let Some(error) = &result.error {
+            haystack.push_str(error);
+        }
+        let text = haystack.to_ascii_uppercase();
+
+        let hard = text.contains("VERDICT: FAIL")
+            || text.contains("VERDICT: REJECTED")
+            || text.contains("REJECTED")
+            || text.contains("BLOCKER")
+            || text.contains("CRITICAL")
+            || ((agent_type == "security-reviewer" || agent_type == "critic")
+                && text.contains("HIGH"));
+
+        if hard {
+            return ReviewerBlockingLevel::Hard;
+        }
+
+        let soft = text.contains("VERDICT: PARTIAL")
+            || text.contains("PARTIAL")
+            || text.contains("CONCERN")
+            || text.contains("RISK")
+            || text.contains("WARN")
+            || text.contains("HIGH");
+        if soft {
+            level = ReviewerBlockingLevel::Soft;
+        }
+    }
+
+    level
 }
 
 /// Agent 编排器
@@ -141,6 +210,18 @@ impl AgentOrchestrator {
         } else {
             ExecutionStatus::PartiallyCompleted
         };
+
+        let reviewer_level = reviewer_blocking_level(&result.subtask_results);
+        match (result.status.clone(), reviewer_level) {
+            (ExecutionStatus::Completed, ReviewerBlockingLevel::Soft) => {
+                result.status = ExecutionStatus::PartiallyCompleted;
+            }
+            (ExecutionStatus::Completed, ReviewerBlockingLevel::Hard)
+            | (ExecutionStatus::PartiallyCompleted, ReviewerBlockingLevel::Hard) => {
+                result.status = ExecutionStatus::Failed;
+            }
+            _ => {}
+        }
         result.completed_at = Some(unix_timestamp_secs());
 
         let summary = format!(
@@ -148,6 +229,35 @@ impl AgentOrchestrator {
             completed, total_subtasks, failed
         );
         result.final_summary = summary.clone();
+        let reviewer_count = result
+            .subtask_results
+            .values()
+            .filter(|r| {
+                r.agent_type
+                    .as_deref()
+                    .map(is_reviewer_agent)
+                    .unwrap_or(false)
+            })
+            .count();
+        if reviewer_count > 0 {
+            result.final_summary.push_str(&format!(
+                "\nReviewer 子任务数: {}（已纳入最终综合）",
+                reviewer_count
+            ));
+            match reviewer_level {
+                ReviewerBlockingLevel::Soft => {
+                    result.final_summary.push_str(
+                        "\nReviewer 阻断级别: soft（存在需要在最终结论中保留的风险/部分通过项）",
+                    );
+                }
+                ReviewerBlockingLevel::Hard => {
+                    result.final_summary.push_str(
+                        "\nReviewer 阻断级别: hard（存在明确 FAIL/REJECT/CRITICAL 结论）",
+                    );
+                }
+                ReviewerBlockingLevel::None => {}
+            }
+        }
         self.log(result, None, &summary, LogLevel::Info);
     }
 }
@@ -155,6 +265,67 @@ impl AgentOrchestrator {
 impl Default for AgentOrchestrator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod finalize_tests {
+    use super::*;
+
+    fn subtask(agent_type: &str, output: &str) -> SubTaskResult {
+        SubTaskResult {
+            subtask_id: format!("{}-1", agent_type),
+            agent_type: Some(agent_type.to_string()),
+            status: ExecutionStatus::Completed,
+            output: Some(output.to_string()),
+            error: None,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn soft_reviewer_findings_downgrade_completed_to_partial() {
+        let mut result = OrchestrationResult {
+            plan_id: "p".to_string(),
+            status: ExecutionStatus::Running,
+            subtask_results: HashMap::from([
+                ("exec".to_string(), subtask("executor", "done")),
+                (
+                    "review".to_string(),
+                    subtask("quality-reviewer", "VERDICT: PARTIAL\nNeed follow-up"),
+                ),
+            ]),
+            execution_log: vec![],
+            started_at: None,
+            completed_at: None,
+            final_summary: String::new(),
+        };
+        AgentOrchestrator::new().finalize_result(&mut result, 2);
+        assert_eq!(result.status, ExecutionStatus::PartiallyCompleted);
+        assert!(result.final_summary.contains("soft"));
+    }
+
+    #[test]
+    fn hard_reviewer_findings_fail_the_result() {
+        let mut result = OrchestrationResult {
+            plan_id: "p".to_string(),
+            status: ExecutionStatus::Running,
+            subtask_results: HashMap::from([
+                ("exec".to_string(), subtask("executor", "done")),
+                (
+                    "review".to_string(),
+                    subtask("security-reviewer", "CRITICAL: secret exposed"),
+                ),
+            ]),
+            execution_log: vec![],
+            started_at: None,
+            completed_at: None,
+            final_summary: String::new(),
+        };
+        AgentOrchestrator::new().finalize_result(&mut result, 2);
+        assert_eq!(result.status, ExecutionStatus::Failed);
+        assert!(result.final_summary.contains("hard"));
     }
 }
 
@@ -426,6 +597,7 @@ impl AgentOrchestrator {
                                 task_id_str.clone(),
                                 SubTaskResult {
                                     subtask_id: task_id_str.clone(),
+                                    agent_type: Some(subtask.agent_type.clone()),
                                     status: ExecutionStatus::Failed,
                                     output: None,
                                     error: Some(e),
@@ -474,11 +646,21 @@ impl AgentOrchestrator {
                 let timeout = subtask_meta.get(sid).and_then(|(t, _, _)| *t);
                 let sid_c = sid.clone();
                 let bg_c = bg_id.clone();
+                let agent_c = subtask_meta
+                    .get(sid)
+                    .map(|(_, _, task)| task.agent_type.clone())
+                    .unwrap_or_else(|| "general-purpose".to_string());
                 let cancel_c = cancel.clone();
                 stream.push(Box::pin(async move {
-                    let res =
-                        poll_background_agent(manager, sid_c.clone(), bg_c, timeout, cancel_c)
-                            .await;
+                    let res = poll_background_agent(
+                        manager,
+                        sid_c.clone(),
+                        agent_c,
+                        bg_c,
+                        timeout,
+                        cancel_c,
+                    )
+                    .await;
                     (sid_c, 0u32, res)
                 }));
             }
@@ -586,11 +768,16 @@ impl AgentOrchestrator {
                                 );
                                 let timeout = subtask_meta.get(&sid).and_then(|(t, _, _)| *t);
                                 let sid_c = sid.clone();
+                                let agent_c = subtask_meta
+                                    .get(&sid)
+                                    .map(|(_, _, task)| task.agent_type.clone())
+                                    .unwrap_or_else(|| "general-purpose".to_string());
                                 let cancel_c = cancel.clone();
                                 stream.push(Box::pin(async move {
                                     let res = poll_background_agent(
                                         manager,
                                         sid_c.clone(),
+                                        agent_c,
                                         new_bg_id,
                                         timeout,
                                         cancel_c,
@@ -801,6 +988,7 @@ impl AgentOrchestrator {
                         let (fix_result, _) = poll_background_agent(
                             manager,
                             fix_id.clone(),
+                            "debugger".to_string(),
                             fix_bg_id,
                             Some(600),
                             cancel.clone(),
@@ -882,6 +1070,7 @@ impl AgentOrchestrator {
                                 let (rv_result, _) = poll_background_agent(
                                     manager,
                                     reverify_id.clone(),
+                                    "verification".to_string(),
                                     rv_bg_id,
                                     Some(300),
                                     cancel.clone(),
@@ -985,6 +1174,7 @@ impl AgentOrchestrator {
 async fn poll_background_agent(
     manager: &'static crate::domain::agents::background::BackgroundAgentManager,
     subtask_id: String,
+    agent_type: String,
     bg_task_id: String,
     timeout_secs: Option<u64>,
     cancel: tokio_util::sync::CancellationToken,
@@ -1001,6 +1191,7 @@ async fn poll_background_agent(
             return (
                 SubTaskResult {
                     subtask_id,
+                    agent_type: Some(agent_type.clone()),
                     status: ExecutionStatus::Cancelled,
                     output: None,
                     error: Some("Orchestration cancelled by user.".to_string()),
@@ -1022,6 +1213,7 @@ async fn poll_background_agent(
                     return (
                         SubTaskResult {
                             subtask_id,
+                            agent_type: Some(agent_type.clone()),
                             status: ExecutionStatus::Completed,
                             output,
                             error: None,
@@ -1039,6 +1231,7 @@ async fn poll_background_agent(
                     return (
                         SubTaskResult {
                             subtask_id,
+                            agent_type: Some(agent_type.clone()),
                             status: ExecutionStatus::Failed,
                             output: None,
                             error: Some(err),
@@ -1052,6 +1245,7 @@ async fn poll_background_agent(
                     return (
                         SubTaskResult {
                             subtask_id,
+                            agent_type: Some(agent_type.clone()),
                             status: ExecutionStatus::Cancelled,
                             output: None,
                             error: Some("Cancelled.".to_string()),
@@ -1067,6 +1261,7 @@ async fn poll_background_agent(
                 return (
                     SubTaskResult {
                         subtask_id,
+                        agent_type: Some(agent_type.clone()),
                         status: ExecutionStatus::Failed,
                         output: None,
                         error: Some("Task vanished from manager.".to_string()),
@@ -1082,6 +1277,7 @@ async fn poll_background_agent(
             return (
                 SubTaskResult {
                     subtask_id,
+                    agent_type: Some(agent_type),
                     status: ExecutionStatus::Failed,
                     output: None,
                     error: Some("Timeout waiting for background agent.".to_string()),

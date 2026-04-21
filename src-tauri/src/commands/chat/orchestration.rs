@@ -1,0 +1,379 @@
+//! Orchestration mode lifecycle helpers and implicit-memory indexing.
+//!
+//! This module owns the thin wrappers that call into `domain::orchestration::*`
+//! at phase boundaries (begin / update / complete / fail) for Ralph, Autopilot,
+//! and Team modes, plus the post-turn chat-to-memory indexer.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter};
+use tokio::sync::RwLock;
+
+use crate::domain::chat_state::SessionRuntimeState;
+
+// ── Ralph ────────────────────────────────────────────────────────────────────
+
+pub(super) fn ralph_runtime_env_label(
+    execution_environment: &str,
+    ssh_server: Option<&str>,
+    local_venv_type: &str,
+    local_venv_name: &str,
+) -> Option<String> {
+    if !local_venv_name.trim().is_empty() {
+        let kind = if local_venv_type.trim().is_empty() {
+            "env"
+        } else {
+            local_venv_type.trim()
+        };
+        return Some(format!("{kind}:{}", local_venv_name.trim()));
+    }
+    match execution_environment {
+        "ssh" => Some(format!("ssh:{}", ssh_server.unwrap_or("unknown"))),
+        "" => None,
+        other => Some(other.to_string()),
+    }
+}
+
+pub(super) async fn begin_ralph_turn_if_needed(
+    is_ralph_turn: bool,
+    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    project_root: &Path,
+    session_id: &str,
+    goal: &str,
+    env_label: Option<String>,
+) {
+    if !is_ralph_turn {
+        return;
+    }
+    if let Err(e) = crate::domain::orchestration::ralph::RalphOrchestrator::begin(
+        sessions,
+        project_root,
+        session_id,
+        goal,
+        env_label,
+    )
+    .await
+    {
+        tracing::warn!(target: "omiga::ralph", session_id, error = %e, "Failed to begin Ralph turn");
+    }
+}
+
+pub(super) async fn update_ralph_phase_if_needed(
+    is_ralph_turn: bool,
+    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    project_root: &Path,
+    session_id: &str,
+    phase: crate::domain::ralph_state::RalphPhase,
+    env_label: Option<String>,
+) {
+    if !is_ralph_turn {
+        return;
+    }
+    if let Err(e) = crate::domain::orchestration::ralph::RalphOrchestrator::set_phase(
+        sessions,
+        project_root,
+        session_id,
+        phase,
+        env_label,
+    )
+    .await
+    {
+        tracing::warn!(target: "omiga::ralph", session_id, error = %e, "Failed to update Ralph phase");
+    }
+}
+
+pub(super) async fn complete_ralph_turn_if_needed(
+    is_ralph_turn: bool,
+    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    project_root: &Path,
+    session_id: &str,
+) {
+    if !is_ralph_turn {
+        return;
+    }
+    if let Err(e) = crate::domain::orchestration::ralph::RalphOrchestrator::complete(
+        sessions,
+        project_root,
+        session_id,
+    )
+    .await
+    {
+        tracing::warn!(target: "omiga::ralph", session_id, error = %e, "Failed to complete Ralph turn");
+    }
+}
+
+pub(super) async fn fail_ralph_turn_if_needed(
+    is_ralph_turn: bool,
+    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    project_root: &Path,
+    session_id: &str,
+    phase: crate::domain::ralph_state::RalphPhase,
+    error: &str,
+) {
+    if !is_ralph_turn {
+        return;
+    }
+    if let Err(e) = crate::domain::orchestration::ralph::RalphOrchestrator::fail(
+        sessions,
+        project_root,
+        session_id,
+        phase,
+        error,
+    )
+    .await
+    {
+        tracing::warn!(target: "omiga::ralph", session_id, error = %e, "Failed to record Ralph failure");
+    }
+}
+
+// ── Autopilot ────────────────────────────────────────────────────────────────
+
+pub(super) async fn begin_autopilot_turn_if_needed(
+    is_autopilot_turn: bool,
+    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    project_root: &Path,
+    session_id: &str,
+    goal: &str,
+    env_label: Option<String>,
+) {
+    if !is_autopilot_turn {
+        return;
+    }
+    if let Err(e) = crate::domain::orchestration::autopilot::AutopilotOrchestrator::begin(
+        sessions,
+        project_root,
+        session_id,
+        goal,
+        env_label,
+    )
+    .await
+    {
+        tracing::warn!(target: "omiga::autopilot", session_id, error = %e, "Failed to begin Autopilot turn");
+    }
+}
+
+pub(super) async fn update_autopilot_phase_if_needed(
+    is_autopilot_turn: bool,
+    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    project_root: &Path,
+    session_id: &str,
+    phase: crate::domain::autopilot_state::AutopilotPhase,
+    env_label: Option<String>,
+) -> Option<crate::domain::autopilot_state::AutopilotState> {
+    if !is_autopilot_turn {
+        return None;
+    }
+    match crate::domain::orchestration::autopilot::AutopilotOrchestrator::set_phase(
+        sessions,
+        project_root,
+        session_id,
+        phase,
+        env_label,
+    )
+    .await
+    {
+        Ok(state) => state,
+        Err(e) => {
+            tracing::warn!(target: "omiga::autopilot", session_id, error = %e, "Failed to update Autopilot phase");
+            None
+        }
+    }
+}
+
+pub(super) async fn complete_autopilot_turn_if_needed(
+    is_autopilot_turn: bool,
+    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    project_root: &Path,
+    session_id: &str,
+) {
+    if !is_autopilot_turn {
+        return;
+    }
+    if let Err(e) = crate::domain::orchestration::autopilot::AutopilotOrchestrator::complete(
+        sessions,
+        project_root,
+        session_id,
+    )
+    .await
+    {
+        tracing::warn!(target: "omiga::autopilot", session_id, error = %e, "Failed to complete Autopilot turn");
+    }
+}
+
+pub(super) async fn fail_autopilot_turn_if_needed(
+    is_autopilot_turn: bool,
+    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    project_root: &Path,
+    session_id: &str,
+    phase: crate::domain::autopilot_state::AutopilotPhase,
+    error: &str,
+) {
+    if !is_autopilot_turn {
+        return;
+    }
+    if let Err(e) = crate::domain::orchestration::autopilot::AutopilotOrchestrator::fail(
+        sessions,
+        project_root,
+        session_id,
+        phase,
+        error,
+    )
+    .await
+    {
+        tracing::warn!(target: "omiga::autopilot", session_id, error = %e, "Failed to record Autopilot failure");
+    }
+}
+
+// ── Team ─────────────────────────────────────────────────────────────────────
+
+pub(super) async fn begin_team_turn_if_needed(
+    is_team_turn: bool,
+    project_root: &Path,
+    session_id: &str,
+    goal: &str,
+) {
+    if !is_team_turn {
+        return;
+    }
+    if let Err(e) =
+        crate::domain::orchestration::team::TeamOrchestrator::begin(project_root, session_id, goal)
+            .await
+    {
+        tracing::warn!(target: "omiga::team", session_id, error = %e, "Failed to begin Team turn");
+    }
+}
+
+pub(super) async fn complete_team_turn_if_needed(
+    is_team_turn: bool,
+    project_root: &Path,
+    session_id: &str,
+) {
+    if !is_team_turn {
+        return;
+    }
+    if let Err(e) =
+        crate::domain::orchestration::team::TeamOrchestrator::complete(project_root, session_id)
+            .await
+    {
+        tracing::warn!(target: "omiga::team", session_id, error = %e, "Failed to complete Team turn");
+    }
+}
+
+pub(super) async fn fail_team_turn_if_needed(
+    is_team_turn: bool,
+    project_root: &Path,
+    session_id: &str,
+    error: &str,
+) {
+    if !is_team_turn {
+        return;
+    }
+    if let Err(e) =
+        crate::domain::orchestration::team::TeamOrchestrator::fail(project_root, session_id, error)
+            .await
+    {
+        tracing::warn!(target: "omiga::team", session_id, error = %e, "Failed to record Team failure");
+    }
+}
+
+// ── Implicit memory indexing ──────────────────────────────────────────────────
+
+/// Index a completed chat session into PageIndex implicit memory.
+/// Emits `chat-index-start`, `chat-index-complete`, or `chat-index-error` events.
+pub(super) async fn index_chat_to_implicit_memory(
+    app: &AppHandle,
+    project_path: &str,
+    session_id: &str,
+    session_name: &str,
+    repo: &crate::domain::persistence::SessionRepository,
+) {
+    let _ = app.emit(
+        "chat-index-start",
+        serde_json::json!({ "session_id": session_id }),
+    );
+
+    let session_with_messages = match repo.get_session(session_id).await {
+        Ok(Some(s)) => s,
+        _ => {
+            tracing::debug!("Session {} not found for indexing", session_id);
+            let _ = app.emit(
+                "chat-index-error",
+                serde_json::json!({ "session_id": session_id, "error": "Session not found" }),
+            );
+            return;
+        }
+    };
+
+    let messages: Vec<crate::domain::memory::ChatMessage> = session_with_messages
+        .messages
+        .into_iter()
+        .map(|msg| crate::domain::memory::ChatMessage {
+            id: msg.id,
+            session_id: msg.session_id,
+            role: match msg.role.as_str() {
+                "assistant" => crate::domain::memory::ChatRole::Assistant,
+                "tool" => crate::domain::memory::ChatRole::Tool,
+                _ => crate::domain::memory::ChatRole::User,
+            },
+            content: msg.content,
+            timestamp: chrono::DateTime::parse_from_rfc3339(&msg.created_at)
+                .map(|dt| dt.timestamp())
+                .unwrap_or_else(|_| chrono::Utc::now().timestamp()),
+            tool_calls: msg.tool_calls.and_then(|tc| serde_json::from_str(&tc).ok()),
+        })
+        .collect();
+
+    if messages.is_empty() {
+        let _ = app.emit(
+            "chat-index-complete",
+            serde_json::json!({ "session_id": session_id, "document_count": 0 }),
+        );
+        return;
+    }
+
+    let project_root = super::resolve_session_project_root(project_path);
+    let memory_dir = match crate::domain::memory::load_resolved_config(&project_root).await {
+        Ok(cfg) => cfg.implicit_path(&project_root),
+        Err(_) => project_root.join(".omiga/memory/implicit"),
+    };
+
+    let mut indexer = crate::domain::memory::ChatIndexer::new(&memory_dir);
+    if let Err(e) = indexer.init().await {
+        tracing::warn!("Failed to init chat indexer: {}", e);
+        let _ = app.emit(
+            "chat-index-error",
+            serde_json::json!({ "session_id": session_id, "error": format!("Failed to init indexer: {e}") }),
+        );
+        return;
+    }
+    if let Err(e) = indexer.load().await {
+        tracing::warn!("Failed to load chat indexer: {}", e);
+        let _ = app.emit(
+            "chat-index-error",
+            serde_json::json!({ "session_id": session_id, "error": format!("Failed to load indexer: {e}") }),
+        );
+        return;
+    }
+
+    match indexer
+        .index_session(session_id, session_name, &messages)
+        .await
+    {
+        Ok(_) => {
+            tracing::info!("Indexed chat session {} into implicit memory", session_id);
+            crate::domain::memory::touch_project_registry(&project_root).await;
+            let _ = app.emit(
+                "chat-index-complete",
+                serde_json::json!({ "session_id": session_id, "document_count": indexer.document_count() }),
+            );
+        }
+        Err(e) => {
+            tracing::warn!("Failed to index chat session: {}", e);
+            let _ = app.emit(
+                "chat-index-error",
+                serde_json::json!({ "session_id": session_id, "error": format!("Failed to index: {e}") }),
+            );
+        }
+    }
+}

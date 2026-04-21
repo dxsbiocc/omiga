@@ -104,9 +104,7 @@ impl super::ToolImpl for RecallTool {
 
         // ── 1. Implicit memory (PageIndex over session history) ──────────────────
         if search_implicit {
-            if let Some(implicit_text) =
-                query_implicit_memory(project_root, &query, limit).await
-            {
+            if let Some(implicit_text) = query_implicit_memory(project_root, &query, limit).await {
                 total_results += 1;
                 sections.push(implicit_text);
             }
@@ -114,9 +112,7 @@ impl super::ToolImpl for RecallTool {
 
         // ── 2. Wiki pages (explicit memory) ─────────────────────────────────────
         if search_wiki {
-            if let Some(wiki_text) =
-                search_wiki_pages(project_root, &query, limit, false).await
-            {
+            if let Some(wiki_text) = search_wiki_pages(project_root, &query, limit, false).await {
                 total_results += 1;
                 sections.push(wiki_text);
             }
@@ -124,9 +120,7 @@ impl super::ToolImpl for RecallTool {
 
         // ── 3. Permanent (cross-project) wiki ────────────────────────────────────
         if search_permanent {
-            if let Some(perm_text) =
-                search_permanent_wiki(&query, limit).await
-            {
+            if let Some(perm_text) = search_permanent_wiki(&query, limit).await {
                 total_results += 1;
                 sections.push(perm_text);
             }
@@ -177,7 +171,9 @@ async fn query_implicit_memory(
     }
 
     let formatted = QueryEngine::new().format_results_as_context(&results);
-    Some(format!("### Implicit memory (session history)\n\n{formatted}"))
+    Some(format!(
+        "### Implicit memory (session history)\n\n{formatted}"
+    ))
 }
 
 /// Keyword search in wiki markdown pages under the project memory directory.
@@ -205,7 +201,10 @@ async fn search_wiki_pages(
     let mut pages: Vec<(String, String)> = Vec::new(); // (filename, content)
     while let Ok(Some(entry)) = read_dir.next_entry().await {
         let path = entry.path();
-        if path.extension().map_or(false, |e| e.eq_ignore_ascii_case("md")) {
+        if path
+            .extension()
+            .map_or(false, |e| e.eq_ignore_ascii_case("md"))
+        {
             if let Ok(content) = fs::read_to_string(&path).await {
                 let name = path
                     .file_name()
@@ -231,7 +230,10 @@ async fn search_wiki_pages(
         .into_iter()
         .filter_map(|(name, content)| {
             let lc = content.to_lowercase();
-            let score: usize = keywords.iter().map(|kw| lc.matches(kw.as_str()).count()).sum();
+            let score: usize = keywords
+                .iter()
+                .map(|kw| lc.matches(kw.as_str()).count())
+                .sum();
             if score == 0 {
                 None
             } else {
@@ -256,9 +258,7 @@ async fn search_wiki_pages(
     let mut out = format!("### {label}\n\n");
     for (_, name, content) in &scored {
         let excerpt = excerpt_around_keywords(&content, &keywords, 400);
-        out.push_str(&format!(
-            "**`{name}`**\n\n{excerpt}\n\n---\n\n"
-        ));
+        out.push_str(&format!("**`{name}`**\n\n{excerpt}\n\n---\n\n"));
     }
     Some(out)
 }

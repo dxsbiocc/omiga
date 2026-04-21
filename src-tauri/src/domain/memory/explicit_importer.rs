@@ -189,10 +189,7 @@ impl ExplicitImporter {
     /// Copy the original file into `raw_dir/<slug>.<ext>` and return the destination path string.
     /// Logs a warning but does not fail the import if the copy cannot be completed.
     async fn copy_raw_file(&self, src: &Path, slug: &str) -> Option<String> {
-        let ext = src
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("bin");
+        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("bin");
         let dest_name = format!("{}.{}", slug, ext);
         let dest = self.raw_dir.join(&dest_name);
 

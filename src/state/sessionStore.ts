@@ -174,6 +174,8 @@ export interface Message {
   toolCallsList?: Array<{ id: string; name: string; arguments: string }>;
   /** Assistant thinking merged into the ReAct fold (optional round-trip for local snapshot) */
   prefaceBeforeTools?: string;
+  /** Unix ms timestamp for when this message was created (from DB created_at). */
+  timestamp?: number;
   toolCall?: {
     id: string;
     name: string;
@@ -181,6 +183,8 @@ export interface Message {
     /** Tool stdout/stderr result (tool role messages also keep plain text in `content`) */
     output?: string;
     status?: "pending" | "running" | "completed" | "error";
+    /** Unix ms when tool finished executing — persisted for elapsed-time display on reload. */
+    completedAt?: number;
   };
   roundId?: string;
   roundStatus?: RoundStatus;
@@ -256,6 +260,8 @@ interface RawMessage {
   };
   /** Follow-up suggestions from backend (LLM-generated) */
   follow_up_suggestions?: Array<{ label: string; prompt: string }>;
+  /** RFC3339 creation timestamp from SQLite — used to reconstruct elapsed-time display. */
+  created_at?: string;
 }
 
 interface SessionData {
@@ -349,6 +355,13 @@ interface SessionState {
   updateRoundStatus: (roundId: string, status: RoundStatus) => void;
 }
 
+/** Parse RFC3339/ISO timestamp to Unix ms, returning undefined on failure. */
+function parseCreatedAtMs(createdAt: string | undefined): number | undefined {
+  if (!createdAt) return undefined;
+  const ms = Date.parse(createdAt);
+  return isNaN(ms) ? undefined : ms;
+}
+
 /** Convert raw DB message rows to store Messages. Extracted so both loadSession
  *  and loadMoreMessages can share the same conversion logic. */
 function convertRawMessages(
@@ -357,16 +370,24 @@ function convertRawMessages(
 ): Message[] {
   // Build tool_call_id → {name, arguments} map from assistant rows in O(N).
   const toolMetaById = new Map<string, { name: string; arguments: string }>();
+  // Build tool_call_id → assistant created_at for tool start-time estimation.
+  const toolStartMsByCallId = new Map<string, number>();
   for (const m of rawMessages) {
     if (m.role !== "assistant" || !m.tool_calls?.length) continue;
+    const assistantMs = parseCreatedAtMs(m.created_at);
     for (const tc of m.tool_calls) {
       toolMetaById.set(tc.id, { name: tc.name, arguments: tc.arguments });
+      if (assistantMs !== undefined) {
+        toolStartMsByCallId.set(tc.id, assistantMs);
+      }
     }
   }
 
   return rawMessages.map((m, index) => {
     const content =
       m.role === "tool" && m.output != null ? m.output : m.content || "";
+
+    const rowTimestamp = parseCreatedAtMs(m.created_at);
 
     let toolCallsList: Message["toolCallsList"];
     let toolCall: Message["toolCall"];
@@ -382,11 +403,14 @@ function convertRawMessages(
     } else if (m.role === "tool") {
       const tid = (m.tool_call_id ?? "").trim();
       const meta = tid ? toolMetaById.get(tid) : undefined;
+      const completedAt = rowTimestamp;
       toolCall = {
         id: tid || `tool-row-${index}`,
         name: meta?.name ?? "tool",
         arguments: meta?.arguments ?? "",
         output: m.output ?? content,
+        status: "completed" as const,
+        ...(completedAt !== undefined ? { completedAt } : {}),
       };
     }
 
@@ -405,12 +429,20 @@ function convertRawMessages(
         ? m.follow_up_suggestions
         : undefined;
 
+    // For tool rows, use the assistant message's created_at as the start timestamp
+    // so elapsed time = completedAt - timestamp reflects actual execution duration.
+    const timestamp: number | undefined =
+      m.role === "tool" && toolCall?.id
+        ? (toolStartMsByCallId.get(toolCall.id) ?? rowTimestamp)
+        : rowTimestamp;
+
     return sanitizeMessageForPersistence({
       id: m.id ?? `${sessionId}-msg-${index}`,
       role: m.role,
       content,
       toolCallsList,
       toolCall,
+      ...(timestamp !== undefined ? { timestamp } : {}),
       ...(tokenUsage ? { tokenUsage } : {}),
       ...(followUpSuggestions ? { followUpSuggestions } : {}),
     });

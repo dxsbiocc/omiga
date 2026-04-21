@@ -43,6 +43,27 @@ export interface BackgroundAgentTask {
   messageId: string;
 }
 
+/** 原始调度请求（供确认后重发） */
+export interface ScheduleRequest {
+  userRequest: string;
+  projectRoot: string;
+  sessionId: string;
+  maxAgents?: number;
+  autoDecompose?: boolean;
+  strategy?: string;
+  skipConfirmation?: boolean;
+}
+
+/** 确认请求载荷（来自 agent-schedule-confirmation-required 事件） */
+export interface ScheduleConfirmationPayload {
+  sessionId: string;
+  planId: string;
+  summary: string;
+  estimatedMinutes: number;
+  agents: string[];
+  originalRequest: ScheduleRequest;
+}
+
 /** 后台 Agent 完成事件载荷 */
 interface BackgroundAgentCompleteEvent {
   sessionId: string;
@@ -63,6 +84,10 @@ interface AgentState {
   selectedTaskId: string | null;
   /** 是否显示任务详情面板 */
   showTaskPanel: boolean;
+  /** 待确认的编排请求（非 null 时弹出确认对话框） */
+  pendingConfirmation: ScheduleConfirmationPayload | null;
+  /** 编排完成的会话 ID（非 null 时触发 Chat 滚动到底部，消费后置 null） */
+  scheduleCompleteSession: string | null;
 
   /** 添加或更新任务 */
   upsertTask: (task: BackgroundAgentTask) => void;
@@ -84,6 +109,10 @@ interface AgentState {
   toggleTaskPanel: () => void;
   /** 设置面板显示状态 */
   setTaskPanelVisible: (visible: boolean) => void;
+  /** 设置待确认请求 */
+  setPendingConfirmation: (payload: ScheduleConfirmationPayload | null) => void;
+  /** 设置编排完成会话（触发 Chat 滚到底部） */
+  setScheduleCompleteSession: (sessionId: string | null) => void;
   /** 获取会话的所有任务 */
   getSessionTasks: (sessionId: string) => BackgroundAgentTask[];
   /** 获取正在运行的任务 */
@@ -96,6 +125,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   backgroundTasks: [],
   selectedTaskId: null,
   showTaskPanel: false,
+  pendingConfirmation: null,
+  scheduleCompleteSession: null,
 
   upsertTask: (task) =>
     set((s) => {
@@ -149,6 +180,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setTaskPanelVisible: (visible) => set({ showTaskPanel: visible }),
 
+  setPendingConfirmation: (payload) => set({ pendingConfirmation: payload }),
+
+  setScheduleCompleteSession: (sessionId) => set({ scheduleCompleteSession: sessionId }),
+
   getSessionTasks: (sessionId) =>
     get().backgroundTasks.filter((t) => t.sessionId === sessionId),
 
@@ -187,25 +222,65 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       },
     );
 
+    // 编排完成后刷新父会话并通知 Chat 滚动到底部
+    const unlistenSchedule = await listen<{ sessionId: string; messageId: string }>(
+      "agent-schedule-complete",
+      (event) => {
+        const { sessionId } = event.payload;
+        import("./sessionStore").then(({ useSessionStore }) => {
+          const current = useSessionStore.getState().currentSession;
+          if (current?.id === sessionId) {
+            void useSessionStore.getState().loadSession(sessionId, { silent: true }).then(() => {
+              get().setScheduleCompleteSession(sessionId);
+            });
+          }
+        });
+      },
+    );
+
+    // 编排计划需要确认时，存入 store 触发确认对话框
+    const unlistenConfirm = await listen<ScheduleConfirmationPayload>(
+      "agent-schedule-confirmation-required",
+      (event) => {
+        get().setPendingConfirmation(event.payload);
+      },
+    );
+
     // 返回清理函数
     return () => {
       unlistenUpdate();
       unlistenComplete();
+      unlistenSchedule();
+      unlistenConfirm();
     };
   },
 }));
 
-/** Agent 类型显示名称映射 */
+/** Agent 类型显示名称映射（统一使用首字母大写英文名） */
 export const AGENT_TYPE_DISPLAY_NAMES: Record<string, string> = {
-  "general-purpose": "通用 Agent",
-  Explore: "探索 Agent",
-  Plan: "规划 Agent",
-  verification: "验证 Agent",
+  "auto": "Auto",
+  "general-purpose": "General",
+  "Explore": "Explore",
+  "Plan": "Plan",
+  "verification": "Verification",
+  "executor": "Executor",
+  "architect": "Architect",
+  "debugger": "Debugger",
 };
 
-/** 获取 Agent 类型的显示名称 */
+/** 将 agent_type 字符串规范化为首字母大写的显示名 */
+export function normalizeAgentDisplayName(agentType: string): string {
+  if (AGENT_TYPE_DISPLAY_NAMES[agentType]) return AGENT_TYPE_DISPLAY_NAMES[agentType];
+  // kebab-case → Title Case fallback: "my-agent" → "My Agent"
+  return agentType
+    .split("-")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+/** 获取 Agent 类型的显示名称（保留向后兼容） */
 export function getAgentTypeDisplayName(agentType: string): string {
-  return AGENT_TYPE_DISPLAY_NAMES[agentType] || agentType;
+  return normalizeAgentDisplayName(agentType);
 }
 
 /** 状态颜色映射 */

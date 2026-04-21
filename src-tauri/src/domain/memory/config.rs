@@ -192,9 +192,7 @@ impl MemoryConfig {
 
     /// Get raw file storage path (absolute). Falls back to `~/.omiga/memory/raw`.
     pub fn raw_path(&self) -> PathBuf {
-        self.raw_dir
-            .clone()
-            .unwrap_or_else(default_raw_path)
+        self.raw_dir.clone().unwrap_or_else(default_raw_path)
     }
 
     /// Legacy helper — use [`project_config_path`] instead.

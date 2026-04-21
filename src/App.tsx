@@ -13,6 +13,9 @@ import { CodeWorkspace } from "./components/CodeWorkspace";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ResizeHandle } from "./components/ResizeHandle";
 import { OnboardingWizard } from "./components/Onboarding";
+import { AgentPanel } from "./components/AgentPanel";
+import { ConfirmationDialog } from "./components/AgentSchedule/AgentScheduleLauncher";
+import { useAgentStore } from "./state/agentStore";
 import {
   useSessionStore,
   useWorkspaceStore,
@@ -76,6 +79,17 @@ export default function App() {
     window.addEventListener("resize", onWinResize);
     return () => window.removeEventListener("resize", onWinResize);
   }, [clampCodeH, clampTasksH]);
+
+  // Initialize agent event listeners at app level so background-agent-update,
+  // background-agent-complete, agent-schedule-complete, and
+  // agent-schedule-confirmation-required are always active regardless of panel visibility.
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    useAgentStore.getState().initEventListeners().then((fn) => {
+      cleanup = fn;
+    });
+    return () => cleanup?.();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -301,6 +315,8 @@ export default function App() {
       {!onboardingCompleted && (
         <OnboardingWizard onComplete={() => setOnboardingCompleted(true)} />
       )}
+      {/* Orchestration confirmation dialog — mounted at root so it shows regardless of projectRoot */}
+      <ConfirmationDialog />
       <Layout>
         <Stack
           direction="row"
@@ -470,6 +486,7 @@ export default function App() {
                   borderLeft: 1,
                   borderColor: "divider",
                   bgcolor: "background.paper",
+                  position: "relative",
                 }}
               >
                 <Box
@@ -509,6 +526,9 @@ export default function App() {
                 >
                   <FileTree />
                 </Box>
+
+                {/* 后台 Agent 任务面板 — 从文件夹区域向上滑出 */}
+                <AgentPanel />
               </Paper>
             </>
           )}

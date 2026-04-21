@@ -85,6 +85,11 @@ pub struct ChatState {
     /// switch that hits the provider-restore code path.  Cleared whenever the config
     /// file is written so callers never see stale data.
     pub cached_config_file: CachedConfigFile,
+    /// Active agent orchestrations keyed by session_id → map of (orch_id → CancellationToken).
+    /// One session may have multiple concurrent orchestrations; each gets its own entry.
+    /// Populated by `run_agent_schedule`, consumed by `cancel_agent_schedule`.
+    pub active_orchestrations:
+        Arc<Mutex<HashMap<String, HashMap<String, tokio_util::sync::CancellationToken>>>>,
 }
 
 /// Runtime state for an active session. Chat transcript is persisted via messages;
@@ -149,6 +154,7 @@ impl Default for ChatState {
             mcp_manager: Arc::new(GlobalMcpManager::new()),
             permission_deny_cache: Arc::new(Mutex::new(HashMap::new())),
             cached_config_file: Arc::new(Mutex::new(None)),
+            active_orchestrations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

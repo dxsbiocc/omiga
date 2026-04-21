@@ -162,8 +162,8 @@ pub enum ApiError {
     #[error("Request timeout")]
     Timeout,
 
-    #[error("Rate limited")]
-    RateLimited,
+    #[error("Rate limited (retry after {retry_after}s)")]
+    RateLimited { retry_after: u64 },
 
     #[error("Server error: {message}")]
     Server { message: String },

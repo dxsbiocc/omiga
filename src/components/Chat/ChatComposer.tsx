@@ -87,6 +87,7 @@ import {
   type SandboxBackend,
   type LocalVenvType,
 } from "../../state";
+import { normalizeAgentDisplayName } from "../../state/agentStore";
 import {
   RSYNC_INSTALL_HELP_URL,
   RSYNC_SSH_WARN_STORAGE_KEY,
@@ -260,7 +261,7 @@ function permissionModeAccent(theme: Theme, mode: PermissionMode): string {
   }
 }
 
-type AvailableAgentRow = { agentType: string; description: string };
+type AvailableAgentRow = { agentType: string; description: string; background: boolean };
 
 function normalizeFsPath(p: string): string {
   return p.replace(/\\/g, "/");
@@ -775,14 +776,27 @@ export const ChatComposer = memo(function ChatComposer({
     return { active: true as const, query: t.slice(1) };
   }, [input]);
 
+  // Agents selectable via slash-picker: exclude defaults and background-only agents.
+  const selectableAgents = useMemo(
+    () =>
+      availableAgents.filter(
+        (a) =>
+          a.agentType !== "auto" &&
+          a.agentType !== "general-purpose" &&
+          !a.background,
+      ),
+    [availableAgents],
+  );
+
   const filteredAtAgents = useMemo(() => {
     if (!slashParse.active) return [];
     const q = slashParse.query.toLowerCase();
-    return availableAgents.filter((a) => {
+    return selectableAgents.filter((a) => {
       const id = a.agentType.toLowerCase();
-      return !q || id.startsWith(q) || id.includes(q);
+      const displayName = normalizeAgentDisplayName(a.agentType).toLowerCase();
+      return !q || id.startsWith(q) || id.includes(q) || displayName.includes(q);
     });
-  }, [availableAgents, slashParse]);
+  }, [selectableAgents, slashParse]);
 
   const slashFilterKey = useMemo(
     () => filteredAtAgents.map((a) => a.agentType).join("\u0001"),
@@ -1140,8 +1154,14 @@ export const ChatComposer = memo(function ChatComposer({
     !needsWorkspacePath &&
     Boolean(workspacePath.trim());
 
+  const isBackgroundAgent = useMemo(
+    () => availableAgents.find((a) => a.agentType === composerAgentType)?.background ?? false,
+    [availableAgents, composerAgentType],
+  );
   const showComposerAgentChip =
-    composerAgentType !== "general-purpose" && composerAgentType !== "auto";
+    composerAgentType !== "general-purpose" &&
+    composerAgentType !== "auto" &&
+    !isBackgroundAgent;
   const hasInlineComposerChips =
     showComposerAgentChip || composerAttachedPaths.length > 0;
 
@@ -1581,7 +1601,7 @@ export const ChatComposer = memo(function ChatComposer({
                       display="block"
                       sx={{ mb: 0.5 }}
                     >
-                      /{composerAgentType}
+                      {normalizeAgentDisplayName(composerAgentType)}
                     </Typography>
                     <Typography
                       variant="caption"
@@ -1592,7 +1612,7 @@ export const ChatComposer = memo(function ChatComposer({
                     </Typography>
                   </Box>
                 ) : (
-                  `/${composerAgentType}`
+                  normalizeAgentDisplayName(composerAgentType)
                 )
               }
             >
@@ -1612,7 +1632,7 @@ export const ChatComposer = memo(function ChatComposer({
                   size="small"
                   variant="outlined"
                   icon={<SmartToy sx={{ fontSize: 16, color: accent }} />}
-                  label={`/${composerAgentType}`}
+                  label={normalizeAgentDisplayName(composerAgentType)}
                   sx={{
                     flexShrink: 0,
                     height: "var(--composer-chip-h)",
@@ -1787,7 +1807,7 @@ export const ChatComposer = memo(function ChatComposer({
                       <ListItemIcon sx={{ minWidth: 36 }}>
                         <SmartToy fontSize="small" />
                       </ListItemIcon>
-                      <ListItemText primary={`/${a.agentType}`} />
+                      <ListItemText primary={normalizeAgentDisplayName(a.agentType)} />
                     </ListItemButton>
                   </Tooltip>
                 ))

@@ -211,6 +211,7 @@ pub async fn permission_check(
         arguments: arguments.clone(),
         file_paths: None,
         timestamp: chrono::Utc::now(),
+        project_root: None,
     };
 
     let decision = manager.check_permission(&context).await;
@@ -241,6 +242,7 @@ pub async fn permission_approve(
         arguments: request.arguments.clone(),
         file_paths: None,
         timestamp: chrono::Utc::now(),
+        project_root: None,
     };
 
     // 转换 PermissionModeInput -> PermissionMode
@@ -293,6 +295,7 @@ pub async fn permission_deny(
         arguments: request.arguments,
         file_paths: None,
         timestamp: chrono::Utc::now(),
+        project_root: None,
     };
 
     manager

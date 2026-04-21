@@ -19,7 +19,6 @@ pub mod grep;
 pub mod list_mcp_resources;
 pub mod list_skills;
 pub mod notebook_edit;
-pub mod visualization;
 pub mod read_mcp_resource;
 pub mod recall;
 pub mod send_user_message;
@@ -38,6 +37,7 @@ pub mod task_stop;
 pub mod task_update;
 pub mod todo_write;
 pub mod tool_search;
+pub mod visualization;
 pub mod web_fetch;
 pub mod web_search;
 pub mod workflow;
@@ -302,7 +302,9 @@ impl Tool {
             Tool::WebSearch(args) => web_search::WebSearchTool::execute(ctx, args).await?,
             Tool::TodoWrite(args) => todo_write::TodoWriteTool::execute(ctx, args).await?,
             Tool::NotebookEdit(args) => notebook_edit::NotebookEditTool::execute(ctx, args).await?,
-            Tool::Visualization(args) => visualization::VisualizationTool::execute(ctx, args).await?,
+            Tool::Visualization(args) => {
+                visualization::VisualizationTool::execute(ctx, args).await?
+            }
             Tool::Sleep(args) => sleep::SleepTool::execute(ctx, args).await?,
             Tool::AskUserQuestion(args) => {
                 ask_user_question::AskUserQuestionTool::execute(ctx, args).await?

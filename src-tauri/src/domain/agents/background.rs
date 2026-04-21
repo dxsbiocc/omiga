@@ -262,6 +262,30 @@ impl BackgroundAgentManager {
         token
     }
 
+    /// 取消所有 Running/Pending 状态的任务，返回取消的任务数量。
+    pub async fn cancel_all_running(&self) -> usize {
+        // Collect IDs first to avoid holding the async read lock while cancelling.
+        let running_ids: Vec<String> = {
+            let tasks = self.tasks.read().await;
+            tasks
+                .iter()
+                .filter(|(_, t)| {
+                    matches!(
+                        t.status,
+                        BackgroundAgentStatus::Running | BackgroundAgentStatus::Pending
+                    )
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+
+        let count = running_ids.len();
+        for id in running_ids {
+            self.cancel_task(&id).await;
+        }
+        count
+    }
+
     /// 清理已完成/失败的旧任务
     pub async fn cleanup_old_tasks(&self, max_age_secs: u64) -> usize {
         let now = unix_timestamp_secs();

@@ -270,9 +270,20 @@ impl ClaudeClient {
 
         let status = response.status();
         if !status.is_success() {
+            let status_u16 = status.as_u16();
+            // 429 = rate limit, 529 = Anthropic engine overloaded — both are retryable
+            if status_u16 == 429 || status_u16 == 529 {
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                return Err(ApiError::RateLimited { retry_after });
+            }
             let text = response.text().await.unwrap_or_default();
             return Err(ApiError::Http {
-                status: status.as_u16(),
+                status: status_u16,
                 message: text,
             });
         }

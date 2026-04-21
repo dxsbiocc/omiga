@@ -296,3 +296,131 @@ pub struct DirectoryListResponse {
     pub total: usize,
     pub has_more: bool,
 }
+
+// ─── Local file viewer ────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind")]
+pub enum LocalFileViewResponse {
+    #[serde(rename = "html")]
+    Html { content: String },
+    #[serde(rename = "image")]
+    Image { data_uri: String, mime: String },
+    #[serde(rename = "pdf")]
+    Pdf { data_uri: String },
+    #[serde(rename = "unsupported")]
+    Unsupported { ext: String },
+}
+
+/// Read a local file for inline rendering in the chat UI.
+///
+/// - HTML  → returns text content (rendered in sandboxed iframe)
+/// - Images (PNG/JPG/GIF/WebP/SVG/BMP/ICO) → returns base64 data URI
+/// - PDF   → returns base64 data URI for iframe embed
+///
+/// Size caps: HTML 1 MB · images 20 MB · PDF 50 MB.
+#[tauri::command]
+pub async fn read_local_file_for_view(path: String) -> CommandResult<LocalFileViewResponse> {
+    let path_buf = PathBuf::from(&path);
+    let canonical = path_buf.canonicalize().map_err(|e| {
+        AppError::Fs(FsError::IoError {
+            message: format!("{}: {}", path, e),
+        })
+    })?;
+
+    if !canonical.is_file() {
+        return Err(AppError::Fs(FsError::InvalidPath { path: path.clone() }));
+    }
+
+    let ext = canonical
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let meta = tokio::fs::metadata(&canonical)
+        .await
+        .map_err(|e: std::io::Error| AppError::Fs(FsError::from(e)))?;
+
+    match ext.as_str() {
+        "html" | "htm" => {
+            const MAX: u64 = 1 * 1024 * 1024;
+            if meta.len() > MAX {
+                return Err(AppError::Fs(FsError::FileTooLarge {
+                    path: path.clone(),
+                    size: meta.len(),
+                    max: MAX,
+                }));
+            }
+            let content = tokio::fs::read_to_string(&canonical)
+                .await
+                .map_err(|e: std::io::Error| AppError::Fs(FsError::from(e)))?;
+            Ok(LocalFileViewResponse::Html { content })
+        }
+
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" => {
+            const MAX: u64 = 20 * 1024 * 1024;
+            if meta.len() > MAX {
+                return Err(AppError::Fs(FsError::FileTooLarge {
+                    path: path.clone(),
+                    size: meta.len(),
+                    max: MAX,
+                }));
+            }
+            let bytes = tokio::fs::read(&canonical)
+                .await
+                .map_err(|e: std::io::Error| AppError::Fs(FsError::from(e)))?;
+            let mime = match ext.as_str() {
+                "jpg" | "jpeg" => "image/jpeg",
+                "png" => "image/png",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                "bmp" => "image/bmp",
+                "ico" => "image/x-icon",
+                _ => "image/png",
+            };
+            let data_uri = format!("data:{};base64,{}", mime, BASE64.encode(&bytes));
+            Ok(LocalFileViewResponse::Image {
+                data_uri,
+                mime: mime.to_string(),
+            })
+        }
+
+        "svg" => {
+            const MAX: u64 = 2 * 1024 * 1024;
+            if meta.len() > MAX {
+                return Err(AppError::Fs(FsError::FileTooLarge {
+                    path: path.clone(),
+                    size: meta.len(),
+                    max: MAX,
+                }));
+            }
+            let bytes = tokio::fs::read(&canonical)
+                .await
+                .map_err(|e: std::io::Error| AppError::Fs(FsError::from(e)))?;
+            let data_uri = format!("data:image/svg+xml;base64,{}", BASE64.encode(&bytes));
+            Ok(LocalFileViewResponse::Image {
+                data_uri,
+                mime: "image/svg+xml".to_string(),
+            })
+        }
+
+        "pdf" => {
+            const MAX: u64 = 50 * 1024 * 1024;
+            if meta.len() > MAX {
+                return Err(AppError::Fs(FsError::FileTooLarge {
+                    path: path.clone(),
+                    size: meta.len(),
+                    max: MAX,
+                }));
+            }
+            let bytes = tokio::fs::read(&canonical)
+                .await
+                .map_err(|e: std::io::Error| AppError::Fs(FsError::from(e)))?;
+            let data_uri = format!("data:application/pdf;base64,{}", BASE64.encode(&bytes));
+            Ok(LocalFileViewResponse::Pdf { data_uri })
+        }
+
+        _ => Ok(LocalFileViewResponse::Unsupported { ext }),
+    }
+}

@@ -99,6 +99,21 @@ pub fn run() {
                     };
                     integrations_settings::warm_integrations_catalog_cache(&state, "").await;
                 });
+
+                // Hourly cleanup of completed/failed background agent tasks older than 1 hour.
+                tauri::async_runtime::spawn(async {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(3600));
+                    loop {
+                        interval.tick().await;
+                        let removed = crate::domain::agents::background::get_background_agent_manager()
+                            .cleanup_old_tasks(3600)
+                            .await;
+                        if removed > 0 {
+                            tracing::debug!("cleanup_old_tasks: removed {} stale tasks", removed);
+                        }
+                    }
+                });
             });
 
             Ok(())
@@ -106,6 +121,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::chat::send_message,
             commands::chat::list_available_agents,
+            commands::chat::list_agent_roles,
             commands::chat::list_session_background_tasks,
             commands::chat::load_background_agent_transcript,
             commands::chat::cancel_background_agent_task,
@@ -132,6 +148,8 @@ pub fn run() {
             commands::chat::quick_switch_provider,
             commands::chat::set_default_provider_config,
             commands::chat::run_agent_schedule,
+            commands::chat::cancel_agent_schedule,
+            commands::citation::fetch_citation_metadata,
             commands::permissions::permission_check,
             commands::permissions::permission_approve,
             commands::permissions::permission_deny,
@@ -170,6 +188,7 @@ pub fn run() {
             commands::session::set_setting,
             commands::fs::read_file,
             commands::fs::read_file_bytes_fast,
+            commands::fs::read_local_file_for_view,
             commands::fs::write_file,
             commands::fs::read_image_base64,
             commands::fs::list_directory,
@@ -229,6 +248,24 @@ pub fn run() {
             commands::memory::memory_get_import_extensions,
             commands::memory::write_user_omiga_file,
             commands::memory::init_user_context_files,
+            commands::ralph::list_ralph_sessions,
+            commands::ralph::clear_ralph_session,
+            commands::ralph::clear_all_ralph_sessions,
+            commands::ralph::list_autopilot_sessions,
+            commands::ralph::clear_autopilot_session,
+            commands::ralph::clear_all_autopilot_sessions,
+            commands::ralph::check_ralph_stuck,
+            commands::ralph::list_team_sessions,
+            commands::ralph::clear_team_session,
+            commands::ralph::cancel_all,
+            commands::ralph::cancel_team_session,
+            commands::blackboard::get_blackboard,
+            commands::blackboard::post_blackboard_entry,
+            commands::blackboard::clear_blackboard,
+            commands::context_snapshot::list_context_snapshots,
+            commands::context_snapshot::read_context_snapshot,
+            commands::context_snapshot::delete_context_snapshot,
+            commands::context_snapshot::clear_all_context_snapshots,
             commands::test_notification,
             commands::get_notification_permission_status,
             commands::request_notification_permission,

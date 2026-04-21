@@ -3,7 +3,6 @@ import {
   Button,
   Typography,
   Alert,
-  AlertTitle,
   Box,
   Chip,
   Divider,
@@ -249,6 +248,7 @@ export const PermissionPromptBar: React.FC = () => {
   const [timeWindowMinutes, setTimeWindowMinutes] = useState<number>(60);
   const [showDetails, setShowDetails] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [cmdExpanded, setCmdExpanded] = useState(false);
 
   if (!pendingRequest) return null;
 
@@ -286,6 +286,13 @@ export const PermissionPromptBar: React.FC = () => {
     }
   };
 
+  const detail = intent.detail ?? pendingRequest.tool_name;
+  const DETAIL_TRUNCATE = 120;
+  const detailTruncated = detail.length > DETAIL_TRUNCATE
+    ? detail.slice(0, DETAIL_TRUNCATE) + "…"
+    : detail;
+  const hasLongDetail = detail.length > DETAIL_TRUNCATE;
+
   return (
     <Box
       sx={{
@@ -297,78 +304,60 @@ export const PermissionPromptBar: React.FC = () => {
           t.palette.mode === "dark"
             ? "rgba(255,255,255,0.04)"
             : "rgba(0,0,0,0.02)",
+        maxHeight: "50vh",
+        overflowY: "auto",
       }}
     >
-      <Stack spacing={1.5}>
-        <Stack
-          direction="row"
-          alignItems="center"
-          gap={1}
-          flexWrap="wrap"
-          justifyContent="flex-start"
-        >
-          <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
-            {getRiskIcon(pendingRequest.risk_level)}
-            <Typography variant="subtitle2" fontWeight={700}>
-              {intent.title}
-            </Typography>
-            <Chip
-              label={getRiskLabel(pendingRequest.risk_level)}
-              color={getRiskColor(pendingRequest.risk_level) as never}
-              size="small"
-            />
-            <Box
-              component="code"
-              sx={{
-                px: 1,
-                py: 0.25,
-                borderRadius: 1,
-                bgcolor: "action.hover",
-                fontSize: "0.85rem",
-              }}
-            >
-              {intent.detail ?? pendingRequest.tool_name}
-            </Box>
-          </Stack>
+      <Stack spacing={1}>
+        {/* 标题行：只显示操作类型 + 风险等级 */}
+        <Stack direction="row" alignItems="center" gap={1}>
+          {getRiskIcon(pendingRequest.risk_level)}
+          <Typography variant="subtitle2" fontWeight={700} sx={{ flex: 1 }}>
+            {intent.title}
+          </Typography>
+          <Chip
+            label={getRiskLabel(pendingRequest.risk_level)}
+            color={getRiskColor(pendingRequest.risk_level) as never}
+            size="small"
+          />
         </Stack>
 
+        {/* 具体操作内容：路径或命令，限制展示 */}
+        {detail && (
+          <Box
+            component="code"
+            sx={{
+              display: "block",
+              px: 1,
+              py: 0.5,
+              borderRadius: 1,
+              bgcolor: "action.hover",
+              fontSize: "0.78rem",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+              cursor: hasLongDetail ? "pointer" : "default",
+              maxHeight: cmdExpanded ? 160 : "none",
+              overflowY: cmdExpanded ? "auto" : "visible",
+            }}
+            onClick={hasLongDetail ? () => setCmdExpanded((v) => !v) : undefined}
+            title={hasLongDetail && !cmdExpanded ? "点击展开完整内容" : undefined}
+          >
+            {cmdExpanded ? detail : detailTruncated}
+          </Box>
+        )}
+
         {error && (
-          <Alert severity="error" onClose={clearError}>
+          <Alert severity="error" onClose={clearError} sx={{ py: 0 }}>
             {error}
           </Alert>
         )}
 
-        {isCritical && (
-          <Alert severity="error">
-            <AlertTitle>严重风险操作</AlertTitle>
-            此操作可能导致系统损坏或数据丢失，请格外谨慎！
+        {isDangerous && (
+          <Alert severity={isCritical ? "error" : "warning"} sx={{ py: 0.5 }}>
+            {isCritical
+              ? "此操作可能导致数据丢失，请格外谨慎！"
+              : "高风险操作，请确认您了解其后果。"}
           </Alert>
-        )}
-
-        {!isCritical && isDangerous && (
-          <Alert severity="warning">
-            <AlertTitle>高风险操作</AlertTitle>
-            此操作可能影响系统稳定性，请确认您了解其后果。
-          </Alert>
-        )}
-
-        <Typography variant="body2" color="text.secondary">
-          {pendingRequest.risk_description}
-        </Typography>
-
-        {pendingRequest.recommendations.length > 0 && (
-          <Box>
-            <Typography variant="caption" color="text.secondary" display="block">
-              建议
-            </Typography>
-            <Stack spacing={0.25}>
-              {pendingRequest.recommendations.map((rec, idx) => (
-                <Typography key={idx} variant="caption" color="text.secondary">
-                  • {rec}
-                </Typography>
-              ))}
-            </Stack>
-          </Box>
         )}
 
         {pendingRequest.detected_risks.length > 0 && (
@@ -379,29 +368,24 @@ export const PermissionPromptBar: React.FC = () => {
             disableGutters
             sx={{ "&:before": { display: "none" } }}
           >
-            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ minHeight: 32, "& .MuiAccordionSummary-content": { my: 0.5 } }}>
               <Typography variant="caption">
-                检测到 {pendingRequest.detected_risks.length} 个风险点
+                {pendingRequest.detected_risks.length} 个风险点
               </Typography>
             </AccordionSummary>
-            <AccordionDetails>
-              <Stack spacing={1}>
+            <AccordionDetails sx={{ pt: 0.5 }}>
+              <Stack spacing={0.75}>
                 {pendingRequest.detected_risks.map((risk, idx) => (
                   <Alert
                     key={idx}
                     severity={getRiskColor(risk.severity) as never}
                     variant="outlined"
-                    sx={{ textAlign: "left" }}
+                    sx={{ py: 0.25 }}
                   >
                     <Typography variant="caption" fontWeight={600} display="block">
-                      {risk.category} — {getRiskLabel(risk.severity)}
+                      {risk.category}
                     </Typography>
-                    <Typography variant="body2">{risk.description}</Typography>
-                    {risk.mitigation && (
-                      <Typography variant="caption" color="text.secondary">
-                        建议: {risk.mitigation}
-                      </Typography>
-                    )}
+                    <Typography variant="caption">{risk.description}</Typography>
                   </Alert>
                 ))}
               </Stack>

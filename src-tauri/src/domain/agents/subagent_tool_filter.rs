@@ -80,6 +80,7 @@ pub fn should_block_subagent_builtin_call(canonical: &str, opts: SubagentFilterO
             | "enter_plan_mode"
             | "ask_user_question"
             | "task_stop"
+            | "send_user_message" // workers write to blackboard; only the Leader/main agent sends to user
     )
 }
 
@@ -118,6 +119,7 @@ mod tests {
             ToolSchema::new("Agent", "x", serde_json::json!({})),
             ToolSchema::new("TaskOutput", "x", serde_json::json!({})),
             ToolSchema::new("ExitPlanMode", "x", serde_json::json!({})),
+            ToolSchema::new("SendUserMessage", "x", serde_json::json!({})),
             ToolSchema::new("mcp__srv__t", "x", serde_json::json!({})),
         ];
         let out = filter_tool_schemas_for_subagent(v, SubagentFilterOptions::default());
@@ -127,6 +129,7 @@ mod tests {
         assert!(!names.iter().any(|n| *n == "Agent"));
         assert!(!names.iter().any(|n| *n == "TaskOutput"));
         assert!(!names.iter().any(|n| *n == "ExitPlanMode"));
+        assert!(!names.iter().any(|n| *n == "SendUserMessage"));
     }
 
     #[test]
