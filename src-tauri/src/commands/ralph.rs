@@ -124,6 +124,94 @@ pub async fn clear_all_autopilot_sessions(project_root: String) -> CommandResult
     Ok(autopilot_state::clear_all_states(root).await)
 }
 
+// ─── Mode lane visualization ────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct ModeLaneInfo {
+    pub session_id: String,
+    pub mode: String,
+    pub lane_id: String,
+    pub preferred_agent_type: Option<String>,
+    pub supplemental_agent_types: Vec<String>,
+}
+
+/// Return active mode → execution-lane mappings for the current project so the
+/// frontend can visualize which role bundle is currently steering each mode.
+#[tauri::command]
+pub async fn list_active_mode_lanes(project_root: String) -> CommandResult<Vec<ModeLaneInfo>> {
+    use crate::domain::orchestration::{
+        autopilot::AutopilotOrchestrator, ralph::RalphOrchestrator, team::TeamOrchestrator,
+    };
+
+    let root = std::path::Path::new(&project_root);
+    let mut out = Vec::new();
+
+    for state in ralph_state::list_states(root).await {
+        if matches!(state.phase, ralph_state::RalphPhase::Complete) {
+            continue;
+        }
+        if let Some(lane) = RalphOrchestrator::current_execution_lane(root, &state.session_id).await {
+            out.push(ModeLaneInfo {
+                session_id: state.session_id.clone(),
+                mode: "ralph".to_string(),
+                lane_id: lane.lane_id.to_string(),
+                preferred_agent_type: lane.preferred_agent_type.map(str::to_string),
+                supplemental_agent_types: lane
+                    .supplemental_agent_types
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+            });
+        }
+    }
+
+    for state in autopilot_state::list_states(root).await {
+        if matches!(state.phase, autopilot_state::AutopilotPhase::Complete) {
+            continue;
+        }
+        if let Some(lane) =
+            AutopilotOrchestrator::current_execution_lane(root, &state.session_id).await
+        {
+            out.push(ModeLaneInfo {
+                session_id: state.session_id.clone(),
+                mode: "autopilot".to_string(),
+                lane_id: lane.lane_id.to_string(),
+                preferred_agent_type: lane.preferred_agent_type.map(str::to_string),
+                supplemental_agent_types: lane
+                    .supplemental_agent_types
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+            });
+        }
+    }
+
+    for state in crate::domain::team_state::list_states(root).await {
+        if matches!(
+            state.phase,
+            crate::domain::team_state::TeamPhase::Complete
+                | crate::domain::team_state::TeamPhase::Failed
+        ) {
+            continue;
+        }
+        if let Some(lane) = TeamOrchestrator::current_execution_lane(root, &state.session_id).await {
+            out.push(ModeLaneInfo {
+                session_id: state.session_id.clone(),
+                mode: "team".to_string(),
+                lane_id: lane.lane_id.to_string(),
+                preferred_agent_type: lane.preferred_agent_type.map(str::to_string),
+                supplemental_agent_types: lane
+                    .supplemental_agent_types
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+            });
+        }
+    }
+
+    Ok(out)
+}
+
 // ─── Team session commands ───────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]

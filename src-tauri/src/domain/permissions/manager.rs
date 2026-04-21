@@ -902,8 +902,7 @@ impl PermissionManager {
                         let is_home_level = home_dir
                             .as_ref()
                             .map(|h| {
-                                let canonical_home =
-                                    std::fs::canonicalize(h).unwrap_or(h.clone());
+                                let canonical_home = std::fs::canonicalize(h).unwrap_or(h.clone());
                                 // 直接子目录或文件（depth == home + 1）
                                 canonical_path.starts_with(&canonical_home)
                                     && canonical_path
@@ -968,8 +967,7 @@ impl PermissionManager {
                         continue;
                     }
 
-                    let canonical_root =
-                        std::fs::canonicalize(root).unwrap_or(root.clone());
+                    let canonical_root = std::fs::canonicalize(root).unwrap_or(root.clone());
                     let canonical_path =
                         std::fs::canonicalize(&expanded).unwrap_or(expanded.clone());
 
@@ -1198,6 +1196,7 @@ mod tests {
             session_id: "session_deny_test".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
 
         // 第一次拒绝
@@ -1231,6 +1230,7 @@ mod tests {
             session_id: "session_a".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
         let ctx_b = PermissionContext {
             session_id: "session_b".to_string(),
@@ -1260,6 +1260,7 @@ mod tests {
             session_id: "s_approve".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
 
         mgr.approve_request("s_approve", PermissionMode::Session, &ctx)
@@ -1293,6 +1294,7 @@ mod tests {
             session_id: "s_alias".to_string(),
             file_paths: Some(vec![std::path::PathBuf::from("/a")]),
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
         mgr.approve_request("s_alias", PermissionMode::Session, &ctx_read)
             .await
@@ -1320,6 +1322,7 @@ mod tests {
             session_id: "s_fw".to_string(),
             file_paths: Some(vec![std::path::PathBuf::from("/tmp/a.txt")]),
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
         mgr.approve_request("s_fw", PermissionMode::Session, &ctx_a)
             .await
@@ -1348,6 +1351,7 @@ mod tests {
             session_id: "s_crit".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
 
         let before = mgr.check_permission(&ctx).await;
@@ -1387,6 +1391,7 @@ mod tests {
             session_id: "s_tw".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
 
         mgr.approve_request("s_tw", PermissionMode::TimeWindow { minutes: 60 }, &ctx)
@@ -1416,6 +1421,7 @@ mod tests {
             session_id: "s".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
         let result = mgr.approve_request("s", PermissionMode::Bypass, &ctx).await;
         assert!(result.is_err(), "Bypass 模式应被拒绝");
@@ -1461,6 +1467,7 @@ mod tests {
             session_id: "s_ul".to_string(),
             file_paths: Some(vec![std::path::PathBuf::from("/tmp/test.txt")]),
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
 
         // 第一次：规则有效（use_count=0 < limit=1），Auto + Low risk → Allow
@@ -1508,6 +1515,7 @@ mod tests {
             session_id: "session_owner".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
         let dec_owner = mgr.check_permission(&ctx_owner).await;
         assert!(
@@ -1630,6 +1638,7 @@ mod tests {
             session_id: "s_audit".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
 
         mgr.deny_request(&ctx, "用户明确拒绝").await.unwrap();

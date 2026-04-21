@@ -254,6 +254,7 @@ pub fn run() {
             commands::ralph::list_autopilot_sessions,
             commands::ralph::clear_autopilot_session,
             commands::ralph::clear_all_autopilot_sessions,
+            commands::ralph::list_active_mode_lanes,
             commands::ralph::check_ralph_stuck,
             commands::ralph::list_team_sessions,
             commands::ralph::clear_team_session,

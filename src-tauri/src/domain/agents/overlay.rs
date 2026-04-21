@@ -14,6 +14,8 @@ const MAX_ACTIVE_AUTOPILOT: usize = 2;
 const MAX_ACTIVE_TEAM: usize = 2;
 const MAX_SNAPSHOTS: usize = 3;
 const MAX_TOP_LEVEL_ENTRIES: usize = 8;
+const MAX_NOTEPAD_CHARS: usize = 500;
+const MAX_PROJECT_MEMORY_CHARS: usize = 700;
 
 fn truncate_overlay(mut text: String) -> String {
     if text.len() <= MAX_OVERLAY_CHARS {
@@ -60,6 +62,127 @@ fn summarize_top_level_entries(project_root: &Path) -> Vec<String> {
     out.sort();
     out.truncate(MAX_TOP_LEVEL_ENTRIES);
     out
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut out = text.chars().take(max_chars).collect::<String>();
+    if text.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
+fn summarize_notepad(project_root: &Path) -> Option<String> {
+    let candidates = [
+        project_root.join(".omiga").join("notepad.md"),
+        project_root.join(".omiga").join("notes.md"),
+    ];
+    for path in candidates {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let single_line = trimmed
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        return Some(truncate_chars(&single_line, MAX_NOTEPAD_CHARS));
+    }
+    None
+}
+
+fn summarize_project_memory_json(project_root: &Path) -> Option<String> {
+    let candidates = [
+        project_root.join(".omiga").join("project-memory.json"),
+        project_root.join(".omiga").join("project_memory.json"),
+    ];
+    for path in candidates {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let mut parts: Vec<String> = Vec::new();
+        for key in [
+            "techStack",
+            "conventions",
+            "structure",
+            "notes",
+            "directives",
+        ] {
+            if let Some(value) = json.get(key) {
+                let rendered = match value {
+                    serde_json::Value::String(s) => s.trim().to_string(),
+                    serde_json::Value::Array(arr) => arr
+                        .iter()
+                        .take(3)
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                    serde_json::Value::Object(map) => {
+                        map.keys().take(4).cloned().collect::<Vec<_>>().join(", ")
+                    }
+                    _ => String::new(),
+                };
+                if !rendered.is_empty() {
+                    parts.push(format!("{key}: {rendered}"));
+                }
+            }
+        }
+        if !parts.is_empty() {
+            return Some(truncate_chars(&parts.join(" | "), MAX_PROJECT_MEMORY_CHARS));
+        }
+    }
+    None
+}
+
+fn summarize_registry_backed_memory(project_root: &Path) -> Option<String> {
+    let registry_path = crate::domain::memory::registry::registry_file_path();
+    let Ok(raw) = std::fs::read_to_string(registry_path) else {
+        return None;
+    };
+    let Ok(registry) =
+        serde_json::from_str::<crate::domain::memory::registry::MemoryRegistry>(&raw)
+    else {
+        return None;
+    };
+    let canonical = std::fs::canonicalize(project_root)
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    let entry = registry.projects.get(&canonical)?;
+    let wiki_dir = std::path::PathBuf::from(&entry.wiki_path);
+    let wiki_pages = std::fs::read_dir(&wiki_dir)
+        .ok()
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|name| name.ends_with(".md"))
+                .take(4)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut parts = vec![format!("wiki_path: {}", entry.wiki_path)];
+    if !entry.implicit_path.is_empty() {
+        parts.push(format!("implicit_path: {}", entry.implicit_path));
+    }
+    if !wiki_pages.is_empty() {
+        parts.push(format!("wiki_pages: {}", wiki_pages.join(", ")));
+    }
+    Some(truncate_chars(&parts.join(" | "), MAX_PROJECT_MEMORY_CHARS))
+}
+
+fn summarize_project_memory(project_root: &Path) -> Option<String> {
+    summarize_project_memory_json(project_root)
+        .or_else(|| summarize_registry_backed_memory(project_root))
 }
 
 fn count_project_skill_dirs(project_root: &Path) -> usize {
@@ -157,6 +280,8 @@ pub async fn build_runtime_overlay(project_root: &Path) -> Option<String> {
     let top_level = summarize_top_level_entries(project_root);
     let project_skill_count = count_project_skill_dirs(project_root);
     let project_agent_override_count = count_project_agent_overrides(project_root);
+    let notepad_summary = summarize_notepad(project_root);
+    let project_memory_summary = summarize_project_memory(project_root);
 
     let mut lines = vec!["## Omiga Runtime Overlay".to_string()];
     lines.push(format!("- Project root: `{}`", project_root.display()));
@@ -173,6 +298,12 @@ pub async fn build_runtime_overlay(project_root: &Path) -> Option<String> {
             "- Project-local orchestration assets: {} skill(s), {} custom agent override(s)",
             project_skill_count, project_agent_override_count
         ));
+    }
+    if let Some(notepad) = &notepad_summary {
+        lines.push(format!("- Notepad summary: {}", notepad));
+    }
+    if let Some(memory) = &project_memory_summary {
+        lines.push(format!("- Project memory summary: {}", memory));
     }
 
     if !active_ralph.is_empty() {
@@ -252,6 +383,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::create_dir_all(dir.path().join(".omiga").join("context")).unwrap();
         std::fs::create_dir_all(dir.path().join(".omiga").join("skills").join("plan")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".omiga").join("memory")).unwrap();
         std::fs::write(
             dir.path()
                 .join(".omiga")
@@ -259,6 +391,21 @@ mod tests {
                 .join("plan")
                 .join("SKILL.md"),
             "---\nname: plan\n---\nbody",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".omiga").join("notepad.md"),
+            "priority: preserve runtime state\nnext: validate reviewer outputs\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(".omiga").join("project-memory.json"),
+            serde_json::json!({
+                "techStack": ["rust", "tauri", "react"],
+                "conventions": ["small diffs", "verify before complete"],
+                "notes": "keep orchestration evidence concise"
+            })
+            .to_string(),
         )
         .unwrap();
 
@@ -344,6 +491,8 @@ mod tests {
         assert!(overlay.contains("snapshot-a"));
         assert!(overlay.contains("Top-level workspace map"));
         assert!(overlay.contains("Project-local orchestration assets"));
+        assert!(overlay.contains("Notepad summary"));
+        assert!(overlay.contains("Project memory summary"));
     }
 
     #[test]

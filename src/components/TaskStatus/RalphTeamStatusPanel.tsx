@@ -60,6 +60,26 @@ interface TeamSessionInfo {
   updated_at: string;
 }
 
+interface AutopilotSessionInfo {
+  session_id: string;
+  goal: string;
+  phase: string;
+  qa_cycles: number;
+  max_qa_cycles: number;
+  todos_completed: string[];
+  todos_pending: string[];
+  started_at: string;
+  updated_at: string;
+}
+
+interface ModeLaneInfo {
+  session_id: string;
+  mode: string;
+  lane_id: string;
+  preferred_agent_type?: string | null;
+  supplemental_agent_types: string[];
+}
+
 interface RalphSessionInfo {
   session_id: string;
   goal: string;
@@ -100,15 +120,56 @@ function phaseColor(phase: string): string {
   return PHASE_COLORS[phase] ?? "#9ca3af";
 }
 
+function LaneSummary({
+  lane,
+  color,
+}: {
+  lane: ModeLaneInfo | null;
+  color: string;
+}) {
+  if (!lane) return null;
+  return (
+    <Stack spacing={0.5} sx={{ mt: 0.75 }}>
+      <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" useFlexGap>
+        <Chip
+          label={lane.lane_id}
+          size="small"
+          sx={{
+            height: 16,
+            fontSize: 9,
+            bgcolor: alpha(color, 0.1),
+            color,
+            fontWeight: 600,
+          }}
+        />
+        {lane.preferred_agent_type && (
+          <Chip
+            label={`主角色: ${lane.preferred_agent_type}`}
+            size="small"
+            variant="outlined"
+            sx={{ height: 16, fontSize: 9 }}
+          />
+        )}
+      </Stack>
+      {lane.supplemental_agent_types.length > 0 && (
+        <Typography variant="caption" color="text.secondary" sx={{ fontSize: 10 }}>
+          辅助角色：{lane.supplemental_agent_types.join(" / ")}
+        </Typography>
+      )}
+    </Stack>
+  );
+}
+
 // ─── Single Ralph session card ───────────────────────────────────────────────
 
 interface RalphCardProps {
   session: RalphSessionInfo;
+  lane: ModeLaneInfo | null;
   projectRoot: string;
   onCleared: () => void;
 }
 
-function RalphCard({ session, projectRoot, onCleared }: RalphCardProps) {
+function RalphCard({ session, lane, projectRoot, onCleared }: RalphCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [clearing, setClearing] = useState(false);
 
@@ -206,6 +267,7 @@ function RalphCard({ session, projectRoot, onCleared }: RalphCardProps) {
             >
               {session.goal}
             </Typography>
+            <LaneSummary lane={lane} color={color} />
           </Box>
           <Stack direction="row" alignItems="center" spacing={0}>
             <Tooltip title={expanded ? "收起" : "展开待办"}>
@@ -422,6 +484,7 @@ function TeamWorkersStrip() {
 
 interface TeamCardProps {
   session: TeamSessionInfo;
+  lane: ModeLaneInfo | null;
   projectRoot: string;
   onCleared: () => void;
 }
@@ -434,7 +497,7 @@ const TEAM_PHASE_LABELS: Record<string, string> = {
   failed: "失败",
 };
 
-function TeamCard({ session, projectRoot, onCleared }: TeamCardProps) {
+function TeamCard({ session, lane, projectRoot, onCleared }: TeamCardProps) {
   const [clearing, setClearing] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [board, setBoard] = useState<BlackboardDto | null>(null);
@@ -541,6 +604,7 @@ function TeamCard({ session, projectRoot, onCleared }: TeamCardProps) {
             >
               {session.goal}
             </Typography>
+            <LaneSummary lane={lane} color={color} />
           </Box>
           <Stack direction="row" alignItems="center" spacing={0}>
             {board && board.entries.length > 0 && (
@@ -632,6 +696,135 @@ function TeamCard({ session, projectRoot, onCleared }: TeamCardProps) {
   );
 }
 
+// ─── Single Autopilot session card ──────────────────────────────────────────
+
+const AUTOPILOT_PHASE_LABELS: Record<string, string> = {
+  intake: "接收中",
+  interview: "澄清中",
+  expansion: "展开中",
+  design: "设计中",
+  plan: "计划中",
+  implementation: "实现中",
+  qa: "QA 循环",
+  validation: "最终验证",
+  complete: "已完成",
+};
+
+function AutopilotCard({
+  session,
+  lane,
+  projectRoot,
+  onCleared,
+}: {
+  session: AutopilotSessionInfo;
+  lane: ModeLaneInfo | null;
+  projectRoot: string;
+  onCleared: () => void;
+}) {
+  const [clearing, setClearing] = useState(false);
+  const totalTodos = session.todos_completed.length + session.todos_pending.length;
+  const progress = totalTodos > 0 ? (session.todos_completed.length / totalTodos) * 100 : 0;
+  const color = session.phase === "complete" ? "#10b981" : "#2563eb";
+
+  const handleClear = async () => {
+    setClearing(true);
+    try {
+      await invoke("clear_autopilot_session", {
+        projectRoot,
+        sessionId: session.session_id,
+      });
+      onCleared();
+    } catch {
+      /* ignore */
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  return (
+    <Fade in timeout={250}>
+      <Box
+        sx={{
+          border: 1,
+          borderColor: alpha(color, 0.2),
+          borderRadius: 1.5,
+          bgcolor: alpha(color, 0.03),
+          overflow: "hidden",
+        }}
+      >
+        <Stack direction="row" alignItems="flex-start" spacing={0.75} sx={{ px: 1.25, pt: 1, pb: 0.75 }}>
+          <Loop fontSize="small" sx={{ color, mt: 0.1, flexShrink: 0 }} />
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Stack direction="row" alignItems="center" spacing={0.5}>
+              <Chip
+                label={AUTOPILOT_PHASE_LABELS[session.phase] ?? session.phase}
+                size="small"
+                sx={{
+                  height: 17,
+                  fontSize: 10,
+                  bgcolor: alpha(color, 0.12),
+                  color,
+                  fontWeight: 600,
+                }}
+              />
+              <Typography variant="caption" color="text.disabled" sx={{ fontSize: 10 }}>
+                QA {session.qa_cycles}/{session.max_qa_cycles}
+              </Typography>
+            </Stack>
+            <Typography
+              variant="body2"
+              sx={{
+                fontSize: 12,
+                mt: 0.25,
+                lineHeight: 1.35,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                display: "-webkit-box",
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: "vertical",
+              }}
+              title={session.goal}
+            >
+              {session.goal}
+            </Typography>
+            <LaneSummary lane={lane} color={color} />
+          </Box>
+          <Tooltip title="清除状态文件">
+            <IconButton
+              size="small"
+              onClick={handleClear}
+              disabled={clearing}
+              sx={{ p: 0.25, color: "text.disabled" }}
+            >
+              <DeleteOutline fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+        {totalTodos > 0 && (
+          <Box sx={{ px: 1.25, pb: 0.75 }}>
+            <Stack direction="row" alignItems="center" spacing={0.75}>
+              <LinearProgress
+                variant="determinate"
+                value={progress}
+                sx={{
+                  flex: 1,
+                  height: 4,
+                  borderRadius: 2,
+                  bgcolor: alpha(color, 0.12),
+                  "& .MuiLinearProgress-bar": { bgcolor: color, borderRadius: 2 },
+                }}
+              />
+              <Typography variant="caption" color="text.disabled" sx={{ fontSize: 10, flexShrink: 0 }}>
+                {session.todos_completed.length}/{totalTodos}
+              </Typography>
+            </Stack>
+          </Box>
+        )}
+      </Box>
+    </Fade>
+  );
+}
+
 // ─── Main panel ──────────────────────────────────────────────────────────────
 
 interface RalphTeamStatusPanelProps {
@@ -641,18 +834,24 @@ interface RalphTeamStatusPanelProps {
 
 export function RalphTeamStatusPanel({ projectRoot }: RalphTeamStatusPanelProps) {
   const [ralphSessions, setRalphSessions] = useState<RalphSessionInfo[]>([]);
+  const [autopilotSessions, setAutopilotSessions] = useState<AutopilotSessionInfo[]>([]);
   const [teamSessions, setTeamSessions] = useState<TeamSessionInfo[]>([]);
+  const [modeLanes, setModeLanes] = useState<ModeLaneInfo[]>([]);
   const backgroundJobs = useActivityStore((s) => s.backgroundJobs);
 
   const fetchSessions = useCallback(async () => {
     if (!projectRoot) return;
     try {
-      const [ralph, team] = await Promise.all([
+      const [ralph, autopilot, team, lanes] = await Promise.all([
         invoke<RalphSessionInfo[]>("list_ralph_sessions", { projectRoot }),
+        invoke<AutopilotSessionInfo[]>("list_autopilot_sessions", { projectRoot }),
         invoke<TeamSessionInfo[]>("list_team_sessions", { projectRoot }),
+        invoke<ModeLaneInfo[]>("list_active_mode_lanes", { projectRoot }),
       ]);
       setRalphSessions(ralph ?? []);
+      setAutopilotSessions(autopilot ?? []);
       setTeamSessions(team ?? []);
+      setModeLanes(lanes ?? []);
     } catch {
       // Backend not ready or no state dir — silent
     }
@@ -662,11 +861,17 @@ export function RalphTeamStatusPanel({ projectRoot }: RalphTeamStatusPanelProps)
   useEffect(() => {
     void fetchSessions();
     const hasRunningJobs = backgroundJobs.some((j) => j.state === "running");
-    const totalSessions = ralphSessions.length + teamSessions.length;
+    const totalSessions = ralphSessions.length + autopilotSessions.length + teamSessions.length;
     const interval = totalSessions > 0 || hasRunningJobs ? 4000 : 15000;
     const id = window.setInterval(() => void fetchSessions(), interval);
     return () => window.clearInterval(id);
-  }, [fetchSessions, ralphSessions.length, teamSessions.length, backgroundJobs]);
+  }, [fetchSessions, ralphSessions.length, autopilotSessions.length, teamSessions.length, backgroundJobs]);
+
+  const laneFor = useCallback(
+    (mode: string, sessionId: string) =>
+      modeLanes.find((lane) => lane.mode === mode && lane.session_id === sessionId) ?? null,
+    [modeLanes],
+  );
 
   const teamJobs = backgroundJobs.filter(
     (j) =>
@@ -675,7 +880,8 @@ export function RalphTeamStatusPanel({ projectRoot }: RalphTeamStatusPanelProps)
       j.label.startsWith("subtask"),
   );
 
-  const hasAnything = ralphSessions.length > 0 || teamSessions.length > 0 || teamJobs.length > 0;
+  const hasAnything =
+    ralphSessions.length > 0 || autopilotSessions.length > 0 || teamSessions.length > 0 || teamJobs.length > 0;
   if (!hasAnything) return null;
 
   return (
@@ -701,6 +907,13 @@ export function RalphTeamStatusPanel({ projectRoot }: RalphTeamStatusPanelProps)
             sx={{ height: 16, fontSize: 9 }}
           />
         )}
+        {autopilotSessions.length > 0 && (
+          <Chip
+            label={`Autopilot ×${autopilotSessions.length}`}
+            size="small"
+            sx={{ height: 16, fontSize: 9, bgcolor: alpha("#2563eb", 0.1), color: "#2563eb" }}
+          />
+        )}
         {teamSessions.length > 0 && (
           <Chip
             label={`Team ×${teamSessions.length}`}
@@ -716,6 +929,18 @@ export function RalphTeamStatusPanel({ projectRoot }: RalphTeamStatusPanelProps)
           <RalphCard
             key={s.session_id}
             session={s}
+            lane={laneFor("ralph", s.session_id)}
+            projectRoot={projectRoot ?? ""}
+            onCleared={() => void fetchSessions()}
+          />
+        ))}
+
+        {/* Autopilot sessions */}
+        {autopilotSessions.map((s) => (
+          <AutopilotCard
+            key={s.session_id}
+            session={s}
+            lane={laneFor("autopilot", s.session_id)}
             projectRoot={projectRoot ?? ""}
             onCleared={() => void fetchSessions()}
           />
@@ -726,6 +951,7 @@ export function RalphTeamStatusPanel({ projectRoot }: RalphTeamStatusPanelProps)
           <TeamCard
             key={s.session_id}
             session={s}
+            lane={laneFor("team", s.session_id)}
             projectRoot={projectRoot ?? ""}
             onCleared={() => void fetchSessions()}
           />

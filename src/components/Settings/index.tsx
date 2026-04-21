@@ -36,6 +36,7 @@ import { ProviderManager } from "./ProviderManager";
 import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 import { RuntimeConstraintsPanel } from "./RuntimeConstraintsPanel";
 import { AgentScheduleLauncher } from "../AgentSchedule/AgentScheduleLauncher";
+import { AgentRolesPanel } from "../AgentRoles/AgentRolesPanel";
 
 interface SettingsProps {
   open: boolean;
@@ -1038,10 +1039,13 @@ export function Settings({
                   启动多 Agent 协作任务，由调度器自动分配子任务并并行执行。
                 </Typography>
                 {currentSessionId && projectPath ? (
-                  <AgentScheduleLauncher
-                    sessionId={currentSessionId}
-                    projectRoot={projectPath}
-                  />
+                  <Box display="flex" flexDirection="column" gap={2}>
+                    <AgentScheduleLauncher
+                      sessionId={currentSessionId}
+                      projectRoot={projectPath}
+                    />
+                    <AgentRolesPanel />
+                  </Box>
                 ) : (
                   <Alert severity="info" sx={{ borderRadius: 2 }}>
                     请先打开一个会话
