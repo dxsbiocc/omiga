@@ -1102,7 +1102,7 @@ function buildMarkdownComponents(
           );
         }
         if (!config) return null;
-        return <VisualizationRenderer config={config} />;
+        return <VisualizationRenderer config={config} onNodeClick={onNodeClick} />;
       }
 
       if (language === "omiga-dag") {

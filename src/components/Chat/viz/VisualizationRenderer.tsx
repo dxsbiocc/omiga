@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Box, Alert } from "@mui/material";
+import { MermaidFlow } from "./MermaidFlow";
+import { DotFlow } from "./DotFlow";
 
 export interface VizConfig {
   type: string;
   [key: string]: unknown;
 }
-
-let mermaidIdCounter = 0;
 
 function EChartView({ option }: { option: unknown }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -48,63 +48,6 @@ function EChartView({ option }: { option: unknown }) {
   return <Box ref={containerRef} sx={{ width: "100%", height: 320 }} />;
 }
 
-function MermaidView({ source }: { source: string }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [svg, setSvg] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let disposed = false;
-    (async () => {
-      type MermaidT = { initialize: (opts: object) => void; render: (id: string, src: string) => Promise<{ svg: string }> };
-      let mermaid: MermaidT | null = null;
-      try {
-        // @ts-ignore - optional peer dependency
-        const mod = (await import("mermaid")) as { default: MermaidT };
-        mermaid = mod.default;
-      } catch {
-        if (!disposed) setError("Mermaid 未安装，请运行 npm install mermaid");
-        return;
-      }
-      if (!mermaid || disposed) return;
-      try {
-        mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
-        const id = `mermaid-${++mermaidIdCounter}`;
-        const { svg: rendered } = await mermaid.render(id, source);
-        if (!disposed) setSvg(rendered);
-      } catch (err) {
-        if (!disposed) setError(`图表渲染失败: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    })();
-    return () => {
-      disposed = true;
-    };
-  }, [source]);
-
-  if (error) {
-    return (
-      <Alert severity="warning" sx={{ my: 1 }}>
-        {error}
-      </Alert>
-    );
-  }
-
-  return (
-    <Box
-      ref={containerRef}
-      sx={{
-        width: "100%",
-        overflowX: "auto",
-        my: 1,
-        p: 1,
-        borderRadius: 1,
-        border: (t) => `1px solid ${t.palette.divider}`,
-        bgcolor: "background.paper",
-      }}
-      dangerouslySetInnerHTML={svg ? { __html: svg } : undefined}
-    />
-  );
-}
 
 function IframeView({ src }: { src: string }) {
   return (
@@ -229,50 +172,6 @@ function PlotlyView({ data, layout }: { data: unknown; layout?: unknown }) {
   return <Box ref={containerRef} sx={{ width: "100%", height: 360 }} />;
 }
 
-function buildGraphvizIframe(dot: string) {
-  const html = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Graphviz</title>
-<style>
-html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#fff}
-#graph{width:100%;height:100%;display:flex;align-items:center;justify-content:center}
-#graph svg{max-width:100%;max-height:100%}
-</style>
-</head>
-<body>
-<div id="graph"></div>
-<script src="https://unpkg.com/viz.js@2.1.2-pre.1/viz.js"></script>
-<script src="https://unpkg.com/viz.js@2.1.2-pre.1/full.render.js"></script>
-<script>
-(function(){
-  var dot = ${JSON.stringify(dot)};
-  var viz = new Viz();
-  viz.renderSVGElement(dot).then(function(element){
-    document.getElementById('graph').appendChild(element);
-  }).catch(function(err){
-    document.getElementById('graph').textContent = String(err);
-  });
-})();
-</script>
-</body>
-</html>`;
-  const blob = new Blob([html], { type: "text/html" });
-  return URL.createObjectURL(blob);
-}
-
-function GraphvizView({ dot }: { dot: string }) {
-  const [src, setSrc] = useState<string | null>(null);
-  useEffect(() => {
-    const url = buildGraphvizIframe(dot);
-    setSrc(url);
-    return () => URL.revokeObjectURL(url);
-  }, [dot]);
-  if (!src) return null;
-  return <IframeView src={src} />;
-}
 
 function buildThreeIframe(code: string) {
   const html = `<!DOCTYPE html>
@@ -418,18 +317,24 @@ function KatexView({ source, displayMode }: { source: string; displayMode?: bool
   );
 }
 
-export function VisualizationRenderer({ config }: { config: VizConfig }) {
+export function VisualizationRenderer({
+  config,
+  onNodeClick,
+}: {
+  config: VizConfig;
+  onNodeClick?: (text: string) => void;
+}) {
   switch (config.type) {
     case "echarts":
       return <EChartView option={config.option} />;
     case "mermaid":
-      return <MermaidView source={String(config.source || "")} />;
+      return <MermaidFlow source={String(config.source || "")} onNodeClick={onNodeClick} />;
     case "pdb":
       return <PdbView url={String(config.url || "")} />;
     case "plotly":
       return <PlotlyView data={config.data} layout={config.layout} />;
     case "graphviz":
-      return <GraphvizView dot={String(config.dot || "")} />;
+      return <DotFlow dot={String(config.dot || "")} onNodeClick={onNodeClick} />;
     case "three":
       return <ThreeView code={String(config.code || "")} />;
     case "map":
