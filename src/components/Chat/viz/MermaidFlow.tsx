@@ -133,9 +133,12 @@ function groupColor(name: string): { bg: string; border: string; text: string } 
   };
 }
 
-/** Split label by <br> / <br/> into lines. */
+/** Split label by <br> tags or literal \\n into lines. */
 function splitLabel(label: string): string[] {
-  return label.split(/\s*<br\s*\/?>\s*/i).filter(Boolean);
+  return label
+    .split(/\s*(?:<br\s*\/?>|\\n)\s*/i)
+    .map((l) => l.trim())
+    .filter(Boolean);
 }
 
 /** Estimate card height from number of text lines. */
@@ -156,7 +159,7 @@ export function parseMermaid(source: string): ParsedGraph {
   let currentGroup: string | undefined;
 
   const ensureNode = (id: string, label?: string, shape?: NodeShape) => {
-    const hasMultiline = label?.includes("<br") ?? false;
+    const hasMultiline = label ? /(<br\s*\/?>|\\n)/i.test(label) : false;
     const resolvedShape: NodeShape = shape ?? (hasMultiline ? "card" : "rect");
     if (!nodeMap.has(id)) {
       nodeMap.set(id, {
