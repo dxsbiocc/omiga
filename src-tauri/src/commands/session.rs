@@ -20,6 +20,7 @@ pub type AppState = OmigaAppState;
 
 fn message_record_to_api(rec: MessageRecord) -> Message {
     let id = Some(rec.id.clone());
+    let created_at = Some(rec.created_at.clone());
     match rec.role.as_str() {
         "assistant" => {
             let tool_calls = rec
@@ -39,16 +40,19 @@ fn message_record_to_api(rec: MessageRecord) -> Message {
                 reasoning_content: rec.reasoning_content,
                 follow_up_suggestions,
                 id,
+                created_at,
             }
         }
         "tool" => Message::Tool {
             tool_call_id: rec.tool_call_id.unwrap_or_default(),
             output: rec.content,
             id,
+            created_at,
         },
         _ => Message::User {
             content: rec.content,
             id,
+            created_at,
         },
     }
 }
@@ -1067,6 +1071,9 @@ pub enum Message {
         /// SQLite `messages.id` when loaded from DB; omitted for legacy JSON.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        /// RFC3339 creation timestamp from DB; used by frontend for elapsed-time display.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
     },
     #[serde(rename = "assistant")]
     Assistant {
@@ -1080,6 +1087,9 @@ pub enum Message {
         follow_up_suggestions: Option<Vec<FollowUpSuggestion>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        /// RFC3339 creation timestamp from DB; used by frontend for elapsed-time display.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
     },
     #[serde(rename = "tool")]
     Tool {
@@ -1087,6 +1097,9 @@ pub enum Message {
         output: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        /// RFC3339 creation timestamp from DB; used by frontend for elapsed-time display.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
     },
 }
 

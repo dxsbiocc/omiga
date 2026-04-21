@@ -2,11 +2,10 @@
 //!
 //! 协调多个 Agent 的执行，管理依赖关系和结果传递。
 //!
-//! 两种执行模式：
-//! - `execute`: mock 模式（向后兼容，用于测试）
-//! - `execute_with_runtime`: 真实模式，通过 `spawn_background_agent` 驱动实际 LLM 子 Agent
+//! 主要入口：
+//! - `execute_with_runtime`：真实模式，通过 `spawn_background_agent` 驱动 LLM 子 Agent
 
-use super::{SchedulingRequest, SubTask, TaskPlan};
+use super::{SchedulingRequest, SchedulingStrategy, TaskPlan};
 
 #[inline]
 fn unix_timestamp_secs() -> u64 {
@@ -18,7 +17,7 @@ fn unix_timestamp_secs() -> u64 {
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use crate::app_state::OmigaAppState;
 use crate::domain::tools::WebSearchApiKeys;
@@ -47,8 +46,12 @@ pub struct OrchestrationResult {
 pub enum ExecutionStatus {
     Pending,
     Running,
+    /// 全部子任务成功
     Completed,
+    /// 全部子任务失败
     Failed,
+    /// 部分子任务成功、部分失败（非关键任务失败时）
+    PartiallyCompleted,
     Cancelled,
 }
 
@@ -89,95 +92,6 @@ impl AgentOrchestrator {
         Self {}
     }
 
-    /// 执行任务计划
-    pub async fn execute(
-        &self,
-        plan: &TaskPlan,
-        _request: &SchedulingRequest,
-        app: &tauri::AppHandle,
-    ) -> Result<OrchestrationResult, String> {
-        let mut result = OrchestrationResult {
-            plan_id: plan.plan_id.clone(),
-            status: ExecutionStatus::Running,
-            subtask_results: HashMap::new(),
-            execution_log: Vec::new(),
-            started_at: Some(unix_timestamp_secs()),
-            completed_at: None,
-            final_summary: String::new(),
-        };
-
-        self.log(&mut result, None, "开始执行计划", LogLevel::Info);
-
-        let groups = plan.get_parallel_groups();
-
-        for (group_idx, group) in groups.iter().enumerate() {
-            self.log(
-                &mut result,
-                None,
-                &format!("执行组 {}: {:?}", group_idx + 1, group),
-                LogLevel::Info,
-            );
-
-            let mut handles = Vec::new();
-
-            for task_id in group {
-                if let Some(subtask) = plan.subtasks.iter().find(|t| &t.id == task_id) {
-                    let handle = self.spawn_subtask(
-                        subtask.clone(),
-                        plan.global_context.clone(),
-                        app.clone(),
-                    );
-                    handles.push((task_id.clone(), handle));
-                }
-            }
-
-            for (task_id, handle) in handles {
-                match handle.await {
-                    Ok(subtask_result) => {
-                        let status = subtask_result.status.clone();
-                        result
-                            .subtask_results
-                            .insert(task_id.clone(), subtask_result);
-
-                        if status == ExecutionStatus::Failed {
-                            self.log(&mut result, Some(&task_id), "子任务失败", LogLevel::Error);
-                            if plan.subtasks.iter().any(|t| t.id == task_id && t.critical) {
-                                result.status = ExecutionStatus::Failed;
-                                result.final_summary =
-                                    format!("关键任务 {} 失败，中止执行", task_id);
-                                return Ok(result);
-                            }
-                        } else {
-                            self.log(&mut result, Some(&task_id), "子任务完成", LogLevel::Info);
-                        }
-                    }
-                    Err(e) => {
-                        self.log(
-                            &mut result,
-                            Some(&task_id),
-                            &format!("执行错误: {}", e),
-                            LogLevel::Error,
-                        );
-                        result.subtask_results.insert(
-                            task_id.clone(),
-                            SubTaskResult {
-                                subtask_id: task_id,
-                                status: ExecutionStatus::Failed,
-                                output: None,
-                                error: Some(e.to_string()),
-                                started_at: None,
-                                completed_at: None,
-                            },
-                        );
-                    }
-                }
-            }
-        }
-
-        self.finalize_result(&mut result, plan.subtasks.len());
-        Ok(result)
-    }
-
     /// 生成动态执行计划（基于 LLM 分析）
     pub async fn generate_dynamic_plan(
         &self,
@@ -189,61 +103,6 @@ impl AgentOrchestrator {
         let planner = super::planner::TaskPlanner::new();
         let scheduling_request = SchedulingRequest::new(request);
         planner.decompose(&scheduling_request).await
-    }
-
-    /// 执行单个 Agent（简单包装）
-    pub async fn execute_single_agent(
-        &self,
-        agent_type: &str,
-        prompt: &str,
-        _app: &tauri::AppHandle,
-    ) -> Result<String, String> {
-        // 这里应该调用实际的 Agent 执行
-        // 暂时返回模拟结果
-        Ok(format!(
-            "Agent {} executed with prompt: {}",
-            agent_type, prompt
-        ))
-    }
-
-    /// 执行带确认的计划
-    pub async fn execute_with_confirmation(
-        &self,
-        plan: &TaskPlan,
-        request: &SchedulingRequest,
-        app: &tauri::AppHandle,
-        confirmation_callback: impl FnOnce(&str) -> bool,
-    ) -> Result<Option<OrchestrationResult>, String> {
-        let summary = self.generate_execution_summary(plan);
-
-        if confirmation_callback(&summary) {
-            let result = self.execute(plan, request, app).await?;
-            Ok(Some(result))
-        } else {
-            Ok(None) // 用户取消
-        }
-    }
-
-    /// 生成执行摘要
-    fn generate_execution_summary(&self, plan: &TaskPlan) -> String {
-        let mut summary = format!("执行计划将使用以下 Agent:\n\n");
-
-        for subtask in &plan.subtasks {
-            summary.push_str(&format!(
-                "- [{}] {}\n",
-                subtask.agent_type, subtask.description
-            ));
-            if !subtask.dependencies.is_empty() {
-                summary.push_str(&format!("  依赖: {}\n", subtask.dependencies.join(", ")));
-            }
-        }
-
-        summary.push_str(&format!(
-            "\n预估执行时间: {} 分钟",
-            plan.estimate_total_duration() / 60
-        ));
-
-        summary
     }
 
     /// 添加日志条目
@@ -280,7 +139,7 @@ impl AgentOrchestrator {
         } else if completed == 0 {
             ExecutionStatus::Failed
         } else {
-            ExecutionStatus::Completed // partial completion counts as completed
+            ExecutionStatus::PartiallyCompleted
         };
         result.completed_at = Some(unix_timestamp_secs());
 
@@ -291,35 +150,6 @@ impl AgentOrchestrator {
         result.final_summary = summary.clone();
         self.log(result, None, &summary, LogLevel::Info);
     }
-
-    /// 生成子任务执行句柄
-    fn spawn_subtask(
-        &self,
-        subtask: SubTask,
-        _global_context: String,
-        _app: tauri::AppHandle,
-    ) -> tokio::task::JoinHandle<SubTaskResult> {
-        let subtask_id = subtask.id.clone();
-        let agent_type = subtask.agent_type.clone();
-        let description = subtask.description.clone();
-
-        tokio::spawn(async move {
-            let start_time = unix_timestamp_secs();
-            // TODO: replace with real agent execution
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            SubTaskResult {
-                subtask_id: subtask_id.clone(),
-                status: ExecutionStatus::Completed,
-                output: Some(format!(
-                    "Agent '{}' completed task: {}",
-                    agent_type, description
-                )),
-                error: None,
-                started_at: Some(start_time),
-                completed_at: Some(unix_timestamp_secs()),
-            }
-        })
-    }
 }
 
 impl Default for AgentOrchestrator {
@@ -328,10 +158,10 @@ impl Default for AgentOrchestrator {
     }
 }
 
-/// 真实执行：使用 `spawn_background_agent` 驱动并行子 Agent。
+/// 核心执行路径：使用 `spawn_background_agent` 驱动并行子 Agent。
 ///
-/// 与 `execute` (mock) 不同，此方法会真正启动 LLM 子会话并等待结果。
-/// 需要调用方提供 `AgentLlmRuntime`（由 `chat.rs` 的 `send_message` 流程持有）。
+/// 需要调用方提供已构建好的 `AgentLlmRuntime`（携带 LLM config 和执行环境）。
+/// 调用方通过 `from_app()` 构建 runtime 后传入，`cancel` token 贯穿整个执行生命周期。
 impl AgentOrchestrator {
     pub(crate) async fn execute_with_runtime(
         &self,
@@ -340,8 +170,60 @@ impl AgentOrchestrator {
         app: &tauri::AppHandle,
         runtime: &crate::commands::chat::AgentLlmRuntime,
         session_id: &str,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Result<OrchestrationResult, String> {
         use crate::domain::agents::background::get_background_agent_manager;
+        use crate::domain::blackboard::{self as bb, Blackboard};
+        use crate::domain::team_state::{self, TeamPhase, TeamState, TeamSubtaskState};
+
+        let project_root = std::path::Path::new(&request.project_root);
+
+        // ── Team crash recovery: initialise & persist state ──────────────────
+        let mut team_st = TeamState::new(
+            session_id.to_string(),
+            plan.original_request.clone(),
+            request.project_root.clone(),
+        );
+        team_st.subtasks = plan
+            .subtasks
+            .iter()
+            .map(|t| TeamSubtaskState {
+                id: t.id.clone(),
+                description: t.description.clone(),
+                agent_type: t.agent_type.clone(),
+                status: "pending".to_string(),
+                attempt: 0,
+                max_retries: t.max_retries,
+                error: None,
+                bg_task_id: None,
+            })
+            .collect();
+        let is_team = request.strategy == SchedulingStrategy::Team;
+
+        // Team 模式：Planning → Executing；其他模式直接进入 Executing
+        team_st.phase = TeamPhase::Executing;
+        let _ = team_state::write_state(project_root, &team_st).await;
+
+        // ── Gap 4: Shared blackboard — resume from prior run if it exists ────
+        let mut blackboard: Blackboard = bb::read_board(project_root, session_id)
+            .await
+            .unwrap_or_else(|| Blackboard::new(session_id.to_string()));
+
+        // Helper: update subtask status in the persisted state
+        macro_rules! persist_subtask {
+            ($id:expr, $status:expr, $attempt:expr, $bg:expr, $err:expr) => {{
+                if let Some(s) = team_st.subtasks.iter_mut().find(|s| &s.id == $id) {
+                    s.status = $status.to_string();
+                    s.attempt = $attempt;
+                    if let Some(bg) = $bg {
+                        s.bg_task_id = Some(bg);
+                    }
+                    s.error = $err;
+                }
+                team_st.touch();
+                let _ = team_state::write_state(project_root, &team_st).await;
+            }};
+        }
 
         let mut result = OrchestrationResult {
             plan_id: plan.plan_id.clone(),
@@ -381,6 +263,15 @@ impl AgentOrchestrator {
         let groups = plan.get_parallel_groups();
 
         for (group_idx, group) in groups.iter().enumerate() {
+            // Check for cancellation before starting each group.
+            if cancel.is_cancelled() {
+                self.log(&mut result, None, "编排已被取消", LogLevel::Warning);
+                result.status = ExecutionStatus::Cancelled;
+                result.completed_at = Some(unix_timestamp_secs());
+                result.final_summary = "编排已被用户取消".to_string();
+                return Ok(result);
+            }
+
             self.log(
                 &mut result,
                 None,
@@ -388,19 +279,70 @@ impl AgentOrchestrator {
                 LogLevel::Info,
             );
 
+            // Team 模式：当当前组全是 verification agent 时进入 Verifying 阶段
+            if is_team {
+                let is_verify_group = group.iter().all(|task_id| {
+                    plan.subtasks
+                        .iter()
+                        .find(|t| &t.id == task_id)
+                        .map(|t| t.agent_type == "verification")
+                        .unwrap_or(false)
+                });
+                if is_verify_group {
+                    team_st.phase = TeamPhase::Verifying;
+                    team_st.touch();
+                    let _ = team_state::write_state(project_root, &team_st).await;
+                    self.log(&mut result, None, "[Team] 进入验证阶段", LogLevel::Info);
+                }
+            }
+
             // 并行启动组内所有后台 Agent，收集 bg_task_id
             let mut bg_task_ids: Vec<(String, String)> = Vec::new(); // (subtask_id, bg_task_id)
 
             for task_id_str in group {
                 if let Some(subtask) = plan.subtasks.iter().find(|t| &t.id == task_id_str) {
                     let effective_root = std::path::Path::new(&request.project_root);
+
+                    // Build prompt, injecting blackboard entries for all upstream dependencies.
+                    // This lets the arbitrate/architect subtask (Competitive) and post-verify
+                    // (VerificationFirst) actually see prior outputs rather than just a
+                    // placeholder "黑板中包含…" instruction.
+                    let dep_context = if subtask.dependencies.is_empty() {
+                        String::new()
+                    } else {
+                        let mut dep_ctx = String::new();
+                        for dep_id in &subtask.dependencies {
+                            let entries = blackboard.query_by_subtask(dep_id);
+                            for e in entries {
+                                dep_ctx.push_str(&format!(
+                                    "\n\n---\n**[{}] {} 的输出**\n\n{}",
+                                    e.subtask_id,
+                                    e.agent_type,
+                                    e.value.trim()
+                                ));
+                            }
+                        }
+                        if dep_ctx.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n\n## 上游子任务结果（来自共享黑板）{}", dep_ctx)
+                        }
+                    };
+
+                    let base_prompt = if subtask.context.is_empty() {
+                        subtask.description.clone()
+                    } else {
+                        format!("{}\n\n{}", subtask.description, subtask.context)
+                    };
+                    let full_prompt = if dep_context.is_empty() {
+                        base_prompt
+                    } else {
+                        format!("{}{}", base_prompt, dep_context)
+                    };
+
                     let agent_args = crate::domain::tools::agent::AgentArgs {
                         description: subtask.description.clone(),
-                        prompt: if subtask.context.is_empty() {
-                            subtask.description.clone()
-                        } else {
-                            format!("{}\n\n{}", subtask.description, subtask.context)
-                        },
+                        prompt: full_prompt,
                         subagent_type: Some(subtask.agent_type.clone()),
                         model: None,
                         run_in_background: None,
@@ -435,6 +377,24 @@ impl AgentOrchestrator {
                                 &format!("后台 Agent 已启动 (bg_task_id={})", bg_task_id),
                                 LogLevel::Info,
                             );
+                            persist_subtask!(
+                                task_id_str,
+                                "running",
+                                0u32,
+                                Some(bg_task_id.clone()),
+                                None::<String>
+                            );
+                            // Notify frontend: worker started
+                            let _ = app.emit(
+                                "team-worker-update",
+                                serde_json::json!({
+                                    "sessionId": session_id,
+                                    "subtaskId": task_id_str,
+                                    "agentType": subtask.agent_type,
+                                    "status": "running",
+                                    "description": subtask.description,
+                                }),
+                            );
                             bg_task_ids.push((task_id_str.clone(), bg_task_id));
                         }
                         Err(e) => {
@@ -443,6 +403,24 @@ impl AgentOrchestrator {
                                 Some(task_id_str),
                                 &format!("启动后台 Agent 失败: {}", e),
                                 LogLevel::Error,
+                            );
+                            persist_subtask!(
+                                task_id_str,
+                                "failed",
+                                0u32,
+                                None::<String>,
+                                Some(e.clone())
+                            );
+                            // Notify frontend of launch failure so UI doesn't stall.
+                            let _ = app.emit(
+                                "team-worker-update",
+                                serde_json::json!({
+                                    "sessionId": session_id,
+                                    "subtaskId": task_id_str,
+                                    "agentType": subtask.agent_type,
+                                    "status": "failed",
+                                    "error": e,
+                                }),
                             );
                             result.subtask_results.insert(
                                 task_id_str.clone(),
@@ -460,74 +438,579 @@ impl AgentOrchestrator {
                 }
             }
 
-            // Poll all background agents in this group concurrently instead of sequentially.
-            // Sequential polling would make group[1] wait up to 600 s for group[0] even if
-            // group[0] is still running while group[1] finished minutes ago.
+            // ── Gap 5: Streaming aggregation via FuturesUnordered ────────────
+            // Each worker result is processed as soon as it arrives instead of
+            // waiting for the slowest task in the group (join_all behaviour).
+            // Completed results are posted to the shared blackboard immediately,
+            // letting the Architect read partial results while other workers run.
+            //
+            // Retry / per-subtask timeout are preserved from the earlier design.
             let manager = get_background_agent_manager();
-            let poll_futures: Vec<_> = bg_task_ids
+
+            // Build per-subtask metadata lookup: id → (timeout_secs, max_retries, subtask)
+            let subtask_meta: std::collections::HashMap<
+                String,
+                (Option<u64>, u32, crate::domain::agents::scheduler::SubTask),
+            > = bg_task_ids
                 .iter()
-                .map(|(subtask_id, bg_task_id)| {
-                    poll_background_agent(manager, subtask_id.clone(), bg_task_id.clone())
+                .filter_map(|(sid, _)| {
+                    plan.subtasks
+                        .iter()
+                        .find(|t| &t.id == sid)
+                        .map(|t| (sid.clone(), (t.timeout_secs, t.max_retries, t.clone())))
                 })
                 .collect();
 
-            let poll_results = futures::future::join_all(poll_futures).await;
+            // Seed the stream: (subtask_id, bg_task_id, attempt)
+            // We use a VecDeque so re-spawned retries can be pushed back cheaply.
+            use futures::stream::{FuturesUnordered, StreamExt};
+            use std::pin::Pin;
+            type PollFut = Pin<
+                Box<dyn std::future::Future<Output = (String, u32, (SubTaskResult, bool))> + Send>,
+            >;
+            let mut stream: FuturesUnordered<PollFut> = FuturesUnordered::new();
 
-            for (subtask_result, is_critical_failure) in poll_results {
-                let subtask_id = subtask_result.subtask_id.clone();
+            for (sid, bg_id) in &bg_task_ids {
+                let timeout = subtask_meta.get(sid).and_then(|(t, _, _)| *t);
+                let sid_c = sid.clone();
+                let bg_c = bg_id.clone();
+                let cancel_c = cancel.clone();
+                stream.push(Box::pin(async move {
+                    let res =
+                        poll_background_agent(manager, sid_c.clone(), bg_c, timeout, cancel_c)
+                            .await;
+                    (sid_c, 0u32, res)
+                }));
+            }
+
+            while let Some((sid, attempt, (subtask_result, _))) = stream.next().await {
                 let is_fail = subtask_result.status == ExecutionStatus::Failed;
-                result
-                    .subtask_results
-                    .insert(subtask_id.clone(), subtask_result);
+                // Cancelled subtasks must NOT be retried — propagate immediately.
+                let is_cancelled = subtask_result.status == ExecutionStatus::Cancelled;
+
+                if is_cancelled {
+                    result.subtask_results.insert(sid.clone(), subtask_result);
+                    continue;
+                }
 
                 if is_fail {
+                    let max_retries = subtask_meta.get(&sid).map(|(_, r, _)| *r).unwrap_or(2);
+
+                    if attempt < max_retries {
+                        let backoff = 1u64 << attempt.min(4);
+                        self.log(
+                            &mut result,
+                            Some(&sid),
+                            &format!(
+                                "子任务失败，{} s 后重试（第 {}/{} 次）",
+                                backoff,
+                                attempt + 1,
+                                max_retries
+                            ),
+                            LogLevel::Warning,
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
+
+                        let Some(subtask) = subtask_meta.get(&sid).map(|(_, _, t)| t.clone())
+                        else {
+                            tracing::warn!(target: "omiga::scheduler", sid = %sid, "subtask missing from meta on retry; skipping");
+                            continue;
+                        };
+                        let effective_root = std::path::Path::new(&request.project_root);
+                        // Re-inject blackboard context on retry as well.
+                        let retry_dep_context = if subtask.dependencies.is_empty() {
+                            String::new()
+                        } else {
+                            let mut dep_ctx = String::new();
+                            for dep_id in &subtask.dependencies {
+                                for e in blackboard.query_by_subtask(dep_id) {
+                                    dep_ctx.push_str(&format!(
+                                        "\n\n---\n**[{}] {} 的输出**\n\n{}",
+                                        e.subtask_id,
+                                        e.agent_type,
+                                        e.value.trim()
+                                    ));
+                                }
+                            }
+                            if dep_ctx.is_empty() {
+                                String::new()
+                            } else {
+                                format!("\n\n## 上游子任务结果（来自共享黑板）{}", dep_ctx)
+                            }
+                        };
+                        let retry_base = if subtask.context.is_empty() {
+                            subtask.description.clone()
+                        } else {
+                            format!("{}\n\n{}", subtask.description, subtask.context)
+                        };
+                        let agent_args = crate::domain::tools::agent::AgentArgs {
+                            description: subtask.description.clone(),
+                            prompt: if retry_dep_context.is_empty() {
+                                retry_base
+                            } else {
+                                format!("{}{}", retry_base, retry_dep_context)
+                            },
+                            subagent_type: Some(subtask.agent_type.clone()),
+                            model: None,
+                            run_in_background: None,
+                            cwd: None,
+                        };
+                        let router = crate::domain::agents::get_agent_router();
+                        let agent_def = router.select_agent(Some(&subtask.agent_type));
+                        let new_msg_id = uuid::Uuid::new_v4().to_string();
+                        let next_attempt = attempt + 1;
+                        match crate::commands::chat::spawn_background_agent(
+                            app,
+                            &new_msg_id,
+                            session_id,
+                            &tool_results_dir,
+                            effective_root,
+                            None,
+                            None,
+                            &agent_args,
+                            runtime,
+                            1,
+                            web_search_keys.clone(),
+                            skill_cache.clone(),
+                            agent_def,
+                        )
+                        .await
+                        {
+                            Ok(new_bg_id) => {
+                                persist_subtask!(
+                                    &sid,
+                                    "running",
+                                    next_attempt,
+                                    Some(new_bg_id.clone()),
+                                    None::<String>
+                                );
+                                let timeout = subtask_meta.get(&sid).and_then(|(t, _, _)| *t);
+                                let sid_c = sid.clone();
+                                let cancel_c = cancel.clone();
+                                stream.push(Box::pin(async move {
+                                    let res = poll_background_agent(
+                                        manager,
+                                        sid_c.clone(),
+                                        new_bg_id,
+                                        timeout,
+                                        cancel_c,
+                                    )
+                                    .await;
+                                    (sid_c, next_attempt, res)
+                                }));
+                            }
+                            Err(e) => {
+                                self.log(
+                                    &mut result,
+                                    Some(&sid),
+                                    &format!("重试启动失败: {}", e),
+                                    LogLevel::Error,
+                                );
+                                persist_subtask!(&sid, "failed", attempt, None::<String>, Some(e));
+                                result.subtask_results.insert(sid, subtask_result);
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Exhausted retries
+                    let fail_err = subtask_result
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "exceeded max retries".to_string());
                     self.log(
                         &mut result,
-                        Some(&subtask_id),
-                        "子任务失败",
+                        Some(&sid),
+                        "子任务失败（已用尽重试次数）",
                         LogLevel::Error,
                     );
-                    if is_critical_failure {
+                    persist_subtask!(&sid, "failed", attempt, None::<String>, Some(fail_err));
+                    let is_critical = subtask_meta
+                        .get(&sid)
+                        .map(|(_, _, t)| t.critical)
+                        .unwrap_or(false);
+                    let critical_err = subtask_result.error.clone();
+                    let critical_agent = subtask_meta
+                        .get(&sid)
+                        .map(|(_, _, t)| t.agent_type.clone())
+                        .unwrap_or_default();
+                    result.subtask_results.insert(sid.clone(), subtask_result);
+                    if is_critical {
+                        team_st.phase = TeamPhase::Failed;
+                        team_st.touch();
+                        let _ = team_state::write_state(project_root, &team_st).await;
+                        let _ = app.emit(
+                            "team-worker-update",
+                            serde_json::json!({
+                                "sessionId": session_id,
+                                "subtaskId": sid,
+                                "agentType": critical_agent,
+                                "status": "failed_critical",
+                                "error": critical_err.as_deref().unwrap_or("critical failure"),
+                            }),
+                        );
                         result.status = ExecutionStatus::Failed;
-                        result.final_summary = format!("关键任务 {} 失败，中止执行", subtask_id);
+                        result.final_summary = format!("关键任务 {} 失败，中止执行", sid);
                         return Ok(result);
                     }
                 } else {
-                    self.log(&mut result, Some(&subtask_id), "子任务完成", LogLevel::Info);
+                    // ── Gap 4: post to shared blackboard immediately ──────────
+                    self.log(
+                        &mut result,
+                        Some(&sid),
+                        "子任务完成，写入黑板",
+                        LogLevel::Info,
+                    );
+                    persist_subtask!(&sid, "completed", attempt, None::<String>, None::<String>);
+                    let agent_type = subtask_meta
+                        .get(&sid)
+                        .map(|(_, _, t)| t.agent_type.clone())
+                        .unwrap_or_default();
+                    // Notify frontend: worker completed (include a short preview of output)
+                    let preview = subtask_result
+                        .output
+                        .as_deref()
+                        .map(|s| s.chars().take(200).collect::<String>())
+                        .unwrap_or_default();
+                    let _ = app.emit(
+                        "team-worker-update",
+                        serde_json::json!({
+                            "sessionId": session_id,
+                            "subtaskId": sid,
+                            "agentType": agent_type,
+                            "status": "completed",
+                            "preview": preview,
+                        }),
+                    );
+                    // Always post to the blackboard so downstream query_by_subtask
+                    // always finds an entry for completed dependencies — even when
+                    // output is empty we post a sentinel so injection isn't silently skipped.
+                    let output_val = subtask_result
+                        .output
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "（任务已完成，无文本输出）".to_string());
+                    blackboard.post(crate::domain::blackboard::BlackboardEntry {
+                        subtask_id: sid.clone(),
+                        agent_type,
+                        key: "result".to_string(),
+                        value: output_val,
+                        posted_at: chrono::Utc::now(),
+                    });
+                    let _ = crate::domain::blackboard::write_board(project_root, &blackboard).await;
+                    result.subtask_results.insert(sid, subtask_result);
                 }
             }
         }
 
         self.finalize_result(&mut result, plan.subtasks.len());
+
+        // ── Team 模式：verify 失败 → Fixing 循环（最多 3 轮）────────────────────
+        // 当 team-verify 子任务失败时，派遣 debugger 读取黑板并修复问题，之后重新验证。
+        if is_team && !cancel.is_cancelled() {
+            let verify_failed = result
+                .subtask_results
+                .get(crate::domain::agents::scheduler::planner::TEAM_VERIFY_TASK_ID)
+                .map(|r| r.status == ExecutionStatus::Failed)
+                .unwrap_or(false);
+
+            let mut fix_round = 0u32;
+            const MAX_FIX_ROUNDS: u32 = 3;
+            let mut verify_failed_now = verify_failed;
+
+            while verify_failed_now && fix_round < MAX_FIX_ROUNDS && !cancel.is_cancelled() {
+                fix_round += 1;
+                team_st.phase = TeamPhase::Fixing;
+                team_st.touch();
+                let _ = team_state::write_state(project_root, &team_st).await;
+                self.log(
+                    &mut result,
+                    None,
+                    &format!(
+                        "[Team] 验证失败，启动修复轮次 {}/{}",
+                        fix_round, MAX_FIX_ROUNDS
+                    ),
+                    LogLevel::Warning,
+                );
+
+                // Build fix prompt from blackboard
+                let verify_error = result
+                    .subtask_results
+                    .get(crate::domain::agents::scheduler::planner::TEAM_VERIFY_TASK_ID)
+                    .and_then(|r| r.error.clone())
+                    .unwrap_or_else(|| "验证失败，详见黑板".to_string());
+                let fix_id = format!("team-fix-{}", fix_round);
+                let fix_subtask = crate::domain::agents::scheduler::SubTask::new(
+                    &fix_id,
+                    &format!(
+                        "【修复 {}/{}】根据验证失败原因修复问题",
+                        fix_round, MAX_FIX_ROUNDS
+                    ),
+                )
+                .with_agent("debugger")
+                .with_context(format!(
+                    "原始目标: {}\n\n验证阶段发现的问题:\n{}\n\n\
+                     请从共享黑板中读取所有 Worker 输出，定位根本原因并修复。\
+                     修复后将完整的修复结果输出，供重新验证使用。",
+                    request.user_request, verify_error
+                ))
+                .with_timeout(600)
+                .critical();
+
+                let effective_root = std::path::Path::new(&request.project_root);
+                let fix_agent_args = crate::domain::tools::agent::AgentArgs {
+                    description: fix_subtask.description.clone(),
+                    prompt: format!(
+                        "{}\n\n{}\n\n## 共享黑板内容\n\n{}",
+                        fix_subtask.description,
+                        fix_subtask.context,
+                        blackboard.snapshot_markdown()
+                    ),
+                    subagent_type: Some("debugger".to_string()),
+                    model: None,
+                    run_in_background: None,
+                    cwd: None,
+                };
+                let router = crate::domain::agents::get_agent_router();
+                if cancel.is_cancelled() {
+                    break;
+                }
+
+                let fix_agent_def = router.select_agent(Some("debugger"));
+                let fix_msg_id = uuid::Uuid::new_v4().to_string();
+
+                match crate::commands::chat::spawn_background_agent(
+                    app,
+                    &fix_msg_id,
+                    session_id,
+                    &tool_results_dir,
+                    effective_root,
+                    None,
+                    None,
+                    &fix_agent_args,
+                    runtime,
+                    1,
+                    web_search_keys.clone(),
+                    skill_cache.clone(),
+                    fix_agent_def,
+                )
+                .await
+                {
+                    Ok(fix_bg_id) => {
+                        let manager = get_background_agent_manager();
+                        let (fix_result, _) = poll_background_agent(
+                            manager,
+                            fix_id.clone(),
+                            fix_bg_id,
+                            Some(600),
+                            cancel.clone(),
+                        )
+                        .await;
+
+                        // Post fix output to blackboard
+                        let fix_output = fix_result
+                            .output
+                            .clone()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| "（修复完成，无文本输出）".to_string());
+                        blackboard.post(crate::domain::blackboard::BlackboardEntry {
+                            subtask_id: fix_id.clone(),
+                            agent_type: "debugger".to_string(),
+                            key: "result".to_string(),
+                            value: fix_output,
+                            posted_at: chrono::Utc::now(),
+                        });
+                        let _ =
+                            crate::domain::blackboard::write_board(project_root, &blackboard).await;
+                        result.subtask_results.insert(fix_id.clone(), fix_result);
+
+                        // Re-run team-verify
+                        team_st.phase = TeamPhase::Verifying;
+                        team_st.touch();
+                        let _ = team_state::write_state(project_root, &team_st).await;
+                        self.log(
+                            &mut result,
+                            None,
+                            &format!("[Team] 修复完成，重新验证（轮次 {}）", fix_round),
+                            LogLevel::Info,
+                        );
+
+                        let reverify_id = format!("team-verify-{}", fix_round);
+                        let reverify_context = format!(
+                            "原始目标: {}\n\n这是第 {} 次重新验证。\
+                             黑板中包含原始 Worker 输出和 {} 的修复结果。\
+                             请确认修复是否解决了所有问题。",
+                            request.user_request, fix_round, fix_id
+                        );
+                        let reverify_args = crate::domain::tools::agent::AgentArgs {
+                            description: "重新验证修复结果".to_string(),
+                            prompt: format!(
+                                "{}\n\n## 共享黑板\n\n{}",
+                                reverify_context,
+                                blackboard.snapshot_markdown()
+                            ),
+                            subagent_type: Some("verification".to_string()),
+                            model: None,
+                            run_in_background: None,
+                            cwd: None,
+                        };
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+
+                        let reverify_agent_def = router.select_agent(Some("verification"));
+                        let reverify_msg_id = uuid::Uuid::new_v4().to_string();
+
+                        match crate::commands::chat::spawn_background_agent(
+                            app,
+                            &reverify_msg_id,
+                            session_id,
+                            &tool_results_dir,
+                            effective_root,
+                            None,
+                            None,
+                            &reverify_args,
+                            runtime,
+                            1,
+                            web_search_keys.clone(),
+                            skill_cache.clone(),
+                            reverify_agent_def,
+                        )
+                        .await
+                        {
+                            Ok(rv_bg_id) => {
+                                let (rv_result, _) = poll_background_agent(
+                                    manager,
+                                    reverify_id.clone(),
+                                    rv_bg_id,
+                                    Some(300),
+                                    cancel.clone(),
+                                )
+                                .await;
+                                verify_failed_now = rv_result.status == ExecutionStatus::Failed;
+                                let rv_output = rv_result
+                                    .output
+                                    .clone()
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or_else(|| "（重新验证完成）".to_string());
+                                blackboard.post(crate::domain::blackboard::BlackboardEntry {
+                                    subtask_id: reverify_id.clone(),
+                                    agent_type: "verification".to_string(),
+                                    key: "result".to_string(),
+                                    value: rv_output,
+                                    posted_at: chrono::Utc::now(),
+                                });
+                                let _ = crate::domain::blackboard::write_board(
+                                    project_root,
+                                    &blackboard,
+                                )
+                                .await;
+                                result.subtask_results.insert(reverify_id, rv_result);
+                                // Update overall status based on latest verify
+                                if !verify_failed_now {
+                                    result.status = ExecutionStatus::Completed;
+                                    self.log(
+                                        &mut result,
+                                        None,
+                                        "[Team] 修复后验证通过",
+                                        LogLevel::Info,
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                self.log(
+                                    &mut result,
+                                    None,
+                                    &format!("[Team] 重新验证启动失败: {}", e),
+                                    LogLevel::Error,
+                                );
+                                verify_failed_now = false; // stop loop on spawn error
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.log(
+                            &mut result,
+                            None,
+                            &format!("[Team] 修复 Agent 启动失败: {}", e),
+                            LogLevel::Error,
+                        );
+                        verify_failed_now = false;
+                    }
+                }
+            }
+        }
+
+        // Append blackboard snapshot to the final summary so the caller/Architect can read it
+        if !blackboard.is_empty() {
+            result.final_summary.push_str("\n\n");
+            result
+                .final_summary
+                .push_str(&blackboard.snapshot_markdown());
+        }
+
+        // Team 模式：成功后进入 Synthesizing，信号化给 inject_schedule_summary_message 执行 Leader 综合
+        if is_team
+            && result.status != ExecutionStatus::Failed
+            && result.status != ExecutionStatus::Cancelled
+        {
+            team_st.phase = TeamPhase::Synthesizing;
+            team_st.touch();
+            let _ = team_state::write_state(project_root, &team_st).await;
+            self.log(
+                &mut result,
+                None,
+                "[Team] 进入综合阶段，Leader 将汇总所有 Worker 输出",
+                LogLevel::Info,
+            );
+        }
+
+        // Persist final Team state
+        team_st.phase = if result.status == ExecutionStatus::Failed {
+            TeamPhase::Failed
+        } else {
+            TeamPhase::Complete
+        };
+        team_st.touch();
+        let _ = team_state::write_state(project_root, &team_st).await;
+
         Ok(result)
     }
 }
 
-/// 快速编排执行
-pub async fn execute_single_task(
-    agent_type: &str,
-    prompt: &str,
-    app: &tauri::AppHandle,
-) -> Result<String, String> {
-    let orchestrator = AgentOrchestrator::new();
-    orchestrator
-        .execute_single_agent(agent_type, prompt, app)
-        .await
-}
-
-/// Poll a single background agent until it reaches a terminal state or times out.
+/// Poll a single background agent until it reaches a terminal state, times out, or is cancelled.
 /// Returns `(SubTaskResult, is_critical_failure)`.
 /// Runs independently so callers can drive multiple polls concurrently with `join_all`.
+/// `timeout_secs` overrides the global 600 s default when `Some`.
 async fn poll_background_agent(
     manager: &'static crate::domain::agents::background::BackgroundAgentManager,
     subtask_id: String,
     bg_task_id: String,
+    timeout_secs: Option<u64>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> (SubTaskResult, bool) {
     use crate::domain::agents::background::BackgroundAgentStatus;
 
-    let poll_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(600);
+    let effective_timeout = timeout_secs.unwrap_or(600);
+    let poll_deadline =
+        tokio::time::Instant::now() + tokio::time::Duration::from_secs(effective_timeout);
 
     loop {
+        // Bail immediately if the orchestration was cancelled.
+        if cancel.is_cancelled() {
+            return (
+                SubTaskResult {
+                    subtask_id,
+                    status: ExecutionStatus::Cancelled,
+                    output: None,
+                    error: Some("Orchestration cancelled by user.".to_string()),
+                    started_at: None,
+                    completed_at: None,
+                },
+                false,
+            );
+        }
+
         match manager.get_task(&bg_task_id).await {
             Some(task) => match task.status {
                 BackgroundAgentStatus::Completed => {
@@ -609,6 +1092,9 @@ async fn poll_background_agent(
             );
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(500)) => {}
+            _ = cancel.cancelled() => {}
+        }
     }
 }
