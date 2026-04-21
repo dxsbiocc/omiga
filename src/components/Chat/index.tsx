@@ -2017,6 +2017,36 @@ export function Chat({ sessionId }: ChatProps) {
     };
   }, [refreshBackgroundTasks]);
 
+  // Listen for implicit memory indexing events emitted by index_chat_to_implicit_memory.
+  // These are global Tauri events filtered by session_id.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let completedTimer: ReturnType<typeof setTimeout> | null = null;
+    const setup = async () => {
+      const u1 = await listen<{ session_id: string }>("chat-index-start", ({ payload }) => {
+        if (payload.session_id !== sessionId) return;
+        if (completedTimer) clearTimeout(completedTimer);
+        setIndexingStatus("indexing");
+      });
+      const u2 = await listen<{ session_id: string }>("chat-index-complete", ({ payload }) => {
+        if (payload.session_id !== sessionId) return;
+        setIndexingStatus("completed");
+        completedTimer = setTimeout(() => setIndexingStatus("idle"), 2500);
+      });
+      const u3 = await listen<{ session_id: string; error: string }>("chat-index-error", ({ payload }) => {
+        if (payload.session_id !== sessionId) return;
+        setIndexingStatus("error");
+        completedTimer = setTimeout(() => setIndexingStatus("idle"), 3500);
+      });
+      unlisten = () => { u1(); u2(); u3(); };
+    };
+    void setup();
+    return () => {
+      unlisten?.();
+      if (completedTimer) clearTimeout(completedTimer);
+    };
+  }, [sessionId]);
+
   // Listen for background title updates emitted by spawn_session_title_async.
   // The backend already persisted the rename; we only need to refresh local state.
   useEffect(() => {
@@ -3013,20 +3043,7 @@ export function Chat({ sessionId }: ChatProps) {
           setCurrentResponse("");
           currentResponseRef.current = "";
 
-          // Trigger implicit memory indexing status display
-          setIndexingStatus("indexing");
-          // Auto-hide after 3 seconds
-          setTimeout(() => {
-            setIndexingStatus((prev) =>
-              prev === "indexing" ? "completed" : prev,
-            );
-            // Clear completed status after another 2 seconds
-            setTimeout(() => {
-              setIndexingStatus((prev) =>
-                prev === "completed" ? "idle" : prev,
-              );
-            }, 2000);
-          }, 3000);
+          // Memory indexing status is driven by chat-index-* Tauri events below.
 
           if (isDev) {
             console.debug("[OmigaDev][AgentComplete]", {
