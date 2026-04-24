@@ -555,6 +555,24 @@ pub struct RunAgentScheduleRequest {
     pub skip_confirmation: bool,
 }
 
+/// Request body for executing an already-generated plan without asking the planner to rebuild it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunExistingAgentPlanRequest {
+    /// Existing scheduler plan payload returned by `/plan`.
+    pub plan: crate::domain::agents::scheduler::TaskPlan,
+    /// Working directory (project root) for all subtasks.
+    pub project_root: String,
+    /// Parent chat session id for attribution and final synthesis.
+    pub session_id: String,
+    /// Optional orchestration mode hint (`schedule`, `team`, `autopilot`).
+    #[serde(default)]
+    pub mode_hint: Option<String>,
+    /// Execution strategy to use when running the existing plan.
+    #[serde(default)]
+    pub strategy: Option<crate::domain::agents::scheduler::SchedulingStrategy>,
+}
+
 fn default_auto_decompose() -> bool {
     true
 }
@@ -564,14 +582,13 @@ fn default_auto_decompose() -> bool {
 ///
 /// The caller must have an active LLM session (API key configured). Returns the
 /// full `OrchestrationResult` when all subtasks finish.
-#[tauri::command]
-pub async fn run_agent_schedule(
+pub(crate) async fn run_agent_schedule_inner(
     app: tauri::AppHandle,
-    app_state: State<'_, OmigaAppState>,
+    app_state: &OmigaAppState,
     request: RunAgentScheduleRequest,
-) -> CommandResult<crate::domain::agents::scheduler::OrchestrationResult> {
+) -> Result<crate::domain::agents::scheduler::OrchestrationResult, OmigaError> {
     use crate::domain::agents::scheduler::{AgentScheduler, SchedulingRequest};
-    use crate::errors::{ChatError, OmigaError};
+    use crate::errors::ChatError;
 
     // Register a cancel token for this orchestration so cancel_agent_schedule can abort it.
     // Multiple concurrent orchestrations on the same session are each tracked by orch_id.
@@ -709,12 +726,138 @@ pub async fn run_agent_schedule(
     Ok(orch_result)
 }
 
+#[tauri::command]
+pub async fn run_agent_schedule(
+    app: tauri::AppHandle,
+    app_state: State<'_, OmigaAppState>,
+    request: RunAgentScheduleRequest,
+) -> CommandResult<crate::domain::agents::scheduler::OrchestrationResult> {
+    run_agent_schedule_inner(app, &app_state, request).await
+}
+
+/// Execute a plan that was already generated and shown to the user.
+///
+/// This is intentionally different from `run_agent_schedule`: it does **not** call the planner
+/// again, so `/plan` → "执行此计划" preserves the visible steps instead of silently replanning.
+#[tauri::command]
+pub async fn run_existing_agent_plan(
+    app: tauri::AppHandle,
+    app_state: State<'_, OmigaAppState>,
+    request: RunExistingAgentPlanRequest,
+) -> CommandResult<crate::domain::agents::scheduler::OrchestrationResult> {
+    use crate::domain::agents::scheduler::{AgentScheduler, SchedulingRequest, TaskPlanner};
+    use crate::errors::ChatError;
+
+    let orch_cancel = tokio_util::sync::CancellationToken::new();
+    let orch_id = uuid::Uuid::new_v4().to_string();
+    {
+        let mut orch_map = app_state.chat.active_orchestrations.lock().await;
+        orch_map
+            .entry(request.session_id.clone())
+            .or_default()
+            .insert(orch_id.clone(), orch_cancel.clone());
+    }
+
+    let project_root_path = std::path::Path::new(&request.project_root);
+    let runtime = AgentLlmRuntime::from_app(&app, Some(request.session_id.as_str()))
+        .await
+        .map_err(|e| OmigaError::Chat(ChatError::StreamError(e)))?
+        .with_runtime_context(project_root_path, &request.session_id);
+
+    let strategy = request
+        .strategy
+        .unwrap_or(crate::domain::agents::scheduler::SchedulingStrategy::Phased);
+    let sched_req = SchedulingRequest::new(request.plan.original_request.clone())
+        .with_project_root(request.project_root.clone())
+        .with_mode_hint(
+            request
+                .mode_hint
+                .clone()
+                .unwrap_or_else(|| "schedule".to_string()),
+        )
+        .with_strategy(strategy)
+        .with_parallel(request.plan.allow_parallel);
+
+    let plan = if strategy == crate::domain::agents::scheduler::SchedulingStrategy::Team {
+        TaskPlanner::new().ensure_team_verify(request.plan, &sched_req)
+    } else {
+        request.plan
+    };
+
+    let _ = app_state
+        .repo
+        .append_orchestration_event(
+            &request.session_id,
+            None,
+            None,
+            request.mode_hint.as_deref().or(Some("schedule")),
+            "approved_plan_execution_started",
+            Some("executing"),
+            None,
+            &serde_json::json!({
+                "planId": plan.plan_id,
+                "taskCount": plan.subtasks.len(),
+                "strategy": format!("{:?}", strategy),
+            })
+            .to_string(),
+        )
+        .await;
+
+    let scheduler = AgentScheduler::new();
+    let orch_result = scheduler
+        .execute_plan_with_runtime(
+            &plan,
+            &sched_req,
+            &app,
+            &runtime,
+            &request.session_id,
+            orch_cancel.clone(),
+        )
+        .await
+        .map_err(|e| OmigaError::Chat(ChatError::StreamError(e)));
+
+    {
+        let mut orch_map = app_state.chat.active_orchestrations.lock().await;
+        if let Some(inner) = orch_map.get_mut(&request.session_id) {
+            inner.remove(&orch_id);
+            if inner.is_empty() {
+                orch_map.remove(&request.session_id);
+            }
+        }
+    }
+
+    let orch_result = orch_result?;
+    inject_schedule_summary_message(
+        &app,
+        &request.session_id,
+        &plan.original_request,
+        &orch_result,
+        &runtime,
+    )
+    .await;
+
+    Ok(orch_result)
+}
+
 /// Cancel all running agent orchestrations for the given session.
 #[tauri::command]
 pub async fn cancel_agent_schedule(
     app_state: State<'_, OmigaAppState>,
     session_id: String,
 ) -> CommandResult<bool> {
+    let _ = app_state
+        .repo
+        .append_orchestration_event(
+            &session_id,
+            None,
+            None,
+            None,
+            "cancel_requested",
+            None,
+            None,
+            &serde_json::json!({}).to_string(),
+        )
+        .await;
     let tokens: Vec<tokio_util::sync::CancellationToken> = {
         let orch_map = app_state.chat.active_orchestrations.lock().await;
         orch_map
@@ -743,6 +886,19 @@ pub async fn cancel_agent_schedule(
         let mut orch_map = app_state.chat.active_orchestrations.lock().await;
         orch_map.remove(&session_id);
     }
+    let _ = app_state
+        .repo
+        .append_orchestration_event(
+            &session_id,
+            None,
+            None,
+            None,
+            "cancel_completed",
+            None,
+            None,
+            &serde_json::json!({ "cancelled": true }).to_string(),
+        )
+        .await;
     Ok(true)
 }
 
@@ -787,6 +943,8 @@ pub(crate) async fn inject_schedule_summary_message(
 
     let mut reviewer_outputs: Vec<(String, String)> = Vec::new();
     let mut worker_outputs: Vec<(String, String)> = Vec::new();
+    let mut reviewer_verdicts: Vec<crate::domain::agents::reviewer_verdict::ReviewerVerdict> =
+        Vec::new();
     for subtask in result.subtask_results.values() {
         let Some(output) = subtask.output.as_deref().filter(|s| !s.is_empty()) else {
             continue;
@@ -796,7 +954,10 @@ pub(crate) async fn inject_schedule_summary_message(
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
         if is_reviewer(agent.as_str()) {
-            reviewer_outputs.push((agent, output.to_string()));
+            reviewer_outputs.push((agent.clone(), output.to_string()));
+            reviewer_verdicts.push(
+                crate::domain::agents::reviewer_verdict::parse_reviewer_verdict(&agent, output),
+            );
         } else {
             worker_outputs.push((agent, output.to_string()));
         }
@@ -843,6 +1004,23 @@ pub(crate) async fn inject_schedule_summary_message(
             })
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
+        let reviewer_structured_block = reviewer_verdicts
+            .iter()
+            .map(|v| {
+                format!(
+                    "- `{}` | severity=`{:?}` | verdict=`{:?}` | summary={}{}",
+                    v.agent_type,
+                    v.severity,
+                    v.verdict,
+                    v.summary,
+                    v.recommendation
+                        .as_deref()
+                        .map(|r| format!(" | recommendation={}", r))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let citation_instruction =
             "\n\n**引用格式规则（严格执行）：**\n\
@@ -859,6 +1037,7 @@ pub(crate) async fn inject_schedule_summary_message(
             **用户的原始请求：**\n{}\n\n\
             **当前整体状态：** {}\n\n\
             **各 Worker 输出：**\n\n{}\n\n\
+            **Reviewer 结构化结论：**\n{}\n\n\
             **Reviewer 结论：**\n\n{}\n\n\
             综合要求：\n\
             1. 用清晰的 Markdown 结构直接回答用户问题，不得提及「子任务」「Agent」「Worker」等内部概念\n\
@@ -872,6 +1051,7 @@ pub(crate) async fn inject_schedule_summary_message(
             user_request,
             status_label,
             worker_outputs_block,
+            reviewer_structured_block,
             reviewer_outputs_block,
             citation_instruction
         );
@@ -937,17 +1117,17 @@ pub(crate) async fn inject_schedule_summary_message(
             let reviewer_block = if reviewer_outputs.is_empty() {
                 String::new()
             } else {
-                format!(
-                    "\n\n**Reviewer 结论:**\n{}",
-                    reviewer_outputs
-                        .iter()
-                        .map(|(agent, output)| {
-                            let preview = output.chars().take(300).collect::<String>();
-                            format!("- `{}`: {}", agent, preview)
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                )
+                let verdict_lines = reviewer_verdicts
+                    .iter()
+                    .map(|v| {
+                        format!(
+                            "- `{}` [{:?}/{:?}] {}",
+                            v.agent_type, v.severity, v.verdict, v.summary
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("\n\n**Reviewer 结论:**\n{}", verdict_lines)
             };
             let failed_block = {
                 let failed: Vec<_> = result
@@ -1000,11 +1180,138 @@ pub(crate) async fn inject_schedule_summary_message(
             None,
             None,
             None,
+            None,
         )
         .await
     {
         tracing::warn!(target: "omiga::scheduler", "Failed to save schedule summary message: {}", e);
         return;
+    }
+
+    let (summary_enabled, follow_enabled) =
+        crate::domain::post_turn_settings::load_post_turn_meta_flags(&*state.repo)
+            .await
+            .unwrap_or((true, true));
+
+    if summary_enabled || follow_enabled {
+        match crate::llm::create_client(runtime.llm_config.clone()) {
+            Ok(client) => {
+                let turn_summary =
+                    match crate::domain::agents::output_formatter::run_turn_summary_pass(
+                        client.as_ref(),
+                        &summary,
+                        summary_enabled,
+                    )
+                    .await
+                    {
+                        Ok(value) => value,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "omiga::scheduler",
+                                "Failed to generate orchestration turn summary: {}",
+                                e
+                            );
+                            None
+                        }
+                    };
+
+                let _ = app.emit(
+                    &format!("chat-stream-{}", msg_id_to_use),
+                    &StreamOutputItem::TurnSummary {
+                        text: turn_summary.clone(),
+                    },
+                );
+
+                if let Some(turn_summary_text) = turn_summary.as_deref() {
+                    if let Err(e) = state
+                        .repo
+                        .update_message_turn_summary(&msg_id_to_use, Some(turn_summary_text))
+                        .await
+                    {
+                        tracing::warn!(
+                            target: "omiga::scheduler",
+                            "Failed to persist orchestration turn summary: {}",
+                            e
+                        );
+                    }
+                }
+
+                if follow_enabled {
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", msg_id_to_use),
+                        &StreamOutputItem::SuggestionsGenerating,
+                    );
+
+                    match crate::domain::suggestions::generate_follow_up_suggestions(
+                        client.as_ref(),
+                        &summary,
+                        follow_enabled,
+                    )
+                    .await
+                    {
+                        Ok(items) if !items.is_empty() => {
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", msg_id_to_use),
+                                &StreamOutputItem::FollowUpSuggestions(items.clone()),
+                            );
+                            if let Ok(json) = serde_json::to_string(&items) {
+                                if let Err(e) = state
+                                    .repo
+                                    .update_message_follow_up_suggestions(
+                                        &msg_id_to_use,
+                                        Some(&json),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        target: "omiga::scheduler",
+                                        "Failed to persist orchestration follow-up suggestions: {}",
+                                        e
+                                    );
+                                }
+                            }
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", msg_id_to_use),
+                                &StreamOutputItem::SuggestionsComplete {
+                                    generated: true,
+                                    error: None,
+                                },
+                            );
+                        }
+                        Ok(_) => {
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", msg_id_to_use),
+                                &StreamOutputItem::SuggestionsComplete {
+                                    generated: false,
+                                    error: None,
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "omiga::scheduler",
+                                "Failed to generate orchestration follow-up suggestions: {}",
+                                e
+                            );
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", msg_id_to_use),
+                                &StreamOutputItem::SuggestionsComplete {
+                                    generated: false,
+                                    error: Some(e.to_string()),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "omiga::scheduler",
+                    "Failed to create post-turn client for orchestration summary: {}",
+                    e
+                );
+            }
+        }
     }
 
     // Notify the frontend: the streamed message is now persisted; scroll to it.

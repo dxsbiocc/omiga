@@ -4,11 +4,14 @@ use super::provider::{get_config_file, invalidate_config_file_cache};
 use super::subagent::persist_background_agent_task_snapshot;
 use super::{get_llm_config, CommandResult};
 use crate::app_state::OmigaAppState;
+use crate::domain::agents::background::{BackgroundAgentStatus, BackgroundAgentTask};
 use crate::domain::session::Message;
 use crate::errors::{ApiError, ChatError, OmigaError};
 use crate::llm::{create_client, load_config_from_env, LlmConfig, LlmProvider};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
@@ -673,6 +676,10 @@ pub struct ModelTestResult {
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
     pub content: String,
+    /// Optional routing-only content used for skill detection / scheduler forcing while preserving
+    /// the original user-visible transcript content.
+    #[serde(default, rename = "routingContent")]
+    pub routing_content: Option<String>,
     pub session_id: Option<String>,
     /// Explicit project path (required for new sessions)
     pub project_path: Option<String>,
@@ -707,11 +714,408 @@ pub struct SendMessageRequest {
     /// When set, truncate SQLite transcript after this user row and reuse it instead of inserting a new user message.
     #[serde(default, rename = "retryFromUserMessageId")]
     pub retry_from_user_message_id: Option<String>,
+    /// Explicit workflow slash command from the composer (`plan` | `schedule` | `team` | `autopilot`).
+    #[serde(default, rename = "workflowCommand")]
+    pub workflow_command: Option<String>,
     /// Session's stored provider entry name (from load_session → active_provider_entry_name).
     /// Used for lazy LLM config restoration: ensures the correct provider is active for this
     /// session without blocking the session-switch path.
     #[serde(default, rename = "activeProviderEntryName")]
     pub active_provider_entry_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrchestrationEventDto {
+    pub id: String,
+    pub session_id: String,
+    pub round_id: Option<String>,
+    pub message_id: Option<String>,
+    pub mode: Option<String>,
+    pub event_type: String,
+    pub phase: Option<String>,
+    pub task_id: Option<String>,
+    pub payload: Value,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockOrchestrationScenarioRequest {
+    pub session_id: String,
+    pub project_root: String,
+    pub scenario: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockOrchestrationScenarioResult {
+    pub session_id: String,
+    pub scenario: String,
+    pub background_task_count: usize,
+    pub event_count: usize,
+}
+
+#[tauri::command]
+pub async fn list_orchestration_events(
+    app_state: State<'_, OmigaAppState>,
+    session_id: String,
+    limit: Option<i64>,
+) -> CommandResult<Vec<OrchestrationEventDto>> {
+    let rows = app_state
+        .repo
+        .list_orchestration_events_for_session(&session_id, limit.unwrap_or(50).clamp(1, 200))
+        .await
+        .map_err(|e| OmigaError::Persistence(e.to_string()))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| OrchestrationEventDto {
+            id: row.id,
+            session_id: row.session_id,
+            round_id: row.round_id,
+            message_id: row.message_id,
+            mode: row.mode,
+            event_type: row.event_type,
+            phase: row.phase,
+            task_id: row.task_id,
+            payload: serde_json::from_str(&row.payload_json).unwrap_or(Value::Null),
+            created_at: row.created_at,
+        })
+        .collect())
+}
+
+async fn ensure_session_exists(
+    repo: &crate::domain::persistence::SessionRepository,
+    session_id: &str,
+    project_root: &str,
+    name: &str,
+) -> Result<(), OmigaError> {
+    let existing = repo
+        .get_session(session_id)
+        .await
+        .map_err(|e| OmigaError::Persistence(e.to_string()))?;
+    if existing.is_some() {
+        return Ok(());
+    }
+    repo.create_session(session_id, name, project_root)
+        .await
+        .map_err(|e| OmigaError::Persistence(e.to_string()))
+}
+
+async fn append_mock_bg_task(
+    repo: &crate::domain::persistence::SessionRepository,
+    task: &BackgroundAgentTask,
+    transcript: &[Message],
+) -> Result<(), OmigaError> {
+    repo.upsert_background_agent_task(task)
+        .await
+        .map_err(|e| OmigaError::Persistence(e.to_string()))?;
+    if !transcript.is_empty() {
+        repo.append_background_agent_messages_batch(&task.task_id, &task.session_id, transcript)
+            .await
+            .map_err(|e| OmigaError::Persistence(e.to_string()))?;
+    }
+    Ok(())
+}
+
+async fn append_mock_event(
+    repo: &crate::domain::persistence::SessionRepository,
+    session_id: &str,
+    mode: Option<&str>,
+    event_type: &str,
+    phase: Option<&str>,
+    task_id: Option<&str>,
+    payload: Value,
+) -> Result<(), OmigaError> {
+    repo.append_orchestration_event(
+        session_id,
+        Some("mock-round"),
+        None,
+        mode,
+        event_type,
+        phase,
+        task_id,
+        &serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .await
+    .map_err(|e| OmigaError::Persistence(e.to_string()))
+}
+
+pub async fn seed_mock_orchestration_scenario(
+    repo: &crate::domain::persistence::SessionRepository,
+    project_root: &Path,
+    session_id: &str,
+    scenario: &str,
+) -> Result<MockOrchestrationScenarioResult, OmigaError> {
+    ensure_session_exists(
+        repo,
+        session_id,
+        &project_root.to_string_lossy(),
+        &format!("Mock {scenario}"),
+    )
+    .await?;
+
+    let now = chrono::Utc::now();
+    let base_ts = now.timestamp() as u64;
+    let mut event_count = 0usize;
+    let mut task_count = 0usize;
+
+    match scenario {
+        "schedule" => {
+            append_mock_event(
+                repo,
+                session_id,
+                Some("schedule"),
+                "schedule_plan_created",
+                None,
+                None,
+                serde_json::json!({ "planId": "mock-plan-a", "taskCount": 3 }),
+            )
+            .await?;
+            event_count += 1;
+
+            let exec_task = BackgroundAgentTask {
+                task_id: "mock-schedule-exec".to_string(),
+                agent_type: "executor".to_string(),
+                description: "实现登录流程重构".to_string(),
+                status: BackgroundAgentStatus::Completed,
+                created_at: base_ts.saturating_sub(90),
+                started_at: Some(base_ts.saturating_sub(88)),
+                completed_at: Some(base_ts.saturating_sub(50)),
+                result_summary: Some("已完成实现".to_string()),
+                error_message: None,
+                output_path: None,
+                session_id: session_id.to_string(),
+                message_id: "mock-msg".to_string(),
+                round_id: Some("mock-round".to_string()),
+                plan_id: Some("mock-plan-a".to_string()),
+            };
+            append_mock_bg_task(
+                repo,
+                &exec_task,
+                &[Message::User {
+                    content: "实现登录流程重构".to_string(),
+                }],
+            )
+            .await?;
+            task_count += 1;
+            append_mock_event(
+                repo,
+                session_id,
+                Some("schedule"),
+                "worker_completed",
+                Some("executing"),
+                Some(&exec_task.task_id),
+                serde_json::json!({
+                    "agentType": exec_task.agent_type,
+                    "description": exec_task.description,
+                }),
+            )
+            .await?;
+            event_count += 1;
+
+            let reviewer_task = BackgroundAgentTask {
+                task_id: "mock-schedule-review".to_string(),
+                agent_type: "verification".to_string(),
+                description: "验证登录流程重构".to_string(),
+                status: BackgroundAgentStatus::Completed,
+                created_at: base_ts.saturating_sub(45),
+                started_at: Some(base_ts.saturating_sub(44)),
+                completed_at: Some(base_ts.saturating_sub(20)),
+                result_summary: Some("VERDICT: PASS\n验证通过，无阻断问题".to_string()),
+                error_message: None,
+                output_path: None,
+                session_id: session_id.to_string(),
+                message_id: "mock-msg".to_string(),
+                round_id: Some("mock-round".to_string()),
+                plan_id: Some("mock-plan-a".to_string()),
+            };
+            append_mock_bg_task(
+                repo,
+                &reviewer_task,
+                &[Message::Assistant {
+                    content: "VERDICT: PASS\n验证通过，无阻断问题".to_string(),
+                    tool_calls: None,
+                    token_usage: None,
+                    reasoning_content: None,
+                    follow_up_suggestions: None,
+                    turn_summary: None,
+                }],
+            )
+            .await?;
+            task_count += 1;
+            append_mock_event(
+                repo,
+                session_id,
+                Some("schedule"),
+                "reviewer_verdict",
+                Some("verifying"),
+                Some(&reviewer_task.task_id),
+                serde_json::json!({
+                    "agentType": reviewer_task.agent_type,
+                    "verdict": "pass",
+                    "summary": "验证通过，无阻断问题",
+                }),
+            )
+            .await?;
+            event_count += 1;
+        }
+        "team" => {
+            let mock_goal = "修复导出流程并完成验证";
+
+            for (event_type, phase) in [
+                ("mode_requested", Some("planning")),
+                ("phase_changed", Some("executing")),
+                ("verification_started", Some("verifying")),
+                ("fix_started", Some("fixing")),
+                ("verification_started", Some("verifying")),
+                ("synthesizing_started", Some("synthesizing")),
+            ] {
+                append_mock_event(
+                    repo,
+                    session_id,
+                    Some("team"),
+                    event_type,
+                    phase,
+                    None,
+                    serde_json::json!({ "goal": mock_goal }),
+                )
+                .await?;
+                event_count += 1;
+            }
+
+            let worker_task = BackgroundAgentTask {
+                task_id: "mock-team-worker".to_string(),
+                agent_type: "executor".to_string(),
+                description: "修复导出并发问题".to_string(),
+                status: BackgroundAgentStatus::Completed,
+                created_at: base_ts.saturating_sub(120),
+                started_at: Some(base_ts.saturating_sub(118)),
+                completed_at: Some(base_ts.saturating_sub(80)),
+                result_summary: Some("已修复导出并发问题".to_string()),
+                error_message: None,
+                output_path: None,
+                session_id: session_id.to_string(),
+                message_id: "mock-msg".to_string(),
+                round_id: Some("mock-round".to_string()),
+                plan_id: Some("mock-team-plan".to_string()),
+            };
+            append_mock_bg_task(repo, &worker_task, &[]).await?;
+            task_count += 1;
+            let reviewer_task = BackgroundAgentTask {
+                task_id: "mock-team-review".to_string(),
+                agent_type: "verification".to_string(),
+                description: "验证修复结果".to_string(),
+                status: BackgroundAgentStatus::Completed,
+                created_at: base_ts.saturating_sub(70),
+                started_at: Some(base_ts.saturating_sub(69)),
+                completed_at: Some(base_ts.saturating_sub(40)),
+                result_summary: Some("VERDICT: PARTIAL\n需要补充导出回归测试".to_string()),
+                error_message: None,
+                output_path: None,
+                session_id: session_id.to_string(),
+                message_id: "mock-msg".to_string(),
+                round_id: Some("mock-round".to_string()),
+                plan_id: Some("mock-team-plan".to_string()),
+            };
+            append_mock_bg_task(repo, &reviewer_task, &[]).await?;
+            task_count += 1;
+        }
+        "autopilot" => {
+            let mock_goal = "实现设置同步并完成验收";
+            let mock_qa_cycles = 2;
+
+            for (event_type, phase) in [
+                ("mode_requested", Some("intake")),
+                ("phase_changed", Some("design")),
+                ("phase_changed", Some("plan")),
+                ("phase_changed", Some("implementation")),
+                ("phase_changed", Some("qa")),
+                ("phase_changed", Some("validation")),
+            ] {
+                append_mock_event(
+                    repo,
+                    session_id,
+                    Some("autopilot"),
+                    event_type,
+                    phase,
+                    None,
+                    serde_json::json!({ "goal": mock_goal, "qaCycles": mock_qa_cycles }),
+                )
+                .await?;
+                event_count += 1;
+            }
+
+            let review_task = BackgroundAgentTask {
+                task_id: "mock-auto-review".to_string(),
+                agent_type: "verification".to_string(),
+                description: "验证设置同步实现".to_string(),
+                status: BackgroundAgentStatus::Completed,
+                created_at: base_ts.saturating_sub(55),
+                started_at: Some(base_ts.saturating_sub(54)),
+                completed_at: Some(base_ts.saturating_sub(30)),
+                result_summary: Some("VERDICT: PASS\n设置同步通过 QA 与 validation".to_string()),
+                error_message: None,
+                output_path: None,
+                session_id: session_id.to_string(),
+                message_id: "mock-msg".to_string(),
+                round_id: Some("mock-round".to_string()),
+                plan_id: Some("mock-auto-plan".to_string()),
+            };
+            append_mock_bg_task(repo, &review_task, &[]).await?;
+            task_count += 1;
+            append_mock_event(
+                repo,
+                session_id,
+                Some("autopilot"),
+                "reviewer_verdict",
+                Some("validation"),
+                Some(&review_task.task_id),
+                serde_json::json!({
+                    "agentType": review_task.agent_type,
+                    "verdict": "pass",
+                    "summary": "设置同步通过 QA 与 validation",
+                }),
+            )
+            .await?;
+            event_count += 1;
+        }
+        other => {
+            return Err(OmigaError::Chat(ChatError::StreamError(format!(
+                "Unknown mock orchestration scenario: {other}"
+            ))));
+        }
+    }
+
+    Ok(MockOrchestrationScenarioResult {
+        session_id: session_id.to_string(),
+        scenario: scenario.to_string(),
+        background_task_count: task_count,
+        event_count,
+    })
+}
+
+#[tauri::command]
+pub async fn run_mock_orchestration_scenario(
+    app_state: State<'_, OmigaAppState>,
+    app: AppHandle,
+    request: MockOrchestrationScenarioRequest,
+) -> CommandResult<MockOrchestrationScenarioResult> {
+    let result = seed_mock_orchestration_scenario(
+        &app_state.repo,
+        Path::new(&request.project_root),
+        &request.session_id,
+        &request.scenario,
+    )
+    .await?;
+    let _ = app.emit(
+        "mock-orchestration-scenario-loaded",
+        serde_json::json!({
+            "sessionId": result.session_id,
+            "scenario": result.scenario,
+        }),
+    );
+    Ok(result)
 }
 
 /// Background Agent tasks for one session (Claude Code–style teammate follow-ups).
@@ -867,4 +1271,111 @@ pub struct ProviderConfigEntry {
     pub is_session_active: bool,
     /// `default` in `omiga.yaml` — the default used on startup and after Settings save.
     pub is_default: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::persistence::{init_db, SessionRepository};
+
+    #[tokio::test]
+    async fn seeds_mock_schedule_scenario() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("mock-schedule.sqlite");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        let result =
+            seed_mock_orchestration_scenario(&repo, dir.path(), "sess-mock-schedule", "schedule")
+                .await
+                .expect("seed schedule scenario");
+
+        assert_eq!(result.scenario, "schedule");
+        assert!(result.event_count >= 3);
+        assert!(result.background_task_count >= 2);
+
+        let events = repo
+            .list_orchestration_events_for_session("sess-mock-schedule", 50)
+            .await
+            .expect("list events");
+        assert!(events
+            .iter()
+            .any(|e| e.event_type == "schedule_plan_created"));
+        assert!(events.iter().any(|e| e.event_type == "worker_completed"));
+        assert!(events.iter().any(|e| e.event_type == "reviewer_verdict"));
+    }
+
+    #[tokio::test]
+    async fn seeds_mock_team_scenario() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("mock-scenario.sqlite");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        let result = seed_mock_orchestration_scenario(&repo, dir.path(), "sess-mock-team", "team")
+            .await
+            .expect("seed team scenario");
+
+        assert_eq!(result.scenario, "team");
+        assert!(result.event_count >= 5);
+        assert!(result.background_task_count >= 2);
+
+        let events = repo
+            .list_orchestration_events_for_session("sess-mock-team", 50)
+            .await
+            .expect("list events");
+        assert!(events
+            .iter()
+            .any(|e| e.event_type == "verification_started"));
+        assert!(events.iter().any(|e| e.event_type == "fix_started"));
+        assert!(events
+            .iter()
+            .any(|e| e.event_type == "synthesizing_started"));
+
+        let tasks = repo
+            .list_background_agent_tasks_for_session("sess-mock-team")
+            .await
+            .expect("list tasks");
+        assert!(tasks.iter().any(|t| t.agent_type == "executor"));
+        assert!(tasks.iter().any(|t| t.agent_type == "verification"));
+        assert!(
+            crate::domain::team_state::read_state(dir.path(), "sess-mock-team")
+                .await
+                .is_none(),
+            "mock team scenario should not write live team state"
+        );
+    }
+
+    #[tokio::test]
+    async fn seeds_mock_autopilot_scenario() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("mock-autopilot.sqlite");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        let result =
+            seed_mock_orchestration_scenario(&repo, dir.path(), "sess-mock-autopilot", "autopilot")
+                .await
+                .expect("seed autopilot scenario");
+
+        assert_eq!(result.scenario, "autopilot");
+        assert!(result.event_count >= 6);
+        assert!(result.background_task_count >= 1);
+
+        let events = repo
+            .list_orchestration_events_for_session("sess-mock-autopilot", 50)
+            .await
+            .expect("list events");
+        assert!(events.iter().any(|e| e.event_type == "mode_requested"));
+        assert!(events
+            .iter()
+            .any(|e| e.event_type == "phase_changed" && e.phase.as_deref() == Some("validation")));
+        assert!(events.iter().any(|e| e.event_type == "reviewer_verdict"));
+        assert!(
+            crate::domain::autopilot_state::read_state(dir.path(), "sess-mock-autopilot")
+                .await
+                .is_none(),
+            "mock autopilot scenario should not write live autopilot state"
+        );
+    }
 }

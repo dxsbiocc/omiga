@@ -13,10 +13,73 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
+const LARGE_REQUEST_WARN_BYTES: usize = 900_000;
+const VERY_LARGE_REQUEST_WARN_BYTES: usize = 2_500_000;
+
 /// OpenAI-compatible client
 pub struct OpenAiCompatibleClient {
     client: Client,
     config: LlmConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RequestDiagnostics {
+    body_bytes: usize,
+    message_count: usize,
+    tool_count: usize,
+}
+
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.2} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn request_size_advice(diag: RequestDiagnostics) -> String {
+    let severity = if diag.body_bytes >= VERY_LARGE_REQUEST_WARN_BYTES {
+        "很大"
+    } else if diag.body_bytes >= LARGE_REQUEST_WARN_BYTES {
+        "偏大"
+    } else {
+        "正常"
+    };
+    let mut text = format!(
+        "[Omiga] 本次 LLM 请求体：{}（{}），messages={}，tools={}。",
+        format_bytes(diag.body_bytes),
+        severity,
+        diag.message_count,
+        diag.tool_count
+    );
+    if diag.body_bytes >= LARGE_REQUEST_WARN_BYTES {
+        text.push_str(
+            "\n请求体偏大时，代理/网关可能在上传阶段断开连接，表现为 `error sending request`。\
+             建议先压缩/开启新会话，减少长工具输出、Trace、队友记录后再重试。",
+        );
+    }
+    text
+}
+
+fn request_diagnostics(body: &serde_json::Value) -> RequestDiagnostics {
+    let body_bytes = serde_json::to_vec(body).map(|v| v.len()).unwrap_or(0);
+    let message_count = body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let tool_count = body
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    RequestDiagnostics {
+        body_bytes,
+        message_count,
+        tool_count,
+    }
 }
 
 /// Moonshot returns 403 when the user selects a **Kimi For Coding** model or coding-only endpoint,
@@ -32,6 +95,37 @@ fn enrich_openai_compatible_http_error(status: u16, body: &str) -> String {
         );
     }
     body.to_string()
+}
+
+fn enrich_openai_compatible_network_error(
+    config: &LlmConfig,
+    url: &str,
+    diagnostics: RequestDiagnostics,
+    err: reqwest::Error,
+) -> ApiError {
+    let original = err.to_string();
+    let size_advice = request_size_advice(diagnostics);
+    let mut message = format!("{original}\n\n{size_advice}");
+
+    if matches!(config.provider, LlmProvider::Deepseek) {
+        message = format!(
+            "{message}\n\n\
+            [Omiga] 无法连接 DeepSeek API（{url}）。这通常是本机网络/DNS/TLS/代理问题，而不是模型返回错误。\n\
+            建议检查：\n\
+            1. 在同一台机器运行：curl -I https://api.deepseek.com\n\
+            2. 如在需要代理的网络中，确保启动 Omiga 的进程继承了 HTTPS_PROXY/HTTP_PROXY，或在终端设置代理后再启动应用。\n\
+            3. DeepSeek 官方 base_url 是 https://api.deepseek.com；OpenAI 兼容的 https://api.deepseek.com/v1 也可用。若在设置中填了 base_url，请不要填错域名。\n\
+            4. 如果浏览器可访问但桌面应用不可访问，请检查系统代理/防火墙是否允许 Omiga 访问 api.deepseek.com:443。"
+        );
+    }
+
+    if err.is_timeout() {
+        ApiError::Network {
+            message: format!("Request timeout while sending request. {message}"),
+        }
+    } else {
+        ApiError::Network { message }
+    }
 }
 
 /// Kimi OpenAPI (`KimiK25ChatRequest`): `thinking` must be an object `{"type":"enabled"|"disabled"}`,
@@ -462,6 +556,18 @@ impl LlmClient for OpenAiCompatibleClient {
         }
 
         maybe_attach_kimi_thinking_body(&mut body, &self.config);
+        let diagnostics = request_diagnostics(&body);
+        if diagnostics.body_bytes >= LARGE_REQUEST_WARN_BYTES {
+            tracing::warn!(
+                target: "omiga::openai",
+                provider = %self.config.provider,
+                model = %self.config.model,
+                body_bytes = diagnostics.body_bytes,
+                message_count = diagnostics.message_count,
+                tool_count = diagnostics.tool_count,
+                "large LLM request body before send"
+            );
+        }
 
         let response = self
             .client
@@ -470,7 +576,9 @@ impl LlmClient for OpenAiCompatibleClient {
             .json(&body)
             .send()
             .await
-            .map_err(ApiError::from)?;
+            .map_err(|e| {
+                enrich_openai_compatible_network_error(&self.config, &url, diagnostics, e)
+            })?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();

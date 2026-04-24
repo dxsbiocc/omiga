@@ -286,6 +286,7 @@ pub(super) async fn run_skill_forked(
                 token_usage: None,
                 reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text),
                 follow_up_suggestions: None,
+                turn_summary: None,
             });
             for (tool_use_id, _name, _arguments) in &tool_calls {
                 transcript.push(Message::Tool {
@@ -299,6 +300,7 @@ pub(super) async fn run_skill_forked(
                 token_usage: None,
                 reasoning_content: None,
                 follow_up_suggestions: None,
+                turn_summary: None,
             });
             return Ok(block.assistant_response);
         }
@@ -310,6 +312,7 @@ pub(super) async fn run_skill_forked(
             token_usage: None,
             reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text.clone()),
             follow_up_suggestions: None,
+            turn_summary: None,
         });
 
         if tool_calls.is_empty() {
@@ -354,6 +357,7 @@ pub(super) async fn run_skill_forked(
                         token_usage: None,
                         reasoning_content: (!retry_reasoning.is_empty()).then(|| retry_reasoning),
                         follow_up_suggestions: None,
+                        turn_summary: None,
                     });
                     return Ok(retry_text);
                 }
@@ -648,6 +652,7 @@ pub(super) async fn run_subagent_session_foreground_inner(
                 token_usage: None,
                 reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text),
                 follow_up_suggestions: None,
+                turn_summary: None,
             };
             if let Some(tid) = background_task_id {
                 persist_background_transcript_message(
@@ -682,6 +687,7 @@ pub(super) async fn run_subagent_session_foreground_inner(
                 token_usage: None,
                 reasoning_content: None,
                 follow_up_suggestions: None,
+                turn_summary: None,
             };
             if let Some(tid) = background_task_id {
                 persist_background_transcript_message(
@@ -702,6 +708,7 @@ pub(super) async fn run_subagent_session_foreground_inner(
             token_usage: None,
             reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text.clone()),
             follow_up_suggestions: None,
+            turn_summary: None,
         };
         if let Some(tid) = background_task_id {
             persist_background_transcript_message(&runtime.repo, tid, session_id, &asst).await;
@@ -749,6 +756,7 @@ pub(super) async fn run_subagent_session_foreground_inner(
                         token_usage: None,
                         reasoning_content: (!retry_reasoning.is_empty()).then(|| retry_reasoning),
                         follow_up_suggestions: None,
+                        turn_summary: None,
                     };
                     if let Some(tid) = background_task_id {
                         persist_background_transcript_message(
@@ -855,6 +863,7 @@ pub(super) async fn run_subagent_session(
             app,
             message_id,
             session_id,
+            None,
             tool_results_dir,
             &effective_root,
             session_todos,
@@ -964,6 +973,7 @@ pub(crate) async fn spawn_background_agent(
     app: &AppHandle,
     message_id: &str,
     session_id: &str,
+    plan_id: Option<&str>,
     tool_results_dir: &std::path::Path,
     effective_root: &std::path::Path,
     session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
@@ -985,6 +995,8 @@ pub(crate) async fn spawn_background_agent(
             args.description.clone(),
             session_id.to_string(),
             message_id.to_string(),
+            Some(runtime.round_id.clone()),
+            plan_id.map(|id| id.to_string()),
         )
         .await;
 

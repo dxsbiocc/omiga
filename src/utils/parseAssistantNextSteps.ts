@@ -18,6 +18,20 @@ function clampLabelForChip(s: string, maxChars: number): string {
   return `${chars.slice(0, maxChars - 1).join("")}…`;
 }
 
+function cleanSuggestionLabelSource(raw: string): string {
+  const normalized = raw
+    .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
+    .replace(/\*\*/g, "")
+    .replace(/`/g, "")
+    .replace(/^[-*#>\s]+/u, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const split = normalized.split(/[：:]/u);
+  const head = split[0]?.trim() || normalized;
+  return head || normalized;
+}
+
 /**
  * 从助手 Markdown 正文中解析「### 下一步建议」小节下的编号列表，用于生成快捷按钮。
  * 无该小节或列表为空时返回 []（按需出现，不生成泛化建议）。
@@ -48,7 +62,7 @@ export function parseNextStepSuggestionsFromMarkdown(raw: string): NextStepSugge
     if (!body) continue;
     if (seen.has(body)) continue;
     seen.add(body);
-    const label = clampLabelForChip(body, 14);
+    const label = clampLabelForChip(cleanSuggestionLabelSource(body), 14);
     if (!label) continue;
     out.push({ label, text: body });
     if (out.length >= 8) break;

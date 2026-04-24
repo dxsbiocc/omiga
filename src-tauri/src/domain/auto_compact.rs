@@ -15,6 +15,9 @@ use std::collections::HashSet;
 const SAFETY_BUFFER_TOKENS: u32 = 12_000;
 /// Rough upper bound for tool schema + definitions serialized into the provider request (when tools on).
 const TOOL_SCHEMA_OVERHEAD_TOKENS: u32 = 28_000;
+/// Start compacting before the hard context edge. Users can override with
+/// `OMIGA_AUTO_COMPACT_THRESHOLD_PERCENT`; default is 80%.
+const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT: u32 = 80;
 /// Minimum domain messages to retain after head trimming (last user turn should survive if possible).
 const MIN_MESSAGES: usize = 1;
 /// When truncating tool output, keep at least this many bytes of prefix.
@@ -30,6 +33,22 @@ fn env_truthy(key: &str) -> bool {
             .unwrap_or(false),
         true
     )
+}
+
+fn auto_compact_threshold_percent() -> u32 {
+    if let Ok(s) = std::env::var("OMIGA_AUTO_COMPACT_THRESHOLD_PERCENT") {
+        if let Ok(n) = s.parse::<u32>() {
+            return n.clamp(50, 95);
+        }
+    }
+    if let Ok(s) = std::env::var("OMIGA_AUTO_COMPACT_RATIO") {
+        if let Ok(v) = s.parse::<f32>() {
+            if v.is_finite() {
+                return ((v * 100.0).round() as i32).clamp(50, 95) as u32;
+            }
+        }
+    }
+    DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT
 }
 
 /// Whether automatic compaction is enabled (default: on).
@@ -111,11 +130,17 @@ fn request_overhead_tokens(cfg: &LlmConfig, tools_enabled: bool) -> u32 {
 }
 
 /// Budget for the **chat history** portion only (messages array), in estimated tokens.
+/// This is a *trigger* budget, not the absolute hard context limit: by default Omiga compacts
+/// around 80% of the provider context window so large requests do not fail during upload/streaming.
 pub fn messages_budget_tokens(cfg: &LlmConfig, tools_enabled: bool) -> u32 {
     let ctx = context_window_tokens(cfg);
+    let trigger_ctx = ctx
+        .saturating_mul(auto_compact_threshold_percent())
+        .saturating_div(100);
     let reserve_out = cfg.max_tokens;
     let overhead = request_overhead_tokens(cfg, tools_enabled);
-    ctx.saturating_sub(reserve_out)
+    trigger_ctx
+        .saturating_sub(reserve_out)
         .saturating_sub(SAFETY_BUFFER_TOKENS)
         .saturating_sub(overhead)
 }
@@ -267,7 +292,8 @@ pub fn compact_session_messages(
 
     if initial_len > messages.len() || after < before {
         let notice = format!(
-            "[Omiga: Earlier conversation was automatically removed or shortened to stay within the ~{} token context limit. Estimated chat history: ~{} → ~{} tokens.]",
+            "[Omiga: Earlier conversation was automatically removed or shortened near the {}% context threshold (window ~{} tokens). Estimated chat history: ~{} → ~{} tokens.]",
+            auto_compact_threshold_percent(),
             context_window_tokens(cfg),
             before,
             after
@@ -323,6 +349,7 @@ pub async fn replace_session_messages(
             token_usage_json.as_deref(),
             reasoning_content.as_deref(),
             follow_up_suggestions_json.as_deref(),
+            SessionCodec::extract_turn_summary(msg).as_deref(),
         )
         .await?;
         if matches!(msg, Message::User { .. }) {
@@ -383,6 +410,13 @@ mod tests {
     fn budget_respects_max_tokens_and_overhead() {
         let c = test_config();
         let b = messages_budget_tokens(&c, true);
+        // Default trigger is ~80% of the context window, then output/tool/safety reserves.
+        let expected = (131_072u32 * DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT / 100)
+            .saturating_sub(c.max_tokens)
+            .saturating_sub(SAFETY_BUFFER_TOKENS)
+            .saturating_sub(TOOL_SCHEMA_OVERHEAD_TOKENS)
+            .saturating_sub(system_prompt_tokens(&c));
+        assert_eq!(b, expected);
         assert!(b < 131_072);
     }
 
@@ -402,6 +436,7 @@ mod tests {
                 token_usage: None,
                 reasoning_content: None,
                 follow_up_suggestions: None,
+                turn_summary: None,
             },
             Message::Tool {
                 tool_call_id: "t1".into(),

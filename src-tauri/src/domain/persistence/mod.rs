@@ -7,7 +7,7 @@
 //! - Session-scoped tool state (`todo_write`, V2 tasks)
 
 use crate::domain::agents::background::{BackgroundAgentStatus, BackgroundAgentTask};
-use crate::domain::session::{AgentTask, Message, TodoItem};
+use crate::domain::session::{sanitize_background_sidechain_message, AgentTask, Message, TodoItem};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     Row, SqlitePool,
@@ -144,6 +144,11 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await;
 
+    // Migration: optional assistant turn summary (persist recap text shown in UI)
+    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN turn_summary TEXT")
+        .execute(pool)
+        .await;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS settings (
@@ -193,6 +198,35 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             created_at TEXT NOT NULL,
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS orchestration_events (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            round_id TEXT,
+            message_id TEXT,
+            mode TEXT,
+            event_type TEXT NOT NULL,
+            phase TEXT,
+            task_id TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_orchestration_events_session
+        ON orchestration_events(session_id, created_at DESC)
         "#,
     )
     .execute(pool)
@@ -337,6 +371,8 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             task_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
             message_id TEXT NOT NULL,
+            round_id TEXT,
+            plan_id TEXT,
             agent_type TEXT NOT NULL,
             description TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -353,6 +389,9 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+
+    ensure_column_exists(pool, "background_agent_tasks", "round_id", "TEXT").await?;
+    ensure_column_exists(pool, "background_agent_tasks", "plan_id", "TEXT").await?;
 
     sqlx::query(
         r#"
@@ -393,6 +432,28 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+async fn ensure_column_exists(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    column_def: &str,
+) -> Result<(), sqlx::Error> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let rows = sqlx::query(&pragma).fetch_all(pool).await?;
+    let exists = rows.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|name| name == column)
+            .unwrap_or(false)
+    });
+    if exists {
+        return Ok(());
+    }
+
+    let alter = format!("ALTER TABLE {table} ADD COLUMN {column} {column_def}");
+    sqlx::query(&alter).execute(pool).await?;
+    Ok(())
+}
+
 fn background_agent_status_db(s: &BackgroundAgentStatus) -> &'static str {
     match s {
         BackgroundAgentStatus::Pending => "pending",
@@ -418,6 +479,8 @@ struct BackgroundAgentTaskRow {
     task_id: String,
     session_id: String,
     message_id: String,
+    round_id: Option<String>,
+    plan_id: Option<String>,
     agent_type: String,
     description: String,
     status: String,
@@ -443,6 +506,8 @@ fn row_to_background_task(row: BackgroundAgentTaskRow) -> BackgroundAgentTask {
         output_path: row.output_path,
         session_id: row.session_id,
         message_id: row.message_id,
+        round_id: row.round_id,
+        plan_id: row.plan_id,
     }
 }
 
@@ -507,7 +572,7 @@ impl SessionRepository {
         sqlx::query_as::<_, MessageRecord>(
             r#"
             SELECT id, session_id, role, content, tool_calls, tool_call_id,
-                   token_usage_json, NULL as reasoning_content, follow_up_suggestions_json, created_at
+                   token_usage_json, NULL as reasoning_content, follow_up_suggestions_json, turn_summary, created_at
             FROM messages
             WHERE session_id = ?
             ORDER BY created_at DESC, id DESC
@@ -532,7 +597,7 @@ impl SessionRepository {
         sqlx::query_as::<_, MessageRecord>(
             r#"
             SELECT id, session_id, role, content, tool_calls, tool_call_id,
-                   token_usage_json, NULL as reasoning_content, follow_up_suggestions_json, created_at
+                   token_usage_json, NULL as reasoning_content, follow_up_suggestions_json, turn_summary, created_at
             FROM messages
             WHERE session_id = ?
               AND (created_at, id) < (
@@ -568,7 +633,7 @@ impl SessionRepository {
         // Get all messages for this session
         let messages = sqlx::query_as::<_, MessageRecord>(
             r#"
-            SELECT id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, follow_up_suggestions_json, created_at
+            SELECT id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, follow_up_suggestions_json, turn_summary, created_at
             FROM messages
             WHERE session_id = ?
             ORDER BY created_at ASC, id ASC
@@ -699,13 +764,14 @@ impl SessionRepository {
         token_usage_json: Option<&str>,
         reasoning_content: Option<&str>,
         follow_up_suggestions_json: Option<&str>,
+        turn_summary: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(
             r#"
-            INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, follow_up_suggestions_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, follow_up_suggestions_json, turn_summary, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#
         )
         .bind(id)
@@ -717,6 +783,7 @@ impl SessionRepository {
         .bind(token_usage_json)
         .bind(reasoning_content)
         .bind(follow_up_suggestions_json)
+        .bind(turn_summary)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -747,8 +814,8 @@ impl SessionRepository {
                 r#"
                 INSERT INTO messages
                     (id, session_id, role, content, tool_calls, tool_call_id,
-                     token_usage_json, reasoning_content, follow_up_suggestions_json, created_at)
-                VALUES (?, ?, 'tool', ?, NULL, ?, NULL, NULL, NULL, ?)
+                     token_usage_json, reasoning_content, follow_up_suggestions_json, turn_summary, created_at)
+                VALUES (?, ?, 'tool', ?, NULL, ?, NULL, NULL, NULL, NULL, ?)
                 "#,
             )
             .bind(&msg_id)
@@ -785,6 +852,20 @@ impl SessionRepository {
     ) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE messages SET follow_up_suggestions_json = ? WHERE id = ?")
             .bind(follow_up_suggestions_json)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Update turn summary on an existing assistant message row.
+    pub async fn update_message_turn_summary(
+        &self,
+        id: &str,
+        turn_summary: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE messages SET turn_summary = ? WHERE id = ?")
+            .bind(turn_summary)
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -962,6 +1043,60 @@ impl SessionRepository {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn append_orchestration_event(
+        &self,
+        session_id: &str,
+        round_id: Option<&str>,
+        message_id: Option<&str>,
+        mode: Option<&str>,
+        event_type: &str,
+        phase: Option<&str>,
+        task_id: Option<&str>,
+        payload_json: &str,
+    ) -> Result<(), sqlx::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO orchestration_events
+                (id, session_id, round_id, message_id, mode, event_type, phase, task_id, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(session_id)
+        .bind(round_id)
+        .bind(message_id)
+        .bind(mode)
+        .bind(event_type)
+        .bind(phase)
+        .bind(task_id)
+        .bind(payload_json)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_orchestration_events_for_session(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<OrchestrationEventRecord>, sqlx::Error> {
+        sqlx::query_as::<_, OrchestrationEventRecord>(
+            r#"
+            SELECT id, session_id, round_id, message_id, mode, event_type, phase, task_id, payload_json, created_at
+            FROM orchestration_events
+            WHERE session_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(session_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
     }
 
     pub async fn list_runtime_constraint_events_for_round(
@@ -1157,13 +1292,15 @@ impl SessionRepository {
         sqlx::query(
             r#"
             INSERT INTO background_agent_tasks (
-                task_id, session_id, message_id, agent_type, description, status,
+                task_id, session_id, message_id, round_id, plan_id, agent_type, description, status,
                 created_at, started_at, completed_at, result_summary, error_message, output_path, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 message_id = excluded.message_id,
+                round_id = excluded.round_id,
+                plan_id = excluded.plan_id,
                 agent_type = excluded.agent_type,
                 description = excluded.description,
                 status = excluded.status,
@@ -1178,6 +1315,8 @@ impl SessionRepository {
         .bind(&task.task_id)
         .bind(&task.session_id)
         .bind(&task.message_id)
+        .bind(task.round_id.as_deref())
+        .bind(task.plan_id.as_deref())
         .bind(&task.agent_type)
         .bind(&task.description)
         .bind(status)
@@ -1201,7 +1340,7 @@ impl SessionRepository {
     ) -> Result<Vec<BackgroundAgentTask>, sqlx::Error> {
         let rows = sqlx::query_as::<_, BackgroundAgentTaskRow>(
             r#"
-            SELECT task_id, session_id, message_id, agent_type, description, status,
+            SELECT task_id, session_id, message_id, round_id, plan_id, agent_type, description, status,
                    created_at, started_at, completed_at, result_summary, error_message, output_path
             FROM background_agent_tasks
             WHERE session_id = ?
@@ -1222,7 +1361,7 @@ impl SessionRepository {
     ) -> Result<Option<BackgroundAgentTask>, sqlx::Error> {
         let row = sqlx::query_as::<_, BackgroundAgentTaskRow>(
             r#"
-            SELECT task_id, session_id, message_id, agent_type, description, status,
+            SELECT task_id, session_id, message_id, round_id, plan_id, agent_type, description, status,
                    created_at, started_at, completed_at, result_summary, error_message, output_path
             FROM background_agent_tasks
             WHERE task_id = ?
@@ -1242,7 +1381,8 @@ impl SessionRepository {
         session_id: &str,
         message: &Message,
     ) -> Result<(), sqlx::Error> {
-        let payload_json = serde_json::to_string(message).unwrap_or_else(|_| "{}".to_string());
+        let message = sanitize_background_sidechain_message(message);
+        let payload_json = serde_json::to_string(&message).unwrap_or_else(|_| "{}".to_string());
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -1293,7 +1433,8 @@ impl SessionRepository {
         .await?;
 
         for (i, message) in messages.iter().enumerate() {
-            let payload_json = serde_json::to_string(message).unwrap_or_else(|_| "{}".to_string());
+            let message = sanitize_background_sidechain_message(message);
+            let payload_json = serde_json::to_string(&message).unwrap_or_else(|_| "{}".to_string());
             let id = uuid::Uuid::new_v4().to_string();
             let seq = base_seq + 1 + i as i64;
             sqlx::query(
@@ -1432,6 +1573,7 @@ pub struct MessageRecord {
     pub token_usage_json: Option<String>,
     pub reasoning_content: Option<String>,
     pub follow_up_suggestions_json: Option<String>,
+    pub turn_summary: Option<String>,
     pub created_at: String,
 }
 
@@ -1524,4 +1666,74 @@ pub struct RuntimeConstraintRoundTraceRecord {
     pub event_count: i64,
     pub first_event_at: String,
     pub last_event_at: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OrchestrationEventRecord {
+    pub id: String,
+    pub session_id: String,
+    pub round_id: Option<String>,
+    pub message_id: Option<String>,
+    pub mode: Option<String>,
+    pub event_type: String,
+    pub phase: Option<String>,
+    pub task_id: Option<String>,
+    pub payload_json: String,
+    pub created_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn persists_and_lists_orchestration_events() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        repo.create_session("session-1", "Scenario A", "/tmp/project")
+            .await
+            .expect("create session");
+
+        repo.append_orchestration_event(
+            "session-1",
+            Some("round-1"),
+            Some("message-1"),
+            Some("schedule"),
+            "schedule_plan_created",
+            None,
+            None,
+            r#"{"planId":"plan-1","taskCount":3}"#,
+        )
+        .await
+        .expect("append event");
+
+        repo.append_orchestration_event(
+            "session-1",
+            Some("round-1"),
+            Some("message-1"),
+            Some("team"),
+            "phase_changed",
+            Some("executing"),
+            None,
+            r#"{"goal":"fix export flow"}"#,
+        )
+        .await
+        .expect("append phase event");
+
+        let events = repo
+            .list_orchestration_events_for_session("session-1", 10)
+            .await
+            .expect("list events");
+
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .any(|e| e.event_type == "schedule_plan_created"));
+        assert!(events
+            .iter()
+            .any(|e| e.event_type == "phase_changed" && e.phase.as_deref() == Some("executing")));
+    }
 }

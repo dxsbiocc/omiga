@@ -73,7 +73,14 @@ export function getExecutionSurfaceView(
   ctx: ExecutionSurfaceContext,
 ): { label: string; kind: ExecutionSurfaceKind; toolName: string | null } {
   if (ctx.isConnecting) {
-    return { label: "等待响应", kind: "waiting", toolName: null };
+    const connectStep = steps.find(
+      (step) => step.id === "connect" && step.status === "running",
+    );
+    return {
+      label: connectStep?.title || "等待响应",
+      kind: "waiting",
+      toolName: null,
+    };
   }
 
   const run = steps.find((s) => s.status === "running");

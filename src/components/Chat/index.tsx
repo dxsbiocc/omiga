@@ -53,6 +53,8 @@ import {
   Edit as EditIcon,
   ContentCopy as ContentCopyIcon,
   InfoOutlined as InfoOutlinedIcon,
+  Groups as GroupsIcon,
+  RocketLaunch as RocketLaunchIcon,
 } from "@mui/icons-material";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import {
@@ -95,10 +97,24 @@ import {
 import { BackgroundAgentTranscriptDrawer } from "./BackgroundAgentTranscriptDrawer";
 import { AgentSessionStatus } from "./AgentSessionStatus";
 import { SshDirectoryTreeDialog } from "./SshDirectoryTreeDialog";
+import { ReviewerVerdictList } from "../ReviewerVerdictList";
 import { formatToolDisplayName } from "../../utils/executionSurfaceLabel";
+import { buildPendingExecutionFeedback } from "../../utils/pendingExecutionFeedback";
 import { parseNextStepSuggestionsFromMarkdown } from "../../utils/parseAssistantNextSteps";
+import { extractSuggestionTooltipMarkdown } from "../../utils/suggestionTooltip";
+import {
+  aggregateReviewerVerdicts,
+  overallReviewerHeadline,
+  type BackgroundAgentTaskRow,
+  type ReviewerVerdictChip,
+} from "../../utils/reviewerVerdict";
+import { parseWorkflowCommand } from "../../utils/workflowCommands";
+import {
+  OMIGA_COMPOSER_DISPATCH_EVENT,
+  type ComposerDispatchDetail,
+} from "../../utils/chatComposerEvents";
 import { CitationLink } from "../CitationLink";
-import { useAgentStore } from "../../state/agentStore";
+import { normalizeAgentDisplayName, useAgentStore } from "../../state/agentStore";
 
 /** SQLite `messages.id` shape — used to pass `retryFromUserMessageId` (not temp `user-…` ids). */
 function isPersistedMessageIdForRetry(id: string): boolean {
@@ -113,6 +129,7 @@ interface ChatProps {
 
 interface SchedulerPlan {
   planId: string;
+  originalRequest?: string;
   subtasks: Array<{
     id: string;
     description: string;
@@ -123,6 +140,7 @@ interface SchedulerPlan {
   }>;
   selectedAgents: string[];
   estimatedDurationSecs: number;
+  reviewerAgents?: string[];
 }
 
 interface InitialTodoItem {
@@ -216,6 +234,57 @@ function pathsStillMatchMergedContent(
   return content.startsWith(prefix) || content.trim() === pathLine;
 }
 
+function compactSuggestionLabel(label: string, prompt: string): string {
+  const source = (label || prompt).replace(/\r?\n/g, " ").trim();
+  const cleaned = source
+    .replace(/^[-*#>\s]+/u, "")
+    .replace(/^\d+[.、)\]]\s*/u, "")
+    .replace(/\*\*/g, "")
+    .replace(/`/g, "")
+    .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  const heading = cleaned.split(/[：:]/u)[0]?.trim() || cleaned;
+  const chars = [...heading];
+  if (chars.length <= 14) return heading;
+  return `${chars.slice(0, 13).join("")}…`;
+}
+
+function rewriteWorkflowBodyForBackend(body: string): {
+  content: string;
+  workflowCommand?: "plan" | "schedule" | "team" | "autopilot";
+} {
+  const parsed = parseWorkflowCommand(body);
+  if (!parsed) {
+    return { content: body };
+  }
+  const taskBody = parsed.body;
+  switch (parsed.command) {
+    case "plan":
+      return {
+        content: taskBody ? `plan this ${taskBody}` : "plan this",
+        workflowCommand: "plan",
+      };
+    case "team":
+      return {
+        content: taskBody ? `team ${taskBody}` : "team",
+        workflowCommand: "team",
+      };
+    case "autopilot":
+      return {
+        content: taskBody ? `autopilot ${taskBody}` : "autopilot",
+        workflowCommand: "autopilot",
+      };
+    case "schedule":
+      return {
+        content: taskBody || body,
+        workflowCommand: "schedule",
+      };
+    default:
+      return { content: body };
+  }
+}
+
 function formatUserMessageTimestamp(ts: number | undefined): string {
   try {
     return new Date(ts ?? Date.now()).toLocaleString(undefined, {
@@ -242,6 +311,7 @@ function chatMessageToStore(m: Message): StoreMessage {
     content: m.content,
     composerAgentType: m.composerAgentType,
     composerAttachedPaths: m.composerAttachedPaths,
+    initialTodos: m.initialTodos,
     followUpSuggestions: m.followUpSuggestions,
     turnSummary: m.turnSummary,
     tokenUsage: m.tokenUsage,
@@ -278,6 +348,7 @@ interface StreamOutputItem {
     | "turn_summary"
     | "follow_up_suggestions"
     | "suggestions_generating"
+    | "suggestions_complete"
     | "token_usage"
     | "complete";
   data?: unknown;
@@ -746,48 +817,60 @@ function getNestedToolPanelOpen(
 }
 
 /** 调度计划显示组件 */
-function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
+function SchedulerPlanDisplay({
+  plan,
+  sessionId,
+  onOpenReviewerTranscript,
+  onExecutePlan,
+  onRevisePlan,
+}: {
+  plan: SchedulerPlan;
+  sessionId?: string;
+  onOpenReviewerTranscript?: (taskId: string) => void;
+  onExecutePlan?: (mode: "schedule" | "team" | "autopilot") => void;
+  onRevisePlan?: () => void;
+}) {
   const theme = useTheme();
   const [expanded, setExpanded] = useState(false);
+  const [reviewerHeadline, setReviewerHeadline] = useState<{
+    label: string;
+    color: string;
+  } | null>(null);
+  const [reviewerVerdicts, setReviewerVerdicts] = useState<ReviewerVerdictChip[]>([]);
+  const [planTasks, setPlanTasks] = useState<BackgroundAgentTaskRow[]>([]);
 
-  // 获取并行执行组
-  const getParallelGroups = () => {
-    const groups: string[][] = [];
-    const completed = new Set<string>();
-    const remaining = plan.subtasks.map((t) => t.id);
-
-    while (remaining.length > 0) {
-      const currentGroup: string[] = [];
-      const stillRemaining: string[] = [];
-
-      for (const taskId of remaining) {
-        const task = plan.subtasks.find((t) => t.id === taskId);
-        if (task) {
-          const depsSatisfied = task.dependencies.every((dep) =>
-            completed.has(dep),
-          );
-          if (depsSatisfied) {
-            currentGroup.push(taskId);
-          } else {
-            stillRemaining.push(taskId);
-          }
-        }
-      }
-
-      if (currentGroup.length === 0 && stillRemaining.length > 0) {
-        currentGroup.push(stillRemaining.shift()!);
-      }
-
-      currentGroup.forEach((id) => completed.add(id));
-      groups.push(currentGroup);
-      remaining.length = 0;
-      remaining.push(...stillRemaining);
+  useEffect(() => {
+    if (!sessionId) {
+      setReviewerHeadline(null);
+      setReviewerVerdicts([]);
+      setPlanTasks([]);
+      return;
     }
-
-    return groups;
-  };
-
-  const groups = getParallelGroups();
+    let cancelled = false;
+    invoke<BackgroundAgentTaskRow[]>("list_session_background_tasks", {
+      sessionId,
+    })
+      .then((rows) => {
+        if (cancelled) return;
+        const scopedRows = (rows ?? []).filter(
+          (row) => row.plan_id && row.plan_id === plan.planId,
+        );
+        setPlanTasks(scopedRows);
+        const verdicts = aggregateReviewerVerdicts(scopedRows);
+        setReviewerVerdicts(verdicts);
+        setReviewerHeadline(overallReviewerHeadline(verdicts));
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setReviewerHeadline(null);
+          setReviewerVerdicts([]);
+          setPlanTasks([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [plan.planId, sessionId]);
 
   // Agent 颜色映射
   const getAgentColor = (agentType: string) => {
@@ -800,11 +883,44 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
     return colors[agentType] || theme.palette.grey[500];
   };
 
+  const runningCount = planTasks.filter(
+    (task) => task.status === "Running" || task.status === "Pending",
+  ).length;
+  const completedCount = planTasks.filter(
+    (task) => task.status === "Completed",
+  ).length;
+  const failedCount = planTasks.filter(
+    (task) => task.status === "Failed" || task.status === "Cancelled",
+  ).length;
+  const executionFeed = useMemo(() => {
+    const sorted = [...planTasks].sort((a, b) => {
+      const aTs = a.completed_at ?? a.created_at ?? 0;
+      const bTs = b.completed_at ?? b.created_at ?? 0;
+      return bTs - aTs;
+    });
+    return sorted.slice(0, 4).map((task) => ({
+      id: task.task_id,
+      label:
+        task.status === "Running" || task.status === "Pending"
+          ? "进行中"
+          : task.status === "Completed"
+            ? "已完成"
+            : "异常",
+      color:
+        task.status === "Running" || task.status === "Pending"
+          ? "#0ea5e9"
+          : task.status === "Completed"
+            ? "#22c55e"
+            : "#ef4444",
+      text: `${normalizeAgentDisplayName(task.agent_type)} · ${task.description}`,
+    }));
+  }, [planTasks]);
+
   return (
     <Box
       sx={{
-        borderRadius: 1.5,
-        border: `1px solid ${alpha(theme.palette.primary.main, 0.2)}`,
+        borderRadius: 1.25,
+        border: `1px solid ${alpha(theme.palette.primary.main, 0.14)}`,
         bgcolor: alpha(theme.palette.primary.main, 0.03),
         overflow: "hidden",
       }}
@@ -813,7 +929,7 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
       <Box
         onClick={() => setExpanded(!expanded)}
         sx={{
-          px: 1.5,
+          px: 1.25,
           py: 0.75,
           display: "flex",
           alignItems: "center",
@@ -830,7 +946,7 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
             variant="caption"
             sx={{ fontWeight: 600, color: "primary.main" }}
           >
-            智能调度计划
+            已生成调度计划
           </Typography>
           <Chip
             size="small"
@@ -842,6 +958,21 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
               color: "primary.main",
             }}
           />
+          {runningCount > 0 ? (
+            <Typography
+              variant="caption"
+              sx={{ color: "#0ea5e9", fontWeight: 600 }}
+            >
+              正在执行 {runningCount} 项
+            </Typography>
+          ) : completedCount > 0 ? (
+            <Typography
+              variant="caption"
+              sx={{ color: "#22c55e", fontWeight: 600 }}
+            >
+              已完成 {completedCount} 项
+            </Typography>
+          ) : null}
         </Box>
         <ExpandMore
           sx={{
@@ -855,123 +986,222 @@ function SchedulerPlanDisplay({ plan }: { plan: SchedulerPlan }) {
 
       {/* 展开内容 */}
       <Collapse in={expanded}>
-        <Box sx={{ px: 1.5, pb: 1.5 }}>
-          <Typography
-            variant="caption"
-            sx={{ color: "text.secondary", mb: 1, display: "block" }}
-          >
-            预估执行时间: ~{Math.round(plan.estimatedDurationSecs / 60)} 分钟
-          </Typography>
-
-          {groups.map((group, groupIdx) => (
-            <Box key={groupIdx} sx={{ mb: 1 }}>
-              {groups.length > 1 && (
+        <Box sx={{ px: 1.25, pb: 1.1 }}>
+          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ mb: 0.75 }}>
+            {runningCount > 0 && (
+              <Chip
+                size="small"
+                label={`${runningCount} 运行中`}
+                sx={{
+                  height: 18,
+                  fontSize: 9,
+                  bgcolor: alpha("#0ea5e9", 0.1),
+                  color: "#0ea5e9",
+                }}
+              />
+            )}
+            {completedCount > 0 && (
+              <Chip
+                size="small"
+                label={`${completedCount} 已完成`}
+                sx={{
+                  height: 18,
+                  fontSize: 9,
+                  bgcolor: alpha("#22c55e", 0.1),
+                  color: "#22c55e",
+                }}
+              />
+            )}
+            {failedCount > 0 && (
+              <Chip
+                size="small"
+                label={`${failedCount} 异常`}
+                sx={{
+                  height: 18,
+                  fontSize: 9,
+                  bgcolor: alpha("#ef4444", 0.1),
+                  color: "#ef4444",
+                }}
+              />
+            )}
+            {reviewerHeadline && (
+              <Chip
+                size="small"
+                label={reviewerHeadline.label}
+                sx={{
+                  height: 18,
+                  fontSize: 9,
+                  bgcolor: alpha(reviewerHeadline.color, 0.12),
+                  color: reviewerHeadline.color,
+                }}
+              />
+            )}
+          </Stack>
+          {runningCount + completedCount + failedCount > 0 ? (
+            <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>
+              编排详情已收敛到右侧任务 / 编排区；这里只保留轻量摘要。
+            </Typography>
+          ) : (
+            <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mb: 0.5 }}>
+              这是可审阅计划，尚未执行。确认方向后可从下方选择执行方式。
+            </Typography>
+          )}
+          {executionFeed.length > 0 && (
+            <Box sx={{ mb: 0.75 }}>
+              <Typography
+                variant="caption"
+                sx={{ color: "text.secondary", display: "block", mb: 0.35 }}
+              >
+                执行动态：
+              </Typography>
+              <Stack spacing={0.35}>
+                {executionFeed.map((item) => (
+                  <Typography
+                    key={item.id}
+                    variant="caption"
+                    sx={{
+                      display: "block",
+                      color: "text.secondary",
+                      lineHeight: 1.35,
+                    }}
+                  >
+                    <Box
+                      component="span"
+                      sx={{ color: item.color, fontWeight: 700, mr: 0.75 }}
+                    >
+                      {item.label}
+                    </Box>
+                    {item.text}
+                  </Typography>
+                ))}
+              </Stack>
+            </Box>
+          )}
+          <Stack spacing={0.5}>
+            {plan.subtasks.slice(0, 3).map((task, index) => (
+              <Box
+                key={task.id}
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 0.75,
+                  px: 0.75,
+                  py: 0.5,
+                  borderRadius: 1,
+                  bgcolor: alpha(theme.palette.background.paper, 0.45),
+                }}
+              >
                 <Typography
                   variant="caption"
                   sx={{
-                    fontSize: 10,
+                    width: 14,
+                    textAlign: "center",
                     color: "text.secondary",
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
+                    fontWeight: 700,
+                    flexShrink: 0,
                   }}
                 >
-                  阶段 {groupIdx + 1}
+                  {index + 1}
                 </Typography>
-              )}
-              <Box
-                sx={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 0.5,
-                  mt: 0.5,
-                }}
-              >
-                {group.map((taskId) => {
-                  const task = plan.subtasks.find((t) => t.id === taskId);
-                  if (!task) return null;
-
-                  const globalIndex =
-                    plan.subtasks.findIndex((t) => t.id === taskId) + 1;
-
-                  return (
-                    <Box
-                      key={task.id}
-                      sx={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 1,
-                        py: 0.5,
-                        px: 1,
-                        borderRadius: 1,
-                        bgcolor: "background.paper",
-                        border: `1px solid ${alpha(theme.palette.divider, 0.5)}`,
-                      }}
-                    >
-                      <Typography
-                        variant="caption"
-                        sx={{
-                          width: 16,
-                          height: 16,
-                          borderRadius: "50%",
-                          bgcolor: alpha(getAgentColor(task.agentType), 0.1),
-                          color: getAgentColor(task.agentType),
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontSize: 10,
-                          fontWeight: 600,
-                          flexShrink: 0,
-                        }}
-                      >
-                        {globalIndex}
-                      </Typography>
-                      <Box sx={{ flex: 1, minWidth: 0 }}>
-                        <Typography
-                          variant="caption"
-                          sx={{ display: "block", fontWeight: 500 }}
-                        >
-                          {task.description}
-                        </Typography>
-                        {task.dependencies.length > 0 && (
-                          <Typography
-                            variant="caption"
-                            sx={{ fontSize: 10, color: "text.secondary" }}
-                          >
-                            依赖: {task.dependencies.join(", ")}
-                          </Typography>
-                        )}
-                      </Box>
-                      <Chip
-                        size="small"
-                        label={task.agentType}
-                        sx={{
-                          height: 18,
-                          fontSize: 9,
-                          bgcolor: alpha(getAgentColor(task.agentType), 0.1),
-                          color: getAgentColor(task.agentType),
-                          fontWeight: 500,
-                          flexShrink: 0,
-                        }}
-                      />
-                      {task.critical && (
-                        <Tooltip title="关键任务">
-                          <Box
-                            sx={{
-                              width: 6,
-                              height: 6,
-                              borderRadius: "50%",
-                              bgcolor: "warning.main",
-                              flexShrink: 0,
-                            }}
-                          />
-                        </Tooltip>
-                      )}
-                    </Box>
-                  );
-                })}
+                <Typography
+                  variant="caption"
+                  sx={{
+                    flex: 1,
+                    minWidth: 0,
+                    fontWeight: 500,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {task.description}
+                </Typography>
+                <Chip
+                  size="small"
+                  label={normalizeAgentDisplayName(task.agentType)}
+                  sx={{
+                    height: 16,
+                    fontSize: 8.5,
+                    bgcolor: alpha(getAgentColor(task.agentType), 0.1),
+                    color: getAgentColor(task.agentType),
+                    flexShrink: 0,
+                  }}
+                />
               </Box>
+            ))}
+          </Stack>
+          {onExecutePlan && runningCount + completedCount + failedCount === 0 && (
+            <Stack
+              direction="row"
+              spacing={0.75}
+              flexWrap="wrap"
+              useFlexGap
+              sx={{ mt: 1 }}
+            >
+              <Button
+                size="small"
+                variant="contained"
+                startIcon={<SendIcon sx={{ fontSize: 14 }} />}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onExecutePlan("schedule");
+                }}
+                sx={{ fontSize: 11, py: 0.35 }}
+              >
+                执行分析
+              </Button>
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<GroupsIcon sx={{ fontSize: 14 }} />}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onExecutePlan("team");
+                }}
+                sx={{ fontSize: 11, py: 0.35 }}
+              >
+                协作分析
+              </Button>
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<RocketLaunchIcon sx={{ fontSize: 14 }} />}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onExecutePlan("autopilot");
+                }}
+                sx={{ fontSize: 11, py: 0.35 }}
+              >
+                全流程分析
+              </Button>
+              {onRevisePlan && (
+                <Button
+                  size="small"
+                  variant="text"
+                  startIcon={<EditIcon sx={{ fontSize: 14 }} />}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onRevisePlan();
+                  }}
+                  sx={{ fontSize: 11, py: 0.35 }}
+                >
+                  修改计划
+                </Button>
+              )}
+            </Stack>
+          )}
+          {reviewerVerdicts.length > 0 && (
+            <Box sx={{ mt: 0.75 }}>
+              <ReviewerVerdictList
+                verdicts={reviewerVerdicts}
+                title="Reviewer 摘要："
+                onSelectVerdict={(verdict) => {
+                  if (!verdict.taskId) return;
+                  onOpenReviewerTranscript?.(verdict.taskId);
+                }}
+              />
             </Box>
-          ))}
+          )}
         </Box>
       </Collapse>
     </Box>
@@ -1610,6 +1840,7 @@ export function Chat({ sessionId }: ChatProps) {
   /** True while background follow-up suggestions are being generated after `complete` fires */
   const [suggestionsGenerating, setSuggestionsGenerating] = useState(false);
   const [currentResponse, setCurrentResponse] = useState("");
+  const [pendingAssistantHint, setPendingAssistantHint] = useState<string | null>(null);
   const [currentStreamId, setCurrentStreamId] = useState<string | null>(null);
   const [currentRoundId, setCurrentRoundId] = useState<string | null>(null);
   /** After cancel_stream, offer header “断点继续” until a new turn completes or the user sends again. */
@@ -1790,6 +2021,28 @@ export function Chat({ sessionId }: ChatProps) {
   useEffect(() => {
     currentResponseRef.current = currentResponse;
   }, [currentResponse]);
+
+  const isMainReplyBusy = useCallback(() => {
+    const act = useActivityStore.getState();
+    return (
+      act.isConnecting ||
+      act.isStreaming ||
+      act.waitingFirstChunk ||
+      isStreamingRef.current
+    );
+  }, []);
+
+  const clearStaleRetryBusyFlag = useCallback(() => {
+    if (!isMainReplyBusy()) {
+      retrySendInFlightRef.current = false;
+    }
+  }, [isMainReplyBusy]);
+
+  useEffect(() => {
+    if (!isConnecting) {
+      setPendingAssistantHint(null);
+    }
+  }, [isConnecting]);
 
   useEffect(() => {
     currentRoundIdRef.current = currentRoundId;
@@ -1996,11 +2249,77 @@ export function Chat({ sessionId }: ChatProps) {
     setBgTranscriptTaskId(taskId);
   }, []);
 
+  const dispatchWorkflowCommand = useCallback(
+    (
+      mode: "plan" | "schedule" | "team" | "autopilot",
+      body: string,
+      autoSend = true,
+    ) => {
+      const trimmedBody = body.trim();
+      if (!trimmedBody) return;
+      window.dispatchEvent(
+        new CustomEvent<ComposerDispatchDetail>(OMIGA_COMPOSER_DISPATCH_EVENT, {
+          detail: {
+            content: `/${mode} ${trimmedBody}`,
+            autoSend,
+          },
+        }),
+      );
+    },
+    [],
+  );
+
+  const executeExistingPlan = useCallback(
+    async (plan: SchedulerPlan, mode: "schedule" | "team" | "autopilot") => {
+      const request =
+        plan.originalRequest?.trim() ||
+        plan.subtasks.map((task) => task.description).join("\n").trim();
+      if (!request) return;
+
+      if (mode === "autopilot") {
+        dispatchWorkflowCommand("autopilot", request);
+        return;
+      }
+
+      const projectRoot =
+        currentSession?.workingDirectory ?? currentSession?.projectPath;
+      if (!sessionId || !projectRoot || isUnsetWorkspacePath(projectRoot)) {
+        setBgToast("请先选择有效工作目录，再执行计划。");
+        return;
+      }
+
+      setBgToast(mode === "team" ? "正在按团队模式执行当前计划…" : "正在执行当前计划…");
+      try {
+        await invoke("run_existing_agent_plan", {
+          request: {
+            plan,
+            projectRoot,
+            sessionId,
+            modeHint: mode,
+            strategy: mode === "team" ? "Team" : "Phased",
+          },
+        });
+        await refreshBackgroundTasks();
+      } catch (error) {
+        console.error("[Chat] run_existing_agent_plan failed:", error);
+        setBgToast("直接执行当前计划失败，已回退为重新发送命令。");
+        dispatchWorkflowCommand(mode, request);
+      }
+    },
+    [
+      currentSession?.projectPath,
+      currentSession?.workingDirectory,
+      dispatchWorkflowCommand,
+      refreshBackgroundTasks,
+      sessionId,
+    ],
+  );
+
   const bgTranscriptLabel = useMemo(() => {
     if (!bgTranscriptTaskId) return undefined;
     const t = backgroundTasks.find((x) => x.task_id === bgTranscriptTaskId);
     if (!t) return undefined;
-    return `${t.agent_type}: ${shortBgTaskLabel(t, 72)}`;
+    return `${normalizeAgentDisplayName(t.agent_type)}: ${shortBgTaskLabel(t, 72)}`;
   }, [bgTranscriptTaskId, backgroundTasks]);
 
   useEffect(() => {
@@ -2008,6 +2327,16 @@ export function Chat({ sessionId }: ChatProps) {
     setBgTranscriptTaskId(null);
     void refreshBackgroundTasks();
   }, [sessionId, refreshBackgroundTasks]);
+
+  useEffect(() => {
+    if (!followUpTaskId) return;
+    const selectedTask = backgroundTasks.find(
+      (task) => task.task_id === followUpTaskId,
+    );
+    if (!selectedTask || !canSendFollowUpToTask(selectedTask.status)) {
+      setFollowUpTaskId(null);
+    }
+  }, [backgroundTasks, followUpTaskId]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -2288,7 +2617,7 @@ export function Chat({ sessionId }: ChatProps) {
     ) {
       return {
         rows: last.followUpSuggestions.map((s) => ({
-          label: s.label,
+          label: compactSuggestionLabel(s.label, s.prompt),
           text: s.prompt,
         })),
         source: "llm" as const,
@@ -2469,6 +2798,24 @@ export function Chat({ sessionId }: ChatProps) {
     };
     window.addEventListener("wikiSendMessage", handler);
     return () => window.removeEventListener("wikiSendMessage", handler);
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<ComposerDispatchDetail>).detail;
+      const content = detail?.content?.trim();
+      if (!content) return;
+      composerRef.current?.setValue(content);
+      queueMicrotask(() => {
+        composerRef.current?.focus();
+        if (detail?.autoSend) {
+          void handleSendRef.current();
+        }
+      });
+    };
+    window.addEventListener(OMIGA_COMPOSER_DISPATCH_EVENT, handler);
+    return () =>
+      window.removeEventListener(OMIGA_COMPOSER_DISPATCH_EVENT, handler);
   }, []);
 
   // Set up stream listener for a specific stream ID
@@ -2858,6 +3205,9 @@ export function Chat({ sessionId }: ChatProps) {
           setAwaitingResumeAfterCancel(false);
           isStreamingRef.current = false;
           setIsStreaming(false);
+          setCurrentStreamId(null);
+          setCurrentRoundId(null);
+          retrySendInFlightRef.current = false;
           setPendingAskUser(null);
           setAskUserSelections({});
           pendingTokenUsageRef.current = null;
@@ -2890,6 +3240,9 @@ export function Chat({ sessionId }: ChatProps) {
           setAwaitingResumeAfterCancel(true);
           isStreamingRef.current = false;
           setIsStreaming(false);
+          setCurrentStreamId(null);
+          setCurrentRoundId(null);
+          retrySendInFlightRef.current = false;
           setPendingAskUser(null);
           setAskUserSelections({});
           pendingTokenUsageRef.current = null;
@@ -2978,6 +3331,10 @@ export function Chat({ sessionId }: ChatProps) {
           setSuggestionsGenerating(true);
           break;
         }
+        case "suggestions_complete": {
+          setSuggestionsGenerating(false);
+          break;
+        }
         case "token_usage": {
           const raw = payload.data as
             | {
@@ -3008,6 +3365,9 @@ export function Chat({ sessionId }: ChatProps) {
           setAwaitingResumeAfterCancel(false);
           isStreamingRef.current = false;
           setIsStreaming(false);
+          setCurrentStreamId(null);
+          setCurrentRoundId(null);
+          retrySendInFlightRef.current = false;
           useActivityStore.getState().finalizeExecutionRun();
           useActivityStore.getState().clearTransient();
           // Mark round as completed - use ref to get latest round ID
@@ -3224,10 +3584,17 @@ export function Chat({ sessionId }: ChatProps) {
       return;
     }
 
+    const workflowPrepared = rewriteWorkflowBodyForBackend(trimmed);
+    const pendingFeedback = buildPendingExecutionFeedback({
+      workflowCommand: workflowPrepared.workflowCommand,
+      composerAgentType,
+    });
+
     // Reset indexing status on new message
     setIndexingStatus("idle");
+    setPendingAssistantHint(pendingFeedback.assistantHint);
 
-    useActivityStore.getState().beginExecutionRun();
+    useActivityStore.getState().beginExecutionRun(pendingFeedback.connectLabel);
     useActivityStore.getState().setConnecting(true);
     useActivityStore.getState().setStreaming(false, false);
     useActivityStore.getState().clearActiveTodos();
@@ -3237,6 +3604,12 @@ export function Chat({ sessionId }: ChatProps) {
     const messageContent = mergeComposerPathsAndBody(
       composerAttachedPaths,
       trimmed,
+    );
+    const workflowTitleSeed =
+      parseWorkflowCommand(trimmed)?.body || trimmed;
+    const backendMessageContent = mergeComposerPathsAndBody(
+      composerAttachedPaths,
+      workflowPrepared.content,
     );
     // "general-purpose" 和 "auto" 都不作为显式 Agent 类型传递
     // "auto" 会触发后端的自动调度模式
@@ -3269,6 +3642,7 @@ export function Chat({ sessionId }: ChatProps) {
       composerAgentType: bubbleComposerAgent,
       composerAttachedPaths: bubbleAttachedPaths,
       id: userMessage.id,
+      timestamp: userMessage.timestamp,
     });
 
     composerRef.current?.setValue("");
@@ -3279,13 +3653,13 @@ export function Chat({ sessionId }: ChatProps) {
         isFirstMessageInSession &&
         isPlaceholderSessionTitle(currentSession?.name)
       ) {
-        const heuristicTitle = titleFromFirstUserMessage(messageContent);
+        const heuristicTitle = titleFromFirstUserMessage(workflowTitleSeed);
         await renameSession(sessionId, heuristicTitle);
         // Fire-and-forget: backend spawns an independent task that calls the LLM
         // after a short delay, persists the result, and emits "session-title-updated".
         void invoke("spawn_session_title_async", {
           sessionId,
-          userMessage: messageContent,
+          userMessage: workflowTitleSeed,
         });
       }
 
@@ -3300,11 +3674,13 @@ export function Chat({ sessionId }: ChatProps) {
       }>("send_message", {
         request: {
           content: messageContent,
+          routingContent: backendMessageContent,
           session_id: sessionId,
           project_path: currentSession?.projectPath,
           session_name: getSessionNameForRequest(),
           use_tools: true,
           composerAgentType,
+          workflowCommand: workflowPrepared.workflowCommand,
           permissionMode,
           executionEnvironment: environment,
           sshServer,
@@ -3483,6 +3859,7 @@ export function Chat({ sessionId }: ChatProps) {
         setBgToast("请在主会话中重试（当前为后台跟进模式）");
         return;
       }
+      clearStaleRetryBusyFlag();
       const actNow = useActivityStore.getState();
       if (
         actNow.isConnecting ||
@@ -3501,6 +3878,20 @@ export function Chat({ sessionId }: ChatProps) {
         setBgToast("消息为空，无法重试");
         return;
       }
+      const rawRetryBody = stripLeadingPathPrefixFromMerged(
+        messageContent,
+        message.composerAttachedPaths ?? [],
+      );
+      const composeAgent = message.composerAgentType ?? "general-purpose";
+      const retryPrepared = rewriteWorkflowBodyForBackend(rawRetryBody);
+      const pendingFeedback = buildPendingExecutionFeedback({
+        workflowCommand: retryPrepared.workflowCommand,
+        composerAgentType: composeAgent,
+      });
+      const backendRetryContent = mergeComposerPathsAndBody(
+        message.composerAttachedPaths ?? [],
+        retryPrepared.content,
+      );
 
       const truncated = messages
         .slice(0, idx + 1)
@@ -3527,11 +3918,13 @@ export function Chat({ sessionId }: ChatProps) {
       setAwaitingResumeAfterCancel(false);
 
       setIndexingStatus("idle");
-      useActivityStore.getState().beginExecutionRun();
+      setPendingAssistantHint(pendingFeedback.assistantHint);
+      useActivityStore
+        .getState()
+        .beginExecutionRun(pendingFeedback.connectLabel);
       useActivityStore.getState().setConnecting(true);
       useActivityStore.getState().setStreaming(false, false);
 
-      const composeAgent = message.composerAgentType ?? "general-purpose";
       flushSync(() => {
         useChatComposerStore.getState().setComposerAgentType(composeAgent);
       });
@@ -3550,11 +3943,13 @@ export function Chat({ sessionId }: ChatProps) {
         }>("send_message", {
           request: {
             content: messageContent,
+            routingContent: backendRetryContent,
             session_id: sessionId,
             project_path: currentSession?.projectPath,
             session_name: getSessionNameForRequest(),
             use_tools: true,
             composerAgentType: composeAgent,
+            workflowCommand: retryPrepared.workflowCommand,
             permissionMode,
             executionEnvironment: useChatComposerStore.getState().environment,
             sshServer: useChatComposerStore.getState().sshServer,
@@ -3690,6 +4085,7 @@ export function Chat({ sessionId }: ChatProps) {
       getSessionNameForRequest,
       replaceStoreMessagesSnapshot,
       bumpQueueUi,
+      clearStaleRetryBusyFlag,
     ],
   );
 
@@ -3741,6 +4137,7 @@ export function Chat({ sessionId }: ChatProps) {
         setBgToast("请在主会话中重试（当前为后台跟进模式）");
         return;
       }
+      clearStaleRetryBusyFlag();
       if (
         useActivityStore.getState().isConnecting ||
         isStreamingRef.current ||
@@ -3757,7 +4154,7 @@ export function Chat({ sessionId }: ChatProps) {
       }
       setRetryConfirmForMessage(message);
     },
-    [sessionId, needsWorkspacePath, followUpTaskId, messages],
+    [sessionId, needsWorkspacePath, followUpTaskId, messages, clearStaleRetryBusyFlag],
   );
 
   const confirmRetryUserMessage = useCallback(() => {
@@ -3958,6 +4355,7 @@ export function Chat({ sessionId }: ChatProps) {
     setAwaitingResumeAfterCancel(false);
     setIndexingStatus("idle");
 
+    setPendingAssistantHint(null);
     useActivityStore.getState().beginExecutionRun();
     useActivityStore.getState().setConnecting(true);
     useActivityStore.getState().setStreaming(false, false);
@@ -4254,6 +4652,12 @@ export function Chat({ sessionId }: ChatProps) {
                   toolHintFallback={currentToolHint}
                   showResume={awaitingResumeAfterCancel && !followUpTaskId}
                   onResume={handleResumeAfterCancel}
+                  backgroundTaskCount={
+                    backgroundTasks.filter(
+                      (task) =>
+                        task.status === "Running" || task.status === "Pending",
+                    ).length
+                  }
                 />
               </Stack>
             </Box>
@@ -5291,7 +5695,30 @@ export function Chat({ sessionId }: ChatProps) {
                             mt: 0.5,
                           }}
                         >
-                          <SchedulerPlanDisplay plan={message.schedulerPlan} />
+                          <SchedulerPlanDisplay
+                            plan={message.schedulerPlan}
+                            sessionId={sessionId}
+                            onOpenReviewerTranscript={(taskId) =>
+                              setBgTranscriptTaskId(taskId)
+                            }
+                            onExecutePlan={(mode) => {
+                              if (!message.schedulerPlan) return;
+                              void executeExistingPlan(message.schedulerPlan, mode);
+                            }}
+                            onRevisePlan={() => {
+                              const request =
+                                message.schedulerPlan?.originalRequest?.trim() ||
+                                stripLeadingPathPrefixFromMerged(
+                                  message.content,
+                                  message.composerAttachedPaths ?? [],
+                                ).replace(/^\/plan\s+/iu, "").trim();
+                              dispatchWorkflowCommand(
+                                "plan",
+                                `${request}\n\n修改要求：`,
+                                false,
+                              );
+                            }}
+                          />
                         </Box>
                       )}
                   </Box>
@@ -5300,6 +5727,27 @@ export function Chat({ sessionId }: ChatProps) {
                 </Box>
               );
             })}
+
+            {isConnecting && pendingAssistantHint && (
+              <Box
+                sx={{
+                  width: "100%",
+                  minWidth: 0,
+                  maxWidth: "100%",
+                  px: 1.75,
+                  py: 1.5,
+                  borderRadius: `${BUBBLE_RADIUS_PX}px`,
+                  bgcolor: alpha(CHAT.agentBubbleBg, 0.75),
+                  border: `1px dashed ${alpha(CHAT.agentBubbleBorder, 0.9)}`,
+                  fontFamily: CHAT.font,
+                  color: "text.secondary",
+                }}
+              >
+                <Typography variant="body2" sx={{ fontSize: 14, lineHeight: 1.7 }}>
+                  {pendingAssistantHint}
+                </Typography>
+              </Box>
+            )}
 
             {/* Streaming: final summary text only — divider appears on the persisted assistant row after complete */}
             {isStreaming && currentResponse && (
@@ -5529,32 +5977,65 @@ export function Chat({ sessionId }: ChatProps) {
                     sx={{ width: "100%" }}
                   >
                     {composerSuggestions.map((s, idx) => (
-                      <Tooltip
-                        key={`${idx}-${s.label}`}
-                        title={s.text}
-                        placement="top"
-                        enterDelay={400}
-                      >
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          color="primary"
-                          onClick={() => {
-                            composerRef.current?.setValue(s.text);
-                            queueMicrotask(() => inputRef.current?.focus());
-                          }}
-                          sx={{
-                            textTransform: "none",
-                            borderRadius: `${BUBBLE_RADIUS_PX}px`,
-                            maxWidth: "100%",
-                            fontSize: 12,
-                            fontWeight: 600,
-                            py: 0.5,
-                          }}
-                        >
-                          {s.label}
-                        </Button>
-                      </Tooltip>
+                      (() => {
+                        const tooltipMarkdown = extractSuggestionTooltipMarkdown(
+                          s.text,
+                          s.label,
+                        );
+                        const button = (
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            color="primary"
+                            onClick={() => {
+                              composerRef.current?.setValue(s.text);
+                              queueMicrotask(() => inputRef.current?.focus());
+                            }}
+                            sx={{
+                              textTransform: "none",
+                              borderRadius: `${BUBBLE_RADIUS_PX}px`,
+                              maxWidth: "100%",
+                              fontSize: 12,
+                              fontWeight: 600,
+                              py: 0.5,
+                            }}
+                          >
+                            {s.label}
+                          </Button>
+                        );
+
+                        if (!tooltipMarkdown) {
+                          return (
+                            <Box key={`${idx}-${s.label}`} sx={{ display: "inline-flex" }}>
+                              {button}
+                            </Box>
+                          );
+                        }
+
+                        return (
+                          <Tooltip
+                            key={`${idx}-${s.label}`}
+                            placement="top"
+                            enterDelay={400}
+                            title={
+                              <Box
+                                sx={{
+                                  maxWidth: 360,
+                                  "& p": { m: 0, lineHeight: 1.45 },
+                                  "& ul, & ol": { my: 0.5, pl: 2 },
+                                  "& li": { my: 0.25 },
+                                }}
+                              >
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                  {tooltipMarkdown}
+                                </ReactMarkdown>
+                              </Box>
+                            }
+                          >
+                            {button}
+                          </Tooltip>
+                        );
+                      })()
                     ))}
                   </Stack>
                 </Box>
@@ -5675,6 +6156,7 @@ export function Chat({ sessionId }: ChatProps) {
                 onEditQueuedAt={editQueuedAt}
                 onCancelBackgroundTask={handleCancelBackgroundTask}
                 onOpenBackgroundTranscript={handleOpenBackgroundTranscript}
+                onCloseBackgroundTranscript={() => setBgTranscriptTaskId(null)}
                 askUserQuestion={
                   pendingAskUser
                     ? {

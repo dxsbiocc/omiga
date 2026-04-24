@@ -113,6 +113,14 @@ pub(crate) struct AgentLlmRuntime {
 }
 
 impl AgentLlmRuntime {
+    pub(crate) fn round_id(&self) -> &str {
+        &self.round_id
+    }
+
+    pub(crate) fn repo(&self) -> &Arc<crate::domain::persistence::SessionRepository> {
+        &self.repo
+    }
+
     /// Build a runtime from app state, optionally inheriting execution environment from a parent
     /// session. If `session_id` is `Some`, the session's `execution_environment`, `ssh_server`,
     /// `sandbox_backend`, `local_venv_*`, and `env_store` are copied; otherwise defaults apply.
@@ -425,6 +433,7 @@ async fn handle_runtime_constraint_block_main(
             None,
             reasoning_save,
             None,
+            None,
         )
         .await
     {
@@ -519,6 +528,7 @@ async fn handle_runtime_constraint_block_main(
                     None,
                     None,
                     None,
+                    None,
                 )
                 .await
             {
@@ -584,6 +594,7 @@ async fn handle_runtime_constraint_block_main(
                             None,
                             None,
                             None,
+                            None,
                         )
                         .await
                     {
@@ -620,6 +631,7 @@ async fn handle_runtime_constraint_block_main(
                 session_id,
                 "assistant",
                 &block.assistant_response,
+                None,
                 None,
                 None,
                 None,
@@ -831,6 +843,7 @@ fn fold_tool_stream_item_for_model(
         | StreamOutputItem::TurnSummary { .. }
         | StreamOutputItem::FollowUpSuggestions(_)
         | StreamOutputItem::SuggestionsGenerating
+        | StreamOutputItem::SuggestionsComplete { .. }
         | StreamOutputItem::TokenUsage { .. } => {}
     }
 }
@@ -1053,6 +1066,12 @@ fn format_scheduler_plan(result: &crate::domain::agents::scheduler::SchedulingRe
         "\n预估执行时间: ~{} 分钟\n",
         result.estimated_duration_secs / 60
     ));
+    if !result.reviewer_agents.is_empty() {
+        plan_text.push_str(&format!(
+            "Reviewer 结构化结论将由: {}\n",
+            result.reviewer_agents.join(", ")
+        ));
+    }
 
     // 对于内容生成任务，添加重要提示
     if is_content_generation {
@@ -1070,6 +1089,104 @@ fn format_scheduler_plan(result: &crate::domain::agents::scheduler::SchedulingRe
     plan_text
 }
 
+fn looks_like_resume_request(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "resume",
+        "continue",
+        "继续",
+        "恢复",
+        "从上次继续",
+        "继续上次",
+        "pick up where",
+    ]
+    .iter()
+    .any(|token| lower.contains(token))
+}
+
+async fn append_orchestration_event(
+    repo: &crate::domain::persistence::SessionRepository,
+    session_id: &str,
+    round_id: Option<&str>,
+    message_id: Option<&str>,
+    mode: Option<&str>,
+    event_type: &str,
+    phase: Option<&str>,
+    task_id: Option<&str>,
+    payload: serde_json::Value,
+) {
+    let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+    if let Err(e) = repo
+        .append_orchestration_event(
+            session_id,
+            round_id,
+            message_id,
+            mode,
+            event_type,
+            phase,
+            task_id,
+            &payload_json,
+        )
+        .await
+    {
+        tracing::warn!(target: "omiga::orchestration_events", session_id, event_type, error = %e, "append_orchestration_event failed");
+    }
+}
+
+async fn append_preflight_stage_event(
+    repo: &crate::domain::persistence::SessionRepository,
+    session_id: &str,
+    message_id: &str,
+    mode: Option<&str>,
+    stage: &str,
+    duration_ms: u128,
+    payload: serde_json::Value,
+) {
+    append_orchestration_event(
+        repo,
+        session_id,
+        None,
+        Some(message_id),
+        mode,
+        "preflight_stage_completed",
+        Some("preflight"),
+        None,
+        serde_json::json!({
+            "stage": stage,
+            "durationMs": duration_ms,
+            "payload": payload,
+        }),
+    )
+    .await;
+}
+
+async fn append_preflight_stage_failed_event(
+    repo: &crate::domain::persistence::SessionRepository,
+    session_id: &str,
+    message_id: &str,
+    mode: Option<&str>,
+    stage: &str,
+    duration_ms: u128,
+    error: &str,
+) {
+    append_orchestration_event(
+        repo,
+        session_id,
+        None,
+        Some(message_id),
+        mode,
+        "preflight_stage_failed",
+        Some("preflight"),
+        None,
+        serde_json::json!({
+            "stage": stage,
+            "durationMs": duration_ms,
+            "error": error,
+        }),
+    )
+    .await;
+}
+
 /// Send a message to Claude and get a streaming response
 #[tauri::command]
 pub async fn send_message(
@@ -1077,6 +1194,7 @@ pub async fn send_message(
     app_state: State<'_, OmigaAppState>,
     request: SendMessageRequest,
 ) -> CommandResult<MessageResponse> {
+    let send_message_started_at = std::time::Instant::now();
     let input_target = match ChatInputTarget::parse(request.input_target.as_deref()) {
         Ok(t) => t,
         Err(msg) => {
@@ -1113,11 +1231,40 @@ pub async fn send_message(
     // which means the LLM's very first token is already operating under skill guidance (OMX-style
     // auto-invocation) rather than having to decide whether to call the Skill tool.
     let request = request;
+    let routing_content = request
+        .routing_content
+        .as_deref()
+        .unwrap_or(&request.content);
+    let explicit_workflow_command = request
+        .workflow_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|cmd| !cmd.is_empty());
     let keyword_skill_route = if request.use_tools {
-        crate::domain::routing::detect_skill_route(&request.content)
+        match explicit_workflow_command {
+            Some("plan") => Some(crate::domain::routing::SkillRoute {
+                skill_name: "plan".to_string(),
+                args: routing_content.to_string(),
+                priority: 12,
+            }),
+            Some("team") => Some(crate::domain::routing::SkillRoute {
+                skill_name: "team".to_string(),
+                args: routing_content.to_string(),
+                priority: 12,
+            }),
+            Some("autopilot") => Some(crate::domain::routing::SkillRoute {
+                skill_name: "autopilot".to_string(),
+                args: routing_content.to_string(),
+                priority: 12,
+            }),
+            _ => crate::domain::routing::detect_skill_route(routing_content),
+        }
     } else {
         None
     };
+    let trace_mode = explicit_workflow_command
+        .map(str::to_string)
+        .or_else(|| keyword_skill_route.as_ref().map(|route| route.skill_name.clone()));
     if let Some(ref route) = keyword_skill_route {
         tracing::info!(
             target: "omiga::routing",
@@ -1204,6 +1351,7 @@ pub async fn send_message(
                     &session.id,
                     "user",
                     &request.content,
+                    None,
                     None,
                     None,
                     None,
@@ -1303,6 +1451,7 @@ pub async fn send_message(
             None,
             None,
             None,
+            None,
         )
         .await
         .map_err(|e| {
@@ -1338,6 +1487,17 @@ pub async fn send_message(
     };
 
     let project_root = resolve_session_project_root(&project_path);
+    let has_existing_ralph_state =
+        crate::domain::ralph_state::read_state(&project_root, &session_id)
+            .await
+            .is_some();
+    let has_existing_autopilot_state =
+        crate::domain::autopilot_state::read_state(&project_root, &session_id)
+            .await
+            .is_some();
+    let has_existing_team_state = crate::domain::team_state::read_state(&project_root, &session_id)
+        .await
+        .is_some();
 
     // Composer「权限模式」→ PermissionManager：无用户规则命中时按本会话立场硬拦截（与前端输入框同步）
     app_state
@@ -1345,8 +1505,9 @@ pub async fn send_message(
         .set_session_composer_stance(&session_id, request.permission_mode.as_deref())
         .await;
 
-    // 检测是否为 Plan mode
-    let is_plan_mode = request.composer_agent_type.as_deref() == Some("Plan");
+    // 检测是否为 Plan mode（Composer Plan Agent 或显式 /plan 命令）
+    let is_plan_mode = request.composer_agent_type.as_deref() == Some("Plan")
+        || matches!(explicit_workflow_command, Some("plan"));
 
     // ===== 智能调度系统集成 =====
     // 检测是否使用自动调度模式（用户选择 auto 或未指定特定 Agent）
@@ -1363,11 +1524,28 @@ pub async fn send_message(
         .as_ref()
         .map(|r| r.skill_name == "autopilot")
         .unwrap_or(false);
+    let is_plan_command = matches!(explicit_workflow_command, Some("plan"));
+    let is_schedule_command = matches!(explicit_workflow_command, Some("schedule"));
 
     if is_ralph_keyword_route {
+        if looks_like_resume_request(routing_content) || has_existing_ralph_state {
+            append_orchestration_event(
+                repo,
+                &session_id,
+                None,
+                Some(&user_message_id),
+                Some("ralph"),
+                "resume_requested",
+                None,
+                None,
+                serde_json::json!({ "goal": request.content }),
+            )
+            .await;
+        }
         begin_ralph_turn_if_needed(
             true,
             &app_state.chat.sessions,
+            repo,
             &project_root,
             &session_id,
             &request.content,
@@ -1377,13 +1555,44 @@ pub async fn send_message(
                 request.local_venv_type.as_deref().unwrap_or(""),
                 request.local_venv_name.as_deref().unwrap_or(""),
             ),
+            None,
+        )
+        .await;
+        append_orchestration_event(
+            repo,
+            &session_id,
+            None,
+            Some(&user_message_id),
+            Some("ralph"),
+            "mode_requested",
+            Some("planning"),
+            None,
+            serde_json::json!({ "goal": request.content }),
         )
         .await;
     }
     if is_autopilot_keyword_route {
+        if matches!(explicit_workflow_command, Some("autopilot"))
+            || looks_like_resume_request(routing_content)
+            || has_existing_autopilot_state
+        {
+            append_orchestration_event(
+                repo,
+                &session_id,
+                None,
+                Some(&user_message_id),
+                Some("autopilot"),
+                "resume_requested",
+                None,
+                None,
+                serde_json::json!({ "goal": request.content }),
+            )
+            .await;
+        }
         begin_autopilot_turn_if_needed(
             true,
             &app_state.chat.sessions,
+            repo,
             &project_root,
             &session_id,
             &request.content,
@@ -1393,11 +1602,61 @@ pub async fn send_message(
                 request.local_venv_type.as_deref().unwrap_or(""),
                 request.local_venv_name.as_deref().unwrap_or(""),
             ),
+            None,
+        )
+        .await;
+        append_orchestration_event(
+            repo,
+            &session_id,
+            None,
+            Some(&user_message_id),
+            Some("autopilot"),
+            "mode_requested",
+            Some("intake"),
+            None,
+            serde_json::json!({ "goal": request.content }),
         )
         .await;
     }
     if is_team_keyword_route {
-        begin_team_turn_if_needed(true, &project_root, &session_id, &request.content).await;
+        if matches!(explicit_workflow_command, Some("team"))
+            || looks_like_resume_request(routing_content)
+            || has_existing_team_state
+        {
+            append_orchestration_event(
+                repo,
+                &session_id,
+                None,
+                Some(&user_message_id),
+                Some("team"),
+                "resume_requested",
+                None,
+                None,
+                serde_json::json!({ "goal": request.content }),
+            )
+            .await;
+        }
+        begin_team_turn_if_needed(
+            true,
+            repo,
+            &project_root,
+            &session_id,
+            &request.content,
+            None,
+        )
+        .await;
+        append_orchestration_event(
+            repo,
+            &session_id,
+            None,
+            Some(&user_message_id),
+            Some("team"),
+            "mode_requested",
+            Some("planning"),
+            None,
+            serde_json::json!({ "goal": request.content }),
+        )
+        .await;
     }
 
     let mode_strategy_override = if let Some(route) = keyword_skill_route.as_ref() {
@@ -1443,13 +1702,21 @@ pub async fn send_message(
         .and_then(|r| {
             match r.skill_name.as_str() {
                 "team" => Some(SchedulingStrategy::Team),
-                // No dedicated keyword rules for phased/competitive yet — reserved for future skill routing
+                "plan" => Some(SchedulingStrategy::Phased),
+                // No dedicated keyword rules for competitive yet — reserved for future skill routing
                 _ => None,
             }
         })
+        .or(if is_schedule_command {
+            Some(SchedulingStrategy::Phased)
+        } else {
+            None
+        })
         .or(mode_strategy_override);
 
-    let use_scheduler = is_team_keyword_route
+    let use_scheduler = is_plan_command
+        || is_schedule_command
+        || is_team_keyword_route
         || request
             .composer_agent_type
             .as_deref()
@@ -1465,6 +1732,7 @@ pub async fn send_message(
     let scheduler_result: Option<crate::domain::agents::scheduler::SchedulingResult> =
         if use_scheduler && request.use_tools {
             let scheduler = AgentScheduler::new();
+            let scheduler_stage_started_at = std::time::Instant::now();
             // Strategy priority: keyword route > composer_agent_type > Auto
             let (strategy, force_decompose) = if let Some(s) = keyword_strategy {
                 (s, true)
@@ -1479,14 +1747,12 @@ pub async fn send_message(
                 }
             };
 
-            let scheduling_req = SchedulingRequest::new(&request.content)
+            let scheduling_req = SchedulingRequest::new(routing_content)
                 .with_project_root(project_root.to_string_lossy().as_ref())
-                .with_mode_hint(
-                    keyword_skill_route
-                        .as_ref()
-                        .map(|r| r.skill_name.clone())
-                        .unwrap_or_default(),
-                )
+                .with_mode_hint(match keyword_skill_route.as_ref() {
+                    Some(route) => route.skill_name.clone(),
+                    None => explicit_workflow_command.unwrap_or_default().to_string(),
+                })
                 .with_strategy(strategy)
                 .with_auto_decompose(force_decompose);
 
@@ -1495,6 +1761,22 @@ pub async fn send_message(
                 .await
             {
                 Ok(result) => {
+                    if trace_mode.is_some() {
+                        append_preflight_stage_event(
+                            repo,
+                            &session_id,
+                            &user_message_id,
+                            trace_mode.as_deref(),
+                            "scheduler_plan",
+                            scheduler_stage_started_at.elapsed().as_millis(),
+                            serde_json::json!({
+                                "taskCount": result.plan.subtasks.len(),
+                                "agentCount": result.selected_agents.len(),
+                                "strategy": format!("{:?}", result.recommended_strategy),
+                            }),
+                        )
+                        .await;
+                    }
                     // Accept the result when:
                     //  a) explicit team keyword route (user typed /team)
                     //  b) planner produced > 1 agent (real multi-agent plan)
@@ -1504,7 +1786,10 @@ pub async fn send_message(
                         result.recommended_strategy,
                         SchedulingStrategy::Single | SchedulingStrategy::Auto
                     );
-                    if is_team_keyword_route || is_real_multiagent || strategy_demands_orchestration
+                    if is_plan_command
+                        || is_team_keyword_route
+                        || is_real_multiagent
+                        || strategy_demands_orchestration
                     {
                         tracing::info!(
                             target: "omiga::scheduler",
@@ -1514,6 +1799,30 @@ pub async fn send_message(
                             team_mode = is_team_keyword_route,
                             "Task decomposed into subtasks"
                         );
+                        append_orchestration_event(
+                            repo,
+                            &session_id,
+                            None,
+                            Some(&user_message_id),
+                            keyword_skill_route
+                                .as_ref()
+                                .map(|r| r.skill_name.as_str())
+                                .or(if is_schedule_command {
+                                    Some("schedule")
+                                } else {
+                                    None
+                                }),
+                            "schedule_plan_created",
+                            None,
+                            None,
+                            serde_json::json!({
+                                "planId": result.plan.plan_id,
+                                "taskCount": result.plan.subtasks.len(),
+                                "agents": result.selected_agents,
+                                "strategy": format!("{:?}", result.recommended_strategy),
+                            }),
+                        )
+                        .await;
                         Some(result)
                     } else {
                         None
@@ -1521,12 +1830,84 @@ pub async fn send_message(
                 }
                 Err(e) => {
                     tracing::warn!(target: "omiga::scheduler", "Scheduling failed: {}", e);
+                    if trace_mode.is_some() {
+                        append_preflight_stage_failed_event(
+                            repo,
+                            &session_id,
+                            &user_message_id,
+                            trace_mode.as_deref(),
+                            "scheduler_plan",
+                            scheduler_stage_started_at.elapsed().as_millis(),
+                            &e,
+                        )
+                        .await;
+                    }
                     None
                 }
             }
         } else {
             None
         };
+
+    if is_schedule_command {
+        if let Some(schedule_result) = scheduler_result.clone() {
+            let stream_message_id = uuid::Uuid::new_v4().to_string();
+            let schedule_round_id = uuid::Uuid::new_v4().to_string();
+            let session_id_for_bg = session_id.clone();
+            let project_root_for_bg = project_root.to_string_lossy().to_string();
+            let request_for_bg = crate::commands::chat::RunAgentScheduleRequest {
+                user_request: routing_content.to_string(),
+                project_root: project_root_for_bg.clone(),
+                session_id: session_id_for_bg.clone(),
+                max_agents: Some(schedule_result.plan.subtasks.len()),
+                auto_decompose: true,
+                strategy: Some(SchedulingStrategy::Phased),
+                mode_hint: Some("schedule".to_string()),
+                skip_confirmation: true,
+            };
+            let app_for_bg = app.clone();
+            let stream_message_id_for_bg = stream_message_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let _ = app_for_bg.emit(
+                    &format!("chat-stream-{}", stream_message_id_for_bg),
+                    &StreamOutputItem::Start,
+                );
+                let _ = app_for_bg.emit(
+                    &format!("chat-stream-{}", stream_message_id_for_bg),
+                    &StreamOutputItem::Complete,
+                );
+                if let Some(state) = app_for_bg.try_state::<OmigaAppState>() {
+                    if let Err(e) = self::provider::run_agent_schedule_inner(
+                        app_for_bg.clone(),
+                        &state,
+                        request_for_bg,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            target: "omiga::scheduler",
+                            session_id = %session_id_for_bg,
+                            error = %e,
+                            "Direct /schedule orchestration failed"
+                        );
+                    }
+                } else {
+                    tracing::warn!(target: "omiga::scheduler", "OmigaAppState unavailable for direct /schedule orchestration");
+                }
+            });
+
+            return Ok(MessageResponse {
+                message_id: stream_message_id,
+                session_id,
+                round_id: schedule_round_id,
+                user_message_id: Some(user_message_id),
+                input_kind: Some("schedule_orchestration_started".to_string()),
+                scheduler_plan: Some(schedule_result),
+                initial_todos: None,
+            });
+        }
+    }
 
     if is_autopilot_keyword_route {
         if let Some(phase) = crate::domain::orchestration::autopilot::AutopilotOrchestrator::phase_for_scheduler_result(
@@ -1539,6 +1920,7 @@ pub async fn send_message(
             update_autopilot_phase_if_needed(
                 true,
                 &app_state.chat.sessions,
+                repo,
                 &project_root,
                 &session_id,
                 phase,
@@ -1548,6 +1930,7 @@ pub async fn send_message(
                     request.local_venv_type.as_deref().unwrap_or(""),
                     request.local_venv_name.as_deref().unwrap_or(""),
                 ),
+                None,
             )
             .await;
         }
@@ -1851,6 +2234,22 @@ pub async fn send_message(
 
     let compact_log_for_stream = compact_outcome.map(|p| p.log_line);
 
+    if trace_mode.is_some() {
+        append_preflight_stage_event(
+            repo,
+            &session_id,
+            &user_message_id,
+            trace_mode.as_deref(),
+            "send_message_ready",
+            send_message_started_at.elapsed().as_millis(),
+            serde_json::json!({
+                "toolsEnabled": request.use_tools,
+                "schedulerBuiltPlan": scheduler_result.is_some(),
+            }),
+        )
+        .await;
+    }
+
     // Generate round and message IDs
     let round_id = uuid::Uuid::new_v4().to_string();
     let message_id = uuid::Uuid::new_v4().to_string();
@@ -1898,6 +2297,7 @@ pub async fn send_message(
     // Merge MCP `tools/list` from Omiga MCP config (stdio / HTTP), same naming as Claude Code (`mcp__server__tool`).
     // Filter with `permissions.deny` from Claude-style settings (`filterToolsByDenyRules` parity).
     let tools: Vec<ToolSchema> = if request.use_tools {
+        let tool_schema_stage_started_at = std::time::Instant::now();
         let deny_entries = {
             let hit = app_state
                 .chat
@@ -1941,38 +2341,86 @@ pub async fn send_message(
         }
         built.sort_by(|a, b| a.name.cmp(&b.name));
         let base_names: HashSet<String> = built.iter().map(|t| t.name.clone()).collect();
-        let mcp_timeout = std::time::Duration::from_secs(45);
-        let mcp_tools = {
-            let hit = app_state
+        let mcp_stage_started_at = std::time::Instant::now();
+        let (mcp_tools, mcp_cache_status) = {
+            let cached = app_state
                 .chat
                 .mcp_tool_cache
                 .lock()
                 .await
                 .get(&project_root)
-                .filter(|e| e.cached_at.elapsed() < MCP_TOOL_CACHE_TTL)
-                .map(|e| e.schemas.clone());
-            match hit {
-                Some(schemas) => {
+                .map(|e| (e.schemas.clone(), e.cached_at.elapsed() < MCP_TOOL_CACHE_TTL));
+            match cached {
+                Some((schemas, true)) => {
                     tracing::debug!(target: "omiga::mcp", "MCP tool schemas served from cache");
-                    schemas
+                    (schemas, "fresh")
+                }
+                Some((schemas, false)) => {
+                    tracing::info!(
+                        target: "omiga::mcp",
+                        cached = schemas.len(),
+                        "MCP tool cache stale; using stale schemas and refreshing in background"
+                    );
+                    let mcp_tool_cache = app_state.chat.mcp_tool_cache.clone();
+                    let root = project_root.clone();
+                    tokio::spawn(async move {
+                        let schemas =
+                            crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(
+                                &root,
+                                std::time::Duration::from_secs(10),
+                            )
+                            .await;
+                        mcp_tool_cache.lock().await.insert(
+                            root,
+                            McpToolCache {
+                                schemas,
+                                cached_at: std::time::Instant::now(),
+                            },
+                        );
+                    });
+                    (schemas, "stale")
                 }
                 None => {
-                    let schemas = crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(
-                        &project_root,
-                        mcp_timeout,
-                    )
-                    .await;
-                    app_state.chat.mcp_tool_cache.lock().await.insert(
-                        project_root.clone(),
-                        McpToolCache {
-                            schemas: schemas.clone(),
-                            cached_at: std::time::Instant::now(),
-                        },
+                    tracing::info!(
+                        target: "omiga::mcp",
+                        "MCP tool cache cold; warming in background without blocking first response"
                     );
-                    schemas
+                    let mcp_tool_cache = app_state.chat.mcp_tool_cache.clone();
+                    let root = project_root.clone();
+                    tokio::spawn(async move {
+                        let schemas =
+                            crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(
+                                &root,
+                                std::time::Duration::from_secs(10),
+                            )
+                            .await;
+                        mcp_tool_cache.lock().await.insert(
+                            root,
+                            McpToolCache {
+                                schemas,
+                                cached_at: std::time::Instant::now(),
+                            },
+                        );
+                    });
+                    (vec![], "cold")
                 }
             }
         };
+        if trace_mode.is_some() {
+            append_preflight_stage_event(
+                repo,
+                &session_id,
+                &user_message_id,
+                trace_mode.as_deref(),
+                "mcp_tools",
+                mcp_stage_started_at.elapsed().as_millis(),
+                serde_json::json!({
+                    "toolCount": mcp_tools.len(),
+                    "cacheStatus": mcp_cache_status,
+                }),
+            )
+            .await;
+        }
         let n_mcp_before = mcp_tools.len();
         let mcp_after_deny = filter_tool_schemas_by_deny_rule_entries(mcp_tools, &deny_entries);
         let n_mcp_after = mcp_after_deny.len();
@@ -2000,6 +2448,22 @@ pub async fn send_message(
                 after = combined.len(),
                 "coordinator mode: tool list restricted to orchestration tools"
             );
+        }
+        if trace_mode.is_some() {
+            append_preflight_stage_event(
+                repo,
+                &session_id,
+                &user_message_id,
+                trace_mode.as_deref(),
+                "tool_schemas",
+                tool_schema_stage_started_at.elapsed().as_millis(),
+                serde_json::json!({
+                    "toolCount": combined.len(),
+                    "builtinCount": n_builtin_after,
+                    "mcpCount": n_mcp_after,
+                }),
+            )
+            .await;
         }
         combined
     } else {
@@ -2064,7 +2528,11 @@ pub async fn send_message(
 
     // Prepare orchestration variables for the spawn (scheduler_result stays on the stack for
     // MessageResponse; we clone only when a real multi-agent plan was built).
-    let scheduler_for_spawn = scheduler_result.clone();
+    let scheduler_for_spawn = if is_plan_mode {
+        None
+    } else {
+        scheduler_result.clone()
+    };
     let project_root_str_for_spawn = project_root.to_string_lossy().to_string();
     let project_root_for_ralph = project_root.clone();
     let project_root_for_autopilot = project_root.clone();
@@ -2214,19 +2682,23 @@ pub async fn send_message(
         update_ralph_phase_if_needed(
             is_ralph_mode_for_spawn,
             &sessions_clone,
+            &repo_clone,
             &project_root_for_ralph,
             &session_id_clone,
             crate::domain::ralph_state::RalphPhase::EnvCheck,
             ralph_env_for_spawn.clone(),
+            Some(&round_id_clone),
         )
         .await;
         update_autopilot_phase_if_needed(
             is_autopilot_mode_for_spawn,
             &sessions_clone,
+            &repo_clone,
             &project_root_for_autopilot,
             &session_id_clone,
             crate::domain::autopilot_state::AutopilotPhase::Design,
             autopilot_env_for_spawn.clone(),
+            Some(&round_id_clone),
         )
         .await;
 
@@ -2260,26 +2732,32 @@ pub async fn send_message(
                 fail_ralph_turn_if_needed(
                     is_ralph_mode_for_spawn,
                     &sessions_clone,
+                    &repo_clone,
                     &project_root_for_ralph,
                     &session_id_clone,
                     crate::domain::ralph_state::RalphPhase::EnvCheck,
                     &e.to_string(),
+                    Some(&round_id_clone),
                 )
                 .await;
                 fail_autopilot_turn_if_needed(
                     is_autopilot_mode_for_spawn,
                     &sessions_clone,
+                    &repo_clone,
                     &project_root_for_autopilot,
                     &session_id_clone,
                     crate::domain::autopilot_state::AutopilotPhase::Design,
                     &e.to_string(),
+                    Some(&round_id_clone),
                 )
                 .await;
                 fail_team_turn_if_needed(
                     is_team_mode_for_spawn,
+                    &repo_clone,
                     &project_root_for_team,
                     &session_id_clone,
                     &e.to_string(),
+                    Some(&round_id_clone),
                 )
                 .await;
 
@@ -2305,19 +2783,23 @@ pub async fn send_message(
             update_ralph_phase_if_needed(
                 is_ralph_mode_for_spawn,
                 &sessions_clone,
+                &repo_clone,
                 &project_root_for_ralph,
                 &session_id_clone,
                 crate::domain::ralph_state::RalphPhase::Executing,
                 ralph_env_for_spawn.clone(),
+                Some(&round_id_clone),
             )
             .await;
             update_autopilot_phase_if_needed(
                 is_autopilot_mode_for_spawn,
                 &sessions_clone,
+                &repo_clone,
                 &project_root_for_autopilot,
                 &session_id_clone,
                 crate::domain::autopilot_state::AutopilotPhase::Qa,
                 autopilot_env_for_spawn.clone(),
+                Some(&round_id_clone),
             )
             .await;
             let _ = app_clone.emit(
@@ -2420,6 +2902,7 @@ pub async fn send_message(
                     None,
                     reasoning_save,
                     None,
+                    None,
                 )
                 .await
             {
@@ -2441,6 +2924,7 @@ pub async fn send_message(
         update_ralph_phase_if_needed(
             is_ralph_mode_for_spawn,
             &sessions_clone,
+            &repo_clone,
             &project_root_for_ralph,
             &session_id_clone,
             if pending_tool_calls.is_empty() {
@@ -2449,11 +2933,13 @@ pub async fn send_message(
                 crate::domain::ralph_state::RalphPhase::Executing
             },
             ralph_env_for_spawn.clone(),
+            Some(&round_id_clone),
         )
         .await;
         update_autopilot_phase_if_needed(
             is_autopilot_mode_for_spawn,
             &sessions_clone,
+            &repo_clone,
             &project_root_for_autopilot,
             &session_id_clone,
             if pending_tool_calls.is_empty() {
@@ -2462,6 +2948,7 @@ pub async fn send_message(
                 crate::domain::autopilot_state::AutopilotPhase::Implementation
             },
             autopilot_env_for_spawn.clone(),
+            Some(&round_id_clone),
         )
         .await;
 
@@ -2528,6 +3015,7 @@ pub async fn send_message(
                                 None,
                                 retry_reasoning_save,
                                 None,
+                                None,
                             )
                             .await
                         {
@@ -2580,19 +3068,23 @@ pub async fn send_message(
             update_ralph_phase_if_needed(
                 is_ralph_mode_for_spawn,
                 &sessions_clone,
+                &repo_clone,
                 &project_root_for_ralph,
                 &session_id_clone,
                 crate::domain::ralph_state::RalphPhase::Verifying,
                 ralph_env_for_spawn.clone(),
+                Some(&round_id_clone),
             )
             .await;
             update_autopilot_phase_if_needed(
                 is_autopilot_mode_for_spawn,
                 &sessions_clone,
+                &repo_clone,
                 &project_root_for_autopilot,
                 &session_id_clone,
                 crate::domain::autopilot_state::AutopilotPhase::Validation,
                 autopilot_env_for_spawn.clone(),
+                Some(&round_id_clone),
             )
             .await;
 
@@ -2644,21 +3136,27 @@ pub async fn send_message(
             complete_ralph_turn_if_needed(
                 is_ralph_mode_for_spawn,
                 &sessions_clone,
+                &repo_clone,
                 &project_root_for_ralph,
                 &session_id_clone,
+                Some(&round_id_clone),
             )
             .await;
             complete_autopilot_turn_if_needed(
                 is_autopilot_mode_for_spawn,
                 &sessions_clone,
+                &repo_clone,
                 &project_root_for_autopilot,
                 &session_id_clone,
+                Some(&round_id_clone),
             )
             .await;
             complete_team_turn_if_needed(
                 is_team_mode_for_spawn,
+                &repo_clone,
                 &project_root_for_team,
                 &session_id_clone,
+                Some(&round_id_clone),
             )
             .await;
             emit_post_turn_meta_then_complete(
@@ -2748,26 +3246,30 @@ pub async fn send_message(
             update_ralph_phase_if_needed(
                 is_ralph_mode_for_spawn,
                 &sessions_clone,
+                &repo_clone,
                 &project_root_for_ralph,
                 &session_id_clone,
                 crate::domain::ralph_state::RalphPhase::Executing,
                 ralph_env_for_spawn.clone(),
+                Some(&round_id_clone),
             )
             .await;
             let autopilot_state = update_autopilot_phase_if_needed(
                 is_autopilot_mode_for_spawn,
                 &sessions_clone,
+                &repo_clone,
                 &project_root_for_autopilot,
                 &session_id_clone,
                 crate::domain::autopilot_state::AutopilotPhase::Qa,
                 autopilot_env_for_spawn.clone(),
+                Some(&round_id_clone),
             )
             .await;
 
             if let Some(state) = autopilot_state {
                 if state.qa_limit_reached() {
                     let stop_text = format!(
-                        "Autopilot stopped after exceeding max QA cycles ({}/{}). Last known goal: {}",
+                        "Autopilot stopped after exceeding max argumentation cycles ({}/{}). Last known goal: {}",
                         state.qa_cycles, state.max_qa_cycles, state.goal
                     );
                     let stop_msg_id = uuid::Uuid::new_v4().to_string();
@@ -2783,12 +3285,13 @@ pub async fn send_message(
                             None,
                             reasoning_save,
                             None,
+                            None,
                         )
                         .await
                     {
                         tracing::warn!(
                             target: "omiga::autopilot",
-                            "Failed to save autopilot QA limit stop message: {}",
+                            "Failed to save autopilot argumentation limit stop message: {}",
                             e
                         );
                     }
@@ -2805,10 +3308,12 @@ pub async fn send_message(
                     fail_autopilot_turn_if_needed(
                         true,
                         &sessions_clone,
+                        &repo_clone,
                         &project_root_for_autopilot,
                         &session_id_clone,
                         crate::domain::autopilot_state::AutopilotPhase::Qa,
                         &stop_text,
+                        Some(&round_id_clone),
                     )
                     .await;
                     {
@@ -2928,26 +3433,32 @@ pub async fn send_message(
                         fail_ralph_turn_if_needed(
                             is_ralph_mode_for_spawn,
                             &sessions_clone,
+                            &repo_clone,
                             &project_root_for_ralph,
                             &session_id_clone,
                             crate::domain::ralph_state::RalphPhase::Executing,
                             &e.to_string(),
+                            Some(&round_id_clone),
                         )
                         .await;
                         fail_autopilot_turn_if_needed(
                             is_autopilot_mode_for_spawn,
                             &sessions_clone,
+                            &repo_clone,
                             &project_root_for_autopilot,
                             &session_id_clone,
                             crate::domain::autopilot_state::AutopilotPhase::Qa,
                             &e.to_string(),
+                            Some(&round_id_clone),
                         )
                         .await;
                         fail_team_turn_if_needed(
                             is_team_mode_for_spawn,
+                            &repo_clone,
                             &project_root_for_team,
                             &session_id_clone,
                             &e.to_string(),
+                            Some(&round_id_clone),
                         )
                         .await;
                         let _ = app_clone.emit(
@@ -3034,19 +3545,23 @@ pub async fn send_message(
                 update_ralph_phase_if_needed(
                     is_ralph_mode_for_spawn,
                     &sessions_clone,
+                    &repo_clone,
                     &project_root_for_ralph,
                     &session_id_clone,
                     crate::domain::ralph_state::RalphPhase::Executing,
                     ralph_env_for_spawn.clone(),
+                    Some(&round_id_clone),
                 )
                 .await;
                 update_autopilot_phase_if_needed(
                     is_autopilot_mode_for_spawn,
                     &sessions_clone,
+                    &repo_clone,
                     &project_root_for_autopilot,
                     &session_id_clone,
                     crate::domain::autopilot_state::AutopilotPhase::Qa,
                     autopilot_env_for_spawn.clone(),
+                    Some(&round_id_clone),
                 )
                 .await;
                 let _ = app_clone.emit(
@@ -3076,6 +3591,7 @@ pub async fn send_message(
                         None,
                         None,
                         next_reasoning_save,
+                        None,
                         None,
                     )
                     .await
@@ -3159,6 +3675,7 @@ pub async fn send_message(
                                     None,
                                     retry_reasoning_save,
                                     None,
+                                    None,
                                 )
                                 .await
                             {
@@ -3214,19 +3731,23 @@ pub async fn send_message(
                 update_ralph_phase_if_needed(
                     is_ralph_mode_for_spawn,
                     &sessions_clone,
+                    &repo_clone,
                     &project_root_for_ralph,
                     &session_id_clone,
                     crate::domain::ralph_state::RalphPhase::Verifying,
                     ralph_env_for_spawn.clone(),
+                    Some(&round_id_clone),
                 )
                 .await;
                 update_autopilot_phase_if_needed(
                     is_autopilot_mode_for_spawn,
                     &sessions_clone,
+                    &repo_clone,
                     &project_root_for_autopilot,
                     &session_id_clone,
                     crate::domain::autopilot_state::AutopilotPhase::Validation,
                     autopilot_env_for_spawn.clone(),
+                    Some(&round_id_clone),
                 )
                 .await;
 
@@ -3278,21 +3799,27 @@ pub async fn send_message(
                 complete_ralph_turn_if_needed(
                     is_ralph_mode_for_spawn,
                     &sessions_clone,
+                    &repo_clone,
                     &project_root_for_ralph,
                     &session_id_clone,
+                    Some(&round_id_clone),
                 )
                 .await;
                 complete_autopilot_turn_if_needed(
                     is_autopilot_mode_for_spawn,
                     &sessions_clone,
+                    &repo_clone,
                     &project_root_for_autopilot,
                     &session_id_clone,
+                    Some(&round_id_clone),
                 )
                 .await;
                 complete_team_turn_if_needed(
                     is_team_mode_for_spawn,
+                    &repo_clone,
                     &project_root_for_team,
                     &session_id_clone,
+                    Some(&round_id_clone),
                 )
                 .await;
                 emit_post_turn_meta_then_complete(
@@ -3314,26 +3841,32 @@ pub async fn send_message(
         fail_ralph_turn_if_needed(
             is_ralph_mode_for_spawn,
             &sessions_clone,
+            &repo_clone,
             &project_root_for_ralph,
             &session_id_clone,
             crate::domain::ralph_state::RalphPhase::Executing,
             &format!("Exceeded maximum tool rounds ({MAX_TOOL_ROUNDS})"),
+            Some(&round_id_clone),
         )
         .await;
         fail_autopilot_turn_if_needed(
             is_autopilot_mode_for_spawn,
             &sessions_clone,
+            &repo_clone,
             &project_root_for_autopilot,
             &session_id_clone,
             crate::domain::autopilot_state::AutopilotPhase::Qa,
             &format!("Exceeded maximum tool rounds ({MAX_TOOL_ROUNDS})"),
+            Some(&round_id_clone),
         )
         .await;
         fail_team_turn_if_needed(
             is_team_mode_for_spawn,
+            &repo_clone,
             &project_root_for_team,
             &session_id_clone,
             &format!("Exceeded maximum tool rounds ({MAX_TOOL_ROUNDS})"),
+            Some(&round_id_clone),
         )
         .await;
 

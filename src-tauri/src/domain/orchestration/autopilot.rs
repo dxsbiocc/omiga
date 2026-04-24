@@ -119,45 +119,39 @@ impl AutopilotOrchestrator {
                 ExecutionLane {
                     lane_id: "autopilot-spec",
                     preferred_agent_type: Some("Plan"),
-                    supplemental_agent_types: &["test-engineer"],
-                    instructions: "Spec lane: clarify requirements, define acceptance criteria, and preserve completed analysis before broad implementation.",
+                    supplemental_agent_types: &["literature-search", "deep-research"],
+                    instructions: "Spec lane: clarify the scientific question, data/literature scope, inclusion/exclusion criteria, and expected research deliverable before broad analysis.",
                 }
             }
             AutopilotPhase::Design => ExecutionLane {
                 lane_id: "autopilot-design",
                 preferred_agent_type: Some("architect"),
-                supplemental_agent_types: &["test-engineer"],
-                instructions: "Design lane: focus on architecture, boundaries, and test strategy before large code changes.",
+                supplemental_agent_types: &["literature-search", "deep-research"],
+                instructions: "Design lane: define the analysis strategy, evidence sources, database queries, data-processing boundaries, and citation/report structure.",
             },
             AutopilotPhase::Plan => ExecutionLane {
                 lane_id: "autopilot-plan",
                 preferred_agent_type: Some("Plan"),
-                supplemental_agent_types: &["test-engineer"],
-                instructions: "Planning lane: decompose work into ordered subtasks with explicit dependencies and parallelism boundaries.",
+                supplemental_agent_types: &["literature-search", "deep-research"],
+                instructions: "Planning lane: decompose the research task into evidence collection, data/method analysis, synthesis, and quality-control subtasks.",
             },
             AutopilotPhase::Implementation => ExecutionLane {
                 lane_id: "autopilot-implementation",
-                preferred_agent_type: Some("executor"),
-                supplemental_agent_types: &["test-engineer"],
-                instructions: "Implementation lane: execute the next pending task, write or run tests, and avoid reopening already accepted planning work.",
+                preferred_agent_type: Some("deep-research"),
+                supplemental_agent_types: &["literature-search", "verification"],
+                instructions: "Analysis lane: execute the next pending literature/data analysis task, preserve collected evidence, and avoid reopening accepted scope unless evidence forces it.",
             },
             AutopilotPhase::Qa => ExecutionLane {
                 lane_id: "autopilot-qa",
                 preferred_agent_type: Some("verification"),
-                supplemental_agent_types: &["test-engineer", "performance-reviewer"],
-                instructions: "QA lane: prioritize tests, build, lint, and narrow fixes. Do not expand scope or restart completed tasks.",
+                supplemental_agent_types: &["critic", "deep-research"],
+                instructions: "Argumentation lane: stress-test the analysis, identify potential problems or counter-evidence, examine whether claims are logically supported, and make narrow corrections without expanding scope.",
             },
             AutopilotPhase::Validation => ExecutionLane {
                 lane_id: "autopilot-validation",
                 preferred_agent_type: Some("verification"),
-                supplemental_agent_types: &[
-                    "code-reviewer",
-                    "security-reviewer",
-                    "quality-reviewer",
-                    "api-reviewer",
-                    "critic",
-                ],
-                instructions: "Validation lane: verify acceptance criteria, gather completion evidence, and prepare the final summary.",
+                supplemental_agent_types: &["critic", "deep-research", "literature-search"],
+                instructions: "Review lane: audit the scientific soundness, completeness, citation/data traceability, limitations, and conclusion boundaries before preparing the final research summary.",
             },
             AutopilotPhase::Complete => return None,
         };
@@ -274,10 +268,8 @@ mod tests {
             .unwrap();
         assert_eq!(lane.lane_id, "autopilot-qa");
         assert_eq!(lane.preferred_agent_type, Some("verification"));
-        assert!(lane.supplemental_agent_types.contains(&"test-engineer"));
-        assert!(lane
-            .supplemental_agent_types
-            .contains(&"performance-reviewer"));
+        assert!(lane.supplemental_agent_types.contains(&"critic"));
+        assert!(lane.supplemental_agent_types.contains(&"deep-research"));
     }
 
     #[tokio::test]
@@ -305,10 +297,8 @@ mod tests {
         let lane = AutopilotOrchestrator::current_execution_lane(dir.path(), "sess-validation")
             .await
             .unwrap();
-        assert!(lane.supplemental_agent_types.contains(&"code-reviewer"));
-        assert!(lane.supplemental_agent_types.contains(&"security-reviewer"));
-        assert!(lane.supplemental_agent_types.contains(&"quality-reviewer"));
-        assert!(lane.supplemental_agent_types.contains(&"api-reviewer"));
         assert!(lane.supplemental_agent_types.contains(&"critic"));
+        assert!(lane.supplemental_agent_types.contains(&"deep-research"));
+        assert!(lane.supplemental_agent_types.contains(&"literature-search"));
     }
 }

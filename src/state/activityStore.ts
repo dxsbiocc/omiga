@@ -76,7 +76,7 @@ interface ActivityState {
     patch: Partial<Pick<BackgroundJob, "state" | "exitCode" | "label">>,
   ) => void;
 
-  beginExecutionRun: () => void;
+  beginExecutionRun: (connectTitle?: string) => void;
   onStreamStart: () => void;
   /** First non-empty text in this stream turn. */
   onFirstTextChunk: () => void;
@@ -105,6 +105,7 @@ interface ActivityState {
   /** Mark run finished: freeze timer and mark any running steps done. */
   finalizeExecutionRun: () => void;
   clearBackgroundJobs: () => void;
+  clearAllActivity: () => void;
 }
 
 export const useActivityStore = create<ActivityState>((set) => ({
@@ -156,10 +157,10 @@ export const useActivityStore = create<ActivityState>((set) => ({
       return { backgroundJobs: nextJobs };
     }),
 
-  beginExecutionRun: () =>
+  beginExecutionRun: (connectTitle = "等待响应") =>
     set({
       executionSteps: [
-        { id: "connect", title: "等待响应", status: "running" },
+        { id: "connect", title: connectTitle, status: "running" },
       ],
       executionStartedAt: Date.now(),
       executionEndedAt: null,
@@ -294,4 +295,17 @@ export const useActivityStore = create<ActivityState>((set) => ({
     }),
 
   clearBackgroundJobs: () => set({ backgroundJobs: [] }),
+
+  clearAllActivity: () =>
+    set({
+      isConnecting: false,
+      isStreaming: false,
+      waitingFirstChunk: false,
+      currentToolHint: null,
+      backgroundJobs: [],
+      executionSteps: [],
+      executionStartedAt: null,
+      executionEndedAt: null,
+      activeTodos: null,
+    }),
 }));

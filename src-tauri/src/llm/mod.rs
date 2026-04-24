@@ -302,12 +302,19 @@ impl LlmConfig {
             .clone()
             .or_else(|| self.provider.default_base_url())
             .unwrap_or_else(|| "http://localhost:8080".to_string());
-        Self::normalize_moonshot_chat_url(&self.provider, raw)
+        Self::normalize_openai_compatible_chat_url(&self.provider, raw)
     }
 
-    /// If the user pastes only the API base (`.../v1`), Moonshot returns HTTP 404.
-    fn normalize_moonshot_chat_url(provider: &LlmProvider, url: String) -> String {
-        if !matches!(provider, LlmProvider::Moonshot) {
+    /// If the user pastes only an OpenAI-compatible API base (`.../v1` or provider root),
+    /// normalize it to the chat-completions endpoint used by this client.
+    fn normalize_openai_compatible_chat_url(provider: &LlmProvider, url: String) -> String {
+        if !matches!(
+            provider,
+            LlmProvider::OpenAi
+                | LlmProvider::Deepseek
+                | LlmProvider::Moonshot
+                | LlmProvider::Custom
+        ) {
             return url.trim().to_string();
         }
         let t = url.trim().trim_end_matches('/');
@@ -315,6 +322,9 @@ impl LlmConfig {
             return t.to_string();
         }
         if t.ends_with("/v1") {
+            return format!("{}/chat/completions", t);
+        }
+        if matches!(provider, LlmProvider::Deepseek) && t == "https://api.deepseek.com" {
             return format!("{}/chat/completions", t);
         }
         t.to_string()
@@ -618,4 +628,39 @@ pub fn get_config_info() -> HashMap<String, String> {
     }
 
     info
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LlmConfig, LlmProvider};
+
+    #[test]
+    fn deepseek_base_url_normalizes_to_chat_completions() {
+        let config = LlmConfig::new(LlmProvider::Deepseek, "test-key")
+            .with_base_url("https://api.deepseek.com");
+        assert_eq!(
+            config.api_url(),
+            "https://api.deepseek.com/chat/completions"
+        );
+    }
+
+    #[test]
+    fn openai_compatible_v1_base_normalizes_to_chat_completions() {
+        let config = LlmConfig::new(LlmProvider::Deepseek, "test-key")
+            .with_base_url("https://api.deepseek.com/v1");
+        assert_eq!(
+            config.api_url(),
+            "https://api.deepseek.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn full_chat_completions_url_is_preserved() {
+        let config = LlmConfig::new(LlmProvider::Deepseek, "test-key")
+            .with_base_url("https://api.deepseek.com/v1/chat/completions");
+        assert_eq!(
+            config.api_url(),
+            "https://api.deepseek.com/v1/chat/completions"
+        );
+    }
 }

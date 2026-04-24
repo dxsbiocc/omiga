@@ -20,7 +20,36 @@ use std::collections::HashMap;
 use tauri::{Emitter, Manager};
 
 use crate::app_state::OmigaAppState;
+use crate::domain::agents::reviewer_verdict::parse_reviewer_verdict;
 use crate::domain::tools::WebSearchApiKeys;
+
+async fn append_orchestration_runtime_event(
+    repo: &crate::domain::persistence::SessionRepository,
+    session_id: &str,
+    round_id: Option<&str>,
+    mode: Option<&str>,
+    event_type: &str,
+    phase: Option<&str>,
+    task_id: Option<&str>,
+    payload: serde_json::Value,
+) {
+    let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+    if let Err(e) = repo
+        .append_orchestration_event(
+            session_id,
+            round_id,
+            None,
+            mode,
+            event_type,
+            phase,
+            task_id,
+            &payload_json,
+        )
+        .await
+    {
+        tracing::warn!(target: "omiga::orchestration_events", session_id, event_type, error = %e, "append_orchestration_runtime_event failed");
+    }
+}
 
 /// 编排结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +134,10 @@ enum ReviewerBlockingLevel {
 }
 
 fn reviewer_blocking_level(results: &HashMap<String, SubTaskResult>) -> ReviewerBlockingLevel {
+    use crate::domain::agents::reviewer_verdict::{
+        parse_reviewer_verdict, ReviewerSeverity, ReviewerVerdictKind,
+    };
+
     let mut level = ReviewerBlockingLevel::None;
 
     for result in results.values() {
@@ -114,35 +147,28 @@ fn reviewer_blocking_level(results: &HashMap<String, SubTaskResult>) -> Reviewer
         if !is_reviewer_agent(agent_type) {
             continue;
         }
+        let text = result
+            .output
+            .as_deref()
+            .or(result.error.as_deref())
+            .unwrap_or("");
+        let verdict = parse_reviewer_verdict(agent_type, text);
 
-        let mut haystack = String::new();
-        if let Some(output) = &result.output {
-            haystack.push_str(output);
-            haystack.push('\n');
-        }
-        if let Some(error) = &result.error {
-            haystack.push_str(error);
-        }
-        let text = haystack.to_ascii_uppercase();
-
-        let hard = text.contains("VERDICT: FAIL")
-            || text.contains("VERDICT: REJECTED")
-            || text.contains("REJECTED")
-            || text.contains("BLOCKER")
-            || text.contains("CRITICAL")
+        let hard = matches!(
+            verdict.verdict,
+            ReviewerVerdictKind::Fail | ReviewerVerdictKind::Reject
+        ) || verdict.severity == ReviewerSeverity::Critical
             || ((agent_type == "security-reviewer" || agent_type == "critic")
-                && text.contains("HIGH"));
-
+                && verdict.severity == ReviewerSeverity::High);
         if hard {
             return ReviewerBlockingLevel::Hard;
         }
 
-        let soft = text.contains("VERDICT: PARTIAL")
-            || text.contains("PARTIAL")
-            || text.contains("CONCERN")
-            || text.contains("RISK")
-            || text.contains("WARN")
-            || text.contains("HIGH");
+        let soft = matches!(verdict.verdict, ReviewerVerdictKind::Partial)
+            || matches!(
+                verdict.severity,
+                ReviewerSeverity::High | ReviewerSeverity::Medium
+            );
         if soft {
             level = ReviewerBlockingLevel::Soft;
         }
@@ -348,6 +374,17 @@ impl AgentOrchestrator {
         use crate::domain::team_state::{self, TeamPhase, TeamState, TeamSubtaskState};
 
         let project_root = std::path::Path::new(&request.project_root);
+        let plan_id = plan.plan_id.clone();
+        let orchestration_mode = request
+            .mode_hint
+            .as_deref()
+            .filter(|mode| !mode.trim().is_empty())
+            .unwrap_or(if request.strategy == SchedulingStrategy::Team {
+                "team"
+            } else {
+                "schedule"
+            });
+        let repo = &**runtime.repo();
 
         // ── Team crash recovery: initialise & persist state ──────────────────
         let mut team_st = TeamState::new(
@@ -374,6 +411,17 @@ impl AgentOrchestrator {
         // Team 模式：Planning → Executing；其他模式直接进入 Executing
         team_st.phase = TeamPhase::Executing;
         let _ = team_state::write_state(project_root, &team_st).await;
+        append_orchestration_runtime_event(
+            repo,
+            session_id,
+            Some(runtime.round_id()),
+            Some(orchestration_mode),
+            "phase_changed",
+            Some("executing"),
+            None,
+            serde_json::json!({ "planId": plan_id }),
+        )
+        .await;
 
         // ── Gap 4: Shared blackboard — resume from prior run if it exists ────
         let mut blackboard: Blackboard = bb::read_board(project_root, session_id)
@@ -463,6 +511,28 @@ impl AgentOrchestrator {
                     team_st.phase = TeamPhase::Verifying;
                     team_st.touch();
                     let _ = team_state::write_state(project_root, &team_st).await;
+                    append_orchestration_runtime_event(
+                        repo,
+                        session_id,
+                        Some(runtime.round_id()),
+                        Some(orchestration_mode),
+                        "phase_changed",
+                        Some("verifying"),
+                        None,
+                        serde_json::json!({ "group": group }),
+                    )
+                    .await;
+                    append_orchestration_runtime_event(
+                        repo,
+                        session_id,
+                        Some(runtime.round_id()),
+                        Some(orchestration_mode),
+                        "verification_started",
+                        Some("verifying"),
+                        None,
+                        serde_json::json!({ "group": group }),
+                    )
+                    .await;
                     self.log(&mut result, None, "[Team] 进入验证阶段", LogLevel::Info);
                 }
             }
@@ -528,6 +598,7 @@ impl AgentOrchestrator {
                         app,
                         &message_id,
                         session_id,
+                        Some(plan_id.as_str()),
                         &tool_results_dir,
                         effective_root,
                         None, // session_todos
@@ -566,6 +637,22 @@ impl AgentOrchestrator {
                                     "description": subtask.description,
                                 }),
                             );
+                            append_orchestration_runtime_event(
+                                repo,
+                                session_id,
+                                Some(runtime.round_id()),
+                                Some(orchestration_mode),
+                                "worker_started",
+                                Some("executing"),
+                                Some(task_id_str),
+                                serde_json::json!({
+                                    "planId": plan_id,
+                                    "agentType": subtask.agent_type,
+                                    "description": subtask.description,
+                                    "backgroundTaskId": bg_task_id,
+                                }),
+                            )
+                            .await;
                             bg_task_ids.push((task_id_str.clone(), bg_task_id));
                         }
                         Err(e) => {
@@ -593,6 +680,22 @@ impl AgentOrchestrator {
                                     "error": e,
                                 }),
                             );
+                            append_orchestration_runtime_event(
+                                repo,
+                                session_id,
+                                Some(runtime.round_id()),
+                                Some(orchestration_mode),
+                                "worker_launch_failed",
+                                Some("executing"),
+                                Some(task_id_str),
+                                serde_json::json!({
+                                    "planId": plan_id,
+                                    "agentType": subtask.agent_type,
+                                    "description": subtask.description,
+                                    "error": e,
+                                }),
+                            )
+                            .await;
                             result.subtask_results.insert(
                                 task_id_str.clone(),
                                 SubTaskResult {
@@ -671,6 +774,21 @@ impl AgentOrchestrator {
                 let is_cancelled = subtask_result.status == ExecutionStatus::Cancelled;
 
                 if is_cancelled {
+                    append_orchestration_runtime_event(
+                        repo,
+                        session_id,
+                        Some(runtime.round_id()),
+                        Some(orchestration_mode),
+                        "worker_cancelled",
+                        Some("executing"),
+                        Some(&sid),
+                        serde_json::json!({
+                            "planId": plan_id,
+                            "agentType": subtask_result.agent_type,
+                            "error": subtask_result.error,
+                        }),
+                    )
+                    .await;
                     result.subtask_results.insert(sid.clone(), subtask_result);
                     continue;
                 }
@@ -745,6 +863,7 @@ impl AgentOrchestrator {
                             app,
                             &new_msg_id,
                             session_id,
+                            Some(plan_id.as_str()),
                             &tool_results_dir,
                             effective_root,
                             None,
@@ -793,7 +912,30 @@ impl AgentOrchestrator {
                                     &format!("重试启动失败: {}", e),
                                     LogLevel::Error,
                                 );
-                                persist_subtask!(&sid, "failed", attempt, None::<String>, Some(e));
+                                persist_subtask!(
+                                    &sid,
+                                    "failed",
+                                    attempt,
+                                    None::<String>,
+                                    Some(e.clone())
+                                );
+                                append_orchestration_runtime_event(
+                                    repo,
+                                    session_id,
+                                    Some(runtime.round_id()),
+                                    Some(orchestration_mode),
+                                    "worker_launch_failed",
+                                    Some("executing"),
+                                    Some(&sid),
+                                    serde_json::json!({
+                                        "planId": plan_id,
+                                        "agentType": subtask.agent_type,
+                                        "description": subtask.description,
+                                        "error": e,
+                                        "attempt": next_attempt,
+                                    }),
+                                )
+                                .await;
                                 result.subtask_results.insert(sid, subtask_result);
                             }
                         }
@@ -812,6 +954,22 @@ impl AgentOrchestrator {
                         LogLevel::Error,
                     );
                     persist_subtask!(&sid, "failed", attempt, None::<String>, Some(fail_err));
+                    append_orchestration_runtime_event(
+                        repo,
+                        session_id,
+                        Some(runtime.round_id()),
+                        Some(orchestration_mode),
+                        "worker_failed",
+                        Some("executing"),
+                        Some(&sid),
+                        serde_json::json!({
+                            "planId": plan_id,
+                            "agentType": subtask_result.agent_type,
+                            "error": subtask_result.error,
+                            "attempt": attempt,
+                        }),
+                    )
+                    .await;
                     let is_critical = subtask_meta
                         .get(&sid)
                         .map(|(_, _, t)| t.critical)
@@ -841,6 +999,57 @@ impl AgentOrchestrator {
                         return Ok(result);
                     }
                 } else {
+                    append_orchestration_runtime_event(
+                        repo,
+                        session_id,
+                        Some(runtime.round_id()),
+                        Some(orchestration_mode),
+                        "worker_completed",
+                        Some("executing"),
+                        Some(&sid),
+                        serde_json::json!({
+                            "planId": plan_id,
+                            "agentType": subtask_result.agent_type,
+                            "attempt": attempt,
+                        }),
+                    )
+                    .await;
+                    if let (Some(agent_type), Some(output)) = (
+                        subtask_result.agent_type.as_deref(),
+                        subtask_result.output.as_deref(),
+                    ) {
+                        if [
+                            "verification",
+                            "code-reviewer",
+                            "security-reviewer",
+                            "performance-reviewer",
+                            "quality-reviewer",
+                            "api-reviewer",
+                            "critic",
+                            "test-engineer",
+                        ]
+                        .contains(&agent_type)
+                        {
+                            let verdict = parse_reviewer_verdict(agent_type, output);
+                            append_orchestration_runtime_event(
+                                repo,
+                                session_id,
+                                Some(runtime.round_id()),
+                                Some(orchestration_mode),
+                                "reviewer_verdict",
+                                Some("verifying"),
+                                Some(&sid),
+                                serde_json::json!({
+                                    "planId": plan_id,
+                                    "agentType": agent_type,
+                                    "severity": format!("{:?}", verdict.severity),
+                                    "verdict": format!("{:?}", verdict.verdict),
+                                    "summary": verdict.summary,
+                                }),
+                            )
+                            .await;
+                        }
+                    }
                     // ── Gap 4: post to shared blackboard immediately ──────────
                     self.log(
                         &mut result,
@@ -910,6 +1119,28 @@ impl AgentOrchestrator {
                 team_st.phase = TeamPhase::Fixing;
                 team_st.touch();
                 let _ = team_state::write_state(project_root, &team_st).await;
+                append_orchestration_runtime_event(
+                    repo,
+                    session_id,
+                    Some(runtime.round_id()),
+                    Some(orchestration_mode),
+                    "phase_changed",
+                    Some("fixing"),
+                    None,
+                    serde_json::json!({ "round": fix_round }),
+                )
+                .await;
+                append_orchestration_runtime_event(
+                    repo,
+                    session_id,
+                    Some(runtime.round_id()),
+                    Some(orchestration_mode),
+                    "fix_started",
+                    Some("fixing"),
+                    None,
+                    serde_json::json!({ "round": fix_round }),
+                )
+                .await;
                 self.log(
                     &mut result,
                     None,
@@ -970,6 +1201,7 @@ impl AgentOrchestrator {
                     app,
                     &fix_msg_id,
                     session_id,
+                    Some(plan_id.as_str()),
                     &tool_results_dir,
                     effective_root,
                     None,
@@ -1016,6 +1248,28 @@ impl AgentOrchestrator {
                         team_st.phase = TeamPhase::Verifying;
                         team_st.touch();
                         let _ = team_state::write_state(project_root, &team_st).await;
+                        append_orchestration_runtime_event(
+                            repo,
+                            session_id,
+                            Some(runtime.round_id()),
+                            Some(orchestration_mode),
+                            "phase_changed",
+                            Some("verifying"),
+                            None,
+                            serde_json::json!({ "round": fix_round }),
+                        )
+                        .await;
+                        append_orchestration_runtime_event(
+                            repo,
+                            session_id,
+                            Some(runtime.round_id()),
+                            Some(orchestration_mode),
+                            "verification_started",
+                            Some("verifying"),
+                            None,
+                            serde_json::json!({ "round": fix_round }),
+                        )
+                        .await;
                         self.log(
                             &mut result,
                             None,
@@ -1053,6 +1307,7 @@ impl AgentOrchestrator {
                             app,
                             &reverify_msg_id,
                             session_id,
+                            Some(plan_id.as_str()),
                             &tool_results_dir,
                             effective_root,
                             None,
@@ -1146,6 +1401,28 @@ impl AgentOrchestrator {
             team_st.phase = TeamPhase::Synthesizing;
             team_st.touch();
             let _ = team_state::write_state(project_root, &team_st).await;
+            append_orchestration_runtime_event(
+                repo,
+                session_id,
+                Some(runtime.round_id()),
+                Some(orchestration_mode),
+                "phase_changed",
+                Some("synthesizing"),
+                None,
+                serde_json::json!({ "planId": plan_id }),
+            )
+            .await;
+            append_orchestration_runtime_event(
+                repo,
+                session_id,
+                Some(runtime.round_id()),
+                Some(orchestration_mode),
+                "synthesizing_started",
+                Some("synthesizing"),
+                None,
+                serde_json::json!({ "planId": plan_id }),
+            )
+            .await;
             self.log(
                 &mut result,
                 None,

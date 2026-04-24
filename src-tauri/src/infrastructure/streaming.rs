@@ -87,6 +87,12 @@ pub enum StreamOutputItem {
     /// Indicator that follow-up suggestions are being generated in the background
     #[serde(rename = "suggestions_generating")]
     SuggestionsGenerating,
+    /// Follow-up suggestions generation has finished, whether or not any suggestions were produced
+    #[serde(rename = "suggestions_complete")]
+    SuggestionsComplete {
+        generated: bool,
+        error: Option<String>,
+    },
     /// Aggregated LLM token usage for this user turn (main agent only; excludes post-turn summary / follow-up LLM calls)
     #[serde(rename = "token_usage")]
     TokenUsage {

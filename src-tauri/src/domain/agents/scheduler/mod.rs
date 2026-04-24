@@ -93,6 +93,8 @@ pub struct SchedulingResult {
     pub selected_agents: Vec<String>,
     /// 预估执行时间（秒）
     pub estimated_duration_secs: u64,
+    /// Reviewer subtasks attached by mode-aware scheduling (if any).
+    pub reviewer_agents: Vec<String>,
     /// 是否需要人工确认
     pub requires_confirmation: bool,
     /// 确认提示信息
@@ -201,6 +203,7 @@ impl AgentScheduler {
 
             let selected_agents: Vec<String> =
                 plan.subtasks.iter().map(|t| t.agent_type.clone()).collect();
+            let reviewer_agents = self.reviewer_agents(&selected_agents);
 
             let estimated = self.estimate_duration(&plan, &selected_agents);
 
@@ -218,6 +221,7 @@ impl AgentScheduler {
                 plan,
                 selected_agents,
                 estimated_duration_secs: estimated,
+                reviewer_agents,
                 requires_confirmation,
                 confirmation_message,
                 recommended_strategy: effective_strategy,
@@ -232,6 +236,7 @@ impl AgentScheduler {
                 plan,
                 selected_agents: vec![agent.to_string()],
                 estimated_duration_secs: 60,
+                reviewer_agents: vec![],
                 requires_confirmation: false,
                 confirmation_message: None,
                 recommended_strategy: SchedulingStrategy::Single,
@@ -444,6 +449,29 @@ impl AgentScheduler {
         }
         anchors
     }
+
+    fn reviewer_agents(&self, selected_agents: &[String]) -> Vec<String> {
+        let mut reviewers: Vec<String> = selected_agents
+            .iter()
+            .filter(|agent| {
+                matches!(
+                    agent.as_str(),
+                    "verification"
+                        | "code-reviewer"
+                        | "security-reviewer"
+                        | "performance-reviewer"
+                        | "quality-reviewer"
+                        | "api-reviewer"
+                        | "critic"
+                        | "test-engineer"
+                )
+            })
+            .cloned()
+            .collect();
+        reviewers.sort();
+        reviewers.dedup();
+        reviewers
+    }
 }
 
 impl Default for AgentScheduler {
@@ -478,6 +506,14 @@ mod tests {
             .iter()
             .any(|t| t.agent_type == "security-reviewer"));
         assert!(plan.subtasks.iter().any(|t| t.agent_type == "critic"));
+        let reviewers = scheduler.reviewer_agents(
+            &plan
+                .subtasks
+                .iter()
+                .map(|t| t.agent_type.clone())
+                .collect::<Vec<_>>(),
+        );
+        assert!(reviewers.contains(&"critic".to_string()));
     }
 
     #[test]

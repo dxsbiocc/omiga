@@ -13,7 +13,6 @@ import { CodeWorkspace } from "./components/CodeWorkspace";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ResizeHandle } from "./components/ResizeHandle";
 import { OnboardingWizard } from "./components/Onboarding";
-import { AgentPanel } from "./components/AgentPanel";
 import { ConfirmationDialog } from "./components/AgentSchedule/AgentScheduleLauncher";
 import { useAgentStore } from "./state/agentStore";
 import {
@@ -527,8 +526,6 @@ export default function App() {
                   <FileTree />
                 </Box>
 
-                {/* 后台 Agent 任务面板 — 从文件夹区域向上滑出 */}
-                <AgentPanel />
               </Paper>
             </>
           )}

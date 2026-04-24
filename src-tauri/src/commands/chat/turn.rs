@@ -351,14 +351,27 @@ pub(super) async fn emit_post_turn_meta_then_complete(
     };
     let _ = app.emit(
         &format!("chat-stream-{}", stream_message_id),
-        &StreamOutputItem::TurnSummary { text: summary_text },
+        &StreamOutputItem::TurnSummary {
+            text: summary_text.clone(),
+        },
     );
 
-    // Emit Complete immediately to unblock the frontend
-    let _ = app.emit(
-        &format!("chat-stream-{}", stream_message_id),
-        &StreamOutputItem::Complete,
-    );
+    if let Some(summary) = summary_text.as_deref() {
+        if let Err(e) = repo
+            .update_message_turn_summary(&assistant_message_id, Some(summary))
+            .await
+        {
+            tracing::warn!("Failed to persist turn summary: {}", e);
+        }
+    }
+
+    if !follow_enabled {
+        let _ = app.emit(
+            &format!("chat-stream-{}", stream_message_id),
+            &StreamOutputItem::Complete,
+        );
+        return;
+    }
 
     // Emit indicator that suggestions are being generated in background
     if follow_enabled {
@@ -380,6 +393,17 @@ pub(super) async fn emit_post_turn_meta_then_complete(
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(target: "omiga::follow_up", "failed to create bg client: {}", e);
+                let _ = app_bg.emit(
+                    &format!("chat-stream-{}", stream_id),
+                    &StreamOutputItem::SuggestionsComplete {
+                        generated: false,
+                        error: Some(e.to_string()),
+                    },
+                );
+                let _ = app_bg.emit(
+                    &format!("chat-stream-{}", stream_id),
+                    &StreamOutputItem::Complete,
+                );
                 return;
             }
         };
@@ -405,9 +429,45 @@ pub(super) async fn emit_post_turn_meta_then_complete(
                         tracing::warn!("Failed to persist follow-up suggestions: {}", e);
                     }
                 }
+                let _ = app_bg.emit(
+                    &format!("chat-stream-{}", stream_id),
+                    &StreamOutputItem::SuggestionsComplete {
+                        generated: true,
+                        error: None,
+                    },
+                );
+                let _ = app_bg.emit(
+                    &format!("chat-stream-{}", stream_id),
+                    &StreamOutputItem::Complete,
+                );
             }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(target: "omiga::follow_up", "follow-up suggestions: {}", e),
+            Ok(_) => {
+                let _ = app_bg.emit(
+                    &format!("chat-stream-{}", stream_id),
+                    &StreamOutputItem::SuggestionsComplete {
+                        generated: false,
+                        error: None,
+                    },
+                );
+                let _ = app_bg.emit(
+                    &format!("chat-stream-{}", stream_id),
+                    &StreamOutputItem::Complete,
+                );
+            }
+            Err(e) => {
+                tracing::warn!(target: "omiga::follow_up", "follow-up suggestions: {}", e);
+                let _ = app_bg.emit(
+                    &format!("chat-stream-{}", stream_id),
+                    &StreamOutputItem::SuggestionsComplete {
+                        generated: false,
+                        error: Some(e.to_string()),
+                    },
+                );
+                let _ = app_bg.emit(
+                    &format!("chat-stream-{}", stream_id),
+                    &StreamOutputItem::Complete,
+                );
+            }
         }
     });
 }

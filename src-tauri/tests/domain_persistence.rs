@@ -31,6 +31,8 @@ fn sample_task(session_id: &str, task_id: &str) -> BackgroundAgentTask {
         output_path: None,
         session_id: session_id.to_string(),
         message_id: "msg-invoke".to_string(),
+        round_id: None,
+        plan_id: None,
     }
 }
 
@@ -87,6 +89,7 @@ async fn background_agent_messages_append_order() {
         token_usage: None,
         reasoning_content: None,
         follow_up_suggestions: None,
+        turn_summary: None,
     };
     let t1 = Message::Tool {
         tool_call_id: "tu1".to_string(),
@@ -159,6 +162,7 @@ async fn background_agent_messages_tool_calls_roundtrip() {
         token_usage: None,
         reasoning_content: None,
         follow_up_suggestions: None,
+        turn_summary: None,
     };
     repo.append_background_agent_message("bg-task-tools", &session_id, &asst)
         .await
@@ -176,4 +180,102 @@ async fn background_agent_messages_tool_calls_roundtrip() {
         }
         _ => panic!("expected assistant"),
     }
+}
+
+#[tokio::test]
+async fn background_agent_messages_sanitize_opaque_object_text() {
+    let (repo, _dir, session_id) = setup_session_repo().await;
+    let task = sample_task(&session_id, "bg-task-opaque");
+    repo.upsert_background_agent_task(&task)
+        .await
+        .expect("upsert");
+
+    let user = Message::User {
+        content: "[object Object]".to_string(),
+    };
+    let assistant = Message::Assistant {
+        content: "ok".to_string(),
+        tool_calls: Some(vec![ToolCall {
+            id: "opaque-call".to_string(),
+            name: "tool".to_string(),
+            arguments: "[object Object]".to_string(),
+        }]),
+        token_usage: None,
+        reasoning_content: None,
+        follow_up_suggestions: None,
+        turn_summary: None,
+    };
+    let tool = Message::Tool {
+        tool_call_id: "opaque-call".to_string(),
+        output: "[object Object]".to_string(),
+    };
+
+    repo.append_background_agent_messages_batch(
+        "bg-task-opaque",
+        &session_id,
+        &[user, assistant, tool],
+    )
+    .await
+    .expect("append batch");
+
+    let rows = repo
+        .list_background_agent_messages_for_task("bg-task-opaque")
+        .await
+        .expect("list");
+    assert_eq!(rows.len(), 3);
+
+    match &rows[0] {
+        Message::User { content } => {
+            assert!(!content.contains("[object Object]"));
+            assert!(content.contains("未序列化对象"));
+        }
+        _ => panic!("expected user"),
+    }
+    match &rows[1] {
+        Message::Assistant { tool_calls, .. } => {
+            let args = &tool_calls.as_ref().expect("tool calls")[0].arguments;
+            assert!(!args.contains("[object Object]"));
+            assert!(args.contains("未序列化对象"));
+        }
+        _ => panic!("expected assistant"),
+    }
+    match &rows[2] {
+        Message::Tool { output, .. } => {
+            assert!(!output.contains("[object Object]"));
+            assert!(output.contains("未序列化对象"));
+        }
+        _ => panic!("expected tool"),
+    }
+}
+
+#[tokio::test]
+async fn save_message_persists_turn_summary() {
+    let (repo, _dir, session_id) = setup_session_repo().await;
+
+    repo.save_message(
+        "assistant-turn-summary",
+        &session_id,
+        "assistant",
+        "done",
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("short recap"),
+    )
+    .await
+    .expect("save assistant");
+
+    let session = repo
+        .get_session(&session_id)
+        .await
+        .expect("load session")
+        .expect("session exists");
+    let assistant = session
+        .messages
+        .into_iter()
+        .find(|message| message.id == "assistant-turn-summary")
+        .expect("assistant row");
+    assert_eq!(assistant.turn_summary.as_deref(), Some("short recap"));
 }

@@ -3,8 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { notifyProviderChanged } from "../utils/providerEvents";
 import {
   useChatComposerStore,
+  DEFAULT_SESSION_CONFIG,
+  normalizeSessionConfig,
   type SessionConfigResponse,
 } from "./chatComposerStore";
+import { useActivityStore } from "./activityStore";
 
 const dbg = (...args: unknown[]) =>
   console.debug("[OmigaDebug][sessionStore]", ...args);
@@ -158,6 +161,13 @@ export interface SchedulerPlan {
   }>;
   selectedAgents: string[];
   estimatedDurationSecs: number;
+  reviewerAgents?: string[];
+}
+
+export interface InitialTodoItem {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed";
 }
 
 export interface Message {
@@ -170,6 +180,8 @@ export interface Message {
   composerAttachedPaths?: string[];
   /** 调度系统生成的任务执行计划 */
   schedulerPlan?: SchedulerPlan;
+  /** Plan mode 初始 todos（用于任务区计划步骤展示，仅本地会话快照） */
+  initialTodos?: InitialTodoItem[];
   /** Full tool_calls from DB on assistant rows — used to rebuild trace when tool rows are missing or unnamed */
   toolCallsList?: Array<{ id: string; name: string; arguments: string }>;
   /** Assistant thinking merged into the ReAct fold (optional round-trip for local snapshot) */
@@ -260,6 +272,8 @@ interface RawMessage {
   };
   /** Follow-up suggestions from backend (LLM-generated) */
   follow_up_suggestions?: Array<{ label: string; prompt: string }>;
+  /** Optional persisted turn summary text from backend */
+  turn_summary?: string;
   /** RFC3339 creation timestamp from SQLite — used to reconstruct elapsed-time display. */
   created_at?: string;
 }
@@ -273,7 +287,7 @@ interface SessionData {
   updated_at: string;
   active_provider_entry_name: string | null;
   has_more_messages: boolean;
-  session_config: SessionConfigResponse;
+  session_config?: SessionConfigResponse | null;
 }
 
 interface SendMessageRequest {
@@ -428,6 +442,10 @@ function convertRawMessages(
       m.role === "assistant" && m.follow_up_suggestions?.length
         ? m.follow_up_suggestions
         : undefined;
+    const turnSummary: Message["turnSummary"] =
+      m.role === "assistant" && typeof m.turn_summary === "string" && m.turn_summary.trim()
+        ? m.turn_summary.trim()
+        : undefined;
 
     // For tool rows, use the assistant message's created_at as the start timestamp
     // so elapsed time = completedAt - timestamp reflects actual execution duration.
@@ -445,6 +463,7 @@ function convertRawMessages(
       ...(timestamp !== undefined ? { timestamp } : {}),
       ...(tokenUsage ? { tokenUsage } : {}),
       ...(followUpSuggestions ? { followUpSuggestions } : {}),
+      ...(turnSummary ? { turnSummary } : {}),
     });
   });
 }
@@ -478,6 +497,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         updatedAt: sessionData.updated_at,
         messageCount: 0,
       };
+      const sessionConfig = normalizeSessionConfig(sessionData.session_config);
 
       set((state) => {
         let pending = state.pendingProjectPathSessions;
@@ -496,7 +516,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       });
       useChatComposerStore.getState().initForSession(
         sessionData.id,
-        sessionData.session_config,
+        sessionConfig,
       );
     } catch (error) {
       console.error("Failed to create session:", error);
@@ -607,13 +627,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       };
 
       const newActiveProvider = sessionData.active_provider_entry_name ?? null;
+      const sessionConfig = normalizeSessionConfig(sessionData.session_config);
       // Write to cache so subsequent switches to this session are instant.
       msgCacheSet(sessionId, {
         session,
         messages,
         hasMoreMessages: sessionData.has_more_messages,
         activeProviderEntryName: newActiveProvider,
-        sessionConfig: sessionData.session_config,
+        sessionConfig,
       });
 
       if (opts?.silent) {
@@ -639,7 +660,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           // Sync composer config only while this session is still active.
           useChatComposerStore
             .getState()
-            .initForSession(sessionId, sessionData.session_config);
+            .initForSession(sessionId, sessionConfig);
         }
         dbg("loadSession:silent-refresh-ok", { sessionId, msgs: messages.length });
         return;
@@ -663,6 +684,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           messages,
           storeMessages: messages,
           isLoading: false,
+          isSwitchingSession: false,
           hasMoreMessages: sessionData.has_more_messages,
           activeProviderEntryName: newActiveProvider,
           sessions,
@@ -677,7 +699,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       );
 
       // Sync composer config so the latest per-session settings are applied.
-      useChatComposerStore.getState().initForSession(sessionId, sessionData.session_config);
+      useChatComposerStore.getState().initForSession(sessionId, sessionConfig);
 
       // Pre-warm LLM config / integrations / permission / MCP caches so the first
       // send_message in this session doesn't pay cold-cache penalties. Fire notifyProviderChanged
@@ -796,6 +818,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setCurrentSession: async (sessionId) => {
     const t0 = performance.now();
     dbg("setCurrentSession", { sessionId });
+    useActivityStore.getState().clearAllActivity();
+
     if (!sessionId) {
       set({
         currentSession: null,
@@ -861,7 +885,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       currentSession: immediateSession,
       messages: [],
       storeMessages: [],
-      isSwitchingSession: false,
+      isSwitchingSession: true,
     });
     notifyProviderChanged();
 
@@ -869,21 +893,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     void invoke<SessionConfigResponse>("get_session_config", { sessionId })
       .then((cfg) => {
         if (get().currentSession?.id !== sessionId) return;
-        useChatComposerStore.getState().initForSession(sessionId, cfg);
+        useChatComposerStore
+          .getState()
+          .initForSession(sessionId, normalizeSessionConfig(cfg));
       })
       .catch(() => {
         if (get().currentSession?.id !== sessionId) return;
-        useChatComposerStore.getState().initForSession(sessionId, {
-          active_provider_entry_name: null,
-          permission_mode: "auto",
-          composer_agent_type: "auto",
-          execution_environment: "local",
-          ssh_server: null,
-          sandbox_backend: "docker",
-          local_venv_type: "none",
-          local_venv_name: "",
-          use_worktree: false,
-        });
+        useChatComposerStore
+          .getState()
+          .initForSession(sessionId, DEFAULT_SESSION_CONFIG);
       });
 
     void get()
@@ -905,6 +923,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const newMessage: Message = sanitizeMessageForPersistence({
       ...message,
       id: message.id ?? `msg-${Date.now()}`,
+      timestamp: message.timestamp ?? Date.now(),
     });
     set((state) => {
       const messages = [...state.messages, newMessage];

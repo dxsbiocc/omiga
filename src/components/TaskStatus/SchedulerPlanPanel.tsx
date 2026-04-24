@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   Box,
   Typography,
@@ -16,6 +17,15 @@ import {
   Route,
   RadioButtonUnchecked,
 } from "@mui/icons-material";
+import {
+  aggregateReviewerVerdicts,
+  overallReviewerHeadline,
+  type BackgroundAgentTaskRow,
+  type ReviewerVerdictChip,
+} from "../../utils/reviewerVerdict";
+import { ReviewerVerdictList } from "../ReviewerVerdictList";
+import { normalizeAgentDisplayName } from "../../state/agentStore";
+import { compactLabel, isLabelCompacted } from "../../utils/compactLabel";
 
 interface SchedulerPlan {
   planId: string;
@@ -29,16 +39,55 @@ interface SchedulerPlan {
   }>;
   selectedAgents: string[];
   estimatedDurationSecs: number;
+  reviewerAgents?: string[];
 }
 
 interface SchedulerPlanPanelProps {
   plan: SchedulerPlan;
+  sessionId?: string;
+  onOpenReviewerTranscript?: (taskId: string, label?: string) => void;
 }
 
 /** 调度计划面板 - 显示多 Agent 编排的执行计划 */
-export function SchedulerPlanPanel({ plan }: SchedulerPlanPanelProps) {
+export function SchedulerPlanPanel({
+  plan,
+  sessionId,
+  onOpenReviewerTranscript,
+}: SchedulerPlanPanelProps) {
   const [expanded, setExpanded] = useState(true);
+  const [reviewerHeadline, setReviewerHeadline] = useState<{ label: string; color: string } | null>(null);
+  const [reviewerVerdicts, setReviewerVerdicts] = useState<ReviewerVerdictChip[]>([]);
   const theme = useTheme();
+
+  useEffect(() => {
+    if (!sessionId) {
+      setReviewerHeadline(null);
+      setReviewerVerdicts([]);
+      return;
+    }
+    let cancelled = false;
+    invoke<BackgroundAgentTaskRow[]>("list_session_background_tasks", {
+      sessionId,
+    })
+      .then((rows) => {
+        if (cancelled) return;
+        const scopedRows = (rows ?? []).filter(
+          (row) => row.plan_id && row.plan_id === plan.planId,
+        );
+        const verdicts = aggregateReviewerVerdicts(scopedRows);
+        setReviewerVerdicts(verdicts);
+        setReviewerHeadline(overallReviewerHeadline(verdicts));
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setReviewerHeadline(null);
+          setReviewerVerdicts([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [plan.planId, sessionId]);
 
   // 获取并行执行组
   const getParallelGroups = () => {
@@ -78,6 +127,11 @@ export function SchedulerPlanPanel({ plan }: SchedulerPlanPanelProps) {
   };
 
   const groups = getParallelGroups();
+  const compactAgentChip = (agent: string, maxChars = 14) => {
+    const full = normalizeAgentDisplayName(agent);
+    const short = compactLabel(full, maxChars);
+    return { full, short, compacted: isLabelCompacted(full, short) };
+  };
 
   // Agent 颜色映射
   const getAgentColor = (agentType: string) => {
@@ -145,21 +199,96 @@ export function SchedulerPlanPanel({ plan }: SchedulerPlanPanelProps) {
         <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mb: 0.75 }}>
           预估执行时间: ~{Math.round(plan.estimatedDurationSecs / 60)} 分钟
         </Typography>
-        <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
-          {plan.selectedAgents.map((agent) => (
+        {plan.reviewerAgents && plan.reviewerAgents.length > 0 && (
+          <Box sx={{ mb: 1 }}>
+            <Typography
+              variant="caption"
+              sx={{ color: "text.secondary", display: "block", mb: 0.5 }}
+            >
+              Reviewer 结构化结论将来自以下角色：
+            </Typography>
+            <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+              {plan.reviewerAgents.map((agent) => {
+                const role = compactAgentChip(agent);
+                const chip = (
+                  <Chip
+                    key={agent}
+                    size="small"
+                    label={role.short}
+                    color="secondary"
+                    variant="outlined"
+                    sx={{ height: 18, fontSize: 9 }}
+                  />
+                );
+                return role.compacted ? (
+                  <Tooltip key={agent} title={role.full}>
+                    <Box>{chip}</Box>
+                  </Tooltip>
+                ) : (
+                  chip
+                );
+              })}
+            </Stack>
+          </Box>
+        )}
+        {reviewerHeadline && (
+          <Box sx={{ mb: 1 }}>
+            <Typography
+              variant="caption"
+              sx={{ color: "text.secondary", display: "block", mb: 0.5 }}
+            >
+              当前 reviewer 聚合结论：
+            </Typography>
             <Chip
-              key={agent}
               size="small"
-              icon={<SmartToy sx={{ fontSize: 10 }} />}
-              label={agent}
+              label={reviewerHeadline.label}
               sx={{
                 height: 20,
                 fontSize: 10,
-                bgcolor: alpha(getAgentColor(agent), 0.1),
-                color: getAgentColor(agent),
+                fontWeight: 600,
+                bgcolor: alpha(reviewerHeadline.color, 0.12),
+                color: reviewerHeadline.color,
               }}
             />
-          ))}
+          </Box>
+        )}
+        {reviewerVerdicts.length > 0 && (
+          <ReviewerVerdictList
+            verdicts={reviewerVerdicts}
+            onSelectVerdict={(verdict) => {
+              if (!verdict.taskId) return;
+              onOpenReviewerTranscript?.(
+                verdict.taskId,
+                `${normalizeAgentDisplayName(verdict.agentType)}: ${verdict.taskDescription ?? verdict.summary}`,
+              );
+            }}
+          />
+        )}
+        <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+          {plan.selectedAgents.map((agent) => {
+            const role = compactAgentChip(agent);
+            const chip = (
+              <Chip
+                key={agent}
+                size="small"
+                icon={<SmartToy sx={{ fontSize: 10 }} />}
+                label={role.short}
+                sx={{
+                  height: 20,
+                  fontSize: 10,
+                  bgcolor: alpha(getAgentColor(agent), 0.1),
+                  color: getAgentColor(agent),
+                }}
+              />
+            );
+            return role.compacted ? (
+              <Tooltip key={agent} title={role.full}>
+                <Box>{chip}</Box>
+              </Tooltip>
+            ) : (
+              chip
+            );
+          })}
         </Stack>
       </Box>
 
@@ -218,6 +347,7 @@ export function SchedulerPlanPanel({ plan }: SchedulerPlanPanelProps) {
                 {group.map((taskId) => {
                   const task = plan.subtasks.find((t) => t.id === taskId);
                   if (!task) return null;
+                  const taskRole = compactAgentChip(task.agentType, 12);
 
                   return (
                     <Box
@@ -256,17 +386,35 @@ export function SchedulerPlanPanel({ plan }: SchedulerPlanPanelProps) {
                         )}
                       </Box>
                       <Stack direction="row" alignItems="center" spacing={0.5}>
-                        <Chip
-                          size="small"
-                          label={task.agentType}
-                          sx={{
-                            height: 18,
-                            fontSize: 9,
-                            bgcolor: alpha(getAgentColor(task.agentType), 0.1),
-                            color: getAgentColor(task.agentType),
-                            fontWeight: 500,
-                          }}
-                        />
+                        {taskRole.compacted ? (
+                          <Tooltip title={taskRole.full}>
+                            <Box>
+                              <Chip
+                                size="small"
+                                label={taskRole.short}
+                                sx={{
+                                  height: 18,
+                                  fontSize: 9,
+                                  bgcolor: alpha(getAgentColor(task.agentType), 0.1),
+                                  color: getAgentColor(task.agentType),
+                                  fontWeight: 500,
+                                }}
+                              />
+                            </Box>
+                          </Tooltip>
+                        ) : (
+                          <Chip
+                            size="small"
+                            label={taskRole.short}
+                            sx={{
+                              height: 18,
+                              fontSize: 9,
+                              bgcolor: alpha(getAgentColor(task.agentType), 0.1),
+                              color: getAgentColor(task.agentType),
+                              fontWeight: 500,
+                            }}
+                          />
+                        )}
                         {task.critical && (
                           <Tooltip title="关键任务">
                             <Box

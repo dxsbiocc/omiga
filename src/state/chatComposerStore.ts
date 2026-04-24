@@ -26,6 +26,68 @@ export interface SessionConfigResponse {
   runtime_constraints?: unknown;
 }
 
+export const DEFAULT_SESSION_CONFIG: SessionConfigResponse = {
+  active_provider_entry_name: null,
+  permission_mode: "auto",
+  composer_agent_type: "auto",
+  execution_environment: "local",
+  ssh_server: null,
+  sandbox_backend: "docker",
+  local_venv_type: "none",
+  local_venv_name: "",
+  use_worktree: false,
+};
+
+function asString(v: unknown, fallback: string): string {
+  return typeof v === "string" ? v : fallback;
+}
+
+function asNullableString(v: unknown): string | null {
+  return typeof v === "string" ? v : null;
+}
+
+function asBoolean(v: unknown, fallback: boolean): boolean {
+  return typeof v === "boolean" ? v : fallback;
+}
+
+export function normalizeSessionConfig(
+  cfg?: Partial<SessionConfigResponse> | null,
+): SessionConfigResponse {
+  return {
+    active_provider_entry_name: asNullableString(cfg?.active_provider_entry_name),
+    permission_mode: asString(
+      cfg?.permission_mode,
+      DEFAULT_SESSION_CONFIG.permission_mode,
+    ),
+    composer_agent_type: asString(
+      cfg?.composer_agent_type,
+      DEFAULT_SESSION_CONFIG.composer_agent_type,
+    ),
+    execution_environment: asString(
+      cfg?.execution_environment,
+      DEFAULT_SESSION_CONFIG.execution_environment,
+    ),
+    ssh_server: asNullableString(cfg?.ssh_server),
+    sandbox_backend: asString(
+      cfg?.sandbox_backend,
+      DEFAULT_SESSION_CONFIG.sandbox_backend,
+    ),
+    local_venv_type: asString(
+      cfg?.local_venv_type,
+      DEFAULT_SESSION_CONFIG.local_venv_type,
+    ),
+    local_venv_name: asString(
+      cfg?.local_venv_name,
+      DEFAULT_SESSION_CONFIG.local_venv_name,
+    ),
+    use_worktree: asBoolean(
+      cfg?.use_worktree,
+      DEFAULT_SESSION_CONFIG.use_worktree,
+    ),
+    runtime_constraints: cfg?.runtime_constraints,
+  };
+}
+
 interface ChatComposerState {
   permissionMode: PermissionMode;
   /** 注册表中的 Agent id，如 Explore、Plan、general-purpose */
@@ -60,7 +122,10 @@ interface ChatComposerState {
   setLocalVenv: (type: LocalVenvType, name: string) => void;
   setBranchForRoot: (root: string, branch: string) => void;
   /** Initialize composer state for a specific session (called on session switch). */
-  initForSession: (sessionId: string, cfg: SessionConfigResponse) => void;
+  initForSession: (
+    sessionId: string,
+    cfg?: Partial<SessionConfigResponse> | null,
+  ) => void;
   /** Reset to defaults when no session is active. */
   resetToDefaults: () => void;
 }
@@ -186,16 +251,17 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
     })),
 
   initForSession: (sessionId, cfg) => {
+    const normalized = normalizeSessionConfig(cfg);
     set({
       activeSessionId: sessionId,
-      permissionMode: (cfg.permission_mode as PermissionMode) ?? "auto",
-      composerAgentType: cfg.composer_agent_type || "auto",
-      environment: (cfg.execution_environment as ExecutionEnvironment) ?? "local",
-      sshServer: cfg.ssh_server ?? null,
-      sandboxBackend: (cfg.sandbox_backend as SandboxBackend) ?? "docker",
-      localVenvType: (cfg.local_venv_type as LocalVenvType) ?? "none",
-      localVenvName: cfg.local_venv_name ?? "",
-      useWorktree: cfg.use_worktree ?? false,
+      permissionMode: normalized.permission_mode as PermissionMode,
+      composerAgentType: normalized.composer_agent_type || "auto",
+      environment: normalized.execution_environment as ExecutionEnvironment,
+      sshServer: normalized.ssh_server,
+      sandboxBackend: normalized.sandbox_backend as SandboxBackend,
+      localVenvType: normalized.local_venv_type as LocalVenvType,
+      localVenvName: normalized.local_venv_name,
+      useWorktree: normalized.use_worktree,
       // Keep composerAttachedPaths empty on switch
       composerAttachedPaths: [],
     });

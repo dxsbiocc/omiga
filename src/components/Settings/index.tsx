@@ -36,6 +36,7 @@ import { ProviderManager } from "./ProviderManager";
 import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 import { RuntimeConstraintsPanel } from "./RuntimeConstraintsPanel";
 import { AgentScheduleLauncher } from "../AgentSchedule/AgentScheduleLauncher";
+import { MockScenarioLauncher } from "../AgentSchedule/MockScenarioLauncher";
 import { AgentRolesPanel } from "../AgentRoles/AgentRolesPanel";
 
 interface SettingsProps {
@@ -1044,7 +1045,11 @@ export function Settings({
                       sessionId={currentSessionId}
                       projectRoot={projectPath}
                     />
-                    <AgentRolesPanel />
+                    <MockScenarioLauncher
+                      sessionId={currentSessionId}
+                      projectRoot={projectPath}
+                    />
+                    <AgentRolesPanel projectRoot={projectPath} />
                   </Box>
                 ) : (
                   <Alert severity="info" sx={{ borderRadius: 2 }}>

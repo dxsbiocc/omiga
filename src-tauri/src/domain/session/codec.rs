@@ -52,6 +52,7 @@ impl SessionCodec {
                     token_usage,
                     reasoning_content: record.reasoning_content,
                     follow_up_suggestions,
+                    turn_summary: record.turn_summary,
                 }
             }
             "tool" => Message::Tool {
@@ -99,6 +100,7 @@ impl SessionCodec {
                 token_usage,
                 reasoning_content,
                 follow_up_suggestions,
+                turn_summary: _,
             } => {
                 let tool_calls_json = tool_calls
                     .as_ref()
@@ -158,6 +160,7 @@ impl SessionCodec {
                     token_usage: _,
                     reasoning_content,
                     follow_up_suggestions: _,
+                    turn_summary: _,
                 } => {
                     let mut blocks: Vec<ContentBlock> = vec![ContentBlock::text(content.clone())];
 
@@ -204,6 +207,17 @@ impl SessionCodec {
         }
     }
 
+    pub fn extract_turn_summary(message: &Message) -> Option<String> {
+        match message {
+            Message::Assistant { turn_summary, .. } => turn_summary
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            _ => None,
+        }
+    }
+
     /// Parse tool calls from JSON string
     pub fn parse_tool_calls(json: &str) -> Option<Vec<ToolCall>> {
         serde_json::from_str(json).ok()
@@ -218,6 +232,7 @@ impl SessionCodec {
             token_usage: None,
             reasoning_content: None,
             follow_up_suggestions: None,
+            turn_summary: None,
         }
     }
 }
@@ -259,6 +274,7 @@ mod tests {
             token_usage: None,
             reasoning_content: None,
             follow_up_suggestions: None,
+            turn_summary: None,
         };
 
         let (_, _, role, content, tool_calls_json, _, tok, reasoning, follow_up) =
@@ -289,6 +305,7 @@ mod tests {
             token_usage_json: None,
             reasoning_content: None,
             follow_up_suggestions_json: None,
+            turn_summary: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
 

@@ -88,37 +88,32 @@ impl TeamOrchestrator {
             TeamPhase::Planning => ExecutionLane {
                 lane_id: "team-planning",
                 preferred_agent_type: Some("Plan"),
-                supplemental_agent_types: &["test-engineer"],
-                instructions: "Team planning lane: decompose the goal into parallel worker subtasks with explicit ownership, dependencies, and success criteria.",
+                supplemental_agent_types: &["literature-search", "deep-research"],
+                instructions: "Team planning lane: decompose the scientific question into parallel evidence/data-analysis subtasks with explicit sources, ownership, dependencies, and success criteria.",
             },
             TeamPhase::Executing => ExecutionLane {
                 lane_id: "team-execution",
-                preferred_agent_type: Some("executor"),
-                supplemental_agent_types: &["test-engineer"],
-                instructions: "Team execution lane: drive the next pending worker task, preserve completed subtasks, and coordinate through the shared blackboard.",
+                preferred_agent_type: Some("deep-research"),
+                supplemental_agent_types: &["literature-search", "verification"],
+                instructions: "Team execution lane: drive the next pending research-analysis worker task, preserve completed evidence, and coordinate through the shared blackboard.",
             },
             TeamPhase::Verifying => ExecutionLane {
                 lane_id: "team-verification",
                 preferred_agent_type: Some("verification"),
-                supplemental_agent_types: &[
-                    "code-reviewer",
-                    "security-reviewer",
-                    "quality-reviewer",
-                    "api-reviewer",
-                ],
-                instructions: "Team verification lane: compare all worker outputs against the original goal and acceptance criteria before declaring success.",
+                supplemental_agent_types: &["critic", "deep-research", "literature-search"],
+                instructions: "Team verification lane: compare all worker outputs against the original scientific question, evidence quality, citation traceability, and acceptance criteria before declaring success.",
             },
             TeamPhase::Fixing => ExecutionLane {
                 lane_id: "team-fixing",
                 preferred_agent_type: Some("debugger"),
                 supplemental_agent_types: &["verification", "critic"],
-                instructions: "Team fixing lane: focus on the root causes reported during verification and apply the narrowest corrective changes needed.",
+                instructions: "Team fixing lane: focus on verification-reported evidence gaps, citation errors, data inconsistencies, and unsupported claims; apply the narrowest corrective analysis.",
             },
             TeamPhase::Synthesizing => ExecutionLane {
                 lane_id: "team-synthesis",
                 preferred_agent_type: Some("architect"),
-                supplemental_agent_types: &["code-reviewer", "quality-reviewer", "critic"],
-                instructions: "Team synthesis lane: aggregate verified worker outputs into a coherent final response without re-opening settled work.",
+                supplemental_agent_types: &["critic", "verification", "deep-research"],
+                instructions: "Team synthesis lane: aggregate verified worker outputs into a coherent research report with traceable citations, limitations, and next-step analysis suggestions.",
             },
             TeamPhase::Complete | TeamPhase::Failed => return None,
         };
@@ -191,7 +186,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn team_verification_lane_includes_api_and_quality_reviewers() {
+    async fn team_verification_lane_includes_research_reviewers() {
         let dir = tempdir().unwrap();
         let state = team_state::TeamState {
             version: 1,
@@ -207,7 +202,8 @@ mod tests {
         let lane = TeamOrchestrator::current_execution_lane(dir.path(), "team-v")
             .await
             .unwrap();
-        assert!(lane.supplemental_agent_types.contains(&"quality-reviewer"));
-        assert!(lane.supplemental_agent_types.contains(&"api-reviewer"));
+        assert!(lane.supplemental_agent_types.contains(&"critic"));
+        assert!(lane.supplemental_agent_types.contains(&"deep-research"));
+        assert!(lane.supplemental_agent_types.contains(&"literature-search"));
     }
 }

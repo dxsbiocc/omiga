@@ -1,24 +1,34 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   Box,
   Button,
+  Chip,
   CircularProgress,
-  Drawer,
-  IconButton,
   Stack,
   Typography,
   alpha,
   useTheme,
 } from "@mui/material";
 import {
-  Close as CloseIcon,
-  ContentCopy as ContentCopyIcon,
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
 } from "@mui/icons-material";
-import type { BackgroundAgentTask, BgSidechainMessage } from "./backgroundAgentTypes";
+import {
+  shortBgTaskLabel,
+  type BackgroundAgentTask,
+  type BgSidechainMessage,
+} from "./backgroundAgentTypes";
+import { normalizeAgentDisplayName } from "../../state/agentStore";
+import {
+  buildOpaqueSidechainFallback,
+  normalizeSidechainValue,
+  type BackgroundTaskSummary,
+} from "./backgroundAgentTranscriptUtils";
+import { extractErrorMessage } from "../../utils/errorMessage";
+import { MarkdownTextViewer } from "../MarkdownText";
+import { RightDetailDrawer } from "../RightDetailDrawer";
 
 /** Debounce rapid `background-agent-*` events so we do not hammer `load_background_agent_transcript`. */
 const LIVE_REFRESH_DEBOUNCE_MS = 380;
@@ -42,10 +52,10 @@ export function BackgroundAgentTranscriptDrawer({
   taskId,
   taskLabel,
 }: BackgroundAgentTranscriptDrawerProps) {
-  const theme = useTheme();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [messages, setMessages] = useState<BgSidechainMessage[]>([]);
+  const [rawMessages, setRawMessages] = useState<BgSidechainMessage[]>([]);
+  const [taskSummary, setTaskSummary] = useState<BackgroundAgentTask | null>(null);
   const [liveNonce, setLiveNonce] = useState(0);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -101,24 +111,37 @@ export function BackgroundAgentTranscriptDrawer({
 
   useEffect(() => {
     if (!open || !sessionId || !taskId) {
-      setMessages([]);
+      setRawMessages([]);
+      setTaskSummary(null);
       setError(null);
       return;
     }
     let cancelled = false;
     setLoading(true);
     setError(null);
-    invoke<BgSidechainMessage[]>("load_background_agent_transcript", {
-      sessionId,
-      taskId,
-    })
-      .then((rows) => {
-        if (!cancelled) setMessages(rows ?? []);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) {
-          setError(e instanceof Error ? e.message : String(e));
-          setMessages([]);
+
+    void Promise.allSettled([
+      invoke<BgSidechainMessage[]>("load_background_agent_transcript", {
+        sessionId,
+        taskId,
+      }),
+      invoke<BackgroundAgentTask[]>("list_session_background_tasks", { sessionId }),
+    ])
+      .then(([transcriptResult, tasksResult]) => {
+        if (cancelled) return;
+        if (transcriptResult.status === "fulfilled") {
+          setRawMessages(transcriptResult.value ?? []);
+        } else {
+          setRawMessages([]);
+          setError(extractErrorMessage(transcriptResult.reason));
+        }
+
+        if (tasksResult.status === "fulfilled") {
+          setTaskSummary(
+            (tasksResult.value ?? []).find((task) => task.task_id === taskId) ?? null,
+          );
+        } else {
+          setTaskSummary(null);
         }
       })
       .finally(() => {
@@ -129,78 +152,203 @@ export function BackgroundAgentTranscriptDrawer({
     };
   }, [open, sessionId, taskId, liveNonce]);
 
-  const paper = theme.palette.background.paper;
+
+  const effectiveTaskLabel = useMemo(() => {
+    if (taskLabel?.trim()) return taskLabel;
+    if (!taskSummary) return undefined;
+    const agentLabel = normalizeAgentDisplayName(taskSummary.agent_type);
+    return `${agentLabel}: ${shortBgTaskLabel(taskSummary, 72)}`;
+  }, [taskLabel, taskSummary]);
+
+  const messages = useMemo(() => {
+    const fallbackTask: BackgroundTaskSummary | null = taskSummary;
+    return rawMessages.map((row) => {
+      if (row.role === "user") {
+        const fallback = buildOpaqueSidechainFallback({
+          kind: "message",
+          task: fallbackTask,
+          taskLabel: effectiveTaskLabel,
+        });
+        return { ...row, content: normalizeSidechainValue(row.content, fallback) };
+      }
+      if (row.role === "assistant") {
+        const messageFallback = buildOpaqueSidechainFallback({
+          kind: "message",
+          task: fallbackTask,
+          taskLabel: effectiveTaskLabel,
+        });
+        const argumentFallback = buildOpaqueSidechainFallback({
+          kind: "toolArguments",
+          task: fallbackTask,
+          taskLabel: effectiveTaskLabel,
+        });
+        return {
+          ...row,
+          content: normalizeSidechainValue(row.content, messageFallback),
+          tool_calls:
+            row.tool_calls?.map((tool) => ({
+              ...tool,
+              arguments: normalizeSidechainValue(tool.arguments, argumentFallback),
+            })) ?? null,
+        };
+      }
+      const fallback = buildOpaqueSidechainFallback({
+        kind: "toolOutput",
+        task: fallbackTask,
+        taskLabel: effectiveTaskLabel,
+      });
+      return {
+        ...row,
+        output: normalizeSidechainValue(row.output, fallback),
+      };
+    });
+  }, [effectiveTaskLabel, rawMessages, taskSummary]);
+
+  return (
+    <RightDetailDrawer
+      open={open}
+      onClose={onClose}
+      title="队友记录"
+      subtitle={effectiveTaskLabel}
+      closeLabel="Close transcript"
+    >
+      <TaskSummaryCard task={taskSummary} fallbackLabel={effectiveTaskLabel} />
+      {loading ? (
+        <Stack alignItems="center" py={4}>
+          <CircularProgress size={28} />
+        </Stack>
+      ) : error ? (
+        <Typography color="error" variant="body2">
+          {error}
+        </Typography>
+      ) : messages.length === 0 ? (
+        <Typography variant="body2" color="text.secondary">
+          暂无记录（任务刚开始或尚未写入侧链）。
+        </Typography>
+      ) : (
+        <Stack spacing={2}>
+          {messages.map((m, i) => (
+            <BgMessageBlock key={`${i}-${m.role}`} message={m} />
+          ))}
+        </Stack>
+      )}
+    </RightDetailDrawer>
+  );
+}
+
+
+function taskStatusLabel(status?: string | null): string {
+  const labels: Record<string, string> = {
+    Pending: "待执行",
+    Running: "执行中",
+    Completed: "已完成",
+    Failed: "失败",
+    Cancelled: "已取消",
+    pending: "待执行",
+    running: "执行中",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+  };
+  return status ? (labels[status] ?? status) : "未知";
+}
+
+function taskStatusColor(status?: string | null): "default" | "primary" | "success" | "error" | "warning" {
+  switch (status) {
+    case "Running":
+    case "running":
+      return "primary";
+    case "Completed":
+    case "completed":
+      return "success";
+    case "Failed":
+    case "failed":
+      return "error";
+    case "Cancelled":
+    case "cancelled":
+      return "warning";
+    default:
+      return "default";
+  }
+}
+
+function formatTaskField(value: unknown): string {
+  const text = normalizeSidechainValue(value, undefined, { allowOpaqueFallback: false }).trim();
+  return text === "[object Object]" ? "" : text;
+}
+
+function TaskSummaryCard({
+  task,
+  fallbackLabel,
+}: {
+  task: BackgroundAgentTask | null;
+  fallbackLabel?: string;
+}) {
+  const theme = useTheme();
   const edge = alpha(
     theme.palette.mode === "dark"
       ? theme.palette.common.white
       : theme.palette.common.black,
-    0.08,
+    0.07,
   );
+  if (!task && !fallbackLabel) return null;
+
+  const description = task?.description?.trim() || fallbackLabel || "后台任务";
+  const result = formatTaskField(task?.result_summary);
+  const error = formatTaskField(task?.error_message);
+  const agent = task?.agent_type ? normalizeAgentDisplayName(task.agent_type) : undefined;
 
   return (
-    <Drawer
-      anchor="right"
-      open={open}
-      onClose={onClose}
-      PaperProps={{
-        sx: {
-          width: { xs: "100%", sm: 440 },
-          maxWidth: "100vw",
-          bgcolor: alpha(paper, 0.98),
-          borderLeft: `1px solid ${edge}`,
-        },
+    <Box
+      sx={{
+        mb: 2,
+        p: 1.5,
+        borderRadius: 2,
+        bgcolor: alpha(theme.palette.info.main, 0.055),
+        border: `1px solid ${edge}`,
       }}
     >
-      <Stack
-        direction="row"
-        alignItems="center"
-        justifyContent="space-between"
-        sx={{
-          px: 2,
-          py: 1.5,
-          borderBottom: `1px solid ${edge}`,
-        }}
-      >
-        <Typography variant="subtitle1" fontWeight={600} sx={{ pr: 1 }}>
-          队友记录
-          {taskLabel ? (
-            <Typography
-              component="span"
-              variant="body2"
-              color="text.secondary"
-              sx={{ display: "block", fontWeight: 400, mt: 0.25 }}
-            >
-              {taskLabel}
-            </Typography>
-          ) : null}
+      <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mb: 0.75 }}>
+        <Typography variant="caption" color="info.dark" fontWeight={700}>
+          任务详情
         </Typography>
-        <IconButton size="small" aria-label="Close transcript" onClick={onClose}>
-          <CloseIcon />
-        </IconButton>
+        {agent ? (
+          <Chip size="small" label={agent} sx={{ height: 20, fontSize: 10 }} />
+        ) : null}
+        {task?.status ? (
+          <Chip
+            size="small"
+            color={taskStatusColor(task.status)}
+            variant="outlined"
+            label={taskStatusLabel(task.status)}
+            sx={{ height: 20, fontSize: 10 }}
+          />
+        ) : null}
       </Stack>
-
-      <Box sx={{ flex: 1, overflow: "auto", p: 2 }}>
-        {loading ? (
-          <Stack alignItems="center" py={4}>
-            <CircularProgress size={28} />
-          </Stack>
-        ) : error ? (
-          <Typography color="error" variant="body2">
-            {error}
+      <Typography variant="body2" sx={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+        {description}
+      </Typography>
+      {error ? (
+        <Box sx={{ mt: 1 }}>
+          <Typography variant="caption" color="error" fontWeight={700}>
+            错误信息
           </Typography>
-        ) : messages.length === 0 ? (
-          <Typography variant="body2" color="text.secondary">
-            暂无记录（任务刚开始或尚未写入侧链）。
+          <Box sx={{ mt: 0.35 }}>
+            <MarkdownTextViewer>{error}</MarkdownTextViewer>
+          </Box>
+        </Box>
+      ) : null}
+      {result ? (
+        <Box sx={{ mt: 1 }}>
+          <Typography variant="caption" color="text.secondary" fontWeight={700}>
+            结果摘要
           </Typography>
-        ) : (
-          <Stack spacing={2}>
-            {messages.map((m, i) => (
-              <BgMessageBlock key={`${i}-${m.role}`} message={m} />
-            ))}
-          </Stack>
-        )}
-      </Box>
-    </Drawer>
+          <Box sx={{ mt: 0.35 }}>
+            <MarkdownTextViewer>{result}</MarkdownTextViewer>
+          </Box>
+        </Box>
+      ) : null}
+    </Box>
   );
 }
 
@@ -226,12 +374,9 @@ function BgMessageBlock({ message }: { message: BgSidechainMessage }) {
         <Typography variant="caption" color="primary" fontWeight={600}>
           User
         </Typography>
-        <Typography
-          variant="body2"
-          sx={{ whiteSpace: "pre-wrap", wordBreak: "break-word", mt: 0.5 }}
-        >
-          {message.content}
-        </Typography>
+        <Box sx={{ mt: 0.5 }}>
+          <MarkdownTextViewer color="text.primary">{message.content}</MarkdownTextViewer>
+        </Box>
       </Box>
     );
   }
@@ -270,12 +415,9 @@ function AssistantSidechainBlock({
         Assistant
       </Typography>
       {message.content.trim().length > 0 ? (
-        <Typography
-          variant="body2"
-          sx={{ whiteSpace: "pre-wrap", wordBreak: "break-word", mt: 0.5 }}
-        >
-          {message.content}
-        </Typography>
+        <Box sx={{ mt: 0.5 }}>
+          <MarkdownTextViewer color="text.primary">{message.content}</MarkdownTextViewer>
+        </Box>
       ) : null}
       {calls.length > 0 ? (
         <Stack spacing={1} sx={{ mt: 1 }}>
@@ -364,20 +506,9 @@ function ToolSidechainBlock({
 }) {
   const theme = useTheme();
   const [expanded, setExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
   const long = output.length > TOOL_OUTPUT_PREVIEW_CHARS;
   const display =
     expanded || !long ? output : `${output.slice(0, TOOL_OUTPUT_PREVIEW_CHARS)}\n…`;
-
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(output);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      /* ignore */
-    }
-  };
 
   return (
     <Box
@@ -399,15 +530,6 @@ function ToolSidechainBlock({
           Tool · {toolCallId}
         </Typography>
         <Stack direction="row" spacing={0.5} flexShrink={0}>
-          <Button
-            size="small"
-            variant="text"
-            sx={{ minWidth: 0, fontSize: 11, py: 0 }}
-            startIcon={<ContentCopyIcon sx={{ fontSize: 14 }} />}
-            onClick={handleCopy}
-          >
-            {copied ? "已复制" : "复制"}
-          </Button>
           {long ? (
             <Button
               size="small"
@@ -427,20 +549,11 @@ function ToolSidechainBlock({
           ) : null}
         </Stack>
       </Stack>
-      <Typography
-        variant="body2"
-        component="pre"
-        sx={{
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-          mt: 0.5,
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-          fontSize: 12,
-          m: 0,
-        }}
-      >
-        {display}
-      </Typography>
+      <Box sx={{ mt: 0.5 }}>
+        <MarkdownTextViewer color="text.primary" copyText={output}>
+          {display}
+        </MarkdownTextViewer>
+      </Box>
     </Box>
   );
 }

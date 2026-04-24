@@ -150,7 +150,8 @@ pub async fn list_active_mode_lanes(project_root: String) -> CommandResult<Vec<M
         if matches!(state.phase, ralph_state::RalphPhase::Complete) {
             continue;
         }
-        if let Some(lane) = RalphOrchestrator::current_execution_lane(root, &state.session_id).await {
+        if let Some(lane) = RalphOrchestrator::current_execution_lane(root, &state.session_id).await
+        {
             out.push(ModeLaneInfo {
                 session_id: state.session_id.clone(),
                 mode: "ralph".to_string(),
@@ -194,7 +195,8 @@ pub async fn list_active_mode_lanes(project_root: String) -> CommandResult<Vec<M
         ) {
             continue;
         }
-        if let Some(lane) = TeamOrchestrator::current_execution_lane(root, &state.session_id).await {
+        if let Some(lane) = TeamOrchestrator::current_execution_lane(root, &state.session_id).await
+        {
             out.push(ModeLaneInfo {
                 session_id: state.session_id.clone(),
                 mode: "team".to_string(),
@@ -341,13 +343,30 @@ pub async fn cancel_all(project_root: String) -> CommandResult<CancelAllResult> 
 /// Cancel all background agents associated with a specific Team session's subtasks,
 /// then clear the Team state and blackboard for that session.
 #[tauri::command]
-pub async fn cancel_team_session(project_root: String, session_id: String) -> CommandResult<usize> {
+pub async fn cancel_team_session(
+    app_state: tauri::State<'_, crate::app_state::OmigaAppState>,
+    project_root: String,
+    session_id: String,
+) -> CommandResult<usize> {
     use crate::domain::agents::background::{get_background_agent_manager, BackgroundAgentStatus};
     use crate::domain::{blackboard, team_state};
 
     let root = std::path::Path::new(&project_root);
     let manager = get_background_agent_manager();
     let mut cancelled = 0;
+    let _ = app_state
+        .repo
+        .append_orchestration_event(
+            &session_id,
+            None,
+            None,
+            Some("team"),
+            "cancel_requested",
+            Some("failed"),
+            None,
+            &serde_json::json!({}).to_string(),
+        )
+        .await;
 
     // Read the team state to find bg_task_ids for each subtask
     if let Some(state) = team_state::read_state(root, &session_id).await {
@@ -369,6 +388,19 @@ pub async fn cancel_team_session(project_root: String, session_id: String) -> Co
     // Clean up state and blackboard
     team_state::clear_state(root, &session_id).await;
     blackboard::clear_board(root, &session_id).await;
+    let _ = app_state
+        .repo
+        .append_orchestration_event(
+            &session_id,
+            None,
+            None,
+            Some("team"),
+            "cancel_completed",
+            Some("failed"),
+            None,
+            &serde_json::json!({ "cancelled_subtasks": cancelled }).to_string(),
+        )
+        .await;
 
     Ok(cancelled)
 }

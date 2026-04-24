@@ -49,9 +49,9 @@ import {
   Mic,
   Square,
   SmartToy,
+  Route as RouteIcon,
   ForumOutlined,
   Close,
-  ArticleOutlined,
   InsertDriveFile,
   Edit,
   ArrowUpward,
@@ -88,6 +88,10 @@ import {
   type LocalVenvType,
 } from "../../state";
 import { normalizeAgentDisplayName } from "../../state/agentStore";
+import {
+  WORKFLOW_SLASH_COMMANDS,
+  type WorkflowSlashCommandDefinition,
+} from "../../utils/workflowCommands";
 import {
   RSYNC_INSTALL_HELP_URL,
   RSYNC_SSH_WARN_STORAGE_KEY,
@@ -161,7 +165,6 @@ import { ProviderSwitcher } from "./ProviderSwitcher";
 import type { BackgroundAgentTask } from "./backgroundAgentTypes";
 import {
   canSendFollowUpToTask,
-  shortBgTaskLabel,
 } from "./backgroundAgentTypes";
 import { PermissionPromptBar } from "../permissions/PermissionPromptBar";
 import {
@@ -262,6 +265,9 @@ function permissionModeAccent(theme: Theme, mode: PermissionMode): string {
 }
 
 type AvailableAgentRow = { agentType: string; description: string; background: boolean };
+type SlashPickerOption =
+  | { kind: "command"; command: WorkflowSlashCommandDefinition }
+  | { kind: "agent"; agent: AvailableAgentRow };
 
 function normalizeFsPath(p: string): string {
   return p.replace(/\\/g, "/");
@@ -382,6 +388,8 @@ export interface ChatComposerProps {
   onCancelBackgroundTask?: (taskId: string) => void;
   /** Open sidechain transcript drawer (`load_background_agent_transcript`). */
   onOpenBackgroundTranscript?: (taskId: string) => void;
+  /** Close sidechain transcript drawer (used when switching back to main session). */
+  onCloseBackgroundTranscript?: () => void;
   /** Blocked `ask_user_question` — wizard above permission bar, same band as permission prompt. */
   askUserQuestion?: ChatComposerAskUserQuestion | null;
 }
@@ -411,6 +419,7 @@ export const ChatComposer = memo(function ChatComposer({
   onEditQueuedAt,
   onCancelBackgroundTask,
   onOpenBackgroundTranscript,
+  onCloseBackgroundTranscript,
   askUserQuestion = null,
 }: ChatComposerProps) {
   const [input, setInput] = useState(initialInput ?? "");
@@ -768,7 +777,7 @@ export const ChatComposer = memo(function ChatComposer({
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  /** `/`：选择 Agent（整段输入仅为 `/` 或 `/query`） */
+  /** `/`：工作流命令或 Agent 选择（整段输入仅为 `/` 或 `/query`） */
   const slashParse = useMemo(() => {
     const t = input;
     if (!/^\/[^\s]*$/u.test(t)) return { active: false as const, query: "" };
@@ -804,9 +813,38 @@ export const ChatComposer = memo(function ChatComposer({
     });
   }, [selectableAgents, slashParse]);
 
+  const filteredWorkflowCommands = useMemo(() => {
+    if (!slashParse.active) return [];
+    const q = slashParse.query.toLowerCase();
+    return WORKFLOW_SLASH_COMMANDS.filter((command) => {
+      const id = command.id.toLowerCase();
+      const label = command.label.toLowerCase();
+      const desc = command.description.toLowerCase();
+      return !q || id.startsWith(q) || label.includes(q) || desc.includes(q);
+    });
+  }, [slashParse]);
+
+  const filteredSlashOptions = useMemo<SlashPickerOption[]>(
+    () => [
+      ...filteredWorkflowCommands.map((command) => ({
+        kind: "command" as const,
+        command,
+      })),
+      ...filteredAtAgents.map((agent) => ({ kind: "agent" as const, agent })),
+    ],
+    [filteredAtAgents, filteredWorkflowCommands],
+  );
+
   const slashFilterKey = useMemo(
-    () => filteredAtAgents.map((a) => a.agentType).join("\u0001"),
-    [filteredAtAgents],
+    () =>
+      filteredSlashOptions
+        .map((item) =>
+          item.kind === "command"
+            ? `cmd:${item.command.id}`
+            : `agent:${item.agent.agentType}`,
+        )
+        .join("\u0001"),
+    [filteredSlashOptions],
   );
 
   const [slashHighlightIndex, setSlashHighlightIndex] = useState(0);
@@ -922,7 +960,7 @@ export const ChatComposer = memo(function ChatComposer({
   }, [fileFilterKey]);
 
   useEffect(() => {
-    if (!slashParse.active || filteredAtAgents.length === 0) return;
+    if (!slashParse.active || filteredSlashOptions.length === 0) return;
     const el = slashListRef.current?.querySelector(
       `[data-slash-index="${slashHighlightIndex}"]`,
     );
@@ -930,7 +968,7 @@ export const ChatComposer = memo(function ChatComposer({
   }, [
     slashHighlightIndex,
     slashParse.active,
-    filteredAtAgents.length,
+    filteredSlashOptions.length,
     slashFilterKey,
   ]);
 
@@ -953,6 +991,14 @@ export const ChatComposer = memo(function ChatComposer({
       setInputValue("");
     },
     [setComposerAgentType, setInputValue],
+  );
+
+  const pickWorkflowCommand = useCallback(
+    (commandId: WorkflowSlashCommandDefinition["id"]) => {
+      setInputValue(`/${commandId} `);
+      queueMicrotask(() => textareaRef.current?.focus());
+    },
+    [setInputValue],
   );
 
   const pickFilePath = useCallback(
@@ -1070,11 +1116,11 @@ export const ChatComposer = memo(function ChatComposer({
           e.preventDefault();
           return;
         }
-        if (filteredAtAgents.length > 0) {
+        if (filteredSlashOptions.length > 0) {
           if (e.key === "ArrowDown") {
             e.preventDefault();
             setSlashHighlightIndex((i) => {
-              const next = (i + 1) % filteredAtAgents.length;
+              const next = (i + 1) % filteredSlashOptions.length;
               slashHighlightIndexRef.current = next;
               return next;
             });
@@ -1084,7 +1130,8 @@ export const ChatComposer = memo(function ChatComposer({
             e.preventDefault();
             setSlashHighlightIndex((i) => {
               const next =
-                (i - 1 + filteredAtAgents.length) % filteredAtAgents.length;
+                (i - 1 + filteredSlashOptions.length) %
+                filteredSlashOptions.length;
               slashHighlightIndexRef.current = next;
               return next;
             });
@@ -1093,15 +1140,17 @@ export const ChatComposer = memo(function ChatComposer({
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             const idx = slashHighlightIndexRef.current;
-            const pick = filteredAtAgents[idx] ?? filteredAtAgents[0];
-            if (pick) pickAtAgent(pick.agentType);
+            const pick = filteredSlashOptions[idx] ?? filteredSlashOptions[0];
+            if (pick?.kind === "command") pickWorkflowCommand(pick.command.id);
+            if (pick?.kind === "agent") pickAtAgent(pick.agent.agentType);
             return;
           }
           if (e.key === "Tab" && !e.shiftKey) {
             e.preventDefault();
             const idx = slashHighlightIndexRef.current;
-            const pick = filteredAtAgents[idx] ?? filteredAtAgents[0];
-            if (pick) pickAtAgent(pick.agentType);
+            const pick = filteredSlashOptions[idx] ?? filteredSlashOptions[0];
+            if (pick?.kind === "command") pickWorkflowCommand(pick.command.id);
+            if (pick?.kind === "agent") pickAtAgent(pick.agent.agentType);
             return;
           }
         }
@@ -1113,13 +1162,14 @@ export const ChatComposer = memo(function ChatComposer({
       fileParse.active,
       composerAgentType,
       composerAttachedPaths,
-      filteredAtAgents,
+      filteredSlashOptions,
       filteredFilePaths,
       fileGlobLoading,
       input,
       setInputValue,
       onKeyDown,
       pickAtAgent,
+      pickWorkflowCommand,
       pickFilePath,
       popComposerAttachedPath,
       setComposerAgentType,
@@ -1140,7 +1190,7 @@ export const ChatComposer = memo(function ChatComposer({
       ? "请先选择工作目录后再发送消息…"
       : followUpTaskId
         ? "追加说明将进入该后台 Agent 的下一轮工具循环…"
-        : "输入 / 选择 Agent；输入 @ 从当前工作目录选择…";
+        : "输入 / 选择工作流命令或 Agent；输入 @ 从当前工作目录选择…";
 
   /** 允许排队时：连接中 / 流式中均可继续输入；否则与旧行为一致（等待响应或生成时禁用）。 */
   const inputDisabled =
@@ -1151,7 +1201,7 @@ export const ChatComposer = memo(function ChatComposer({
     slashParse.active &&
     !slashPickerDismissed &&
     !inputDisabled &&
-    availableAgents.length > 0;
+    (availableAgents.length > 0 || WORKFLOW_SLASH_COMMANDS.length > 0);
 
   const showFilePopover =
     fileParse.active &&
@@ -1174,8 +1224,31 @@ export const ChatComposer = memo(function ChatComposer({
   const showBgRouting =
     Boolean(sessionId) &&
     !needsWorkspacePath &&
-    backgroundTasks.length > 0 &&
+    backgroundTasks.some((task) => canSendFollowUpToTask(task.status)) &&
     typeof onFollowUpTaskIdChange === "function";
+
+  const followUpTargets = useMemo(() => {
+    const list = backgroundTasks.filter((task) => canSendFollowUpToTask(task.status));
+    const totalByRole = new Map<string, number>();
+    for (const task of list) {
+      const role = normalizeAgentDisplayName(task.agent_type);
+      totalByRole.set(role, (totalByRole.get(role) ?? 0) + 1);
+    }
+    const seenByRole = new Map<string, number>();
+    return list.map((task) => {
+      const role = normalizeAgentDisplayName(task.agent_type);
+      const idx = (seenByRole.get(role) ?? 0) + 1;
+      seenByRole.set(role, idx);
+      const total = totalByRole.get(role) ?? 1;
+      return {
+        task,
+        chipLabel: total > 1 ? `${role} #${idx}` : role,
+        tooltip: `${role} · ${task.description.slice(0, 200)}${
+          task.description.length > 200 ? "…" : ""
+        }`,
+      };
+    });
+  }, [backgroundTasks]);
 
   return (
     <Stack spacing={0.75}>
@@ -1474,10 +1547,13 @@ export const ChatComposer = memo(function ChatComposer({
             label="主会话"
             color={followUpTaskId ? "default" : "primary"}
             variant={followUpTaskId ? "outlined" : "filled"}
-            onClick={() => onFollowUpTaskIdChange?.(null)}
+            onClick={() => {
+              onFollowUpTaskIdChange?.(null);
+              onCloseBackgroundTranscript?.();
+            }}
             sx={{ fontWeight: followUpTaskId ? 400 : 600 }}
           />
-          {backgroundTasks.map((t) => {
+          {followUpTargets.map(({ task: t, chipLabel, tooltip }) => {
             const ok = canSendFollowUpToTask(t.status);
             const selected = followUpTaskId === t.task_id;
             return (
@@ -1487,36 +1563,30 @@ export const ChatComposer = memo(function ChatComposer({
                 alignItems="center"
                 spacing={0.25}
               >
-                <Tooltip
-                  title={`${t.agent_type} · ${t.description.slice(0, 200)}${t.description.length > 200 ? "…" : ""}`}
-                >
+                <Tooltip title={tooltip}>
                   <span>
                     <Chip
                       size="small"
                       icon={<SmartToy sx={{ fontSize: 16 }} />}
-                      label={`${t.agent_type}: ${shortBgTaskLabel(t, 28)}`}
+                      label={chipLabel}
                       color={selected ? "secondary" : "default"}
                       variant={selected ? "filled" : "outlined"}
                       disabled={!ok}
-                      onClick={() => ok && onFollowUpTaskIdChange?.(t.task_id)}
+                      onClick={() => {
+                        if (!ok) return;
+                        onFollowUpTaskIdChange?.(t.task_id);
+                        onOpenBackgroundTranscript?.(t.task_id);
+                      }}
+                      sx={{
+                        maxWidth: 156,
+                        "& .MuiChip-label": {
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        },
+                      }}
                     />
                   </span>
                 </Tooltip>
-                {onOpenBackgroundTranscript ? (
-                  <Tooltip title="队友记录">
-                    <IconButton
-                      size="small"
-                      aria-label="Background teammate transcript"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onOpenBackgroundTranscript(t.task_id);
-                      }}
-                      sx={{ p: 0.25 }}
-                    >
-                      <ArticleOutlined sx={{ fontSize: 16 }} />
-                    </IconButton>
-                  </Tooltip>
-                ) : null}
                 {ok && onCancelBackgroundTask ? (
                   <Tooltip title="取消后台任务">
                     <IconButton
@@ -1724,7 +1794,7 @@ export const ChatComposer = memo(function ChatComposer({
             aria-label="消息输入"
             aria-autocomplete="list"
             aria-expanded={
-              (showSlashPopover && filteredAtAgents.length > 0) ||
+              (showSlashPopover && filteredSlashOptions.length > 0) ||
               (showFilePopover &&
                 (fileGlobLoading || filteredFilePaths.length > 0))
             }
@@ -1790,30 +1860,59 @@ export const ChatComposer = memo(function ChatComposer({
               dense
               sx={{ py: 0, maxHeight: 260, overflow: "auto" }}
             >
-              {filteredAtAgents.length === 0 ? (
+              {filteredSlashOptions.length === 0 ? (
                 <ListItemButton disabled>
                   <ListItemText
-                    primary="无匹配 Agent"
+                    primary="无匹配命令或 Agent"
                     secondary="继续输入或按 Esc 取消"
                   />
                 </ListItemButton>
               ) : (
-                filteredAtAgents.map((a, i) => (
+                filteredSlashOptions.map((item, i) => (
                   <Tooltip
-                    key={a.agentType}
-                    title={a.description}
+                    key={
+                      item.kind === "command"
+                        ? `cmd-${item.command.id}`
+                        : item.agent.agentType
+                    }
+                    title={
+                      item.kind === "command"
+                        ? item.command.description
+                        : item.agent.description
+                    }
                     placement="right"
                     enterDelay={200}
                   >
                     <ListItemButton
                       data-slash-index={i}
                       selected={i === slashHighlightIndex}
-                      onClick={() => pickAtAgent(a.agentType)}
+                      onClick={() => {
+                        if (item.kind === "command") {
+                          pickWorkflowCommand(item.command.id);
+                        } else {
+                          pickAtAgent(item.agent.agentType);
+                        }
+                      }}
                     >
                       <ListItemIcon sx={{ minWidth: 36 }}>
-                        <SmartToy fontSize="small" />
+                        {item.kind === "command" ? (
+                          <RouteIcon fontSize="small" />
+                        ) : (
+                          <SmartToy fontSize="small" />
+                        )}
                       </ListItemIcon>
-                      <ListItemText primary={normalizeAgentDisplayName(a.agentType)} />
+                      <ListItemText
+                        primary={
+                          item.kind === "command"
+                            ? item.command.label
+                            : normalizeAgentDisplayName(item.agent.agentType)
+                        }
+                        secondary={
+                          item.kind === "command"
+                            ? item.command.description
+                            : "设置当前输入框角色"
+                        }
+                      />
                     </ListItemButton>
                   </Tooltip>
                 ))

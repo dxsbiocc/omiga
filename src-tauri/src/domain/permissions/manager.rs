@@ -1470,16 +1470,16 @@ mod tests {
             project_root: None,
         };
 
-        // 第一次：规则有效（use_count=0 < limit=1），Auto + Low risk → Allow
+        // 第一次：规则有效（use_count=0 < limit=1），Auto + Medium risk → Allow
         let dec1 = mgr.check_permission(&ctx).await;
         assert!(matches!(dec1, PermissionDecision::Allow), "第一次应 Allow");
 
         // 第二次：规则已失效（use_count=1 >= limit=1），走 default_decision
         let dec2 = mgr.check_permission(&ctx).await;
-        // file_write 在 assess_tool_risk 中为 Low，default_decision 对 Low 为 Allow
+        // file_write 在 assess_tool_risk 中为 Medium，default_decision 对 Medium 为 RequireApproval
         assert!(
-            matches!(dec2, PermissionDecision::Allow),
-            "规则失效后应按默认策略：Low 风险 Allow，实际: {:?}",
+            matches!(dec2, PermissionDecision::RequireApproval(_)),
+            "规则失效后应按默认策略：Medium 风险 RequireApproval，实际: {:?}",
             dec2
         );
     }
@@ -1492,7 +1492,7 @@ mod tests {
             id: "rule_cs".to_string(),
             name: "当前会话规则".to_string(),
             description: None,
-            tool_matcher: ToolMatcher::Exact("bash".to_string()),
+            tool_matcher: ToolMatcher::Exact("file_write".to_string()),
             path_matcher: None,
             argument_conditions: vec![],
             mode: PermissionMode::Auto,
@@ -1506,14 +1506,16 @@ mod tests {
         };
         mgr.add_rule(rule).await.unwrap();
 
-        let safe_cmd = serde_json::json!({"command": "ls"});
+        let write_args = serde_json::json!({"path": "/tmp/current-session-test.txt"});
 
-        // 规则创建者的会话：bash 是 Medium 风险，Auto 规则 → Allow（Low/Medium 允许）
+        // 规则创建者的会话：file_write 是 Medium 风险，Auto 规则 → Allow（Low/Medium 允许）
         let ctx_owner = PermissionContext {
-            tool_name: "bash".to_string(),
-            arguments: safe_cmd.clone(),
+            tool_name: "file_write".to_string(),
+            arguments: write_args.clone(),
             session_id: "session_owner".to_string(),
-            file_paths: None,
+            file_paths: Some(vec![std::path::PathBuf::from(
+                "/tmp/current-session-test.txt",
+            )]),
             timestamp: chrono::Utc::now(),
             project_root: None,
         };

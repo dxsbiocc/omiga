@@ -60,6 +60,10 @@ pub struct BackgroundAgentTask {
     pub session_id: String,
     /// 消息 ID
     pub message_id: String,
+    /// 调度 round ID（可选）
+    pub round_id: Option<String>,
+    /// 调度 plan ID（可选）
+    pub plan_id: Option<String>,
 }
 
 /// 后台 Agent 管理器
@@ -124,6 +128,8 @@ impl BackgroundAgentManager {
         description: String,
         session_id: String,
         message_id: String,
+        round_id: Option<String>,
+        plan_id: Option<String>,
     ) -> String {
         let task_id = Uuid::new_v4().to_string();
         let task = BackgroundAgentTask {
@@ -139,6 +145,8 @@ impl BackgroundAgentManager {
             output_path: None,
             session_id,
             message_id,
+            round_id,
+            plan_id,
         };
 
         let mut tasks = self.tasks.write().await;

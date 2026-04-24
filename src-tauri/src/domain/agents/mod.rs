@@ -18,6 +18,7 @@ pub mod overlay;
 pub mod personality;
 pub mod prompt_loader;
 pub mod registry;
+pub mod reviewer_verdict;
 pub mod router;
 pub mod scheduler;
 pub mod subagent_tool_filter;

@@ -31,6 +31,7 @@ fn test_assistant_message_roundtrip() {
         token_usage: None,
         reasoning_content: None,
         follow_up_suggestions: None,
+        turn_summary: None,
     };
 
     let (_, _, role, content, tool_calls, tool_call_id, tok, reasoning, _) =
@@ -58,6 +59,7 @@ fn test_assistant_message_with_tool_calls_roundtrip() {
         token_usage: None,
         reasoning_content: None,
         follow_up_suggestions: None,
+        turn_summary: None,
     };
 
     let (_, _, role, content, tool_calls_json, _, tok, reasoning, _) =
@@ -108,6 +110,7 @@ fn test_record_to_message_user() {
         token_usage_json: None,
         reasoning_content: None,
         follow_up_suggestions_json: None,
+        turn_summary: None,
         created_at: Utc::now().to_rfc3339(),
     };
 
@@ -132,6 +135,7 @@ fn test_record_to_message_assistant_with_tool_calls() {
         token_usage_json: None,
         reasoning_content: None,
         follow_up_suggestions_json: None,
+        turn_summary: None,
         created_at: Utc::now().to_rfc3339(),
     };
 
@@ -165,6 +169,7 @@ fn test_record_to_message_tool() {
         token_usage_json: None,
         reasoning_content: None,
         follow_up_suggestions_json: None,
+        turn_summary: None,
         created_at: Utc::now().to_rfc3339(),
     };
 
@@ -208,6 +213,7 @@ fn test_to_api_messages_conversation() {
             token_usage: None,
             reasoning_content: None,
             follow_up_suggestions: None,
+            turn_summary: None,
         },
         Message::Tool {
             tool_call_id: "call-1".to_string(),
@@ -241,6 +247,7 @@ fn test_extract_tool_calls() {
         token_usage: None,
         reasoning_content: None,
         follow_up_suggestions: None,
+        turn_summary: None,
     };
 
     let extracted = SessionCodec::extract_tool_calls(&msg_with_tools);

@@ -39,6 +39,7 @@ fn message_record_to_api(rec: MessageRecord) -> Message {
                 token_usage,
                 reasoning_content: rec.reasoning_content,
                 follow_up_suggestions,
+                turn_summary: rec.turn_summary,
                 id,
                 created_at,
             }
@@ -230,6 +231,8 @@ pub async fn save_session(state: State<'_, AppState>, session: SessionData) -> C
                 tool_calls,
                 token_usage,
                 reasoning_content,
+                follow_up_suggestions,
+                turn_summary,
                 ..
             } => DomainMessage::Assistant {
                 content: content.clone(),
@@ -244,7 +247,16 @@ pub async fn save_session(state: State<'_, AppState>, session: SessionData) -> C
                 }),
                 token_usage: token_usage.clone(),
                 reasoning_content: reasoning_content.clone(),
-                follow_up_suggestions: None, // Not used in this path
+                follow_up_suggestions: follow_up_suggestions.as_ref().map(|items| {
+                    items
+                        .iter()
+                        .map(|item| crate::domain::session::FollowUpSuggestion {
+                            label: item.label.clone(),
+                            prompt: item.prompt.clone(),
+                        })
+                        .collect()
+                }),
+                turn_summary: turn_summary.clone(),
             },
             Message::Tool {
                 tool_call_id,
@@ -279,6 +291,7 @@ pub async fn save_session(state: State<'_, AppState>, session: SessionData) -> C
             token_usage_json.as_deref(),
             reasoning_content.as_deref(),
             follow_up_suggestions_json.as_deref(),
+            SessionCodec::extract_turn_summary(&domain_msg).as_deref(),
         )
         .await
         .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
@@ -390,6 +403,8 @@ pub async fn save_message(
             tool_calls,
             token_usage,
             reasoning_content,
+            follow_up_suggestions,
+            turn_summary,
             ..
         } => DomainMessage::Assistant {
             content,
@@ -404,7 +419,16 @@ pub async fn save_message(
             }),
             token_usage,
             reasoning_content,
-            follow_up_suggestions: None, // Not used in this path
+            follow_up_suggestions: follow_up_suggestions.map(|items| {
+                items
+                    .into_iter()
+                    .map(|item| crate::domain::session::FollowUpSuggestion {
+                        label: item.label,
+                        prompt: item.prompt,
+                    })
+                    .collect()
+            }),
+            turn_summary,
         },
         Message::Tool {
             tool_call_id,
@@ -439,6 +463,7 @@ pub async fn save_message(
         token_usage_json.as_deref(),
         reasoning_content.as_deref(),
         follow_up_suggestions_json.as_deref(),
+        SessionCodec::extract_turn_summary(&domain_msg).as_deref(),
     )
     .await
     .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
@@ -1085,6 +1110,8 @@ pub enum Message {
         reasoning_content: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         follow_up_suggestions: Option<Vec<FollowUpSuggestion>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         /// RFC3339 creation timestamp from DB; used by frontend for elapsed-time display.

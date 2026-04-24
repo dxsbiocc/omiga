@@ -146,13 +146,13 @@ pub async fn build_autopilot_phase_guidance(
             "Decompose into ordered tasks with dependencies and parallelism boundaries before executing."
         }
         crate::domain::autopilot_state::AutopilotPhase::Implementation => {
-            "Prioritize implementation of pending tasks and tests; avoid reopening already accepted planning work."
+            "Prioritize execution of pending literature/data analysis tasks; avoid reopening already accepted scope unless new evidence requires it."
         }
         crate::domain::autopilot_state::AutopilotPhase::Qa => {
-            "You are in the QA cycle. Prioritize tests, build, lint, and narrow fixes. Do not expand scope. If repeated failures persist, summarize the root blocker."
+            "You are in the argumentation cycle. Prioritize problem finding, counter-evidence, logical support, citation/data traceability, and narrow corrections. Do not expand scope."
         }
         crate::domain::autopilot_state::AutopilotPhase::Validation => {
-            "Prioritize final validation against acceptance criteria and prepare a concise evidence-backed completion summary."
+            "You are in the review phase. Prioritize scientific soundness, completeness, evidence boundaries, citation traceability, and prepare a concise evidence-backed final summary."
         }
         crate::domain::autopilot_state::AutopilotPhase::Complete => return None,
     };
@@ -337,7 +337,7 @@ mod tests {
             .await
             .unwrap();
         assert!(guidance.contains("Phase Control: Autopilot"));
-        assert!(guidance.contains("QA cycle"));
+        assert!(guidance.contains("argumentation cycle"));
 
         let strategy = suggested_mode_strategy(dir.path(), "sess-strategy", "autopilot")
             .await

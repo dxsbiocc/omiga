@@ -256,19 +256,32 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 }));
 
-/** Agent 类型显示名称映射（统一使用首字母大写英文名） */
+/** Agent 类型显示名称映射（显示层科研分析语义；后端 agent id 不变） */
 export const AGENT_TYPE_DISPLAY_NAMES: Record<string, string> = {
   "auto": "Auto",
-  "general-purpose": "General",
-  "Explore": "Explore",
-  "Plan": "Plan",
-  "verification": "Verification",
-  "executor": "Executor",
-  "architect": "Architect",
-  "debugger": "Debugger",
+  "general-purpose": "通用分析",
+  "Explore": "资料探索",
+  "Plan": "分析设计",
+  "verification": "证据核查",
+  "executor": "分析执行",
+  "architect": "科学审查",
+  "debugger": "问题排查",
+  "test-engineer": "论证检查",
+  "critic": "论证审查",
+  "code-reviewer": "完整性审查",
+  "security-reviewer": "风险审查",
+  "quality-reviewer": "质量审查",
+  "api-reviewer": "口径审查",
+  "performance-reviewer": "效率审查",
+  "literature-search": "文献检索",
+  "deep-research": "深度研究",
+  "researcher": "研究员",
+  "writer": "报告撰写",
+  "data-analyst": "数据分析",
+  "bioinformatics-analyst": "生信分析",
 };
 
-/** 将 agent_type 字符串规范化为首字母大写的显示名 */
+/** 将 agent_type 字符串规范化为面向用户的显示名 */
 export function normalizeAgentDisplayName(agentType: string): string {
   if (AGENT_TYPE_DISPLAY_NAMES[agentType]) return AGENT_TYPE_DISPLAY_NAMES[agentType];
   // kebab-case → Title Case fallback: "my-agent" → "My Agent"

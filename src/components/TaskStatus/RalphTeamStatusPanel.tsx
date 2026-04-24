@@ -7,7 +7,7 @@
  * backgroundJobs list (jobs with agent-type-style labels).
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Box,
@@ -31,6 +31,17 @@ import {
   Groups,
 } from "@mui/icons-material";
 import { useActivityStore } from "../../state/activityStore";
+import {
+  aggregateReviewerVerdicts,
+  reviewerVerdictColor,
+  type BackgroundAgentTaskRow,
+  type ReviewerVerdictChip,
+} from "../../utils/reviewerVerdict";
+import { normalizeAgentDisplayName } from "../../state/agentStore";
+import { compactLabel, isLabelCompacted } from "../../utils/compactLabel";
+import { MarkdownText, MarkdownTextViewer } from "../MarkdownText";
+import { RightDetailDrawer } from "../RightDetailDrawer";
+import { filterPersistentSessionsBySessionId } from "./persistentSessionScope";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -46,6 +57,93 @@ interface BlackboardDto {
   session_id: string;
   entries: BlackboardEntry[];
   updated_at: string;
+}
+
+type PersistentDetail = {
+  title: string;
+  subtitle?: string;
+  body: string;
+  chips?: string[];
+};
+
+function PersistentDetailDrawer({
+  detail,
+  onClose,
+}: {
+  detail: PersistentDetail | null;
+  onClose: () => void;
+}) {
+  return (
+    <RightDetailDrawer
+      open={Boolean(detail)}
+      onClose={onClose}
+      title="阶段详情"
+      subtitle={detail?.title ?? "详情"}
+      width={480}
+      titleWeight={700}
+      titleAlign="flex-start"
+    >
+      <Box
+        sx={{
+          mb: 2,
+          p: 1.5,
+          borderRadius: 2,
+          bgcolor: (theme) => alpha(theme.palette.secondary.main, 0.06),
+          border: 1,
+          borderColor: (theme) =>
+            alpha(
+              theme.palette.mode === "dark"
+                ? theme.palette.common.white
+                : theme.palette.common.black,
+              0.08,
+            ),
+        }}
+      >
+        <Typography variant="caption" color="secondary" fontWeight={700}>
+          黑板结果
+        </Typography>
+        {detail?.subtitle ? (
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ whiteSpace: "pre-wrap", wordBreak: "break-word", mt: 0.5 }}
+          >
+            {detail.subtitle}
+          </Typography>
+        ) : null}
+        {detail?.chips && detail.chips.length > 0 ? (
+          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ mt: 1 }}>
+            {detail.chips.map((chip) => (
+              <Chip key={chip} label={chip} size="small" sx={{ height: 20, fontSize: 10 }} />
+            ))}
+          </Stack>
+        ) : null}
+      </Box>
+
+      <Box
+        sx={{
+          p: 1.5,
+          borderRadius: 2,
+          bgcolor: (theme) => alpha(theme.palette.warning.main, 0.06),
+          border: 1,
+          borderColor: (theme) =>
+            alpha(
+              theme.palette.mode === "dark"
+                ? theme.palette.common.white
+                : theme.palette.common.black,
+              0.08,
+            ),
+        }}
+      >
+        <Typography variant="caption" color="warning.dark" fontWeight={700}>
+          完整内容
+        </Typography>
+        <Box sx={{ mt: 0.75 }}>
+          <MarkdownTextViewer>{detail?.body ?? ""}</MarkdownTextViewer>
+        </Box>
+      </Box>
+    </RightDetailDrawer>
+  );
 }
 
 interface TeamSessionInfo {
@@ -120,6 +218,136 @@ function phaseColor(phase: string): string {
   return PHASE_COLORS[phase] ?? "#9ca3af";
 }
 
+function ReviewerSummary({
+  verdicts,
+}: {
+  verdicts: ReviewerVerdictChip[];
+}) {
+  const [selectedVerdict, setSelectedVerdict] = useState<ReviewerVerdictChip | null>(null);
+  if (verdicts.length === 0) return null;
+  const headline = verdicts.some((v) => v.verdict === "reject" || v.verdict === "fail")
+    ? "存在阻断性 reviewer 结论"
+    : verdicts.some((v) => v.verdict === "partial")
+      ? "存在部分通过 / 风险提示"
+      : "reviewer 已完成";
+
+  return (
+    <>
+    <Stack spacing={0.5} sx={{ mt: 0.75 }}>
+      <Typography variant="caption" color="text.secondary" sx={{ fontSize: 10 }}>
+        Reviewer 摘要：{headline}
+      </Typography>
+      {verdicts.map((v) => {
+        const color = reviewerVerdictColor(v.verdict, v.severity);
+        return (
+          <Box
+            key={`${v.agentType}-${v.summary}`}
+            role="button"
+            tabIndex={0}
+            onClick={() => setSelectedVerdict(v)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                setSelectedVerdict(v);
+              }
+            }}
+            sx={{
+              p: 0.75,
+              borderRadius: 1,
+              border: 1,
+              borderColor: alpha(color, 0.18),
+              bgcolor: alpha(color, 0.05),
+              cursor: "pointer",
+              transition: "background-color 0.15s ease, border-color 0.15s ease",
+              "&:hover": {
+                bgcolor: alpha(color, 0.1),
+                borderColor: alpha(color, 0.3),
+              },
+              "&:focus-visible": {
+                outline: `2px solid ${alpha(color, 0.45)}`,
+                outlineOffset: 2,
+              },
+            }}
+          >
+            <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mb: 0.25 }}>
+              <Chip label={normalizeAgentDisplayName(v.agentType)} size="small" sx={{ height: 16, fontSize: 9 }} />
+              <Chip label={v.severity} size="small" sx={{ height: 16, fontSize: 9, bgcolor: alpha(color, 0.12), color }} />
+              <Chip label={v.verdict} size="small" variant="outlined" sx={{ height: 16, fontSize: 9, borderColor: alpha(color, 0.3), color }} />
+            </Stack>
+            <Typography variant="caption" sx={{ fontSize: 10, color: "text.secondary" }}>
+              {v.summary}
+            </Typography>
+            <Typography variant="caption" sx={{ display: "block", mt: 0.35, fontSize: 9, color, fontWeight: 700 }}>
+              详情
+            </Typography>
+          </Box>
+        );
+      })}
+    </Stack>
+    <RightDetailDrawer
+      open={selectedVerdict !== null}
+      onClose={() => setSelectedVerdict(null)}
+      title="Reviewer 结论"
+      subtitle={
+        selectedVerdict
+          ? `${normalizeAgentDisplayName(selectedVerdict.agentType)} · ${selectedVerdict.verdict.toUpperCase()}`
+          : undefined
+      }
+      width={500}
+      titleWeight={700}
+      titleAlign="flex-start"
+    >
+      {selectedVerdict && (() => {
+        const color = reviewerVerdictColor(selectedVerdict.verdict, selectedVerdict.severity);
+        return (
+          <Stack spacing={1.5}>
+            <Box
+              sx={{
+                p: 1.25,
+                borderRadius: 2,
+                border: 1,
+                borderColor: alpha(color, 0.22),
+                bgcolor: alpha(color, 0.06),
+              }}
+            >
+              <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ mb: 0.75 }}>
+                <Chip label={normalizeAgentDisplayName(selectedVerdict.agentType)} size="small" sx={{ height: 20, fontSize: 10 }} />
+                <Chip label={selectedVerdict.verdict.toUpperCase()} size="small" sx={{ height: 20, fontSize: 10, bgcolor: alpha(color, 0.14), color, fontWeight: 700 }} />
+                <Chip label={selectedVerdict.severity.toUpperCase()} size="small" variant="outlined" sx={{ height: 20, fontSize: 10, borderColor: alpha(color, 0.32), color }} />
+              </Stack>
+              {selectedVerdict.taskDescription && (
+                <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                  {selectedVerdict.taskDescription}
+                </Typography>
+              )}
+              <Typography variant="body2" sx={{ mt: 1, color, fontWeight: 700, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                {selectedVerdict.summary}
+              </Typography>
+            </Box>
+            <Box
+              sx={{
+                p: 1.25,
+                borderRadius: 2,
+                border: 1,
+                borderColor: alpha(color, 0.12),
+                bgcolor: alpha(color, 0.04),
+              }}
+            >
+              <Typography variant="caption" color="text.secondary" fontWeight={700}>
+                原始 reviewer 输出
+              </Typography>
+              <Box sx={{ mt: 0.75 }}>
+                <MarkdownTextViewer>{selectedVerdict.rawText || selectedVerdict.summary}</MarkdownTextViewer>
+              </Box>
+            </Box>
+          </Stack>
+        );
+      })()}
+    </RightDetailDrawer>
+    </>
+  );
+}
+
 function LaneSummary({
   lane,
   color,
@@ -128,35 +356,160 @@ function LaneSummary({
   color: string;
 }) {
   if (!lane) return null;
+  const laneIdShort = compactLabel(lane.lane_id, 18);
+  const laneIdCompacted = isLabelCompacted(lane.lane_id, laneIdShort);
+  const preferredRole = lane.preferred_agent_type
+    ? normalizeAgentDisplayName(lane.preferred_agent_type)
+    : null;
+  const preferredRoleShort = preferredRole ? compactLabel(preferredRole, 16) : null;
+  const preferredRoleCompacted =
+    preferredRole != null &&
+    preferredRoleShort != null &&
+    isLabelCompacted(preferredRole, preferredRoleShort);
+  const supplementalDisplay = lane.supplemental_agent_types
+    .map(normalizeAgentDisplayName)
+    .map((name) => compactLabel(name, 14))
+    .join(" / ");
+  const supplementalRaw = lane.supplemental_agent_types
+    .map(normalizeAgentDisplayName)
+    .join(" / ");
+  const supplementalCompacted = isLabelCompacted(
+    supplementalRaw,
+    supplementalDisplay,
+  );
+
+  const laneChip = (
+    <Chip
+      label={laneIdShort}
+      size="small"
+      sx={{
+        height: 16,
+        fontSize: 9,
+        bgcolor: alpha(color, 0.1),
+        color,
+        fontWeight: 600,
+      }}
+    />
+  );
+
   return (
     <Stack spacing={0.5} sx={{ mt: 0.75 }}>
       <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" useFlexGap>
-        <Chip
-          label={lane.lane_id}
-          size="small"
-          sx={{
-            height: 16,
-            fontSize: 9,
-            bgcolor: alpha(color, 0.1),
-            color,
-            fontWeight: 600,
-          }}
-        />
-        {lane.preferred_agent_type && (
-          <Chip
-            label={`主角色: ${lane.preferred_agent_type}`}
-            size="small"
-            variant="outlined"
-            sx={{ height: 16, fontSize: 9 }}
-          />
+        {laneIdCompacted ? (
+          <Tooltip title={lane.lane_id}>
+            <Box>{laneChip}</Box>
+          </Tooltip>
+        ) : (
+          laneChip
+        )}
+        {preferredRole && preferredRoleShort && (
+          preferredRoleCompacted ? (
+            <Tooltip title={`主角色: ${preferredRole}`}>
+              <Box>
+                <Chip
+                  label={`主角色: ${preferredRoleShort}`}
+                  size="small"
+                  variant="outlined"
+                  sx={{ height: 16, fontSize: 9 }}
+                />
+              </Box>
+            </Tooltip>
+          ) : (
+            <Chip
+              label={`主角色: ${preferredRoleShort}`}
+              size="small"
+              variant="outlined"
+              sx={{ height: 16, fontSize: 9 }}
+            />
+          )
         )}
       </Stack>
       {lane.supplemental_agent_types.length > 0 && (
-        <Typography variant="caption" color="text.secondary" sx={{ fontSize: 10 }}>
-          辅助角色：{lane.supplemental_agent_types.join(" / ")}
-        </Typography>
+        supplementalCompacted ? (
+          <Tooltip title={supplementalRaw}>
+            <Typography variant="caption" color="text.secondary" sx={{ fontSize: 10 }}>
+              辅助角色：{supplementalDisplay}
+            </Typography>
+          </Tooltip>
+        ) : (
+          <Typography variant="caption" color="text.secondary" sx={{ fontSize: 10 }}>
+            辅助角色：{supplementalDisplay}
+          </Typography>
+        )
       )}
     </Stack>
+  );
+}
+
+function ClickableTodoRow({
+  text,
+  done,
+  color,
+  onOpen,
+}: {
+  text: string;
+  done: boolean;
+  color: string;
+  onOpen: () => void;
+}) {
+  const mutedColor = done ? "text.secondary" : "text.disabled";
+  return (
+    <Box
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
+      sx={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 0.5,
+        p: 0.45,
+        borderRadius: 1,
+        cursor: "pointer",
+        transition: "background-color 0.15s ease",
+        "&:hover": {
+          bgcolor: alpha(color, 0.07),
+        },
+        "&:focus-visible": {
+          outline: `2px solid ${alpha(color, 0.4)}`,
+          outlineOffset: 1,
+        },
+      }}
+    >
+      {done ? (
+        <CheckCircleOutline
+          sx={{ fontSize: 12, color: "#22c55e", mt: 0.15, flexShrink: 0 }}
+        />
+      ) : (
+        <Box
+          sx={{
+            width: 12,
+            height: 12,
+            borderRadius: "50%",
+            border: "1.5px solid",
+            borderColor: alpha(color, 0.4),
+            mt: 0.2,
+            flexShrink: 0,
+          }}
+        />
+      )}
+      <Box sx={{ flex: 1, minWidth: 0 }}>
+        <MarkdownText compact color={mutedColor}>
+          {text}
+        </MarkdownText>
+      </Box>
+      <Typography
+        variant="caption"
+        sx={{ fontSize: 9, color, fontWeight: 700, flexShrink: 0, mt: 0.05 }}
+      >
+        详情
+      </Typography>
+    </Box>
   );
 }
 
@@ -172,6 +525,8 @@ interface RalphCardProps {
 function RalphCard({ session, lane, projectRoot, onCleared }: RalphCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [reviewerVerdicts, setReviewerVerdicts] = useState<ReviewerVerdictChip[]>([]);
+  const [detail, setDetail] = useState<PersistentDetail | null>(null);
 
   const totalTodos =
     session.todos_completed.length + session.todos_pending.length;
@@ -195,7 +550,44 @@ function RalphCard({ session, lane, projectRoot, onCleared }: RalphCardProps) {
     }
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const tasks = await invoke<BackgroundAgentTaskRow[]>("list_session_background_tasks", {
+          sessionId: session.session_id,
+        });
+        if (cancelled) return;
+        const verdicts = (tasks ?? [])
+          .filter((t) => t.result_summary || t.error_message);
+        setReviewerVerdicts(aggregateReviewerVerdicts(verdicts));
+      } catch {
+        if (!cancelled) setReviewerVerdicts([]);
+      }
+    };
+    void load();
+    const id = window.setInterval(() => void load(), 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [session.session_id]);
+
+  const openTodoDetail = (args: { text: string; done: boolean; index: number }) => {
+    setDetail({
+      title: `${args.done ? "已完成" : "待处理"}待办 #${args.index + 1}`,
+      subtitle: `Ralph · ${phaseLabel(session.phase)} · 第 ${session.iteration} 轮`,
+      body: args.text,
+      chips: [
+        args.done ? "已完成" : "待处理",
+        phaseLabel(session.phase),
+        `${completedCount}/${totalTodos || 0}`,
+      ],
+    });
+  };
+
   return (
+    <>
     <Fade in timeout={250}>
       <Box
         sx={{
@@ -268,6 +660,7 @@ function RalphCard({ session, lane, projectRoot, onCleared }: RalphCardProps) {
               {session.goal}
             </Typography>
             <LaneSummary lane={lane} color={color} />
+            <ReviewerSummary verdicts={reviewerVerdicts} />
           </Box>
           <Stack direction="row" alignItems="center" spacing={0}>
             <Tooltip title={expanded ? "收起" : "展开待办"}>
@@ -343,45 +736,31 @@ function RalphCard({ session, lane, projectRoot, onCleared }: RalphCardProps) {
             {session.todos_completed.length > 0 && (
               <Stack spacing={0.25} sx={{ mb: 0.5 }}>
                 {session.todos_completed.map((t, i) => (
-                  <Stack key={i} direction="row" alignItems="flex-start" spacing={0.5}>
-                    <CheckCircleOutline
-                      sx={{ fontSize: 12, color: "#22c55e", mt: 0.1, flexShrink: 0 }}
-                    />
-                    <Typography
-                      variant="caption"
-                      sx={{ fontSize: 10, color: "text.secondary", lineHeight: 1.4 }}
-                    >
-                      {t}
-                    </Typography>
-                  </Stack>
+                  <ClickableTodoRow
+                    key={i}
+                    text={t}
+                    done
+                    color={color}
+                    onOpen={() => openTodoDetail({ text: t, done: true, index: i })}
+                  />
                 ))}
               </Stack>
             )}
             {session.todos_pending.map((t, i) => (
-              <Stack key={i} direction="row" alignItems="flex-start" spacing={0.5}>
-                <Box
-                  sx={{
-                    width: 12,
-                    height: 12,
-                    borderRadius: "50%",
-                    border: "1.5px solid",
-                    borderColor: alpha(color, 0.4),
-                    mt: 0.1,
-                    flexShrink: 0,
-                  }}
-                />
-                <Typography
-                  variant="caption"
-                  sx={{ fontSize: 10, color: "text.disabled", lineHeight: 1.4 }}
-                >
-                  {t}
-                </Typography>
-              </Stack>
+              <ClickableTodoRow
+                key={i}
+                text={t}
+                done={false}
+                color={color}
+                onOpen={() => openTodoDetail({ text: t, done: false, index: i })}
+              />
             ))}
           </Box>
         </Collapse>
       </Box>
     </Fade>
+    <PersistentDetailDrawer detail={detail} onClose={() => setDetail(null)} />
+    </>
   );
 }
 
@@ -447,6 +826,8 @@ function TeamWorkersStrip() {
                 : job.state === "error"
                   ? "#ef4444"
                   : "#9ca3af";
+          const shortLabel = compactLabel(job.label, 30);
+          const labelCompacted = isLabelCompacted(job.label, shortLabel);
           return (
             <Stack key={job.id} direction="row" alignItems="center" spacing={0.5}>
               <Box
@@ -465,13 +846,25 @@ function TeamWorkersStrip() {
                   },
                 }}
               />
-              <Typography
-                variant="caption"
-                sx={{ fontSize: 10, color: "text.secondary", flex: 1, minWidth: 0 }}
-                noWrap
-              >
-                {job.label}
-              </Typography>
+              {labelCompacted ? (
+                <Tooltip title={job.label}>
+                  <Typography
+                    variant="caption"
+                    sx={{ fontSize: 10, color: "text.secondary", flex: 1, minWidth: 0 }}
+                    noWrap
+                  >
+                    {shortLabel}
+                  </Typography>
+                </Tooltip>
+              ) : (
+                <Typography
+                  variant="caption"
+                  sx={{ fontSize: 10, color: "text.secondary", flex: 1, minWidth: 0 }}
+                  noWrap
+                >
+                  {shortLabel}
+                </Typography>
+              )}
             </Stack>
           );
         })}
@@ -501,6 +894,8 @@ function TeamCard({ session, lane, projectRoot, onCleared }: TeamCardProps) {
   const [clearing, setClearing] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [board, setBoard] = useState<BlackboardDto | null>(null);
+  const [reviewerVerdicts, setReviewerVerdicts] = useState<ReviewerVerdictChip[]>([]);
+  const [detail, setDetail] = useState<PersistentDetail | null>(null);
 
   // Poll blackboard while session is active
   useEffect(() => {
@@ -546,17 +941,41 @@ function TeamCard({ session, lane, projectRoot, onCleared }: TeamCardProps) {
     }
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const tasks = await invoke<BackgroundAgentTaskRow[]>("list_session_background_tasks", {
+          sessionId: session.session_id,
+        });
+        if (cancelled) return;
+        const verdicts = (tasks ?? [])
+          .filter((t) => t.result_summary || t.error_message);
+        setReviewerVerdicts(aggregateReviewerVerdicts(verdicts));
+      } catch {
+        if (!cancelled) setReviewerVerdicts([]);
+      }
+    };
+    void load();
+    const id = window.setInterval(() => void load(), 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [session.session_id]);
+
   return (
-    <Fade in timeout={250}>
-      <Box
-        sx={{
-          border: 1,
-          borderColor: alpha(color, 0.2),
-          borderRadius: 1.5,
-          bgcolor: alpha(color, 0.03),
-          overflow: "hidden",
-        }}
-      >
+    <>
+      <Fade in timeout={250}>
+        <Box
+          sx={{
+            border: 1,
+            borderColor: alpha(color, 0.2),
+            borderRadius: 1.5,
+            bgcolor: alpha(color, 0.03),
+            overflow: "hidden",
+          }}
+        >
         <Stack
           direction="row"
           alignItems="flex-start"
@@ -605,6 +1024,7 @@ function TeamCard({ session, lane, projectRoot, onCleared }: TeamCardProps) {
               {session.goal}
             </Typography>
             <LaneSummary lane={lane} color={color} />
+            <ReviewerSummary verdicts={reviewerVerdicts} />
           </Box>
           <Stack direction="row" alignItems="center" spacing={0}>
             {board && board.entries.length > 0 && (
@@ -658,41 +1078,70 @@ function TeamCard({ session, lane, projectRoot, onCleared }: TeamCardProps) {
               {(board?.entries ?? []).map((entry, i) => (
                 <Box
                   key={i}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() =>
+                    setDetail({
+                      title: `[${entry.subtask_id}] ${normalizeAgentDisplayName(entry.agent_type)}`,
+                      subtitle: `黑板结果 · ${entry.key} · ${entry.posted_at}`,
+                      body: entry.value,
+                      chips: [
+                        TEAM_PHASE_LABELS[session.phase] ?? session.phase,
+                        `${session.completed_count}/${session.subtask_count} 子任务`,
+                      ],
+                    })
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setDetail({
+                        title: `[${entry.subtask_id}] ${normalizeAgentDisplayName(entry.agent_type)}`,
+                        subtitle: `黑板结果 · ${entry.key} · ${entry.posted_at}`,
+                        body: entry.value,
+                        chips: [
+                          TEAM_PHASE_LABELS[session.phase] ?? session.phase,
+                          `${session.completed_count}/${session.subtask_count} 子任务`,
+                        ],
+                      });
+                    }
+                  }}
                   sx={{
                     p: 0.75,
                     borderRadius: 1,
                     bgcolor: alpha(color, 0.05),
                     border: 1,
                     borderColor: alpha(color, 0.1),
+                    cursor: "pointer",
+                    transition: "border-color 0.15s ease, background-color 0.15s ease",
+                    "&:hover": {
+                      bgcolor: alpha(color, 0.09),
+                      borderColor: alpha(color, 0.28),
+                    },
+                    "&:focus-visible": {
+                      outline: `2px solid ${alpha(color, 0.45)}`,
+                      outlineOffset: 2,
+                    },
                   }}
                 >
                   <Stack direction="row" alignItems="center" spacing={0.5} sx={{ mb: 0.25 }}>
                     <CheckCircleOutline sx={{ fontSize: 10, color: "#22c55e", flexShrink: 0 }} />
-                    <Typography variant="caption" sx={{ fontSize: 9, color, fontWeight: 600 }}>
-                      [{entry.subtask_id}] {entry.agent_type}
+                    <Typography variant="caption" sx={{ fontSize: 9, color, fontWeight: 600, flex: 1, minWidth: 0 }}>
+                      [{entry.subtask_id}] {normalizeAgentDisplayName(entry.agent_type)}
+                    </Typography>
+                    <Typography variant="caption" sx={{ fontSize: 9, color, fontWeight: 600, flexShrink: 0 }}>
+                      详情
                     </Typography>
                   </Stack>
-                  <Typography
-                    variant="caption"
-                    sx={{
-                      fontSize: 10,
-                      color: "text.secondary",
-                      display: "-webkit-box",
-                      WebkitLineClamp: 3,
-                      WebkitBoxOrient: "vertical",
-                      overflow: "hidden",
-                      lineHeight: 1.4,
-                    }}
-                  >
-                    {entry.value}
-                  </Typography>
+                  <MarkdownText compact>{entry.value}</MarkdownText>
                 </Box>
               ))}
             </Stack>
           </Box>
         </Collapse>
-      </Box>
-    </Fade>
+        </Box>
+      </Fade>
+      <PersistentDetailDrawer detail={detail} onClose={() => setDetail(null)} />
+    </>
   );
 }
 
@@ -701,12 +1150,12 @@ function TeamCard({ session, lane, projectRoot, onCleared }: TeamCardProps) {
 const AUTOPILOT_PHASE_LABELS: Record<string, string> = {
   intake: "接收中",
   interview: "澄清中",
-  expansion: "展开中",
-  design: "设计中",
-  plan: "计划中",
-  implementation: "实现中",
-  qa: "QA 循环",
-  validation: "最终验证",
+  expansion: "问题展开",
+  design: "分析设计",
+  plan: "分析计划",
+  implementation: "分析执行",
+  qa: "论证中",
+  validation: "审查中",
   complete: "已完成",
 };
 
@@ -721,7 +1170,10 @@ function AutopilotCard({
   projectRoot: string;
   onCleared: () => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [reviewerVerdicts, setReviewerVerdicts] = useState<ReviewerVerdictChip[]>([]);
+  const [detail, setDetail] = useState<PersistentDetail | null>(null);
   const totalTodos = session.todos_completed.length + session.todos_pending.length;
   const progress = totalTodos > 0 ? (session.todos_completed.length / totalTodos) * 100 : 0;
   const color = session.phase === "complete" ? "#10b981" : "#2563eb";
@@ -741,7 +1193,44 @@ function AutopilotCard({
     }
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const tasks = await invoke<BackgroundAgentTaskRow[]>("list_session_background_tasks", {
+          sessionId: session.session_id,
+        });
+        if (cancelled) return;
+        const verdicts = (tasks ?? [])
+          .filter((t) => t.result_summary || t.error_message);
+        setReviewerVerdicts(aggregateReviewerVerdicts(verdicts));
+      } catch {
+        if (!cancelled) setReviewerVerdicts([]);
+      }
+    };
+    void load();
+    const id = window.setInterval(() => void load(), 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [session.session_id]);
+
+  const openTodoDetail = (args: { text: string; done: boolean; index: number }) => {
+    setDetail({
+      title: `${args.done ? "已完成" : "待处理"}阶段 #${args.index + 1}`,
+      subtitle: `Autopilot · ${AUTOPILOT_PHASE_LABELS[session.phase] ?? session.phase} · QA ${session.qa_cycles}/${session.max_qa_cycles}`,
+      body: args.text,
+      chips: [
+        args.done ? "已完成" : "待处理",
+        AUTOPILOT_PHASE_LABELS[session.phase] ?? session.phase,
+        `${session.todos_completed.length}/${totalTodos || 0}`,
+      ],
+    });
+  };
+
   return (
+    <>
     <Fade in timeout={250}>
       <Box
         sx={{
@@ -768,7 +1257,7 @@ function AutopilotCard({
                 }}
               />
               <Typography variant="caption" color="text.disabled" sx={{ fontSize: 10 }}>
-                QA {session.qa_cycles}/{session.max_qa_cycles}
+                论证 {session.qa_cycles}/{session.max_qa_cycles}
               </Typography>
             </Stack>
             <Typography
@@ -788,17 +1277,27 @@ function AutopilotCard({
               {session.goal}
             </Typography>
             <LaneSummary lane={lane} color={color} />
+            <ReviewerSummary verdicts={reviewerVerdicts} />
           </Box>
-          <Tooltip title="清除状态文件">
-            <IconButton
-              size="small"
-              onClick={handleClear}
-              disabled={clearing}
-              sx={{ p: 0.25, color: "text.disabled" }}
-            >
-              <DeleteOutline fontSize="small" />
-            </IconButton>
-          </Tooltip>
+          <Stack direction="row" alignItems="center" spacing={0}>
+            {totalTodos > 0 && (
+              <Tooltip title={expanded ? "收起阶段" : "展开阶段"}>
+                <IconButton size="small" onClick={() => setExpanded((v) => !v)} sx={{ p: 0.25 }}>
+                  {expanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
+                </IconButton>
+              </Tooltip>
+            )}
+            <Tooltip title="清除状态文件">
+              <IconButton
+                size="small"
+                onClick={handleClear}
+                disabled={clearing}
+                sx={{ p: 0.25, color: "text.disabled" }}
+              >
+                <DeleteOutline fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </Stack>
         </Stack>
         {totalTodos > 0 && (
           <Box sx={{ px: 1.25, pb: 0.75 }}>
@@ -820,8 +1319,36 @@ function AutopilotCard({
             </Stack>
           </Box>
         )}
+        <Collapse in={expanded && totalTodos > 0}>
+          <Box sx={{ px: 1.25, pb: 1 }}>
+            {session.todos_completed.length > 0 && (
+              <Stack spacing={0.25} sx={{ mb: 0.5 }}>
+                {session.todos_completed.map((t, i) => (
+                  <ClickableTodoRow
+                    key={i}
+                    text={t}
+                    done
+                    color={color}
+                    onOpen={() => openTodoDetail({ text: t, done: true, index: i })}
+                  />
+                ))}
+              </Stack>
+            )}
+            {session.todos_pending.map((t, i) => (
+              <ClickableTodoRow
+                key={i}
+                text={t}
+                done={false}
+                color={color}
+                onOpen={() => openTodoDetail({ text: t, done: false, index: i })}
+              />
+            ))}
+          </Box>
+        </Collapse>
       </Box>
     </Fade>
+    <PersistentDetailDrawer detail={detail} onClose={() => setDetail(null)} />
+    </>
   );
 }
 
@@ -830,9 +1357,17 @@ function AutopilotCard({
 interface RalphTeamStatusPanelProps {
   /** Project root path — used to scope Ralph session queries */
   projectRoot?: string;
+  /** When set, only show persistent tasks for this session. */
+  sessionId?: string | null;
+  /** Render inside another card/tab without extra outer divider chrome. */
+  embedded?: boolean;
 }
 
-export function RalphTeamStatusPanel({ projectRoot }: RalphTeamStatusPanelProps) {
+export function RalphTeamStatusPanel({
+  projectRoot,
+  sessionId,
+  embedded = false,
+}: RalphTeamStatusPanelProps) {
   const [ralphSessions, setRalphSessions] = useState<RalphSessionInfo[]>([]);
   const [autopilotSessions, setAutopilotSessions] = useState<AutopilotSessionInfo[]>([]);
   const [teamSessions, setTeamSessions] = useState<TeamSessionInfo[]>([]);
@@ -873,6 +1408,19 @@ export function RalphTeamStatusPanel({ projectRoot }: RalphTeamStatusPanelProps)
     [modeLanes],
   );
 
+  const visibleRalphSessions = useMemo(
+    () => filterPersistentSessionsBySessionId(ralphSessions, sessionId),
+    [ralphSessions, sessionId],
+  );
+  const visibleAutopilotSessions = useMemo(
+    () => filterPersistentSessionsBySessionId(autopilotSessions, sessionId),
+    [autopilotSessions, sessionId],
+  );
+  const visibleTeamSessions = useMemo(
+    () => filterPersistentSessionsBySessionId(teamSessions, sessionId),
+    [sessionId, teamSessions],
+  );
+
   const teamJobs = backgroundJobs.filter(
     (j) =>
       j.label.startsWith("executor") ||
@@ -881,17 +1429,20 @@ export function RalphTeamStatusPanel({ projectRoot }: RalphTeamStatusPanelProps)
   );
 
   const hasAnything =
-    ralphSessions.length > 0 || autopilotSessions.length > 0 || teamSessions.length > 0 || teamJobs.length > 0;
+    visibleRalphSessions.length > 0 ||
+    visibleAutopilotSessions.length > 0 ||
+    visibleTeamSessions.length > 0 ||
+    teamJobs.length > 0;
   if (!hasAnything) return null;
 
   return (
     <Box
       sx={{
         flexShrink: 0,
-        borderTop: 1,
+        borderTop: embedded ? 0 : 1,
         borderColor: "divider",
-        px: 1.25,
-        py: 1,
+        px: embedded ? 0 : 1.25,
+        py: embedded ? 0 : 1,
       }}
     >
       {/* Section header */}
@@ -900,23 +1451,23 @@ export function RalphTeamStatusPanel({ projectRoot }: RalphTeamStatusPanelProps)
         <Typography variant="body2" fontWeight={600} sx={{ fontSize: 11 }}>
           持久任务
         </Typography>
-        {ralphSessions.length > 0 && (
+        {visibleRalphSessions.length > 0 && (
           <Chip
-            label={`Ralph ×${ralphSessions.length}`}
+            label={`Ralph ×${visibleRalphSessions.length}`}
             size="small"
             sx={{ height: 16, fontSize: 9 }}
           />
         )}
-        {autopilotSessions.length > 0 && (
+        {visibleAutopilotSessions.length > 0 && (
           <Chip
-            label={`Autopilot ×${autopilotSessions.length}`}
+            label={`Autopilot ×${visibleAutopilotSessions.length}`}
             size="small"
             sx={{ height: 16, fontSize: 9, bgcolor: alpha("#2563eb", 0.1), color: "#2563eb" }}
           />
         )}
-        {teamSessions.length > 0 && (
+        {visibleTeamSessions.length > 0 && (
           <Chip
-            label={`Team ×${teamSessions.length}`}
+            label={`Team ×${visibleTeamSessions.length}`}
             size="small"
             sx={{ height: 16, fontSize: 9, bgcolor: alpha("#8b5cf6", 0.1), color: "#8b5cf6" }}
           />
@@ -925,7 +1476,7 @@ export function RalphTeamStatusPanel({ projectRoot }: RalphTeamStatusPanelProps)
 
       <Stack spacing={0.75}>
         {/* Ralph sessions */}
-        {ralphSessions.map((s) => (
+        {visibleRalphSessions.map((s) => (
           <RalphCard
             key={s.session_id}
             session={s}
@@ -936,7 +1487,7 @@ export function RalphTeamStatusPanel({ projectRoot }: RalphTeamStatusPanelProps)
         ))}
 
         {/* Autopilot sessions */}
-        {autopilotSessions.map((s) => (
+        {visibleAutopilotSessions.map((s) => (
           <AutopilotCard
             key={s.session_id}
             session={s}
@@ -947,7 +1498,7 @@ export function RalphTeamStatusPanel({ projectRoot }: RalphTeamStatusPanelProps)
         ))}
 
         {/* Team sessions from backend state */}
-        {teamSessions.map((s) => (
+        {visibleTeamSessions.map((s) => (
           <TeamCard
             key={s.session_id}
             session={s}

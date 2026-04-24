@@ -11,7 +11,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 pub const TEAM_VERIFY_TASK_ID: &str = "team-verify";
-pub const TEAM_VERIFY_DESCRIPTION: &str = "【Team 验证】核查所有 Worker 输出，确认原始目标已完成";
+pub const TEAM_VERIFY_DESCRIPTION: &str = "【Team 核查】核查所有分析结果，确认原始科研问题已被回答";
 
 const SHORT_REQUEST_LEN: usize = 100;
 const MEDIUM_REQUEST_LEN: usize = 300;
@@ -559,6 +559,66 @@ impl TaskPlanner {
         plan.allow_parallel = false; // phases are sequential
         plan.global_context = format!("Project root: {}", request.project_root);
 
+        let research_like = Self::is_research_analysis_task(&request.user_request)
+            || self.is_content_generation_task(&request.user_request);
+        if research_like {
+            plan.add_subtask(
+                SubTask::new(
+                    "phase-scope",
+                    "【界定阶段】明确科研问题、分析边界、数据/文献范围与交付格式",
+                )
+                .with_agent("Plan")
+                .with_context(format!(
+                    "科研分析目标: {}\n请明确：研究问题、关键词/实体、数据或文献范围、排除标准、预期输出（表格/综述/图表/结论清单）。",
+                    request.user_request
+                ))
+                .critical(),
+            );
+            plan.add_subtask(
+                SubTask::new(
+                    "phase-evidence",
+                    "【证据阶段】检索并整理相关文献、数据、方法和可靠来源",
+                )
+                .with_agent("literature-search")
+                .with_dependencies(vec!["phase-scope".to_string()])
+                .with_context(format!(
+                    "基于界定阶段的范围，为科研分析收集证据。\
+                    优先 PubMed / Google Scholar / arXiv / bioRxiv / 官方数据库；\
+                    每条证据必须保留标题、年份、来源、DOI/URL、关键结论和适用边界。原始目标: {}",
+                    request.user_request
+                ))
+                .with_timeout(TIMEOUT_STANDARD_SECS)
+                .critical(),
+            );
+            plan.add_subtask(
+                SubTask::new(
+                    "phase-analysis",
+                    "【分析阶段】综合证据/数据，形成可追溯的科研结论",
+                )
+                .with_agent("deep-research")
+                .with_dependencies(vec!["phase-evidence".to_string()])
+                .with_context(format!(
+                    "读取前序证据，围绕原始科研问题形成结构化分析。\
+                    要求区分事实、推断和不确定性；结论需绑定引用或数据来源；必要时给出下一步实验/分析建议。原始目标: {}",
+                    request.user_request
+                ))
+                .with_timeout(TIMEOUT_DEEP_SECS)
+                .critical(),
+            );
+            plan.add_subtask(
+                SubTask::new(
+                    "phase-check",
+                    "【核查阶段】检查引用、数据口径、结论边界和报告完整性",
+                )
+                .with_agent("verification")
+                .with_dependencies(vec!["phase-analysis".to_string()])
+                .with_context(
+                    "核查最终分析是否回答原始科研问题；引用/URL 是否可追溯；是否存在过度推断；是否明确局限性、数据口径和后续建议。",
+                ),
+            );
+            return Ok(plan);
+        }
+
         plan.add_subtask(
             SubTask::new(
                 "phase-explore",
@@ -1008,7 +1068,7 @@ Respond with ONLY a JSON object — no markdown fences, no prose.
 "single"     — simple Q&A, greeting, factual lookup, short translation, one-file edit
 "team"       — research / survey / literature review / multi-source analysis / report generation
                → parallel workers gather info independently, Leader synthesizes
-"phased"     — multi-step software dev: Explore → Design → Implement → Verify (pipeline)
+"phased"     — single-theme research analysis pipeline: scope → evidence/data collection → analysis → citation/quality check
 "sequential" — strict ordering required (debug: pre-verify → fix → post-verify)
 "parallel"   — fully independent workstreams with no synthesis needed (rare)
 

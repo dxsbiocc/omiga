@@ -43,6 +43,8 @@ export interface AgentSessionStatusProps {
   /** After user cancelled a stream: show resume control */
   showResume?: boolean;
   onResume?: () => void;
+  /** Running background orchestration tasks for the current session */
+  backgroundTaskCount?: number;
 }
 
 function pickToolIcon(toolName: string | null | undefined): SvgIconComponent {
@@ -103,6 +105,7 @@ export function AgentSessionStatus({
   toolHintFallback,
   showResume = false,
   onResume,
+  backgroundTaskCount = 0,
 }: AgentSessionStatusProps) {
   const theme = useTheme();
   const ctx: ExecutionSurfaceContext = {
@@ -116,9 +119,19 @@ export function AgentSessionStatus({
     kind,
     toolName,
   } = getExecutionSurfaceView(executionSteps, ctx);
-  const displayLabel = showResume ? "已中断 · 可继续" : surfaceLabel;
+  const derivedLabel =
+    !showResume &&
+    backgroundTaskCount > 0 &&
+    (kind === "idle" || kind === "finished")
+      ? `后台执行中 · ${backgroundTaskCount} 个任务`
+      : surfaceLabel;
+  const displayLabel = showResume ? "已中断 · 可继续" : derivedLabel;
   const { Icon, accent } = showResume
     ? { Icon: Replay, accent: theme.palette.warning.main }
+    : !showResume &&
+        backgroundTaskCount > 0 &&
+        (kind === "idle" || kind === "finished")
+      ? { Icon: Autorenew, accent: theme.palette.info.main }
     : pickIconAndAccent(kind, toolName, theme);
   const busy = !showResume && kind !== "idle" && kind !== "finished";
 
