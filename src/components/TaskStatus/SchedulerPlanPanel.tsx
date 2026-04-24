@@ -26,13 +26,21 @@ import {
 import { ReviewerVerdictList } from "../ReviewerVerdictList";
 import { normalizeAgentDisplayName } from "../../state/agentStore";
 import { compactLabel, isLabelCompacted } from "../../utils/compactLabel";
+import {
+  buildSchedulerPlanHierarchy,
+  schedulerStageLabel,
+} from "../../utils/schedulerPlanHierarchy";
 
 interface SchedulerPlan {
   planId: string;
+  entryAgentType?: string;
+  executionSupervisorAgentType?: string;
   subtasks: Array<{
     id: string;
     description: string;
     agentType: string;
+    supervisorAgentType?: string;
+    stage?: string;
     dependencies: string[];
     critical: boolean;
     estimatedSecs: number;
@@ -127,6 +135,7 @@ export function SchedulerPlanPanel({
   };
 
   const groups = getParallelGroups();
+  const hierarchy = buildSchedulerPlanHierarchy(plan);
   const compactAgentChip = (agent: string, maxChars = 14) => {
     const full = normalizeAgentDisplayName(agent);
     const short = compactLabel(full, maxChars);
@@ -290,6 +299,57 @@ export function SchedulerPlanPanel({
             );
           })}
         </Stack>
+        {!hierarchy.legacyFlat && (
+          <Box
+            sx={{
+              mt: 1,
+              p: 1,
+              borderRadius: 1.25,
+              bgcolor: alpha(theme.palette.background.paper, 0.55),
+              border: `1px solid ${alpha(theme.palette.primary.main, 0.12)}`,
+            }}
+          >
+            <Typography
+              variant="caption"
+              sx={{ display: "block", color: "text.secondary", mb: 0.75 }}
+            >
+              指挥链
+            </Typography>
+            <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" useFlexGap>
+              <Chip
+                size="small"
+                label={normalizeAgentDisplayName(hierarchy.entryAgentType)}
+                sx={{
+                  height: 20,
+                  fontSize: 10,
+                  bgcolor: alpha(theme.palette.primary.main, 0.12),
+                  color: theme.palette.primary.main,
+                  fontWeight: 600,
+                }}
+              />
+              <Typography variant="caption" sx={{ color: "text.disabled" }}>
+                →
+              </Typography>
+              <Chip
+                size="small"
+                label={normalizeAgentDisplayName(hierarchy.executionSupervisorAgentType)}
+                sx={{
+                  height: 20,
+                  fontSize: 10,
+                  bgcolor: alpha(theme.palette.success.main, 0.12),
+                  color: theme.palette.success.main,
+                  fontWeight: 600,
+                }}
+              />
+              <Typography variant="caption" sx={{ color: "text.disabled" }}>
+                →
+              </Typography>
+              <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                {hierarchy.children.length} 个专职子 Agent
+              </Typography>
+            </Stack>
+          </Box>
+        )}
       </Box>
 
       {/* 执行阶段 */}
@@ -382,6 +442,18 @@ export function SchedulerPlanPanel({
                             sx={{ fontSize: 10, color: "text.secondary", mt: 0.25, display: "block" }}
                           >
                             依赖: {task.dependencies.join(", ")}
+                          </Typography>
+                        )}
+                        {!hierarchy.legacyFlat && (
+                          <Typography
+                            variant="caption"
+                            sx={{ fontSize: 10, color: "text.secondary", mt: 0.25, display: "block" }}
+                          >
+                            {schedulerStageLabel(task.stage)} · 上级{" "}
+                            {normalizeAgentDisplayName(
+                              task.supervisorAgentType ??
+                                hierarchy.executionSupervisorAgentType,
+                            )}
                           </Typography>
                         )}
                       </Box>

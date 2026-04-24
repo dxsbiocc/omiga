@@ -259,7 +259,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 /** Agent 类型显示名称映射（显示层科研分析语义；后端 agent id 不变） */
 export const AGENT_TYPE_DISPLAY_NAMES: Record<string, string> = {
   "auto": "Auto",
-  "general-purpose": "通用分析",
+  "general-purpose": "General / 主调度",
   "Explore": "资料探索",
   "Plan": "分析设计",
   "verification": "证据核查",
@@ -277,6 +277,8 @@ export const AGENT_TYPE_DISPLAY_NAMES: Record<string, string> = {
   "deep-research": "深度研究",
   "researcher": "研究员",
   "writer": "报告撰写",
+  "data-analysis": "数据分析",
+  "data-visual": "可视化",
   "data-analyst": "数据分析",
   "bioinformatics-analyst": "生信分析",
 };

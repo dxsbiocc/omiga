@@ -199,7 +199,9 @@ impl AgentScheduler {
                 (p, request.strategy)
             };
 
-            plan = self.attach_mode_specific_reviewers(plan, &request);
+            plan = self
+                .attach_mode_specific_reviewers(plan, &request)
+                .with_execution_defaults();
 
             let selected_agents: Vec<String> =
                 plan.subtasks.iter().map(|t| t.agent_type.clone()).collect();
@@ -230,7 +232,8 @@ impl AgentScheduler {
             let agent = self
                 .selector
                 .select(&request.user_request, &request.project_root);
-            let plan = TaskPlan::single_agent(&agent, &request.user_request);
+            let plan =
+                TaskPlan::single_agent(&agent, &request.user_request).with_execution_defaults();
 
             Ok(SchedulingResult {
                 plan,

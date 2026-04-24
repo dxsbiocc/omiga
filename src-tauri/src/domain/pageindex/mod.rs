@@ -50,7 +50,9 @@ mod storage;
 mod tree;
 
 pub use parser::{DocumentParser, ParseResult};
-pub use query::{MatchType, QueryEngine, QueryResult};
+pub use query::{
+    derive_query_terms, score_terms_against_text, MatchType, QueryEngine, QueryResult,
+};
 pub use storage::{CacheEntry, IndexStorage};
 pub use tree::{DocumentNode, DocumentTree, NodeType, SectionNode};
 

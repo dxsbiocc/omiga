@@ -9,7 +9,7 @@ use crate::domain::memory::{
     migration::{detect_structure_version, MemoryStructureVersion},
     permanent_wiki_path, registry, MemorySystem,
 };
-use crate::domain::pageindex::{IndexConfig, IndexStorage, PageIndex, QueryEngine, QueryResult};
+use crate::domain::pageindex::{IndexConfig, PageIndex, QueryResult};
 use crate::errors::AppError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -488,32 +488,49 @@ pub async fn memory_update_index(project_path: String) -> Result<MemoryStatus, A
 pub async fn memory_query(req: QueryRequest) -> Result<QueryResponse, AppError> {
     let root = project_root(&req.project_path);
     let config = load_resolved_config(&root).await.unwrap_or_default();
-    let implicit_path = config.implicit_path(&root);
-    let tree_path = implicit_path.join("tree.json");
-
-    if !tree_path.exists() {
-        return Err(AppError::Unknown("Memory index not found".to_string()));
-    }
-
     let limit = req.limit.unwrap_or(5);
-    let storage = IndexStorage::new(&implicit_path);
-    let tree = match storage.load_tree().await {
-        Ok(Some(t)) => t,
-        Ok(None) => {
-            return Err(AppError::Unknown("Memory index not found".to_string()));
-        }
-        Err(e) => return Err(AppError::Unknown(e.to_string())),
-    };
-    let engine = QueryEngine::new();
-    let results = engine
-        .search(&tree, &req.query, limit)
-        .await
-        .map_err(|e| AppError::Unknown(e.to_string()))?;
+    let memory = MemorySystem::with_config(&root, config);
+    let unified = memory.query(&req.query, limit).await;
+    let total_matches = unified.total_matches;
+
+    let mut results: Vec<QueryResultItem> = unified
+        .explicit_results
+        .into_iter()
+        .map(|r| QueryResultItem {
+            title: r.title,
+            path: r.path,
+            breadcrumb: vec![],
+            excerpt: r.excerpt,
+            score: r.score,
+            match_type: "Wiki".to_string(),
+        })
+        .collect();
+
+    results.extend(
+        unified
+            .implicit_results
+            .into_iter()
+            .map(|r| QueryResultItem {
+                title: r.title,
+                path: r.path,
+                breadcrumb: r.breadcrumb,
+                excerpt: r.excerpt,
+                score: r.score,
+                match_type: "Implicit".to_string(),
+            }),
+    );
+
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    results.truncate(limit);
 
     Ok(QueryResponse {
-        total_matches: results.len(),
+        total_matches,
         query: req.query,
-        results: results.into_iter().map(Into::into).collect(),
+        results,
     })
 }
 

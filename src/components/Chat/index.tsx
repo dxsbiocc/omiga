@@ -110,6 +110,10 @@ import {
 } from "../../utils/reviewerVerdict";
 import { parseWorkflowCommand } from "../../utils/workflowCommands";
 import {
+  buildSchedulerPlanHierarchy,
+  schedulerStageLabel,
+} from "../../utils/schedulerPlanHierarchy";
+import {
   OMIGA_COMPOSER_DISPATCH_EVENT,
   type ComposerDispatchDetail,
 } from "../../utils/chatComposerEvents";
@@ -130,10 +134,14 @@ interface ChatProps {
 interface SchedulerPlan {
   planId: string;
   originalRequest?: string;
+  entryAgentType?: string;
+  executionSupervisorAgentType?: string;
   subtasks: Array<{
     id: string;
     description: string;
     agentType: string;
+    supervisorAgentType?: string;
+    stage?: string;
     dependencies: string[];
     critical: boolean;
     estimatedSecs: number;
@@ -161,6 +169,8 @@ interface Message {
   toolCallsList?: Array<{ id: string; name: string; arguments: string }>;
   /** Assistant text streamed before the first tool in this round (shown inside tool block, not in final summary). */
   prefaceBeforeTools?: string;
+  /** Assistant/tool-gap text that belongs inside the ReAct fold, not as the final answer row. */
+  intermediate?: boolean;
   toolCall?: {
     id?: string;
     name: string;
@@ -316,6 +326,7 @@ function chatMessageToStore(m: Message): StoreMessage {
     turnSummary: m.turnSummary,
     tokenUsage: m.tokenUsage,
     prefaceBeforeTools: m.prefaceBeforeTools,
+    intermediate: m.intermediate,
     toolCallsList: m.toolCallsList,
     ...(m.timestamp !== undefined ? { timestamp: m.timestamp } : {}),
     toolCall: m.toolCall
@@ -660,7 +671,7 @@ function groupMessagesForRender(messages: Message[]): RenderMsgItem[] {
 
     let lastAssistantAfterTools = -1;
     for (let k = segment.length - 1; k > lastToolIdx; k--) {
-      if (segment[k].role === "assistant") {
+      if (segment[k].role === "assistant" && !segment[k].intermediate) {
         lastAssistantAfterTools = k;
         break;
       }
@@ -807,6 +818,108 @@ function toolCallPanelTitle(
   return parseToolDescriptionFromInput(input) ?? toolName;
 }
 
+function shortToolValue(value: unknown, max = 120): string {
+  if (value == null) return "";
+  const text = String(value).trim().replace(/\s+/g, " ");
+  if (!text) return "";
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function lastPathSegments(path: unknown, count = 3): string {
+  const text = shortToolValue(path, 180);
+  if (!text) return "";
+  return text.split("/").filter(Boolean).slice(-count).join("/") || text;
+}
+
+/**
+ * UI-generated action intent, not private hidden chain-of-thought.
+ * When the model jumps straight to a tool call, this keeps the visible trace as
+ * "思考摘要 → 行动" instead of a bare action list.
+ */
+function toolActionThoughtSummary(
+  toolName: string,
+  input: string | undefined,
+): string {
+  const n = (toolName || "").toLowerCase();
+  let args: Record<string, unknown> | null = null;
+  if (input?.trim()) {
+    try {
+      args = JSON.parse(input) as Record<string, unknown>;
+    } catch {
+      args = null;
+    }
+  }
+
+  const query = shortToolValue(
+    args?.query ?? args?.q ?? args?.search_query ?? args?.pattern,
+  );
+  const url = shortToolValue(args?.url ?? args?.href ?? args?.link);
+  const path = lastPathSegments(
+    args?.path ?? args?.file_path ?? args?.target_file ?? args?.cwd,
+  );
+  const description = shortToolValue(args?.description);
+  const command = shortToolValue(args?.command, 140);
+
+  if (description) return description;
+  if (n === "recall") {
+    return query
+      ? `先从记忆/知识库查找「${query}」的相关上下文。`
+      : "先从记忆/知识库查找可复用的上下文。";
+  }
+  if (n.includes("web_search")) {
+    return query
+      ? `需要搜索「${query}」来补充外部依据。`
+      : "需要先搜索外部资料，确认可用信息源。";
+  }
+  if (n.includes("web_fetch") || n.includes("fetch")) {
+    return url
+      ? `需要打开来源验证细节：${url}`
+      : "需要打开候选来源，核对正文细节。";
+  }
+  if (n.includes("bash")) {
+    return command
+      ? `需要执行命令来推进验证或实现：${command}`
+      : "需要执行命令来推进验证或实现。";
+  }
+  if (n.includes("file_read") || n === "read_file") {
+    return path
+      ? `需要读取 ${path}，确认当前实现细节。`
+      : "需要读取相关文件，确认当前实现细节。";
+  }
+  if (n.includes("ripgrep") || n.includes("grep")) {
+    return query || path
+      ? `需要在代码中定位 ${query || path} 的相关位置。`
+      : "需要在代码中定位相关符号或调用点。";
+  }
+  if (n.includes("glob")) {
+    return query
+      ? `需要按模式查找文件：${query}`
+      : "需要先查找候选文件。";
+  }
+  if (n.includes("file_write") || n.includes("write")) {
+    return path
+      ? `需要写入 ${path}，落地当前改动。`
+      : "需要写入文件，落地当前改动。";
+  }
+  if (n.includes("file_edit") || n.includes("edit")) {
+    return path
+      ? `需要编辑 ${path}，调整当前实现。`
+      : "需要编辑文件，调整当前实现。";
+  }
+  if (n.includes("todo_write") || n.includes("todowrite")) {
+    return "需要更新任务清单，让后续执行状态保持同步。";
+  }
+  if (n === "taskcreate") return "需要创建后台任务，把执行交给专门 Agent。";
+  if (n === "taskget") return "需要读取任务状态，判断是否继续或汇总。";
+  if (n === "tasklist") return "需要查看任务列表，掌握并行执行进展。";
+  if (n === "taskupdate") return "需要更新任务状态，保持调度面板一致。";
+
+  const summary = executionStepSummary(toolName, input);
+  return summary === toolName
+    ? `需要调用 ${formatToolDisplayName(toolName)} 推进下一步。`
+    : summary;
+}
+
 function getNestedToolPanelOpen(
   key: string,
   tc: NonNullable<Message["toolCall"]>,
@@ -892,6 +1005,7 @@ function SchedulerPlanDisplay({
   const failedCount = planTasks.filter(
     (task) => task.status === "Failed" || task.status === "Cancelled",
   ).length;
+  const hierarchy = buildSchedulerPlanHierarchy(plan);
   const executionFeed = useMemo(() => {
     const sorted = [...planTasks].sort((a, b) => {
       const aTs = a.completed_at ?? a.created_at ?? 0;
@@ -1077,6 +1191,52 @@ function SchedulerPlanDisplay({
               </Stack>
             </Box>
           )}
+          {!hierarchy.legacyFlat && (
+            <Box
+              sx={{
+                mb: 0.75,
+                px: 0.75,
+                py: 0.55,
+                borderRadius: 1,
+                bgcolor: alpha(theme.palette.background.paper, 0.45),
+                border: `1px solid ${alpha(theme.palette.primary.main, 0.12)}`,
+              }}
+            >
+              <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" useFlexGap>
+                <Chip
+                  size="small"
+                  label={normalizeAgentDisplayName(hierarchy.entryAgentType)}
+                  sx={{
+                    height: 17,
+                    fontSize: 8.5,
+                    bgcolor: alpha(theme.palette.primary.main, 0.12),
+                    color: theme.palette.primary.main,
+                    fontWeight: 600,
+                  }}
+                />
+                <Typography variant="caption" sx={{ color: "text.disabled" }}>
+                  →
+                </Typography>
+                <Chip
+                  size="small"
+                  label={normalizeAgentDisplayName(hierarchy.executionSupervisorAgentType)}
+                  sx={{
+                    height: 17,
+                    fontSize: 8.5,
+                    bgcolor: alpha(theme.palette.success.main, 0.12),
+                    color: theme.palette.success.main,
+                    fontWeight: 600,
+                  }}
+                />
+                <Typography variant="caption" sx={{ color: "text.disabled" }}>
+                  →
+                </Typography>
+                <Typography variant="caption" sx={{ color: "text.secondary", fontSize: 10 }}>
+                  {hierarchy.children.length} 个子 Agent
+                </Typography>
+              </Stack>
+            </Box>
+          )}
           <Stack spacing={0.5}>
             {plan.subtasks.slice(0, 3).map((task, index) => (
               <Box
@@ -1118,7 +1278,11 @@ function SchedulerPlanDisplay({
                 </Typography>
                 <Chip
                   size="small"
-                  label={normalizeAgentDisplayName(task.agentType)}
+                  label={
+                    hierarchy.legacyFlat
+                      ? normalizeAgentDisplayName(task.agentType)
+                      : `${schedulerStageLabel(task.stage)} · ${normalizeAgentDisplayName(task.agentType)}`
+                  }
                   sx={{
                     height: 16,
                     fontSize: 8.5,
@@ -1792,6 +1956,7 @@ function convertStoreMessages(storeMessages: StoreMessage[], sessionId: string):
     turnSummary: msg.turnSummary,
     tokenUsage: msg.tokenUsage,
     prefaceBeforeTools: msg.prefaceBeforeTools,
+    intermediate: msg.intermediate,
     toolCallsList: msg.toolCallsList,
     // Use stored DB timestamp; fall back to an estimated sequence offset if missing.
     timestamp: msg.timestamp ?? (Date.now() - (storeMessages.length - index) * 1000),
@@ -1840,6 +2005,7 @@ export function Chat({ sessionId }: ChatProps) {
   /** True while background follow-up suggestions are being generated after `complete` fires */
   const [suggestionsGenerating, setSuggestionsGenerating] = useState(false);
   const [currentResponse, setCurrentResponse] = useState("");
+  const [currentFoldIntermediate, setCurrentFoldIntermediate] = useState("");
   const [pendingAssistantHint, setPendingAssistantHint] = useState<string | null>(null);
   const [currentStreamId, setCurrentStreamId] = useState<string | null>(null);
   const [currentRoundId, setCurrentRoundId] = useState<string | null>(null);
@@ -2011,16 +2177,25 @@ export function Chat({ sessionId }: ChatProps) {
   } | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
   const currentResponseRef = useRef(currentResponse);
+  const currentFoldIntermediateRef = useRef(currentFoldIntermediate);
   const currentRoundIdRef = useRef(currentRoundId);
   /** Buffered text chunks waiting to be batched into React state */
   const pendingTextBufferRef = useRef("");
+  /** Buffered provider reasoning/tool-gap chunks shown inside the active ReAct fold. */
+  const pendingFoldIntermediateBufferRef = useRef("");
   /** RAF handle for scheduled text flush */
   const textFlushRafRef = useRef<number | null>(null);
+  /** RAF handle for scheduled fold-intermediate flush */
+  const foldIntermediateFlushRafRef = useRef<number | null>(null);
 
   // Keep refs in sync with state for access in event listeners
   useEffect(() => {
     currentResponseRef.current = currentResponse;
   }, [currentResponse]);
+
+  useEffect(() => {
+    currentFoldIntermediateRef.current = currentFoldIntermediate;
+  }, [currentFoldIntermediate]);
 
   const isMainReplyBusy = useCallback(() => {
     const act = useActivityStore.getState();
@@ -2053,6 +2228,10 @@ export function Chat({ sessionId }: ChatProps) {
       if (textFlushRafRef.current !== null) {
         cancelAnimationFrame(textFlushRafRef.current);
         textFlushRafRef.current = null;
+      }
+      if (foldIntermediateFlushRafRef.current !== null) {
+        cancelAnimationFrame(foldIntermediateFlushRafRef.current);
+        foldIntermediateFlushRafRef.current = null;
       }
       if (scrollRafRef.current !== null) {
         cancelAnimationFrame(scrollRafRef.current);
@@ -2528,6 +2707,21 @@ export function Chat({ sessionId }: ChatProps) {
   useEffect(() => {
     lastReactFoldIdRef.current = lastReactFoldId;
   }, [lastReactFoldId]);
+  const shouldRenderCurrentResponseInFold = Boolean(
+    isStreaming &&
+      lastReactFoldId &&
+      (currentResponse.trim() || currentFoldIntermediate.trim()),
+  );
+
+  useEffect(() => {
+    if (!shouldRenderCurrentResponseInFold || !lastReactFoldId) return;
+    setExpandedToolGroups((prev) => {
+      if (prev.has(lastReactFoldId)) return prev;
+      const next = new Set(prev);
+      next.add(lastReactFoldId);
+      return next;
+    });
+  }, [lastReactFoldId, shouldRenderCurrentResponseInFold]);
 
   // Phase-1: show only the most-recent items so the viewport is populated
   // on the very first paint. Phase-2 (allItemsVisible=true) adds all older
@@ -2579,6 +2773,9 @@ export function Chat({ sessionId }: ChatProps) {
         const { messageId } = event.payload;
         setCurrentStreamId(messageId);
         setCurrentResponse("");
+        setCurrentFoldIntermediate("");
+        currentFoldIntermediateRef.current = "";
+        pendingFoldIntermediateBufferRef.current = "";
         useActivityStore.getState().resetExecutionState();
         useActivityStore.getState().setConnecting(true);
         void setupStreamListener(messageId);
@@ -2829,14 +3026,23 @@ export function Chat({ sessionId }: ChatProps) {
       cancelAnimationFrame(textFlushRafRef.current);
       textFlushRafRef.current = null;
     }
+    if (foldIntermediateFlushRafRef.current !== null) {
+      cancelAnimationFrame(foldIntermediateFlushRafRef.current);
+      foldIntermediateFlushRafRef.current = null;
+    }
     const buffered = pendingTextBufferRef.current;
     if (buffered) {
       pendingTextBufferRef.current = "";
-      setCurrentResponse((prev) => {
-        const next = prev + buffered;
-        currentResponseRef.current = next;
-        return next;
-      });
+      const next = currentResponseRef.current + buffered;
+      currentResponseRef.current = next;
+      setCurrentResponse(next);
+    }
+    const bufferedFoldIntermediate = pendingFoldIntermediateBufferRef.current;
+    if (bufferedFoldIntermediate) {
+      pendingFoldIntermediateBufferRef.current = "";
+      const next = currentFoldIntermediateRef.current + bufferedFoldIntermediate;
+      currentFoldIntermediateRef.current = next;
+      setCurrentFoldIntermediate(next);
     }
 
     const eventName = `chat-stream-${streamId}`;
@@ -2849,17 +3055,35 @@ export function Chat({ sessionId }: ChatProps) {
       const text = pendingTextBufferRef.current;
       if (!text) return;
       pendingTextBufferRef.current = "";
-      setCurrentResponse((prev) => {
-        const next = prev + text;
-        currentResponseRef.current = next;
-        return next;
-      });
+      const next = currentResponseRef.current + text;
+      currentResponseRef.current = next;
+      setCurrentResponse(next);
+    };
+
+    const flushPendingFoldIntermediate = () => {
+      if (foldIntermediateFlushRafRef.current !== null) {
+        cancelAnimationFrame(foldIntermediateFlushRafRef.current);
+        foldIntermediateFlushRafRef.current = null;
+      }
+      const text = pendingFoldIntermediateBufferRef.current;
+      if (!text) return;
+      pendingFoldIntermediateBufferRef.current = "";
+      const next = currentFoldIntermediateRef.current + text;
+      currentFoldIntermediateRef.current = next;
+      setCurrentFoldIntermediate(next);
     };
 
     const scheduleFlush = () => {
       if (textFlushRafRef.current !== null) return;
       textFlushRafRef.current = requestAnimationFrame(() => {
         flushPendingText();
+      });
+    };
+
+    const scheduleFoldIntermediateFlush = () => {
+      if (foldIntermediateFlushRafRef.current !== null) return;
+      foldIntermediateFlushRafRef.current = requestAnimationFrame(() => {
+        flushPendingFoldIntermediate();
       });
     };
 
@@ -2892,12 +3116,19 @@ export function Chat({ sessionId }: ChatProps) {
         act.onStreamStart();
         if (clearAssistantDraft) {
           pendingTextBufferRef.current = "";
+          pendingFoldIntermediateBufferRef.current = "";
           if (textFlushRafRef.current !== null) {
             cancelAnimationFrame(textFlushRafRef.current);
             textFlushRafRef.current = null;
           }
+          if (foldIntermediateFlushRafRef.current !== null) {
+            cancelAnimationFrame(foldIntermediateFlushRafRef.current);
+            foldIntermediateFlushRafRef.current = null;
+          }
           setCurrentResponse("");
           currentResponseRef.current = "";
+          setCurrentFoldIntermediate("");
+          currentFoldIntermediateRef.current = "";
         }
       };
 
@@ -2938,6 +3169,11 @@ export function Chat({ sessionId }: ChatProps) {
         case "thinking": {
           ensureChatStreamStarted(false);
           const piece = typeof payload.data === "string" ? payload.data : "";
+          if (piece) {
+            pendingFoldIntermediateBufferRef.current += piece;
+            scheduleFoldIntermediateFlush();
+            useActivityStore.getState().setStreaming(true, false);
+          }
           if (isDev && piece) {
             console.debug("[OmigaDev][AgentThinking]", {
               streamId,
@@ -2948,6 +3184,7 @@ export function Chat({ sessionId }: ChatProps) {
         }
         case "tool_use": {
           flushPendingText();
+          flushPendingFoldIntermediate();
           ensureChatStreamStarted(false);
           const toolData = payload.data as
             | { id?: string; name?: string; arguments?: string }
@@ -2992,10 +3229,16 @@ export function Chat({ sessionId }: ChatProps) {
                 return next;
               }
             }
-            const thinkingChunk = currentResponseRef.current.trim();
-            // Clear immediately so parallel tool_use events don't capture the same thinking text twice.
+            const visibleChunk = currentResponseRef.current.trim();
+            const foldIntermediateChunk = currentFoldIntermediateRef.current.trim();
+            const intermediateChunk = [foldIntermediateChunk, visibleChunk]
+              .filter(Boolean)
+              .join("\n\n");
+            // Clear immediately so parallel tool_use events don't capture the same intermediate text twice.
             currentResponseRef.current = "";
+            currentFoldIntermediateRef.current = "";
             queueMicrotask(() => setCurrentResponse(""));
+            queueMicrotask(() => setCurrentFoldIntermediate(""));
             const newToolId = `tool-${Date.now()}`;
             const toolMsg: Message = {
               id: newToolId,
@@ -3010,11 +3253,12 @@ export function Chat({ sessionId }: ChatProps) {
               timestamp: Date.now(),
             };
             const next = [...prev];
-            if (thinkingChunk) {
+            if (intermediateChunk) {
               next.push({
                 id: `assistant-seg-${newToolId}`,
                 role: "assistant",
-                content: thinkingChunk,
+                content: intermediateChunk,
+                intermediate: true,
                 timestamp: Date.now(),
               });
             }
@@ -3215,6 +3459,8 @@ export function Chat({ sessionId }: ChatProps) {
           useActivityStore.getState().clearTransient();
           setCurrentResponse("");
           currentResponseRef.current = "";
+          setCurrentFoldIntermediate("");
+          currentFoldIntermediateRef.current = "";
           const errorMsg: Message = {
             id: `error-${Date.now()}`,
             role: "assistant",
@@ -3270,6 +3516,8 @@ export function Chat({ sessionId }: ChatProps) {
           });
           setCurrentResponse("");
           currentResponseRef.current = "";
+          setCurrentFoldIntermediate("");
+          currentFoldIntermediateRef.current = "";
           if (isDev) {
             console.debug("[OmigaDev][AgentCancelled]", {
               streamId,
@@ -3362,6 +3610,7 @@ export function Chat({ sessionId }: ChatProps) {
         }
         case "complete": {
           flushPendingText();
+          flushPendingFoldIntermediate();
           setAwaitingResumeAfterCancel(false);
           isStreamingRef.current = false;
           setIsStreaming(false);
@@ -3377,6 +3626,7 @@ export function Chat({ sessionId }: ChatProps) {
           }
           // Use ref to get the latest accumulated response
           const finalResponse = currentResponseRef.current;
+          const finalFoldIntermediate = currentFoldIntermediateRef.current.trim();
           const followUps = pendingFollowUpSuggestionsRef.current;
           pendingFollowUpSuggestionsRef.current = null;
           const turnSum = pendingTurnSummaryRef.current;
@@ -3385,6 +3635,18 @@ export function Chat({ sessionId }: ChatProps) {
           pendingTokenUsageRef.current = null;
           setMessages((prev) => {
             let next = prev;
+            if (finalFoldIntermediate && lastReactFoldIdRef.current) {
+              next = [
+                ...next,
+                {
+                  id: `assistant-intermediate-${Date.now()}`,
+                  role: "assistant",
+                  content: finalFoldIntermediate,
+                  intermediate: true,
+                  timestamp: Date.now(),
+                },
+              ];
+            }
             if (finalResponse) {
               const assistantMsg: Message = {
                 id: `assistant-${Date.now()}`,
@@ -3414,6 +3676,8 @@ export function Chat({ sessionId }: ChatProps) {
           });
           setCurrentResponse("");
           currentResponseRef.current = "";
+          setCurrentFoldIntermediate("");
+          currentFoldIntermediateRef.current = "";
 
           // Memory indexing status is driven by chat-index-* Tauri events below.
 
@@ -3593,6 +3857,12 @@ export function Chat({ sessionId }: ChatProps) {
     // Reset indexing status on new message
     setIndexingStatus("idle");
     setPendingAssistantHint(pendingFeedback.assistantHint);
+    setCurrentResponse("");
+    currentResponseRef.current = "";
+    setCurrentFoldIntermediate("");
+    currentFoldIntermediateRef.current = "";
+    pendingTextBufferRef.current = "";
+    pendingFoldIntermediateBufferRef.current = "";
 
     useActivityStore.getState().beginExecutionRun(pendingFeedback.connectLabel);
     useActivityStore.getState().setConnecting(true);
@@ -3910,10 +4180,17 @@ export function Chat({ sessionId }: ChatProps) {
       replaceStoreMessagesSnapshot(truncated.map(chatMessageToStore));
       setCurrentResponse("");
       currentResponseRef.current = "";
+      setCurrentFoldIntermediate("");
+      currentFoldIntermediateRef.current = "";
       pendingTextBufferRef.current = "";
+      pendingFoldIntermediateBufferRef.current = "";
       if (textFlushRafRef.current !== null) {
         cancelAnimationFrame(textFlushRafRef.current);
         textFlushRafRef.current = null;
+      }
+      if (foldIntermediateFlushRafRef.current !== null) {
+        cancelAnimationFrame(foldIntermediateFlushRafRef.current);
+        foldIntermediateFlushRafRef.current = null;
       }
       setAwaitingResumeAfterCancel(false);
 
@@ -4234,10 +4511,17 @@ export function Chat({ sessionId }: ChatProps) {
     isStreamingRef.current = false;
     setCurrentResponse("");
     currentResponseRef.current = "";
+    setCurrentFoldIntermediate("");
+    currentFoldIntermediateRef.current = "";
     pendingTextBufferRef.current = "";
+    pendingFoldIntermediateBufferRef.current = "";
     if (textFlushRafRef.current !== null) {
       cancelAnimationFrame(textFlushRafRef.current);
       textFlushRafRef.current = null;
+    }
+    if (foldIntermediateFlushRafRef.current !== null) {
+      cancelAnimationFrame(foldIntermediateFlushRafRef.current);
+      foldIntermediateFlushRafRef.current = null;
     }
     setAwaitingResumeAfterCancel(false);
     act.clearTransient();
@@ -4323,10 +4607,17 @@ export function Chat({ sessionId }: ChatProps) {
     isStreamingRef.current = false;
     setCurrentResponse("");
     currentResponseRef.current = "";
+    setCurrentFoldIntermediate("");
+    currentFoldIntermediateRef.current = "";
     pendingTextBufferRef.current = "";
+    pendingFoldIntermediateBufferRef.current = "";
     if (textFlushRafRef.current !== null) {
       cancelAnimationFrame(textFlushRafRef.current);
       textFlushRafRef.current = null;
+    }
+    if (foldIntermediateFlushRafRef.current !== null) {
+      cancelAnimationFrame(foldIntermediateFlushRafRef.current);
+      foldIntermediateFlushRafRef.current = null;
     }
     setAwaitingResumeAfterCancel(false);
     const act = useActivityStore.getState();
@@ -4752,6 +5043,12 @@ export function Chat({ sessionId }: ChatProps) {
                 const runningToolName = firstRunningToolName(toolMsgs);
                 const runningToolCount = toolMsgs.filter(m => m.toolCall?.status === "running").length;
                 const isLastFold = id === lastReactFoldId;
+                const liveIntermediateText =
+                  isLastFold && shouldRenderCurrentResponseInFold
+                    ? [currentFoldIntermediate.trim(), currentResponse.trim()]
+                        .filter(Boolean)
+                        .join("\n\n")
+                    : "";
 
                 return (
                   <Box
@@ -4856,11 +5153,49 @@ export function Chat({ sessionId }: ChatProps) {
                               gap: 1.25,
                             }}
                           >
-                            {fold.map((message) => {
+                            {fold.map((message, foldIndex) => {
                               if (message.role === "assistant") {
                                 if (!message.content?.trim()) return null;
                                 return (
-                                  <Box key={message.id} sx={{ pb: 0.25 }}>
+                                  <Box
+                                    key={message.id}
+                                    sx={{
+                                      pb: 0.25,
+                                      ...(message.intermediate
+                                        ? {
+                                            px: 1,
+                                            py: 0.75,
+                                            borderRadius: "8px",
+                                            bgcolor: alpha(
+                                              CHAT.agentBubbleBg,
+                                              0.62,
+                                            ),
+                                            border: `1px dashed ${alpha(
+                                              CHAT.agentBubbleBorder,
+                                              0.95,
+                                            )}`,
+                                          }
+                                        : {}),
+                                    }}
+                                  >
+                                    {message.intermediate && (
+                                      <Stack
+                                        direction="row"
+                                        alignItems="center"
+                                        spacing={0.75}
+                                        sx={{ mb: 0.5 }}
+                                      >
+                                        <Chip
+                                          size="small"
+                                          label="思考"
+                                          sx={{
+                                            height: 18,
+                                            fontSize: 9,
+                                            color: CHAT.textMuted,
+                                          }}
+                                        />
+                                      </Stack>
+                                    )}
                                     <Box
                                       sx={{
                                         fontSize: 12,
@@ -4908,6 +5243,15 @@ export function Chat({ sessionId }: ChatProps) {
                                 tc.id &&
                                 pendingAskUser.toolUseId === tc.id,
                               );
+                              const previousAssistantIsThought = Boolean(
+                                fold[foldIndex - 1]?.role === "assistant" &&
+                                  fold[foldIndex - 1]?.content?.trim(),
+                              );
+                              const thoughtText =
+                                message.prefaceBeforeTools?.trim() ||
+                                (!previousAssistantIsThought
+                                  ? toolActionThoughtSummary(tc.name, tc.input)
+                                  : "");
                               const nestedOpen =
                                 getNestedToolPanelOpen(
                                   nestedKey,
@@ -4917,19 +5261,67 @@ export function Chat({ sessionId }: ChatProps) {
 
                               return (
                                 <Box key={message.id}>
-                                  {message.prefaceBeforeTools ? (
-                                    <Typography
+                                  {thoughtText ? (
+                                    <Box
                                       sx={{
-                                        fontSize: 12,
-                                        color: CHAT.textMuted,
-                                        lineHeight: 1.45,
-                                        whiteSpace: "pre-wrap",
-                                        wordBreak: "break-word",
-                                        pb: 0.75,
+                                        px: 1,
+                                        py: 0.75,
+                                        borderRadius: "8px",
+                                        bgcolor: alpha(CHAT.agentBubbleBg, 0.52),
+                                        border: `1px dashed ${alpha(
+                                          CHAT.agentBubbleBorder,
+                                          0.82,
+                                        )}`,
+                                        mb: 0.75,
                                       }}
                                     >
-                                      {message.prefaceBeforeTools}
-                                    </Typography>
+                                      <Stack
+                                        direction="row"
+                                        alignItems="center"
+                                        spacing={0.75}
+                                        sx={{ mb: 0.35 }}
+                                      >
+                                        <Chip
+                                          size="small"
+                                          label={
+                                            message.prefaceBeforeTools
+                                              ? "思考"
+                                              : "思考摘要"
+                                          }
+                                          sx={{
+                                            height: 18,
+                                            fontSize: 9,
+                                            color: CHAT.textMuted,
+                                          }}
+                                        />
+                                        {!message.prefaceBeforeTools && (
+                                          <Typography
+                                            sx={{
+                                              fontSize: 10,
+                                              color: CHAT.labelMuted,
+                                            }}
+                                          >
+                                            由工具意图生成，不是隐藏推理原文
+                                          </Typography>
+                                        )}
+                                      </Stack>
+                                      <Box
+                                        sx={{
+                                          fontSize: 12,
+                                          color: CHAT.textMuted,
+                                          lineHeight: 1.45,
+                                          whiteSpace: "pre-wrap",
+                                          wordBreak: "break-word",
+                                        }}
+                                      >
+                                        {message.prefaceBeforeTools
+                                          ? renderMessageContent(
+                                              thoughtText,
+                                              "agent",
+                                            )
+                                          : thoughtText}
+                                      </Box>
+                                    </Box>
                                   ) : null}
 
                                   <Box
@@ -4970,6 +5362,16 @@ export function Chat({ sessionId }: ChatProps) {
                                             ? "rotate(0deg)"
                                             : "rotate(-90deg)",
                                           transition: "transform 0.15s",
+                                        }}
+                                      />
+                                      <Chip
+                                        size="small"
+                                        label="行动"
+                                        sx={{
+                                          height: 18,
+                                          fontSize: 9,
+                                          color: CHAT.textMuted,
+                                          flexShrink: 0,
                                         }}
                                       />
                                       <StepIcon
@@ -5170,6 +5572,78 @@ export function Chat({ sessionId }: ChatProps) {
                                 </Box>
                               );
                             })}
+
+                            {liveIntermediateText && (
+                              <Box
+                                key={`${id}-live-assistant-segment`}
+                                sx={{
+                                  pb: 0.25,
+                                  px: 1,
+                                  py: 0.75,
+                                  borderRadius: "8px",
+                                  bgcolor: alpha(CHAT.agentBubbleBg, 0.62),
+                                  border: `1px dashed ${alpha(
+                                    CHAT.agentBubbleBorder,
+                                    0.95,
+                                  )}`,
+                                }}
+                              >
+                                <Stack
+                                  direction="row"
+                                  alignItems="center"
+                                  spacing={0.75}
+                                  sx={{ mb: 0.5 }}
+                                >
+                                  <Chip
+                                    size="small"
+                                    label="思考中"
+                                    sx={{
+                                      height: 18,
+                                      fontSize: 9,
+                                      color: CHAT.textMuted,
+                                    }}
+                                  />
+                                  <Typography
+                                    sx={{
+                                      fontSize: 10,
+                                      color: CHAT.labelMuted,
+                                    }}
+                                  >
+                                    流式中；下一次行动会接在这里
+                                  </Typography>
+                                </Stack>
+                                <Box
+                                  sx={{
+                                    fontSize: 12,
+                                    color: CHAT.textMuted,
+                                    lineHeight: 1.45,
+                                    "& p": { m: 0 },
+                                  }}
+                                >
+                                  {renderMessageContent(
+                                    liveIntermediateText,
+                                    "agent",
+                                  )}
+                                  <Box
+                                    component="span"
+                                    sx={{
+                                      display: "inline-block",
+                                      width: 7,
+                                      height: 14,
+                                      bgcolor: CHAT.accent,
+                                      ml: 0.5,
+                                      verticalAlign: "text-bottom",
+                                      animation:
+                                        "pulse 1s ease-in-out infinite",
+                                      "@keyframes pulse": {
+                                        "0%, 100%": { opacity: 1 },
+                                        "50%": { opacity: 0.3 },
+                                      },
+                                    }}
+                                  />
+                                </Box>
+                              </Box>
+                            )}
 
                             {showGroupDone && (
                               <Stack
@@ -5749,8 +6223,8 @@ export function Chat({ sessionId }: ChatProps) {
               </Box>
             )}
 
-            {/* Streaming: final summary text only — divider appears on the persisted assistant row after complete */}
-            {isStreaming && currentResponse && (
+            {/* Streaming: before any tool, show normal assistant text; after tools, attach live text to the active ReAct fold. */}
+            {isStreaming && currentResponse && !shouldRenderCurrentResponseInFold && (
               <Box
                 sx={{
                   width: "100%",

@@ -25,6 +25,7 @@ pub mod registry;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tracing::{info, warn};
+use walkdir::WalkDir;
 
 pub use chat_indexer::{ChatIndexer, ChatMessage, ChatRole};
 pub use config::{
@@ -176,52 +177,16 @@ impl MemorySystem {
         let mut explicit_results = Vec::new();
         let mut implicit_results = Vec::new();
 
-        // ── Explicit: 搜索项目 wiki，再搜索永久 wiki ────────────────────────
-        for wiki_root in [self.wiki_path(), config::permanent_wiki_path()] {
-            if explicit_results.len() >= limit {
-                break;
-            }
-            if !wiki_root.exists() {
-                continue;
-            }
-            if let Ok(mut entries) = fs::read_dir(&wiki_root).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    if explicit_results.len() >= limit {
-                        break;
-                    }
-                    let path = entry.path();
-                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    if ext != "md" {
-                        continue;
-                    }
-                    let Ok(content) = fs::read_to_string(&path).await else {
-                        continue;
-                    };
-                    if !content.to_lowercase().contains(&query.to_lowercase()) {
-                        continue;
-                    }
-
-                    // 提取标题（第一个 # 行 或文件名）
-                    let title = content
-                        .lines()
-                        .find(|l| l.starts_with("# "))
-                        .map(|l| l.trim_start_matches('#').trim().to_string())
-                        .unwrap_or_else(|| {
-                            path.file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("Untitled")
-                                .to_string()
-                        });
-
-                    let excerpt = extract_excerpt(&content, query, 300);
-                    explicit_results.push(ExplicitResult {
-                        title,
-                        path: path.to_string_lossy().to_string(),
-                        excerpt,
-                    });
-                }
-            }
-        }
+        // ── Explicit: 搜索项目 wiki + 永久 wiki，并统一排序 ───────────────────
+        explicit_results.extend(search_markdown_wiki(&self.wiki_path(), query, limit).await);
+        explicit_results
+            .extend(search_markdown_wiki(&config::permanent_wiki_path(), query, limit).await);
+        explicit_results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        explicit_results.truncate(limit);
 
         // ── Implicit: 搜索 PageIndex ──────────────────────────────────────
         let implicit_path = self.implicit_path();
@@ -285,6 +250,7 @@ pub struct ExplicitResult {
     pub title: String,
     pub path: String,
     pub excerpt: String,
+    pub score: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -382,9 +348,18 @@ pub async fn init_memory_system(
 fn extract_excerpt(content: &str, query: &str, max_len: usize) -> String {
     let query_lower = query.to_lowercase();
     let content_lower = content.to_lowercase();
+    let query_terms = crate::domain::pageindex::derive_query_terms(query);
 
-    // 找到第一个匹配位置作为锚点
-    let anchor = content_lower.find(&query_lower).unwrap_or(0);
+    // 优先定位整句命中，否则回退到查询词命中。
+    let anchor = content_lower
+        .find(&query_lower)
+        .or_else(|| {
+            query_terms
+                .iter()
+                .filter_map(|term| content_lower.find(term))
+                .min()
+        })
+        .unwrap_or(0);
 
     // 窗口从锚点前 60 字符开始
     let start = anchor.saturating_sub(60);
@@ -403,6 +378,100 @@ fn extract_excerpt(content: &str, query: &str, max_len: usize) -> String {
         (false, true) => format!("{}…", slice),
         _ => slice,
     }
+}
+
+pub async fn search_markdown_wiki(root: &Path, query: &str, limit: usize) -> Vec<ExplicitResult> {
+    if limit == 0 || !root.is_dir() {
+        return vec![];
+    }
+
+    let query_terms = crate::domain::pageindex::derive_query_terms(query);
+    if query_terms.is_empty() {
+        return vec![];
+    }
+
+    let query_lower = query.trim().to_lowercase();
+    let mut results = Vec::new();
+
+    for path in markdown_files(root) {
+        let Ok(content) = fs::read_to_string(&path).await else {
+            continue;
+        };
+        let title = markdown_title(&path, &content);
+        let score = explicit_match_score(&title, &content, &query_lower, &query_terms);
+        if score <= 0.0 {
+            continue;
+        }
+
+        results.push(ExplicitResult {
+            title,
+            path: path.to_string_lossy().to_string(),
+            excerpt: extract_excerpt(&content, query, 300),
+            score,
+        });
+    }
+
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    results.truncate(limit);
+    results
+}
+
+fn markdown_files(root: &Path) -> Vec<PathBuf> {
+    WalkDir::new(root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .map_or(false, |ext| ext.eq_ignore_ascii_case("md"))
+        })
+        .map(|entry| entry.into_path())
+        .collect()
+}
+
+fn markdown_title(path: &Path, content: &str) -> String {
+    content
+        .lines()
+        .find(|line| line.starts_with("# "))
+        .map(|line| line.trim_start_matches('#').trim().to_string())
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Untitled")
+                .to_string()
+        })
+}
+
+fn explicit_match_score(
+    title: &str,
+    content: &str,
+    query_lower: &str,
+    query_terms: &[String],
+) -> f64 {
+    let mut score = 0.0;
+    let title_lower = title.to_lowercase();
+    let content_lower = content.to_lowercase();
+
+    if !query_lower.is_empty() {
+        if title_lower.contains(query_lower) {
+            score += 0.45;
+        }
+        if content_lower.contains(query_lower) {
+            score += 0.2;
+        }
+    }
+
+    score += crate::domain::pageindex::score_terms_against_text(&title_lower, query_terms) * 1.4;
+    score += crate::domain::pageindex::score_terms_against_text(&content_lower, query_terms);
+
+    score.min(2.0)
 }
 
 // Explicit memory importer
@@ -443,4 +512,45 @@ pub fn memory_agent_system_prompt_with_config(
          summary of what was done.",
         wiki_path_str, perm_str, imp_str
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn search_markdown_wiki_matches_cjk_natural_language_queries() {
+        let temp = tempfile::tempdir().unwrap();
+        let page = temp.path().join("redox.md");
+        tokio::fs::write(
+            &page,
+            "# 氧化还原节律\n\n氧化还原节律与生物钟调控、NRF2 和谷胱甘肽有关。",
+        )
+        .await
+        .unwrap();
+
+        let results =
+            search_markdown_wiki(temp.path(), "获取全局记忆中与氧化还原节律相关内容", 5).await;
+
+        assert!(!results.is_empty());
+        assert_eq!(results[0].title, "氧化还原节律");
+    }
+
+    #[tokio::test]
+    async fn search_markdown_wiki_reads_nested_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("topics");
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+        tokio::fs::write(
+            nested.join("circadian.md"),
+            "# circadian redox\n\nRedox rhythm couples ROS buffering with circadian control.",
+        )
+        .await
+        .unwrap();
+
+        let results = search_markdown_wiki(temp.path(), "redox circadian rhythm", 5).await;
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].path.ends_with("circadian.md"));
+    }
 }

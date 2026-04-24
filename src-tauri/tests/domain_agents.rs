@@ -1,8 +1,8 @@
 //! Agent 系统单元测试
 
 use omiga_lib::domain::agents::builtins::{
-    explore::ExploreAgent, general::GeneralPurposeAgent, get_agent_tool_set, plan::PlanAgent,
-    resolve_agent_model, verification::VerificationAgent,
+    executor::ExecutorAgent, explore::ExploreAgent, general::GeneralPurposeAgent,
+    get_agent_tool_set, plan::PlanAgent, resolve_agent_model, verification::VerificationAgent,
 };
 use omiga_lib::domain::agents::{builtins, AgentDefinition, AgentRouter, AgentSource};
 
@@ -84,6 +84,16 @@ fn test_plan_agent_disallowed_tools() {
 
     assert!(disallowed.contains(&"Agent".to_string()));
     assert!(disallowed.contains(&"file_edit".to_string()));
+}
+
+#[test]
+fn test_executor_agent_keeps_nested_agent_disabled() {
+    let agent = ExecutorAgent;
+    let disallowed = agent.disallowed_tools().unwrap();
+
+    assert!(disallowed.contains(&"Agent".to_string()));
+    assert!(disallowed.contains(&"EnterPlanMode".to_string()));
+    assert!(disallowed.contains(&"ExitPlanMode".to_string()));
 }
 
 #[test]

@@ -1031,6 +1031,21 @@ fn format_scheduler_plan(result: &crate::domain::agents::scheduler::SchedulingRe
         "此任务已自动分解为 **{}** 个子任务，将按以下顺序执行：\n\n",
         result.plan.subtasks.len()
     ));
+    plan_text.push_str(&format!(
+        "调度层级：`{}`（主入口） → `{}`（执行监督） → 专职子 Agent。\
+         项目计划是执行依据；阶段标签仅用于观测，不代表固定流水线。\
+         真实派发、重试、取消和状态汇总由后端编排器负责。\n\n",
+        result
+            .plan
+            .entry_agent_type
+            .as_deref()
+            .unwrap_or("general-purpose"),
+        result
+            .plan
+            .execution_supervisor_agent_type
+            .as_deref()
+            .unwrap_or("executor")
+    ));
 
     // 获取并行执行组
     let groups = result.plan.get_parallel_groups();
@@ -1047,6 +1062,16 @@ fn format_scheduler_plan(result: &crate::domain::agents::scheduler::SchedulingRe
                     "{}. **{}** - 使用 `{}` Agent\n",
                     task_idx, task.description, task.agent_type
                 ));
+                if let Some(stage) = task.stage.as_ref().and_then(|s| {
+                    serde_json::to_value(s)
+                        .ok()
+                        .and_then(|value| value.as_str().map(ToString::to_string))
+                }) {
+                    plan_text.push_str(&format!("   - 阶段: `{}`\n", stage));
+                }
+                if let Some(supervisor) = task.supervisor_agent_type.as_deref() {
+                    plan_text.push_str(&format!("   - 上级: `{}`\n", supervisor));
+                }
                 if !task.context.is_empty() {
                     plan_text.push_str(&format!("   - 要求: {}\n", task.context));
                 }
@@ -1080,10 +1105,13 @@ fn format_scheduler_plan(result: &crate::domain::agents::scheduler::SchedulingRe
         plan_text.push_str("1. **生成完整、详细的内容**，不要只是概述或框架\n");
         plan_text.push_str("2. **包含具体的细节**：名称、地址、时间、价格、建议等\n");
         plan_text.push_str("3. **确保内容实用可读**，用户可以直接使用\n");
-        plan_text.push_str("4. **按步骤执行**，先收集需求，再研究，最后生成完整内容\n");
-        plan_text.push_str("\n现在开始执行第一个子任务。\n");
+        plan_text.push_str(
+            "4. 如果这是默认 General 路径，请先向用户展示计划，等待计划卡片按钮确认后再执行\n",
+        );
     } else {
-        plan_text.push_str("\n你可以直接开始执行第一个子任务，或要求我调整计划。");
+        plan_text.push_str(
+            "\n请向用户展示该计划并说明可通过计划卡片按钮执行；不要在默认 General 路径中自行执行子任务。",
+        );
     }
 
     plan_text
@@ -1262,9 +1290,11 @@ pub async fn send_message(
     } else {
         None
     };
-    let trace_mode = explicit_workflow_command
-        .map(str::to_string)
-        .or_else(|| keyword_skill_route.as_ref().map(|route| route.skill_name.clone()));
+    let trace_mode = explicit_workflow_command.map(str::to_string).or_else(|| {
+        keyword_skill_route
+            .as_ref()
+            .map(|route| route.skill_name.clone())
+    });
     if let Some(ref route) = keyword_skill_route {
         tracing::info!(
             target: "omiga::routing",
@@ -1526,6 +1556,17 @@ pub async fn send_message(
         .unwrap_or(false);
     let is_plan_command = matches!(explicit_workflow_command, Some("plan"));
     let is_schedule_command = matches!(explicit_workflow_command, Some("schedule"));
+    let is_explicit_execution_workflow = is_schedule_command
+        || is_team_keyword_route
+        || is_autopilot_keyword_route
+        || is_ralph_keyword_route;
+    let is_default_general_route = !is_plan_command
+        && !is_explicit_execution_workflow
+        && request
+            .composer_agent_type
+            .as_deref()
+            .map(|t| t == "auto" || t == "general-purpose" || t.is_empty())
+            .unwrap_or(true);
 
     if is_ralph_keyword_route {
         if looks_like_resume_request(routing_content) || has_existing_ralph_state {
@@ -1761,6 +1802,43 @@ pub async fn send_message(
                 .await
             {
                 Ok(result) => {
+                    let classified_complex = result.selected_agents.len() > 1
+                        || !matches!(
+                            result.recommended_strategy,
+                            SchedulingStrategy::Single | SchedulingStrategy::Auto
+                        );
+                    append_orchestration_event(
+                        repo,
+                        &session_id,
+                        None,
+                        Some(&user_message_id),
+                        keyword_skill_route
+                            .as_ref()
+                            .map(|r| r.skill_name.as_str())
+                            .or(if is_schedule_command {
+                                Some("schedule")
+                            } else if is_plan_command || is_default_general_route {
+                                Some("plan")
+                            } else {
+                                None
+                            }),
+                        "leader_intent_classified",
+                        if classified_complex {
+                            Some("planning")
+                        } else {
+                            Some("solo")
+                        },
+                        None,
+                        serde_json::json!({
+                            "entryAgentType": "general-purpose",
+                            "classification": if classified_complex { "complex" } else { "simple" },
+                            "strategy": format!("{:?}", result.recommended_strategy),
+                            "taskCount": result.plan.subtasks.len(),
+                            "agentCount": result.selected_agents.len(),
+                            "willAutoExecute": is_explicit_execution_workflow,
+                        }),
+                    )
+                    .await;
                     if trace_mode.is_some() {
                         append_preflight_stage_event(
                             repo,
@@ -1823,6 +1901,26 @@ pub async fn send_message(
                             }),
                         )
                         .await;
+                        if is_plan_command || is_default_general_route {
+                            append_orchestration_event(
+                                repo,
+                                &session_id,
+                                None,
+                                Some(&user_message_id),
+                                Some("plan"),
+                                "plan_ready_for_approval",
+                                Some("planning"),
+                                None,
+                                serde_json::json!({
+                                    "planId": result.plan.plan_id,
+                                    "entryAgentType": result.plan.entry_agent_type.clone(),
+                                    "executionSupervisorAgentType": result.plan.execution_supervisor_agent_type.clone(),
+                                    "taskCount": result.plan.subtasks.len(),
+                                    "approvalSurface": "plan_card_buttons",
+                                }),
+                            )
+                            .await;
+                        }
                         Some(result)
                     } else {
                         None
@@ -2349,7 +2447,12 @@ pub async fn send_message(
                 .lock()
                 .await
                 .get(&project_root)
-                .map(|e| (e.schemas.clone(), e.cached_at.elapsed() < MCP_TOOL_CACHE_TTL));
+                .map(|e| {
+                    (
+                        e.schemas.clone(),
+                        e.cached_at.elapsed() < MCP_TOOL_CACHE_TTL,
+                    )
+                });
             match cached {
                 Some((schemas, true)) => {
                     tracing::debug!(target: "omiga::mcp", "MCP tool schemas served from cache");
@@ -2364,12 +2467,11 @@ pub async fn send_message(
                     let mcp_tool_cache = app_state.chat.mcp_tool_cache.clone();
                     let root = project_root.clone();
                     tokio::spawn(async move {
-                        let schemas =
-                            crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(
-                                &root,
-                                std::time::Duration::from_secs(10),
-                            )
-                            .await;
+                        let schemas = crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(
+                            &root,
+                            std::time::Duration::from_secs(10),
+                        )
+                        .await;
                         mcp_tool_cache.lock().await.insert(
                             root,
                             McpToolCache {
@@ -2388,12 +2490,11 @@ pub async fn send_message(
                     let mcp_tool_cache = app_state.chat.mcp_tool_cache.clone();
                     let root = project_root.clone();
                     tokio::spawn(async move {
-                        let schemas =
-                            crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(
-                                &root,
-                                std::time::Duration::from_secs(10),
-                            )
-                            .await;
+                        let schemas = crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(
+                            &root,
+                            std::time::Duration::from_secs(10),
+                        )
+                        .await;
                         mcp_tool_cache.lock().await.insert(
                             root,
                             McpToolCache {
@@ -2528,7 +2629,7 @@ pub async fn send_message(
 
     // Prepare orchestration variables for the spawn (scheduler_result stays on the stack for
     // MessageResponse; we clone only when a real multi-agent plan was built).
-    let scheduler_for_spawn = if is_plan_mode {
+    let scheduler_for_spawn = if is_plan_mode || !is_explicit_execution_workflow {
         None
     } else {
         scheduler_result.clone()
@@ -2540,6 +2641,7 @@ pub async fn send_message(
     let is_team_mode_for_spawn = is_team_keyword_route;
     let is_ralph_mode_for_spawn = is_ralph_keyword_route;
     let is_autopilot_mode_for_spawn = is_autopilot_keyword_route;
+    let is_explicit_execution_workflow_for_spawn = is_explicit_execution_workflow;
     let ralph_env_for_spawn = ralph_runtime_env_label(
         exec_env.as_str(),
         request.ssh_server.as_deref(),
@@ -3915,7 +4017,9 @@ pub async fn send_message(
                 // Confirmation gate: when the plan is large and skip_confirmation was not
                 // set (team keyword route always skips since the user explicitly requested it),
                 // emit the confirmation event and defer execution.
-                let needs_confirm = sched.requires_confirmation && !is_team_mode_for_spawn;
+                let needs_confirm = sched.requires_confirmation
+                    && !is_team_mode_for_spawn
+                    && !is_explicit_execution_workflow_for_spawn;
                 if needs_confirm {
                     use crate::domain::agents::scheduler::SchedulingStrategy;
                     let _ = app_clone.emit(

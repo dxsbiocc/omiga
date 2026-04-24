@@ -99,10 +99,9 @@ impl QueryEngine {
     /// Search within a single document.
     fn search_document(&self, doc: &DocumentNode, keywords: &[String]) -> Vec<QueryResult> {
         let mut results = Vec::new();
-        let keyword_set: Vec<&str> = keywords.iter().map(|s| s.as_str()).collect();
 
         // Check document title
-        let title_score = self.score_text(&doc.title, &keyword_set);
+        let title_score = self.score_text(&doc.title, keywords);
         if title_score > 0.0 {
             results.push(QueryResult {
                 doc_id: doc.id.clone(),
@@ -118,7 +117,7 @@ impl QueryEngine {
         }
 
         // Check document path
-        let path_score = self.score_text(&doc.path, &keyword_set);
+        let path_score = self.score_text(&doc.path, keywords);
         if path_score > 0.0 {
             results.push(QueryResult {
                 doc_id: doc.id.clone(),
@@ -134,7 +133,7 @@ impl QueryEngine {
         }
 
         // Check document content
-        let content_score = self.score_text(&doc.content, &keyword_set);
+        let content_score = self.score_text(&doc.content, keywords);
         if content_score > 0.0 && title_score == 0.0 && path_score == 0.0 {
             results.push(QueryResult {
                 doc_id: doc.id.clone(),
@@ -151,7 +150,7 @@ impl QueryEngine {
 
         // Search sections
         for section in &doc.sections {
-            let section_results = self.search_section(doc, section, &keyword_set, vec![]);
+            let section_results = self.search_section(doc, section, keywords, vec![]);
             results.extend(section_results);
         }
 
@@ -163,7 +162,7 @@ impl QueryEngine {
         &self,
         doc: &DocumentNode,
         section: &SectionNode,
-        keywords: &[&str],
+        keywords: &[String],
         parent_breadcrumb: Vec<String>,
     ) -> Vec<QueryResult> {
         let mut results = Vec::new();
@@ -179,11 +178,7 @@ impl QueryEngine {
                 section_id: Some(section.id.clone()),
                 title: section.title.clone(),
                 breadcrumb: breadcrumb.clone(),
-                excerpt: self.create_excerpt(
-                    &section.content,
-                    &keywords.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                    300,
-                ),
+                excerpt: self.create_excerpt(&section.content, keywords, 300),
                 content: section.full_text(),
                 score: title_score * 1.8, // Boost section title matches
                 match_type: MatchType::Heading,
@@ -199,11 +194,7 @@ impl QueryEngine {
                 section_id: Some(section.id.clone()),
                 title: section.title.clone(),
                 breadcrumb: breadcrumb.clone(),
-                excerpt: self.create_excerpt(
-                    &section.content,
-                    &keywords.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                    300,
-                ),
+                excerpt: self.create_excerpt(&section.content, keywords, 300),
                 content: section.full_text(),
                 score: content_score * 0.9, // Slight penalty for body matches
                 match_type: MatchType::Content,
@@ -220,49 +211,15 @@ impl QueryEngine {
     }
 
     /// Score how well text matches keywords.
-    fn score_text(&self, text: &str, keywords: &[&str]) -> f64 {
-        let text_lower = text.to_lowercase();
-        let words: Vec<&str> = text_lower.split_whitespace().collect();
-        let word_count = words.len().max(1);
-
-        let mut matched_keywords = 0;
-        let mut total_matches = 0;
-
-        for keyword in keywords {
-            let keyword_lower = keyword.to_lowercase();
-            if text_lower.contains(&keyword_lower) {
-                matched_keywords += 1;
-                // Count occurrences
-                let matches = text_lower.matches(&keyword_lower).count();
-                total_matches += matches;
-            }
-        }
-
-        if matched_keywords == 0 {
-            return 0.0;
-        }
-
-        // Score based on:
-        // - Ratio of matched keywords
-        // - Frequency of matches (TF-like)
-        // - Inverse document frequency would require global stats, skip for simplicity
-        let keyword_coverage = matched_keywords as f64 / keywords.len() as f64;
-        let frequency_score = (total_matches as f64 / word_count as f64).min(1.0);
-
-        keyword_coverage * 0.7 + frequency_score * 0.3
+    fn score_text(&self, text: &str, keywords: &[String]) -> f64 {
+        score_terms_against_text(text, keywords)
     }
 
     /// Extract keywords from a query string.
     fn extract_keywords(&self, query: &str) -> Vec<String> {
-        query
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| w.len() >= 3)
-            .map(|w| w.to_lowercase())
-            .filter(|w| !self.stop_words.contains(w))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .take(10)
-            .collect()
+        let mut keywords = derive_query_terms(query);
+        keywords.retain(|w| !self.stop_words.contains(w));
+        keywords
     }
 
     /// Create an excerpt around matched keywords.
@@ -397,6 +354,177 @@ impl Default for QueryEngine {
     }
 }
 
+pub fn derive_query_terms(query: &str) -> Vec<String> {
+    let normalized = query.trim().to_lowercase();
+    if normalized.is_empty() {
+        return vec![];
+    }
+
+    let mut terms = Vec::new();
+    for raw_segment in normalized.split(|c: char| !c.is_alphanumeric()) {
+        let cleaned = strip_query_wrappers(raw_segment);
+        for segment in cleaned.split_whitespace() {
+            push_query_terms(segment, &mut terms);
+        }
+    }
+
+    if terms.is_empty() {
+        let fallback = strip_query_wrappers(&normalized)
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>();
+        push_term(&fallback, &mut terms);
+    }
+
+    terms.sort_by(|a, b| {
+        b.chars()
+            .count()
+            .cmp(&a.chars().count())
+            .then_with(|| a.cmp(b))
+    });
+    terms.truncate(12);
+    terms
+}
+
+pub fn score_terms_against_text(text: &str, keywords: &[String]) -> f64 {
+    if keywords.is_empty() {
+        return 0.0;
+    }
+
+    let text_lower = text.to_lowercase();
+    let token_count = estimated_token_count(&text_lower);
+
+    let mut matched_keywords = 0usize;
+    let mut total_matches = 0usize;
+
+    for keyword in keywords {
+        if keyword.is_empty() {
+            continue;
+        }
+        if text_lower.contains(keyword) {
+            matched_keywords += 1;
+            total_matches += text_lower.matches(keyword).count();
+        }
+    }
+
+    if matched_keywords == 0 {
+        return 0.0;
+    }
+
+    let keyword_coverage = matched_keywords as f64 / keywords.len().max(1) as f64;
+    let frequency_score = (total_matches as f64 / token_count as f64).min(1.0);
+    keyword_coverage * 0.7 + frequency_score * 0.3
+}
+
+fn estimated_token_count(text: &str) -> usize {
+    let whitespace_tokens = text.split_whitespace().count();
+    if whitespace_tokens > 1 {
+        return whitespace_tokens;
+    }
+
+    let run_tokens = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|segment| !segment.is_empty())
+        .count();
+    if run_tokens > 1 {
+        return run_tokens;
+    }
+
+    (text.chars().count() / 2).max(1)
+}
+
+fn push_query_terms(segment: &str, out: &mut Vec<String>) {
+    let trimmed_segment = trim_cjk_particles(segment);
+    let trimmed = trimmed_segment.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let char_count = trimmed.chars().count();
+    let has_cjk = trimmed.chars().any(is_cjk);
+
+    if has_cjk {
+        if char_count <= 1 {
+            return;
+        }
+
+        if char_count <= 8 {
+            push_term(trimmed, out);
+        }
+
+        if char_count >= 4 {
+            for size in [4usize, 3, 2] {
+                for gram in cjk_ngrams(trimmed, size) {
+                    push_term(&gram, out);
+                }
+            }
+        } else if char_count >= 2 {
+            for gram in cjk_ngrams(trimmed, char_count) {
+                push_term(&gram, out);
+            }
+        }
+        return;
+    }
+
+    if char_count >= 3 {
+        push_term(trimmed, out);
+    }
+}
+
+fn push_term(term: &str, out: &mut Vec<String>) {
+    let candidate = term.trim().to_lowercase();
+    if candidate.chars().count() < 2 {
+        return;
+    }
+    if SEARCH_NOISE_TERMS.contains(&candidate.as_str()) {
+        return;
+    }
+    if !out.iter().any(|existing| existing == &candidate) {
+        out.push(candidate);
+    }
+}
+
+fn strip_query_wrappers(segment: &str) -> String {
+    let mut cleaned = segment.to_lowercase();
+    for wrapper in QUERY_WRAPPER_PHRASES {
+        cleaned = cleaned.replace(wrapper, " ");
+    }
+    cleaned
+}
+
+fn trim_cjk_particles(segment: &str) -> String {
+    let particles: &[char] = &[
+        '的', '了', '和', '与', '及', '中', '里', '上', '下', '请', '把',
+    ];
+    segment.trim_matches(|c| particles.contains(&c)).to_string()
+}
+
+fn cjk_ngrams(segment: &str, size: usize) -> Vec<String> {
+    let chars: Vec<char> = segment.chars().collect();
+    if size == 0 || chars.len() < size {
+        return vec![];
+    }
+
+    let mut out = Vec::new();
+    for window in chars.windows(size) {
+        out.push(window.iter().collect());
+    }
+    out
+}
+
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+    )
+}
+
 /// Default stop words for keyword extraction.
 const DEFAULT_STOP_WORDS: &[&str] = &[
     "the", "be", "to", "of", "and", "a", "in", "that", "have", "i", "it", "for", "not", "on",
@@ -408,6 +536,39 @@ const DEFAULT_STOP_WORDS: &[&str] = &[
     "think", "also", "back", "after", "use", "two", "how", "our", "first", "well", "way", "even",
     "new", "want", "because", "any", "these", "give", "day", "most", "us", "was", "were", "been",
     "has", "had", "did", "does", "doing", "done",
+];
+
+const QUERY_WRAPPER_PHRASES: &[&str] = &[
+    "获取",
+    "查找",
+    "搜索",
+    "检索",
+    "查询",
+    "请问",
+    "请帮我",
+    "帮我",
+    "看看",
+    "查看",
+    "相关内容",
+    "相关资料",
+    "相关信息",
+    "全局记忆",
+    "项目记忆",
+    "会话记忆",
+    "聊天记录",
+    "知识库",
+    "global memory",
+    "project memory",
+    "session history",
+    "chat history",
+    "knowledge base",
+    "find me",
+    "show me",
+];
+
+const SEARCH_NOISE_TERMS: &[&str] = &[
+    "获取", "查找", "搜索", "检索", "查询", "相关", "内容", "资料", "信息", "show", "find",
+    "search", "retrieve", "query", "related", "content",
 ];
 
 #[cfg(test)]
@@ -431,14 +592,23 @@ mod tests {
     fn test_score_text() {
         let engine = QueryEngine::new();
 
-        let score1 = engine.score_text("Rust programming language", &["rust", "programming"]);
+        let score1 = engine.score_text(
+            "Rust programming language",
+            &["rust".to_string(), "programming".to_string()],
+        );
         assert!(score1 > 0.0);
 
-        let score2 = engine.score_text("Python programming", &["rust", "programming"]);
+        let score2 = engine.score_text(
+            "Python programming",
+            &["rust".to_string(), "programming".to_string()],
+        );
         assert!(score2 > 0.0);
         assert!(score2 < score1); // Should score lower since "rust" is missing
 
-        let score3 = engine.score_text("completely unrelated", &["rust", "programming"]);
+        let score3 = engine.score_text(
+            "completely unrelated",
+            &["rust".to_string(), "programming".to_string()],
+        );
         assert_eq!(score3, 0.0);
     }
 
@@ -458,6 +628,19 @@ mod tests {
 
         assert!(excerpt.to_lowercase().contains("rust"));
         assert!(excerpt.len() <= 150); // Allow some margin
+    }
+
+    #[test]
+    fn test_derive_query_terms_handles_cjk_natural_language_queries() {
+        let terms = derive_query_terms("获取全局记忆中与氧化还原节律相关内容");
+
+        assert!(terms.iter().any(|term| term == "氧化还原节律"));
+        assert!(terms
+            .iter()
+            .any(|term| term == "氧化还原" || term == "还原节律"));
+        assert!(!terms
+            .iter()
+            .any(|term| term == "获取" || term == "相关内容"));
     }
 
     #[test]

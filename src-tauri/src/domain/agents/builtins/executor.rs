@@ -9,9 +9,10 @@ impl AgentDefinition for ExecutorAgent {
     }
 
     fn when_to_use(&self) -> &str {
-        "Execution specialist for completing well-defined tasks end-to-end: running analyses, \
-         writing scripts, processing data, generating figures. Works autonomously with full tool access. \
-         Used internally by ralph and team modes."
+        "Executor-supervisor for approved project plans: coordinates implementation, \
+         data retrieval/download glue, analysis, visualization, debugging, and verification \
+         through backend-controlled child workers without forcing a fixed pipeline. \
+         Used internally by General/Ralph/Team modes."
     }
 
     fn system_prompt(&self, ctx: &ToolContext) -> String {

@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 /// Same as TS `MAX_MARKDOWN_LENGTH`
 const MAX_TEXT_CHARS: usize = 100_000;
+const BROWSER_FETCH_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 pub const DESCRIPTION: &str = r#"Fetch public web content over HTTP(S).
 
@@ -34,6 +35,25 @@ pub struct WebFetchArgs {
 }
 
 pub struct WebFetchTool;
+
+fn browser_fetch_headers() -> reqwest::header::HeaderMap {
+    let mut h = reqwest::header::HeaderMap::new();
+    h.insert(
+        reqwest::header::USER_AGENT,
+        reqwest::header::HeaderValue::from_static(BROWSER_FETCH_USER_AGENT),
+    );
+    h.insert(
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderValue::from_static(
+            "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
+        ),
+    );
+    h.insert(
+        reqwest::header::HeaderName::from_static("accept-language"),
+        reqwest::header::HeaderValue::from_static("en-US,en;q=0.9"),
+    );
+    h
+}
 
 #[async_trait]
 impl super::ToolImpl for WebFetchTool {
@@ -65,7 +85,7 @@ impl super::ToolImpl for WebFetchTool {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::limited(10))
-            .user_agent(concat!("Omiga/", env!("CARGO_PKG_VERSION"), " WebFetch"))
+            .default_headers(browser_fetch_headers())
             // Avoid env HTTP(S)_PROXY hijacking localhost in tests and dev.
             .no_proxy()
             .build()

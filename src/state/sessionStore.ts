@@ -151,10 +151,14 @@ export type RoundStatus = "running" | "partial" | "cancelled" | "completed";
 
 export interface SchedulerPlan {
   planId: string;
+  entryAgentType?: string;
+  executionSupervisorAgentType?: string;
   subtasks: Array<{
     id: string;
     description: string;
     agentType: string;
+    supervisorAgentType?: string;
+    stage?: string;
     dependencies: string[];
     critical: boolean;
     estimatedSecs: number;
@@ -186,6 +190,8 @@ export interface Message {
   toolCallsList?: Array<{ id: string; name: string; arguments: string }>;
   /** Assistant thinking merged into the ReAct fold (optional round-trip for local snapshot) */
   prefaceBeforeTools?: string;
+  /** Assistant/tool-gap text that belongs inside the ReAct fold, not as the final answer row. */
+  intermediate?: boolean;
   /** Unix ms timestamp for when this message was created (from DB created_at). */
   timestamp?: number;
   toolCall?: {
@@ -234,6 +240,7 @@ function sanitizeMessageForPersistence(m: Message): Message {
     ...(ts ? { turnSummary: ts } : { turnSummary: undefined }),
     content: stripTrailingStderrMarker(m.content) ?? "",
     prefaceBeforeTools: stripTrailingStderrMarker(m.prefaceBeforeTools),
+    intermediate: m.intermediate,
     toolCallsList: m.toolCallsList?.map((tc) => ({
       ...tc,
       arguments: stripTrailingStderrMarker(tc.arguments) ?? "",

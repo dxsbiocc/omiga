@@ -16,9 +16,9 @@ impl AgentDefinition for GeneralPurposeAgent {
     }
 
     fn when_to_use(&self) -> &str {
-        "Main commander agent. Analyzes task complexity and routes to solo execution, \
-         ralph persistence loop, or team parallel mode. Use for any research, analysis, \
-         coding, or multi-step task."
+        "General / main scheduler. Handles simple tasks directly, turns complex default \
+         requests into reviewable project plans, and reports final executor-supervised results \
+         to users."
     }
 
     fn system_prompt(&self, ctx: &ToolContext) -> String {

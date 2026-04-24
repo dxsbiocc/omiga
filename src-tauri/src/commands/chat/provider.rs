@@ -782,7 +782,8 @@ pub async fn run_existing_agent_plan(
         TaskPlanner::new().ensure_team_verify(request.plan, &sched_req)
     } else {
         request.plan
-    };
+    }
+    .with_execution_defaults();
 
     let _ = app_state
         .repo
@@ -926,6 +927,28 @@ pub(crate) async fn inject_schedule_summary_message(
         crate::domain::agents::scheduler::orchestrator::ExecutionStatus::Cancelled => "已取消",
         _ => "异常终止",
     };
+
+    if let Err(e) = runtime
+        .repo()
+        .append_orchestration_event(
+            session_id,
+            Some(runtime.round_id()),
+            None,
+            Some("schedule"),
+            "leader_summary_started",
+            Some("synthesizing"),
+            None,
+            &serde_json::json!({
+                "planId": result.plan_id,
+                "status": status_label,
+                "entryAgentType": "general-purpose",
+            })
+            .to_string(),
+        )
+        .await
+    {
+        tracing::warn!(target: "omiga::scheduler", "Failed to append leader_summary_started event: {}", e);
+    }
 
     let is_reviewer = |agent_type: &str| {
         matches!(

@@ -2073,13 +2073,137 @@ export function TaskStatus() {
                     borderColor: alpha("#6366f1", 0.12),
                   }}
                 >
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    sx={{ display: "block", fontSize: 10, lineHeight: 1.6 }}
-                  >
-                    当前会话暂无可展示的编排总览。发送新任务后，这里会显示阶段进度与失败诊断。
-                  </Typography>
+                  {(() => {
+                    const planTotal = schedulerPlan?.subtasks.length ?? 0;
+                    const planCompleted = currentPlanTaskRows.filter(
+                      (task) => task.status === "Completed",
+                    ).length;
+                    const planRunning = currentPlanTaskRows.filter(
+                      (task) => task.status === "Running" || task.status === "Pending",
+                    ).length;
+                    const planFailed = currentPlanTaskRows.filter(
+                      (task) => task.status === "Failed" || task.status === "Cancelled",
+                    ).length;
+                    const toolCalls = executionSteps.filter((step) =>
+                      step.id.startsWith("tool-"),
+                    ).length;
+                    const failedEvents = scopedOrchestrationEvents.filter(
+                      (event) =>
+                        event.event_type.includes("failed") ||
+                        event.event_type.includes("cancelled") ||
+                        event.event_type.includes("escalated"),
+                    ).length;
+                    const latestEvent = orchestrationTimeline[0];
+                    const hasFallbackOverview =
+                      hasExecution ||
+                      Boolean(schedulerPlan) ||
+                      scopedOrchestrationEvents.length > 0 ||
+                      orchestrationTimeline.length > 0;
+
+                    if (!hasFallbackOverview) {
+                      return (
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ display: "block", fontSize: 10, lineHeight: 1.6 }}
+                        >
+                          当前会话暂无可展示的编排总览。发送新任务后，这里会显示阶段进度与失败诊断。
+                        </Typography>
+                      );
+                    }
+
+                    return (
+                      <Stack spacing={0.75}>
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ display: "block", fontSize: 10, lineHeight: 1.45 }}
+                        >
+                          当前没有持久模式状态；这里展示本轮可推导的轻量总览。完整原始记录请看时间线或 Trace。
+                        </Typography>
+                        <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                          {schedulerPlan && (
+                            <Chip
+                              size="small"
+                              icon={<Route sx={{ fontSize: 12 }} />}
+                              label={
+                                currentPlanTaskRows.length > 0
+                                  ? `计划 ${planCompleted}/${planTotal} 完成`
+                                  : `计划 ${planTotal} 步`
+                              }
+                              sx={{ height: 20, fontSize: 9.5, fontWeight: 700 }}
+                            />
+                          )}
+                          {planRunning > 0 && (
+                            <Chip
+                              size="small"
+                              label={`${planRunning} 执行中`}
+                              sx={{
+                                height: 20,
+                                fontSize: 9.5,
+                                bgcolor: alpha("#0ea5e9", 0.1),
+                                color: "#0369a1",
+                              }}
+                            />
+                          )}
+                          {planFailed > 0 || failedEvents > 0 ? (
+                            <Chip
+                              size="small"
+                              icon={<WarningAmber sx={{ fontSize: 12 }} />}
+                              label={`${planFailed + failedEvents} 异常`}
+                              sx={{
+                                height: 20,
+                                fontSize: 9.5,
+                                bgcolor: alpha("#ef4444", 0.1),
+                                color: "#dc2626",
+                              }}
+                            />
+                          ) : null}
+                          {hasExecution && (
+                            <Chip
+                              size="small"
+                              icon={<Terminal sx={{ fontSize: 12 }} />}
+                              label={`ReAct ${executionSteps.length} 步 · 工具 ${toolCalls}`}
+                              sx={{ height: 20, fontSize: 9.5 }}
+                            />
+                          )}
+                          {scopedOrchestrationEvents.length > 0 && (
+                            <Chip
+                              size="small"
+                              label={`Trace ${scopedOrchestrationEvents.length} 事件`}
+                              sx={{ height: 20, fontSize: 9.5 }}
+                            />
+                          )}
+                        </Stack>
+                        {latestEvent && (
+                          <Box
+                            sx={{
+                              p: 0.75,
+                              borderRadius: 1,
+                              bgcolor: alpha("#6366f1", 0.045),
+                              border: `1px solid ${alpha("#6366f1", 0.12)}`,
+                            }}
+                          >
+                            <Typography
+                              variant="caption"
+                              sx={{ display: "block", fontSize: 10.5, fontWeight: 700 }}
+                            >
+                              最近事件：{latestEvent.label}
+                            </Typography>
+                            {latestEvent.detail && (
+                              <Typography
+                                variant="caption"
+                                color="text.secondary"
+                                sx={{ display: "block", fontSize: 9.5, lineHeight: 1.45 }}
+                              >
+                                {latestEvent.detail}
+                              </Typography>
+                            )}
+                          </Box>
+                        )}
+                      </Stack>
+                    );
+                  })()}
                 </Box>
               )}
 

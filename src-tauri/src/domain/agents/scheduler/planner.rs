@@ -41,8 +41,129 @@ pub struct SubTask {
     /// Maximum retry attempts on failure (0 = no retry). Default: 2.
     #[serde(default = "SubTask::default_max_retries")]
     pub max_retries: u32,
+    /// Logical supervisor for this worker. In v1 this is metadata only: the Rust orchestrator
+    /// still owns spawning/retry/cancel, while the UI renders an executor-supervised hierarchy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_agent_type: Option<String>,
+    /// Logical execution stage used by dashboards and event payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<SubTaskStage>,
     /// 任务上下文（传递给 Agent）
     pub context: String,
+}
+
+/// Bounded logical stage vocabulary for executor-supervised plans.
+///
+/// These are observability lanes, not a mandatory lifecycle. The approved project plan remains
+/// the source of truth for what should run, which dependencies matter, and which lanes can be
+/// skipped, merged, or repeated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubTaskStage {
+    Intent,
+    Retrieve,
+    Download,
+    Analyze,
+    Visualize,
+    Report,
+    Verify,
+    Debug,
+    Synthesize,
+    Other,
+}
+
+impl SubTaskStage {
+    pub fn infer(agent_type: &str, id: &str, description: &str) -> Self {
+        let text = format!(
+            "{} {} {}",
+            agent_type.to_lowercase(),
+            id.to_lowercase(),
+            description.to_lowercase()
+        );
+
+        if text.contains("debug")
+            || text.contains("fix")
+            || text.contains("排查")
+            || text.contains("修复")
+        {
+            return Self::Debug;
+        }
+        if text.contains("verify")
+            || text.contains("validation")
+            || text.contains("review")
+            || text.contains("核查")
+            || text.contains("验证")
+            || text.contains("检查")
+        {
+            return Self::Verify;
+        }
+        if text.contains("visual")
+            || text.contains("figure")
+            || text.contains("plot")
+            || text.contains("chart")
+            || text.contains("可视化")
+            || text.contains("作图")
+            || text.contains("图表")
+        {
+            return Self::Visualize;
+        }
+        if text.contains("report")
+            || text.contains("write")
+            || text.contains("draft")
+            || text.contains("撰写")
+            || text.contains("报告")
+        {
+            return Self::Report;
+        }
+        if text.contains("synthesize") || text.contains("synthesis") || text.contains("综合") {
+            return Self::Synthesize;
+        }
+        if text.contains("download")
+            || text.contains("fetch data")
+            || text.contains("dataset")
+            || text.contains("下载")
+            || text.contains("数据集")
+        {
+            return Self::Download;
+        }
+        if text.contains("analysis")
+            || text.contains("analyze")
+            || text.contains("data-analysis")
+            || text.contains("统计")
+            || text.contains("分析")
+            || text.contains("预处理")
+        {
+            return Self::Analyze;
+        }
+        if text.contains("retrieve")
+            || text.contains("search")
+            || text.contains("literature-search")
+            || text.contains("pubmed")
+            || text.contains("检索")
+            || text.contains("文献")
+        {
+            return Self::Retrieve;
+        }
+        if text.contains("plan")
+            || text.contains("scope")
+            || text.contains("intent")
+            || text.contains("意图")
+            || text.contains("界定")
+        {
+            return Self::Intent;
+        }
+
+        match agent_type {
+            "Plan" => Self::Intent,
+            "literature-search" => Self::Retrieve,
+            "data-analysis" => Self::Analyze,
+            "data-visual" => Self::Visualize,
+            "verification" => Self::Verify,
+            "debugger" => Self::Debug,
+            "deep-research" => Self::Synthesize,
+            _ => Self::Other,
+        }
+    }
 }
 
 impl SubTask {
@@ -60,6 +181,8 @@ impl SubTask {
             estimated_secs: 60,
             timeout_secs: None,
             max_retries: Self::default_max_retries(),
+            supervisor_agent_type: None,
+            stage: None,
             context: String::new(),
         }
     }
@@ -89,6 +212,21 @@ impl SubTask {
         self
     }
 
+    pub fn with_supervisor(mut self, supervisor: impl Into<String>) -> Self {
+        let supervisor = supervisor.into();
+        self.supervisor_agent_type = if supervisor.trim().is_empty() {
+            None
+        } else {
+            Some(supervisor)
+        };
+        self
+    }
+
+    pub fn with_stage(mut self, stage: SubTaskStage) -> Self {
+        self.stage = Some(stage);
+        self
+    }
+
     pub fn critical(mut self) -> Self {
         self.critical = true;
         self
@@ -103,6 +241,18 @@ pub struct TaskPlan {
     pub plan_id: String,
     /// 原始请求
     pub original_request: String,
+    /// Logical top-level user-facing leader. Kept as metadata for UI/event rendering.
+    #[serde(
+        default = "TaskPlan::default_entry_agent_type",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub entry_agent_type: Option<String>,
+    /// Logical execution leader for child workers. Real spawning remains backend-controlled.
+    #[serde(
+        default = "TaskPlan::default_execution_supervisor_agent_type",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub execution_supervisor_agent_type: Option<String>,
     /// 子任务列表
     pub subtasks: Vec<SubTask>,
     /// 执行顺序（子任务 ID 列表）
@@ -114,10 +264,20 @@ pub struct TaskPlan {
 }
 
 impl TaskPlan {
+    fn default_entry_agent_type() -> Option<String> {
+        Some("general-purpose".to_string())
+    }
+
+    fn default_execution_supervisor_agent_type() -> Option<String> {
+        Some("executor".to_string())
+    }
+
     pub fn new(request: impl Into<String>) -> Self {
         Self {
             plan_id: uuid::Uuid::new_v4().to_string(),
             original_request: request.into(),
+            entry_agent_type: Self::default_entry_agent_type(),
+            execution_supervisor_agent_type: Self::default_execution_supervisor_agent_type(),
             subtasks: Vec::new(),
             execution_order: Vec::new(),
             allow_parallel: true,
@@ -137,8 +297,67 @@ impl TaskPlan {
 
     /// 添加子任务
     pub fn add_subtask(&mut self, subtask: SubTask) {
+        let mut subtask = subtask;
+        self.apply_subtask_execution_defaults(&mut subtask);
         self.execution_order.push(subtask.id.clone());
         self.subtasks.push(subtask);
+    }
+
+    fn apply_subtask_execution_defaults(&self, subtask: &mut SubTask) {
+        if subtask
+            .supervisor_agent_type
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
+            subtask.supervisor_agent_type = self
+                .execution_supervisor_agent_type
+                .clone()
+                .or_else(Self::default_execution_supervisor_agent_type);
+        }
+        if subtask.stage.is_none() {
+            subtask.stage = Some(SubTaskStage::infer(
+                &subtask.agent_type,
+                &subtask.id,
+                &subtask.description,
+            ));
+        }
+    }
+
+    pub fn with_execution_defaults(mut self) -> Self {
+        if self
+            .entry_agent_type
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
+            self.entry_agent_type = Self::default_entry_agent_type();
+        }
+        if self
+            .execution_supervisor_agent_type
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
+            self.execution_supervisor_agent_type = Self::default_execution_supervisor_agent_type();
+        }
+        let plan_defaults = Self {
+            plan_id: self.plan_id.clone(),
+            original_request: self.original_request.clone(),
+            entry_agent_type: self.entry_agent_type.clone(),
+            execution_supervisor_agent_type: self.execution_supervisor_agent_type.clone(),
+            subtasks: vec![],
+            execution_order: vec![],
+            allow_parallel: self.allow_parallel,
+            global_context: self.global_context.clone(),
+        };
+        for subtask in &mut self.subtasks {
+            plan_defaults.apply_subtask_execution_defaults(subtask);
+        }
+        self
     }
 
     /// 获取可并行执行的任务组
@@ -553,67 +772,210 @@ impl TaskPlanner {
         Ok(plan)
     }
 
-    /// 分阶段策略：Explore → Design → Implement → Verify（四个固定顺序阶段）
+    /// 分阶段策略：先做项目计划，再按计划表达必要的执行/验证阶段。
+    ///
+    /// Stage labels are descriptive lanes, not a hard-coded pipeline; the plan should choose the
+    /// minimum useful graph for the task.
     fn decompose_phased(&self, request: &SchedulingRequest) -> Result<TaskPlan, String> {
         let mut plan = TaskPlan::new(&request.user_request);
         plan.allow_parallel = false; // phases are sequential
-        plan.global_context = format!("Project root: {}", request.project_root);
+        plan.global_context = format!(
+            "Project root: {}\nProject plan is authoritative; stage labels are flexible lanes, not a fixed workflow.",
+            request.project_root
+        );
 
         let research_like = Self::is_research_analysis_task(&request.user_request)
             || self.is_content_generation_task(&request.user_request);
         if research_like {
+            let lowered = request.user_request.to_lowercase();
+            let quick_or_literature_only = Self::contains_any(
+                &lowered,
+                &[
+                    "只要文献",
+                    "只做文献",
+                    "仅文献",
+                    "文献综述",
+                    "综述",
+                    "overview",
+                    "review",
+                    "brief",
+                    "quick",
+                    "简要",
+                    "简单",
+                    "不需要数据",
+                    "无需数据",
+                ],
+            );
+            let needs_data_lane =
+                Self::is_research_analysis_task(&request.user_request) && !quick_or_literature_only;
+            let needs_visual_lane = needs_data_lane
+                && !Self::contains_any(
+                    &lowered,
+                    &["不需要可视化", "无需可视化", "不画图", "无需图表"],
+                )
+                && Self::contains_any(
+                    &lowered,
+                    &[
+                        "可视化",
+                        "图表",
+                        "作图",
+                        "figure",
+                        "plot",
+                        "表达",
+                        "差异",
+                        "生信",
+                        "tcga",
+                        "geo",
+                        "肝癌",
+                        "癌",
+                        "肿瘤",
+                        "tumor",
+                        "cancer",
+                        "功能作用",
+                    ],
+                );
+            let needs_report_lane = !Self::contains_any(
+                &lowered,
+                &["只要结论", "无需报告", "不需要报告", "no report"],
+            );
+
             plan.add_subtask(
                 SubTask::new(
                     "phase-scope",
-                    "【界定阶段】明确科研问题、分析边界、数据/文献范围与交付格式",
+                    "【项目计划】明确目标、边界、证据路径、数据/文献范围与交付格式",
                 )
                 .with_agent("Plan")
+                .with_stage(SubTaskStage::Intent)
                 .with_context(format!(
-                    "科研分析目标: {}\n请明确：研究问题、关键词/实体、数据或文献范围、排除标准、预期输出（表格/综述/图表/结论清单）。",
+                    "科研分析目标: {}\n请先形成项目计划：研究问题、关键词/实体、可用证据路径、是否需要数据下载/统计/可视化、排除标准、预期输出。后续 Worker 必须以该计划为依据；不要机械套固定流程。",
                     request.user_request
                 ))
                 .critical(),
             );
             plan.add_subtask(
                 SubTask::new(
-                    "phase-evidence",
-                    "【证据阶段】检索并整理相关文献、数据、方法和可靠来源",
+                    "phase-retrieve",
+                    "【检索阶段】检索并整理相关文献、公共数据库、方法和可靠来源",
                 )
                 .with_agent("literature-search")
                 .with_dependencies(vec!["phase-scope".to_string()])
+                .with_stage(SubTaskStage::Retrieve)
                 .with_context(format!(
-                    "基于界定阶段的范围，为科研分析收集证据。\
-                    优先 PubMed / Google Scholar / arXiv / bioRxiv / 官方数据库；\
-                    每条证据必须保留标题、年份、来源、DOI/URL、关键结论和适用边界。原始目标: {}",
+                    "基于项目计划的范围，为科研分析收集证据。\
+                    优先 PubMed / Google Scholar / arXiv / bioRxiv / GEO / TCGA / 官方数据库；\
+                    每条证据或数据线索必须保留标题/数据集编号、年份、来源、DOI/URL、关键结论和适用边界。\
+                    如果项目计划判定某类来源不必要，请说明跳过理由。原始目标: {}",
                     request.user_request
                 ))
                 .with_timeout(TIMEOUT_STANDARD_SECS)
                 .critical(),
             );
+
+            let analysis_dependency = if needs_data_lane {
+                plan.add_subtask(
+                    SubTask::new(
+                        "phase-download",
+                        "【数据获取】按项目计划确认可用公开数据并准备下载/获取方案",
+                    )
+                    .with_agent("executor")
+                    .with_dependencies(vec!["phase-retrieve".to_string()])
+                    .with_stage(SubTaskStage::Download)
+                    .with_context(format!(
+                        "读取项目计划和检索结果，筛选可复现、可访问的数据来源。\
+                        v1 不强求真实下载成功；请明确数据集编号/URL、获取方式、文件类型、预期输出路径、失败替代方案。\
+                        若项目计划或证据质量表明无需数据下载，请说明并给出替代分析依据。原始目标: {}",
+                        request.user_request
+                    ))
+                    .with_timeout(TIMEOUT_STANDARD_SECS)
+                    .critical(),
+                );
+                "phase-download"
+            } else {
+                "phase-retrieve"
+            };
+
             plan.add_subtask(
                 SubTask::new(
                     "phase-analysis",
-                    "【分析阶段】综合证据/数据，形成可追溯的科研结论",
+                    if needs_data_lane {
+                        "【分析阶段】按项目计划对可用文献/数据进行预处理、统计分析与功能解释"
+                    } else {
+                        "【综合分析】按项目计划综合证据并形成可追溯结论"
+                    },
                 )
-                .with_agent("deep-research")
-                .with_dependencies(vec!["phase-evidence".to_string()])
+                .with_agent(if needs_data_lane {
+                    "data-analysis"
+                } else {
+                    "deep-research"
+                })
+                .with_dependencies(vec![analysis_dependency.to_string()])
+                .with_stage(if needs_data_lane {
+                    SubTaskStage::Analyze
+                } else {
+                    SubTaskStage::Synthesize
+                })
                 .with_context(format!(
-                    "读取前序证据，围绕原始科研问题形成结构化分析。\
+                    "读取项目计划、前序证据和可用数据/替代依据，围绕原始科研问题形成结构化分析。\
+                    必须按项目计划执行；如果需要调整路线，请说明原因和影响。\
                     要求区分事实、推断和不确定性；结论需绑定引用或数据来源；必要时给出下一步实验/分析建议。原始目标: {}",
                     request.user_request
                 ))
                 .with_timeout(TIMEOUT_DEEP_SECS)
                 .critical(),
             );
+
+            let mut final_dependency = "phase-analysis".to_string();
+            if needs_visual_lane {
+                plan.add_subtask(
+                    SubTask::new(
+                        "phase-visualize",
+                        "【可视化】按项目计划根据分析结果规划或生成关键图表",
+                    )
+                    .with_agent("data-visual")
+                    .with_dependencies(vec!["phase-analysis".to_string()])
+                    .with_stage(SubTaskStage::Visualize)
+                    .with_context(
+                        "读取项目计划和分析结果，只生成能支撑结论的必要图表；如果已有数据文件则生成图表，否则输出可复现绘图代码/图表规格。若计划判定不需要可视化，请说明跳过理由。",
+                    )
+                    .with_timeout(TIMEOUT_STANDARD_SECS),
+                );
+                final_dependency = "phase-visualize".to_string();
+            }
+
+            if needs_report_lane {
+                let mut report_dependencies = vec!["phase-analysis".to_string()];
+                if needs_visual_lane {
+                    report_dependencies.push("phase-visualize".to_string());
+                }
+                plan.add_subtask(
+                    SubTask::new(
+                        "phase-report",
+                        "【报告阶段】按项目计划汇总证据、分析、图表与局限性",
+                    )
+                    .with_agent("deep-research")
+                    .with_dependencies(report_dependencies)
+                    .with_stage(SubTaskStage::Report)
+                    .with_context(format!(
+                        "综合项目计划、检索、数据/分析和可视化结果，撰写面向科研用户的结构化报告。\
+                        必须保留可追溯引用、数据来源、局限性和下一步建议。原始目标: {}",
+                        request.user_request
+                    ))
+                    .with_timeout(TIMEOUT_DEEP_SECS)
+                    .critical(),
+                );
+                final_dependency = "phase-report".to_string();
+            }
+
             plan.add_subtask(
                 SubTask::new(
                     "phase-check",
-                    "【核查阶段】检查引用、数据口径、结论边界和报告完整性",
+                    "【核查阶段】检查项目计划是否被正确执行，以及结论边界和交付完整性",
                 )
                 .with_agent("verification")
-                .with_dependencies(vec!["phase-analysis".to_string()])
+                .with_dependencies(vec![final_dependency])
+                .with_stage(SubTaskStage::Verify)
                 .with_context(
-                    "核查最终分析是否回答原始科研问题；引用/URL 是否可追溯；是否存在过度推断；是否明确局限性、数据口径和后续建议。",
+                    "核查最终结果是否遵循项目计划并回答原始科研问题；引用/URL 是否可追溯；是否存在过度推断；是否明确局限性、数据口径和后续建议。",
                 ),
             );
             return Ok(plan);
@@ -970,8 +1332,13 @@ impl TaskPlanner {
         subtasks
     }
 
+    fn contains_any(text: &str, patterns: &[&str]) -> bool {
+        patterns.iter().any(|p| text.contains(p))
+    }
+
     /// 判断是否为研究分析类任务（研究现状、综述、领域分析）
     fn is_research_analysis_task(text: &str) -> bool {
+        let text = text.to_lowercase();
         const RESEARCH_PATTERNS: &[&str] = &[
             "研究现状",
             "研究进展",
@@ -995,8 +1362,15 @@ impl TaskPlanner {
             "field overview",
             "review of the",
             "overview of the field",
+            "功能作用",
+            "肝癌",
+            "癌",
+            "肿瘤",
+            "cancer",
+            "tumor",
+            "oncology",
         ];
-        RESEARCH_PATTERNS.iter().any(|p| text.contains(p))
+        Self::contains_any(&text, RESEARCH_PATTERNS)
     }
 
     /// 检查是否有特定模式
@@ -1034,6 +1408,10 @@ struct LlmSubtask {
     dependencies: Vec<String>,
     #[serde(default)]
     critical: bool,
+    #[serde(default)]
+    stage: Option<SubTaskStage>,
+    #[serde(default)]
+    supervisor_agent_type: Option<String>,
     #[serde(default)]
     context: String,
     #[serde(default)]
@@ -1097,6 +1475,8 @@ These override all other rules:
 - "debugger"           — root-cause analysis and bug fixing
 - "literature-search"  — academic: PubMed, arXiv, bioRxiv, Google Scholar in parallel; DOI/URL per result; min 10 papers
 - "deep-research"      — domain synthesis: parallel web searches, ≥800-word report, inline citations [Author, Year](URL)
+- "data-analysis"      — scientific data preprocessing/statistics using Python/R
+- "data-visual"        — publication-quality scientific figures
 
 ━━━ JSON FORMATS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Single agent:
@@ -1104,15 +1484,18 @@ Single agent:
 
 Multiple agents:
 {"mode":"multi","strategy":"team|phased|sequential|parallel","subtasks":[
-  {"id":"t1","description":"...","agent":"...","dependencies":[],"critical":false,"context":"...","timeout_secs":300}
+  {"id":"t1","description":"...","agent":"...","dependencies":[],"critical":false,"stage":"intent|retrieve|download|analyze|visualize|report|verify|debug|synthesize|other","context":"...","timeout_secs":300}
 ]}
 
 Rules for subtasks:
-- 2–4 subtasks is usually enough; avoid over-decomposing
+- Treat the plan as a project plan: it should explain the work graph, evidence path, dependencies, and acceptance checks that execution will follow
+- Stage labels are observability lanes, not a fixed workflow; do NOT force retrieve/download/analyze/visualize/report/verify unless the task actually needs those lanes
+- 2–6 subtasks is usually enough; use up to 7 only when the project plan justifies separate retrieve/download/analyze/visualize/report/verify lanes
 - Tasks with no dependencies run in parallel automatically
+- For executor-supervised research pipelines, use stage labels consistently; use "executor" for glue work only when no dedicated agent exists
 - Set critical:true for tasks whose failure should abort the plan
 - timeout_secs: 300 for literature-search, 600 for deep-research/synthesis, 120 default
-- context: give the worker precise instructions (databases to search, citation format, etc.)
+- context: give the worker precise instructions from the project plan (databases to search, citation format, data criteria, skip/merge rules, acceptance checks, etc.)
 
 Respond with JSON only."#;
 
@@ -1211,6 +1594,12 @@ pub async fn plan_with_llm(
             .with_agent(st.agent)
             .with_dependencies(st.dependencies)
             .with_context(st.context);
+        if let Some(supervisor) = st.supervisor_agent_type {
+            subtask = subtask.with_supervisor(supervisor);
+        }
+        if let Some(stage) = st.stage {
+            subtask = subtask.with_stage(stage);
+        }
         if st.critical {
             subtask = subtask.critical();
         }
@@ -1292,5 +1681,105 @@ mod tests {
         let groups = plan.get_parallel_groups();
         // A 和 C 可以并行，B 必须等 A
         assert!(groups.len() >= 2);
+    }
+
+    #[test]
+    fn old_task_plan_json_gets_executor_supervision_defaults() {
+        let raw = r#"{
+            "planId":"legacy-plan",
+            "originalRequest":"legacy",
+            "subtasks":[{
+                "id":"task-1",
+                "description":"Verify result",
+                "agentType":"verification",
+                "dependencies":[],
+                "critical":false,
+                "estimatedSecs":60,
+                "maxRetries":2,
+                "context":""
+            }],
+            "executionOrder":["task-1"],
+            "allowParallel":true,
+            "globalContext":""
+        }"#;
+
+        let plan: TaskPlan = serde_json::from_str(raw).expect("legacy plan deserialize");
+        let plan = plan.with_execution_defaults();
+        assert_eq!(plan.entry_agent_type.as_deref(), Some("general-purpose"));
+        assert_eq!(
+            plan.execution_supervisor_agent_type.as_deref(),
+            Some("executor")
+        );
+        assert_eq!(
+            plan.subtasks[0].supervisor_agent_type.as_deref(),
+            Some("executor")
+        );
+        assert_eq!(plan.subtasks[0].stage, Some(SubTaskStage::Verify));
+    }
+
+    #[test]
+    fn phased_research_plan_has_executor_supervised_scientific_stages() {
+        use crate::domain::agents::scheduler::SchedulingStrategy;
+
+        let planner = TaskPlanner::new();
+        let request = SchedulingRequest::new("分析MID1IP1在肝癌中的功能作用")
+            .with_project_root(".")
+            .with_strategy(SchedulingStrategy::Phased);
+
+        let plan =
+            futures::executor::block_on(planner.decompose(&request)).expect("phased research plan");
+        let stages: Vec<_> = plan
+            .subtasks
+            .iter()
+            .filter_map(|task| task.stage.clone())
+            .collect();
+
+        assert_eq!(plan.entry_agent_type.as_deref(), Some("general-purpose"));
+        assert_eq!(
+            plan.execution_supervisor_agent_type.as_deref(),
+            Some("executor")
+        );
+        assert!(stages.contains(&SubTaskStage::Retrieve));
+        assert!(stages.contains(&SubTaskStage::Download));
+        assert!(stages.contains(&SubTaskStage::Analyze));
+        assert!(stages.contains(&SubTaskStage::Visualize));
+        assert!(stages.contains(&SubTaskStage::Report));
+        assert!(stages.contains(&SubTaskStage::Verify));
+        assert!(plan
+            .subtasks
+            .iter()
+            .all(|task| task.supervisor_agent_type.as_deref() == Some("executor")));
+    }
+
+    #[test]
+    fn literature_review_plan_does_not_force_data_pipeline_lanes() {
+        use crate::domain::agents::scheduler::SchedulingStrategy;
+
+        let planner = TaskPlanner::new();
+        let request = SchedulingRequest::new("写一份肿瘤免疫治疗的文献综述，不需要数据分析")
+            .with_project_root(".")
+            .with_strategy(SchedulingStrategy::Phased);
+
+        let plan =
+            futures::executor::block_on(planner.decompose(&request)).expect("phased review plan");
+        let stages: Vec<_> = plan
+            .subtasks
+            .iter()
+            .filter_map(|task| task.stage.clone())
+            .collect();
+
+        assert!(plan
+            .global_context
+            .contains("Project plan is authoritative"));
+        assert!(stages.contains(&SubTaskStage::Retrieve));
+        assert!(stages.contains(&SubTaskStage::Synthesize));
+        assert!(stages.contains(&SubTaskStage::Report));
+        assert!(stages.contains(&SubTaskStage::Verify));
+        assert!(!stages.contains(&SubTaskStage::Download));
+        assert!(!stages.contains(&SubTaskStage::Visualize));
+        assert!(!plan
+            .subtasks
+            .iter()
+            .any(|task| task.agent_type == "data-analysis"));
     }
 }

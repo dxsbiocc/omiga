@@ -184,7 +184,6 @@ async fn search_wiki_pages(
     permanent: bool,
 ) -> Option<String> {
     use crate::domain::memory::load_resolved_config;
-    use tokio::fs;
 
     let wiki_dir = if permanent {
         crate::domain::memory::config::permanent_wiki_path()
@@ -193,61 +192,10 @@ async fn search_wiki_pages(
         mem_cfg.wiki_path(project_root)
     };
 
-    if !wiki_dir.is_dir() {
+    let results = crate::domain::memory::search_markdown_wiki(&wiki_dir, query, limit).await;
+    if results.is_empty() {
         return None;
     }
-
-    let mut read_dir = fs::read_dir(&wiki_dir).await.ok()?;
-    let mut pages: Vec<(String, String)> = Vec::new(); // (filename, content)
-    while let Ok(Some(entry)) = read_dir.next_entry().await {
-        let path = entry.path();
-        if path
-            .extension()
-            .map_or(false, |e| e.eq_ignore_ascii_case("md"))
-        {
-            if let Ok(content) = fs::read_to_string(&path).await {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                pages.push((name, content));
-            }
-        }
-    }
-
-    if pages.is_empty() {
-        return None;
-    }
-
-    // Simple case-insensitive keyword match — score by number of query-term hits.
-    let keywords: Vec<String> = query
-        .split_whitespace()
-        .filter(|w| w.len() > 2)
-        .map(|w| w.to_lowercase())
-        .collect();
-
-    let mut scored: Vec<(usize, String, String)> = pages
-        .into_iter()
-        .filter_map(|(name, content)| {
-            let lc = content.to_lowercase();
-            let score: usize = keywords
-                .iter()
-                .map(|kw| lc.matches(kw.as_str()).count())
-                .sum();
-            if score == 0 {
-                None
-            } else {
-                Some((score, name, content))
-            }
-        })
-        .collect();
-
-    if scored.is_empty() {
-        return None;
-    }
-
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
-    scored.truncate(limit);
 
     let label = if permanent {
         "Permanent (cross-project) wiki"
@@ -256,9 +204,12 @@ async fn search_wiki_pages(
     };
 
     let mut out = format!("### {label}\n\n");
-    for (_, name, content) in &scored {
-        let excerpt = excerpt_around_keywords(&content, &keywords, 400);
-        out.push_str(&format!("**`{name}`**\n\n{excerpt}\n\n---\n\n"));
+    for result in &results {
+        let name = std::path::Path::new(&result.path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| result.path.clone());
+        out.push_str(&format!("**`{name}`**\n\n{}\n\n---\n\n", result.excerpt));
     }
     Some(out)
 }
@@ -266,42 +217,6 @@ async fn search_wiki_pages(
 /// Search the permanent cross-project wiki.
 async fn search_permanent_wiki(query: &str, limit: usize) -> Option<String> {
     search_wiki_pages(std::path::Path::new(""), query, limit, true).await
-}
-
-/// Return up to `max_chars` of content centred on the first keyword hit.
-fn excerpt_around_keywords(content: &str, keywords: &[String], max_chars: usize) -> String {
-    let lc = content.to_lowercase();
-    let hit_pos = keywords
-        .iter()
-        .filter_map(|kw| lc.find(kw.as_str()))
-        .min()
-        .unwrap_or(0);
-
-    let half = max_chars / 2;
-    let start = hit_pos.saturating_sub(half);
-    // Align to a char boundary.
-    let start = content
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i >= start)
-        .next()
-        .unwrap_or(0);
-    let end = (start + max_chars).min(content.len());
-    let end = content
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i >= end)
-        .next()
-        .unwrap_or(content.len());
-
-    let mut excerpt = content[start..end].to_string();
-    if start > 0 {
-        excerpt = format!("…{excerpt}");
-    }
-    if end < content.len() {
-        excerpt.push('…');
-    }
-    excerpt
 }
 
 pub fn schema() -> ToolSchema {
