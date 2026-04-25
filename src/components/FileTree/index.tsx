@@ -19,7 +19,21 @@ import {
   TableRow,
   Breadcrumbs,
   Link,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Button,
+  TextField,
+  Menu,
+  MenuItem,
+  ListItemIcon,
+  ListItemText,
+  Snackbar,
+  Alert,
+  CircularProgress,
 } from "@mui/material";
+import { alpha } from "@mui/material/styles";
 import { useTheme } from "@mui/material/styles";
 import {
   Folder,
@@ -28,10 +42,13 @@ import {
   PostAdd,
   DeleteOutline,
   DriveFileRenameOutline,
-  Settings,
+  MoreVert,
   NavigateNext,
   ArrowBack,
+  ContentCopy,
+  FolderOpen,
 } from "@mui/icons-material";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { FileIcon, FolderIcon } from "react-material-icon-theme";
 import { materialIconFileExtension } from "../../utils/materialIconTheme";
 import { extractErrorMessage } from "../../utils/errorMessage";
@@ -372,9 +389,9 @@ export function FileTree() {
   }, [sessionId, projectPath, composerConfigSessionId, loadDirectory]);
 
   const [pendingOpen, setPendingOpen] = useState<string | null>(null);
-  
+
   const handleOpenFile = useCallback(async (path: string) => {
-    if (pendingOpen) return; // Prevent double-clicks
+    if (pendingOpen) return;
     setPendingOpen(path);
     try {
       await openFile(path);
@@ -382,6 +399,8 @@ export function FileTree() {
       setPendingOpen(null);
     }
   }, [openFile, pendingOpen]);
+
+
 
   const fileList = Array.isArray(files) ? files : [];
 
@@ -423,6 +442,177 @@ export function FileTree() {
     () => (parentDotDot ? [parentDotDot, ...fileList] : fileList),
     [parentDotDot, fileList],
   );
+
+  // ── File-operation dialogs ────────────────────────────────────────────────
+  type DialogKind = "new_folder" | "new_file" | "rename" | "delete" | null;
+  const [dialogKind, setDialogKind] = useState<DialogKind>(null);
+  const [dialogInput, setDialogInput] = useState("");
+  const [dialogBusy, setDialogBusy] = useState(false);
+  const [dialogError, setDialogError] = useState<string | null>(null);
+  // "More options" menu anchor
+  const [moreAnchorEl, setMoreAnchorEl] = useState<null | HTMLElement>(null);
+  // Snackbar for copy-path / success feedback
+  const [snack, setSnack] = useState<{ msg: string; severity: "success" | "error" } | null>(null);
+
+  const openDialog = useCallback((kind: DialogKind) => {
+    const sel = Object.keys(rowSelection);
+    if (kind === "rename") {
+      const node = tableData.find((n) => n.path === sel[0] && n.name !== "..");
+      setDialogInput(node?.name ?? "");
+    } else {
+      setDialogInput("");
+    }
+    setDialogError(null);
+    setDialogKind(kind);
+  }, [rowSelection, tableData]);
+
+  const closeDialog = useCallback(() => {
+    if (dialogBusy) return;
+    setDialogKind(null);
+    setDialogInput("");
+    setDialogError(null);
+  }, [dialogBusy]);
+
+  const handleNewFolder = useCallback(async () => {
+    const name = dialogInput.trim();
+    if (!name || !currentDir) return;
+    if (name.includes("/") || name.includes("\\")) {
+      setDialogError("名称不能包含路径分隔符");
+      return;
+    }
+    setDialogBusy(true);
+    setDialogError(null);
+    try {
+      await invoke("create_directory", { path: `${currentDir}/${name}` });
+      closeDialog();
+      void loadDirectory(currentDir);
+    } catch (e) {
+      setDialogError(String(e));
+    } finally {
+      setDialogBusy(false);
+    }
+  }, [dialogInput, currentDir, closeDialog, loadDirectory]);
+
+  const handleNewFile = useCallback(async () => {
+    const name = dialogInput.trim();
+    if (!name || !currentDir) return;
+    if (name.includes("/") || name.includes("\\")) {
+      setDialogError("名称不能包含路径分隔符");
+      return;
+    }
+    setDialogBusy(true);
+    setDialogError(null);
+    try {
+      await invoke("create_file", { path: `${currentDir}/${name}` });
+      closeDialog();
+      void loadDirectory(currentDir);
+    } catch (e) {
+      setDialogError(String(e));
+    } finally {
+      setDialogBusy(false);
+    }
+  }, [dialogInput, currentDir, closeDialog, loadDirectory]);
+
+  const handleRename = useCallback(async () => {
+    const newName = dialogInput.trim();
+    const sel = Object.keys(rowSelection).filter((p) => tableData.find((n) => n.path === p && n.name !== ".."));
+    if (!newName || sel.length !== 1 || !currentDir) return;
+    if (newName.includes("/") || newName.includes("\\")) {
+      setDialogError("名称不能包含路径分隔符");
+      return;
+    }
+    const fromPath = sel[0];
+    const toPath = `${currentDir}/${newName}`;
+    if (fromPath === toPath) { closeDialog(); return; }
+    setDialogBusy(true);
+    setDialogError(null);
+    try {
+      await invoke("rename_fs_entry", { fromPath, toPath });
+      setRowSelection({});
+      closeDialog();
+      void loadDirectory(currentDir);
+    } catch (e) {
+      setDialogError(String(e));
+    } finally {
+      setDialogBusy(false);
+    }
+  }, [dialogInput, rowSelection, tableData, currentDir, closeDialog, loadDirectory]);
+
+  const handleDelete = useCallback(async () => {
+    const sel = Object.keys(rowSelection).filter((p) => tableData.find((n) => n.path === p && n.name !== ".."));
+    if (!sel.length || !currentDir) return;
+    setDialogBusy(true);
+    setDialogError(null);
+    try {
+      await Promise.all(sel.map((p) => invoke("delete_fs_entry", { path: p })));
+      setRowSelection({});
+      closeDialog();
+      void loadDirectory(currentDir);
+    } catch (e) {
+      setDialogError(String(e));
+    } finally {
+      setDialogBusy(false);
+    }
+  }, [rowSelection, tableData, currentDir, closeDialog, loadDirectory]);
+
+  const handleCopyPath = useCallback(async (relative = false) => {
+    const sel = Object.keys(rowSelection).filter((p) => tableData.find((n) => n.path === p && n.name !== ".."));
+    const paths = sel.length > 0 ? sel : currentDir ? [currentDir] : [];
+    if (!paths.length) return;
+    const text = relative && sessionRoot
+      ? paths.map((p) => p.startsWith(sessionRoot + "/") ? p.slice(sessionRoot.length + 1) : p).join("\n")
+      : paths.join("\n");
+    await navigator.clipboard.writeText(text);
+    setSnack({ msg: "路径已复制到剪贴板", severity: "success" });
+    setMoreAnchorEl(null);
+  }, [rowSelection, tableData, currentDir, sessionRoot]);
+
+  const handleRevealInFinder = useCallback(async () => {
+    const sel = Object.keys(rowSelection).filter((p) => tableData.find((n) => n.path === p && n.name !== ".."));
+    const target = sel[0] ?? currentDir;
+    if (!target) return;
+    try {
+      await revealItemInDir(target);
+    } catch (e) {
+      setSnack({ msg: `无法打开: ${String(e)}`, severity: "error" });
+    }
+    setMoreAnchorEl(null);
+  }, [rowSelection, tableData, currentDir]);
+
+  // Derived selection info
+  const selectedPaths = useMemo(
+    () => Object.keys(rowSelection).filter((p) => tableData.find((n) => n.path === p && n.name !== "..")),
+    [rowSelection, tableData],
+  );
+  const hasSelection = selectedPaths.length > 0;
+  const isSingleSelection = selectedPaths.length === 1;
+
+  const dialogTitle =
+    dialogKind === "new_folder"
+      ? "新建文件夹"
+      : dialogKind === "new_file"
+        ? "新建文件"
+        : dialogKind === "rename"
+          ? "重命名"
+          : dialogKind === "delete"
+            ? "删除文件"
+            : "";
+
+  const dialogConfirmLabel =
+    dialogKind === "delete"
+      ? "删除"
+      : dialogKind === "rename"
+        ? "重命名"
+        : "创建";
+
+  const handleDialogConfirm = useCallback(() => {
+    if (dialogKind === "new_folder") void handleNewFolder();
+    else if (dialogKind === "new_file") void handleNewFile();
+    else if (dialogKind === "rename") void handleRename();
+    else if (dialogKind === "delete") void handleDelete();
+  }, [dialogKind, handleDelete, handleNewFile, handleNewFolder, handleRename]);
+
+
 
   const columns = useMemo(
     () => [
@@ -679,20 +869,22 @@ export function FileTree() {
     );
   }
 
-  const toolbarBtn = {
-    size: "small" as const,
-    disabled: true,
-    sx: {
-      p: 0.75,
-      color: pen.toolbarIconMuted,
-      "&.Mui-disabled": { opacity: 0.5 },
+  const toolbarBtnSx = {
+    p: 0.75,
+    color: pen.toolbarIconMuted,
+    transition: "color 0.18s ease, background-color 0.18s ease",
+    "&:hover": {
+      color: pen.textTitle,
+      bgcolor: alpha(pen.toolbarBorder, 0.5),
     },
+    "&.Mui-disabled": { opacity: 0.38 },
   };
 
   const refresh = () => void loadDirectory(currentDir ?? projectPath);
 
   return (
-    <Fade in>
+    <>
+      <Fade in>
       <Box
         sx={{
           height: "100%",
@@ -845,40 +1037,64 @@ export function FileTree() {
               border: `1px solid ${pen.toolbarBorder}`,
             }}
           >
-            <Tooltip title="New folder (soon)">
-              <span>
-                <IconButton {...toolbarBtn}>
-                  <CreateNewFolder sx={{ fontSize: 18 }} />
-                </IconButton>
-              </span>
+            <Tooltip title="新建文件夹">
+              <IconButton
+                size="small"
+                onClick={() => openDialog("new_folder")}
+                disabled={!currentDir}
+                sx={toolbarBtnSx}
+              >
+                <CreateNewFolder sx={{ fontSize: 18 }} />
+              </IconButton>
             </Tooltip>
-            <Tooltip title="New file (soon)">
-              <span>
-                <IconButton {...toolbarBtn}>
-                  <PostAdd sx={{ fontSize: 18 }} />
-                </IconButton>
-              </span>
+            <Tooltip title="新建文件">
+              <IconButton
+                size="small"
+                onClick={() => openDialog("new_file")}
+                disabled={!currentDir}
+                sx={toolbarBtnSx}
+              >
+                <PostAdd sx={{ fontSize: 18 }} />
+              </IconButton>
             </Tooltip>
-            <Tooltip title="Delete (soon)">
+            <Tooltip title={hasSelection ? `删除 ${selectedPaths.length} 项` : "删除（请先选择文件）"}>
               <span>
-                <IconButton {...toolbarBtn}>
+                <IconButton
+                  size="small"
+                  onClick={() => openDialog("delete")}
+                  disabled={!hasSelection}
+                  sx={{
+                    ...toolbarBtnSx,
+                    "&:hover": {
+                      color: "error.main",
+                      bgcolor: alpha("#ef4444", 0.1),
+                    },
+                  }}
+                >
                   <DeleteOutline sx={{ fontSize: 18 }} />
                 </IconButton>
               </span>
             </Tooltip>
-            <Tooltip title="Rename (soon)">
+            <Tooltip title={isSingleSelection ? "重命名" : "重命名（请选择单个文件）"}>
               <span>
-                <IconButton {...toolbarBtn}>
+                <IconButton
+                  size="small"
+                  onClick={() => openDialog("rename")}
+                  disabled={!isSingleSelection}
+                  sx={toolbarBtnSx}
+                >
                   <DriveFileRenameOutline sx={{ fontSize: 18 }} />
                 </IconButton>
               </span>
             </Tooltip>
-            <Tooltip title="Options (soon)">
-              <span>
-                <IconButton {...toolbarBtn}>
-                  <Settings sx={{ fontSize: 18 }} />
-                </IconButton>
-              </span>
+            <Tooltip title="更多选项">
+              <IconButton
+                size="small"
+                onClick={(e) => setMoreAnchorEl(e.currentTarget)}
+                sx={toolbarBtnSx}
+              >
+                <MoreVert sx={{ fontSize: 18 }} />
+              </IconButton>
             </Tooltip>
             <Box sx={{ flex: 1, minWidth: 8 }} />
             <Tooltip title="刷新当前文件夹">
@@ -1083,6 +1299,111 @@ export function FileTree() {
           )}
         </Box>
       </Box>
-    </Fade>
+      </Fade>
+
+      <Menu
+        anchorEl={moreAnchorEl}
+        open={Boolean(moreAnchorEl)}
+        onClose={() => setMoreAnchorEl(null)}
+      >
+        <MenuItem
+          onClick={() => void handleCopyPath(false)}
+          disabled={!hasSelection && !currentDir}
+        >
+          <ListItemIcon>
+            <ContentCopy fontSize="small" />
+          </ListItemIcon>
+          <ListItemText primary="复制完整路径" />
+        </MenuItem>
+        <MenuItem
+          onClick={() => void handleCopyPath(true)}
+          disabled={(!hasSelection && !currentDir) || !sessionRoot}
+        >
+          <ListItemIcon>
+            <ContentCopy fontSize="small" />
+          </ListItemIcon>
+          <ListItemText primary="复制相对路径" />
+        </MenuItem>
+        <MenuItem
+          onClick={() => void handleRevealInFinder()}
+          disabled={!hasSelection && !currentDir}
+        >
+          <ListItemIcon>
+            <FolderOpen fontSize="small" />
+          </ListItemIcon>
+          <ListItemText primary="在 Finder 中显示" />
+        </MenuItem>
+      </Menu>
+
+      <Dialog
+        open={dialogKind !== null}
+        onClose={closeDialog}
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle>{dialogTitle}</DialogTitle>
+        <DialogContent>
+          {dialogKind === "delete" ? (
+            <Typography variant="body2" sx={{ pt: 0.5 }}>
+              {selectedPaths.length === 1
+                ? `确定要删除「${tableData.find((n) => n.path === selectedPaths[0])?.name ?? selectedPaths[0]}」吗？此操作不可撤销。`
+                : `确定要删除选中的 ${selectedPaths.length} 个项目吗？此操作不可撤销。`}
+            </Typography>
+          ) : (
+            <TextField
+              autoFocus
+              fullWidth
+              size="small"
+              margin="dense"
+              label={dialogKind === "rename" ? "新名称" : "名称"}
+              value={dialogInput}
+              onChange={(event) => setDialogInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") handleDialogConfirm();
+              }}
+            />
+          )}
+          {dialogError && (
+            <Alert severity="error" sx={{ mt: 1 }}>
+              {dialogError}
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeDialog} disabled={dialogBusy}>
+            取消
+          </Button>
+          <Button
+            onClick={handleDialogConfirm}
+            disabled={
+              dialogBusy ||
+              (dialogKind !== "delete" && !dialogInput.trim())
+            }
+            color={dialogKind === "delete" ? "error" : "primary"}
+            variant="contained"
+            startIcon={
+              dialogBusy ? <CircularProgress color="inherit" size={14} /> : null
+            }
+          >
+            {dialogConfirmLabel}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Snackbar
+        open={Boolean(snack)}
+        autoHideDuration={2400}
+        onClose={() => setSnack(null)}
+      >
+        <Alert
+          onClose={() => setSnack(null)}
+          severity={snack?.severity ?? "success"}
+          variant="filled"
+          sx={{ width: "100%" }}
+        >
+          {snack?.msg ?? ""}
+        </Alert>
+      </Snackbar>
+    </>
   );
 }

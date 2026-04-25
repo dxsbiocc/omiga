@@ -31,6 +31,52 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
+
+fn working_memory_query_text(
+    tool_name: &str,
+    arguments: &str,
+    skill_task_context: Option<&str>,
+) -> Option<String> {
+    let trimmed = arguments.trim();
+    let canonical = canonical_permission_tool_name(tool_name).to_ascii_lowercase();
+
+    let preferred_keys: &[&str] = match canonical.as_str() {
+        "recall" | "web_search" => &["query"],
+        "web_fetch" | "read_mcp_resource" => &["url", "uri"],
+        _ => &[
+            "query", "prompt", "message", "url", "uri", "path", "title", "text",
+        ],
+    };
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(found) = extract_first_string_field(&value, preferred_keys) {
+            return Some(found);
+        }
+    } else if !trimmed.is_empty() && !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+        return Some(trimmed.to_string());
+    }
+
+    skill_task_context
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn extract_first_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    let object = value.as_object()?;
+    for key in keys {
+        let found = object
+            .get(*key)
+            .and_then(|candidate| candidate.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        if let Some(found) = found {
+            return Some(found.to_string());
+        }
+    }
+    None
+}
+
 pub(super) async fn execute_tool_calls(
     tool_calls: &[(String, String, String)], // (id, name, arguments)
     app: &AppHandle,
@@ -1334,12 +1380,32 @@ pub(super) async fn execute_one_tool(
                 .await;
             }
         }
+        let working_memory_query =
+            working_memory_query_text(tool_name, arguments, skill_task_context);
+        let working_memory_context = if let Some(ref query_text) = working_memory_query {
+            let state = app.state::<OmigaAppState>();
+            crate::domain::memory::working_memory::render_context(
+                &state.repo,
+                &session_id,
+                query_text,
+                crate::domain::memory::working_memory::DEFAULT_CONTEXT_TOKENS,
+            )
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
         let ctx = {
+            let web_use_proxy = crate::llm::config::load_web_use_proxy_setting();
             let base = ToolContext::new(project_root.to_path_buf())
+                .with_session_id(Some(session_id.to_string()))
+                .with_working_memory_context(working_memory_context)
                 .with_todos(session_todos.clone())
                 .with_agent_tasks(session_agent_tasks.clone())
                 .with_plan_mode(agent_runtime.and_then(|r| r.plan_mode_flag.clone()))
                 .with_web_search_api_keys(web_search_api_keys.clone())
+                .with_web_use_proxy(web_use_proxy)
                 .with_tool_results_dir(tool_results_dir.to_path_buf())
                 .with_execution_environment(execution_environment.clone())
                 .with_ssh_server(ssh_server.clone())
@@ -1379,17 +1445,23 @@ pub(super) async fn execute_one_tool(
                 .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(str::to_owned))
                 .unwrap_or_default();
             if !query.trim().is_empty() {
-                crate::commands::memory::get_memory_context(project_root, &query, 5)
-                    .await
-                    .map(|kb| {
-                        format!(
-                            "## Knowledge base results (searched before web)\n\
+                crate::commands::memory::get_memory_context(
+                    &app.state::<OmigaAppState>().repo,
+                    project_root,
+                    Some(&session_id),
+                    &query,
+                    5,
+                )
+                .await
+                .map(|kb| {
+                    format!(
+                        "## Knowledge base results (searched before web)\n\
                              > Query: {query}\n\n\
                              {kb}\n\n\
                              ---\n\
                              ## Web search results\n"
-                        )
-                    })
+                    )
+                })
             } else {
                 None
             }
@@ -1515,4 +1587,28 @@ pub(super) async fn execute_one_tool(
     };
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn working_memory_query_prefers_recall_query_field() {
+        let query = working_memory_query_text(
+            "recall",
+            r#"{"query":"氧化还原节律","scope":"all","limit":5}"#,
+            Some("fallback task"),
+        );
+
+        assert_eq!(query.as_deref(), Some("氧化还原节律"));
+    }
+
+    #[test]
+    fn working_memory_query_falls_back_to_task_context_when_needed() {
+        let query =
+            working_memory_query_text("todo_write", r#"{"todos":[]}"#, Some("整理记忆分层"));
+
+        assert_eq!(query.as_deref(), Some("整理记忆分层"));
+    }
 }

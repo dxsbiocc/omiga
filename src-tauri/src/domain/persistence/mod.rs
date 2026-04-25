@@ -5,6 +5,7 @@
 //! - Message history
 //! - Settings/preferences
 //! - Session-scoped tool state (`todo_write`, V2 tasks)
+//! - Session-scoped working memory scratchpad
 
 use crate::domain::agents::background::{BackgroundAgentStatus, BackgroundAgentTask};
 use crate::domain::session::{sanitize_background_sidechain_message, AgentTask, Message, TodoItem};
@@ -364,6 +365,19 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS session_working_memory (
+            session_id TEXT PRIMARY KEY,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     // Background Agent tasks (Rust authority + survive restart; memory cache in BackgroundAgentManager)
     sqlx::query(
         r#"
@@ -554,6 +568,25 @@ impl SessionRepository {
         .bind(id)
         .fetch_optional(&self.pool)
         .await
+    }
+
+    pub async fn find_latest_session_id_for_project(
+        &self,
+        project_path: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let row: Option<(String,)> = sqlx::query_as(
+            r#"
+            SELECT id
+            FROM sessions
+            WHERE project_path = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(project_path)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(id,)| id))
     }
 
     /// Return at most `limit` messages for `session_id`, ordered newest-first.
@@ -1281,6 +1314,24 @@ impl SessionRepository {
         Ok((todos, tasks))
     }
 
+    /// Load session working memory scratchpad JSON.
+    pub async fn get_session_working_memory(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::domain::memory::working_memory::WorkingMemoryState>, sqlx::Error>
+    {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT state_json FROM session_working_memory WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        Ok(row.and_then(|(json,)| {
+            serde_json::from_str::<crate::domain::memory::working_memory::WorkingMemoryState>(&json)
+                .ok()
+        }))
+    }
+
     /// Upsert one background agent task row (authoritative store; memory cache may overlay).
     pub async fn upsert_background_agent_task(
         &self,
@@ -1517,6 +1568,33 @@ impl SessionRepository {
         Ok(())
     }
 
+    /// Persist session working memory scratchpad (best-effort JSON).
+    pub async fn upsert_session_working_memory(
+        &self,
+        session_id: &str,
+        state: &crate::domain::memory::working_memory::WorkingMemoryState,
+    ) -> Result<(), sqlx::Error> {
+        let state_json = serde_json::to_string(state).unwrap_or_else(|_| "{}".to_string());
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            r#"
+            INSERT INTO session_working_memory (session_id, state_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                state_json = excluded.state_json,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(session_id)
+        .bind(&state_json)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// Get all rounds for a session (for history/replay)
     pub async fn get_session_rounds(
         &self,
@@ -1562,7 +1640,7 @@ pub struct SessionWithCount {
 }
 
 /// Message database record
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct MessageRecord {
     pub id: String,
     pub session_id: String,
@@ -1578,7 +1656,7 @@ pub struct MessageRecord {
 }
 
 /// Session with all messages
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionWithMessages {
     pub id: String,
     pub name: String,

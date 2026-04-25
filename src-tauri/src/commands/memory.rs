@@ -6,13 +6,19 @@
 use crate::domain::memory::{
     config::{MemoryConfig, MemoryMode},
     load_resolved_config,
+    long_term::LongTermStatus,
     migration::{detect_structure_version, MemoryStructureVersion},
-    permanent_wiki_path, registry, MemorySystem,
+    permanent_long_term_path,
+    permanent_profile::PermanentProfileStatus,
+    permanent_wiki_path, registry,
+    working_memory::WorkingMemoryStatus as SessionWorkingMemoryStatus,
+    MemorySystem,
 };
 use crate::domain::pageindex::{IndexConfig, PageIndex, QueryResult};
 use crate::errors::AppError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use tauri::State;
 
 /// Memory level for import operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +113,10 @@ pub struct UnifiedMemoryStatus {
     pub needs_migration: bool,
     pub explicit: ExplicitMemoryStatus,
     pub implicit: ImplicitMemoryStatus,
+    pub permanent_profile: PermanentProfileStatus,
+    pub working_memory: SessionWorkingMemoryStatus,
+    pub long_term: LongTermStatus,
+    pub knowledge_base: KnowledgeBaseStatus,
     pub paths: MemoryPaths,
 }
 
@@ -126,12 +136,22 @@ pub struct ImplicitMemoryStatus {
 }
 
 #[derive(Debug, Serialize)]
+pub struct KnowledgeBaseStatus {
+    pub project_page_count: usize,
+    pub global_page_count: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct MemoryPaths {
     pub root: String,
     pub wiki: String,
     pub implicit: String,
     /// User-level permanent wiki (`~/.omiga/memory/permanent/wiki`)
     pub permanent_wiki: String,
+    /// Project-level long-term memory (`.../long_term`)
+    pub long_term: String,
+    /// User-level global long-term memory (`~/.omiga/memory/permanent/long_term`)
+    pub permanent_long_term: String,
     /// Raw original file storage (`~/.omiga/memory/raw` by default)
     pub raw: String,
 }
@@ -238,6 +258,7 @@ pub async fn memory_migrate(project_path: String) -> Result<bool, AppError> {
 /// Get unified memory status
 #[tauri::command]
 pub async fn memory_get_unified_status(
+    app_state: State<'_, crate::app_state::OmigaAppState>,
     project_path: String,
 ) -> Result<UnifiedMemoryStatus, AppError> {
     let root = project_root(&project_path);
@@ -246,6 +267,27 @@ pub async fn memory_get_unified_status(
     let config = load_resolved_config(&root).await.unwrap_or_default();
     let memory = MemorySystem::with_config(&root, config.clone());
     let stats = memory.stats().await;
+    let permanent_profile_status = crate::domain::agents::load_user_omiga_context()
+        .permanent_profile
+        .status();
+    let latest_session_id = app_state
+        .repo
+        .find_latest_session_id_for_project(&project_path)
+        .await
+        .map_err(|e| AppError::Unknown(e.to_string()))?
+        .or(app_state
+            .repo
+            .find_latest_session_id_for_project(&root.to_string_lossy())
+            .await
+            .map_err(|e| AppError::Unknown(e.to_string()))?);
+    let working_memory_status = if let Some(session_id) = latest_session_id {
+        crate::domain::memory::working_memory::load_state(&app_state.repo, &session_id)
+            .await
+            .map(|state| state.status())
+            .map_err(|e| AppError::Unknown(e.to_string()))?
+    } else {
+        SessionWorkingMemoryStatus::default()
+    };
 
     // Get implicit memory details
     let implicit_status = get_implicit_status(&root, &config).await?;
@@ -261,11 +303,23 @@ pub async fn memory_get_unified_status(
             document_count: stats.explicit_documents,
         },
         implicit: implicit_status,
+        permanent_profile: permanent_profile_status,
+        working_memory: working_memory_status,
+        long_term: LongTermStatus {
+            project_entry_count: stats.long_term_project_entries,
+            global_entry_count: stats.long_term_global_entries,
+        },
+        knowledge_base: KnowledgeBaseStatus {
+            project_page_count: stats.project_knowledge_pages,
+            global_page_count: stats.global_knowledge_pages,
+        },
         paths: MemoryPaths {
             root: memory.root_path().to_string_lossy().to_string(),
             wiki: memory.wiki_path().to_string_lossy().to_string(),
             implicit: memory.implicit_path().to_string_lossy().to_string(),
             permanent_wiki: permanent_wiki_path().to_string_lossy().to_string(),
+            long_term: memory.long_term_path().to_string_lossy().to_string(),
+            permanent_long_term: permanent_long_term_path().to_string_lossy().to_string(),
             raw: config.raw_path().to_string_lossy().to_string(),
         },
     })
@@ -362,6 +416,8 @@ pub struct BuildIndexRequest {
 #[derive(Debug, Deserialize)]
 pub struct QueryRequest {
     pub project_path: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub query: String,
     pub limit: Option<usize>,
 }
@@ -381,6 +437,7 @@ pub struct QueryResultItem {
     pub excerpt: String,
     pub score: f64,
     pub match_type: String,
+    pub source_type: String,
 }
 
 impl From<QueryResult> for QueryResultItem {
@@ -392,6 +449,7 @@ impl From<QueryResult> for QueryResultItem {
             excerpt: r.excerpt,
             score: r.score,
             match_type: format!("{:?}", r.match_type),
+            source_type: "Implicit".to_string(),
         }
     }
 }
@@ -485,46 +543,45 @@ pub async fn memory_update_index(project_path: String) -> Result<MemoryStatus, A
 }
 
 #[tauri::command]
-pub async fn memory_query(req: QueryRequest) -> Result<QueryResponse, AppError> {
+pub async fn memory_query(
+    app_state: State<'_, crate::app_state::OmigaAppState>,
+    req: QueryRequest,
+) -> Result<QueryResponse, AppError> {
     let root = project_root(&req.project_path);
     let config = load_resolved_config(&root).await.unwrap_or_default();
     let limit = req.limit.unwrap_or(5);
     let memory = MemorySystem::with_config(&root, config);
-    let unified = memory.query(&req.query, limit).await;
+    let working_memory_excerpt = if let Some(session_id) = req.session_id.as_deref() {
+        crate::domain::memory::working_memory::render_context(
+            &app_state.repo,
+            session_id,
+            &req.query,
+            crate::domain::memory::working_memory::DEFAULT_CONTEXT_TOKENS,
+        )
+        .await
+        .map_err(|e| AppError::Unknown(e.to_string()))?
+    } else {
+        None
+    };
+    let unified = memory
+        .query_with_session(working_memory_excerpt.as_deref(), &req.query, limit)
+        .await;
     let total_matches = unified.total_matches;
 
     let mut results: Vec<QueryResultItem> = unified
-        .explicit_results
+        .results
         .into_iter()
         .map(|r| QueryResultItem {
             title: r.title,
             path: r.path,
-            breadcrumb: vec![],
+            breadcrumb: r.breadcrumb,
             excerpt: r.excerpt,
             score: r.score,
-            match_type: "Wiki".to_string(),
+            match_type: r.match_type,
+            source_type: r.source_type.label().to_string(),
         })
         .collect();
 
-    results.extend(
-        unified
-            .implicit_results
-            .into_iter()
-            .map(|r| QueryResultItem {
-                title: r.title,
-                path: r.path,
-                breadcrumb: r.breadcrumb,
-                excerpt: r.excerpt,
-                score: r.score,
-                match_type: "Implicit".to_string(),
-            }),
-    );
-
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
     results.truncate(limit);
 
     Ok(QueryResponse {
@@ -559,33 +616,46 @@ pub async fn memory_get_dir(project_path: String) -> String {
 
 /// Get relevant context for chat (internal use)
 pub async fn get_memory_context(
+    repo: &crate::domain::persistence::SessionRepository,
     project_path: &std::path::Path,
+    session_id: Option<&str>,
     query: &str,
     limit: usize,
 ) -> Option<String> {
     let mem_cfg = load_resolved_config(project_path).await.ok()?;
-    let implicit = mem_cfg.implicit_path(project_path);
-    let index_config = IndexConfig::default();
-    let mut pageindex = PageIndex::with_memory_dir(project_path, &implicit, index_config);
-
-    // load_tree returns Ok(None) when no index exists — no pre-check needed.
-    match pageindex.load_tree().await {
-        Ok(Some(tree)) => {
-            *pageindex.tree_mut() = tree;
-        }
-        Ok(None) => return None,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load memory index tree; skipping context injection");
-            return None;
-        }
-    }
-
-    let results = pageindex.query(query, limit).await.ok()?;
-    if results.is_empty() {
+    let memory = MemorySystem::with_config(project_path, mem_cfg.clone());
+    let working_memory_excerpt = if let Some(session_id) = session_id {
+        crate::domain::memory::working_memory::render_context(
+            repo,
+            session_id,
+            query,
+            crate::domain::memory::working_memory::DEFAULT_CONTEXT_TOKENS,
+        )
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+    let unified = memory
+        .query_with_session(working_memory_excerpt.as_deref(), query, limit)
+        .await;
+    if unified.results.is_empty() {
         return None;
     }
 
-    Some(crate::domain::pageindex::QueryEngine::new().format_results_as_context(&results))
+    let mut out = String::from("## Relevant Context from Memory Layers\n\n");
+    for (index, result) in unified.results.iter().enumerate() {
+        out.push_str(&format!(
+            "### {}. {} [{}]\n*Source: `{}`*\n\n{}\n\n---\n\n",
+            index + 1,
+            result.title,
+            result.source_type.label(),
+            result.path,
+            result.excerpt
+        ));
+    }
+    Some(out)
 }
 
 /// Build a system-prompt section that tells the main agent about its persistent
@@ -594,22 +664,26 @@ pub async fn get_memory_context(
 /// Always returns a section (overrides the model's default "I have no cross-session
 /// memory" belief). The wiki page list is appended only when pages exist.
 pub async fn memory_navigation_section(project_root: &std::path::Path) -> String {
-    let (wiki_path, implicit_path, perm_wiki, wiki_pages) =
+    let (wiki_path, implicit_path, long_term_path, perm_wiki, perm_long_term, wiki_pages) =
         match load_resolved_config(project_root).await {
             Ok(mem_cfg) => {
                 let wp = mem_cfg.wiki_path(project_root);
                 let ip = mem_cfg.implicit_path(project_root);
+                let lp = mem_cfg.long_term_path(project_root);
                 let pw = crate::domain::memory::config::permanent_wiki_path();
+                let plt = crate::domain::memory::config::permanent_long_term_path();
                 let pages = list_wiki_pages(&wp);
-                (wp, ip, pw, pages)
+                (wp, ip, lp, pw, plt, pages)
             }
             Err(_) => {
                 // Config unavailable — use defaults so we can still emit the section.
                 let default_cfg = crate::domain::memory::MemoryConfig::default();
                 let wp = default_cfg.wiki_path(project_root);
                 let ip = default_cfg.implicit_path(project_root);
+                let lp = default_cfg.long_term_path(project_root);
                 let pw = crate::domain::memory::config::permanent_wiki_path();
-                (wp, ip, pw, vec![])
+                let plt = crate::domain::memory::config::permanent_long_term_path();
+                (wp, ip, lp, pw, plt, vec![])
             }
         };
 
@@ -630,32 +704,49 @@ pub async fn memory_navigation_section(project_root: &std::path::Path) -> String
             .to_string(),
     );
     lines.push(
-        "1. Check the **Relevant memory excerpts** section below (auto-injected from implicit index).".to_string(),
+        "0. Stable persona, user preferences, and hard constraints are already auto-compiled from `~/.omiga/SOUL.md`, `USER.md`, and `MEMORY.md` into the system prompt."
+            .to_string(),
+    );
+    lines.push(
+        "1. Check the **Relevant memory excerpts** section below (auto-injected from working memory + long-term + knowledge base).".to_string(),
     );
     lines.push(format!(
-        "2. Browse wiki pages with `glob` or `file_read` under `{}`.",
+        "2. Browse project knowledge pages under `{}`.",
         wiki_path.display()
     ));
     lines.push(format!(
-        "3. Check permanent wiki under `{}` for cross-project knowledge.",
+        "3. Check project long-term memory under `{}` for reusable prior conclusions.",
+        long_term_path.display()
+    ));
+    lines.push(format!(
+        "4. Check global knowledge base under `{}` for cross-project knowledge.",
         perm_wiki.display()
     ));
-    lines.push(
-        "4. Read `~/.omiga/MEMORY.md` for hand-written durable notes (injected above if non-empty).".to_string(),
-    );
+    lines.push(format!(
+        "5. Check global long-term memory under `{}` for reusable prior experience.",
+        perm_long_term.display()
+    ));
     lines.push(String::new());
     lines.push("### Memory storage locations".to_string());
     lines.push(format!(
-        "- **Wiki (explicit)**: `{}` — structured pages; use `file_read <path>` to read.",
+        "- **Knowledge base (project)**: `{}` — structured stable pages.",
         wiki_path.display()
     ));
     lines.push(format!(
-        "- **Implicit index**: `{}` — auto-indexed sessions; semantic excerpts injected automatically.",
+        "- **Long-term memory (project)**: `{}` — reusable summaries and prior conclusions.",
+        long_term_path.display()
+    ));
+    lines.push(format!(
+        "- **Implicit index**: `{}` — auto-indexed sessions and chat evidence.",
         implicit_path.display()
     ));
     lines.push(format!(
-        "- **Permanent wiki**: `{}` — global, cross-project.",
+        "- **Global knowledge base**: `{}` — cross-project stable knowledge.",
         perm_wiki.display()
+    ));
+    lines.push(format!(
+        "- **Global long-term memory**: `{}` — cross-project reusable conclusions.",
+        perm_long_term.display()
     ));
 
     if !wiki_pages.is_empty() {
@@ -668,7 +759,7 @@ pub async fn memory_navigation_section(project_root: &std::path::Path) -> String
         lines.push(String::new());
         lines.push(
             "No wiki pages exist yet for this project. \
-             If relevant implicit memory excerpts appear below, use them. \
+             If relevant working-memory or long-term excerpts appear below, use them. \
              Otherwise acknowledge the memory system exists but is empty."
                 .to_string(),
         );

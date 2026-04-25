@@ -95,42 +95,35 @@ impl super::ToolImpl for RecallTool {
             });
         }
 
-        let search_implicit = scope == "all" || scope == "implicit";
-        let search_wiki = scope == "all" || scope == "wiki";
-        let search_permanent = scope == "all" || scope == "permanent";
+        let mem_cfg = crate::domain::memory::load_resolved_config(project_root)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("failed to load memory config: {}", e),
+            })?;
+        let memory = crate::domain::memory::MemorySystem::with_config(project_root, mem_cfg);
+        let mut unified = memory
+            .query_with_session(ctx.working_memory_context.as_deref(), &query, limit)
+            .await;
 
-        let mut sections: Vec<String> = Vec::new();
-        let mut total_results = 0usize;
-
-        // ── 1. Implicit memory (PageIndex over session history) ──────────────────
-        if search_implicit {
-            if let Some(implicit_text) = query_implicit_memory(project_root, &query, limit).await {
-                total_results += 1;
-                sections.push(implicit_text);
-            }
-        }
-
-        // ── 2. Wiki pages (explicit memory) ─────────────────────────────────────
-        if search_wiki {
-            if let Some(wiki_text) = search_wiki_pages(project_root, &query, limit, false).await {
-                total_results += 1;
-                sections.push(wiki_text);
-            }
-        }
-
-        // ── 3. Permanent (cross-project) wiki ────────────────────────────────────
-        if search_permanent {
-            if let Some(perm_text) = search_permanent_wiki(&query, limit).await {
-                total_results += 1;
-                sections.push(perm_text);
-            }
-        }
-
-        let content = if sections.is_empty() {
-            String::new()
-        } else {
-            sections.join("\n\n")
-        };
+        unified.results.retain(|result| match scope.as_str() {
+            "implicit" => matches!(
+                result.source_type,
+                crate::domain::memory::MemorySourceType::Implicit
+            ),
+            "wiki" => matches!(
+                result.source_type,
+                crate::domain::memory::MemorySourceType::KnowledgeBaseProject
+                    | crate::domain::memory::MemorySourceType::KnowledgeBaseGlobal
+            ),
+            "permanent" => matches!(
+                result.source_type,
+                crate::domain::memory::MemorySourceType::LongTermGlobal
+                    | crate::domain::memory::MemorySourceType::KnowledgeBaseGlobal
+            ),
+            _ => true,
+        });
+        let total_results = unified.results.len();
+        let content = format_unified_results(&unified.results);
 
         let out = RecallOutput {
             query,
@@ -141,82 +134,22 @@ impl super::ToolImpl for RecallTool {
     }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Query the pageindex (implicit / session memory).
-async fn query_implicit_memory(
-    project_root: &std::path::Path,
-    query: &str,
-    limit: usize,
-) -> Option<String> {
-    use crate::domain::memory::load_resolved_config;
-    use crate::domain::pageindex::{IndexConfig, PageIndex, QueryEngine};
-
-    let mem_cfg = load_resolved_config(project_root).await.ok()?;
-    let implicit = mem_cfg.implicit_path(project_root);
-    let mut pageindex = PageIndex::with_memory_dir(project_root, &implicit, IndexConfig::default());
-
-    match pageindex.load_tree().await {
-        Ok(Some(tree)) => *pageindex.tree_mut() = tree,
-        Ok(None) => return None,
-        Err(e) => {
-            tracing::debug!(target: "omiga::recall", "implicit memory load failed: {e}");
-            return None;
-        }
-    }
-
-    let results = pageindex.query(query, limit).await.ok()?;
+fn format_unified_results(results: &[crate::domain::memory::MemoryQueryMatch]) -> String {
     if results.is_empty() {
-        return None;
+        return String::new();
     }
 
-    let formatted = QueryEngine::new().format_results_as_context(&results);
-    Some(format!(
-        "### Implicit memory (session history)\n\n{formatted}"
-    ))
-}
-
-/// Keyword search in wiki markdown pages under the project memory directory.
-async fn search_wiki_pages(
-    project_root: &std::path::Path,
-    query: &str,
-    limit: usize,
-    permanent: bool,
-) -> Option<String> {
-    use crate::domain::memory::load_resolved_config;
-
-    let wiki_dir = if permanent {
-        crate::domain::memory::config::permanent_wiki_path()
-    } else {
-        let mem_cfg = load_resolved_config(project_root).await.ok()?;
-        mem_cfg.wiki_path(project_root)
-    };
-
-    let results = crate::domain::memory::search_markdown_wiki(&wiki_dir, query, limit).await;
-    if results.is_empty() {
-        return None;
+    let mut out = String::new();
+    for result in results {
+        out.push_str(&format!(
+            "### {} [{}]\n\n*Source: `{}`*\n\n{}\n\n---\n\n",
+            result.title,
+            result.source_type.label(),
+            result.path,
+            result.excerpt
+        ));
     }
-
-    let label = if permanent {
-        "Permanent (cross-project) wiki"
-    } else {
-        "Project wiki (explicit memory)"
-    };
-
-    let mut out = format!("### {label}\n\n");
-    for result in &results {
-        let name = std::path::Path::new(&result.path)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| result.path.clone());
-        out.push_str(&format!("**`{name}`**\n\n{}\n\n---\n\n", result.excerpt));
-    }
-    Some(out)
-}
-
-/// Search the permanent cross-project wiki.
-async fn search_permanent_wiki(query: &str, limit: usize) -> Option<String> {
-    search_wiki_pages(std::path::Path::new(""), query, limit, true).await
+    out
 }
 
 pub fn schema() -> ToolSchema {

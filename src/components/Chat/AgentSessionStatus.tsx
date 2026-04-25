@@ -137,8 +137,20 @@ export function AgentSessionStatus({
 
   return (
     <Box
-      role="status"
+      role={showResume ? "button" : "status"}
       aria-label={displayLabel}
+      tabIndex={showResume ? 0 : undefined}
+      onClick={showResume && onResume ? onResume : undefined}
+      onKeyDown={
+        showResume && onResume
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onResume();
+              }
+            }
+          : undefined
+      }
       sx={{
         position: "relative",
         minWidth: 0,
@@ -150,10 +162,31 @@ export function AgentSessionStatus({
         backdropFilter: "blur(14px) saturate(160%)",
         WebkitBackdropFilter: "blur(14px) saturate(160%)",
         boxShadow: `0 1px 0 ${alpha(theme.palette.common.black, 0.04)}, 0 8px 24px ${alpha(theme.palette.common.black, 0.06)}`,
-        transition: "border-color 0.22s ease, box-shadow 0.22s ease",
+        cursor: showResume ? "pointer" : "default",
+        userSelect: "none",
+        transition: "border-color 0.35s ease, box-shadow 0.35s ease, background 0.35s ease, transform 0.2s ease",
         "@media (prefers-reduced-motion: reduce)": {
           transition: "none",
         },
+        "&:hover": {
+          borderColor: alpha(accent, showResume ? 0.65 : busy ? 0.5 : 0.36),
+          background: showResume
+            ? alpha(accent, 0.15)
+            : alpha(theme.palette.background.paper, 0.72),
+          boxShadow: `0 4px 22px ${alpha(accent, showResume ? 0.38 : 0.14)}, 0 1px 0 ${alpha(theme.palette.common.black, 0.04)}`,
+          transform: "translateY(-1px)",
+          "& .status-pill-label": {
+            letterSpacing: showResume ? "0.08em" : "0.04em",
+          },
+        },
+        "&:active": showResume
+          ? {
+              transform: "translateY(2px)",
+              boxShadow: `0 0 0 0 ${alpha(accent, 0)}`,
+              transition:
+                "transform 0.1s ease, box-shadow 0.1s ease, background 0.1s ease",
+            }
+          : {},
       }}
     >
       <Stack
@@ -211,12 +244,17 @@ export function AgentSessionStatus({
           <Typography
             variant="caption"
             fontWeight={700}
-            letterSpacing={0.02}
             noWrap
+            className="status-pill-label"
             sx={{
               color: "text.primary",
               fontSize: "0.72rem",
               lineHeight: 1.25,
+              letterSpacing: "0.02em",
+              transition: "letter-spacing 0.35s ease",
+              "@media (prefers-reduced-motion: reduce)": {
+                transition: "none",
+              },
               fontFamily:
                 !showResume && kind === "tool"
                   ? "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"

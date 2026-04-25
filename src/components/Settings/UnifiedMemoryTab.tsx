@@ -234,7 +234,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
               Knowledge · 统一记忆
             </Typography>
             <Typography variant="body2" color="text.primary" sx={{ lineHeight: 1.65 }}>
-              <strong>知识库（显性记忆）</strong>是用户级全局存储，保存在{" "}
+              <strong>全局知识库</strong>是用户级全局存储，保存在{" "}
               <strong>~/.omiga/memory/permanent/wiki</strong>，跨所有项目可用。
               <strong>隐性记忆</strong>（PageIndex）自动索引聊天历史，按项目存储在{" "}
               <strong>~/.omiga/memory/projects/&lt;项目键&gt;/</strong>。
@@ -331,7 +331,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                       {memory.status.explicit.enabled ? memory.status.explicit.document_count : "—"}
                     </Typography>
                     <Typography variant="caption" color="text.secondary">
-                      Wiki 页面数
+                      知识库页面数
                     </Typography>
                   </CardContent>
                 </Card>
@@ -489,8 +489,16 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
               }}
             >
               <li>
-                <strong>知识库（显性记忆）</strong>：用户级全局知识库（PDF、MD、TXT 等），位于{" "}
+                <strong>全局知识库</strong>：用户级全局知识库（PDF、MD、TXT 等），位于{" "}
                 <code>{memory.status?.paths.permanent_wiki || "~/.omiga/memory/permanent/wiki"}</code>
+              </li>
+              <li>
+                <strong>长期记忆</strong>：项目级与全局级可召回总结，位于{" "}
+                <code>{memory.status?.paths.long_term || "~/.omiga/memory/projects/<key>/long_term"}</code> /{" "}
+                <code>{memory.status?.paths.permanent_long_term || "~/.omiga/memory/permanent/long_term"}</code>
+              </li>
+              <li>
+                <strong>工作记忆</strong>：session scratchpad，保存在 SQLite，会在当前轮按需注入
               </li>
               <li>
                 <strong>隐性记忆</strong>：自动索引的聊天历史，每次对话后更新
@@ -559,7 +567,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                 bgcolor: alpha(theme.palette.info.main, 0.06),
               }}
             >
-              知识库（显性记忆）是<strong>用户级全局存储</strong>，跨所有项目可用。导入的文档将保存到{" "}
+              全局知识库是<strong>用户级全局存储</strong>，跨所有项目可用。导入的文档将保存到{" "}
               <strong>~/.omiga/memory/permanent/wiki</strong>，对话时自动检索提供上下文。
             </Alert>
 
@@ -571,7 +579,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                     全局知识库路径
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
-                    跨项目共享 · {memory.status?.explicit.document_count ?? 0} 个页面
+                    跨项目共享 · {memory.status?.knowledge_base.global_page_count ?? memory.status?.explicit.document_count ?? 0} 个页面
                   </Typography>
                 </Box>
               </Stack>
@@ -832,7 +840,11 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                           <Typography variant="caption" fontWeight={700} color="text.primary">
                             {result.title}
                           </Typography>
-                          <Chip label={result.match_type} size="small" sx={{ fontWeight: 600 }} />
+                          <Chip
+                            label={`${result.source_type} · ${result.match_type}`}
+                            size="small"
+                            sx={{ fontWeight: 600 }}
+                          />
                         </Stack>
                         <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
                           {result.path}

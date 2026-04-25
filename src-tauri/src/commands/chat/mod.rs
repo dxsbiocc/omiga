@@ -408,6 +408,7 @@ async fn handle_runtime_constraint_block_main(
     session_id: &str,
     round_id: &str,
     message_id: &str,
+    user_message: &str,
     assistant_text: &str,
     assistant_reasoning: &str,
     tool_calls: &[(String, String, String)],
@@ -694,6 +695,17 @@ async fn handle_runtime_constraint_block_main(
         provider_name,
     )
     .await;
+    sync_memory_layers_after_turn(
+        app,
+        sessions,
+        &repo,
+        session_id,
+        client,
+        user_message,
+        &final_response,
+        false,
+    )
+    .await;
     emit_post_turn_meta_then_complete(
         app,
         message_id,
@@ -929,6 +941,26 @@ pub struct AgentRoleInfoDto {
     pub user_facing: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchCommandRequest {
+    pub session_id: String,
+    pub project_path: String,
+    pub content: String,
+    #[serde(default)]
+    pub body: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchCommandResponse {
+    pub session_id: String,
+    pub round_id: String,
+    pub user_message_id: String,
+    pub assistant_message_id: String,
+    pub assistant_content: String,
+}
+
 #[tauri::command]
 pub fn list_available_agents() -> Vec<AvailableAgentInfo> {
     let router = crate::domain::agents::get_agent_router();
@@ -960,6 +992,173 @@ pub fn list_agent_roles() -> Vec<AgentRoleInfoDto> {
             user_facing: role.user_facing,
         })
         .collect()
+}
+
+#[tauri::command]
+pub async fn run_research_command(
+    app_state: State<'_, OmigaAppState>,
+    request: ResearchCommandRequest,
+) -> CommandResult<ResearchCommandResponse> {
+    let repo = &*app_state.repo;
+    let db_session = repo
+        .get_session(&request.session_id)
+        .await
+        .map_err(|e| {
+            OmigaError::Chat(ChatError::StreamError(format!(
+                "Failed to load session: {}",
+                e
+            )))
+        })?
+        .ok_or_else(|| {
+            OmigaError::Chat(ChatError::StreamError(
+                "Session not found for /research".to_string(),
+            ))
+        })?;
+
+    let cwd = resolve_session_project_root(&request.project_path);
+    let args = parse_research_body(&request.body);
+    let output = crate::domain::research_system::run_research_cli(&args, &cwd)
+        .map_err(|e| OmigaError::Chat(ChatError::StreamError(e.to_string())))?;
+    let assistant_content = format_research_output(&args, &output);
+
+    let user_message_id = uuid::Uuid::new_v4().to_string();
+    repo.save_message(
+        &user_message_id,
+        &request.session_id,
+        "user",
+        &request.content,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .map_err(|e| {
+        OmigaError::Chat(ChatError::StreamError(format!(
+            "Failed to save /research user message: {}",
+            e
+        )))
+    })?;
+
+    let round_id = uuid::Uuid::new_v4().to_string();
+    let assistant_message_id = uuid::Uuid::new_v4().to_string();
+    repo.create_round(
+        &round_id,
+        &request.session_id,
+        &assistant_message_id,
+        Some(&user_message_id),
+    )
+    .await
+    .map_err(|e| {
+        OmigaError::Chat(ChatError::StreamError(format!(
+            "Failed to create /research round: {}",
+            e
+        )))
+    })?;
+
+    repo.save_message(
+        &assistant_message_id,
+        &request.session_id,
+        "assistant",
+        &assistant_content,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .map_err(|e| {
+        OmigaError::Chat(ChatError::StreamError(format!(
+            "Failed to save /research assistant message: {}",
+            e
+        )))
+    })?;
+
+    repo.complete_round(&round_id, Some(&assistant_message_id))
+        .await
+        .map_err(|e| {
+            OmigaError::Chat(ChatError::StreamError(format!(
+                "Failed to complete /research round: {}",
+                e
+            )))
+        })?;
+    repo.touch_session(&request.session_id).await.ok();
+
+    {
+        let mut sessions = app_state.chat.sessions.write().await;
+        if let Some(runtime) = sessions.get_mut(&request.session_id) {
+            let mut persisted_session = SessionCodec::db_to_domain(db_session);
+            persisted_session.add_user_message(&request.content);
+            persisted_session.add_assistant_message(&assistant_content);
+            runtime.session = persisted_session;
+        }
+    }
+
+    append_orchestration_event(
+        repo,
+        &request.session_id,
+        Some(&round_id),
+        Some(&assistant_message_id),
+        Some("research"),
+        "research_command_completed",
+        Some("complete"),
+        None,
+        serde_json::json!({
+            "cwd": cwd,
+            "args": args,
+        }),
+    )
+    .await;
+
+    Ok(ResearchCommandResponse {
+        session_id: request.session_id,
+        round_id,
+        user_message_id,
+        assistant_message_id,
+        assistant_content,
+    })
+}
+
+fn parse_research_body(body: &str) -> Vec<String> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return vec!["help".to_string()];
+    }
+
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let first = parts.next().unwrap_or_default();
+    let rest = parts.next().unwrap_or_default().trim();
+
+    match first {
+        "init" | "list-agents" | "list-proposals" | "review-traces" | "help" => {
+            vec![first.to_string()]
+        }
+        "plan" | "run" | "approve-proposal" => {
+            if rest.is_empty() {
+                vec![first.to_string()]
+            } else {
+                vec![first.to_string(), rest.to_string()]
+            }
+        }
+        _ => vec!["run".to_string(), trimmed.to_string()],
+    }
+}
+
+fn format_research_output(args: &[String], output: &str) -> String {
+    let label = args.join(" ");
+    let language = if serde_json::from_str::<serde_json::Value>(output).is_ok() {
+        "json"
+    } else {
+        "text"
+    };
+    format!(
+        "已执行 `/research {}`\n\n```{}\n{}\n```",
+        label, language, output
+    )
 }
 
 /// Normalize composer `sandboxBackend` from the UI (`modal` | `daytona` | `docker` | `singularity`).
@@ -2093,11 +2292,25 @@ pub async fn send_message(
             cfg
         })
     };
+    crate::domain::memory::working_memory::mark_user_turn_started(&repo, &session_id)
+        .await
+        .map_err(|e| {
+            OmigaError::Chat(ChatError::StreamError(format!(
+                "Working memory mark_user_turn_started failed: {}",
+                e
+            )))
+        })?;
     // Run independent async I/O in parallel to reduce pre-LLM latency.
     let skill_cache_ref = &app_state.skill_cache;
     let (skills_exist, memory_ctx, memory_nav) = tokio::join!(
         skills::skills_any_exist(&project_root, skill_cache_ref),
-        crate::commands::memory::get_memory_context(&project_root, &request.content, 3),
+        crate::commands::memory::get_memory_context(
+            &*repo,
+            &project_root,
+            Some(&session_id),
+            &request.content,
+            3,
+        ),
         crate::commands::memory::memory_navigation_section(&project_root),
     );
 
@@ -2296,6 +2509,55 @@ pub async fn send_message(
     } else {
         Some(prompt_parts.join("\n\n"))
     };
+
+    if let Some(removed_messages) =
+        crate::domain::auto_compact::preview_removed_messages_for_compaction(
+            &session.messages,
+            &llm_config,
+            request.use_tools,
+        )
+    {
+        let op_id = format!("memory-precompact-{}", uuid::Uuid::new_v4());
+        emit_activity_operation(
+            &app,
+            &session_id,
+            &op_id,
+            "压缩前摘要",
+            "running",
+            Some(format!(
+                "准备提炼 {} 条即将压缩的消息",
+                removed_messages.len()
+            )),
+        );
+        crate::domain::memory::working_memory::prepare_for_auto_compact(
+            &repo,
+            &session_id,
+            &removed_messages,
+        )
+        .await
+        .map_err(|e| {
+            emit_activity_operation(
+                &app,
+                &session_id,
+                &op_id,
+                "压缩前摘要",
+                "error",
+                Some(e.to_string()),
+            );
+            OmigaError::Chat(ChatError::StreamError(format!(
+                "Working memory prepare_for_auto_compact failed: {}",
+                e
+            )))
+        })?;
+        emit_activity_operation(
+            &app,
+            &session_id,
+            &op_id,
+            "压缩前摘要",
+            "done",
+            Some("已提炼即将被压缩的上下文".to_string()),
+        );
+    }
 
     let compact_outcome = crate::domain::auto_compact::compact_session_and_persist(
         &repo,
@@ -2952,6 +3214,7 @@ pub async fn send_message(
                 &session_id_clone,
                 &round_id_clone,
                 &message_id_clone,
+                &request_text_for_constraints,
                 &assistant_text,
                 &assistant_reasoning,
                 &pending_tool_calls,
@@ -3261,6 +3524,17 @@ pub async fn send_message(
                 Some(&round_id_clone),
             )
             .await;
+            sync_memory_layers_after_turn(
+                &app_clone,
+                &sessions_clone,
+                &repo_clone,
+                &session_id_clone,
+                client.as_ref(),
+                &request_text_for_constraints,
+                &final_reply_for_follow_up,
+                true,
+            )
+            .await;
             emit_post_turn_meta_then_complete(
                 &app_clone,
                 &message_id_clone,
@@ -3433,6 +3707,17 @@ pub async fn send_message(
                         &llm_config_for_spawn.provider.to_string(),
                     )
                     .await;
+                    sync_memory_layers_after_turn(
+                        &app_clone,
+                        &sessions_clone,
+                        &repo_clone,
+                        &session_id_clone,
+                        client.as_ref(),
+                        &request_text_for_constraints,
+                        &stop_text,
+                        true,
+                    )
+                    .await;
                     emit_post_turn_meta_then_complete(
                         &app_clone,
                         &message_id_clone,
@@ -3453,6 +3738,57 @@ pub async fn send_message(
                 let mut sessions = sessions_clone.write().await;
                 if let Some(runtime) = sessions.get_mut(&session_id_clone) {
                     let repo = &*repo_clone;
+                    if let Some(removed_messages) =
+                        crate::domain::auto_compact::preview_removed_messages_for_compaction(
+                            &runtime.session.messages,
+                            &llm_config_for_spawn,
+                            !tools.is_empty(),
+                        )
+                    {
+                        let op_id = format!("memory-precompact-{}", uuid::Uuid::new_v4());
+                        emit_activity_operation(
+                            &app_clone,
+                            &session_id_clone,
+                            &op_id,
+                            "压缩前摘要",
+                            "running",
+                            Some(format!(
+                                "准备提炼 {} 条即将压缩的消息",
+                                removed_messages.len()
+                            )),
+                        );
+                        if let Err(e) =
+                            crate::domain::memory::working_memory::prepare_for_auto_compact(
+                                &repo_clone,
+                                &session_id_clone,
+                                &removed_messages,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                target: "omiga::working_memory",
+                                "tool-loop pre-compact summary failed: {}",
+                                e
+                            );
+                            emit_activity_operation(
+                                &app_clone,
+                                &session_id_clone,
+                                &op_id,
+                                "压缩前摘要",
+                                "error",
+                                Some(e.to_string()),
+                            );
+                        } else {
+                            emit_activity_operation(
+                                &app_clone,
+                                &session_id_clone,
+                                &op_id,
+                                "压缩前摘要",
+                                "done",
+                                Some("已提炼即将被压缩的上下文".to_string()),
+                            );
+                        }
+                    }
                     if let Err(e) = crate::domain::auto_compact::compact_session_and_persist(
                         &repo,
                         &session_id_clone,
@@ -3610,6 +3946,7 @@ pub async fn send_message(
                     &session_id_clone,
                     &round_id_clone,
                     &message_id_clone,
+                    &request_text_for_constraints,
                     &next_text,
                     &next_reasoning,
                     &next_tools,
@@ -3924,6 +4261,17 @@ pub async fn send_message(
                     Some(&round_id_clone),
                 )
                 .await;
+                sync_memory_layers_after_turn(
+                    &app_clone,
+                    &sessions_clone,
+                    &repo_clone,
+                    &session_id_clone,
+                    client.as_ref(),
+                    &request_text_for_constraints,
+                    &final_reply_for_follow_up,
+                    true,
+                )
+                .await;
                 emit_post_turn_meta_then_complete(
                     &app_clone,
                     &message_id_clone,
@@ -3992,6 +4340,17 @@ pub async fn send_message(
             &message_id_clone,
             &turn_token_usage,
             &llm_config_for_spawn.provider.to_string(),
+        )
+        .await;
+        sync_memory_layers_after_turn(
+            &app_clone,
+            &sessions_clone,
+            &repo_clone,
+            &session_id_clone,
+            client.as_ref(),
+            &request_text_for_constraints,
+            &final_reply_for_follow_up,
+            true,
         )
         .await;
         emit_post_turn_meta_then_complete(

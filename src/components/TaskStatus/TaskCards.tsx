@@ -5,8 +5,19 @@ import {
   CheckCircle,
   ErrorOutline,
   Timer,
+  Circle,
 } from "@mui/icons-material";
 import type { PlanTodoItem } from "./PlanTodoList";
+import { AgentInfoChip } from "./AgentInfoChip";
+
+export interface RuntimeAgentTaskItem {
+  id: string;
+  agentType: string;
+  description: string;
+  status: "Pending" | "Running" | "Completed" | "Failed" | "Cancelled";
+  stageLabel?: string;
+  supervisorLabel?: string;
+}
 
 /** 运行中任务卡片 - 高亮显示、带动画 */
 interface RunningTaskCardProps {
@@ -88,6 +99,122 @@ export function RunningTaskCard({ item }: RunningTaskCardProps) {
       >
         {item.name}
       </Typography>
+    </Box>
+  );
+}
+
+interface RunningAgentCardProps {
+  item: RuntimeAgentTaskItem;
+  onClick?: () => void;
+}
+
+export function RunningAgentCard({ item, onClick }: RunningAgentCardProps) {
+  const isPending = item.status === "Pending";
+  const accent = isPending ? "#f59e0b" : "#2563eb";
+  return (
+    <Box
+      onClick={onClick}
+      sx={{
+        p: 1.25,
+        borderRadius: 1.75,
+        bgcolor: alpha(accent, 0.08),
+        border: `1px solid ${alpha(accent, 0.24)}`,
+        position: "relative",
+        overflow: "hidden",
+        cursor: onClick ? "pointer" : "default",
+        transition: "transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease",
+        "&::before": {
+          content: '""',
+          position: "absolute",
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: 3,
+          bgcolor: accent,
+        },
+        "&:hover": onClick
+          ? {
+              transform: "translateY(-1px)",
+              boxShadow: `0 10px 24px ${alpha(accent, 0.12)}`,
+              borderColor: alpha(accent, 0.34),
+            }
+          : undefined,
+      }}
+    >
+      <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1} sx={{ mb: 0.9 }}>
+        <Stack direction="row" alignItems="center" spacing={0.75}>
+          <Chip
+            size="small"
+            icon={
+              <Circle
+                sx={{
+                  fontSize: 8,
+                  color: accent,
+                  ...(item.status === "Running"
+                    ? {
+                        animation: "runtimeAgentPulse 1.45s ease-in-out infinite",
+                        "@keyframes runtimeAgentPulse": {
+                          "0%, 100%": { opacity: 1, transform: "scale(1)" },
+                          "50%": { opacity: 0.5, transform: "scale(1.1)" },
+                        },
+                      }
+                    : {}),
+                }}
+              />
+            }
+            label={item.status === "Pending" ? "等待调度" : "运行中"}
+            sx={{
+              height: 20,
+              fontSize: 10,
+              fontWeight: 700,
+              bgcolor: alpha(accent, 0.14),
+              color: accent,
+              border: `1px solid ${alpha(accent, 0.25)}`,
+              "& .MuiChip-icon": {
+                ml: 0.75,
+              },
+            }}
+          />
+          <AgentInfoChip
+            agentType={item.agentType}
+            status={item.status}
+            description={item.description}
+            stageLabel={item.stageLabel}
+            supervisorLabel={item.supervisorLabel}
+            maxChars={16}
+          />
+        </Stack>
+        <Timer sx={{ fontSize: 15, color: alpha(accent, 0.7) }} />
+      </Stack>
+
+      <Typography
+        variant="body2"
+        sx={{
+          fontSize: 12.5,
+          fontWeight: 600,
+          color: "text.primary",
+          lineHeight: 1.45,
+          pl: 0.4,
+        }}
+      >
+        {item.description}
+      </Typography>
+      {(item.stageLabel || item.supervisorLabel) && (
+        <Typography
+          variant="caption"
+          sx={{
+            display: "block",
+            mt: 0.55,
+            pl: 0.4,
+            fontSize: 10,
+            color: "text.secondary",
+          }}
+        >
+          {[item.stageLabel, item.supervisorLabel ? `上级 ${item.supervisorLabel}` : null]
+            .filter(Boolean)
+            .join(" · ")}
+        </Typography>
+      )}
     </Box>
   );
 }

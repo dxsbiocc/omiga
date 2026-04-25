@@ -1,0 +1,388 @@
+use super::models::{
+    AgentCard, AgentResult, ArtifactRecord, AssembledContext, EvidenceRecord, PermissionStatus,
+    ResultStatus, TaskSpec, TokenUsage, ToolCallRecord,
+};
+use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+pub trait AgentRunner {
+    fn run(
+        &self,
+        agent_card: &AgentCard,
+        task_spec: &TaskSpec,
+        context: &AssembledContext,
+    ) -> Result<AgentResult, String>;
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct MockAgentRunner {
+    forced_status: HashMap<String, ResultStatus>,
+    evidence_omissions: BTreeSet<String>,
+    scripted_outputs: HashMap<String, serde_json::Value>,
+}
+
+impl MockAgentRunner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_forced_status(mut self, task_id: impl Into<String>, status: ResultStatus) -> Self {
+        self.forced_status.insert(task_id.into(), status);
+        self
+    }
+
+    pub fn without_evidence(mut self, task_id: impl Into<String>) -> Self {
+        self.evidence_omissions.insert(task_id.into());
+        self
+    }
+
+    pub fn with_scripted_output(
+        mut self,
+        task_id: impl Into<String>,
+        output: serde_json::Value,
+    ) -> Self {
+        self.scripted_outputs.insert(task_id.into(), output);
+        self
+    }
+}
+
+impl AgentRunner for MockAgentRunner {
+    fn run(
+        &self,
+        agent_card: &AgentCard,
+        task_spec: &TaskSpec,
+        context: &AssembledContext,
+    ) -> Result<AgentResult, String> {
+        let status = self
+            .forced_status
+            .get(&task_spec.task_id)
+            .copied()
+            .unwrap_or(ResultStatus::Completed);
+        let scripted = self.scripted_outputs.get(&task_spec.task_id).cloned();
+        let omit_evidence = self.evidence_omissions.contains(&task_spec.task_id);
+        let tool_calls = build_tool_calls(task_spec, agent_card);
+        let (output, generated_evidence, generated_artifacts) =
+            build_mock_payload(agent_card, task_spec, context, omit_evidence, scripted);
+        let referenced_evidence = inherited_string_refs(context, "evidence_refs");
+        let referenced_artifacts = inherited_string_refs(context, "artifact_refs");
+        let mut evidence_refs = generated_evidence
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        evidence_refs.extend(referenced_evidence);
+        evidence_refs.sort();
+        evidence_refs.dedup();
+
+        let mut artifact_refs = generated_artifacts
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        artifact_refs.extend(referenced_artifacts);
+        artifact_refs.sort();
+        artifact_refs.dedup();
+
+        Ok(AgentResult {
+            task_id: task_spec.task_id.clone(),
+            agent_id: agent_card.id.clone(),
+            status,
+            output,
+            evidence_refs,
+            artifact_refs,
+            issues: Vec::new(),
+            token_usage: Some(TokenUsage {
+                input_tokens: context.token_estimate,
+                output_tokens: 120,
+            }),
+            tool_calls: Some(tool_calls),
+            generated_evidence,
+            generated_artifacts,
+            permission_status: Some(PermissionStatus::Allowed),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderConfig {
+    pub provider_name: String,
+    pub model: String,
+    pub api_key_env: Option<String>,
+    pub allow_live_calls: bool,
+}
+
+pub trait LlmProvider {
+    fn complete(&self, prompt: &str, config: &ProviderConfig) -> Result<String, String>;
+}
+
+pub struct LlmProviderAgentRunner<P> {
+    provider: Option<P>,
+    config: ProviderConfig,
+}
+
+impl<P> LlmProviderAgentRunner<P> {
+    pub fn new(provider: Option<P>, config: ProviderConfig) -> Self {
+        Self { provider, config }
+    }
+}
+
+impl<P: LlmProvider> AgentRunner for LlmProviderAgentRunner<P> {
+    fn run(
+        &self,
+        agent_card: &AgentCard,
+        task_spec: &TaskSpec,
+        context: &AssembledContext,
+    ) -> Result<AgentResult, String> {
+        if !self.config.allow_live_calls {
+            return Err("live LLM execution is disabled for this runner".to_string());
+        }
+        let provider = self
+            .provider
+            .as_ref()
+            .ok_or_else(|| "no LLM provider configured".to_string())?;
+        let prompt = json!({
+            "agent": agent_card.id,
+            "task": task_spec,
+            "context": context.sections,
+        })
+        .to_string();
+        let completion = provider.complete(&prompt, &self.config)?;
+        Ok(AgentResult {
+            task_id: task_spec.task_id.clone(),
+            agent_id: agent_card.id.clone(),
+            status: ResultStatus::Completed,
+            output: json!({
+                "raw_completion": completion,
+                "criteria_coverage": task_spec.success_criteria,
+                "consistency_statement": "Generated by LlmProviderAgentRunner skeleton.",
+            }),
+            evidence_refs: Vec::new(),
+            artifact_refs: Vec::new(),
+            issues: Vec::new(),
+            token_usage: None,
+            tool_calls: Some(build_tool_calls(task_spec, agent_card)),
+            generated_evidence: Vec::new(),
+            generated_artifacts: Vec::new(),
+            permission_status: Some(PermissionStatus::Allowed),
+        })
+    }
+}
+
+fn build_tool_calls(task_spec: &TaskSpec, agent_card: &AgentCard) -> Vec<ToolCallRecord> {
+    let requested = if task_spec.requested_tools.is_empty() {
+        agent_card.tools.allowed.clone()
+    } else {
+        task_spec.requested_tools.clone()
+    };
+    requested
+        .into_iter()
+        .map(|tool_name| ToolCallRecord {
+            tool_name,
+            arguments: BTreeMap::new(),
+        })
+        .collect()
+}
+
+fn build_mock_payload(
+    agent_card: &AgentCard,
+    task_spec: &TaskSpec,
+    context: &AssembledContext,
+    omit_evidence: bool,
+    scripted: Option<serde_json::Value>,
+) -> (serde_json::Value, Vec<EvidenceRecord>, Vec<ArtifactRecord>) {
+    if let Some(output) = scripted {
+        return (output, Vec::new(), Vec::new());
+    }
+
+    let criteria = task_spec.success_criteria.clone();
+    let evidence = if omit_evidence {
+        Vec::new()
+    } else {
+        maybe_mock_evidence(agent_card, task_spec)
+    };
+    let artifacts = maybe_mock_artifacts(agent_card, task_spec);
+    let context_sections = context.sections.keys().cloned().collect::<Vec<_>>();
+
+    let output = match agent_card.category.as_str() {
+        "intake" => build_intake_output(context, &criteria, context_sections),
+        "planning" => build_planning_output(context, &criteria, context_sections),
+        "retrieval" => json!({
+            "findings": [
+                format!("Mock evidence summary for {}", task_spec.goal),
+                "Source quality and uncertainty are explicitly tracked."
+            ],
+            "evidence_refs": evidence.iter().map(|item| item.id.clone()).collect::<Vec<_>>(),
+            "criteria_coverage": criteria,
+            "consistency_statement": "Retrieved evidence is aligned to the task goal.",
+            "context_sections": context_sections,
+        }),
+        "transformation" => json!({
+            "transformed_output": "Normalized intermediate representation",
+            "artifact_refs": artifacts.iter().map(|item| item.id.clone()).collect::<Vec<_>>(),
+            "criteria_coverage": criteria,
+            "consistency_statement": "Transformation preserved the intended semantics.",
+        }),
+        "analysis" => json!({
+            "analysis": format!("Mock analysis for {}", task_spec.goal),
+            "conclusions": [
+                "Method applicability depends on the data regime.",
+                "Evidence-backed trade-offs were preserved."
+            ],
+            "criteria_coverage": criteria,
+            "consistency_statement": "Conclusions stay within the available evidence.",
+        }),
+        "method" => json!({
+            "recommendation": "Use a conservative baseline method first, then refine.",
+            "tradeoffs": [
+                "More robust methods may reduce sensitivity.",
+                "Specialized methods need stronger assumptions."
+            ],
+            "criteria_coverage": criteria,
+            "consistency_statement": "Method trade-offs are explicit.",
+        }),
+        "implementation" => json!({
+            "code": "// mock implementation\nfn solve() {}\n",
+            "change_summary": "Generated a mock implementation artifact.",
+            "criteria_coverage": criteria,
+            "consistency_statement": "Implementation matches the task contract.",
+        }),
+        "debugging" => json!({
+            "root_cause": "Mock root cause points to a mismatched assumption.",
+            "fix_plan": "Tighten the contract and rerun the failing step.",
+            "criteria_coverage": criteria,
+            "consistency_statement": "The proposed fix addresses the diagnosed cause.",
+        }),
+        "visualization" => json!({
+            "visualization_plan": "Use a comparison plot plus concise annotations.",
+            "artifact_refs": artifacts.iter().map(|item| item.id.clone()).collect::<Vec<_>>(),
+            "criteria_coverage": criteria,
+            "consistency_statement": "Visualization matches the analysis objective.",
+        }),
+        "reporting" => json!({
+            "final_report": format!("Mock final report for '{}'", task_spec.goal),
+            "citations": evidence.iter().map(|item| item.source.clone()).collect::<Vec<_>>(),
+            "criteria_coverage": criteria,
+            "consistency_statement": "Final report reflects upstream evidence and constraints.",
+        }),
+        "domain" => json!({
+            "biological_interpretation": "Mock domain interpretation of the retrieved evidence.",
+            "hypotheses": [
+                "Observed differences may be driven by cell-state composition.",
+                "Follow-up validation should test batch sensitivity."
+            ],
+            "criteria_coverage": criteria,
+            "consistency_statement": "Domain hypotheses are separated from established facts.",
+        }),
+        _ => json!({
+            "final_report": format!("Mock output for {}", task_spec.goal),
+            "criteria_coverage": criteria,
+            "consistency_statement": "Output is structurally valid.",
+        }),
+    };
+
+    (output, evidence, artifacts)
+}
+
+fn build_intake_output(
+    context: &AssembledContext,
+    criteria: &[String],
+    context_sections: Vec<String>,
+) -> serde_json::Value {
+    let assessment = context.sections.get("intake_assessment");
+    json!({
+        "user_goal": assessment.and_then(|value| value.get("user_goal")).cloned().unwrap_or_else(|| json!("")),
+        "assumptions": assessment.and_then(|value| value.get("assumptions")).cloned().unwrap_or_else(|| json!(["The request can be structured deterministically in MVP mode."])),
+        "ambiguities": assessment.and_then(|value| value.get("ambiguities")).cloned().unwrap_or_else(|| json!(["No explicit missing requirement was found."])),
+        "execution_route": assessment.and_then(|value| value.get("execution_route")).cloned().unwrap_or_else(|| json!("solo")),
+        "complexity_score": assessment.and_then(|value| value.get("complexity_score")).cloned().unwrap_or_else(|| json!(1)),
+        "criteria_coverage": criteria,
+        "consistency_statement": "Intake output follows the declared schema.",
+        "context_sections": context_sections,
+    })
+}
+
+fn build_planning_output(
+    context: &AssembledContext,
+    criteria: &[String],
+    context_sections: Vec<String>,
+) -> serde_json::Value {
+    let graph = context.sections.get("planned_task_graph");
+    json!({
+        "graph_id": graph.and_then(|value| value.get("graph_id")).cloned().unwrap_or_else(|| json!("")),
+        "tasks": graph.and_then(|value| value.get("tasks")).cloned().unwrap_or_else(|| json!([])),
+        "edges": graph.and_then(|value| value.get("edges")).cloned().unwrap_or_else(|| json!([])),
+        "assumptions": graph.and_then(|value| value.get("assumptions")).cloned().unwrap_or_else(|| json!([])),
+        "ambiguities": graph.and_then(|value| value.get("ambiguities")).cloned().unwrap_or_else(|| json!([])),
+        "execution_route": graph.and_then(|value| value.get("execution_route")).cloned().unwrap_or_else(|| json!("workflow")),
+        "final_output_contract": graph.and_then(|value| value.get("final_output_contract")).cloned().unwrap_or_else(|| json!({})),
+        "criteria_coverage": criteria,
+        "consistency_statement": "Planning output follows the declared schema.",
+        "context_sections": context_sections,
+    })
+}
+
+fn maybe_mock_evidence(agent_card: &AgentCard, task_spec: &TaskSpec) -> Vec<EvidenceRecord> {
+    if agent_card.category != "retrieval" && agent_card.category != "domain" {
+        return Vec::new();
+    }
+    vec![
+        EvidenceRecord {
+            id: format!("evidence-{}-1", task_spec.task_id),
+            task_id: task_spec.task_id.clone(),
+            summary: format!("Primary evidence for {}", task_spec.goal),
+            source: "mock://source/primary".to_string(),
+            quality: "high".to_string(),
+            excerpt: "This is a mock excerpt.".to_string(),
+        },
+        EvidenceRecord {
+            id: format!("evidence-{}-2", task_spec.task_id),
+            task_id: task_spec.task_id.clone(),
+            summary: "Secondary supporting evidence".to_string(),
+            source: "mock://source/secondary".to_string(),
+            quality: "medium".to_string(),
+            excerpt: "Secondary mock excerpt.".to_string(),
+        },
+    ]
+}
+
+fn maybe_mock_artifacts(agent_card: &AgentCard, task_spec: &TaskSpec) -> Vec<ArtifactRecord> {
+    match agent_card.category.as_str() {
+        "implementation" => vec![ArtifactRecord {
+            id: format!("artifact-{}-code", task_spec.task_id),
+            task_id: task_spec.task_id.clone(),
+            name: "mock-implementation.rs".to_string(),
+            kind: "code".to_string(),
+            location: format!("memory://artifacts/{}/code", task_spec.task_id),
+            content: json!({"code": "// mock implementation\nfn solve() {}\n"}),
+        }],
+        "transformation" => vec![ArtifactRecord {
+            id: format!("artifact-{}-table", task_spec.task_id),
+            task_id: task_spec.task_id.clone(),
+            name: "normalized.json".to_string(),
+            kind: "data".to_string(),
+            location: format!("memory://artifacts/{}/normalized", task_spec.task_id),
+            content: json!({"rows": 3}),
+        }],
+        "visualization" => vec![ArtifactRecord {
+            id: format!("artifact-{}-viz", task_spec.task_id),
+            task_id: task_spec.task_id.clone(),
+            name: "visualization-spec.json".to_string(),
+            kind: "visualization".to_string(),
+            location: format!("memory://artifacts/{}/viz", task_spec.task_id),
+            content: json!({"chart": "comparison"}),
+        }],
+        _ => Vec::new(),
+    }
+}
+
+fn inherited_string_refs(context: &AssembledContext, section: &str) -> Vec<String> {
+    context
+        .sections
+        .get(section)
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}

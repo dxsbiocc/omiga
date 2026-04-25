@@ -192,6 +192,46 @@ pub async fn save_llm_settings_to_config(
     Ok(())
 }
 
+/// Persist global settings from the Advanced Settings panel.
+#[tauri::command]
+pub async fn save_global_settings_to_config(
+    state: State<'_, OmigaAppState>,
+    timeout: Option<u64>,
+    web_use_proxy: Option<bool>,
+) -> CommandResult<()> {
+    let mut config_file = get_config_file(&state)
+        .await
+        .as_deref()
+        .cloned()
+        .unwrap_or_default();
+    let mut global = config_file.settings.unwrap_or_default();
+    if let Some(t) = timeout {
+        global.timeout = Some(t);
+    }
+    if let Some(v) = web_use_proxy {
+        global.web_use_proxy = Some(v);
+    }
+    config_file.settings = Some(global);
+
+    let config_path = crate::llm::config::find_config_file()
+        .or_else(|| dirs::config_dir().map(|d| d.join("omiga").join("omiga.yaml")))
+        .ok_or_else(|| OmigaError::Config("Could not determine config file path".to_string()))?;
+    if let Some(parent) = config_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    crate::llm::config::save_config_file(&config_file, &config_path)
+        .map_err(|e| OmigaError::Config(format!("Failed to save config: {}", e)))?;
+    invalidate_config_file_cache(&state).await;
+
+    if let Some(t) = timeout {
+        if let Some(cfg) = state.chat.llm_config.lock().await.as_mut() {
+            cfg.timeout_secs = t;
+        }
+    }
+    Ok(())
+}
+
 /// Get global settings from config file (for Settings UI)
 #[tauri::command]
 pub async fn get_global_settings(
@@ -204,6 +244,7 @@ pub async fn get_global_settings(
         max_tokens: settings.max_tokens,
         temperature: settings.temperature,
         enable_tools: settings.enable_tools,
+        web_use_proxy: settings.web_use_proxy,
     })
 }
 
@@ -215,6 +256,7 @@ pub struct GlobalSettingsResponse {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub enable_tools: Option<bool>,
+    pub web_use_proxy: Option<bool>,
 }
 
 /// Get current LLM configuration

@@ -39,6 +39,7 @@ pub mod todo_write;
 pub mod tool_search;
 pub mod visualization;
 pub mod web_fetch;
+pub mod web_safety;
 pub mod web_search;
 pub mod workflow;
 
@@ -617,6 +618,10 @@ pub struct WebSearchApiKeys {
 /// Execution context passed to all tools
 #[derive(Clone)]
 pub struct ToolContext {
+    /// Active chat session id when available.
+    pub session_id: Option<String>,
+    /// Rendered session scratchpad excerpt for the current task, when available.
+    pub working_memory_context: Option<String>,
     /// Current working directory
     pub cwd: std::path::PathBuf,
     /// Project root directory
@@ -652,6 +657,8 @@ pub struct ToolContext {
     pub plan_mode: Option<Arc<tokio::sync::Mutex<bool>>>,
     /// Search API keys from Omiga Settings (`web_search` tool).
     pub web_search_api_keys: WebSearchApiKeys,
+    /// Whether web tools should honor system/env proxy settings.
+    pub web_use_proxy: bool,
     /// Skill metadata cache shared across tool calls in a session.
     #[allow(dead_code)]
     pub skill_cache: Option<Arc<std::sync::Mutex<crate::domain::skills::SkillCacheMap>>>,
@@ -662,6 +669,14 @@ pub struct ToolContext {
 impl fmt::Debug for ToolContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ToolContext")
+            .field("session_id", &self.session_id)
+            .field(
+                "working_memory_context",
+                &self
+                    .working_memory_context
+                    .as_ref()
+                    .map(|_| "<working-memory>"),
+            )
             .field("cwd", &self.cwd)
             .field("project_root", &self.project_root)
             .field("execution_environment", &self.execution_environment)
@@ -670,6 +685,7 @@ impl fmt::Debug for ToolContext {
             .field("local_venv_type", &self.local_venv_type)
             .field("local_venv_name", &self.local_venv_name)
             .field("timeout_secs", &self.timeout_secs)
+            .field("web_use_proxy", &self.web_use_proxy)
             .field("skill_cache", &self.skill_cache.as_ref().map(|_| "<cache>"))
             .field("skill_task_context", &self.skill_task_context)
             .finish_non_exhaustive()
@@ -681,6 +697,8 @@ impl ToolContext {
     pub fn new(project_root: impl Into<std::path::PathBuf>) -> Self {
         let project_root = project_root.into();
         Self {
+            session_id: None,
+            working_memory_context: None,
             cwd: project_root.clone(),
             project_root,
             execution_environment: "local".to_string(),
@@ -697,6 +715,7 @@ impl ToolContext {
             tool_results_dir: None,
             plan_mode: None,
             web_search_api_keys: WebSearchApiKeys::default(),
+            web_use_proxy: false,
             env_store: None,
             skill_cache: None,
             skill_task_context: None,
@@ -713,6 +732,19 @@ impl ToolContext {
 
     pub fn with_skill_task_context(mut self, ctx: impl Into<String>) -> Self {
         self.skill_task_context = Some(ctx.into());
+        self
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<Option<String>>) -> Self {
+        self.session_id = session_id.into();
+        self
+    }
+
+    pub fn with_working_memory_context(
+        mut self,
+        working_memory_context: impl Into<Option<String>>,
+    ) -> Self {
+        self.working_memory_context = working_memory_context.into();
         self
     }
 
@@ -772,6 +804,11 @@ impl ToolContext {
     /// All web search API keys from settings (used by `web_search`).
     pub fn with_web_search_api_keys(mut self, keys: WebSearchApiKeys) -> Self {
         self.web_search_api_keys = keys;
+        self
+    }
+
+    pub fn with_web_use_proxy(mut self, enabled: bool) -> Self {
+        self.web_use_proxy = enabled;
         self
     }
 

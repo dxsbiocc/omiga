@@ -7,6 +7,8 @@
 use super::{ToolContext, ToolError, ToolSchema};
 use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
 use async_trait::async_trait;
+use lazy_static::lazy_static;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use std::pin::Pin;
@@ -24,6 +26,7 @@ pub const DESCRIPTION: &str = r#"Fetch public web content over HTTP(S).
 - Converts HTML pages to plain text; returns JSON and plain text as UTF-8 when possible.
 - The `prompt` field is included in the tool result so you can answer using the fetched text in your next message (this build does not run a separate summarization model inside the tool).
 - Will fail for authenticated or private pages; prefer specialized tools or MCP when available.
+- Blocks loopback/private-network targets and URLs that appear to embed credentials or secret-bearing query params.
 - Read-only; does not write project files."#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +58,19 @@ fn browser_fetch_headers() -> reqwest::header::HeaderMap {
     h
 }
 
+fn clean_inline_base64_images(text: &str) -> String {
+    lazy_static! {
+        static ref RE_BASE64_PARENS: Regex =
+            Regex::new(r"\(data:image/[^;]+;base64,[A-Za-z0-9+/=]+\)").expect("regex");
+        static ref RE_BASE64_PLAIN: Regex =
+            Regex::new(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+").expect("regex");
+    }
+    let without_parens = RE_BASE64_PARENS.replace_all(text, "[image omitted]");
+    RE_BASE64_PLAIN
+        .replace_all(without_parens.as_ref(), "[image omitted]")
+        .to_string()
+}
+
 #[async_trait]
 impl super::ToolImpl for WebFetchTool {
     type Args = WebFetchArgs;
@@ -80,14 +96,32 @@ impl super::ToolImpl for WebFetchTool {
             }
         }
 
+        super::web_safety::validate_public_http_url(&ctx.project_root, args.url.trim(), true)
+            .map_err(|message| ToolError::InvalidArguments { message })?;
+
         let timeout = Duration::from_secs(ctx.timeout_secs.clamp(5, 120));
 
-        let client = reqwest::Client::builder()
+        let project_root_for_redirect = ctx.project_root.clone();
+        let mut client_builder = reqwest::Client::builder()
             .timeout(timeout)
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .default_headers(browser_fetch_headers())
-            // Avoid env HTTP(S)_PROXY hijacking localhost in tests and dev.
-            .no_proxy()
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= 10 {
+                    return attempt.error("Too many redirects");
+                }
+                match super::web_safety::validate_public_http_url(
+                    &project_root_for_redirect,
+                    attempt.url().as_str(),
+                    false,
+                ) {
+                    Ok(_) => attempt.follow(),
+                    Err(message) => attempt.error(message),
+                }
+            }))
+            .default_headers(browser_fetch_headers());
+        if !ctx.web_use_proxy {
+            client_builder = client_builder.no_proxy();
+        }
+        let client = client_builder
             .build()
             .map_err(|e| ToolError::ExecutionFailed {
                 message: format!("HTTP client: {}", e),
@@ -109,6 +143,8 @@ impl super::ToolImpl for WebFetchTool {
         let code_text = status.canonical_reason().unwrap_or("Unknown").to_string();
 
         let final_url = response.url().to_string();
+        super::web_safety::validate_public_http_url(&ctx.project_root, &final_url, true)
+            .map_err(|message| ToolError::ExecutionFailed { message })?;
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -170,7 +206,8 @@ impl super::ToolImpl for WebFetchTool {
             });
         };
 
-        let (truncated, truncated_note) = truncate_chars(&text, MAX_TEXT_CHARS);
+        let cleaned = clean_inline_base64_images(&text);
+        let (truncated, truncated_note) = truncate_chars(&cleaned, MAX_TEXT_CHARS);
 
         let mut result = String::new();
         result.push_str(&format!("HTTP {} {}\n", code, code_text));
@@ -260,4 +297,24 @@ pub fn schema() -> ToolSchema {
             "required": ["url", "prompt"]
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_inline_base64_images_replaces_payloads() {
+        let raw = "before data:image/png;base64,abcd1234+/= after";
+        let cleaned = clean_inline_base64_images(raw);
+        assert!(cleaned.contains("[image omitted]"));
+        assert!(!cleaned.contains("base64"));
+    }
+
+    #[test]
+    fn truncate_chars_preserves_boundaries() {
+        let (truncated, note) = truncate_chars("你好hello", 3);
+        assert!(truncated.chars().count() <= 3);
+        assert!(note.is_some());
+    }
 }

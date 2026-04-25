@@ -4,6 +4,7 @@ import {
   OMIGA_PROVIDER_CHANGED_EVENT,
   notifyProviderChanged,
 } from "../../utils/providerEvents";
+import { invokeIfTauri } from "../../utils/tauriRuntime";
 import { useSessionStore } from "../../state/sessionStore";
 import type { SxProps, Theme } from "@mui/material/styles";
 import {
@@ -80,19 +81,15 @@ export function ProviderSwitcher({
   const open = Boolean(anchorEl);
 
   const loadProviders = useCallback(async () => {
-    try {
-      const configs = await invoke<ProviderConfigEntry[]>("list_provider_configs");
-      if (configs && configs.length > 0) {
-        setProviders(configs);
-        const active = configs.find((p) => p.isSessionActive);
-        // Always sync: avoids stale "DeepSeek" chip after switching elsewhere (e.g. Settings).
-        setActiveProvider(active ?? null);
-      } else {
-        setProviders([]);
-        setActiveProvider(null);
-      }
-    } catch (err) {
-      console.error("Failed to load providers:", err);
+    const configs = await invokeIfTauri<ProviderConfigEntry[]>("list_provider_configs");
+    if (configs && configs.length > 0) {
+      setProviders(configs);
+      const active = configs.find((p) => p.isSessionActive);
+      // Always sync: avoids stale "DeepSeek" chip after switching elsewhere (e.g. Settings).
+      setActiveProvider(active ?? null);
+    } else {
+      setProviders([]);
+      setActiveProvider(null);
     }
   }, []);
 

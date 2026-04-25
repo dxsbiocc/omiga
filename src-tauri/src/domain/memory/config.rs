@@ -152,6 +152,14 @@ pub fn permanent_wiki_path() -> PathBuf {
         .join("wiki")
 }
 
+/// Global permanent long-term memory: `~/.omiga/memory/permanent/long_term`
+pub fn permanent_long_term_path() -> PathBuf {
+    user_omiga_root()
+        .join("memory")
+        .join("permanent")
+        .join("long_term")
+}
+
 impl MemoryConfig {
     /// Config file always lives in the **project** at `.omiga/memory/config.json`
     /// (regardless of [`MemoryMode`]).
@@ -188,6 +196,11 @@ impl MemoryConfig {
     /// Get implicit index directory path
     pub fn implicit_path(&self, project_root: impl AsRef<Path>) -> PathBuf {
         self.effective_root(&project_root).join(&self.implicit_dir)
+    }
+
+    /// Get long-term memory directory path
+    pub fn long_term_path(&self, project_root: impl AsRef<Path>) -> PathBuf {
+        self.effective_root(&project_root).join("long_term")
     }
 
     /// Get raw file storage path (absolute). Falls back to `~/.omiga/memory/raw`.

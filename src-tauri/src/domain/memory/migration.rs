@@ -7,6 +7,7 @@
 use std::path::Path;
 use tokio::fs;
 use tracing::info;
+use walkdir::WalkDir;
 
 use crate::errors::AppError;
 
@@ -33,6 +34,65 @@ pub async fn migrate_if_needed(project_root: impl AsRef<Path>) -> Result<(), App
         migrate_pageindex(&old_memory, &new_implicit).await?;
     }
 
+    backfill_wiki_metadata(&new_wiki).await?;
+    backfill_wiki_metadata(&crate::domain::memory::config::permanent_wiki_path()).await?;
+
+    Ok(())
+}
+
+pub async fn backfill_wiki_metadata(wiki_root: &Path) -> Result<(), AppError> {
+    if !wiki_root.is_dir() {
+        return Ok(());
+    }
+    for entry in WalkDir::new(wiki_root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
+        let path = entry.path().to_path_buf();
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let raw = match fs::read_to_string(&path).await {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        if raw.trim_start().starts_with("---") {
+            continue;
+        }
+        let title = raw
+            .lines()
+            .find(|line| line.starts_with("# "))
+            .map(|line| line.trim_start_matches("# ").trim().to_string())
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Untitled")
+                    .to_string()
+            });
+        let doc_id = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("untitled");
+        let enriched = format!(
+            "---\n\
+             title: \"{}\"\n\
+             knowledge_layer: knowledge_base\n\
+             template: legacy_backfill\n\
+             doc_id: {}\n\
+             migrated_at: {}\n\
+             ---\n\n{}",
+            title.replace('"', "\\\""),
+            doc_id,
+            chrono::Utc::now().to_rfc3339(),
+            raw
+        );
+        fs::write(&path, enriched).await.map_err(|e| {
+            AppError::Unknown(format!("Failed to backfill {}: {}", path.display(), e))
+        })?;
+    }
     Ok(())
 }
 
@@ -42,27 +102,35 @@ async fn migrate_wiki(old_wiki: &Path, new_wiki: &Path) -> Result<(), AppError> 
         .await
         .map_err(|e| AppError::Unknown(format!("Failed to create new wiki dir: {}", e)))?;
 
-    // Copy all .md files
-    let mut entries = fs::read_dir(old_wiki)
-        .await
-        .map_err(|e| AppError::Unknown(format!("Failed to read old wiki: {}", e)))?;
-
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    // Copy all .md files recursively, preserving subdirectories.
+    for entry in WalkDir::new(old_wiki)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
         let path = entry.path();
-        if path.extension().map(|e| e == "md").unwrap_or(false) {
-            let file_name = path
-                .file_name()
-                .ok_or_else(|| AppError::Unknown("Invalid file name".to_string()))?;
-            let dest = new_wiki.join(file_name);
-            fs::copy(&path, &dest).await.map_err(|e| {
+        if !path.extension().map(|e| e == "md").unwrap_or(false) {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(old_wiki)
+            .map_err(|e| AppError::Unknown(format!("Invalid wiki path: {}", e)))?;
+        let dest = new_wiki.join(relative);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).await.map_err(|e| {
                 AppError::Unknown(format!(
-                    "Failed to copy {}: {}",
-                    file_name.to_string_lossy(),
+                    "Failed to create migrated wiki parent {}: {}",
+                    parent.display(),
                     e
                 ))
             })?;
-            info!("Migrated wiki file: {:?}", file_name);
         }
+        fs::copy(path, &dest).await.map_err(|e| {
+            AppError::Unknown(format!("Failed to copy {}: {}", relative.display(), e))
+        })?;
+        info!("Migrated wiki file: {:?}", relative);
     }
 
     info!("Wiki migration completed");
@@ -193,5 +261,24 @@ mod tests {
 
         let version = detect_structure_version(temp.path()).await;
         assert_eq!(version, MemoryStructureVersion::None);
+    }
+
+    #[tokio::test]
+    async fn backfill_wiki_metadata_recurses_into_nested_directories() {
+        let temp = TempDir::new().unwrap();
+        let nested_dir = temp.path().join("wiki").join("concepts");
+        fs::create_dir_all(&nested_dir).await.unwrap();
+        let nested_file = nested_dir.join("memory.md");
+        fs::write(&nested_file, "# Memory\n\nLegacy content")
+            .await
+            .unwrap();
+
+        backfill_wiki_metadata(temp.path().join("wiki").as_path())
+            .await
+            .unwrap();
+
+        let enriched = fs::read_to_string(&nested_file).await.unwrap();
+        assert!(enriched.starts_with("---"));
+        assert!(enriched.contains("knowledge_layer: knowledge_base"));
     }
 }

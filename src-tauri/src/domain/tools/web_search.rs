@@ -39,6 +39,7 @@ pub const DESCRIPTION: &str = r#"Search the public web for up-to-date informatio
 - Optional `allowed_domains` or `blocked_domains` filter result URLs (not both).
 - `max_results` (default 5, max 10) limits how many hits are returned.
 - Optional `search_url` overrides the DuckDuckGo HTML endpoint (for private search proxies or tests).
+- Unsafe/private result URLs are filtered out; `search_url` must also be a public-safe HTTP(S) URL.
 - After answering, cite sources with markdown links when you use this tool."#;
 
 fn default_max_results() -> Option<u32> {
@@ -895,7 +896,7 @@ async fn search_via_configured_apis(
 
     if let Some(key) = resolve_exa_api_key(ctx) {
         if let Ok(hits) = search_exa_once(client, &key, query, max_u32).await {
-            let filtered = filter_hits(hits, allowed, blocked, max_results);
+            let filtered = filter_hits(&ctx.project_root, hits, allowed, blocked, max_results);
             if !filtered.is_empty() {
                 return Ok(Some((filtered, SearchApiProvider::Exa)));
             }
@@ -905,7 +906,7 @@ async fn search_via_configured_apis(
     if let Some(key) = resolve_firecrawl_api_key(ctx) {
         let base = resolve_firecrawl_base_url(ctx);
         if let Ok(hits) = search_firecrawl_once(client, &key, &base, query, max_u32).await {
-            let filtered = filter_hits(hits, allowed, blocked, max_results);
+            let filtered = filter_hits(&ctx.project_root, hits, allowed, blocked, max_results);
             if !filtered.is_empty() {
                 return Ok(Some((filtered, SearchApiProvider::Firecrawl)));
             }
@@ -914,7 +915,7 @@ async fn search_via_configured_apis(
 
     if let Some(key) = resolve_parallel_api_key(ctx) {
         if let Ok(hits) = search_parallel_once(client, &key, query, max_u32).await {
-            let filtered = filter_hits(hits, allowed, blocked, max_results);
+            let filtered = filter_hits(&ctx.project_root, hits, allowed, blocked, max_results);
             if !filtered.is_empty() {
                 return Ok(Some((filtered, SearchApiProvider::Parallel)));
             }
@@ -1275,6 +1276,7 @@ async fn run_research_search(
             .collect::<Vec<_>>(),
     );
     execution.hits = filter_hits(
+        &ctx.project_root,
         processed,
         &args.allowed_domains,
         &args.blocked_domains,
@@ -1305,6 +1307,7 @@ async fn run_research_search(
     )
     .await?;
     execution.hits = filter_hits(
+        &ctx.project_root,
         dedupe_hits_preserve_order(hits),
         &args.allowed_domains,
         &args.blocked_domains,
@@ -1317,44 +1320,6 @@ async fn run_research_search(
 /// Returns true if the URL's host resolves to a loopback, link-local, or RFC-1918 private
 /// address — prevents SSRF via LLM-controlled `search_url` pointing at internal services
 /// (AWS metadata 169.254.169.254, localhost, 10/8, 172.16/12, 192.168/16, etc.).
-fn is_ssrf_blocked_url(url_str: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url_str) else {
-        return false;
-    };
-    let Some(host) = parsed.host_str() else {
-        return true; // no host → block
-    };
-    let host_lower = host.to_lowercase();
-
-    // Localhost by name
-    if host_lower == "localhost" || host_lower.ends_with(".localhost") {
-        return true;
-    }
-    // mDNS .local
-    if host_lower == "local" || host_lower.ends_with(".local") {
-        return true;
-    }
-
-    // IPv4 literal — use std::net for precise range checks
-    if let Ok(v4) = host_lower.parse::<std::net::Ipv4Addr>() {
-        return v4.is_loopback()     // 127.0.0.0/8
-            || v4.is_link_local()   // 169.254.0.0/16
-            || v4.is_private()      // 10/8, 172.16/12, 192.168/16
-            || v4.is_broadcast()    // 255.255.255.255
-            || v4.octets()[0] == 0; // 0.x.x.x
-    }
-
-    // IPv6 literal (may be bracketed in the URL host, reqwest strips brackets)
-    if let Ok(v6) = host_lower.parse::<std::net::Ipv6Addr>() {
-        return v6.is_loopback() // ::1
-            || v6.is_multicast() // ff00::/8
-            // link-local fe80::/10
-            || (v6.segments()[0] & 0xffc0) == 0xfe80;
-    }
-
-    false
-}
-
 fn validate(args: &WebSearchArgs) -> Result<(), ToolError> {
     if args.query.trim().len() < 2 {
         return Err(ToolError::InvalidArguments {
@@ -1377,13 +1342,6 @@ fn validate(args: &WebSearchArgs) -> Result<(), ToolError> {
             if reqwest::Url::parse(t).is_err() {
                 return Err(ToolError::InvalidArguments {
                     message: "search_url is not a valid URL".to_string(),
-                });
-            }
-            if is_ssrf_blocked_url(t) {
-                return Err(ToolError::InvalidArguments {
-                    message:
-                        "search_url must not point to a loopback, link-local, or private address"
-                            .to_string(),
                 });
             }
         }
@@ -1431,6 +1389,7 @@ fn url_passes_filters(
 }
 
 fn filter_hits(
+    project_root: &std::path::Path,
     hits: Vec<SearchHit>,
     allowed: &Option<Vec<String>>,
     blocked: &Option<Vec<String>>,
@@ -1438,6 +1397,7 @@ fn filter_hits(
 ) -> Vec<SearchHit> {
     hits.into_iter()
         .filter(|h| url_passes_filters(&h.url, allowed, blocked))
+        .filter(|h| super::web_safety::is_safe_result_url(project_root, &h.url))
         .take(limit)
         .collect()
 }
@@ -2372,6 +2332,26 @@ mod ddg_tests {
         assert_eq!(hits[0].title, "Paper A");
         assert_eq!(hits[0].url, "https://example.org/a");
     }
+
+    #[test]
+    fn filter_hits_drops_unsafe_result_urls() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let hits = vec![
+            SearchHit {
+                title: "local".into(),
+                url: "http://127.0.0.1:3000".into(),
+                snippet: "".into(),
+            },
+            SearchHit {
+                title: "public".into(),
+                url: "https://example.org".into(),
+                snippet: "".into(),
+            },
+        ];
+        let filtered = filter_hits(tmp.path(), hits, &None, &None, 10);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].url, "https://example.org");
+    }
 }
 
 #[async_trait]
@@ -2388,10 +2368,13 @@ impl super::ToolImpl for WebSearchTool {
         let start = Instant::now();
 
         let timeout = std::time::Duration::from_secs(ctx.timeout_secs.clamp(5, 120));
-        let client = reqwest::Client::builder()
+        let mut client_builder = reqwest::Client::builder()
             .timeout(timeout)
-            .no_proxy()
-            .user_agent(concat!("Omiga/", env!("CARGO_PKG_VERSION"), " WebSearch"))
+            .user_agent(concat!("Omiga/", env!("CARGO_PKG_VERSION"), " WebSearch"));
+        if !ctx.web_use_proxy {
+            client_builder = client_builder.no_proxy();
+        }
+        let client = client_builder
             .build()
             .map_err(|e| ToolError::ExecutionFailed {
                 message: format!("HTTP client: {}", e),
@@ -2401,6 +2384,10 @@ impl super::ToolImpl for WebSearchTool {
         let blocked = &args.blocked_domains;
         let max_n = effective_max_results(&args);
         let search_url = args.search_url.as_deref().filter(|s| !s.trim().is_empty());
+        if let Some(search_url) = search_url {
+            super::web_safety::validate_public_http_url(&ctx.project_root, search_url, false)
+                .map_err(|message| ToolError::InvalidArguments { message })?;
+        }
         let had_any_search_key = has_any_search_key(ctx);
         let intent = if has_explicit_domain_override(&args) {
             SearchIntent::General
@@ -2465,7 +2452,7 @@ impl super::ToolImpl for WebSearchTool {
                         _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
                         r = ddg_fut => r?,
                     };
-                    exec.hits = filter_hits(hits, allowed, blocked, max_n);
+                    exec.hits = filter_hits(&ctx.project_root, hits, allowed, blocked, max_n);
                     if had_any_search_key {
                         exec.push_source(
                             "DuckDuckGo fallback after configured search APIs and Agent-browser returned no usable hits",
@@ -2488,7 +2475,7 @@ impl super::ToolImpl for WebSearchTool {
                 .map(sanitize_hit)
                 .collect::<Vec<_>>(),
         );
-        let hits = filter_hits(processed, allowed, blocked, max_n);
+        let hits = filter_hits(&ctx.project_root, processed, allowed, blocked, max_n);
         let duration = start.elapsed().as_secs_f32();
 
         let mut text = String::new();

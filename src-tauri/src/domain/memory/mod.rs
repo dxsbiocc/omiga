@@ -19,8 +19,11 @@
 
 pub mod chat_indexer;
 pub mod config;
+pub mod long_term;
 pub mod migration;
+pub mod permanent_profile;
 pub mod registry;
+pub mod working_memory;
 
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -29,7 +32,8 @@ use walkdir::WalkDir;
 
 pub use chat_indexer::{ChatIndexer, ChatMessage, ChatRole};
 pub use config::{
-    permanent_wiki_path, project_storage_key, user_omiga_root, MemoryConfig, MemoryMode,
+    permanent_long_term_path, permanent_wiki_path, project_storage_key, user_omiga_root,
+    MemoryConfig, MemoryMode,
 };
 
 /// Unified memory system handle
@@ -78,6 +82,11 @@ impl MemorySystem {
         self.config.implicit_path(&self.project_root)
     }
 
+    /// Get project-scoped long-term memory path
+    pub fn long_term_path(&self) -> PathBuf {
+        self.config.long_term_path(&self.project_root)
+    }
+
     /// Initialize memory directory structure
     pub async fn init(&self) -> std::io::Result<()> {
         let root = self.root_path();
@@ -85,10 +94,14 @@ impl MemorySystem {
         fs::create_dir_all(self.wiki_path()).await?;
         fs::create_dir_all(self.implicit_path()).await?;
         fs::create_dir_all(self.implicit_path().join("content")).await?;
+        fs::create_dir_all(self.long_term_path()).await?;
         fs::create_dir_all(config::permanent_wiki_path()).await?;
+        fs::create_dir_all(config::permanent_long_term_path()).await?;
         if let Some(parent) = registry::registry_file_path().parent() {
             fs::create_dir_all(parent).await?;
         }
+        let _ = migration::backfill_wiki_metadata(&self.wiki_path()).await;
+        let _ = migration::backfill_wiki_metadata(&config::permanent_wiki_path()).await;
 
         info!("Initialized memory system at {:?}", root);
         Ok(())
@@ -141,6 +154,12 @@ impl MemorySystem {
     pub async fn stats(&self) -> MemoryStats {
         let mut stats = MemoryStats::default();
 
+        stats.project_knowledge_pages = count_markdown_pages(&self.wiki_path()).await;
+        stats.global_knowledge_pages = count_markdown_pages(&config::permanent_wiki_path()).await;
+        stats.long_term_project_entries = long_term::count_entries(&self.long_term_path()).await;
+        stats.long_term_global_entries =
+            long_term::count_entries(&config::permanent_long_term_path()).await;
+
         // Check explicit memory (wiki): project + permanent
         for wiki_root in [self.wiki_path(), config::permanent_wiki_path()] {
             if wiki_root.exists() {
@@ -173,55 +192,90 @@ impl MemorySystem {
     /// - **Explicit (Wiki)**：扫描 wiki 目录下所有 `.md` 文件，按关键词匹配返回标题 + 摘要。
     /// - **Implicit (PageIndex)**：从磁盘加载 `tree.json`，用 `QueryEngine` 做 TF-IDF 检索。
     pub async fn query(&self, query: &str, limit: usize) -> UnifiedQueryResult {
+        self.query_with_session(None, query, limit).await
+    }
+
+    pub async fn query_with_session(
+        &self,
+        working_memory_excerpt: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> UnifiedQueryResult {
         let limit = limit.max(1);
-        let mut explicit_results = Vec::new();
-        let mut implicit_results = Vec::new();
+        let mut results = Vec::new();
 
-        // ── Explicit: 搜索项目 wiki + 永久 wiki，并统一排序 ───────────────────
-        explicit_results.extend(search_markdown_wiki(&self.wiki_path(), query, limit).await);
-        explicit_results
-            .extend(search_markdown_wiki(&config::permanent_wiki_path(), query, limit).await);
-        explicit_results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        explicit_results.truncate(limit);
-
-        // ── Implicit: 搜索 PageIndex ──────────────────────────────────────
-        let implicit_path = self.implicit_path();
-        let storage = crate::domain::pageindex::IndexStorage::new(&implicit_path);
-        match storage.load_tree().await {
-            Ok(Some(tree)) => {
-                let engine = crate::domain::pageindex::QueryEngine::new();
-                match engine.search(&tree, query, limit).await {
-                    Ok(results) => {
-                        for r in results {
-                            implicit_results.push(ImplicitResult {
-                                title: r.title,
-                                path: r.path,
-                                breadcrumb: r.breadcrumb,
-                                excerpt: r.excerpt,
-                                score: r.score,
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        warn!("PageIndex search error: {}", e);
-                    }
-                }
-            }
-            Ok(None) => {} // 尚未建立索引
-            Err(e) => {
-                warn!("Failed to load PageIndex tree: {}", e);
-            }
+        if let Some(excerpt) = working_memory_excerpt {
+            results.extend(query_working_memory(excerpt, query));
         }
 
-        let total_matches = explicit_results.len() + implicit_results.len();
+        results.extend(
+            long_term::search_entries(&self.long_term_path(), query, limit, false)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "summary".to_string(),
+                    source_type: MemorySourceType::LongTermProject,
+                }),
+        );
+        results.extend(
+            long_term::search_entries(&config::permanent_long_term_path(), query, limit, true)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "summary".to_string(),
+                    source_type: MemorySourceType::LongTermGlobal,
+                }),
+        );
+
+        results.extend(
+            search_markdown_wiki(&self.wiki_path(), query, limit)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "Wiki".to_string(),
+                    source_type: MemorySourceType::KnowledgeBaseProject,
+                }),
+        );
+        results.extend(
+            search_markdown_wiki(&config::permanent_wiki_path(), query, limit)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "Wiki".to_string(),
+                    source_type: MemorySourceType::KnowledgeBaseGlobal,
+                }),
+        );
+
+        results.extend(query_implicit_matches(&self.implicit_path(), query, limit).await);
+
+        sort_memory_results(&mut results);
+        dedupe_matches(&mut results);
+        let total_matches = results.len();
+        results.truncate(limit);
+
         UnifiedQueryResult {
             query: query.to_string(),
-            explicit_results,
-            implicit_results,
+            results,
             total_matches,
         }
     }
@@ -234,30 +288,69 @@ pub struct MemoryStats {
     pub implicit_exists: bool,
     pub implicit_documents: usize,
     pub implicit_sections: usize,
+    pub project_knowledge_pages: usize,
+    pub global_knowledge_pages: usize,
+    pub long_term_project_entries: usize,
+    pub long_term_global_entries: usize,
 }
 
 /// Unified query result
 #[derive(Debug, Clone)]
 pub struct UnifiedQueryResult {
     pub query: String,
-    pub explicit_results: Vec<ExplicitResult>,
-    pub implicit_results: Vec<ImplicitResult>,
+    pub results: Vec<MemoryQueryMatch>,
     pub total_matches: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemorySourceType {
+    WorkingMemory,
+    LongTermProject,
+    LongTermGlobal,
+    KnowledgeBaseProject,
+    KnowledgeBaseGlobal,
+    Implicit,
+}
+
+impl MemorySourceType {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WorkingMemory => "WorkingMemory",
+            Self::LongTermProject => "LongTermProject",
+            Self::LongTermGlobal => "LongTermGlobal",
+            Self::KnowledgeBaseProject => "KnowledgeBaseProject",
+            Self::KnowledgeBaseGlobal => "KnowledgeBaseGlobal",
+            Self::Implicit => "Implicit",
+        }
+    }
+
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::WorkingMemory => 6,
+            Self::LongTermProject => 5,
+            Self::LongTermGlobal => 4,
+            Self::KnowledgeBaseProject => 3,
+            Self::KnowledgeBaseGlobal => 2,
+            Self::Implicit => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryQueryMatch {
+    pub title: String,
+    pub path: String,
+    pub breadcrumb: Vec<String>,
+    pub excerpt: String,
+    pub score: f64,
+    pub match_type: String,
+    pub source_type: MemorySourceType,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExplicitResult {
     pub title: String,
     pub path: String,
-    pub excerpt: String,
-    pub score: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct ImplicitResult {
-    pub title: String,
-    pub path: String,
-    pub breadcrumb: Vec<String>,
     pub excerpt: String,
     pub score: f64,
 }
@@ -380,6 +473,10 @@ fn extract_excerpt(content: &str, query: &str, max_len: usize) -> String {
     }
 }
 
+async fn count_markdown_pages(root: &Path) -> usize {
+    markdown_files(root).len()
+}
+
 pub async fn search_markdown_wiki(root: &Path, query: &str, limit: usize) -> Vec<ExplicitResult> {
     if limit == 0 || !root.is_dir() {
         return vec![];
@@ -474,6 +571,89 @@ fn explicit_match_score(
     score.min(2.0)
 }
 
+fn query_working_memory(excerpt: &str, query: &str) -> Vec<MemoryQueryMatch> {
+    let query_terms = crate::domain::pageindex::derive_query_terms(query);
+    if query_terms.is_empty() || excerpt.trim().is_empty() {
+        return vec![];
+    }
+    let score = crate::domain::pageindex::score_terms_against_text(excerpt, &query_terms);
+    if score <= 0.0 {
+        return vec![];
+    }
+    vec![MemoryQueryMatch {
+        title: "Session scratchpad".to_string(),
+        path: "session_working_memory".to_string(),
+        breadcrumb: vec![],
+        excerpt: extract_excerpt(excerpt, query, 320),
+        score,
+        match_type: "summary".to_string(),
+        source_type: MemorySourceType::WorkingMemory,
+    }]
+}
+
+async fn query_implicit_matches(
+    implicit_path: &Path,
+    query: &str,
+    limit: usize,
+) -> Vec<MemoryQueryMatch> {
+    let storage = crate::domain::pageindex::IndexStorage::new(implicit_path);
+    match storage.load_tree().await {
+        Ok(Some(tree)) => {
+            let engine = crate::domain::pageindex::QueryEngine::new();
+            match engine.search(&tree, query, limit).await {
+                Ok(results) => results
+                    .into_iter()
+                    .map(|result| MemoryQueryMatch {
+                        title: result.title,
+                        path: result.path,
+                        breadcrumb: result.breadcrumb,
+                        excerpt: result.excerpt,
+                        score: result.score,
+                        match_type: format!("{:?}", result.match_type),
+                        source_type: MemorySourceType::Implicit,
+                    })
+                    .collect(),
+                Err(e) => {
+                    warn!("PageIndex search error: {}", e);
+                    vec![]
+                }
+            }
+        }
+        Ok(None) => vec![],
+        Err(e) => {
+            warn!("Failed to load PageIndex tree: {}", e);
+            vec![]
+        }
+    }
+}
+
+fn dedupe_matches(results: &mut Vec<MemoryQueryMatch>) {
+    let mut deduped = Vec::new();
+    for item in results.drain(..) {
+        if deduped.iter().any(|existing: &MemoryQueryMatch| {
+            existing.path == item.path && existing.source_type == item.source_type
+        }) {
+            continue;
+        }
+        deduped.push(item);
+    }
+    *results = deduped;
+}
+
+pub fn sort_memory_results(results: &mut [MemoryQueryMatch]) {
+    results.sort_by(|a, b| {
+        b.source_type
+            .rank()
+            .cmp(&a.source_type.rank())
+            .then_with(|| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.title.cmp(&b.title))
+    });
+}
+
 // Explicit memory importer
 pub mod explicit_importer;
 
@@ -487,6 +667,10 @@ pub fn memory_agent_system_prompt_with_config(
     let wiki_path_str = wiki_pb.to_string_lossy();
     let perm_pb = config::permanent_wiki_path();
     let perm_str = perm_pb.to_string_lossy();
+    let long_term_pb = config.long_term_path(project_root);
+    let long_term_str = long_term_pb.to_string_lossy();
+    let perm_long_term_pb = config::permanent_long_term_path();
+    let perm_long_term_str = perm_long_term_pb.to_string_lossy();
     let imp_pb = config.implicit_path(project_root);
     let imp_str = imp_pb.to_string_lossy();
     format!(
@@ -494,8 +678,10 @@ pub fn memory_agent_system_prompt_with_config(
          You are a specialized memory agent for the Omiga project memory system.\n\
          \n\
          Memory structure:\n\
-         - `{}` — Project explicit memory (Wiki)\n\
-         - `{}` — Permanent explicit memory (user-level Wiki, applies across projects)\n\
+         - `{}` — Project knowledge base (Wiki)\n\
+         - `{}` — Project long-term memory\n\
+         - `{}` — Global knowledge base (user-level Wiki, applies across projects)\n\
+         - `{}` — Global long-term memory\n\
          - `{}` — Implicit memory: Auto-indexed chats / documents\n\
          \n\
          Your responsibilities:\n\
@@ -510,7 +696,7 @@ pub fn memory_agent_system_prompt_with_config(
          Always check existing content first. Prefer editing existing \
          pages over creating duplicates. Keep page excerpts under 800 lines. Return a concise \
          summary of what was done.",
-        wiki_path_str, perm_str, imp_str
+        wiki_path_str, long_term_str, perm_str, perm_long_term_str, imp_str
     )
 }
 
@@ -552,5 +738,44 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(results[0].path.ends_with("circadian.md"));
+    }
+
+    #[test]
+    fn sort_memory_results_prioritizes_memory_layers_before_raw_score() {
+        let mut results = vec![
+            MemoryQueryMatch {
+                title: "Implicit hit".to_string(),
+                path: "chat/1.md".to_string(),
+                breadcrumb: vec![],
+                excerpt: "implicit".to_string(),
+                score: 0.95,
+                match_type: "Content".to_string(),
+                source_type: MemorySourceType::Implicit,
+            },
+            MemoryQueryMatch {
+                title: "Working hit".to_string(),
+                path: "session_working_memory".to_string(),
+                breadcrumb: vec![],
+                excerpt: "working".to_string(),
+                score: 0.40,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::WorkingMemory,
+            },
+            MemoryQueryMatch {
+                title: "Knowledge hit".to_string(),
+                path: "wiki/page.md".to_string(),
+                breadcrumb: vec![],
+                excerpt: "wiki".to_string(),
+                score: 0.90,
+                match_type: "Wiki".to_string(),
+                source_type: MemorySourceType::KnowledgeBaseProject,
+            },
+        ];
+
+        sort_memory_results(&mut results);
+
+        assert_eq!(results[0].title, "Working hit");
+        assert_eq!(results[1].title, "Knowledge hit");
+        assert_eq!(results[2].title, "Implicit hit");
     }
 }

@@ -145,11 +145,13 @@ pub fn messages_budget_tokens(cfg: &LlmConfig, tools_enabled: bool) -> u32 {
         .saturating_sub(overhead)
 }
 
-fn pop_head_message(messages: &mut Vec<Message>) -> bool {
+fn take_head_message_block(messages: &mut Vec<Message>) -> Vec<Message> {
     if messages.is_empty() {
-        return false;
+        return vec![];
     }
-    match messages.remove(0) {
+    let first = messages.remove(0);
+    let mut removed = vec![first.clone()];
+    match first {
         Message::Assistant {
             tool_calls: Some(calls),
             ..
@@ -159,7 +161,7 @@ fn pop_head_message(messages: &mut Vec<Message>) -> bool {
                 match &messages[0] {
                     Message::Tool { tool_call_id, .. } if pending.contains(tool_call_id) => {
                         let id = tool_call_id.clone();
-                        messages.remove(0);
+                        removed.push(messages.remove(0));
                         pending.remove(&id);
                     }
                     _ => break,
@@ -168,7 +170,11 @@ fn pop_head_message(messages: &mut Vec<Message>) -> bool {
         }
         _ => {}
     }
-    true
+    removed
+}
+
+fn pop_head_message(messages: &mut Vec<Message>) -> bool {
+    !take_head_message_block(messages).is_empty()
 }
 
 fn truncate_tool_results_for_budget(
@@ -317,6 +323,36 @@ pub fn compact_session_messages(
     })
 }
 
+pub fn preview_removed_messages_for_compaction(
+    messages: &[Message],
+    cfg: &LlmConfig,
+    tools_enabled: bool,
+) -> Option<Vec<Message>> {
+    if !is_auto_compact_enabled() {
+        return None;
+    }
+    let before = estimate_tokens_api_messages(&SessionCodec::to_api_messages(messages));
+    let budget = messages_budget_tokens(cfg, tools_enabled);
+    if before <= budget {
+        return None;
+    }
+
+    let mut preview = messages.to_vec();
+    let mut removed = Vec::new();
+    while preview.len() > MIN_MESSAGES {
+        let est = estimate_tokens_api_messages(&SessionCodec::to_api_messages(&preview));
+        if est <= budget {
+            break;
+        }
+        let block = take_head_message_block(&mut preview);
+        if block.is_empty() {
+            break;
+        }
+        removed.extend(block);
+    }
+    (!removed.is_empty()).then_some(removed)
+}
+
 /// Replace all DB rows for `session_id` with `session.messages` and return the database id of the
 /// **last** user message (for linking `conversation_rounds`).
 pub async fn replace_session_messages(
@@ -453,6 +489,29 @@ mod tests {
         match &msgs[0] {
             Message::User { content } => assert!(content.contains("u2")),
             _ => panic!("expected user u2"),
+        }
+    }
+
+    #[test]
+    fn preview_removed_messages_collects_trimmed_head_blocks() {
+        let mut c = test_config();
+        c.max_tokens = 4;
+        c.system_prompt = None;
+        let msgs = vec![
+            Message::User {
+                content: "old context ".repeat(40_000),
+            },
+            Message::User {
+                content: "latest".into(),
+            },
+        ];
+
+        let removed = preview_removed_messages_for_compaction(&msgs, &c, false).unwrap();
+
+        assert_eq!(removed.len(), 1);
+        match &removed[0] {
+            Message::User { content } => assert!(content.contains("old context")),
+            _ => panic!("expected removed user message"),
         }
     }
 }

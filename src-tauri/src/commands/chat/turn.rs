@@ -1,14 +1,46 @@
-use crate::domain::chat_state::PendingToolCall;
+use crate::domain::chat_state::{PendingToolCall, SessionRuntimeState};
 use crate::domain::session::MessageTokenUsage;
 use crate::domain::tools::ToolSchema;
 use crate::errors::{ApiError, ChatError, OmigaError};
 use crate::infrastructure::streaming::StreamOutputItem;
 use crate::llm::{LlmClient, LlmMessage, LlmStreamChunk, TokenUsage};
+use serde::Serialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, RwLock};
+
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ActivityOperationPayload {
+    pub session_id: String,
+    pub operation_id: String,
+    pub label: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+pub(super) fn emit_activity_operation(
+    app: &AppHandle,
+    session_id: &str,
+    operation_id: &str,
+    label: &str,
+    status: &str,
+    detail: Option<String>,
+) {
+    let _ = app.emit(
+        "omiga-activity-step",
+        ActivityOperationPayload {
+            session_id: session_id.to_string(),
+            operation_id: operation_id.to_string(),
+            label: label.to_string(),
+            status: status.to_string(),
+            detail,
+        },
+    );
+}
 
 /// Emit full `ToolUse` and append to `completed_tool_calls` when a tool block ends.
 /// Call when `BlockStop` fires, when a new `ToolStart` supersedes the previous tool, or when the stream ends without `BlockStop` (provider quirk).
@@ -308,6 +340,93 @@ pub(super) async fn persist_and_emit_turn_token_usage(
             provider: provider.to_string(),
         },
     );
+}
+
+pub(super) async fn sync_memory_layers_after_turn(
+    app: &AppHandle,
+    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    repo: &Arc<crate::domain::persistence::SessionRepository>,
+    session_id: &str,
+    client: &dyn LlmClient,
+    user_message: &str,
+    assistant_reply: &str,
+    allow_long_term_promotion: bool,
+) {
+    let project_root = {
+        let sessions_guard = sessions.read().await;
+        sessions_guard
+            .get(session_id)
+            .map(|runtime| super::resolve_session_project_root(&runtime.session.project_path))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    };
+
+    match crate::domain::memory::working_memory::sync_after_turn(
+        &**repo,
+        session_id,
+        client,
+        user_message,
+        assistant_reply,
+    )
+    .await
+    {
+        Ok(state) => {
+            if !state.dirty {
+                let op_id = format!("memory-sync-{}", uuid::Uuid::new_v4());
+                emit_activity_operation(
+                    app,
+                    session_id,
+                    &op_id,
+                    "更新工作记忆",
+                    "done",
+                    Some("已提炼并更新 session scratchpad".to_string()),
+                );
+            }
+            if !allow_long_term_promotion {
+                return;
+            }
+            let candidate_count =
+                crate::domain::memory::long_term::promotion_candidate_count(session_id, &state);
+            if candidate_count == 0 {
+                return;
+            }
+            let config = match crate::domain::memory::load_resolved_config(&project_root).await {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    tracing::warn!(target: "omiga::working_memory", "load_resolved_config: {}", e);
+                    return;
+                }
+            };
+            let op_id = format!("memory-promote-{}", uuid::Uuid::new_v4());
+            emit_activity_operation(
+                app,
+                session_id,
+                &op_id,
+                "晋升长期记忆",
+                "running",
+                Some(format!("准备晋升 {} 条候选摘要", candidate_count)),
+            );
+            let promoted = crate::domain::memory::long_term::promote_from_working_memory(
+                &config,
+                &project_root,
+                session_id,
+                &state,
+            )
+            .await;
+            emit_activity_operation(
+                app,
+                session_id,
+                &op_id,
+                "晋升长期记忆",
+                "done",
+                Some(format!("已晋升 {} 条长期记忆", promoted)),
+            );
+        }
+        Err(e) => {
+            tracing::warn!(target: "omiga::working_memory", "sync_after_turn: {}", e);
+            let op_id = format!("memory-sync-{}", uuid::Uuid::new_v4());
+            emit_activity_operation(app, session_id, &op_id, "更新工作记忆", "error", Some(e));
+        }
+    }
 }
 
 /// After the visible assistant reply is finalized: optional recap (independent LLM), then follow-up chips (independent LLM), then [`StreamOutputItem::Complete`].

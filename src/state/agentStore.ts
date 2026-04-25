@@ -5,7 +5,8 @@
  */
 
 import { create } from "zustand";
-import { listen } from "@tauri-apps/api/event";
+import { listenTauriEvent } from "../utils/tauriEvents";
+import { useSessionStore } from "./sessionStore";
 
 /** 后台 Agent 任务状态 */
 export type BackgroundAgentStatus =
@@ -196,7 +197,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     const { upsertTask, updateTaskStatus } = get();
 
     // 监听任务更新事件
-    const unlistenUpdate = await listen<BackgroundAgentTask>(
+    const unlistenUpdate = await listenTauriEvent<BackgroundAgentTask>(
       "background-agent-update",
       (event) => {
         upsertTask(event.payload);
@@ -204,7 +205,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     );
 
     // 监听任务完成事件
-    const unlistenComplete = await listen<BackgroundAgentCompleteEvent>(
+    const unlistenComplete = await listenTauriEvent<BackgroundAgentCompleteEvent>(
       "background-agent-complete",
       (event) => {
         const {
@@ -223,23 +224,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     );
 
     // 编排完成后刷新父会话并通知 Chat 滚动到底部
-    const unlistenSchedule = await listen<{ sessionId: string; messageId: string }>(
+    const unlistenSchedule = await listenTauriEvent<{ sessionId: string; messageId: string }>(
       "agent-schedule-complete",
       (event) => {
         const { sessionId } = event.payload;
-        import("./sessionStore").then(({ useSessionStore }) => {
-          const current = useSessionStore.getState().currentSession;
-          if (current?.id === sessionId) {
-            void useSessionStore.getState().loadSession(sessionId, { silent: true }).then(() => {
-              get().setScheduleCompleteSession(sessionId);
-            });
-          }
-        });
+        const current = useSessionStore.getState().currentSession;
+        if (current?.id === sessionId) {
+          void useSessionStore.getState().loadSession(sessionId, { silent: true }).then(() => {
+            get().setScheduleCompleteSession(sessionId);
+          });
+        }
       },
     );
 
     // 编排计划需要确认时，存入 store 触发确认对话框
-    const unlistenConfirm = await listen<ScheduleConfirmationPayload>(
+    const unlistenConfirm = await listenTauriEvent<ScheduleConfirmationPayload>(
       "agent-schedule-confirmation-required",
       (event) => {
         get().setPendingConfirmation(event.payload);

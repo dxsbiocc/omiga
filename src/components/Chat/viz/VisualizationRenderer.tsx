@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Box, Alert } from "@mui/material";
+import katex from "katex";
 import { MermaidFlow } from "./MermaidFlow";
 import { DotFlow } from "./DotFlow";
 
@@ -273,23 +274,16 @@ function KatexView({ source, displayMode }: { source: string; displayMode?: bool
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let disposed = false;
-    (async () => {
-      try {
-        // @ts-ignore - optional peer dependency
-        const katex = await import("katex");
-        if (disposed || !containerRef.current) return;
-        katex.default.render(source, containerRef.current, {
-          throwOnError: false,
-          displayMode: displayMode ?? true,
-        });
-      } catch {
-        setError("KaTeX 未安装，请运行 npm install katex");
-      }
-    })();
-    return () => {
-      disposed = true;
-    };
+    setError(null);
+    if (!containerRef.current) return;
+    try {
+      katex.render(source, containerRef.current, {
+        throwOnError: false,
+        displayMode: displayMode ?? true,
+      });
+    } catch {
+      setError("KaTeX 渲染失败");
+    }
   }, [source, displayMode]);
 
   if (error) {

@@ -259,7 +259,7 @@ describe('Session Flow Integration', () => {
     });
 
 
-    it('should clear activity state immediately when switching sessions', async () => {
+    it('should preserve activity state immediately when switching sessions', async () => {
       const mockInvoke = vi.mocked(invoke);
       const loadDeferred = deferred<{
         id: string;
@@ -306,15 +306,19 @@ describe('Session Flow Integration', () => {
       await useSessionStore.getState().setCurrentSession('session-clear');
 
       const activity = useActivityStore.getState();
-      expect(activity.isConnecting).toBe(false);
-      expect(activity.isStreaming).toBe(false);
-      expect(activity.waitingFirstChunk).toBe(false);
-      expect(activity.currentToolHint).toBeNull();
-      expect(activity.backgroundJobs).toEqual([]);
-      expect(activity.executionSteps).toEqual([]);
-      expect(activity.executionStartedAt).toBeNull();
+      expect(activity.isConnecting).toBe(true);
+      expect(activity.isStreaming).toBe(true);
+      expect(activity.waitingFirstChunk).toBe(true);
+      expect(activity.currentToolHint).toBe('bash');
+      expect(activity.backgroundJobs).toEqual([
+        { id: 'bg1', toolUseId: 'tu1', label: 'executor', state: 'running' },
+      ]);
+      expect(activity.executionSteps).toEqual([{ id: 'tool-1', title: 'old', status: 'running' }]);
+      expect(activity.executionStartedAt).toBe(123);
       expect(activity.executionEndedAt).toBeNull();
-      expect(activity.activeTodos).toBeNull();
+      expect(activity.activeTodos).toEqual([
+        { id: 'todo-1', content: 'old', activeForm: 'olding', status: 'in_progress' },
+      ]);
 
       loadDeferred.resolve({
         id: 'session-clear',
@@ -328,6 +332,46 @@ describe('Session Flow Integration', () => {
       });
       await Promise.resolve();
       await Promise.resolve();
+    });
+
+    it('should clear activity state when creating a new session', async () => {
+      const mockInvoke = vi.mocked(invoke);
+      mockInvoke.mockResolvedValueOnce({
+        id: 'session-new',
+        name: 'New session',
+        messages: [],
+        project_path: '.',
+        created_at: '2026-04-16T00:00:00.000Z',
+        updated_at: '2026-04-16T00:00:00.000Z',
+        active_provider_entry_name: null,
+        has_more_messages: false,
+      });
+
+      useActivityStore.setState({
+        isConnecting: true,
+        isStreaming: true,
+        waitingFirstChunk: true,
+        currentToolHint: 'web_search',
+        backgroundJobs: [{ id: 'bg1', toolUseId: 'tu1', label: 'web_search', state: 'running' }],
+        executionSteps: [{ id: 'tool-1', title: 'old task', status: 'running' }],
+        executionStartedAt: 123,
+        executionEndedAt: null,
+        activeTodos: [{ id: 'todo-1', content: 'old', activeForm: 'olding', status: 'in_progress' }],
+      });
+
+      await useSessionStore.getState().createSession('New session', '.');
+
+      const activity = useActivityStore.getState();
+      expect(activity.isConnecting).toBe(false);
+      expect(activity.isStreaming).toBe(false);
+      expect(activity.waitingFirstChunk).toBe(false);
+      expect(activity.currentToolHint).toBeNull();
+      expect(activity.backgroundJobs).toEqual([]);
+      expect(activity.executionSteps).toEqual([]);
+      expect(activity.executionStartedAt).toBeNull();
+      expect(activity.executionEndedAt).toBeNull();
+      expect(activity.activeTodos).toBeNull();
+      expect(useSessionStore.getState().currentSession?.id).toBe('session-new');
     });
 
     it('should ignore stale session loads when a newer switch starts', async () => {

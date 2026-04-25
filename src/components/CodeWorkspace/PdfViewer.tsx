@@ -1,3 +1,4 @@
+import "../../lib/pdfWorker";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useWheelZoom } from "../../lib/useWheelZoom";
 import { invoke } from "@tauri-apps/api/core";

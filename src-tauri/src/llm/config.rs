@@ -1,7 +1,7 @@
 //! Configuration file support for LLM providers
 //!
-//! Supports YAML, JSON, and TOML formats
-//! Default config file: `omiga.yaml` (or `omiga.json`, `omiga.toml`)
+//! Supports YAML, JSON, TOML, and simple dotenv-style `KEY=VALUE` files.
+//! Default config file: `omiga.yaml` (or `omiga.json`, `omiga.toml`).
 
 use super::{LlmConfig, LlmProvider};
 use crate::errors::ApiError;
@@ -347,6 +347,10 @@ pub struct GlobalSettings {
     /// Whether to enable tools by default
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_tools: Option<bool>,
+
+    /// Whether web-access tools should honor system/env proxy settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_use_proxy: Option<bool>,
 }
 
 impl LlmConfigFile {
@@ -518,6 +522,7 @@ impl LlmConfigFile {
                 temperature: Some(0.7),
                 timeout: Some(600),
                 enable_tools: Some(true),
+                web_use_proxy: Some(false),
             }),
             execution_envs: None,
             terminal: None,
@@ -581,6 +586,7 @@ impl LlmConfigFile {
                 temperature: Some(0.7),
                 timeout: Some(600),
                 enable_tools: Some(true),
+                web_use_proxy: Some(false),
             }),
             execution_envs: None,
             terminal: None,
@@ -659,6 +665,7 @@ settings:
   temperature: {}
   timeout: {}
   enable_tools: {}
+  web_use_proxy: {}
 "#,
             self.version,
             self.default_provider.as_deref().unwrap_or("anthropic"),
@@ -685,9 +692,20 @@ settings:
             self.settings
                 .as_ref()
                 .and_then(|s| s.enable_tools)
-                .unwrap_or(true)
+                .unwrap_or(true),
+            self.settings
+                .as_ref()
+                .and_then(|s| s.web_use_proxy)
+                .unwrap_or(false)
         )
     }
+}
+
+pub fn load_web_use_proxy_setting() -> bool {
+    load_config_file()
+        .ok()
+        .and_then(|cfg| cfg.settings.and_then(|s| s.web_use_proxy))
+        .unwrap_or(false)
 }
 
 fn format_provider_yaml(name: &str, cfg: &ProviderConfig) -> String {
@@ -723,6 +741,137 @@ fn format_provider_yaml(name: &str, cfg: &ProviderConfig) -> String {
     }
 
     lines.join("\n")
+}
+
+fn parse_env_assignment_line(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+    let (key, value) = trimmed.split_once('=')?;
+    let key = key.trim();
+    if key.is_empty() || !key.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+        return None;
+    }
+
+    let mut value = value.trim().to_string();
+    if let Some(comment_start) = value.find(" #") {
+        value.truncate(comment_start);
+        value = value.trim_end().to_string();
+    }
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        let quoted = (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'');
+        if quoted {
+            value = value[1..value.len() - 1].to_string();
+        }
+    }
+    Some((key.to_string(), value))
+}
+
+fn env_value<'a>(vars: &'a HashMap<String, String>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .filter_map(|key| vars.get(*key).map(String::as_str))
+        .find(|value| !value.trim().is_empty())
+}
+
+fn provider_from_env_assignments(vars: &HashMap<String, String>) -> LlmProvider {
+    vars.get("LLM_PROVIDER")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| {
+            if vars.contains_key("ANTHROPIC_API_KEY") {
+                LlmProvider::Anthropic
+            } else if vars.contains_key("OPENAI_API_KEY") {
+                LlmProvider::OpenAi
+            } else if vars.contains_key("AZURE_OPENAI_KEY") {
+                LlmProvider::Azure
+            } else if vars.contains_key("MINIMAX_API_KEY") {
+                LlmProvider::Minimax
+            } else if vars.contains_key("DASHSCOPE_API_KEY") || vars.contains_key("ALIBABA_API_KEY")
+            {
+                LlmProvider::Alibaba
+            } else if vars.contains_key("DEEPSEEK_API_KEY") {
+                LlmProvider::Deepseek
+            } else if vars.contains_key("ZHIPU_API_KEY") {
+                LlmProvider::Zhipu
+            } else if vars.contains_key("MOONSHOT_API_KEY") {
+                LlmProvider::Moonshot
+            } else {
+                LlmProvider::Anthropic
+            }
+        })
+}
+
+fn model_from_env_assignments(vars: &HashMap<String, String>, provider: LlmProvider) -> String {
+    let provider_model_keys = match provider {
+        LlmProvider::Anthropic => &["ANTHROPIC_MODEL", "CLAUDE_MODEL"][..],
+        LlmProvider::OpenAi => &["OPENAI_MODEL"][..],
+        LlmProvider::Azure => &["AZURE_OPENAI_MODEL", "AZURE_MODEL"][..],
+        LlmProvider::Google => &["GOOGLE_MODEL", "GEMINI_MODEL"][..],
+        LlmProvider::Minimax => &["MINIMAX_MODEL"][..],
+        LlmProvider::Alibaba => &["DASHSCOPE_MODEL", "ALIBABA_MODEL"][..],
+        LlmProvider::Deepseek => &["DEEPSEEK_MODEL"][..],
+        LlmProvider::Zhipu => &["ZHIPU_MODEL"][..],
+        LlmProvider::Moonshot => &["MOONSHOT_MODEL"][..],
+        LlmProvider::Custom => &["CUSTOM_MODEL"][..],
+    };
+    env_value(vars, &["LLM_MODEL"])
+        .or_else(|| env_value(vars, provider_model_keys))
+        .map(str::to_string)
+        .unwrap_or_else(|| provider.default_model())
+}
+
+fn dotenv_config_from_str(content: &str) -> Option<LlmConfigFile> {
+    let vars: HashMap<String, String> = content
+        .lines()
+        .filter_map(parse_env_assignment_line)
+        .collect();
+    if vars.is_empty() {
+        return None;
+    }
+
+    let provider = provider_from_env_assignments(&vars);
+    let api_key = env_value(&vars, &provider.api_key_env())?.to_string();
+    let provider_name = provider.to_string();
+    let mut providers = HashMap::new();
+    providers.insert(
+        provider_name.clone(),
+        ProviderConfig {
+            provider_type: provider_name.clone(),
+            api_key: Some(api_key),
+            model: Some(model_from_env_assignments(&vars, provider)),
+            base_url: env_value(&vars, &["LLM_BASE_URL"])
+                .or_else(|| match provider {
+                    LlmProvider::Anthropic => env_value(&vars, &["ANTHROPIC_BASE_URL"]),
+                    LlmProvider::OpenAi => {
+                        env_value(&vars, &["OPENAI_BASE_URL", "OPENAI_API_BASE"])
+                    }
+                    LlmProvider::Azure => env_value(&vars, &["AZURE_OPENAI_ENDPOINT"]),
+                    LlmProvider::Deepseek => env_value(&vars, &["DEEPSEEK_BASE_URL"]),
+                    LlmProvider::Moonshot => env_value(&vars, &["MOONSHOT_BASE_URL"]),
+                    _ => None,
+                })
+                .map(str::to_string),
+            max_tokens: env_value(&vars, &["LLM_MAX_TOKENS"]).and_then(|value| value.parse().ok()),
+            temperature: env_value(&vars, &["LLM_TEMPERATURE"])
+                .and_then(|value| value.parse().ok()),
+            timeout: env_value(&vars, &["LLM_TIMEOUT", "LLM_TIMEOUT_SECS"])
+                .and_then(|value| value.parse().ok()),
+            enabled: true,
+            ..Default::default()
+        },
+    );
+
+    Some(LlmConfigFile {
+        version: "1.0".to_string(),
+        default_provider: Some(provider_name),
+        providers: Some(providers),
+        settings: None,
+        execution_envs: None,
+        terminal: None,
+    })
 }
 
 /// Expand environment variables in string
@@ -776,6 +925,17 @@ pub fn find_config_file() -> Option<PathBuf> {
         }
     }
 
+    // Check legacy Omiga home used by local scripts and older setups.
+    if let Some(home) = dirs::home_dir() {
+        let omiga_home = home.join(".omiga");
+        for name in &possible_names {
+            let path = omiga_home.join(name);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
     None
 }
 
@@ -797,9 +957,12 @@ pub fn load_config_file_at(path: &Path) -> Result<LlmConfigFile, ApiError> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     let config: LlmConfigFile = match ext {
-        "yaml" | "yml" => serde_yaml::from_str(&content).map_err(|e| ApiError::Config {
-            message: format!("Failed to parse YAML config: {}", e),
-        })?,
+        "yaml" | "yml" => match serde_yaml::from_str(&content) {
+            Ok(config) => config,
+            Err(yaml_err) => dotenv_config_from_str(&content).ok_or_else(|| ApiError::Config {
+                message: format!("Failed to parse YAML config: {}", yaml_err),
+            })?,
+        },
         "json" => serde_json::from_str(&content).map_err(|e| ApiError::Config {
             message: format!("Failed to parse JSON config: {}", e),
         })?,
@@ -807,12 +970,16 @@ pub fn load_config_file_at(path: &Path) -> Result<LlmConfigFile, ApiError> {
             message: format!("Failed to parse TOML config: {}", e),
         })?,
         _ => {
-            // Try YAML first, then JSON
-            serde_yaml::from_str(&content)
-                .or_else(|_| serde_json::from_str(&content))
-                .map_err(|e| ApiError::Config {
-                    message: format!("Failed to parse config: {}", e),
-                })?
+            // Try YAML first, then JSON, then dotenv-style KEY=VALUE.
+            match serde_yaml::from_str(&content) {
+                Ok(config) => config,
+                Err(yaml_err) => match serde_json::from_str(&content) {
+                    Ok(config) => config,
+                    Err(_) => dotenv_config_from_str(&content).ok_or_else(|| ApiError::Config {
+                        message: format!("Failed to parse config: {}", yaml_err),
+                    })?,
+                },
+            }
         }
     };
 
@@ -857,4 +1024,34 @@ pub fn init_multi_provider_config(path: &Path) -> Result<(), ApiError> {
     let config = LlmConfigFile::multi_provider_example();
     save_config_file(&config, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_env_assignment_line_with_quotes_and_comments() {
+        assert_eq!(
+            parse_env_assignment_line("export LLM_MODEL='deepseek-v4-flash' # comment"),
+            Some(("LLM_MODEL".to_string(), "deepseek-v4-flash".to_string()))
+        );
+    }
+
+    #[test]
+    fn loads_dotenv_style_deepseek_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("omiga.yaml");
+        std::fs::write(
+            &path,
+            "DEEPSEEK_API_KEY=sk-test\nDEEPSEEK_MODEL=deepseek-v4-flash\n",
+        )
+        .expect("write config");
+
+        let config_file = load_config_file_at(&path).expect("load dotenv-style config");
+        let config = config_file.to_llm_config().expect("runtime config");
+        assert_eq!(config.provider, LlmProvider::Deepseek);
+        assert_eq!(config.api_key, "sk-test");
+        assert_eq!(config.model, "deepseek-v4-flash");
+    }
 }

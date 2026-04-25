@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { parseWorkflowCommand } from "./workflowCommands";
+import {
+  parseResearchCommand,
+  parseWorkflowCommand,
+} from "./workflowCommands";
 
 describe("parseWorkflowCommand", () => {
   it("parses /schedule with task body", () => {
@@ -33,5 +36,18 @@ describe("parseWorkflowCommand", () => {
   it("returns null for non-workflow slash commands", () => {
     expect(parseWorkflowCommand("/Explore")).toBeNull();
     expect(parseWorkflowCommand("/planthis")).toBeNull();
+  });
+
+  it("parses /research commands separately", () => {
+    expect(
+      parseResearchCommand(
+        "/research run 帮我检索单细胞 RNA-seq 差异分析方法",
+      ),
+    ).toEqual({
+      command: "research",
+      body: "run 帮我检索单细胞 RNA-seq 差异分析方法",
+    });
+    expect(parseWorkflowCommand("/research run hello")).toBeNull();
+    expect(parseResearchCommand("/orchestrate run hello")).toBeNull();
   });
 });

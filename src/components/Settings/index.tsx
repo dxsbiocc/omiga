@@ -253,6 +253,8 @@ export function Settings({
     useState(true);
   /** LLM 请求超时（秒）——长对话 / 复杂任务需要更大值 */
   const [requestTimeoutSecs, setRequestTimeoutSecs] = useState(600);
+  /** 网页访问是否使用系统/环境代理；默认关闭 */
+  const [webUseProxy, setWebUseProxy] = useState(false);
 
   // UI state
   const [isLoading, setIsLoading] = useState(false);
@@ -421,10 +423,12 @@ export function Settings({
       try {
         const gs = await invoke<{
           timeout?: number;
+          webUseProxy?: boolean;
         }>("get_global_settings", {});
         if (gs.timeout != null && gs.timeout > 0) {
           setRequestTimeoutSecs(gs.timeout);
         }
+        setWebUseProxy(gs.webUseProxy === true);
       } catch {
         /* ignore */
       }
@@ -460,28 +464,17 @@ export function Settings({
         firecrawl: ws.firecrawl,
         firecrawlUrl: ws.firecrawlUrl,
       });
+      await invoke("save_global_settings_to_config", {
+        timeout: Math.max(30, requestTimeoutSecs),
+        webUseProxy,
+      });
       localStorage.setItem(WEB_SEARCH_KEYS_STORAGE, JSON.stringify(ws));
       localStorage.removeItem("omiga_tavily_search_api_key");
       localStorage.removeItem("omiga_brave_search_api_key");
 
-      const stored = localStorage.getItem("omiga_llm_config");
-      if (stored) {
-        const config: LlmConfig = JSON.parse(stored);
-        await invoke("save_llm_settings_to_config", {
-          provider: config.provider,
-          apiKey: config.apiKey,
-          secretKey: config.secretKey,
-          appId: config.appId,
-          model: config.model,
-          baseUrl: config.baseUrl,
-          timeout: Math.max(30, requestTimeoutSecs),
-        });
-        localStorage.setItem("omiga_llm_config", JSON.stringify(config));
-      }
-
       setMessage({
         type: "success",
-        text: "Advanced settings saved (request timeout, web search keys, post-turn summary & follow-up suggestions)",
+        text: "Advanced settings saved (request timeout, web search keys, web proxy, post-turn summary & follow-up suggestions)",
       });
     } catch (error) {
       console.error("Failed to save advanced settings:", error);
@@ -750,6 +743,33 @@ export function Settings({
                   helperText="流式响应的总超时。长对话、代码生成、测序/数据分析等复杂任务建议设为 1800–3600 秒。"
                   inputProps={{ min: 30, step: 60 }}
                   sx={{ mb: 3 }}
+                />
+
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={webUseProxy}
+                      onChange={(_, v) => setWebUseProxy(v)}
+                      disabled={isLoading}
+                      color="primary"
+                    />
+                  }
+                  label={
+                    <Box>
+                      <Typography variant="body2" fontWeight={600}>
+                        网页访问使用代理
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        仅影响内置 web_search / web_fetch。关闭时强制直连；开启后才会读取系统或环境代理设置。
+                      </Typography>
+                    </Box>
+                  }
+                  sx={{
+                    alignItems: "flex-start",
+                    mb: 3,
+                    ml: 0,
+                    "& .MuiFormControlLabel-label": { mt: 0.25 },
+                  }}
                 />
 
                 <Divider sx={{ mb: 3 }} />

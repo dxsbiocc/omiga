@@ -297,6 +297,92 @@ pub struct DirectoryListResponse {
     pub has_more: bool,
 }
 
+// ─── Filesystem mutation commands ─────────────────────────────────────────────
+
+/// Create a new empty directory (all intermediate parent directories are created).
+#[tauri::command]
+pub async fn create_directory(path: String) -> CommandResult<String> {
+    let p = PathBuf::from(&path);
+    tokio::fs::create_dir_all(&p)
+        .await
+        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+    let canonical = p
+        .canonicalize()
+        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+/// Create a new empty file. Fails if the file already exists.
+#[tauri::command]
+pub async fn create_file(path: String) -> CommandResult<String> {
+    let p = PathBuf::from(&path);
+    if p.exists() {
+        return Err(AppError::Fs(FsError::IoError {
+            message: format!("'{}' already exists", path),
+        }));
+    }
+    // Create parent directories if missing.
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+        }
+    }
+    tokio::fs::File::create(&p)
+        .await
+        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+    let canonical = p
+        .canonicalize()
+        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+/// Delete a file or directory. Directories are removed recursively.
+#[tauri::command]
+pub async fn delete_fs_entry(path: String) -> CommandResult<()> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err(AppError::Fs(FsError::IoError {
+            message: format!("'{}' does not exist", path),
+        }));
+    }
+    if p.is_dir() {
+        tokio::fs::remove_dir_all(&p)
+            .await
+            .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+    } else {
+        tokio::fs::remove_file(&p)
+            .await
+            .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+    }
+    Ok(())
+}
+
+/// Rename (or move) a filesystem entry. `to_path` must not already exist.
+#[tauri::command]
+pub async fn rename_fs_entry(from_path: String, to_path: String) -> CommandResult<String> {
+    let from = PathBuf::from(&from_path);
+    let to = PathBuf::from(&to_path);
+    if !from.exists() {
+        return Err(AppError::Fs(FsError::IoError {
+            message: format!("'{}' does not exist", from_path),
+        }));
+    }
+    if to.exists() {
+        return Err(AppError::Fs(FsError::IoError {
+            message: format!("'{}' already exists", to_path),
+        }));
+    }
+    tokio::fs::rename(&from, &to)
+        .await
+        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+    let canonical = to
+        .canonicalize()
+        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
 // ─── Local file viewer ────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]

@@ -1,3 +1,4 @@
+import "../../lib/monacoWorkers";
 import { useRef, useCallback, useEffect, memo } from "react";
 import Editor, { type OnMount, type OnChange } from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";

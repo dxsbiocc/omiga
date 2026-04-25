@@ -1,9 +1,3 @@
-// Must be the very first import so Monaco workers are registered before any
-// editor instance is created. See src/lib/monacoWorkers.ts for details.
-import "./lib/monacoWorkers";
-// Configure pdf.js worker once at app startup.
-import "./lib/pdfWorker";
-
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";

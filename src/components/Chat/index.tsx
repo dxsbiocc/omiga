@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, startTransition } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, startTransition, memo } from "react";
 import { flushSync } from "react-dom";
 import type { CSSProperties } from "react";
 import type { Components } from "react-markdown";
@@ -24,34 +24,20 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
-  TextField,
   Snackbar,
   CircularProgress,
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import {
   SmartToy,
-  Construction,
   CheckCircle,
   ExpandMore,
   ForumOutlined,
   FolderOpen,
-  Article,
-  Search as SearchIcon,
   Send as SendIcon,
-  Terminal as TerminalIcon,
-  Link as LinkIcon,
-  Checklist as ChecklistIcon,
-  TravelExplore as TravelExploreIcon,
-  MenuBook as MenuBookIcon,
-  Assignment as AssignmentIcon,
   Check as CheckIcon,
-  InsertDriveFile as InsertDriveFileIcon,
   Summarize as SummarizeIcon,
-  Replay as ReplayIcon,
   Edit as EditIcon,
-  ContentCopy as ContentCopyIcon,
-  InfoOutlined as InfoOutlinedIcon,
   Groups as GroupsIcon,
   RocketLaunch as RocketLaunchIcon,
 } from "@mui/icons-material";
@@ -62,8 +48,6 @@ import {
 } from "react-syntax-highlighter/dist/esm/styles/prism";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import {
   useSessionStore,
@@ -80,7 +64,23 @@ import {
 } from "../../state";
 import { Terminal } from "../Terminal";
 import { OmigaLogo } from "../OmigaLogo";
+import {
+  AssistantTraceItem,
+  LiveIntermediateTrace,
+} from "./AssistantTraceItem";
 import { ChatComposer, type ChatComposerRef } from "./ChatComposer";
+import { AssistantMessageBubble } from "./AssistantMessageBubble";
+import { ChatMarkdownContent } from "./ChatMarkdownContent";
+import { ToolCallCard } from "./ToolCallCard";
+import {
+  firstRunningToolName,
+  getNestedToolPanelOpen,
+  summarizeReactFold,
+  ToolFoldHeader,
+  toolGroupAnyRunning,
+  toolGroupFlowComplete,
+} from "./ToolFoldSummary";
+import { UserMessageBubble } from "./UserMessageBubble";
 import type { AskUserQuestionItem } from "./AskUserQuestionWizard";
 import { getChatTokens } from "./chatTokens";
 import type { BackgroundAgentTask } from "./backgroundAgentTypes";
@@ -94,7 +94,21 @@ import {
   shortBgTaskLabel,
 } from "./backgroundAgentTypes";
 import { finalizeResearchCommandMessages } from "./researchCommandUtils";
+import {
+  messageEntranceDelayMs,
+  messageRenderItemKey,
+  shouldAnimateMessageItem,
+} from "./renderItemUtils";
+import {
+  formatProgressiveRenderPerf,
+  shouldLogProgressiveRenderPerf,
+} from "./renderPerfUtils";
 import { settleRunningToolCalls } from "./toolStatusUtils";
+import {
+  getNestedToolPanelOpenForFold,
+  toggleNestedToolPanelOpenForFold,
+  type NestedToolPanelOpenByFold,
+} from "./toolPanelOpenState";
 import { BackgroundAgentTranscriptDrawer } from "./BackgroundAgentTranscriptDrawer";
 import { SessionSwitchSkeleton } from "./SessionSwitchSkeleton";
 import { AgentSessionStatus } from "./AgentSessionStatus";
@@ -318,20 +332,6 @@ type ResearchCommandResponse = {
   assistantContent: string;
 };
 
-function formatUserMessageTimestamp(ts: number | undefined): string {
-  try {
-    return new Date(ts ?? Date.now()).toLocaleString(undefined, {
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return "";
-  }
-}
-
 /** Shown as a user line + sent to the model to continue after the user cancelled a stream. */
 const RESUME_AFTER_CANCEL_PROMPT =
   "请从上一轮中断处继续完成回复，衔接已有内容，不要重复已完整输出的段落。";
@@ -438,42 +438,6 @@ function prismStyleTransparentCodeSurface(
       backgroundColor: "transparent",
     },
   };
-}
-
-function toolRowIcon(toolName: string) {
-  const n = toolName.toLowerCase();
-  if (n.includes("ask_user") || n.includes("askuserquestion"))
-    return ForumOutlined;
-  if (n === "Agent" || n === "Task") return SmartToy;
-  if (
-    n.includes("send_user_message") ||
-    n.includes("sendusermessage") ||
-    n.includes("brief")
-  )
-    return SendIcon;
-  if (n.includes("todo_write") || n.includes("todowrite")) return ChecklistIcon;
-  if (n.includes("notebook_edit") || n.includes("notebookedit"))
-    return MenuBookIcon;
-  if (n === "skill" || n === "skilltool") return MenuBookIcon;
-  if (n === "recall") return SearchIcon;
-  if (n.includes("web_search") || n.includes("websearch"))
-    return TravelExploreIcon;
-  if (n.includes("web_fetch") || n.includes("fetch")) return LinkIcon;
-  if (n.includes("bash") || n.includes("shell")) return TerminalIcon;
-  if (n.includes("glob") || n.includes("file")) return FolderOpen;
-  if (n.includes("ripgrep") || n.includes("grep")) return SearchIcon;
-  if (n.includes("toolsearch")) return SearchIcon;
-  if (n.includes("exitplan") || n.includes("enterplan")) return MenuBookIcon;
-  if (
-    n === "taskcreate" ||
-    n === "taskget" ||
-    n === "tasklist" ||
-    n === "taskupdate"
-  )
-    return AssignmentIcon;
-  if (n.includes("taskstop") || n.includes("taskoutput")) return TerminalIcon;
-  if (n.includes("read")) return Article;
-  return Construction;
 }
 
 /**
@@ -733,127 +697,6 @@ function groupMessagesForRender(messages: Message[]): RenderMsgItem[] {
   return out;
 }
 
-/** Pencil collapseRow summary: "Ran 2 commands, viewed a file" */
-function summarizeToolGroup(messages: Message[]): string {
-  if (messages.length === 0) return "";
-  if (messages.length === 1) {
-    return messages[0].toolCall?.name ?? "tool";
-  }
-  const names = messages.map((m) => m.toolCall?.name ?? "tool");
-  const bashCount = names.filter((n) => n === "bash").length;
-  const fileOps = names.filter(
-    (n) =>
-      n.includes("glob") ||
-      n.includes("file_read") ||
-      n.includes("read_file") ||
-      n.includes("file_write") ||
-      n.includes("file_edit") ||
-      n.includes("web_fetch") ||
-      n.includes("web_search") ||
-      n.includes("todo_write") ||
-      n.includes("notebook_edit") ||
-      n === "file_read",
-  ).length;
-  const parts: string[] = [];
-  if (bashCount > 0) {
-    parts.push(`${bashCount} command${bashCount > 1 ? "s" : ""}`);
-  }
-  if (fileOps > 0) {
-    parts.push(fileOps === 1 ? "viewed a file" : `viewed ${fileOps} files`);
-  }
-  const accounted = bashCount + fileOps;
-  if (accounted < messages.length) {
-    parts.push(`${messages.length - accounted} more`);
-  }
-  if (parts.length === 0) {
-    return `Ran ${messages.length} tools`;
-  }
-  return `Ran ${parts.join(", ")}`;
-}
-
-function summarizeReactFold(fold: Message[]): string {
-  const tools = fold.filter((m) => m.role === "tool" && m.toolCall);
-  const thinking = fold.filter(
-    (m) =>
-      m.role === "assistant" ||
-      (m.role === "tool" && Boolean(m.prefaceBeforeTools?.trim())),
-  ).length;
-  if (tools.length === 0) {
-    return thinking > 0 ? "Reasoning" : "Trace";
-  }
-  const toolSummary = summarizeToolGroup(tools);
-  return thinking > 0 ? `Reasoning · ${toolSummary}` : toolSummary;
-}
-
-function toolGroupAnyRunning(messages: Message[]): boolean {
-  return messages.some((m) => m.toolCall?.status === "running");
-}
-
-/** Name of a tool call still running (prefer the latest in the fold). */
-function firstRunningToolName(messages: Message[]): string | null {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (
-      m.role === "tool" &&
-      m.toolCall?.status === "running" &&
-      m.toolCall.name?.trim()
-    ) {
-      return m.toolCall.name.trim();
-    }
-  }
-  return null;
-}
-
-/**
- * Outer tool fold is "complete" when nothing is still running. Per-tool `error`
- * from `is_error` does not fail the whole fold — nested rows still show Error.
- */
-function toolGroupFlowComplete(messages: Message[]): boolean {
-  if (messages.length === 0) return false;
-  return !toolGroupAnyRunning(messages);
-}
-
-/** Prefer toolCall.output; avoid using short status-only message.content as "Output". */
-function toolDisplayOutputText(
-  message: Message,
-  tc: NonNullable<Message["toolCall"]>,
-): string {
-  const fromTc = tc.output?.trim();
-  if (fromTc) return fromTc;
-  if (message.role !== "tool" || !message.content?.trim()) return "";
-  const c = message.content.trim();
-  if (/^`[^`]+`\s+(completed|failed)$/i.test(c)) return "";
-  return c;
-}
-
-/** Stable key for nested expand state inside a react_fold. */
-function toolNestedPanelKey(foldId: string, messageId: string): string {
-  return `${foldId}::${messageId}`;
-}
-
-/** Read `description` from tool JSON (bash, file_read, etc.). */
-function parseToolDescriptionFromInput(
-  input: string | undefined,
-): string | null {
-  if (!input?.trim()) return null;
-  try {
-    const j = JSON.parse(input) as Record<string, unknown>;
-    const d = j.description;
-    if (typeof d === "string" && d.trim()) return d.trim();
-  } catch {
-    /* not JSON */
-  }
-  return null;
-}
-
-/** Display title for a tool row: `description` from arguments JSON, else tool name. */
-function toolCallPanelTitle(
-  input: string | undefined,
-  toolName: string,
-): string {
-  return parseToolDescriptionFromInput(input) ?? toolName;
-}
-
 function shortToolValue(value: unknown, max = 120): string {
   if (value == null) return "";
   const text = String(value).trim().replace(/\s+/g, " ");
@@ -954,15 +797,6 @@ function toolActionThoughtSummary(
   return summary === toolName
     ? `需要调用 ${formatToolDisplayName(toolName)} 推进下一步。`
     : summary;
-}
-
-function getNestedToolPanelOpen(
-  key: string,
-  tc: NonNullable<Message["toolCall"]>,
-  overrides: Record<string, boolean>,
-): boolean {
-  if (key in overrides) return overrides[key];
-  return tc.status === "running";
 }
 
 /** 调度计划显示组件 */
@@ -1419,90 +1253,340 @@ function SchedulerPlanDisplay({
   );
 }
 
-/**
- * Repair common GFM table breakage caused by LLMs placing newlines inside
- * table cells or embedding next-row markers mid-line.
- *
- * Two patterns handled:
- * A) Continuation lines: after a table separator row, a non-pipe line is cell
- *    continuation — join it into the previous row's last cell.
- * B) Embedded row markers: " | | " or " || " mid-line while in table context
- *    signals a new row — split the line there.
- */
-function fixBrokenGfmTables(md: string): string {
-  const lines = md.split("\n");
-  const out: string[] = [];
-  let afterSeparator = false; // true once we've seen a |---|---| row
+type ChatTokens = ReturnType<typeof getChatTokens>;
+type ReactFoldRenderItemData = Extract<RenderMsgItem, { kind: "react_fold" }>;
+type RowRenderItemData = Extract<RenderMsgItem, { kind: "row" }>;
 
-  const isTableRow = (s: string) => s.trimStart().startsWith("|");
-  const isSeparatorRow = (s: string) => /^\s*\|[\s\-:|]+\|/.test(s);
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const trimmed = line.trim();
-
-    if (isSeparatorRow(trimmed)) {
-      afterSeparator = true;
-      // Flush any pending non-pipe continuation first (shouldn't happen, but guard)
-      out.push(line);
-      continue;
-    }
-
-    if (!trimmed) {
-      afterSeparator = false;
-      out.push(line);
-      continue;
-    }
-
-    if (isTableRow(trimmed)) {
-      afterSeparator = afterSeparator || false; // keep existing state
-      out.push(line);
-      continue;
-    }
-
-    // Non-pipe line while we're inside a table
-    if (afterSeparator) {
-      // Pattern B: line contains embedded row markers " | | " or " || "
-      const embeddedRow = / \| \| | \|\| /;
-      if (embeddedRow.test(line)) {
-        const parts = line.split(/ \| \| | \|\| /);
-        // First part is continuation of the previous row's last cell
-        if (parts[0].trim() && out.length > 0 && isTableRow(out[out.length - 1])) {
-          const prev = out[out.length - 1].trimEnd();
-          out[out.length - 1] = prev.endsWith("|")
-            ? prev.slice(0, -1).trimEnd() + " " + parts[0].trim() + " |"
-            : prev + " " + parts[0].trim();
-        } else if (parts[0].trim()) {
-          out.push(parts[0].trim());
-        }
-        // Remaining parts become new table rows
-        for (let p = 1; p < parts.length; p++) {
-          if (parts[p].trim()) {
-            const rowContent = parts[p].trim();
-            out.push(rowContent.startsWith("|") ? rowContent : "| " + rowContent);
-          }
-        }
-        continue;
-      }
-
-      // Pattern A: plain continuation line — merge into previous row's last cell
-      if (out.length > 0 && isTableRow(out[out.length - 1])) {
-        const prev = out[out.length - 1].trimEnd();
-        out[out.length - 1] = prev.endsWith("|")
-          ? prev.slice(0, -1).trimEnd() + " " + trimmed + " |"
-          : prev + " " + trimmed;
-        continue;
-      }
-
-      // Can't repair — exit table context and emit as-is
-      afterSeparator = false;
-    }
-
-    out.push(line);
-  }
-
-  return out.join("\n");
+interface ReactFoldRenderItemProps {
+  item: ReactFoldRenderItemData;
+  expanded: boolean;
+  isLastFold: boolean;
+  liveIntermediateText: string;
+  activityIsStreaming: boolean;
+  waitingFirstChunk: boolean;
+  pendingAskUserToolUseId: string | null;
+  nestedToolPanelOpenForFold: Readonly<Record<string, boolean>>;
+  chat: ChatTokens;
+  components: Components;
+  onToggleGroup: (groupId: string) => void;
+  onToggleNestedToolPanel: (
+    foldId: string,
+    messageId: string,
+    tc: NonNullable<Message["toolCall"]>,
+  ) => void;
 }
+
+const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
+  item,
+  expanded,
+  isLastFold,
+  liveIntermediateText,
+  activityIsStreaming,
+  waitingFirstChunk,
+  pendingAskUserToolUseId,
+  nestedToolPanelOpenForFold,
+  chat,
+  components,
+  onToggleGroup,
+  onToggleNestedToolPanel,
+}: ReactFoldRenderItemProps) {
+  const { id, fold } = item;
+  const toolMsgs = fold.filter((m) => m.role === "tool" && m.toolCall);
+  const summary = summarizeReactFold(fold);
+  const anyRunning = toolGroupAnyRunning(toolMsgs);
+  const showGroupDone = toolGroupFlowComplete(toolMsgs);
+  const runningToolName = firstRunningToolName(toolMsgs);
+  const runningToolCount = toolMsgs.filter(
+    (m) => m.toolCall?.status === "running",
+  ).length;
+
+  return (
+    <Box
+      sx={{
+        width: "100%",
+        minWidth: 0,
+        maxWidth: "100%",
+      }}
+    >
+      <Box
+        sx={{
+          width: "100%",
+          minWidth: 0,
+          maxWidth: "100%",
+          borderRadius: `${BUBBLE_RADIUS_PX}px`,
+          bgcolor: chat.agentBubbleBg,
+          border: `1px solid ${chat.agentBubbleBorder}`,
+          px: 1.75,
+          py: 1.25,
+          fontFamily: chat.font,
+          overflow: "visible",
+          transition: "border-color 200ms ease",
+          "&:hover": {
+            borderColor: alpha(chat.accent, 0.28),
+          },
+        }}
+      >
+        <ToolFoldHeader
+          foldId={id}
+          expanded={expanded}
+          summary={summary}
+          anyRunning={anyRunning}
+          runningToolName={runningToolName}
+          runningToolCount={runningToolCount}
+          showGroupDone={showGroupDone}
+          isLastFold={isLastFold}
+          activityIsStreaming={activityIsStreaming}
+          waitingFirstChunk={waitingFirstChunk}
+          chat={chat}
+          onToggle={onToggleGroup}
+        />
+
+        <Collapse in={expanded}>
+          <Box
+            sx={{
+              mt: 1.25,
+              pl: 1.75,
+              ml: 0.5,
+              borderLeft: `2px solid ${chat.agentBubbleBorder}`,
+              display: "flex",
+              flexDirection: "column",
+              gap: 1.25,
+            }}
+          >
+            {fold.map((message, foldIndex) => {
+              if (message.role === "assistant") {
+                return (
+                  <AssistantTraceItem
+                    key={message.id}
+                    content={message.content}
+                    intermediate={message.intermediate}
+                    chat={chat}
+                    components={components}
+                  />
+                );
+              }
+              if (message.role !== "tool" || !message.toolCall) return null;
+              const tc = message.toolCall;
+              const showAskUserPanel = Boolean(
+                pendingAskUserToolUseId &&
+                  tc.id &&
+                  pendingAskUserToolUseId === tc.id,
+              );
+              const previousAssistantHasText = Boolean(
+                fold[foldIndex - 1]?.role === "assistant" &&
+                  fold[foldIndex - 1]?.content?.trim(),
+              );
+              const nestedOpen =
+                getNestedToolPanelOpen(message.id, tc, nestedToolPanelOpenForFold) ||
+                showAskUserPanel;
+
+              return (
+                <ToolCallCard
+                  key={message.id}
+                  foldId={id}
+                  messageId={message.id}
+                  content={message.content}
+                  timestamp={message.timestamp}
+                  prefaceBeforeTools={message.prefaceBeforeTools}
+                  toolCall={tc}
+                  previousAssistantHasText={previousAssistantHasText}
+                  generatedThoughtSummary={
+                    previousAssistantHasText
+                      ? ""
+                      : toolActionThoughtSummary(tc.name, tc.input)
+                  }
+                  nestedOpen={nestedOpen}
+                  showAskUserPanel={showAskUserPanel}
+                  chat={chat}
+                  components={components}
+                  onToggle={onToggleNestedToolPanel}
+                />
+              );
+            })}
+
+            {liveIntermediateText && (
+              <LiveIntermediateTrace
+                foldId={id}
+                content={liveIntermediateText}
+                chat={chat}
+                components={components}
+              />
+            )}
+
+            {showGroupDone && (
+              <Stack direction="row" alignItems="center" spacing={1} sx={{ pt: 0.25 }}>
+                <CheckCircle sx={{ fontSize: 14, color: chat.doneGreen }} />
+                <Typography
+                  sx={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: chat.toolIcon,
+                  }}
+                >
+                  Done
+                </Typography>
+              </Stack>
+            )}
+          </Box>
+        </Collapse>
+      </Box>
+    </Box>
+  );
+});
+
+interface MessageRowRenderItemProps {
+  item: RowRenderItemData;
+  nextRowIsUser: boolean;
+  isEditingUser: boolean;
+  editDraft: string;
+  sessionId: string;
+  chat: ChatTokens;
+  components: Components;
+  onRetryMessage: (message: Message) => void;
+  onEditMessage: (message: Message) => void;
+  onCopyMessage: (message: Message) => void;
+  onEditDraftChange: (draft: string) => void;
+  onCancelEdit: () => void;
+  onSaveEdit: () => void;
+  onOpenReviewerTranscript: (taskId: string) => void;
+  onExecutePlan: (
+    plan: SchedulerPlan,
+    mode: "schedule" | "team" | "autopilot",
+  ) => void;
+  onDispatchWorkflowCommand: (
+    mode: "plan" | "schedule" | "team" | "autopilot",
+    body: string,
+    autoSend?: boolean,
+  ) => void;
+}
+
+const MessageRowRenderItem = memo(function MessageRowRenderItem({
+  item,
+  nextRowIsUser,
+  isEditingUser,
+  editDraft,
+  sessionId,
+  chat,
+  components,
+  onRetryMessage,
+  onEditMessage,
+  onCopyMessage,
+  onEditDraftChange,
+  onCancelEdit,
+  onSaveEdit,
+  onOpenReviewerTranscript,
+  onExecutePlan,
+  onDispatchWorkflowCommand,
+}: MessageRowRenderItemProps) {
+  const message = item.message;
+  const dividerBefore = item.dividerBefore === true;
+  const userRowPb =
+    message.role === "user" ? (nextRowIsUser ? 1 : 2) : null;
+  const userAttachPaths = message.composerAttachedPaths ?? [];
+  const userBubbleDisplayText =
+    message.role === "user" && userAttachPaths.length > 0
+      ? stripLeadingPathPrefixFromMerged(message.content, userAttachPaths)
+      : message.content;
+
+  return (
+    <Box
+      sx={{
+        display: "flex",
+        flexDirection: "column",
+        width: "100%",
+        maxWidth: "100%",
+        gap: dividerBefore ? 1.5 : 0,
+      }}
+    >
+      {dividerBefore && (
+        <Divider
+          sx={{
+            borderColor: chat.agentBubbleBorder,
+            "&::before, &::after": {
+              borderColor: chat.agentBubbleBorder,
+            },
+          }}
+        />
+      )}
+      <Box
+        sx={{
+          display: "flex",
+          justifyContent: message.role === "user" ? "flex-end" : "flex-start",
+          width: "100%",
+          minWidth: 0,
+          maxWidth: "100%",
+          pt: 1,
+          pb: userRowPb !== null ? userRowPb : 2,
+        }}
+      >
+        {message.role === "user" ? (
+          <UserMessageBubble
+            content={message.content}
+            displayText={userBubbleDisplayText}
+            timestamp={message.timestamp}
+            composerAgentType={message.composerAgentType}
+            attachedPaths={userAttachPaths}
+            isEditing={isEditingUser}
+            editDraft={editDraft}
+            chat={chat}
+            bubbleRadiusPx={BUBBLE_RADIUS_PX}
+            maxWidth={USER_BUBBLE_MAX_CSS}
+            onRetry={() => onRetryMessage(message)}
+            onEdit={() => onEditMessage(message)}
+            onCopy={() => onCopyMessage(message)}
+            onEditDraftChange={onEditDraftChange}
+            onCancelEdit={onCancelEdit}
+            onSaveEdit={onSaveEdit}
+          />
+        ) : (
+          <AssistantMessageBubble
+            content={message.content}
+            tokenUsage={message.tokenUsage}
+            components={components}
+            chat={chat}
+            bubbleRadiusPx={BUBBLE_RADIUS_PX}
+          />
+        )}
+      </Box>
+
+      {message.schedulerPlan && message.schedulerPlan.subtasks.length > 1 && (
+        <Box
+          sx={{
+            width: "100%",
+            maxWidth: USER_BUBBLE_MAX_CSS,
+            alignSelf: "flex-end",
+            mt: 0.5,
+          }}
+        >
+          <SchedulerPlanDisplay
+            plan={message.schedulerPlan}
+            sessionId={sessionId}
+            onOpenReviewerTranscript={onOpenReviewerTranscript}
+            onExecutePlan={(mode) => {
+              if (!message.schedulerPlan) return;
+              onExecutePlan(message.schedulerPlan, mode);
+            }}
+            onRevisePlan={() => {
+              const request =
+                message.schedulerPlan?.originalRequest?.trim() ||
+                stripLeadingPathPrefixFromMerged(
+                  message.content,
+                  message.composerAttachedPaths ?? [],
+                )
+                  .replace(/^\/plan\s+/iu, "")
+                  .trim();
+              onDispatchWorkflowCommand(
+                "plan",
+                `${request}\n\n修改要求：`,
+                false,
+              );
+            }}
+          />
+        </Box>
+      )}
+    </Box>
+  );
+});
 
 /** How close to the bottom (px) before auto-scroll kicks in */
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 100;
@@ -2048,6 +2132,10 @@ export function Chat({ sessionId }: ChatProps) {
   /** Saved scrollHeight of the scroll container just before phase-2 renders.
    *  Used to compute how much height was added above the current view. */
   const scrollRestoreRef = useRef<number | null>(null);
+  const progressivePhase2StartRef = useRef<number | null>(null);
+  const progressiveLastAddedHeightRef = useRef<number | null>(null);
+  const progressivePhase1LoggedRef = useRef<string | null>(null);
+  const progressivePhase2LoggedRef = useRef<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   /** True while background follow-up suggestions are being generated after `complete` fires */
   const [suggestionsGenerating, setSuggestionsGenerating] = useState(false);
@@ -2098,10 +2186,9 @@ export function Chat({ sessionId }: ChatProps) {
   const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(
     new Set(),
   );
-  /** Per-tool nested panels inside a fold: key → open. Unset → default (open while running). */
-  const [nestedToolPanelOpen, setNestedToolPanelOpen] = useState<
-    Record<string, boolean>
-  >({});
+  /** Per-tool nested panels inside a fold: fold id → message id → open. Unset → default (open while running). */
+  const [nestedToolPanelOpenByFold, setNestedToolPanelOpenByFold] =
+    useState<NestedToolPanelOpenByFold>({});
   const isConnecting = useActivityStore((s) => s.isConnecting);
   const activityIsStreaming = useActivityStore((s) => s.isStreaming);
   const waitingFirstChunk = useActivityStore((s) => s.waitingFirstChunk);
@@ -2336,6 +2423,10 @@ export function Chat({ sessionId }: ChatProps) {
     // Phase-1 of progressive rendering: immediately show only recent items.
     // Phase-2 (older items) is scheduled after the first paint via the effect below.
     setAllItemsVisible(converted.length <= INSTANT_RENDER_COUNT);
+    progressivePhase2StartRef.current = null;
+    progressiveLastAddedHeightRef.current = null;
+    progressivePhase1LoggedRef.current = null;
+    progressivePhase2LoggedRef.current = null;
   }
 
   /** After `renameSession`, React's `currentSession` can still be stale until re-render — use for `send_message.session_name`. */
@@ -2387,7 +2478,7 @@ export function Chat({ sessionId }: ChatProps) {
     queuedMainSendQueueRef.current = [];
     bumpQueueUi();
     setExpandedToolGroups(new Set());
-    setNestedToolPanelOpen({});
+    setNestedToolPanelOpenByFold({});
     setPendingAssistantHint(null);
 
     // Try to restore the state of the session we're switching TO.
@@ -2483,6 +2574,7 @@ export function Chat({ sessionId }: ChatProps) {
     // Wait for the first paint to show phase-1 items, then add older items
     // via startTransition so React can yield to user input between chunks.
     const rafId = requestAnimationFrame(() => {
+      progressivePhase2StartRef.current = performance.now();
       startTransition(() => setAllItemsVisible(true));
     });
     return () => cancelAnimationFrame(rafId);
@@ -2495,8 +2587,9 @@ export function Chat({ sessionId }: ChatProps) {
   useLayoutEffect(() => {
     if (!allItemsVisible || scrollRestoreRef.current === null) return;
     const el = messagesScrollRef.current;
+    let addedHeight = 0;
     if (el) {
-      const addedHeight = el.scrollHeight - scrollRestoreRef.current;
+      addedHeight = el.scrollHeight - scrollRestoreRef.current;
       if (addedHeight > 0) {
         if (shouldAutoScrollRef.current) {
           // User was at the bottom: scroll to the new bottom (same visual position)
@@ -2507,6 +2600,7 @@ export function Chat({ sessionId }: ChatProps) {
         }
       }
     }
+    progressiveLastAddedHeightRef.current = addedHeight;
     scrollRestoreRef.current = null;
   }, [allItemsVisible]);
 
@@ -2819,26 +2913,26 @@ export function Chat({ sessionId }: ChatProps) {
     }
   };
 
-  const toggleToolGroupExpand = (groupId: string) => {
+  const toggleToolGroupExpand = useCallback((groupId: string) => {
     setExpandedToolGroups((prev) => {
       const next = new Set(prev);
       if (next.has(groupId)) next.delete(groupId);
       else next.add(groupId);
       return next;
     });
-  };
+  }, []);
 
-  const toggleNestedToolPanel = (
+  const toggleNestedToolPanel = useCallback((
     foldId: string,
     messageId: string,
     tc: NonNullable<Message["toolCall"]>,
   ) => {
-    const key = toolNestedPanelKey(foldId, messageId);
-    setNestedToolPanelOpen((prev) => {
-      const cur = getNestedToolPanelOpen(key, tc, prev);
-      return { ...prev, [key]: !cur };
+    setNestedToolPanelOpenByFold((prev) => {
+      const foldOverrides = getNestedToolPanelOpenForFold(prev, foldId);
+      const cur = getNestedToolPanelOpen(messageId, tc, foldOverrides);
+      return toggleNestedToolPanelOpenForFold(prev, foldId, messageId, cur);
     });
-  };
+  }, []);
 
   // Auto-scroll: only when user is already near the bottom, throttled by RAF
   const shouldAutoScrollRef = useRef(true);
@@ -2914,6 +3008,56 @@ export function Chat({ sessionId }: ChatProps) {
   const displayedItems = allItemsVisible
     ? messageRenderItems
     : messageRenderItems.slice(-INSTANT_RENDER_COUNT);
+
+  useLayoutEffect(() => {
+    const totalItems = messageRenderItems.length;
+    if (!shouldLogProgressiveRenderPerf(totalItems, INSTANT_RENDER_COUNT)) {
+      return;
+    }
+
+    if (!allItemsVisible) {
+      const key = `${sessionId}:phase-1:${totalItems}:${displayedItems.length}`;
+      if (progressivePhase1LoggedRef.current === key) return;
+      progressivePhase1LoggedRef.current = key;
+      requestAnimationFrame(() => {
+        console.info(
+          `%c${formatProgressiveRenderPerf({
+            phase: "phase-1",
+            sessionId,
+            totalItems,
+            renderedItems: displayedItems.length,
+            instantRenderCount: INSTANT_RENDER_COUNT,
+            durationMs: null,
+          })}`,
+          "color:#8b5cf6;font-weight:bold",
+        );
+      });
+      return;
+    }
+
+    if (progressivePhase2StartRef.current == null) return;
+    const key = `${sessionId}:phase-2:${totalItems}`;
+    if (progressivePhase2LoggedRef.current === key) {
+      progressivePhase2StartRef.current = null;
+      return;
+    }
+    progressivePhase2LoggedRef.current = key;
+    const durationMs = performance.now() - progressivePhase2StartRef.current;
+    progressivePhase2StartRef.current = null;
+    console.info(
+      `%c${formatProgressiveRenderPerf({
+        phase: "phase-2",
+        sessionId,
+        totalItems,
+        renderedItems: displayedItems.length,
+        instantRenderCount: INSTANT_RENDER_COUNT,
+        durationMs,
+        addedHeightPx: progressiveLastAddedHeightRef.current,
+      })}`,
+      "color:#8b5cf6;font-weight:bold",
+    );
+    progressiveLastAddedHeightRef.current = null;
+  }, [allItemsVisible, displayedItems.length, messageRenderItems.length, sessionId]);
 
   const scheduleScrollToBottom = useCallback(() => {
     if (scrollRafRef.current !== null) return;
@@ -5286,47 +5430,20 @@ export function Chat({ sessionId }: ChatProps) {
     () => buildMarkdownComponents(true, theme, CHAT, handleMarkdownImageClick, handleNodeClick),
     [theme, CHAT, handleMarkdownImageClick, handleNodeClick],
   );
-  const defaultComponents = useMemo(
-    () => buildMarkdownComponents(false, theme, CHAT, handleMarkdownImageClick, handleNodeClick),
-    [theme, CHAT, handleMarkdownImageClick, handleNodeClick],
+  const handleCopyUserMessage = useCallback(
+    (message: Message) => {
+      void copyUserMessageText(message);
+    },
+    [copyUserMessageText],
   );
-
-  const renderMessageContent = useCallback((
-    content: string,
-    tone: "default" | "agent" = "default",
-  ) => {
-    const isAgent = tone === "agent";
-    const components = isAgent ? agentComponents : defaultComponents;
-    if (!content || content.trim() === "") {
-      return (
-        <Typography variant="body1" color="text.secondary" sx={{ fontStyle: "italic" }}>
-          (Empty response)
-        </Typography>
-      );
-    }
-    return (
-      <Box
-        sx={{
-          fontFamily: CHAT.font,
-          minWidth: 0,
-          maxWidth: "100%",
-          overflowX: "hidden",
-          overflowWrap: "anywhere",
-          wordBreak: "break-word",
-          ...(isAgent ? { "& :first-of-type": { mt: 0 } } : {}),
-        }}
-      >
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm, remarkMath]}
-          rehypePlugins={[rehypeKatex]}
-          components={components}
-        >
-          {fixBrokenGfmTables(content.replace(/<br\s*\/?>/gi, "\n"))}
-        </ReactMarkdown>
-      </Box>
-    );
-  }, [agentComponents, defaultComponents, CHAT]);
-
+  const handleUserEditDraftChange = useCallback((draft: string) => {
+    setUserMessageEdit((cur) => (cur ? { ...cur, draft } : null));
+  }, []);
+  const handleCancelUserMessageEdit = useCallback(() => {
+    setUserMessageEdit(null);
+  }, []);
+  const restoringOlderItems =
+    allItemsVisible && scrollRestoreRef.current !== null;
 
   return (
     <Box
@@ -5419,8 +5536,21 @@ export function Chat({ sessionId }: ChatProps) {
                       }}
                       sx={{
                         color: "text.secondary",
+                        transition:
+                          "color 0.25s ease, background-color 0.25s ease, transform 0.2s ease, box-shadow 0.25s ease",
+                        "@media (prefers-reduced-motion: reduce)": {
+                          transition: "none",
+                        },
                         "&:hover": {
-                          bgcolor: alpha(theme.palette.primary.main, 0.08),
+                          color: theme.palette.primary.main,
+                          bgcolor: alpha(theme.palette.primary.main, 0.1),
+                          boxShadow: `0 3px 12px ${alpha(theme.palette.primary.main, 0.18)}`,
+                          transform: "translateY(-1px)",
+                        },
+                        "&:active": {
+                          transform: "translateY(1px)",
+                          boxShadow: "none",
+                          transition: "transform 0.1s ease, box-shadow 0.1s ease",
                         },
                       }}
                     >
@@ -5445,6 +5575,32 @@ export function Chat({ sessionId }: ChatProps) {
                           label={`${messages.length} messages`}
                           variant="outlined"
                           color="default"
+                          sx={{
+                            transition:
+                              "border-color 0.3s ease, box-shadow 0.3s ease, background-color 0.3s ease, transform 0.2s ease",
+                            "@media (prefers-reduced-motion: reduce)": {
+                              transition: "none",
+                            },
+                            "& .MuiChip-label": {
+                              letterSpacing: "0.01em",
+                              transition: "letter-spacing 0.3s ease",
+                              "@media (prefers-reduced-motion: reduce)": {
+                                transition: "none",
+                              },
+                            },
+                            "&:hover": {
+                              borderColor: alpha(theme.palette.primary.main, 0.5),
+                              bgcolor: alpha(theme.palette.primary.main, 0.08),
+                              boxShadow: `0 3px 14px ${alpha(theme.palette.primary.main, 0.2)}`,
+                              transform: "translateY(-1px)",
+                              "& .MuiChip-label": { letterSpacing: "0.06em" },
+                            },
+                            "&:active": {
+                              transform: "translateY(1px)",
+                              boxShadow: "none",
+                              transition: "transform 0.1s ease, box-shadow 0.1s ease",
+                            },
+                          }}
                         />
                       )}
                     </Stack>
@@ -5564,1243 +5720,88 @@ export function Chat({ sessionId }: ChatProps) {
               }}
             >
             {displayedItems.map((item, itemIndex) => {
-              const itemKey =
-                item.kind === "react_fold" ? item.id : item.message.id;
-              // Per-message entrance animation.
-              // Stagger: 35 ms per item, capped at 280 ms so long sessions
-              // don't feel sluggish. Animation is gated on reduced-motion.
-              // During streaming, each new message pops in cleanly;
-              // on session switch the container's omigaFadeUp runs first.
-              const msgStagger = Math.min(itemIndex * 35, 280);
+              const itemKey = messageRenderItemKey(item);
+              const animateMessageItem = shouldAnimateMessageItem({
+                restoringOlderItems,
+              });
+              const msgStagger = animateMessageItem
+                ? messageEntranceDelayMs(itemIndex)
+                : 0;
+              const nextItem = displayedItems[itemIndex + 1];
+              const nextRowIsUser =
+                nextItem?.kind === "row" && nextItem.message.role === "user";
+
               return (
                 <Box
                   key={itemKey}
                   sx={{
                     width: "100%",
-                    "@media (prefers-reduced-motion: no-preference)": {
-                      "@keyframes omigaMsgIn": {
-                        from: { opacity: 0, transform: "translateY(5px)" },
-                        to:   { opacity: 1, transform: "translateY(0)" },
-                      },
-                      animation: `omigaMsgIn 180ms ${msgStagger}ms ease-out both`,
-                    },
+                    ...(animateMessageItem
+                      ? {
+                          "@media (prefers-reduced-motion: no-preference)": {
+                            "@keyframes omigaMsgIn": {
+                              from: { opacity: 0, transform: "translateY(5px)" },
+                              to: { opacity: 1, transform: "translateY(0)" },
+                            },
+                            animation: `omigaMsgIn 180ms ${msgStagger}ms ease-out both`,
+                          },
+                        }
+                      : {
+                          animation: "none",
+                          "@media (prefers-reduced-motion: no-preference)": {
+                            animation: "none",
+                          },
+                        }),
                   }}
                 >
-                  {(() => {
-                    if (item.kind === "react_fold") {
-                const { id, fold } = item;
-                const toolMsgs = fold.filter(
-                  (m) => m.role === "tool" && m.toolCall,
-                );
-                const summary = summarizeReactFold(fold);
-                const anyRunning = toolGroupAnyRunning(toolMsgs);
-                const showGroupDone = toolGroupFlowComplete(toolMsgs);
-                const runningToolName = firstRunningToolName(toolMsgs);
-                const runningToolCount = toolMsgs.filter(m => m.toolCall?.status === "running").length;
-                const isLastFold = id === activeReactFoldId;
-                const liveIntermediateText =
-                  isLastFold && shouldRenderCurrentResponseInFold
-                    ? [currentFoldIntermediate.trim(), currentResponse.trim()]
-                        .filter(Boolean)
-                        .join("\n\n")
-                    : "";
-
-                return (
-                  <Box
-                    key={id}
-                    sx={{
-                      width: "100%",
-                      minWidth: 0,
-                      maxWidth: "100%",
-                    }}
-                  >
-                      <Box
-                        sx={{
-                          width: "100%",
-                          minWidth: 0,
-                          maxWidth: "100%",
-                          borderRadius: `${BUBBLE_RADIUS_PX}px`,
-                          bgcolor: CHAT.agentBubbleBg,
-                          border: `1px solid ${CHAT.agentBubbleBorder}`,
-                          px: 1.75,
-                          py: 1.25,
-                          fontFamily: CHAT.font,
-                          overflow: "visible",
-                          // Outer bubble: border shimmers to accent on hover,
-                          // signalling the whole fold is interactive.
-                          transition: "border-color 200ms ease",
-                          "&:hover": {
-                            borderColor: alpha(CHAT.accent, 0.28),
-                          },
-                        }}
-                      >
-                        <Stack
-                          direction="row"
-                          alignItems="center"
-                          spacing={1}
-                          onClick={() => toggleToolGroupExpand(id)}
-                          sx={{
-                            cursor: "pointer",
-                            userSelect: "none",
-                            minWidth: 0,
-                            // Hover hit-area: rounded pill that hugs the row.
-                            borderRadius: "8px",
-                            mx: -0.75,
-                            px: 0.75,
-                            py: 0.5,
-                            transition: "background-color 150ms ease",
-                            "&:hover": {
-                              bgcolor: alpha(CHAT.accent, 0.07),
-                              // Brighten the ExpandMore icon to accent on hover.
-                              "& > svg:first-of-type": {
-                                color: CHAT.accent,
-                                opacity: 1,
-                              },
-                              // Lift summary text from muted → primary.
-                              "& > .MuiTypography-root:first-of-type": {
-                                color: CHAT.textPrimary,
-                              },
-                            },
-                          }}
-                        >
-                          <ExpandMore
-                            sx={{
-                              fontSize: 14,
-                              color: CHAT.toolIcon,
-                              opacity: 0.65,
-                              transform: expandedToolGroups.has(id)
-                                ? "rotate(0deg)"
-                                : "rotate(-90deg)",
-                              // Animate rotation + colour + opacity together.
-                              transition: "transform 0.2s ease, color 150ms ease, opacity 150ms ease",
-                            }}
-                          />
-                          <Typography
-                            sx={{
-                              fontSize: 12,
-                              color: CHAT.textMuted,
-                              flex: 1,
-                              minWidth: 0,
-                              overflowWrap: "anywhere",
-                              wordBreak: "break-word",
-                              transition: "color 150ms ease",
-                            }}
-                          >
-                            {summary}
-                            {anyRunning && runningToolCount > 1
-                              ? ` · ${runningToolCount} 并行`
-                              : anyRunning && runningToolName
-                              ? ` · ${formatToolDisplayName(runningToolName)}`
-                              : ""}
-                            {!anyRunning &&
-                              isLastFold &&
-                              activityIsStreaming &&
-                              ` · ${waitingFirstChunk ? "推理中" : "解析输出"}`}
-                          </Typography>
-                          {anyRunning && (
-                            <Chip
-                              size="small"
-                              label={
-                                runningToolCount > 1
-                                  ? `${runningToolCount} 并行运行中`
-                                  : runningToolName
-                                  ? formatToolDisplayName(runningToolName)
-                                  : "运行中"
-                              }
-                              sx={{ height: 22, fontSize: 11 }}
-                            />
-                          )}
-                          {showGroupDone && (
-                            <Chip
-                              size="small"
-                              icon={<CheckCircle fontSize="small" />}
-                              label="Done"
-                              color="primary"
-                              variant="outlined"
-                              sx={{ height: 22, fontSize: 11 }}
-                            />
-                          )}
-                        </Stack>
-
-                        <Collapse in={expandedToolGroups.has(id)}>
-                          <Box
-                            sx={{
-                              mt: 1.25,
-                              pl: 1.75,
-                              ml: 0.5,
-                              borderLeft: `2px solid ${CHAT.agentBubbleBorder}`,
-                              display: "flex",
-                              flexDirection: "column",
-                              gap: 1.25,
-                            }}
-                          >
-                            {fold.map((message, foldIndex) => {
-                              if (message.role === "assistant") {
-                                if (!message.content?.trim()) return null;
-                                return (
-                                  <Box
-                                    key={message.id}
-                                    sx={{
-                                      pb: 0.25,
-                                      ...(message.intermediate
-                                        ? {
-                                            px: 1,
-                                            py: 0.75,
-                                            borderRadius: "8px",
-                                            bgcolor: alpha(
-                                              CHAT.agentBubbleBg,
-                                              0.62,
-                                            ),
-                                            border: `1px dashed ${alpha(
-                                              CHAT.agentBubbleBorder,
-                                              0.95,
-                                            )}`,
-                                          }
-                                        : {}),
-                                    }}
-                                  >
-                                    {message.intermediate && (
-                                      <Stack
-                                        direction="row"
-                                        alignItems="center"
-                                        spacing={0.75}
-                                        sx={{ mb: 0.5 }}
-                                      >
-                                        <Chip
-                                          size="small"
-                                          label="思考"
-                                          sx={{
-                                            height: 18,
-                                            fontSize: 9,
-                                            color: CHAT.textMuted,
-                                          }}
-                                        />
-                                      </Stack>
-                                    )}
-                                    <Box
-                                      sx={{
-                                        fontSize: 12,
-                                        color: CHAT.textMuted,
-                                        lineHeight: 1.45,
-                                        "& p": { m: 0 },
-                                      }}
-                                    >
-                                      {renderMessageContent(
-                                        message.content,
-                                        "agent",
-                                      )}
-                                    </Box>
-                                  </Box>
-                                );
-                              }
-                              if (message.role !== "tool" || !message.toolCall)
-                                return null;
-                              const tc = message.toolCall;
-                              const StepIcon = toolRowIcon(tc.name);
-                              const displayOutput = toolDisplayOutputText(
-                                message,
-                                tc,
-                              );
-                              const hasInput = Boolean(
-                                tc.input && tc.input.trim(),
-                              );
-                              const hasOutput = Boolean(displayOutput);
-                              const isBash =
-                                tc.name === "bash" ||
-                                tc.name.toLowerCase().includes("bash");
-                              const commandSectionLabel = isBash
-                                ? "Command"
-                                : tc.name;
-                              const nestedKey = toolNestedPanelKey(
-                                id,
-                                message.id,
-                              );
-                              const panelTitle = toolCallPanelTitle(
-                                tc.input,
-                                tc.name,
-                              );
-                              const showAskUserPanel = Boolean(
-                                pendingAskUser &&
-                                tc.id &&
-                                pendingAskUser.toolUseId === tc.id,
-                              );
-                              const previousAssistantIsThought = Boolean(
-                                fold[foldIndex - 1]?.role === "assistant" &&
-                                  fold[foldIndex - 1]?.content?.trim(),
-                              );
-                              const thoughtText =
-                                message.prefaceBeforeTools?.trim() ||
-                                (!previousAssistantIsThought
-                                  ? toolActionThoughtSummary(tc.name, tc.input)
-                                  : "");
-                              const nestedOpen =
-                                getNestedToolPanelOpen(
-                                  nestedKey,
-                                  tc,
-                                  nestedToolPanelOpen,
-                                ) || showAskUserPanel;
-
-                              return (
-                                <Box key={message.id}>
-                                  {thoughtText ? (
-                                    <Box
-                                      sx={{
-                                        px: 1,
-                                        py: 0.75,
-                                        borderRadius: "8px",
-                                        bgcolor: alpha(CHAT.agentBubbleBg, 0.52),
-                                        border: `1px dashed ${alpha(
-                                          CHAT.agentBubbleBorder,
-                                          0.82,
-                                        )}`,
-                                        mb: 0.75,
-                                      }}
-                                    >
-                                      <Stack
-                                        direction="row"
-                                        alignItems="center"
-                                        spacing={0.75}
-                                        sx={{ mb: 0.35 }}
-                                      >
-                                        <Chip
-                                          size="small"
-                                          label={
-                                            message.prefaceBeforeTools
-                                              ? "思考"
-                                              : "思考摘要"
-                                          }
-                                          sx={{
-                                            height: 18,
-                                            fontSize: 9,
-                                            color: CHAT.textMuted,
-                                          }}
-                                        />
-                                        {!message.prefaceBeforeTools && (
-                                          <Typography
-                                            sx={{
-                                              fontSize: 10,
-                                              color: CHAT.labelMuted,
-                                            }}
-                                          >
-                                            由工具意图生成，不是隐藏推理原文
-                                          </Typography>
-                                        )}
-                                      </Stack>
-                                      <Box
-                                        sx={{
-                                          fontSize: 12,
-                                          color: CHAT.textMuted,
-                                          lineHeight: 1.45,
-                                          whiteSpace: "pre-wrap",
-                                          wordBreak: "break-word",
-                                        }}
-                                      >
-                                        {message.prefaceBeforeTools
-                                          ? renderMessageContent(
-                                              thoughtText,
-                                              "agent",
-                                            )
-                                          : thoughtText}
-                                      </Box>
-                                    </Box>
-                                  ) : null}
-
-                                  <Box
-                                    sx={{
-                                      borderRadius: "10px",
-                                      border: `1px solid ${CHAT.agentBubbleBorder}`,
-                                      bgcolor: CHAT.toolCallCardBg,
-                                      overflow: "hidden",
-                                      // Card border shimmers on hover like the outer fold.
-                                      transition: "border-color 200ms ease",
-                                      "&:hover": {
-                                        borderColor: alpha(CHAT.accent, 0.22),
-                                      },
-                                    }}
-                                  >
-                                    <Stack
-                                      direction="row"
-                                      alignItems="center"
-                                      spacing={1}
-                                      onClick={() =>
-                                        toggleNestedToolPanel(
-                                          id,
-                                          message.id,
-                                          tc,
-                                        )
-                                      }
-                                      sx={{
-                                        cursor: "pointer",
-                                        userSelect: "none",
-                                        px: 1.25,
-                                        py: 0.85,
-                                        transition: "background-color 150ms ease",
-                                        "&:hover": {
-                                          bgcolor: alpha(CHAT.accent, 0.06),
-                                          // Icon brightens to accent.
-                                          "& > svg:first-of-type": {
-                                            color: CHAT.accent,
-                                            opacity: 1,
-                                          },
-                                          // Step icon also brightens.
-                                          "& > svg:nth-of-type(2)": {
-                                            color: CHAT.accent,
-                                          },
-                                          // Title text lifts to primary.
-                                          "& > .MuiTypography-root": {
-                                            color: CHAT.textPrimary,
-                                          },
-                                        },
-                                      }}
-                                    >
-                                      <ExpandMore
-                                        sx={{
-                                          fontSize: 18,
-                                          color: CHAT.toolIcon,
-                                          opacity: 0.65,
-                                          flexShrink: 0,
-                                          transform: nestedOpen
-                                            ? "rotate(0deg)"
-                                            : "rotate(-90deg)",
-                                          transition: "transform 0.2s ease, color 150ms ease, opacity 150ms ease",
-                                        }}
-                                      />
-                                      <Chip
-                                        size="small"
-                                        label="行动"
-                                        sx={{
-                                          height: 18,
-                                          fontSize: 9,
-                                          color: CHAT.textMuted,
-                                          flexShrink: 0,
-                                        }}
-                                      />
-                                      <StepIcon
-                                        sx={{
-                                          fontSize: 16,
-                                          color: CHAT.toolIcon,
-                                          flexShrink: 0,
-                                          transition: "color 150ms ease",
-                                        }}
-                                      />
-                                      <Typography
-                                        sx={{
-                                          fontSize: 12,
-                                          fontWeight: 600,
-                                          color: CHAT.textPrimary,
-                                          flex: 1,
-                                          lineHeight: 1.35,
-                                          wordBreak: "break-word",
-                                          transition: "color 150ms ease",
-                                        }}
-                                      >
-                                        {panelTitle}
-                                      </Typography>
-                                      {tc.status === "running" && (
-                                        <Chip
-                                          size="small"
-                                          label={
-                                            showAskUserPanel
-                                              ? "等待你的回答"
-                                              : "Running"
-                                          }
-                                          sx={{
-                                            height: 22,
-                                            fontSize: 11,
-                                            flexShrink: 0,
-                                          }}
-                                        />
-                                      )}
-                                      {tc.status === "error" && (
-                                        <Chip
-                                          size="small"
-                                          label="Error"
-                                          color="error"
-                                          variant="outlined"
-                                          sx={{
-                                            height: 22,
-                                            fontSize: 11,
-                                            flexShrink: 0,
-                                          }}
-                                        />
-                                      )}
-                                      {tc.completedAt != null &&
-                                        message.timestamp != null && (
-                                          <Typography
-                                            sx={{
-                                              fontSize: 10,
-                                              color: CHAT.labelMuted,
-                                              flexShrink: 0,
-                                              fontVariantNumeric: "tabular-nums",
-                                            }}
-                                          >
-                                            {tc.completedAt - message.timestamp >= 1000
-                                              ? `${((tc.completedAt - message.timestamp) / 1000).toFixed(1)}s`
-                                              : `${tc.completedAt - message.timestamp}ms`}
-                                          </Typography>
-                                        )}
-                                    </Stack>
-
-                                    <Collapse in={nestedOpen}>
-                                      <Box
-                                        sx={{
-                                          px: 1.25,
-                                          pb: 1.25,
-                                          pt: 0,
-                                          borderTop: `1px solid ${alpha(CHAT.agentBubbleBorder, 0.85)}`,
-                                        }}
-                                      >
-                                        {panelTitle !== tc.name && (
-                                          <Typography
-                                            sx={{
-                                              fontSize: 10,
-                                              color: CHAT.labelMuted,
-                                              mb: 0.75,
-                                              fontWeight: 500,
-                                            }}
-                                          >
-                                            {tc.name}
-                                          </Typography>
-                                        )}
-
-                                        {(hasInput || hasOutput) && (
-                                          <Stack
-                                            direction="column"
-                                            spacing={1}
-                                            sx={{ width: "100%" }}
-                                          >
-                                            {hasInput && (
-                                              <Box>
-                                                <Typography
-                                                  sx={{
-                                                    fontSize: 10,
-                                                    color: CHAT.labelMuted,
-                                                    mb: 0.5,
-                                                    fontWeight: 400,
-                                                  }}
-                                                >
-                                                  {isBash ? commandSectionLabel : "Input"}
-                                                </Typography>
-                                                <Box
-                                                  sx={{
-                                                    borderRadius: "6px",
-                                                    border: `1px solid ${CHAT.agentBubbleBorder}`,
-                                                    bgcolor: "transparent",
-                                                    p: 1,
-                                                    maxHeight: 200,
-                                                    maxWidth: "100%",
-                                                    overflowY: "auto",
-                                                    overflowX: "hidden",
-                                                  }}
-                                                >
-                                                  <Typography
-                                                    component="pre"
-                                                    sx={{
-                                                      m: 0,
-                                                      fontFamily:
-                                                        "Menlo, Monaco, Consolas, monospace",
-                                                      fontSize: 11,
-                                                      lineHeight: 1.45,
-                                                      color: CHAT.textPrimary,
-                                                      whiteSpace: "pre-wrap",
-                                                      wordBreak: "break-word",
-                                                    }}
-                                                  >
-                                                    {tc.input}
-                                                  </Typography>
-                                                </Box>
-                                              </Box>
-                                            )}
-                                            {hasOutput && (
-                                              <Box>
-                                                <Typography
-                                                  sx={{
-                                                    fontSize: 10,
-                                                    color: CHAT.labelMuted,
-                                                    mb: 0.5,
-                                                    fontWeight: 400,
-                                                  }}
-                                                >
-                                                  Output
-                                                </Typography>
-                                                <Box
-                                                  sx={{
-                                                    borderRadius: "6px",
-                                                    border: `1px solid ${CHAT.agentBubbleBorder}`,
-                                                    bgcolor: CHAT.outputBg,
-                                                    p: 1,
-                                                    maxHeight: 320,
-                                                    maxWidth: "100%",
-                                                    overflowY: "auto",
-                                                    overflowX: "hidden",
-                                                  }}
-                                                >
-                                                  <Typography
-                                                    component="pre"
-                                                    sx={{
-                                                      m: 0,
-                                                      fontFamily:
-                                                        "Inter, system-ui, sans-serif",
-                                                      fontSize: 10,
-                                                      lineHeight: 1.35,
-                                                      color: CHAT.textMuted,
-                                                      whiteSpace: "pre-wrap",
-                                                      wordBreak: "break-word",
-                                                    }}
-                                                  >
-                                                    {displayOutput}
-                                                  </Typography>
-                                                </Box>
-                                              </Box>
-                                            )}
-                                          </Stack>
-                                        )}
-
-                                        {!hasInput &&
-                                          !hasOutput &&
-                                          !showAskUserPanel && (
-                                            <Typography
-                                              sx={{
-                                                fontSize: 12,
-                                                color: CHAT.textMuted,
-                                                fontStyle: "italic",
-                                              }}
-                                            >
-                                              No command or output yet.
-                                            </Typography>
-                                          )}
-                                      </Box>
-                                    </Collapse>
-                                  </Box>
-                                </Box>
-                              );
-                            })}
-
-                            {liveIntermediateText && (
-                              <Box
-                                key={`${id}-live-assistant-segment`}
-                                sx={{
-                                  pb: 0.25,
-                                  px: 1,
-                                  py: 0.75,
-                                  borderRadius: "8px",
-                                  bgcolor: alpha(CHAT.agentBubbleBg, 0.62),
-                                  border: `1px dashed ${alpha(
-                                    CHAT.agentBubbleBorder,
-                                    0.95,
-                                  )}`,
-                                }}
-                              >
-                                <Stack
-                                  direction="row"
-                                  alignItems="center"
-                                  spacing={0.75}
-                                  sx={{ mb: 0.5 }}
-                                >
-                                  <Chip
-                                    size="small"
-                                    label="思考中"
-                                    sx={{
-                                      height: 18,
-                                      fontSize: 9,
-                                      color: CHAT.textMuted,
-                                    }}
-                                  />
-                                  <Typography
-                                    sx={{
-                                      fontSize: 10,
-                                      color: CHAT.labelMuted,
-                                    }}
-                                  >
-                                    流式中；下一次行动会接在这里
-                                  </Typography>
-                                </Stack>
-                                <Box
-                                  sx={{
-                                    fontSize: 12,
-                                    color: CHAT.textMuted,
-                                    lineHeight: 1.45,
-                                    "& p": { m: 0 },
-                                  }}
-                                >
-                                  {renderMessageContent(
-                                    liveIntermediateText,
-                                    "agent",
-                                  )}
-                                  <Box
-                                    component="span"
-                                    sx={{
-                                      display: "inline-block",
-                                      width: 7,
-                                      height: 14,
-                                      bgcolor: CHAT.accent,
-                                      ml: 0.5,
-                                      verticalAlign: "text-bottom",
-                                      animation:
-                                        "pulse 1s ease-in-out infinite",
-                                      "@keyframes pulse": {
-                                        "0%, 100%": { opacity: 1 },
-                                        "50%": { opacity: 0.3 },
-                                      },
-                                    }}
-                                  />
-                                </Box>
-                              </Box>
-                            )}
-
-                            {showGroupDone && (
-                              <Stack
-                                direction="row"
-                                alignItems="center"
-                                spacing={1}
-                                sx={{ pt: 0.25 }}
-                              >
-                                <CheckCircle
-                                  sx={{ fontSize: 14, color: CHAT.doneGreen }}
-                                />
-                                <Typography
-                                  sx={{
-                                    fontSize: 12,
-                                    fontWeight: 600,
-                                    color: CHAT.toolIcon,
-                                  }}
-                                >
-                                  Done
-                                </Typography>
-                              </Stack>
-                            )}
-                          </Box>
-                        </Collapse>
-                      </Box>
-                    </Box>
-                );
-              }
-
-              const message = item.message;
-              const dividerBefore = item.dividerBefore === true;
-              const nextItem = displayedItems[itemIndex + 1];
-              const nextRowIsUser =
-                nextItem?.kind === "row" && nextItem.message.role === "user";
-              const userRowPb =
-                message.role === "user" ? (nextRowIsUser ? 1 : 2) : null;
-              const userAttachPaths = message.composerAttachedPaths ?? [];
-              const userBubbleDisplayText =
-                message.role === "user" && userAttachPaths.length > 0
-                  ? stripLeadingPathPrefixFromMerged(
-                      message.content,
-                      userAttachPaths,
-                    )
-                  : message.content;
-              const isEditingUser =
-                message.role === "user" && userMessageEdit?.id === message.id;
-              return (
-                <Box
-                  key={message.id}
-                  sx={{
-                    display: "flex",
-                    flexDirection: "column",
-                    width: "100%",
-                    maxWidth: "100%",
-                    gap: dividerBefore ? 1.5 : 0,
-                    }}
-                  >
-                    {dividerBefore && (
-                      <Divider
-                        sx={{
-                          borderColor: CHAT.agentBubbleBorder,
-                          "&::before, &::after": {
-                            borderColor: CHAT.agentBubbleBorder,
-                          },
-                        }}
-                      />
-                    )}
-                    <Box
-                      sx={{
-                        display: "flex",
-                        justifyContent:
-                          message.role === "user" ? "flex-end" : "flex-start",
-                        width: "100%",
-                        minWidth: 0,
-                        maxWidth: "100%",
-                        pt: 1,
-                        pb: userRowPb !== null ? userRowPb : 2,
-                      }}
-                    >
-                      {message.role === "user" ? (
-                        <Box
-                          className="user-msg-wrap"
-                          sx={{
-                            position: "relative",
-                            display: "flex",
-                            flexDirection: "column",
-                            alignItems: isEditingUser ? "stretch" : "flex-end",
-                            minWidth: 0,
-                            width: "100%",
-                            maxWidth: "100%",
-                            alignSelf: "stretch",
-                            pb: 1,
-                            "&:hover .user-msg-hover-actions": {
-                              opacity: 1,
-                              pointerEvents: "auto",
-                            },
-                          }}
-                        >
-                          <Box
-                            sx={{
-                              position: "relative",
-                              display: "flex",
-                              flexDirection: "column",
-                              alignItems: isEditingUser
-                                ? "stretch"
-                                : "flex-end",
-                              width: "100%",
-                              minWidth: 0,
-                            }}
-                          >
-                            <Box
-                              sx={{
-                                minWidth: 0,
-                                width: isEditingUser ? "100%" : "fit-content",
-                                maxWidth: isEditingUser
-                                  ? "100%"
-                                  : USER_BUBBLE_MAX_CSS,
-                                px: isEditingUser ? 2 : 1.75,
-                                py: isEditingUser ? 2 : 1.25,
-                                borderRadius: `${BUBBLE_RADIUS_PX}px`,
-                                border: `1px solid ${
-                                  isEditingUser
-                                    ? CHAT.agentBubbleBorder
-                                    : CHAT.userBubbleBorder
-                                }`,
-                                background: isEditingUser
-                                  ? theme.palette.background.paper
-                                  : CHAT.userGrad,
-                                color: isEditingUser
-                                  ? CHAT.textPrimary
-                                  : CHAT.userBubbleText,
-                                fontFamily: CHAT.font,
-                                overflow: "hidden",
-                                display: "flex",
-                                flexDirection: isEditingUser ? "column" : "row",
-                                flexWrap: isEditingUser ? "nowrap" : "wrap",
-                                alignItems: isEditingUser
-                                  ? "stretch"
-                                  : "center",
-                                alignContent: isEditingUser
-                                  ? "stretch"
-                                  : "center",
-                                gap: 0.25,
-                                boxShadow: isEditingUser
-                                  ? theme.palette.mode === "dark"
-                                    ? `0 1px 4px ${alpha(theme.palette.common.black, 0.45)}`
-                                    : `0 1px 3px ${alpha(theme.palette.common.black, 0.08)}`
-                                  : undefined,
-                              }}
-                            >
-                              {message.composerAgentType ||
-                              userAttachPaths.length > 0 ? (
-                                <Box
-                                  sx={{
-                                    display: "flex",
-                                    flexDirection: "row",
-                                    flexWrap: "wrap",
-                                    alignItems: "center",
-                                    alignContent: "center",
-                                    gap: 0.25,
-                                    flexShrink: 0,
-                                  }}
-                                >
-                                  {message.composerAgentType ? (
-                                    <Chip
-                                      size="small"
-                                      variant="outlined"
-                                      icon={
-                                        <SmartToy
-                                          sx={{ fontSize: 14, opacity: 0.9 }}
-                                        />
-                                      }
-                                      label={`/${message.composerAgentType}`}
-                                      sx={{
-                                        flexShrink: 0,
-                                        maxWidth: "min(100%, 220px)",
-                                        height: 22,
-                                        fontSize: 11,
-                                        fontWeight: 600,
-                                        bgcolor: CHAT.userChipBg,
-                                        borderColor: CHAT.userChipBorder,
-                                        color: CHAT.userBubbleText,
-                                        boxShadow: `0 1px 2px ${alpha(CHAT.userBubbleText, 0.12)}`,
-                                        "& .MuiChip-icon": {
-                                          color: CHAT.accent,
-                                          marginLeft: "6px",
-                                        },
-                                        "& .MuiChip-label": {
-                                          px: 0.5,
-                                          overflow: "hidden",
-                                          textOverflow: "ellipsis",
-                                        },
-                                      }}
-                                    />
-                                  ) : null}
-                                  {userAttachPaths.map((p) => (
-                                    <Tooltip key={p} title={p} placement="top">
-                                      <Chip
-                                        size="small"
-                                        variant="outlined"
-                                        icon={
-                                          <InsertDriveFileIcon
-                                            sx={{ fontSize: 14, opacity: 0.9 }}
-                                          />
-                                        }
-                                        label={`@${p}`}
-                                        sx={{
-                                          flexShrink: 0,
-                                          maxWidth: "min(100%, 220px)",
-                                          height: 22,
-                                          fontSize: 11,
-                                          fontWeight: 600,
-                                          bgcolor: CHAT.userChipBg,
-                                          borderColor: CHAT.userChipBorder,
-                                          color: CHAT.userBubbleText,
-                                          boxShadow: `0 1px 2px ${alpha(CHAT.userBubbleText, 0.12)}`,
-                                          "& .MuiChip-icon": {
-                                            color: CHAT.accent,
-                                            marginLeft: "6px",
-                                          },
-                                          "& .MuiChip-label": {
-                                            px: 0.5,
-                                            overflow: "hidden",
-                                            textOverflow: "ellipsis",
-                                          },
-                                        }}
-                                      />
-                                    </Tooltip>
-                                  ))}
-                                </Box>
-                              ) : null}
-                              {isEditingUser ? (
-                                <>
-                                  <TextField
-                                    autoFocus
-                                    multiline
-                                    fullWidth
-                                    minRows={4}
-                                    maxRows={24}
-                                    value={userMessageEdit?.draft ?? ""}
-                                    onChange={(e) =>
-                                      setUserMessageEdit((cur) =>
-                                        cur
-                                          ? { ...cur, draft: e.target.value }
-                                          : null,
-                                      )
-                                    }
-                                    onKeyDown={(e) => {
-                                      if (e.key === "Escape") {
-                                        e.preventDefault();
-                                        setUserMessageEdit(null);
-                                      }
-                                      if (
-                                        (e.metaKey || e.ctrlKey) &&
-                                        e.key === "Enter"
-                                      ) {
-                                        e.preventDefault();
-                                        saveUserMessageEdit();
-                                      }
-                                    }}
-                                    variant="outlined"
-                                    placeholder="编辑消息内容…"
-                                    sx={{
-                                      flex: "1 1 auto",
-                                      minWidth: 0,
-                                      width: "100%",
-                                      mt: 0.25,
-                                      "& .MuiOutlinedInput-root": {
-                                        fontSize: 13,
-                                        lineHeight: 1.45,
-                                        bgcolor: CHAT.codeBg,
-                                        color: CHAT.textPrimary,
-                                        alignItems: "flex-start",
-                                        borderRadius: `${BUBBLE_RADIUS_PX}px`,
-                                      },
-                                      "& .MuiOutlinedInput-notchedOutline": {
-                                        borderColor: alpha(
-                                          CHAT.agentBubbleBorder,
-                                          0.9,
-                                        ),
-                                      },
-                                      "& .MuiInputBase-input": {
-                                        whiteSpace: "pre-wrap",
-                                        wordBreak: "break-word",
-                                        overflowWrap: "anywhere",
-                                        px: 1,
-                                      },
-                                    }}
-                                  />
-                                  <Stack
-                                    direction="row"
-                                    alignItems="flex-start"
-                                    spacing={1}
-                                    sx={{ mt: 1.5 }}
-                                  >
-                                    <InfoOutlinedIcon
-                                      sx={{
-                                        fontSize: 18,
-                                        color: CHAT.textMuted,
-                                        flexShrink: 0,
-                                        mt: 0.15,
-                                      }}
-                                    />
-                                    <Typography
-                                      variant="caption"
-                                      sx={{
-                                        color: CHAT.textMuted,
-                                        lineHeight: 1.45,
-                                      }}
-                                    >
-                                      保存后将截断后续消息并重新分析。可按 Esc
-                                      取消，或使用 Ctrl/⌘ + Enter 保存并重发。
-                                    </Typography>
-                                  </Stack>
-                                  <Stack
-                                    direction="row"
-                                    justifyContent="flex-end"
-                                    spacing={1}
-                                    sx={{ mt: 1, flexShrink: 0 }}
-                                  >
-                                    <Button
-                                      size="small"
-                                      variant="outlined"
-                                      color="inherit"
-                                      onClick={() => setUserMessageEdit(null)}
-                                    >
-                                      取消
-                                    </Button>
-                                    <Button
-                                      size="small"
-                                      variant="contained"
-                                      onClick={() => saveUserMessageEdit()}
-                                    >
-                                      保存
-                                    </Button>
-                                  </Stack>
-                                </>
-                              ) : userBubbleDisplayText ? (
-                                <Typography
-                                  component="span"
-                                  sx={{
-                                    fontSize: 13,
-                                    lineHeight: 1.45,
-                                    whiteSpace: "pre-wrap",
-                                    wordBreak: "break-word",
-                                    overflowWrap: "anywhere",
-                                    flex: "1 1 0",
-                                    minWidth: 0,
-                                    textAlign: "left",
-                                  }}
-                                >
-                                  {userBubbleDisplayText}
-                                </Typography>
-                              ) : null}
-                            </Box>
-                            <Stack
-                              className="user-msg-hover-actions"
-                              direction="row"
-                              alignItems="center"
-                              justifyContent="flex-end"
-                              flexWrap="nowrap"
-                              sx={{
-                                position: "absolute",
-                                left: 0,
-                                right: 0,
-                                top: "100%",
-                                mt: 0.5,
-                                width: "100%",
-                                maxWidth: "100%",
-                                boxSizing: "border-box",
-                                px: 0.25,
-                                py: 0,
-                                gap: 0.5,
-                                opacity: isEditingUser ? 1 : 0,
-                                pointerEvents: isEditingUser ? "auto" : "none",
-                                transition: "opacity 0.15s ease",
-                                zIndex: 2,
-                                minWidth: 0,
-                                overflowX: "auto",
-                                overflowY: "hidden",
-                                scrollbarWidth: "thin",
-                              }}
-                            >
-                              <Typography
-                                component="span"
-                                sx={{
-                                  fontSize: 11,
-                                  lineHeight: 1.2,
-                                  color: CHAT.textMuted,
-                                  whiteSpace: "nowrap",
-                                  flexShrink: 0,
-                                  userSelect: "none",
-                                }}
-                              >
-                                {formatUserMessageTimestamp(message.timestamp)}
-                              </Typography>
-                              {!isEditingUser ? (
-                                <Tooltip title="重试">
-                                  <IconButton
-                                    size="small"
-                                    aria-label="重试"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      requestRetryUserMessage(message);
-                                    }}
-                                    sx={{
-                                      p: 0.35,
-                                      color: CHAT.toolIcon,
-                                      "&:hover": {
-                                        color: CHAT.accent,
-                                        bgcolor: alpha(CHAT.accent, 0.1),
-                                      },
-                                    }}
-                                  >
-                                    <ReplayIcon sx={{ fontSize: 17 }} />
-                                  </IconButton>
-                                </Tooltip>
-                              ) : null}
-                              {!isEditingUser ? (
-                                <Tooltip title="编辑">
-                                  <IconButton
-                                    size="small"
-                                    aria-label="编辑"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      openEditUserMessage(message);
-                                    }}
-                                    sx={{
-                                      p: 0.35,
-                                      color: CHAT.toolIcon,
-                                      "&:hover": {
-                                        color: CHAT.accent,
-                                        bgcolor: alpha(CHAT.accent, 0.1),
-                                      },
-                                    }}
-                                  >
-                                    <EditIcon sx={{ fontSize: 17 }} />
-                                  </IconButton>
-                                </Tooltip>
-                              ) : null}
-                              <Tooltip title="复制">
-                                <IconButton
-                                  size="small"
-                                  aria-label="复制"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    void copyUserMessageText(message);
-                                  }}
-                                  sx={{
-                                    p: 0.35,
-                                    color: CHAT.toolIcon,
-                                    "&:hover": {
-                                      color: CHAT.accent,
-                                      bgcolor: alpha(CHAT.accent, 0.1),
-                                    },
-                                  }}
-                                >
-                                  <ContentCopyIcon sx={{ fontSize: 17 }} />
-                                </IconButton>
-                              </Tooltip>
-                            </Stack>
-                          </Box>
-                        </Box>
-                      ) : (
-                        <Box
-                          sx={{
-                            position: "relative",
-                            width: "100%",
-                            minWidth: 0,
-                            maxWidth: "100%",
-                            px: 1.75,
-                            py: 1.25,
-                            pb: message.tokenUsage ? 2.25 : 1.25,
-                            borderRadius: `${BUBBLE_RADIUS_PX}px`,
-                            bgcolor: CHAT.agentBubbleBg,
-                            border: `1px solid ${CHAT.agentBubbleBorder}`,
-                            fontFamily: CHAT.font,
-                            overflow: "visible",
-                          }}
-                        >
-                          {renderMessageContent(message.content, "agent")}
-                          {message.tokenUsage ? (
-                            <Typography
-                              component="div"
-                              sx={{
-                                position: "absolute",
-                                right: 10,
-                                bottom: 6,
-                                fontSize: 10,
-                                lineHeight: 1.2,
-                                color: alpha(CHAT.toolIcon, 0.85),
-                                userSelect: "none",
-                                pointerEvents: "none",
-                                textAlign: "right",
-                                maxWidth: "calc(100% - 20px)",
-                              }}
-                            >
-                              输入 {message.tokenUsage.input.toLocaleString()} ·
-                              输出 {message.tokenUsage.output.toLocaleString()}
-                              {message.tokenUsage.total != null &&
-                              message.tokenUsage.total !==
-                                message.tokenUsage.input +
-                                  message.tokenUsage.output
-                                ? ` · Σ ${message.tokenUsage.total.toLocaleString()}`
-                                : ""}
-                              {message.tokenUsage.provider
-                                ? ` · ${message.tokenUsage.provider}`
-                                : ""}
-                            </Typography>
-                          ) : null}
-                        </Box>
+                  {item.kind === "react_fold" ? (
+                    <ReactFoldRenderItem
+                      item={item}
+                      expanded={expandedToolGroups.has(item.id)}
+                      isLastFold={item.id === activeReactFoldId}
+                      liveIntermediateText={
+                        item.id === activeReactFoldId && shouldRenderCurrentResponseInFold
+                          ? [currentFoldIntermediate.trim(), currentResponse.trim()]
+                              .filter(Boolean)
+                              .join("\n\n")
+                          : ""
+                      }
+                      activityIsStreaming={activityIsStreaming}
+                      waitingFirstChunk={waitingFirstChunk}
+                      pendingAskUserToolUseId={pendingAskUser?.toolUseId ?? null}
+                      nestedToolPanelOpenForFold={getNestedToolPanelOpenForFold(
+                        nestedToolPanelOpenByFold,
+                        item.id,
                       )}
-                    </Box>
-
-                    {/* 调度计划显示 */}
-                    {message.schedulerPlan &&
-                      message.schedulerPlan.subtasks.length > 1 && (
-                        <Box
-                          sx={{
-                            width: "100%",
-                            maxWidth: USER_BUBBLE_MAX_CSS,
-                            alignSelf: "flex-end",
-                            mt: 0.5,
-                          }}
-                        >
-                          <SchedulerPlanDisplay
-                            plan={message.schedulerPlan}
-                            sessionId={sessionId}
-                            onOpenReviewerTranscript={(taskId) =>
-                              setBgTranscriptTaskId(taskId)
-                            }
-                            onExecutePlan={(mode) => {
-                              if (!message.schedulerPlan) return;
-                              void executeExistingPlan(message.schedulerPlan, mode);
-                            }}
-                            onRevisePlan={() => {
-                              const request =
-                                message.schedulerPlan?.originalRequest?.trim() ||
-                                stripLeadingPathPrefixFromMerged(
-                                  message.content,
-                                  message.composerAttachedPaths ?? [],
-                                ).replace(/^\/plan\s+/iu, "").trim();
-                              dispatchWorkflowCommand(
-                                "plan",
-                                `${request}\n\n修改要求：`,
-                                false,
-                              );
-                            }}
-                          />
-                        </Box>
-                      )}
-                  </Box>
-              );
-            })()}
+                      chat={CHAT}
+                      components={agentComponents}
+                      onToggleGroup={toggleToolGroupExpand}
+                      onToggleNestedToolPanel={toggleNestedToolPanel}
+                    />
+                  ) : (
+                    <MessageRowRenderItem
+                      item={item}
+                      nextRowIsUser={nextRowIsUser}
+                      isEditingUser={userMessageEdit?.id === item.message.id}
+                      editDraft={
+                        userMessageEdit?.id === item.message.id
+                          ? userMessageEdit.draft
+                          : ""
+                      }
+                      sessionId={sessionId}
+                      chat={CHAT}
+                      components={agentComponents}
+                      onRetryMessage={requestRetryUserMessage}
+                      onEditMessage={openEditUserMessage}
+                      onCopyMessage={handleCopyUserMessage}
+                      onEditDraftChange={handleUserEditDraftChange}
+                      onCancelEdit={handleCancelUserMessageEdit}
+                      onSaveEdit={saveUserMessageEdit}
+                      onOpenReviewerTranscript={handleOpenBackgroundTranscript}
+                      onExecutePlan={executeExistingPlan}
+                      onDispatchWorkflowCommand={dispatchWorkflowCommand}
+                    />
+                  )}
                 </Box>
               );
             })}
@@ -6842,7 +5843,12 @@ export function Chat({ sessionId }: ChatProps) {
                   overflow: "visible",
                 }}
               >
-                {renderMessageContent(currentResponse, "agent")}
+                <ChatMarkdownContent
+                  content={currentResponse}
+                  tone="agent"
+                  components={agentComponents}
+                  chat={CHAT}
+                />
                 <Box
                   component="span"
                   sx={{
@@ -7059,25 +6065,63 @@ export function Chat({ sessionId }: ChatProps) {
                           s.text,
                           s.label,
                         );
+
+                        // ── Glassmorphism suggestion button ──────────────
+                        // Matches the reference design: semi-transparent
+                        // primary gradient, inner purple-pink glow overlay
+                        // that fades in on hover, plus a damped jitter.
                         const button = (
                           <Button
                             size="small"
-                            variant="outlined"
-                            color="primary"
+                            variant="contained"
+                            disableElevation
                             onClick={() => {
                               composerRef.current?.setValue(s.text);
                               queueMicrotask(() => inputRef.current?.focus());
                             }}
                             sx={{
+                              position: "relative",
+                              overflow: "hidden",
                               textTransform: "none",
-                              borderRadius: `${BUBBLE_RADIUS_PX}px`,
+                              borderRadius: "10px",
                               maxWidth: "100%",
                               fontSize: 12,
                               fontWeight: 600,
-                              py: 0.5,
+                              py: 0.625,
+                              px: 1.5,
+                              // Glass base: primary gradient + blur
+                              background: `linear-gradient(135deg, ${alpha(CHAT.accent, 0.88)} 0%, ${alpha(CHAT.accent, 0.72)} 100%)`,
+                              border: `1px solid ${alpha(CHAT.accent, 0.32)}`,
+                              color: theme.palette.primary.contrastText,
+                              boxShadow: `0 2px 12px ${alpha(CHAT.accent, 0.26)}, inset 0 1px 0 ${alpha(theme.palette.common.white, 0.15)}`,
+                              backdropFilter: "blur(4px)",
+                              transition: "background 300ms ease, box-shadow 300ms ease, border-color 300ms ease",
+                              // Inner glow: purple→pink, fades in on hover
+                              "&::before": {
+                                content: '""',
+                                position: "absolute",
+                                inset: 0,
+                                background: `linear-gradient(135deg, ${alpha(CHAT.accent, 0.38)} 0%, ${alpha(CHAT.accent, 0.22)} 100%)`,
+                                filter: "blur(10px)",
+                                opacity: 0,
+                                transition: "opacity 300ms ease",
+                                pointerEvents: "none",
+                              },
+                              "&:hover::before": { opacity: 0.75 },
+                              "&:hover": {
+                                background: `linear-gradient(135deg, ${alpha(CHAT.accent, 0.94)} 0%, ${alpha(CHAT.accent, 0.82)} 100%)`,
+                                boxShadow: `0 4px 20px ${alpha(CHAT.accent, 0.40)}, inset 0 1px 0 ${alpha(theme.palette.common.white, 0.22)}`,
+                                borderColor: alpha(CHAT.accent, 0.5),
+                              },
                             }}
                           >
-                            {s.label}
+                            {/* z-index keeps label above the ::before glow */}
+                            <Box
+                              component="span"
+                              sx={{ position: "relative", zIndex: 1 }}
+                            >
+                              {s.label}
+                            </Box>
                           </Button>
                         );
 
@@ -7089,23 +6133,143 @@ export function Chat({ sessionId }: ChatProps) {
                           );
                         }
 
+                        // ── Glassmorphism tooltip ─────────────────────────
+                        // Matches the reference: dark-gradient panel, blur,
+                        // white/10 border, indigo glow shadow, icon header.
                         return (
                           <Tooltip
                             key={`${idx}-${s.label}`}
                             placement="top"
                             enterDelay={400}
+                            arrow
+                            componentsProps={{
+                              tooltip: {
+                                sx: {
+                                  bgcolor: "transparent",
+                                  p: 0,
+                                  maxWidth: 380,
+                                  boxShadow: "none",
+                                  border: "none",
+                                },
+                              },
+                              arrow: {
+                                sx: {
+                                  color: alpha(theme.palette.background.paper, 0.97),
+                                  "&::before": {
+                                    border: `1px solid ${CHAT.agentBubbleBorder}`,
+                                  },
+                                },
+                              },
+                            }}
                             title={
                               <Box
                                 sx={{
+                                  position: "relative",
+                                  p: "14px 16px",
+                                  background: `linear-gradient(135deg, ${alpha(theme.palette.background.paper, 0.96)} 0%, ${alpha(theme.palette.background.default, 0.94)} 100%)`,
+                                  backdropFilter: "blur(12px)",
+                                  WebkitBackdropFilter: "blur(12px)",
+                                  borderRadius: "16px",
+                                  border: `1px solid ${CHAT.agentBubbleBorder}`,
+                                  boxShadow: `0 0 30px ${alpha(CHAT.accent, 0.18)}, 0 4px 20px ${alpha(theme.palette.common.black, 0.3)}`,
+                                  overflow: "hidden",
                                   maxWidth: 360,
-                                  "& p": { m: 0, lineHeight: 1.45 },
-                                  "& ul, & ol": { my: 0.5, pl: 2 },
-                                  "& li": { my: 0.25 },
                                 }}
                               >
-                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                  {tooltipMarkdown}
-                                </ReactMarkdown>
+                                {/* Header: icon + title */}
+                                <Box
+                                  sx={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 1.25,
+                                    mb: 1.25,
+                                  }}
+                                >
+                                  <Box
+                                    sx={{
+                                      width: 28,
+                                      height: 28,
+                                      borderRadius: "50%",
+                                      bgcolor: alpha(CHAT.accent, 0.22),
+                                      display: "flex",
+                                      alignItems: "center",
+                                      justifyContent: "center",
+                                      flexShrink: 0,
+                                    }}
+                                  >
+                                    <svg
+                                      viewBox="0 0 20 20"
+                                      fill="currentColor"
+                                      style={{
+                                        width: 13,
+                                        height: 13,
+                                        color: CHAT.accent,
+                                      }}
+                                    >
+                                      <path
+                                        clipRule="evenodd"
+                                        fillRule="evenodd"
+                                        d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                                      />
+                                    </svg>
+                                  </Box>
+                                  <Typography
+                                    sx={{
+                                      fontSize: 12,
+                                      fontWeight: 600,
+                                      color: CHAT.textPrimary,
+                                      lineHeight: 1.3,
+                                    }}
+                                  >
+                                    操作详情
+                                  </Typography>
+                                </Box>
+
+                                {/* Markdown content */}
+                                <Box
+                                  sx={{
+                                    position: "relative",
+                                    zIndex: 1,
+                                    "& p": {
+                                      m: 0,
+                                      lineHeight: 1.5,
+                                      fontSize: 12,
+                                      color: CHAT.textMuted,
+                                    },
+                                    "& ul, & ol": {
+                                      my: 0.5,
+                                      pl: 2,
+                                      fontSize: 12,
+                                      color: CHAT.textMuted,
+                                    },
+                                    "& li": { my: 0.25 },
+                                    "& code": {
+                                      fontSize: 11,
+                                      bgcolor: alpha(CHAT.textPrimary, 0.08),
+                                      px: 0.5,
+                                      py: 0.125,
+                                      borderRadius: "4px",
+                                      fontFamily: "monospace",
+                                    },
+                                  }}
+                                >
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    {tooltipMarkdown}
+                                  </ReactMarkdown>
+                                </Box>
+
+                                {/* Background glow layer */}
+                                <Box
+                                  sx={{
+                                    position: "absolute",
+                                    inset: 0,
+                                    borderRadius: "16px",
+                                    background: `linear-gradient(135deg, ${alpha(CHAT.accent, 0.08)}, ${alpha(CHAT.accent, 0.04)})`,
+                                    filter: "blur(20px)",
+                                    opacity: 0.5,
+                                    pointerEvents: "none",
+                                  }}
+                                />
                               </Box>
                             }
                           >

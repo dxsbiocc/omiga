@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import {
   Box,
   Button,
@@ -27,6 +26,7 @@ import {
   type BackgroundTaskSummary,
 } from "./backgroundAgentTranscriptUtils";
 import { extractErrorMessage } from "../../utils/errorMessage";
+import { listenTauriEvent } from "../../utils/tauriEvents";
 import { MarkdownTextViewer } from "../MarkdownText";
 import { RightDetailDrawer } from "../RightDetailDrawer";
 
@@ -79,12 +79,12 @@ export function BackgroundAgentTranscriptDrawer({
 
     void (async () => {
       const [a, b] = await Promise.all([
-        listen<BackgroundAgentTask>("background-agent-update", (e) => {
+        listenTauriEvent<BackgroundAgentTask>("background-agent-update", (e) => {
           if (!cancelled && e.payload.task_id === taskId) {
             scheduleDebouncedRefresh();
           }
         }),
-        listen<{ task_id: string }>("background-agent-complete", (e) => {
+        listenTauriEvent<{ task_id: string }>("background-agent-complete", (e) => {
           if (!cancelled && e.payload.task_id === taskId) {
             scheduleDebouncedRefresh();
           }

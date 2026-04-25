@@ -89,7 +89,9 @@ import {
 } from "../../state";
 import { normalizeAgentDisplayName } from "../../state/agentStore";
 import {
+  parseResearchCommand,
   WORKFLOW_SLASH_COMMANDS,
+  type SlashCommandId,
   type WorkflowSlashCommandDefinition,
 } from "../../utils/workflowCommands";
 import {
@@ -423,19 +425,57 @@ export const ChatComposer = memo(function ChatComposer({
   askUserQuestion = null,
 }: ChatComposerProps) {
   const [input, setInput] = useState(initialInput ?? "");
+  const [selectedSlashCommandId, setSelectedSlashCommandId] =
+    useState<SlashCommandId | null>(null);
   const inputValueRef = useRef(input);
   inputValueRef.current = input;
+  const normalizeSlashValue = useCallback(
+    (
+      rawValue: string,
+    ): { commandId: SlashCommandId | null; body: string } => {
+      const trimmed = rawValue.trim();
+      const research = parseResearchCommand(trimmed);
+      if (research) {
+        return { commandId: "research", body: research.body };
+      }
+      const workflow = WORKFLOW_SLASH_COMMANDS.find((command) => {
+        const label = command.label;
+        return trimmed === label || trimmed.startsWith(`${label} `);
+      });
+      if (workflow) {
+        const body =
+          trimmed === workflow.label
+            ? ""
+            : trimmed.slice(workflow.label.length).trimStart();
+        return { commandId: workflow.id, body };
+      }
+      return { commandId: null, body: rawValue };
+    },
+    [],
+  );
   const setInputValue = useCallback(
     (v: string) => {
-      setInput(v);
-      onInputChange?.(v);
+      const normalized = normalizeSlashValue(v);
+      setSelectedSlashCommandId(normalized.commandId);
+      setInput(normalized.body);
+      const outgoing = normalized.commandId
+        ? normalized.body.trim().length > 0
+          ? `/${normalized.commandId} ${normalized.body}`
+          : `/${normalized.commandId}`
+        : normalized.body;
+      onInputChange?.(outgoing);
     },
-    [onInputChange],
+    [normalizeSlashValue, onInputChange],
   );
   useImperativeHandle(
     composerRef,
     () => ({
-      getValue: () => inputValueRef.current,
+      getValue: () =>
+        selectedSlashCommandId
+          ? inputValueRef.current.trim().length > 0
+            ? `/${selectedSlashCommandId} ${inputValueRef.current}`
+            : `/${selectedSlashCommandId}`
+          : inputValueRef.current,
       setValue: (v: string) => setInputValue(v),
       appendValue: (text: string) => {
         const cur = inputValueRef.current;
@@ -443,7 +483,7 @@ export const ChatComposer = memo(function ChatComposer({
       },
       focus: () => textareaRef.current?.focus(),
     }),
-    [setInputValue],
+    [selectedSlashCommandId, setInputValue],
   );
   const theme = useTheme();
   const pen = usePencilPalette();
@@ -776,13 +816,15 @@ export const ChatComposer = memo(function ChatComposer({
   }, [availableAgents, composerAgentType]);
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerInputAnchorRef = useRef<HTMLDivElement | null>(null);
 
   /** `/`：工作流命令或 Agent 选择（整段输入仅为 `/` 或 `/query`） */
   const slashParse = useMemo(() => {
+    if (selectedSlashCommandId) return { active: false as const, query: "" };
     const t = input;
     if (!/^\/[^\s]*$/u.test(t)) return { active: false as const, query: "" };
     return { active: true as const, query: t.slice(1) };
-  }, [input]);
+  }, [input, selectedSlashCommandId]);
 
   /** `@`：仅工作区根目录下一层文件/文件夹（整段输入仅为 `@` 或 `@query`） */
   const fileParse = useMemo(() => {
@@ -835,6 +877,11 @@ export const ChatComposer = memo(function ChatComposer({
     [filteredAtAgents, filteredWorkflowCommands],
   );
 
+  const explicitSlashCommandId = useMemo(() => {
+    return selectedSlashCommandId;
+  }, [selectedSlashCommandId]);
+  const explicitSlashCommandBody = explicitSlashCommandId ? input : null;
+
   const slashFilterKey = useMemo(
     () =>
       filteredSlashOptions
@@ -852,6 +899,24 @@ export const ChatComposer = memo(function ChatComposer({
   const slashListRef = useRef<HTMLUListElement>(null);
   /** User clicked outside the / picker; hide until input changes or textarea refocuses. */
   const [slashPickerDismissed, setSlashPickerDismissed] = useState(false);
+
+  const highlightedSlashCommand = useMemo(() => {
+    if (explicitSlashCommandId) {
+      return (
+        WORKFLOW_SLASH_COMMANDS.find(
+          (command) => command.id === explicitSlashCommandId,
+        ) ?? null
+      );
+    }
+    if (!slashParse.active || filteredSlashOptions.length === 0) return null;
+    const pick = filteredSlashOptions[slashHighlightIndex] ?? filteredSlashOptions[0];
+    return pick?.kind === "command" ? pick.command : null;
+  }, [
+    explicitSlashCommandId,
+    filteredSlashOptions,
+    slashHighlightIndex,
+    slashParse.active,
+  ]);
 
   const [fileGlobMatches, setFileGlobMatches] = useState<GlobMatchRow[]>([]);
   const [fileGlobLoading, setFileGlobLoading] = useState(false);
@@ -995,10 +1060,13 @@ export const ChatComposer = memo(function ChatComposer({
 
   const pickWorkflowCommand = useCallback(
     (commandId: WorkflowSlashCommandDefinition["id"]) => {
-      setInputValue(`/${commandId} `);
+      setSelectedSlashCommandId(commandId);
+      setComposerAgentType("auto");
+      setInput("");
+      onInputChange?.(`/${commandId}`);
       queueMicrotask(() => textareaRef.current?.focus());
     },
-    [setInputValue],
+    [onInputChange, setComposerAgentType],
   );
 
   const pickFilePath = useCallback(
@@ -1067,6 +1135,16 @@ export const ChatComposer = memo(function ChatComposer({
           setComposerAgentType("auto");
           return;
         }
+      }
+      if (
+        explicitSlashCommandId &&
+        (e.key === "Backspace" || e.key === "Delete") &&
+        !explicitSlashCommandBody
+      ) {
+        e.preventDefault();
+        setSelectedSlashCommandId(null);
+        setInputValue("");
+        return;
       }
       if (fileParse.active) {
         if (e.key === "Escape") {
@@ -1160,6 +1238,8 @@ export const ChatComposer = memo(function ChatComposer({
     [
       slashParse.active,
       fileParse.active,
+      explicitSlashCommandBody,
+      explicitSlashCommandId,
       composerAgentType,
       composerAttachedPaths,
       filteredSlashOptions,
@@ -1217,9 +1297,12 @@ export const ChatComposer = memo(function ChatComposer({
   const showComposerAgentChip =
     composerAgentType !== "general-purpose" &&
     composerAgentType !== "auto" &&
-    !isBackgroundAgent;
+    !isBackgroundAgent &&
+    !highlightedSlashCommand;
   const hasInlineComposerChips =
-    showComposerAgentChip || composerAttachedPaths.length > 0;
+    Boolean(highlightedSlashCommand) ||
+    showComposerAgentChip ||
+    composerAttachedPaths.length > 0;
 
   const showBgRouting =
     Boolean(sessionId) &&
@@ -1649,6 +1732,7 @@ export const ChatComposer = memo(function ChatComposer({
         ) : null}
         <PermissionPromptBar />
         <Box
+          ref={composerInputAnchorRef}
           sx={{
             position: "relative",
             display: "flex",
@@ -1663,6 +1747,52 @@ export const ChatComposer = memo(function ChatComposer({
             "--composer-chip-h": `${COMPOSER_INLINE_CHIP_PX}px`,
           }}
         >
+          {highlightedSlashCommand ? (
+            <Tooltip
+              placement="top"
+              enterDelay={180}
+              title={highlightedSlashCommand.description}
+            >
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  alignSelf: "flex-start",
+                  flexShrink: 0,
+                  height: "var(--composer-chip-h)",
+                  fontSize: "var(--composer-fs)",
+                  lineHeight: "var(--composer-lh)",
+                }}
+              >
+                <Chip
+                  size="small"
+                  variant="outlined"
+                  icon={<RouteIcon sx={{ fontSize: 16, color: accent }} />}
+                  label={highlightedSlashCommand.label}
+                  sx={{
+                    flexShrink: 0,
+                    height: "var(--composer-chip-h)",
+                    maxHeight: "var(--composer-chip-h)",
+                    fontWeight: 700,
+                    bgcolor: alpha(accent, isDark ? 0.22 : 0.18),
+                    borderColor: alpha(accent, 0.5),
+                    color: ink,
+                    maxWidth: { xs: 160, sm: 220 },
+                    boxShadow: `0 1px 2px ${edge(0.12)}`,
+                    "& .MuiChip-label": {
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    },
+                    "& .MuiChip-icon": {
+                      marginTop: 0,
+                      marginBottom: 0,
+                    },
+                  }}
+                />
+              </Box>
+            </Tooltip>
+          ) : null}
           {showComposerAgentChip ? (
             <Tooltip
               placement="top"
@@ -1778,11 +1908,23 @@ export const ChatComposer = memo(function ChatComposer({
               ))}
             </Box>
           ) : null}
-          <Box
-            component="textarea"
-            ref={mergedTextareaRef}
-            value={input}
-            onChange={(e) => setInputValue(e.target.value)}
+            <Box
+              component="textarea"
+              ref={mergedTextareaRef}
+              value={input}
+              onChange={(e) => {
+                const nextValue = e.target.value;
+                if (selectedSlashCommandId) {
+                  setInput(nextValue);
+                  onInputChange?.(
+                    nextValue.trim().length > 0
+                      ? `/${selectedSlashCommandId} ${nextValue}`
+                      : `/${selectedSlashCommandId}`,
+                  );
+                  return;
+                }
+                setInputValue(nextValue);
+              }}
             onFocus={() => {
               if (slashParse.active) setSlashPickerDismissed(false);
               if (fileParse.active) setFilePickerDismissed(false);
@@ -1833,7 +1975,7 @@ export const ChatComposer = memo(function ChatComposer({
           />
           <Popover
             open={showSlashPopover}
-            anchorEl={textareaRef.current}
+            anchorEl={composerInputAnchorRef.current}
             anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
             transformOrigin={{ vertical: "top", horizontal: "left" }}
             disableAutoFocus
@@ -1921,7 +2063,7 @@ export const ChatComposer = memo(function ChatComposer({
           </Popover>
           <Popover
             open={showFilePopover}
-            anchorEl={textareaRef.current}
+            anchorEl={composerInputAnchorRef.current}
             anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
             transformOrigin={{ vertical: "top", horizontal: "left" }}
             disableAutoFocus

@@ -1,3 +1,4 @@
+import "../../lib/monacoWorkers";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useNotebookViewerStore, useUiStore } from "../../state";

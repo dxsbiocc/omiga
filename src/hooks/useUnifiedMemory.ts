@@ -40,12 +40,37 @@ export interface ImplicitMemoryStatus {
   last_build_time: number | null;
 }
 
+export interface PermanentProfileStatus {
+  enabled: boolean;
+  item_count: number;
+  injected_char_count: number;
+}
+
+export interface SessionWorkingMemoryStatus {
+  enabled: boolean;
+  dirty: boolean;
+  item_count: number;
+  last_refreshed_at: string | null;
+}
+
+export interface LongTermStatus {
+  project_entry_count: number;
+  global_entry_count: number;
+}
+
+export interface KnowledgeBaseStatus {
+  project_page_count: number;
+  global_page_count: number;
+}
+
 export interface MemoryPaths {
   root: string;
   wiki: string;
   implicit: string;
   /** ~/.omiga/memory/permanent/wiki */
   permanent_wiki: string;
+  long_term: string;
+  permanent_long_term: string;
   /** ~/.omiga/memory/raw (configurable) */
   raw: string;
 }
@@ -56,6 +81,10 @@ export interface UnifiedMemoryStatus {
   needs_migration: boolean;
   explicit: ExplicitMemoryStatus;
   implicit: ImplicitMemoryStatus;
+  permanent_profile: PermanentProfileStatus;
+  working_memory: SessionWorkingMemoryStatus;
+  long_term: LongTermStatus;
+  knowledge_base: KnowledgeBaseStatus;
   paths: MemoryPaths;
 }
 
@@ -80,6 +109,7 @@ export interface QueryResultItem {
   excerpt: string;
   score: number;
   match_type: string;
+  source_type: string;
 }
 
 export interface QueryResponse {

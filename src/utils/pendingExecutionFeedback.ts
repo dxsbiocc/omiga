@@ -1,7 +1,7 @@
-import type { WorkflowCommandId } from "./workflowCommands";
+import type { SlashCommandId } from "./workflowCommands";
 
 export interface PendingExecutionFeedbackInput {
-  workflowCommand?: WorkflowCommandId | null;
+  workflowCommand?: SlashCommandId | null;
   composerAgentType?: string | null;
 }
 
@@ -46,6 +46,13 @@ export function buildPendingExecutionFeedback(
     return {
       connectLabel: "规划执行中",
       assistantHint: "正在规划自动执行路径与核查阶段…",
+    };
+  }
+
+  if (workflowCommand === "research") {
+    return {
+      connectLabel: "Research 编排中",
+      assistantHint: "正在调用分层 Research System 命令…",
     };
   }
 
