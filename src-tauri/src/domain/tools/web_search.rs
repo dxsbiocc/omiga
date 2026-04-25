@@ -20,6 +20,7 @@ use rmcp::model::CallToolResult;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashSet;
+use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,7 @@ pub const DESCRIPTION: &str = r#"Search the public web for up-to-date informatio
 - `max_results` (default 5, max 10) limits how many hits are returned.
 - Optional `search_url` overrides the DuckDuckGo HTML endpoint (for private search proxies or tests).
 - Unsafe/private result URLs are filtered out; `search_url` must also be a public-safe HTTP(S) URL.
+- The full search attempt respects the tool timeout (default 60s, clamped to 5–120s) so fallback chains cannot hang indefinitely.
 - After answering, cite sources with markdown links when you use this tool."#;
 
 fn default_max_results() -> Option<u32> {
@@ -793,6 +795,29 @@ fn call_tool_result_to_json(result: &CallToolResult) -> Option<JsonValue> {
 fn effective_max_results(args: &WebSearchArgs) -> usize {
     let m = args.max_results.unwrap_or(5).clamp(1, 10) as usize;
     m.min(MAX_RESULTS_CAP)
+}
+
+fn web_search_timeout_error(timeout: Duration) -> ToolError {
+    let timeout_secs = timeout.as_secs().max(1);
+    ToolError::ExecutionFailed {
+        message: format!(
+            "web_search timed out after {}s. Try a narrower query or configure a faster search API provider.",
+            timeout_secs
+        ),
+    }
+}
+
+async fn enforce_web_search_timeout<F>(
+    timeout: Duration,
+    fut: F,
+) -> Result<SearchExecution, ToolError>
+where
+    F: Future<Output = Result<SearchExecution, ToolError>>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(result) => result,
+        Err(_) => Err(web_search_timeout_error(timeout)),
+    }
 }
 
 pub struct WebSearchTool;
@@ -2352,6 +2377,22 @@ mod ddg_tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].url, "https://example.org");
     }
+
+    #[tokio::test]
+    async fn web_search_global_timeout_returns_error() {
+        let result = enforce_web_search_timeout(Duration::from_millis(1), async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(SearchExecution::new())
+        })
+        .await;
+
+        match result {
+            Err(ToolError::ExecutionFailed { message }) => {
+                assert!(message.contains("web_search timed out after 1s"));
+            }
+            other => panic!("expected timeout execution failure, got {other:?}"),
+        }
+    }
 }
 
 #[async_trait]
@@ -2395,77 +2436,82 @@ impl super::ToolImpl for WebSearchTool {
             detect_search_intent(args.query.trim())
         };
 
-        let execution = match intent {
-            SearchIntent::Research => {
-                let research_fut = run_research_search(&client, ctx, &args, max_n, search_url);
-                tokio::select! {
-                    _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                    r = research_fut => r?,
-                }
-            }
-            SearchIntent::General => {
-                let mut exec = SearchExecution::new();
-
-                let api_fut = search_via_configured_apis(
-                    &client,
-                    ctx,
-                    args.query.trim(),
-                    allowed,
-                    blocked,
-                    max_n,
-                );
-                if let Some((hits, provider)) = tokio::select! {
-                    _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                    r = api_fut => r?,
-                } {
-                    exec.hits = hits;
-                    exec.push_source(api_provider_label(provider));
-                }
-
-                if exec.hits.is_empty() {
-                    let browser_fut = search_via_browser_mcp(ctx, args.query.trim(), max_n);
-                    if let Some(browser_exec) = tokio::select! {
-                        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                        r = browser_fut => r?,
-                    } {
-                        exec = browser_exec;
-                        if had_any_search_key {
-                            exec.push_note(
-                                "Configured search APIs returned no usable hits; used Agent-browser fallback.",
-                            );
-                        } else {
-                            exec.push_note(
-                                "No search API keys configured; used Agent-browser fallback.",
-                            );
+        let execution = tokio::select! {
+            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+            r = enforce_web_search_timeout(timeout, async {
+                match intent {
+                    SearchIntent::Research => {
+                        let research_fut = run_research_search(&client, ctx, &args, max_n, search_url);
+                        tokio::select! {
+                            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                            r = research_fut => r,
                         }
                     }
-                }
+                    SearchIntent::General => {
+                        let mut exec = SearchExecution::new();
 
-                if exec.hits.is_empty() {
-                    let ddg_fut = search_ddg(
-                        &client,
-                        args.query.trim(),
-                        max_n,
-                        search_url.or(Some(DDG_HTML_SEARCH_BASE)),
-                    );
-                    let hits = tokio::select! {
-                        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                        r = ddg_fut => r?,
-                    };
-                    exec.hits = filter_hits(&ctx.project_root, hits, allowed, blocked, max_n);
-                    if had_any_search_key {
-                        exec.push_source(
-                            "DuckDuckGo fallback after configured search APIs and Agent-browser returned no usable hits",
+                        let api_fut = search_via_configured_apis(
+                            &client,
+                            ctx,
+                            args.query.trim(),
+                            allowed,
+                            blocked,
+                            max_n,
                         );
-                    } else {
-                        exec.push_source(
-                            "DuckDuckGo fallback (no search API keys configured and no Agent-browser route matched)",
-                        );
+                        if let Some((hits, provider)) = tokio::select! {
+                            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                            r = api_fut => r?,
+                        } {
+                            exec.hits = hits;
+                            exec.push_source(api_provider_label(provider));
+                        }
+
+                        if exec.hits.is_empty() {
+                            let browser_fut = search_via_browser_mcp(ctx, args.query.trim(), max_n);
+                            if let Some(browser_exec) = tokio::select! {
+                                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                                r = browser_fut => r?,
+                            } {
+                                exec = browser_exec;
+                                if had_any_search_key {
+                                    exec.push_note(
+                                        "Configured search APIs returned no usable hits; used Agent-browser fallback.",
+                                    );
+                                } else {
+                                    exec.push_note(
+                                        "No search API keys configured; used Agent-browser fallback.",
+                                    );
+                                }
+                            }
+                        }
+
+                        if exec.hits.is_empty() {
+                            let ddg_fut = search_ddg(
+                                &client,
+                                args.query.trim(),
+                                max_n,
+                                search_url.or(Some(DDG_HTML_SEARCH_BASE)),
+                            );
+                            let hits = tokio::select! {
+                                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                                r = ddg_fut => r?,
+                            };
+                            exec.hits = filter_hits(&ctx.project_root, hits, allowed, blocked, max_n);
+                            if had_any_search_key {
+                                exec.push_source(
+                                    "DuckDuckGo fallback after configured search APIs and Agent-browser returned no usable hits",
+                                );
+                            } else {
+                                exec.push_source(
+                                    "DuckDuckGo fallback (no search API keys configured and no Agent-browser route matched)",
+                                );
+                            }
+                        }
+
+                        Ok(exec)
                     }
                 }
-
-                exec
-            }
+            }) => r?,
         };
 
         let processed = dedupe_hits_preserve_order(

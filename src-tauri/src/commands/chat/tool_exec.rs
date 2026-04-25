@@ -32,6 +32,12 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
 
+const PARALLEL_TOOL_TIMEOUT_SECS: u64 = 60;
+
+fn parallel_tool_timeout_message(tool_name: &str) -> String {
+    format!("Tool `{tool_name}` timed out after {PARALLEL_TOOL_TIMEOUT_SECS}s")
+}
+
 fn working_memory_query_text(
     tool_name: &str,
     arguments: &str,
@@ -224,14 +230,16 @@ pub(super) async fn execute_tool_calls(
         // Wrap each future with a 60 s timeout so one slow web_fetch can't stall
         // the whole batch.  On timeout we return an error result for that tool slot
         // instead of blocking every other tool indefinitely.
-        const PARALLEL_TOOL_TIMEOUT_SECS: u64 = 60;
         let timed_futures: Vec<_> = parallel_futures
             .into_iter()
             .zip(parallel_indices.iter())
             .map(|(fut, &idx)| {
-                let (tool_use_id, tool_name, _) = &tool_calls[idx];
+                let (tool_use_id, tool_name, arguments) = &tool_calls[idx];
                 let tuid = tool_use_id.clone();
                 let tname = tool_name.clone();
+                let args = arguments.clone();
+                let app = app.clone();
+                let message_id = message_id.to_string();
                 async move {
                     match tokio::time::timeout(
                         tokio::time::Duration::from_secs(PARALLEL_TOOL_TIMEOUT_SECS),
@@ -240,11 +248,31 @@ pub(super) async fn execute_tool_calls(
                     .await
                     {
                         Ok(res) => res,
-                        Err(_) => (
-                            tuid.clone(),
-                            format!("Tool `{tname}` timed out after {PARALLEL_TOOL_TIMEOUT_SECS}s"),
-                            true,
-                        ),
+                        Err(_) => {
+                            let error_msg = parallel_tool_timeout_message(&tname);
+                            let display_input = if args.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                                let prefix =
+                                    truncate_utf8_prefix(&args, TOOL_DISPLAY_MAX_INPUT_CHARS);
+                                format!(
+                                    "{}\n\n[Input truncated... {} total characters]",
+                                    prefix,
+                                    args.len()
+                                )
+                            } else {
+                                args.clone()
+                            };
+                            let _ = app.emit(
+                                &format!("chat-stream-{}", message_id),
+                                &StreamOutputItem::ToolResult {
+                                    tool_use_id: tuid.clone(),
+                                    name: tname.clone(),
+                                    input: display_input,
+                                    output: error_msg.clone(),
+                                    is_error: true,
+                                },
+                            );
+                            (tuid.clone(), error_msg, true)
+                        }
                     }
                 }
             })
@@ -1610,5 +1638,13 @@ mod tests {
             working_memory_query_text("todo_write", r#"{"todos":[]}"#, Some("整理记忆分层"));
 
         assert_eq!(query.as_deref(), Some("整理记忆分层"));
+    }
+
+    #[test]
+    fn parallel_tool_timeout_message_names_tool_and_budget() {
+        assert_eq!(
+            parallel_tool_timeout_message("web_search"),
+            "Tool `web_search` timed out after 60s"
+        );
     }
 }
