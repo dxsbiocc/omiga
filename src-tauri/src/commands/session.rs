@@ -104,11 +104,15 @@ pub async fn load_session(
     let repo = &*state.repo;
     let page = limit.unwrap_or(DEFAULT_MSG_PAGE_SIZE).max(1);
 
-    // Run session meta and message queries in parallel — both are independent reads.
-    // WAL mode + pool of 4 connections supports concurrent reads without contention.
-    let (session_result, raw_messages_result) = tokio::join!(
+    // Run all three reads in parallel:
+    //   • session meta (DB)
+    //   • message rows (DB, WAL + pool supports concurrent reads)
+    //   • session config YAML (blocking file I/O via spawn_blocking)
+    let sid_for_cfg = session_id.clone();
+    let (session_result, raw_messages_result, config_result) = tokio::join!(
         repo.get_session_meta(&session_id),
-        repo.get_session_messages_paged(&session_id, page + 1, 0)
+        repo.get_session_messages_paged(&session_id, page + 1, 0),
+        tokio::task::spawn_blocking(move || load_session_config(&sid_for_cfg))
     );
 
     let session = session_result
@@ -147,7 +151,8 @@ pub async fn load_session(
         .map(message_record_to_api)
         .collect();
 
-    let session_config = load_session_config(&session_id);
+    // spawn_blocking only fails if the thread panicked — fall back to defaults.
+    let session_config = config_result.unwrap_or_else(|_| load_session_config(&session_id));
     let config_response = SessionConfigResponse::from(session_config);
 
     let total = start.elapsed();

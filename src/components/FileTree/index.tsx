@@ -8,7 +8,6 @@ import {
   Box,
   Typography,
   IconButton,
-  CircularProgress,
   Checkbox,
   Tooltip,
   Fade,
@@ -47,6 +46,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useSessionStore } from "../../state/sessionStore";
 import { useChatComposerStore } from "../../state/chatComposerStore";
 import { usePencilPalette } from "../../theme";
+import { FileTreeSkeleton } from "./FileTreeSkeleton";
 
 export interface FileNode {
   name: string;
@@ -621,19 +621,29 @@ export function FileTree() {
     return (
       <Box
         sx={{
+          height: "100%",
           display: "flex",
           flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          height: "100%",
-          gap: 2,
           bgcolor: "background.paper",
         }}
       >
-        <CircularProgress size={28} thickness={4} sx={{ color: pen.loadingSpinner }} />
-        <Typography variant="body2" sx={{ color: pen.textLoading, fontSize: 13 }}>
-          {loadingMessage}
-        </Typography>
+        {/* Loading label above skeleton rows */}
+        <Box
+          sx={{
+            px: 1.5,
+            py: 0.75,
+            borderBottom: 1,
+            borderColor: "divider",
+          }}
+        >
+          <Typography variant="caption" sx={{ color: pen.textLoading, fontSize: 11 }}>
+            {loadingMessage}
+          </Typography>
+        </Box>
+        {/* Skeleton table rows — match real table column layout */}
+        <Box sx={{ px: 0.5, pt: 0.5, overflow: "hidden" }}>
+          <FileTreeSkeleton />
+        </Box>
       </Box>
     );
   }

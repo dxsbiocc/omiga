@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { notifyProviderChanged } from "../utils/providerEvents";
+import { invokeIfTauri } from "../utils/tauriRuntime";
 import {
   useChatComposerStore,
   DEFAULT_SESSION_CONFIG,
@@ -406,7 +407,9 @@ function convertRawMessages(
 
   return rawMessages.map((m, index) => {
     const content =
-      m.role === "tool" && m.output != null ? m.output : m.content || "";
+      m.role === "tool" && m.output != null
+        ? m.output
+        : m.content || "";
 
     const rowTimestamp = parseCreatedAtMs(m.created_at);
 
@@ -453,7 +456,6 @@ function convertRawMessages(
       m.role === "assistant" && typeof m.turn_summary === "string" && m.turn_summary.trim()
         ? m.turn_summary.trim()
         : undefined;
-
     // For tool rows, use the assistant message's created_at as the start timestamp
     // so elapsed time = completedAt - timestamp reflects actual execution duration.
     const timestamp: number | undefined =
@@ -505,6 +507,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         messageCount: 0,
       };
       const sessionConfig = normalizeSessionConfig(sessionData.session_config);
+      useActivityStore.getState().clearAllActivity();
 
       set((state) => {
         let pending = state.pendingProjectPathSessions;
@@ -574,24 +577,22 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   loadSessions: async () => {
     set({ isLoading: true });
-    try {
-      const sessionsData = await invoke<SessionSummary[]>("list_sessions");
-
-      const sessions: Session[] = sessionsData.map((s) => ({
-        id: s.id,
-        name: s.name,
-        projectPath: s.project_path || ".",
-        workingDirectory: s.project_path || ".",
-        createdAt: s.updated_at,
-        updatedAt: s.updated_at,
-        messageCount: s.message_count,
-      }));
-
-      set({ sessions, isLoading: false });
-    } catch (error) {
-      console.error("Failed to load sessions:", error);
-      set({ isLoading: false });
+    const sessionsData = await invokeIfTauri<SessionSummary[]>("list_sessions");
+    if (!sessionsData) {
+      set({ sessions: [], isLoading: false });
+      return;
     }
+    const sessions: Session[] = sessionsData.map((s) => ({
+      id: s.id,
+      name: s.name,
+      projectPath: s.project_path || ".",
+      workingDirectory: s.project_path || ".",
+      createdAt: s.updated_at,
+      updatedAt: s.updated_at,
+      messageCount: s.message_count,
+    }));
+
+    set({ sessions, isLoading: false });
   },
 
   loadSession: async (sessionId: string, opts?: { clearSwitching?: boolean; silent?: boolean }) => {
@@ -825,7 +826,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setCurrentSession: async (sessionId) => {
     const t0 = performance.now();
     dbg("setCurrentSession", { sessionId });
-    useActivityStore.getState().clearAllActivity();
+    // Activity state is saved/restored by the Chat component's session-switch
+    // useEffect so that parallel streaming sessions are not interrupted.
+    // clearAllActivity() was here before but would destroy the activity state
+    // of a session that is still streaming in the background.
 
     if (!sessionId) {
       set({
@@ -896,20 +900,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     });
     notifyProviderChanged();
 
-    // Load per-session config immediately so composer settings don't flash stale values.
-    void invoke<SessionConfigResponse>("get_session_config", { sessionId })
-      .then((cfg) => {
-        if (get().currentSession?.id !== sessionId) return;
-        useChatComposerStore
-          .getState()
-          .initForSession(sessionId, normalizeSessionConfig(cfg));
-      })
-      .catch(() => {
-        if (get().currentSession?.id !== sessionId) return;
-        useChatComposerStore
-          .getState()
-          .initForSession(sessionId, DEFAULT_SESSION_CONFIG);
-      });
+    // Initialize composer with defaults immediately (synchronous, no IPC).
+    // load_session already returns session_config in its payload, so the real
+    // config is applied when loadSession completes — no extra IPC needed here.
+    // This removes a redundant get_session_config IPC that would otherwise
+    // compete with load_session on the macOS WKWebView IPC queue (serialized
+    // when the WebView is rendering), adding 200-800 ms to every cache-miss switch.
+    useChatComposerStore.getState().initForSession(sessionId, DEFAULT_SESSION_CONFIG);
 
     void get()
       .loadSession(sessionId)

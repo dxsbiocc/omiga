@@ -29,6 +29,12 @@ export interface ToolResultStepDetail {
   failed?: boolean;
 }
 
+export interface OperationStepDetail {
+  summary?: string;
+  output?: string;
+  failed?: boolean;
+}
+
 /** A single todo item mirroring the `todo_write` tool schema. */
 export interface ActiveTodoItem {
   id: string;
@@ -88,6 +94,16 @@ interface ActivityState {
   onToolResultDone: (
     toolUseId: string,
     detail?: ToolResultStepDetail,
+  ) => void;
+  onOperationStart: (
+    operationId: string,
+    title: string,
+    detail?: OperationStepDetail,
+  ) => void;
+  onOperationDone: (
+    operationId: string,
+    title: string,
+    detail?: OperationStepDetail,
   ) => void;
 
   /**
@@ -262,6 +278,53 @@ export const useActivityStore = create<ActivityState>((set) => ({
         },
       ),
     })),
+
+  onOperationStart: (operationId, title, detail) =>
+    set((s) => {
+      const oid = `op-${operationId}`;
+      const exists = s.executionSteps.some((step) => step.id === oid);
+      const nextStep: ExecutionStep = {
+        id: oid,
+        title,
+        status: "running",
+        ...(detail?.summary !== undefined ? { summary: detail.summary } : {}),
+        ...(detail?.output !== undefined ? { toolOutput: detail.output } : {}),
+      };
+      return {
+        executionSteps: exists
+          ? s.executionSteps.map((step) => (step.id === oid ? nextStep : step))
+          : [...s.executionSteps, nextStep],
+      };
+    }),
+
+  onOperationDone: (operationId, title, detail) =>
+    set((s) => {
+      const oid = `op-${operationId}`;
+      const exists = s.executionSteps.some((step) => step.id === oid);
+      const next = exists
+        ? markStepDone(s.executionSteps, oid).map((step) =>
+            step.id !== oid
+              ? step
+              : {
+                  ...step,
+                  ...(detail?.summary !== undefined ? { summary: detail.summary } : {}),
+                  ...(detail?.output !== undefined ? { toolOutput: detail.output } : {}),
+                  ...(detail?.failed !== undefined ? { failed: detail.failed } : {}),
+                },
+          )
+        : [
+            ...s.executionSteps,
+            {
+              id: oid,
+              title,
+              status: "done",
+              ...(detail?.summary !== undefined ? { summary: detail.summary } : {}),
+              ...(detail?.output !== undefined ? { toolOutput: detail.output } : {}),
+              ...(detail?.failed !== undefined ? { failed: detail.failed } : {}),
+            } satisfies ExecutionStep,
+          ];
+      return { executionSteps: next };
+    }),
 
   setActiveTodos: (todos) => set({ activeTodos: todos }),
   clearActiveTodos: () => set({ activeTodos: null }),

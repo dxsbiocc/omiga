@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import {
   Box,
   Typography,
@@ -11,8 +10,6 @@ import {
   Tab,
   Tooltip,
   Button,
-  IconButton,
-  Collapse,
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import {
@@ -26,7 +23,6 @@ import {
   Hub,
   WarningAmber,
   Groups,
-  ExpandMore,
 } from "@mui/icons-material";
 import {
   useSessionStore,
@@ -40,9 +36,17 @@ import { formatExecutionElapsedFixed } from "../ExecutionStepPanel";
 import { PlanTodoList, type PlanTodoItem } from "./PlanTodoList";
 import { ReactStepList } from "./ReactStepList";
 import { SchedulerPlanPanel } from "./SchedulerPlanPanel";
-import { RunningTaskCard, PendingTaskCard } from "./TaskCards";
+import {
+  RunningTaskCard,
+  PendingTaskCard,
+  RunningAgentCard,
+  type RuntimeAgentTaskItem,
+} from "./TaskCards";
 import { RalphTeamStatusPanel } from "./RalphTeamStatusPanel";
+import { OrchestrationTimelineList } from "./OrchestrationTimelineList";
+import { OrchestrationTraceList } from "./OrchestrationTraceList";
 import { BackgroundAgentTranscriptDrawer } from "../Chat/BackgroundAgentTranscriptDrawer";
+import { TaskStatusSkeleton } from "./TaskStatusSkeleton";
 import {
   aggregateReviewerVerdicts,
   isBlockerVerdict,
@@ -52,9 +56,20 @@ import {
 import { compactLabel, isLabelCompacted } from "../../utils/compactLabel";
 import { stringifyUnknown } from "../../utils/stringifyUnknown";
 import { parseWorkflowCommand } from "../../utils/workflowCommands";
+import { schedulerStageLabel } from "../../utils/schedulerPlanHierarchy";
 
+import {
+  buildOrchestrationTimelineFromEvents,
+  filterOrchestrationTraceEvents,
+  orchestrationPhaseLabel,
+  parseEventTime,
+  stringifyTracePayload,
+  type OrchestrationEventDto,
+  type TimelineEvent,
+} from "./orchestrationProjection";
 import { notifyTaskCompleted, notifyTaskFailed } from "../../utils/notifications";
 import { OMIGA_COMPOSER_DISPATCH_EVENT } from "../../utils/chatComposerEvents";
+import { listenTauriEvent } from "../../utils/tauriEvents";
 
 interface TodoLine {
   id: string;
@@ -99,32 +114,6 @@ type TeamSessionInfo = {
   updated_at?: string;
 };
 
-type TimelineEvent = {
-  id: string;
-  label: string;
-  detail?: string;
-  tone: "info" | "success" | "warning" | "error";
-  at: number;
-  action?:
-    | { type: "plan" }
-    | { type: "mode" }
-    | { type: "task"; taskId: string; label?: string }
-    | { type: "reviewer"; taskId: string; label?: string };
-};
-
-type OrchestrationEventDto = {
-  id: string;
-  session_id: string;
-  round_id?: string | null;
-  message_id?: string | null;
-  mode?: string | null;
-  event_type: string;
-  phase?: string | null;
-  task_id?: string | null;
-  payload: Record<string, unknown> | null;
-  created_at: string;
-};
-
 type FailureDiagnosticItem = {
   id: string;
   taskId?: string;
@@ -136,39 +125,6 @@ type FailureDiagnosticItem = {
   at?: number;
   source: "task" | "reviewer";
 };
-
-function orchestrationPhaseLabel(phase: string): string {
-  const labels: Record<string, string> = {
-    planning: "规划中",
-    env_check: "环境检查",
-    executing: "执行中",
-    quality_check: "质量检查",
-    verifying: "验证中",
-    intake: "接收中",
-    interview: "澄清中",
-    expansion: "问题展开",
-    design: "分析设计",
-    plan: "分析计划",
-    implementation: "分析执行",
-    qa: "论证中",
-    validation: "审查中",
-    fixing: "修正中",
-    synthesizing: "综合中",
-    complete: "已完成",
-    failed: "失败",
-  };
-  return labels[phase] ?? phase;
-}
-
-function preflightStageLabel(stage: string): string {
-  const labels: Record<string, string> = {
-    scheduler_plan: "计划拆解",
-    mcp_tools: "MCP 工具准备",
-    tool_schemas: "工具清单准备",
-    send_message_ready: "进入流式阶段前准备",
-  };
-  return labels[stage] ?? stage;
-}
 
 function orderedPhaseTrack(mode: string, phase: string): {
   steps: Array<{ id: string; label: string; state: "done" | "current" | "pending" }>;
@@ -225,30 +181,12 @@ function buildResumeCommand(args: {
   return null;
 }
 
-function parseEventTime(value?: string | number | null): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value * 1000;
-  if (typeof value === "string" && value.trim()) {
-    const ts = Date.parse(value);
-    if (Number.isFinite(ts)) return ts;
-  }
-  return null;
-}
-
 function relativeEventTime(ts: number): string {
   const deltaSec = Math.max(0, Math.round((Date.now() - ts) / 1000));
   if (deltaSec < 60) return `${deltaSec}s 前`;
   if (deltaSec < 3600) return `${Math.round(deltaSec / 60)}m 前`;
   if (deltaSec < 86400) return `${Math.round(deltaSec / 3600)}h 前`;
   return `${Math.round(deltaSec / 86400)}d 前`;
-}
-
-function stringifyTracePayload(payload: Record<string, unknown> | null): string {
-  if (!payload || Object.keys(payload).length === 0) return "{}";
-  try {
-    return JSON.stringify(payload, null, 2);
-  } catch {
-    return "{}";
-  }
 }
 
 function payloadText(value: unknown): string | undefined {
@@ -375,6 +313,7 @@ export function TaskStatus() {
   const executionEnvironment = useChatComposerStore((s) => s.environment);
   const storeMessages = useSessionStore((s) => s.storeMessages);
   const currentSession = useSessionStore((s) => s.currentSession);
+  const isSwitchingSession = useSessionStore((s) => s.isSwitchingSession);
   const projectRoot =
     currentSession?.workingDirectory ?? currentSession?.projectPath;
   const executionSteps = useActivityStore((s) => s.executionSteps);
@@ -408,6 +347,19 @@ export function TaskStatus() {
   const [copiedFailureId, setCopiedFailureId] = useState<string | null>(null);
   const [copiedTraceEventId, setCopiedTraceEventId] = useState<string | null>(null);
   const [dashboardRefreshTick, setDashboardRefreshTick] = useState(0);
+
+  useEffect(() => {
+    setActiveTab(0);
+    setOrchestrationTab(0);
+    setStatusPanelTab(0);
+    setTraceModeFilter("all");
+    setTraceEventTypeFilter("all");
+    setExpandedTraceEventId(null);
+    setReviewerTranscriptTask(null);
+    setReviewerHeadline(null);
+    setSessionBackgroundTasks([]);
+    setOrchestrationEvents([]);
+  }, [currentSession?.id]);
 
   const runActive = executionSteps.length > 0 && executionEndedAt == null;
 
@@ -851,6 +803,36 @@ export function TaskStatus() {
       (task) => task.plan_id && task.plan_id === schedulerPlan.planId,
     );
   }, [schedulerPlan, scopedSessionBackgroundTasks]);
+  const runningAgentCards = useMemo<RuntimeAgentTaskItem[]>(() => {
+    const sourceRows =
+      currentPlanTaskRows.length > 0 ? currentPlanTaskRows : runningWorkerTasks;
+    return sourceRows
+      .filter(
+        (task) => task.status === "Running" || task.status === "Pending",
+      )
+      .map((task) => {
+        const schedulerTask = schedulerPlan?.subtasks.find(
+          (item) => item.id === task.task_id,
+        );
+        const supervisorLabel = schedulerTask?.supervisorAgentType
+          ? normalizeAgentDisplayName(schedulerTask.supervisorAgentType)
+          : schedulerPlan?.executionSupervisorAgentType
+            ? normalizeAgentDisplayName(
+                schedulerPlan.executionSupervisorAgentType,
+              )
+            : undefined;
+        return {
+          id: task.task_id,
+          agentType: task.agent_type,
+          description: task.description,
+          status: task.status,
+          stageLabel: schedulerTask?.stage
+            ? schedulerStageLabel(schedulerTask.stage)
+            : undefined,
+          supervisorLabel,
+        };
+      });
+  }, [currentPlanTaskRows, runningWorkerTasks, schedulerPlan]);
   const isPurePlanReviewState = useMemo(
     () =>
       Boolean(
@@ -888,154 +870,10 @@ export function TaskStatus() {
     : 0;
   const orchestrationTimeline = useMemo<TimelineEvent[]>(() => {
     if (scopedOrchestrationEvents.length > 0) {
-      return scopedOrchestrationEvents
-        .map((event) => {
-          const at = parseEventTime(event.created_at) ?? Date.now();
-          const payload = event.payload ?? {};
-          const task = event.task_id
-            ? scopedSessionBackgroundTasks.find((row) => row.task_id === event.task_id)
-            : undefined;
-          const payloadAgentType =
-            typeof payload.agentType === "string" ? payloadText(payload.agentType) : undefined;
-          const agentType = payloadAgentType ?? task?.agent_type ?? "agent";
-          const agentLabel = normalizeAgentDisplayName(agentType);
-          const reviewerAgentType = payloadAgentType ?? task?.agent_type ?? "reviewer";
-          const reviewerAgentLabel = normalizeAgentDisplayName(reviewerAgentType);
-          const description = payloadText(payload.description) ?? task?.description;
-          const summary =
-            payloadText(payload.summary) ??
-            taskRowText(task?.result_summary) ??
-            taskRowText(task?.error_message);
-          const goal = payloadText(payload.goal);
-          const verdict = payloadText(payload.verdict) ?? "结论";
-          const taskCount =
-            typeof payload.taskCount === "number"
-              ? `${payload.taskCount} 个子任务`
-              : payloadText(payload.taskCount);
-          const stage = payloadText(payload.stage);
-          const durationMs =
-            typeof payload.durationMs === "number"
-              ? `${payload.durationMs} ms`
-              : payloadText(payload.durationMs);
-          const nestedPayload =
-            payload.payload && typeof payload.payload === "object"
-              ? (payload.payload as Record<string, unknown>)
-              : null;
-          const cacheStatus = payloadText(nestedPayload?.cacheStatus);
-          const toolCount =
-            typeof nestedPayload?.toolCount === "number"
-              ? `${nestedPayload.toolCount} 个工具`
-              : payloadText(nestedPayload?.toolCount);
-          const stageError = payloadText(payload.error);
-          const taskLabel = description ? `${agentLabel}: ${description}` : undefined;
-          const reviewerLabel = summary ? `${reviewerAgentLabel}: ${summary}` : taskLabel;
-          const action =
-            event.event_type === "schedule_plan_created"
-              ? ({ type: "plan" } as const)
-              : event.event_type === "mode_requested"
-                ? ({ type: "mode" } as const)
-                : event.event_type.startsWith("worker_") && event.task_id
-                  ? ({
-                      type: "task" as const,
-                      taskId: event.task_id,
-                      label: taskLabel,
-                    })
-                  : event.event_type === "reviewer_verdict" && event.task_id
-                    ? ({
-                        type: "reviewer" as const,
-                        taskId: event.task_id,
-                        label: reviewerLabel,
-                      })
-                    : event.phase
-                      ? ({ type: "mode" as const })
-                      : undefined;
-
-          const label =
-            event.event_type === "schedule_plan_created"
-              ? "调度计划已生成"
-              : event.event_type === "resume_requested"
-                ? `${event.mode ?? "编排"} 恢复请求`
-                : event.event_type === "cancel_requested"
-                  ? `${event.mode ?? "编排"} 取消请求`
-                  : event.event_type === "cancel_completed"
-                    ? `${event.mode ?? "编排"} 已取消`
-                    : event.event_type === "verification_started"
-                      ? "验证阶段开始"
-                      : event.event_type === "fix_started"
-                        ? "修复阶段开始"
-                        : event.event_type === "synthesizing_started"
-                          ? "综合阶段开始"
-              : event.event_type === "mode_requested"
-                ? `${event.mode ?? "编排"} 模式已触发`
-                : event.event_type === "phase_changed"
-                  ? `${event.mode ?? "编排"} 切换到 ${orchestrationPhaseLabel(event.phase ?? "")}`
-                : event.event_type === "worker_started"
-                  ? `${agentLabel} 已启动`
-                  : event.event_type === "worker_completed"
-                    ? `${agentLabel} 已完成`
-                    : event.event_type === "worker_failed"
-                      ? `${agentLabel} 失败`
-                      : event.event_type === "worker_cancelled"
-                        ? `${agentLabel} 已取消`
-                        : event.event_type === "worker_launch_failed"
-                          ? `${agentLabel} 启动失败`
-                          : event.event_type === "reviewer_verdict"
-                            ? `${reviewerAgentLabel} 给出 ${verdict}`
-                            : event.event_type === "preflight_stage_completed" && stage
-                              ? `${preflightStageLabel(stage)}完成`
-                              : event.event_type === "preflight_stage_failed" && stage
-                                ? `${preflightStageLabel(stage)}失败`
-                            : event.event_type;
-
-          const detail =
-            event.event_type === "preflight_stage_completed" ||
-            event.event_type === "preflight_stage_failed"
-              ? [durationMs, cacheStatus, toolCount, stageError]
-                  .filter((part): part is string => Boolean(part))
-                  .join(" · ")
-              : description ||
-                summary ||
-                goal ||
-                taskCount ||
-                (event.phase ? orchestrationPhaseLabel(event.phase) : undefined);
-
-          const verdictLower = verdict.toLowerCase();
-          const tone =
-            event.event_type === "preflight_stage_failed"
-              ? "error"
-              : event.event_type === "preflight_stage_completed" &&
-                  typeof payload.durationMs === "number" &&
-                  payload.durationMs >= 1500
-                ? "warning"
-            : event.event_type.includes("failed")
-              ? "error"
-              : event.event_type.includes("cancelled") || event.event_type === "cancel_requested"
-                ? "warning"
-                : event.event_type === "resume_requested"
-                  ? "info"
-                : event.event_type === "reviewer_verdict" &&
-                    ["reject", "fail"].includes(verdictLower)
-                  ? "error"
-                  : event.event_type === "reviewer_verdict" && verdictLower === "partial"
-                    ? "warning"
-                    : ["verification_started", "fix_started", "synthesizing_started"].includes(
-                        event.event_type,
-                      )
-                      ? "info"
-                    : event.event_type.includes("completed")
-                      ? "success"
-                      : "info";
-          return {
-            id: event.id,
-            label,
-            detail,
-            tone,
-            at,
-            action,
-          } satisfies TimelineEvent;
-        })
-        .sort((a, b) => b.at - a.at)
-        .slice(0, 8);
+      return buildOrchestrationTimelineFromEvents(
+        scopedOrchestrationEvents,
+        scopedSessionBackgroundTasks,
+      );
     }
 
     const events: TimelineEvent[] = [];
@@ -1182,13 +1020,11 @@ export function TaskStatus() {
     [scopedOrchestrationEvents],
   );
   const filteredTraceEvents = useMemo(() => {
-    return scopedOrchestrationEvents.filter((event) => {
-      const modeOk =
-        traceModeFilter === "all" || (event.mode ?? "unknown") === traceModeFilter;
-      const typeOk =
-        traceEventTypeFilter === "all" || event.event_type === traceEventTypeFilter;
-      return modeOk && typeOk;
-    });
+    return filterOrchestrationTraceEvents(
+      scopedOrchestrationEvents,
+      traceModeFilter,
+      traceEventTypeFilter,
+    );
   }, [scopedOrchestrationEvents, traceEventTypeFilter, traceModeFilter]);
 
   useEffect(() => {
@@ -1266,7 +1102,7 @@ export function TaskStatus() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void (async () => {
-      unlisten = await listen<{ sessionId: string }>(
+      unlisten = await listenTauriEvent<{ sessionId: string }>(
         "mock-orchestration-scenario-loaded",
         (event) => {
           if (event.payload.sessionId === currentSession?.id) {
@@ -2207,443 +2043,39 @@ export function TaskStatus() {
                 </Box>
               )}
 
-              {orchestrationTab === 1 && orchestrationTimeline.length > 0 && (
-                <Box
-                  sx={{
-                    mt: 0.25,
-                    pt: 0.75,
-                    borderTop: 1,
-                    borderColor: alpha("#6366f1", 0.12),
-                  }}
-                >
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    sx={{ display: "block", mb: 0.75, fontSize: 10 }}
-                  >
-                    编排事件时间线
-                  </Typography>
-                  <Stack spacing={0.75}>
-                    {orchestrationTimeline.map((event) => {
-                      const color =
-                        event.tone === "error"
-                          ? "#ef4444"
-                          : event.tone === "warning"
-                            ? "#f59e0b"
-                            : event.tone === "success"
-                              ? "#22c55e"
-                              : "#6366f1";
-                      const clickable = Boolean(event.action);
-                      return (
-                        <Stack
-                          key={event.id}
-                          direction="row"
-                          spacing={0.75}
-                          alignItems="flex-start"
-                          onClick={clickable ? () => handleTimelineEvent(event) : undefined}
-                          sx={{
-                            cursor: clickable ? "pointer" : "default",
-                            borderRadius: 1,
-                            px: 0.5,
-                            py: 0.25,
-                            transition: "background-color 0.15s ease",
-                            "&:hover": clickable
-                              ? {
-                                  bgcolor: alpha(color, 0.06),
-                                }
-                              : undefined,
-                          }}
-                        >
-                          <Box
-                            sx={{
-                              width: 8,
-                              height: 8,
-                              borderRadius: "50%",
-                              bgcolor: color,
-                              mt: 0.4,
-                              flexShrink: 0,
-                            }}
-                          />
-                          <Box sx={{ minWidth: 0, flex: 1 }}>
-                            <Stack
-                              direction="row"
-                              spacing={0.75}
-                              alignItems="center"
-                              justifyContent="space-between"
-                            >
-                              <Typography
-                                variant="caption"
-                                sx={{ fontSize: 10.5, fontWeight: 600 }}
-                              >
-                                {event.label}
-                              </Typography>
-                              <Typography
-                                variant="caption"
-                                color="text.secondary"
-                                sx={{ fontSize: 9, flexShrink: 0 }}
-                              >
-                                {relativeEventTime(event.at)}
-                              </Typography>
-                            </Stack>
-                            {event.detail && (
-                              <Typography
-                                variant="caption"
-                                color="text.secondary"
-                                sx={{
-                                  display: "block",
-                                  fontSize: 9.5,
-                                  lineHeight: 1.45,
-                                  mt: 0.15,
-                                }}
-                              >
-                                {event.detail}
-                              </Typography>
-                            )}
-                            {clickable && (
-                              <Typography
-                                variant="caption"
-                                sx={{
-                                  display: "block",
-                                  mt: 0.2,
-                                  fontSize: 9,
-                                  color,
-                                  fontWeight: 600,
-                                }}
-                              >
-                                打开关联证据
-                              </Typography>
-                            )}
-                          </Box>
-                        </Stack>
-                      );
-                    })}
-                  </Stack>
-                </Box>
-              )}
-              {orchestrationTab === 1 && orchestrationTimeline.length === 0 && (
-                <Box
-                  sx={{
-                    mt: 0.25,
-                    pt: 0.9,
-                    borderTop: 1,
-                    borderColor: alpha("#6366f1", 0.12),
-                  }}
-                >
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    sx={{ display: "block", fontSize: 10, lineHeight: 1.6 }}
-                  >
-                    当前会话暂无时间线事件。开始执行或恢复任务后，这里会记录关键编排节点。
-                  </Typography>
-                </Box>
+              {orchestrationTab === 1 && (
+                <OrchestrationTimelineList
+                  events={orchestrationTimeline}
+                  onEventClick={handleTimelineEvent}
+                />
               )}
 
               {orchestrationTab === 2 && scopedOrchestrationEvents.length > 0 && (
-                <Box
-                  sx={{
-                    mt: 0.25,
-                    pt: 0.75,
-                    borderTop: 1,
-                    borderColor: alpha("#6366f1", 0.12),
-                  }}
-                >
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    sx={{ display: "block", mb: 0.75, fontSize: 10 }}
-                  >
-                    Trace 原始事件
-                  </Typography>
-
-                  <Stack spacing={0.75}>
-                    <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
-                      <Chip
-                        size="small"
-                        label={
-                          traceModeFilter === "all"
-                            ? `全部模式 ${scopedOrchestrationEvents.length}`
-                            : traceModeFilter
-                        }
-                        color={traceModeFilter === "all" ? "primary" : "default"}
-                        variant={traceModeFilter === "all" ? "filled" : "outlined"}
-                        onClick={() => setTraceModeFilter("all")}
-                        sx={{ height: 18, fontSize: 9, cursor: "pointer" }}
-                      />
-                      {traceModes.map((mode) => (
-                        <Chip
-                          key={mode}
-                          size="small"
-                          label={mode}
-                          color={traceModeFilter === mode ? "primary" : "default"}
-                          variant={traceModeFilter === mode ? "filled" : "outlined"}
-                          onClick={() => setTraceModeFilter(mode)}
-                          sx={{ height: 18, fontSize: 9, cursor: "pointer" }}
-                        />
-                      ))}
-                    </Stack>
-
-                    <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
-                      <Chip
-                        size="small"
-                        label={
-                          traceEventTypeFilter === "all"
-                            ? `全部事件 ${filteredTraceEvents.length}`
-                            : traceEventTypeFilter
-                        }
-                        color={traceEventTypeFilter === "all" ? "secondary" : "default"}
-                        variant={traceEventTypeFilter === "all" ? "filled" : "outlined"}
-                        onClick={() => setTraceEventTypeFilter("all")}
-                        sx={{ height: 18, fontSize: 9, cursor: "pointer" }}
-                      />
-                      {traceEventTypes.slice(0, 10).map((eventType) => (
-                        <Chip
-                          key={eventType}
-                          size="small"
-                          label={eventType}
-                          color={traceEventTypeFilter === eventType ? "secondary" : "default"}
-                          variant={traceEventTypeFilter === eventType ? "filled" : "outlined"}
-                          onClick={() => setTraceEventTypeFilter(eventType)}
-                          sx={{ height: 18, fontSize: 9, cursor: "pointer" }}
-                        />
-                      ))}
-                    </Stack>
-
-                    {filteredTraceEvents.length === 0 ? (
-                      <Typography variant="caption" color="text.secondary">
-                        当前筛选条件下暂无 trace 事件。
-                      </Typography>
-                    ) : (
-                      <Stack spacing={0.5}>
-                        {filteredTraceEvents.slice(0, 12).map((event) => {
-                          const ts = parseEventTime(event.created_at) ?? Date.now();
-                          const isExpanded = expandedTraceEventId === event.id;
-                          const payloadText = stringifyTracePayload(event.payload);
-                          const relatedFailure = failureDiagnostics.find(
-                            (item) =>
-                              item.traceEventId === event.id ||
-                              (event.task_id && item.taskId === event.task_id),
-                          );
-                          const matchingTimeline = orchestrationTimeline.find(
-                            (item) =>
-                              item.id === event.id ||
-                              (event.task_id &&
-                                item.action &&
-                                "taskId" in item.action &&
-                                item.action.taskId === event.task_id),
-                          );
-                          return (
-                            <Box
-                              key={event.id}
-                              sx={{
-                                border: 1,
-                                borderColor: alpha("#6366f1", 0.12),
-                                borderRadius: 1.25,
-                                bgcolor: alpha("#6366f1", 0.03),
-                                overflow: "hidden",
-                              }}
-                            >
-                              <Stack
-                                direction="row"
-                                alignItems="center"
-                                spacing={0.75}
-                                sx={{ px: 1, py: 0.75 }}
-                              >
-                                <Box sx={{ minWidth: 0, flex: 1 }}>
-                                  <Stack
-                                    direction="row"
-                                    spacing={0.5}
-                                    alignItems="center"
-                                    flexWrap="wrap"
-                                    useFlexGap
-                                    sx={{ mb: 0.35 }}
-                                  >
-                                    {event.mode && (
-                                      <Chip
-                                        size="small"
-                                        label={event.mode}
-                                        sx={{ height: 16, fontSize: 8.5 }}
-                                      />
-                                    )}
-                                    <Chip
-                                      size="small"
-                                      label={event.event_type}
-                                      color="primary"
-                                      variant="outlined"
-                                      sx={{ height: 16, fontSize: 8.5 }}
-                                    />
-                                    {event.phase && (
-                                      <Chip
-                                        size="small"
-                                        label={orchestrationPhaseLabel(event.phase)}
-                                        sx={{ height: 16, fontSize: 8.5 }}
-                                      />
-                                    )}
-                                    {relatedFailure && (
-                                      <Chip
-                                        size="small"
-                                        icon={<WarningAmber sx={{ fontSize: 10 }} />}
-                                        label="关联失败"
-                                        sx={{
-                                          height: 16,
-                                          fontSize: 8.5,
-                                          bgcolor: alpha("#ef4444", 0.1),
-                                          color: "#ef4444",
-                                        }}
-                                      />
-                                    )}
-                                  </Stack>
-                                  <Typography
-                                    variant="caption"
-                                    sx={{ display: "block", fontSize: 10, fontWeight: 600 }}
-                                  >
-                                    {matchingTimeline?.label ?? event.event_type}
-                                  </Typography>
-                                  <Typography
-                                    variant="caption"
-                                    color="text.secondary"
-                                    sx={{ display: "block", fontSize: 9 }}
-                                  >
-                                    {relativeEventTime(ts)}
-                                    {matchingTimeline?.detail ? ` · ${matchingTimeline.detail}` : ""}
-                                  </Typography>
-                                  {relatedFailure && (
-                                    <Typography
-                                      variant="caption"
-                                      sx={{
-                                        display: "block",
-                                        mt: 0.2,
-                                        fontSize: 9,
-                                        lineHeight: 1.35,
-                                        color: "#ef4444",
-                                      }}
-                                    >
-                                      {compactLabel(relatedFailure.summary, 96)}
-                                    </Typography>
-                                  )}
-                                </Box>
-
-                                {matchingTimeline?.action && (
-                                  <Button
-                                    size="small"
-                                    variant="outlined"
-                                    onClick={() => handleTimelineEvent(matchingTimeline)}
-                                    sx={{ fontSize: 10, py: 0.2, minWidth: 0 }}
-                                  >
-                                    跳转
-                                  </Button>
-                                )}
-                                {relatedFailure?.taskId && (
-                                  <Button
-                                    size="small"
-                                    color="error"
-                                    variant="outlined"
-                                    onClick={() =>
-                                      setReviewerTranscriptTask({
-                                        taskId: relatedFailure.taskId!,
-                                        label: `${relatedFailure.agentLabel}: ${relatedFailure.detail ?? relatedFailure.summary}`,
-                                      })
-                                    }
-                                    sx={{ fontSize: 10, py: 0.2, minWidth: 0 }}
-                                  >
-                                    记录
-                                  </Button>
-                                )}
-                                <IconButton
-                                  size="small"
-                                  onClick={() =>
-                                    setExpandedTraceEventId((cur) =>
-                                      cur === event.id ? null : event.id,
-                                    )
-                                  }
-                                  sx={{
-                                    transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)",
-                                    transition: "transform 0.2s",
-                                  }}
-                                >
-                                  <ExpandMore sx={{ fontSize: 16 }} />
-                                </IconButton>
-                              </Stack>
-
-                              <Collapse in={isExpanded}>
-                                <Box
-                                  sx={{
-                                    px: 1,
-                                    pb: 1,
-                                    borderTop: 1,
-                                    borderColor: alpha("#6366f1", 0.08),
-                                    bgcolor: alpha("#6366f1", 0.02),
-                                  }}
-                                >
-                                  <Typography
-                                    variant="caption"
-                                    color="text.secondary"
-                                    sx={{ display: "block", mb: 0.5, mt: 0.75, fontSize: 9 }}
-                                  >
-                                    原始 payload
-                                  </Typography>
-                                  <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ mb: 0.75 }}>
-                                    <Button
-                                      size="small"
-                                      variant="outlined"
-                                      onClick={() => void handleCopyTracePayload(event)}
-                                      sx={{ minWidth: 0, fontSize: 10, py: 0.15 }}
-                                    >
-                                      {copiedTraceEventId === event.id ? "已复制" : "复制 payload"}
-                                    </Button>
-                                    {relatedFailure && (
-                                      <Button
-                                        size="small"
-                                        color="error"
-                                        variant="outlined"
-                                        onClick={() => setOrchestrationTab(0)}
-                                        sx={{ minWidth: 0, fontSize: 10, py: 0.15 }}
-                                      >
-                                        回到失败诊断
-                                      </Button>
-                                    )}
-                                    {relatedFailure?.taskId && (
-                                      <Button
-                                        size="small"
-                                        color="error"
-                                        variant="text"
-                                        onClick={() =>
-                                          setReviewerTranscriptTask({
-                                            taskId: relatedFailure.taskId!,
-                                            label: `${relatedFailure.agentLabel}: ${relatedFailure.detail ?? relatedFailure.summary}`,
-                                          })
-                                        }
-                                        sx={{ minWidth: 0, fontSize: 10, py: 0.15 }}
-                                      >
-                                        打开队友记录
-                                      </Button>
-                                    )}
-                                  </Stack>
-                                  <Box
-                                    component="pre"
-                                    sx={{
-                                      m: 0,
-                                      p: 0.75,
-                                      borderRadius: 1,
-                                      bgcolor: alpha("#0f172a", 0.06),
-                                      fontSize: 10,
-                                      lineHeight: 1.45,
-                                      whiteSpace: "pre-wrap",
-                                      wordBreak: "break-word",
-                                      overflowX: "auto",
-                                    }}
-                                  >
-                                    {payloadText}
-                                  </Box>
-                                </Box>
-                              </Collapse>
-                            </Box>
-                          );
-                        })}
-                      </Stack>
-                    )}
-                  </Stack>
-                </Box>
+                <OrchestrationTraceList
+                  scopedEvents={scopedOrchestrationEvents}
+                  filteredEvents={filteredTraceEvents}
+                  timelineEvents={orchestrationTimeline}
+                  failureDiagnostics={failureDiagnostics}
+                  traceModes={traceModes}
+                  traceEventTypes={traceEventTypes}
+                  traceModeFilter={traceModeFilter}
+                  traceEventTypeFilter={traceEventTypeFilter}
+                  expandedTraceEventId={expandedTraceEventId}
+                  copiedTraceEventId={copiedTraceEventId}
+                  onTraceModeFilterChange={setTraceModeFilter}
+                  onTraceEventTypeFilterChange={setTraceEventTypeFilter}
+                  onToggleTraceEvent={(eventId) =>
+                    setExpandedTraceEventId((cur) =>
+                      cur === eventId ? null : eventId,
+                    )
+                  }
+                  onTimelineEvent={handleTimelineEvent}
+                  onOpenTaskRecord={(taskId, label) =>
+                    setReviewerTranscriptTask({ taskId, label })
+                  }
+                  onCopyTracePayload={(event) => void handleCopyTracePayload(event)}
+                  onBackToFailures={() => setOrchestrationTab(0)}
+                />
               )}
               {orchestrationTab === 2 && scopedOrchestrationEvents.length === 0 && (
                 <Box
@@ -2727,6 +2159,38 @@ export function TaskStatus() {
         {/* Plan 模式：待办列表 */}
         {hasTodos && activeTab === 0 && (
           <Box sx={{ p: 1.5 }}>
+            {runningAgentCards.length > 0 && (
+              <Box sx={{ mb: 2 }}>
+                <Typography
+                  variant="caption"
+                  sx={{
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color: "info.main",
+                    textTransform: "uppercase",
+                    letterSpacing: 0.6,
+                    mb: 0.75,
+                    display: "block",
+                  }}
+                >
+                  运行中的 Agent
+                </Typography>
+                <Stack spacing={0.85}>
+                  {runningAgentCards.map((item) => (
+                    <RunningAgentCard
+                      key={item.id}
+                      item={item}
+                      onClick={() =>
+                        setReviewerTranscriptTask({
+                          taskId: item.id,
+                          label: `${normalizeAgentDisplayName(item.agentType)}: ${item.description}`,
+                        })
+                      }
+                    />
+                  ))}
+                </Stack>
+              </Box>
+            )}
             {/* 运行中的任务卡片 */}
             {taskStatus.running.length > 0 && (
               <Box sx={{ mb: 2 }}>
@@ -2843,7 +2307,7 @@ export function TaskStatus() {
             <Box sx={{ p: 1.5 }}>
               <SchedulerPlanPanel
                 plan={schedulerPlan}
-                sessionId={currentSession?.id}
+                taskRows={currentPlanTaskRows}
                 onOpenReviewerTranscript={(taskId, label) =>
                   setReviewerTranscriptTask({ taskId, label })
                 }
@@ -2851,24 +2315,28 @@ export function TaskStatus() {
             </Box>
           )}
 
-        {/* 空状态 */}
+        {/* 空状态 — show skeleton while switching, idle message otherwise */}
         {!hasTodos && !hasExecution && !hasSchedulerPlan && (
-          <Box sx={{ p: 2, textAlign: "center" }}>
-            <Typography
-              variant="body2"
-              color="text.secondary"
-              sx={{ fontSize: 12 }}
-            >
-              当前会话暂无任务
-            </Typography>
-            <Typography
-              variant="caption"
-              color="text.disabled"
-              sx={{ fontSize: 11, mt: 0.5, display: "block" }}
-            >
-              发送消息后，本会话的任务与执行状态将显示在这里
-            </Typography>
-          </Box>
+          isSwitchingSession ? (
+            <TaskStatusSkeleton />
+          ) : (
+            <Box sx={{ p: 2, textAlign: "center" }}>
+              <Typography
+                variant="body2"
+                color="text.secondary"
+                sx={{ fontSize: 12 }}
+              >
+                当前会话暂无任务
+              </Typography>
+              <Typography
+                variant="caption"
+                color="text.disabled"
+                sx={{ fontSize: 11, mt: 0.5, display: "block" }}
+              >
+                发送消息后，本会话的任务与执行状态将显示在这里
+              </Typography>
+            </Box>
+          )
         )}
       </Box>
 

@@ -1,5 +1,4 @@
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useMemo, useState } from "react";
 import {
   Box,
   Typography,
@@ -21,7 +20,6 @@ import {
   aggregateReviewerVerdicts,
   overallReviewerHeadline,
   type BackgroundAgentTaskRow,
-  type ReviewerVerdictChip,
 } from "../../utils/reviewerVerdict";
 import { ReviewerVerdictList } from "../ReviewerVerdictList";
 import { normalizeAgentDisplayName } from "../../state/agentStore";
@@ -30,6 +28,7 @@ import {
   buildSchedulerPlanHierarchy,
   schedulerStageLabel,
 } from "../../utils/schedulerPlanHierarchy";
+import { AgentInfoChip } from "./AgentInfoChip";
 
 interface SchedulerPlan {
   planId: string;
@@ -52,50 +51,31 @@ interface SchedulerPlan {
 
 interface SchedulerPlanPanelProps {
   plan: SchedulerPlan;
-  sessionId?: string;
+  taskRows?: BackgroundAgentTaskRow[];
   onOpenReviewerTranscript?: (taskId: string, label?: string) => void;
 }
 
 /** 调度计划面板 - 显示多 Agent 编排的执行计划 */
 export function SchedulerPlanPanel({
   plan,
-  sessionId,
+  taskRows = [],
   onOpenReviewerTranscript,
 }: SchedulerPlanPanelProps) {
   const [expanded, setExpanded] = useState(true);
-  const [reviewerHeadline, setReviewerHeadline] = useState<{ label: string; color: string } | null>(null);
-  const [reviewerVerdicts, setReviewerVerdicts] = useState<ReviewerVerdictChip[]>([]);
   const theme = useTheme();
-
-  useEffect(() => {
-    if (!sessionId) {
-      setReviewerHeadline(null);
-      setReviewerVerdicts([]);
-      return;
-    }
-    let cancelled = false;
-    invoke<BackgroundAgentTaskRow[]>("list_session_background_tasks", {
-      sessionId,
-    })
-      .then((rows) => {
-        if (cancelled) return;
-        const scopedRows = (rows ?? []).filter(
-          (row) => row.plan_id && row.plan_id === plan.planId,
-        );
-        const verdicts = aggregateReviewerVerdicts(scopedRows);
-        setReviewerVerdicts(verdicts);
-        setReviewerHeadline(overallReviewerHeadline(verdicts));
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setReviewerHeadline(null);
-          setReviewerVerdicts([]);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [plan.planId, sessionId]);
+  const reviewerVerdicts = useMemo(
+    () => aggregateReviewerVerdicts(taskRows),
+    [taskRows],
+  );
+  const reviewerHeadline = useMemo(
+    () => overallReviewerHeadline(reviewerVerdicts),
+    [reviewerVerdicts],
+  );
+  const runtimeRowsByTaskId = useMemo(
+    () =>
+      Object.fromEntries(taskRows.map((row) => [row.task_id, row])),
+    [taskRows],
+  );
 
   // 获取并行执行组
   const getParallelGroups = () => {
@@ -186,8 +166,15 @@ export function SchedulerPlanPanel({
             onClick={() => setExpanded(!expanded)}
             sx={{
               transform: expanded ? "rotate(180deg)" : "rotate(0deg)",
-              transition: "transform 0.2s",
+              transition: "transform 0.2s ease, color 150ms ease",
               p: 0.5,
+              color: "text.secondary",
+              opacity: 0.65,
+              "&:hover": {
+                color: "primary.main",
+                opacity: 1,
+                bgcolor: alpha(theme.palette.primary.main, 0.08),
+              },
             }}
           >
             <ExpandMore sx={{ fontSize: 16 }} />
@@ -408,18 +395,42 @@ export function SchedulerPlanPanel({
                   const task = plan.subtasks.find((t) => t.id === taskId);
                   if (!task) return null;
                   const taskRole = compactAgentChip(task.agentType, 12);
+                  const runtime = runtimeRowsByTaskId[task.id];
+                  const isRunning =
+                    runtime?.status === "Running" || runtime?.status === "Pending";
+                  const isCompleted = runtime?.status === "Completed";
+                  const isFailed =
+                    runtime?.status === "Failed" || runtime?.status === "Cancelled";
+                  const rowAccent = isRunning
+                    ? theme.palette.primary.main
+                    : isCompleted
+                      ? theme.palette.success.main
+                      : isFailed
+                        ? theme.palette.error.main
+                        : theme.palette.divider;
 
                   return (
                     <Box
                       key={task.id}
                       sx={{
                         p: 1,
-                        borderRadius: 1,
-                        bgcolor: "background.paper",
-                        border: `1px solid ${alpha(theme.palette.divider, 0.5)}`,
+                        borderRadius: 1.5,
+                        bgcolor: isRunning
+                          ? alpha(theme.palette.primary.main, 0.06)
+                          : isCompleted
+                            ? alpha(theme.palette.success.main, 0.05)
+                            : isFailed
+                              ? alpha(theme.palette.error.main, 0.05)
+                              : "background.paper",
+                        border: `1px solid ${alpha(rowAccent, isRunning ? 0.28 : 0.18)}`,
                         display: "flex",
                         alignItems: "flex-start",
                         gap: 1,
+                        transition: "border-color 0.18s ease, background-color 0.18s ease, transform 0.18s ease",
+                        ...(isRunning && {
+                          boxShadow: `0 10px 26px ${alpha(theme.palette.primary.main, 0.08)}`,
+                          transform: "translateY(-1px)",
+                        }),
                       }}
                     >
                       <RadioButtonUnchecked
@@ -430,12 +441,44 @@ export function SchedulerPlanPanel({
                         }}
                       />
                       <Box sx={{ flex: 1, minWidth: 0 }}>
-                        <Typography
-                          variant="body2"
-                          sx={{ fontSize: 12, lineHeight: 1.4, fontWeight: 500 }}
+                        <Stack
+                          direction="row"
+                          spacing={0.75}
+                          alignItems="center"
+                          flexWrap="wrap"
+                          useFlexGap
+                          sx={{ mb: 0.35 }}
                         >
-                          {task.description}
-                        </Typography>
+                          <Typography
+                            variant="body2"
+                            sx={{ fontSize: 12, lineHeight: 1.4, fontWeight: 600 }}
+                          >
+                            {task.description}
+                          </Typography>
+                          {runtime && (
+                            <Chip
+                              size="small"
+                              label={
+                                runtime.status === "Running"
+                                  ? "运行中"
+                                  : runtime.status === "Pending"
+                                    ? "等待中"
+                                    : runtime.status === "Completed"
+                                      ? "已完成"
+                                      : runtime.status === "Cancelled"
+                                        ? "已取消"
+                                        : "失败"
+                              }
+                              sx={{
+                                height: 18,
+                                fontSize: 9,
+                                fontWeight: 700,
+                                bgcolor: alpha(rowAccent, 0.12),
+                                color: rowAccent,
+                              }}
+                            />
+                          )}
+                        </Stack>
                         {task.dependencies.length > 0 && (
                           <Typography
                             variant="caption"
@@ -456,37 +499,31 @@ export function SchedulerPlanPanel({
                             )}
                           </Typography>
                         )}
+                        {runtime?.description && runtime.description !== task.description && (
+                          <Typography
+                            variant="caption"
+                            sx={{ fontSize: 10, color: "text.secondary", mt: 0.35, display: "block" }}
+                          >
+                            当前执行: {runtime.description}
+                          </Typography>
+                        )}
                       </Box>
                       <Stack direction="row" alignItems="center" spacing={0.5}>
-                        {taskRole.compacted ? (
-                          <Tooltip title={taskRole.full}>
-                            <Box>
-                              <Chip
-                                size="small"
-                                label={taskRole.short}
-                                sx={{
-                                  height: 18,
-                                  fontSize: 9,
-                                  bgcolor: alpha(getAgentColor(task.agentType), 0.1),
-                                  color: getAgentColor(task.agentType),
-                                  fontWeight: 500,
-                                }}
-                              />
-                            </Box>
-                          </Tooltip>
-                        ) : (
-                          <Chip
-                            size="small"
-                            label={taskRole.short}
-                            sx={{
-                              height: 18,
-                              fontSize: 9,
-                              bgcolor: alpha(getAgentColor(task.agentType), 0.1),
-                              color: getAgentColor(task.agentType),
-                              fontWeight: 500,
-                            }}
-                          />
-                        )}
+                        <AgentInfoChip
+                          agentType={task.agentType}
+                          status={runtime?.status}
+                          description={runtime?.description ?? task.description}
+                          stageLabel={schedulerStageLabel(task.stage)}
+                          supervisorLabel={normalizeAgentDisplayName(
+                            task.supervisorAgentType ??
+                              hierarchy.executionSupervisorAgentType,
+                          )}
+                          maxChars={taskRole.compacted ? 12 : 16}
+                          sx={{
+                            bgcolor: alpha(getAgentColor(task.agentType), 0.1),
+                            color: getAgentColor(task.agentType),
+                          }}
+                        />
                         {task.critical && (
                           <Tooltip title="关键任务">
                             <Box

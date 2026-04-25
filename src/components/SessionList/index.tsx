@@ -55,6 +55,11 @@ import {
   type SessionListStringKey,
 } from "../../i18n/sessionListStrings";
 import { OmigaLogo } from "../OmigaLogo";
+import { useActivityStore } from "../../state/activityStore";
+import {
+  useStreamRegistryVersion,
+  isBackgroundSessionRunning,
+} from "../../state/sessionStreamRegistry";
 
 interface SessionListProps {
   onSelectSession?: () => void;
@@ -87,12 +92,41 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   const renameSession = useSessionStore((s) => s.renameSession);
   const createSessionQuick = useSessionStore((s) => s.createSessionQuick);
 
-  // ── Hover-prefetch ────────────────────────────────────────────────────────
-  // When the user hovers a session for >150 ms, silently load it into the cache
-  // so the click is a cache hit and shows content instantly (~0 ms).
+  // ── Running-session indicators ────────────────────────────────────────────
+  // Current session: subscribe to activityStore (updates on every stream event).
+  // Background sessions: subscribe to the registry version counter — it bumps
+  // whenever a background snapshot is saved/cleared, which is much less frequent.
+  // This avoids re-rendering the sidebar on every streaming token.
+  const currentIsConnecting = useActivityStore((s) => s.isConnecting);
+  const currentIsStreaming = useActivityStore((s) => s.isStreaming);
+  const currentSessionRunning = currentIsConnecting || currentIsStreaming;
+  useStreamRegistryVersion(); // subscribe — re-renders when any background session changes
+
+  const isSessionRunning = (sessionId: string): boolean => {
+    if (sessionId === currentSession?.id) return currentSessionRunning;
+    return isBackgroundSessionRunning(sessionId);
+  };
+
+  // ── Hover / mousedown prefetch ───────────────────────────────────────────
+  // Three complementary strategies to warm the message cache before a click:
+  //
+  // 1. Idle prefetch (sequential): After 250 ms of inactivity, load the top 20
+  //    sessions one at a time. Sequential avoids flooding the macOS WKWebView IPC
+  //    queue (concurrent invoke() calls serialise during renders, so batching them
+  //    would stall all 20 — sequential gives the first result in ~200-800 ms and
+  //    the rest follow as fast as the bridge can drain).
+  //
+  // 2. Hover prefetch: On mouseenter, start a prefetch after 30 ms. Filters out
+  //    accidental passes.
+  //
+  // 3. Mousedown prefetch: On mousedown fire an immediate prefetch. Even if the
+  //    IPC is already in-flight from hover, mousedown is a no-op (prefetchingRef
+  //    guard). When combined with the hover prefetch it buys an extra ~100-200 ms
+  //    headstart over the click handler.
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prefetchingRef = useRef<Set<string>>(new Set());
   const idlePrefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const idlePrefetchAbortRef = useRef<{ aborted: boolean } | null>(null);
 
   const prefetchSession = (sessionId: string) => {
     if (sessionId === currentSession?.id) return;
@@ -106,14 +140,14 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   };
 
   const handleSessionMouseEnter = (sessionId: string) => {
-    if (sessionId === currentSession?.id) return; // already showing
+    if (sessionId === currentSession?.id) return;
     if (hoverTimerRef.current !== null) {
       clearTimeout(hoverTimerRef.current);
     }
-    if (prefetchingRef.current.has(sessionId)) return; // already in-flight
+    if (prefetchingRef.current.has(sessionId)) return;
     hoverTimerRef.current = setTimeout(() => {
       prefetchSession(sessionId);
-    }, 50);
+    }, 30);
   };
 
   const handleSessionMouseLeave = () => {
@@ -121,6 +155,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
       clearTimeout(hoverTimerRef.current);
       hoverTimerRef.current = null;
     }
+  };
+
+  const handleSessionMouseDown = (sessionId: string) => {
+    prefetchSession(sessionId);
   };
 
   const [menuAnchorEl, setMenuAnchorEl] = useState<null | HTMLElement>(null);
@@ -145,22 +183,43 @@ export function SessionList({ onSelectSession }: SessionListProps) {
   }, [loadSessions]);
 
   useEffect(() => {
+    // Abort any in-progress sequential prefetch from a previous run.
+    if (idlePrefetchAbortRef.current) {
+      idlePrefetchAbortRef.current.aborted = true;
+      idlePrefetchAbortRef.current = null;
+    }
     if (idlePrefetchTimerRef.current !== null) {
       clearTimeout(idlePrefetchTimerRef.current);
       idlePrefetchTimerRef.current = null;
     }
     if (sessions.length <= 1) return;
+    // Prefetch up to 20 sessions (most-recently-used first) sequentially so we
+    // don't flood the macOS WKWebView IPC queue with concurrent invoke() calls.
     const targetIds = sessions
       .filter((s) => s.id !== currentSession?.id)
-      .slice(0, 12)
+      .slice(0, 20)
       .map((s) => s.id);
     if (targetIds.length === 0) return;
-    idlePrefetchTimerRef.current = setTimeout(() => {
+
+    const abort = { aborted: false };
+    idlePrefetchAbortRef.current = abort;
+
+    const runSequential = async () => {
       for (const id of targetIds) {
-        prefetchSession(id);
+        if (abort.aborted) return;
+        // Skip if already cached (prefetchingRef check is inside prefetchSession).
+        await loadSession(id, { silent: true }).catch(() => {});
       }
+    };
+
+    idlePrefetchTimerRef.current = setTimeout(() => {
+      idlePrefetchTimerRef.current = null;
+      void runSequential();
     }, 250);
+
     return () => {
+      abort.aborted = true;
+      idlePrefetchAbortRef.current = null;
       if (idlePrefetchTimerRef.current !== null) {
         clearTimeout(idlePrefetchTimerRef.current);
         idlePrefetchTimerRef.current = null;
@@ -519,25 +578,73 @@ export function SessionList({ onSelectSession }: SessionListProps) {
                 onClick={() => handleSelectSession(session.id)}
                 onMouseEnter={() => handleSessionMouseEnter(session.id)}
                 onMouseLeave={handleSessionMouseLeave}
+                onMouseDown={() => handleSessionMouseDown(session.id)}
                 sx={{
                   px: 1.25,
                   py: 1,
                   borderRadius: 1.5,
                   cursor: "pointer",
+                  position: "relative",
+                  overflow: "hidden",
                   bgcolor:
                     currentSession?.id === session.id
                       ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.14 : 0.1)
                       : "transparent",
-                  border: "1px solid transparent",
+                  border: "1px solid",
+                  borderColor:
+                    currentSession?.id === session.id
+                      ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.25 : 0.18)
+                      : "transparent",
+                  transition: "background-color 120ms ease, border-color 120ms ease",
                   "&:hover": {
                     bgcolor:
                       currentSession?.id === session.id
                         ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.2 : 0.14)
                         : "action.hover",
                   },
+                  // Radial bloom on click — expands from press point outward.
+                  // Uses a pseudo-element so it never affects layout.
+                  // prefers-reduced-motion: animation is suppressed entirely.
+                  "@media (prefers-reduced-motion: no-preference)": {
+                    "&:active::after": {
+                      content: '""',
+                      position: "absolute",
+                      inset: 0,
+                      borderRadius: "inherit",
+                      background: alpha(theme.palette.primary.main, 0.18),
+                      "@keyframes omigaBloom": {
+                        from: { opacity: 1, transform: "scale(0.6)" },
+                        to:   { opacity: 0, transform: "scale(1.4)" },
+                      },
+                      animation: "omigaBloom 320ms cubic-bezier(0.2, 0, 0.6, 1) forwards",
+                      pointerEvents: "none",
+                    },
+                  },
                 }}
               >
                 <Stack direction="row" alignItems="center" spacing={0.5}>
+                  {/* Running indicator — pulsing dot + left glow strip */}
+                  {isSessionRunning(session.id) && (
+                    <Box
+                      aria-label="running"
+                      sx={{
+                        flexShrink: 0,
+                        width: 7,
+                        height: 7,
+                        borderRadius: "50%",
+                        bgcolor: "primary.main",
+                        boxShadow: (t) =>
+                          `0 0 6px 1px ${alpha(t.palette.primary.main, 0.55)}`,
+                        "@media (prefers-reduced-motion: no-preference)": {
+                          "@keyframes omigaRunPulse": {
+                            "0%, 100%": { opacity: 1, transform: "scale(1)" },
+                            "50%":       { opacity: 0.45, transform: "scale(0.65)" },
+                          },
+                          animation: "omigaRunPulse 1.2s ease-in-out infinite",
+                        },
+                      }}
+                    />
+                  )}
                   <Typography
                     variant="body2"
                     fontWeight={500}

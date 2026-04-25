@@ -4,7 +4,6 @@ import type { CSSProperties } from "react";
 import type { Components } from "react-markdown";
 import type { Theme } from "@mui/material/styles";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   Box,
@@ -94,7 +93,10 @@ import {
   canSendFollowUpToTask,
   shortBgTaskLabel,
 } from "./backgroundAgentTypes";
+import { finalizeResearchCommandMessages } from "./researchCommandUtils";
+import { settleRunningToolCalls } from "./toolStatusUtils";
 import { BackgroundAgentTranscriptDrawer } from "./BackgroundAgentTranscriptDrawer";
+import { SessionSwitchSkeleton } from "./SessionSwitchSkeleton";
 import { AgentSessionStatus } from "./AgentSessionStatus";
 import { SshDirectoryTreeDialog } from "./SshDirectoryTreeDialog";
 import { ReviewerVerdictList } from "../ReviewerVerdictList";
@@ -108,7 +110,10 @@ import {
   type BackgroundAgentTaskRow,
   type ReviewerVerdictChip,
 } from "../../utils/reviewerVerdict";
-import { parseWorkflowCommand } from "../../utils/workflowCommands";
+import {
+  parseResearchCommand,
+  parseWorkflowCommand,
+} from "../../utils/workflowCommands";
 import {
   buildSchedulerPlanHierarchy,
   schedulerStageLabel,
@@ -117,8 +122,18 @@ import {
   OMIGA_COMPOSER_DISPATCH_EVENT,
   type ComposerDispatchDetail,
 } from "../../utils/chatComposerEvents";
+import { listenTauriEvent } from "../../utils/tauriEvents";
 import { CitationLink } from "../CitationLink";
 import { normalizeAgentDisplayName, useAgentStore } from "../../state/agentStore";
+import {
+  saveStreamSnapshot,
+  loadStreamSnapshot,
+  snapshotIsActive,
+  clearStreamSnapshot,
+  registerStreamListener,
+  cancelStreamListener,
+  cancelAllStreamListeners,
+} from "../../state/sessionStreamRegistry";
 
 /** SQLite `messages.id` shape — used to pass `retryFromUserMessageId` (not temp `user-…` ids). */
 function isPersistedMessageIdForRetry(id: string): boolean {
@@ -295,6 +310,14 @@ function rewriteWorkflowBodyForBackend(body: string): {
   }
 }
 
+type ResearchCommandResponse = {
+  sessionId: string;
+  roundId: string;
+  userMessageId: string;
+  assistantMessageId: string;
+  assistantContent: string;
+};
+
 function formatUserMessageTimestamp(ts: number | undefined): string {
   try {
     return new Date(ts ?? Date.now()).toLocaleString(undefined, {
@@ -312,6 +335,7 @@ function formatUserMessageTimestamp(ts: number | undefined): string {
 /** Shown as a user line + sent to the model to continue after the user cancelled a stream. */
 const RESUME_AFTER_CANCEL_PROMPT =
   "请从上一轮中断处继续完成回复，衔接已有内容，不要重复已完整输出的段落。";
+const CANCEL_STREAM_LOCAL_FALLBACK_MS = 1500;
 
 /** Persist full transcript (including tool rows) to the session store. */
 function chatMessageToStore(m: Message): StoreMessage {
@@ -374,6 +398,14 @@ interface BackgroundShellCompletePayload {
   exit_code: number;
   interrupted: boolean;
   description: string;
+}
+
+interface ActivityOperationPayload {
+  session_id: string;
+  operation_id: string;
+  label: string;
+  status: "running" | "done" | "error";
+  detail?: string | null;
 }
 
 /** Avatar column + row gap; align with pencil-new.pen (36px avatar, ~10px gap). */
@@ -741,7 +773,11 @@ function summarizeToolGroup(messages: Message[]): string {
 
 function summarizeReactFold(fold: Message[]): string {
   const tools = fold.filter((m) => m.role === "tool" && m.toolCall);
-  const thinking = fold.filter((m) => m.role === "assistant").length;
+  const thinking = fold.filter(
+    (m) =>
+      m.role === "assistant" ||
+      (m.role === "tool" && Boolean(m.prefaceBeforeTools?.trim())),
+  ).length;
   if (tools.length === 0) {
     return thinking > 0 ? "Reasoning" : "Trace";
   }
@@ -1037,6 +1073,10 @@ function SchedulerPlanDisplay({
         border: `1px solid ${alpha(theme.palette.primary.main, 0.14)}`,
         bgcolor: alpha(theme.palette.primary.main, 0.03),
         overflow: "hidden",
+        transition: "border-color 200ms ease",
+        "&:hover": {
+          borderColor: alpha(theme.palette.primary.main, 0.3),
+        },
       }}
     >
       {/* 头部 */}
@@ -1049,8 +1089,14 @@ function SchedulerPlanDisplay({
           alignItems: "center",
           justifyContent: "space-between",
           cursor: "pointer",
+          transition: "background-color 150ms ease",
           "&:hover": {
-            bgcolor: alpha(theme.palette.primary.main, 0.05),
+            bgcolor: alpha(theme.palette.primary.main, 0.07),
+            // Brighten ExpandMore on hover
+            "& > svg:last-of-type": {
+              color: "primary.main",
+              opacity: 1,
+            },
           },
         }}
       >
@@ -1092,8 +1138,9 @@ function SchedulerPlanDisplay({
           sx={{
             fontSize: 16,
             color: "text.secondary",
+            opacity: 0.65,
             transform: expanded ? "rotate(180deg)" : "rotate(0deg)",
-            transition: "transform 0.2s",
+            transition: "transform 0.2s ease, color 150ms ease, opacity 150ms ease",
           }}
         />
       </Box>
@@ -2176,9 +2223,12 @@ export function Chat({ sessionId }: ChatProps) {
     provider: string;
   } | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
+  const sessionIdRef = useRef<string | null>(sessionId ?? null);
+  const currentStreamIdRef = useRef<string | null>(currentStreamId);
   const currentResponseRef = useRef(currentResponse);
   const currentFoldIntermediateRef = useRef(currentFoldIntermediate);
   const currentRoundIdRef = useRef(currentRoundId);
+  const cancelFallbackTimerRef = useRef<number | null>(null);
   /** Buffered text chunks waiting to be batched into React state */
   const pendingTextBufferRef = useRef("");
   /** Buffered provider reasoning/tool-gap chunks shown inside the active ReAct fold. */
@@ -2187,6 +2237,13 @@ export function Chat({ sessionId }: ChatProps) {
   const textFlushRafRef = useRef<number | null>(null);
   /** RAF handle for scheduled fold-intermediate flush */
   const foldIntermediateFlushRafRef = useRef<number | null>(null);
+
+  const clearCancelFallbackTimer = useCallback(() => {
+    if (cancelFallbackTimerRef.current !== null) {
+      window.clearTimeout(cancelFallbackTimerRef.current);
+      cancelFallbackTimerRef.current = null;
+    }
+  }, []);
 
   // Keep refs in sync with state for access in event listeners
   useEffect(() => {
@@ -2224,7 +2281,16 @@ export function Chat({ sessionId }: ChatProps) {
   }, [currentRoundId]);
 
   useEffect(() => {
+    currentStreamIdRef.current = currentStreamId;
+  }, [currentStreamId]);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId ?? null;
+  }, [sessionId]);
+
+  useEffect(() => {
     return () => {
+      clearCancelFallbackTimer();
       if (textFlushRafRef.current !== null) {
         cancelAnimationFrame(textFlushRafRef.current);
         textFlushRafRef.current = null;
@@ -2238,7 +2304,7 @@ export function Chat({ sessionId }: ChatProps) {
         scrollRafRef.current = null;
       }
     };
-  }, []);
+  }, [clearCancelFallbackTimer]);
 
   const {
     storeMessages,
@@ -2287,17 +2353,121 @@ export function Chat({ sessionId }: ChatProps) {
     });
 
   useEffect(() => {
-    useActivityStore.getState().clearTransient();
-    useActivityStore.getState().resetExecutionState();
-    useActivityStore.getState().clearBackgroundJobs();
-    setAwaitingResumeAfterCancel(false);
+    // ── Session switch: save → restore (or clear) ─────────────────────────
+    //
+    // Design: stream listeners are NEVER unregistered on session switch.
+    // Each listener captures ownerSessionId at setup and guards:
+    //   if (sessionIdRef.current !== ownerSessionId) return;
+    // While the user is on another session, events are silently discarded.
+    // When the user switches BACK, sessionIdRef.current becomes ownerSessionId
+    // again and the listener transparently resumes updating React state.
+    //
+    // The snapshot map persists the accumulated response text and activity
+    // state so the restored session's UI is correct immediately on return.
+
+    // Capture the session we are ENTERING now.  The return function (cleanup)
+    // runs before the next invocation, at which point refs still hold the
+    // state for THIS session — used to build the save snapshot.
+    const sessionBeingEntered = sessionId ?? null;
+
+    clearCancelFallbackTimer();
+    if (textFlushRafRef.current !== null) {
+      cancelAnimationFrame(textFlushRafRef.current);
+      textFlushRafRef.current = null;
+    }
+    if (foldIntermediateFlushRafRef.current !== null) {
+      cancelAnimationFrame(foldIntermediateFlushRafRef.current);
+      foldIntermediateFlushRafRef.current = null;
+    }
+    pendingFollowUpSuggestionsRef.current = null;
+    pendingTurnSummaryRef.current = null;
+    pendingTokenUsageRef.current = null;
+    retrySendInFlightRef.current = false;
+    sendCancelledDuringRequestRef.current = false;
     queuedMainSendQueueRef.current = [];
     bumpQueueUi();
-    // Reset per-session UI state so previous session's expanded panels don't
-    // bleed into the newly selected session.
     setExpandedToolGroups(new Set());
     setNestedToolPanelOpen({});
-  }, [sessionId, bumpQueueUi]);
+    setPendingAssistantHint(null);
+
+    // Try to restore the state of the session we're switching TO.
+    const snap = sessionBeingEntered
+      ? loadStreamSnapshot(sessionBeingEntered)
+      : null;
+    const restoring = snapshotIsActive(snap);
+
+    if (restoring && snap) {
+      // ── Returning to a session that is (or was recently) streaming ────────
+      setCurrentStreamId(snap.streamId);
+      currentStreamIdRef.current = snap.streamId;
+      setCurrentRoundId(snap.roundId);
+      currentRoundIdRef.current = snap.roundId;
+      setCurrentResponse(snap.response);
+      currentResponseRef.current = snap.response;
+      setCurrentFoldIntermediate(snap.foldIntermediate);
+      currentFoldIntermediateRef.current = snap.foldIntermediate;
+      pendingTextBufferRef.current = snap.pendingText;
+      pendingFoldIntermediateBufferRef.current = snap.pendingFoldText;
+      setIsStreaming(snap.isStreaming);
+      isStreamingRef.current = snap.isStreaming;
+      setAwaitingResumeAfterCancel(false);
+      // Restore the activity panel for this session.
+      useActivityStore.setState({
+        isConnecting: snap.isConnecting,
+        isStreaming: snap.isStreaming,
+        waitingFirstChunk: snap.waitingFirstChunk,
+        currentToolHint: snap.currentToolHint,
+        executionSteps: snap.executionSteps,
+        executionStartedAt: snap.executionStartedAt,
+        executionEndedAt: snap.executionEndedAt,
+        activeTodos: snap.activeTodos,
+        backgroundJobs: snap.backgroundJobs,
+      });
+    } else {
+      // ── Fresh / idle session — reset all stream state ─────────────────────
+      pendingTextBufferRef.current = "";
+      pendingFoldIntermediateBufferRef.current = "";
+      setCurrentStreamId(null);
+      currentStreamIdRef.current = null;
+      setCurrentRoundId(null);
+      currentRoundIdRef.current = null;
+      setCurrentResponse("");
+      currentResponseRef.current = "";
+      setCurrentFoldIntermediate("");
+      currentFoldIntermediateRef.current = "";
+      activeReactFoldIdRef.current = null;
+      setIsStreaming(false);
+      isStreamingRef.current = false;
+      setAwaitingResumeAfterCancel(false);
+      useActivityStore.getState().clearAllActivity();
+    }
+
+    // ── Save state when we LEAVE this session (return = cleanup) ─────────────
+    // This closure captures sessionBeingEntered.  When the next session switch
+    // happens, React calls this cleanup BEFORE running the new effect body, so
+    // all refs still hold the state for sessionBeingEntered.
+    return () => {
+      if (!sessionBeingEntered) return;
+      const act = useActivityStore.getState();
+      saveStreamSnapshot(sessionBeingEntered, {
+        streamId: currentStreamIdRef.current,
+        roundId: currentRoundIdRef.current,
+        response: currentResponseRef.current,
+        foldIntermediate: currentFoldIntermediateRef.current,
+        pendingText: pendingTextBufferRef.current,
+        pendingFoldText: pendingFoldIntermediateBufferRef.current,
+        isStreaming: isStreamingRef.current,
+        isConnecting: act.isConnecting,
+        waitingFirstChunk: act.waitingFirstChunk,
+        currentToolHint: act.currentToolHint,
+        executionSteps: [...act.executionSteps],
+        executionStartedAt: act.executionStartedAt,
+        executionEndedAt: act.executionEndedAt,
+        activeTodos: act.activeTodos,
+        backgroundJobs: [...act.backgroundJobs],
+      });
+    };
+  }, [sessionId, bumpQueueUi, clearCancelFallbackTimer]);
 
   // ── Progressive rendering: phase-2 scheduler ─────────────────────────────
   // When allItemsVisible is false (long session, phase 1 rendered), schedule
@@ -2520,10 +2690,10 @@ export function Chat({ sessionId }: ChatProps) {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     const setup = async () => {
-      const u1 = await listen("background-agent-update", () => {
+      const u1 = await listenTauriEvent("background-agent-update", () => {
         void refreshBackgroundTasks();
       });
-      const u2 = await listen("background-agent-complete", () => {
+      const u2 = await listenTauriEvent("background-agent-complete", () => {
         void refreshBackgroundTasks();
       });
       unlisten = () => {
@@ -2543,17 +2713,17 @@ export function Chat({ sessionId }: ChatProps) {
     let unlisten: (() => void) | undefined;
     let completedTimer: ReturnType<typeof setTimeout> | null = null;
     const setup = async () => {
-      const u1 = await listen<{ session_id: string }>("chat-index-start", ({ payload }) => {
+      const u1 = await listenTauriEvent<{ session_id: string }>("chat-index-start", ({ payload }) => {
         if (payload.session_id !== sessionId) return;
         if (completedTimer) clearTimeout(completedTimer);
         setIndexingStatus("indexing");
       });
-      const u2 = await listen<{ session_id: string }>("chat-index-complete", ({ payload }) => {
+      const u2 = await listenTauriEvent<{ session_id: string }>("chat-index-complete", ({ payload }) => {
         if (payload.session_id !== sessionId) return;
         setIndexingStatus("completed");
         completedTimer = setTimeout(() => setIndexingStatus("idle"), 2500);
       });
-      const u3 = await listen<{ session_id: string; error: string }>("chat-index-error", ({ payload }) => {
+      const u3 = await listenTauriEvent<{ session_id: string; error: string }>("chat-index-error", ({ payload }) => {
         if (payload.session_id !== sessionId) return;
         setIndexingStatus("error");
         completedTimer = setTimeout(() => setIndexingStatus("idle"), 3500);
@@ -2572,7 +2742,7 @@ export function Chat({ sessionId }: ChatProps) {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     const setup = async () => {
-      unlisten = await listen<{ sessionId: string; title: string }>(
+      unlisten = await listenTauriEvent<{ sessionId: string; title: string }>(
         "session-title-updated",
         ({ payload }) => {
           const st = useSessionStore.getState();
@@ -2694,34 +2864,49 @@ export function Chat({ sessionId }: ChatProps) {
     () => groupMessagesForRender(messages),
     [messages],
   );
-  const lastReactFoldId = useMemo(() => {
-    // Always computed from the FULL list so "isLastFold" identifies the real
-    // last tool-group even when only a subset is rendered in phase 1.
-    for (let i = messageRenderItems.length - 1; i >= 0; i--) {
-      const it = messageRenderItems[i];
-      if (it.kind === "react_fold") return it.id;
+  const latestUserMessageId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "user") return messages[i].id;
     }
     return null;
-  }, [messageRenderItems]);
-  const lastReactFoldIdRef = useRef<string | null>(null);
+  }, [messages]);
+  const activeReactFoldId = useMemo(() => {
+    if (!latestUserMessageId) return null;
+    let afterLatestUser = false;
+    let foldId: string | null = null;
+    // Always computed from the FULL list so live streaming never attaches to a
+    // stale ReAct fold from an earlier user turn after retry truncation.
+    for (const item of messageRenderItems) {
+      if (item.kind === "row" && item.message.role === "user") {
+        afterLatestUser = item.message.id === latestUserMessageId;
+        foldId = null;
+        continue;
+      }
+      if (afterLatestUser && item.kind === "react_fold") {
+        foldId = item.id;
+      }
+    }
+    return foldId;
+  }, [latestUserMessageId, messageRenderItems]);
+  const activeReactFoldIdRef = useRef<string | null>(null);
   useEffect(() => {
-    lastReactFoldIdRef.current = lastReactFoldId;
-  }, [lastReactFoldId]);
+    activeReactFoldIdRef.current = activeReactFoldId;
+  }, [activeReactFoldId]);
   const shouldRenderCurrentResponseInFold = Boolean(
     isStreaming &&
-      lastReactFoldId &&
+      activeReactFoldId &&
       (currentResponse.trim() || currentFoldIntermediate.trim()),
   );
 
   useEffect(() => {
-    if (!shouldRenderCurrentResponseInFold || !lastReactFoldId) return;
+    if (!shouldRenderCurrentResponseInFold || !activeReactFoldId) return;
     setExpandedToolGroups((prev) => {
-      if (prev.has(lastReactFoldId)) return prev;
+      if (prev.has(activeReactFoldId)) return prev;
       const next = new Set(prev);
-      next.add(lastReactFoldId);
+      next.add(activeReactFoldId);
       return next;
     });
-  }, [lastReactFoldId, shouldRenderCurrentResponseInFold]);
+  }, [activeReactFoldId, shouldRenderCurrentResponseInFold]);
 
   // Phase-1: show only the most-recent items so the viewport is populated
   // on the very first paint. Phase-2 (allItemsVisible=true) adds all older
@@ -2766,7 +2951,7 @@ export function Chat({ sessionId }: ChatProps) {
   // leader's reply streams inline instead of requiring a page refresh.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    listen<{ sessionId: string; messageId: string }>(
+    listenTauriEvent<{ sessionId: string; messageId: string }>(
       "chat-synthesis-start",
       (event) => {
         if (event.payload.sessionId !== sessionId) return;
@@ -2775,6 +2960,7 @@ export function Chat({ sessionId }: ChatProps) {
         setCurrentResponse("");
         setCurrentFoldIntermediate("");
         currentFoldIntermediateRef.current = "";
+        activeReactFoldIdRef.current = null;
         pendingFoldIntermediateBufferRef.current = "";
         useActivityStore.getState().resetExecutionState();
         useActivityStore.getState().setConnecting(true);
@@ -2913,13 +3099,11 @@ export function Chat({ sessionId }: ChatProps) {
     }
   }, [sessionId, storeMessages]);
 
-  // Clean up listener on unmount
+  // Cancel ALL per-session stream listeners when the component unmounts.
   useEffect(() => {
     return () => {
-      if (unlistenRef.current) {
-        unlistenRef.current();
-        unlistenRef.current = null;
-      }
+      cancelAllStreamListeners();
+      unlistenRef.current = null;
     };
   }, []);
 
@@ -2928,8 +3112,9 @@ export function Chat({ sessionId }: ChatProps) {
     if (!sessionId) return;
     let cancelled = false;
     let unlistenBg: (() => void) | undefined;
+    let unlistenActivity: (() => void) | undefined;
     (async () => {
-      unlistenBg = await listen<BackgroundShellCompletePayload>(
+      unlistenBg = await listenTauriEvent<BackgroundShellCompletePayload>(
         "background-shell-complete",
         (event) => {
           if (cancelled) return;
@@ -2977,10 +3162,32 @@ export function Chat({ sessionId }: ChatProps) {
           });
         },
       );
+      unlistenActivity = await listenTauriEvent<ActivityOperationPayload>(
+        "omiga-activity-step",
+        (event) => {
+          if (cancelled) return;
+          const payload = event.payload;
+          if (!payload || payload.session_id !== sessionId) return;
+          const activity = useActivityStore.getState();
+          const detail = payload.detail?.trim();
+          if (payload.status === "running") {
+            activity.onOperationStart(payload.operation_id, payload.label, {
+              summary: detail || payload.label,
+            });
+          } else {
+            activity.onOperationDone(payload.operation_id, payload.label, {
+              summary: detail || payload.label,
+              output: detail,
+              failed: payload.status === "error",
+            });
+          }
+        },
+      );
     })();
     return () => {
       cancelled = true;
       unlistenBg?.();
+      unlistenActivity?.();
     };
   }, [sessionId, replaceStoreMessagesSnapshot]);
 
@@ -3017,9 +3224,12 @@ export function Chat({ sessionId }: ChatProps) {
 
   // Set up stream listener for a specific stream ID
   const setupStreamListener = async (streamId: string) => {
-    // Clean up previous listener
-    if (unlistenRef.current) {
-      unlistenRef.current();
+    const ownerSessionId = sessionIdRef.current;
+    // Cancel only the PREVIOUS listener for THIS session (e.g., user sent a
+    // second message before the first finished).  Other sessions' listeners
+    // are intentionally left alive so parallel tasks are not interrupted.
+    if (ownerSessionId) {
+      cancelStreamListener(ownerSessionId);
     }
     // Flush any buffered text before swapping listeners
     if (textFlushRafRef.current !== null) {
@@ -3087,7 +3297,20 @@ export function Chat({ sessionId }: ChatProps) {
       });
     };
 
-    const unlisten = await listen<StreamOutputItem>(eventName, (event) => {
+    const unlisten = await listenTauriEvent<StreamOutputItem>(eventName, (event) => {
+      if (sessionIdRef.current !== ownerSessionId) {
+        // Background session: the ownerSessionId guard prevents UI updates, but
+        // terminal events (complete / error / cancelled) must still clear the
+        // snapshot so the sidebar stops showing the session as "running".
+        const t = event.payload.type;
+        if (
+          ownerSessionId &&
+          (t === "complete" || t === "error" || t === "cancelled")
+        ) {
+          clearStreamSnapshot(ownerSessionId);
+        }
+        return;
+      }
       const payload = event.payload;
 
       /**
@@ -3240,10 +3463,15 @@ export function Chat({ sessionId }: ChatProps) {
             queueMicrotask(() => setCurrentResponse(""));
             queueMicrotask(() => setCurrentFoldIntermediate(""));
             const newToolId = `tool-${Date.now()}`;
+            activeReactFoldIdRef.current =
+              activeReactFoldIdRef.current ?? `rf-${newToolId}`;
             const toolMsg: Message = {
               id: newToolId,
               role: "tool",
               content: `\`${toolData?.name || "tool"}\``,
+              ...(intermediateChunk
+                ? { prefaceBeforeTools: intermediateChunk }
+                : {}),
               toolCall: {
                 id: tuId || undefined,
                 name: toolData?.name || "tool",
@@ -3253,15 +3481,6 @@ export function Chat({ sessionId }: ChatProps) {
               timestamp: Date.now(),
             };
             const next = [...prev];
-            if (intermediateChunk) {
-              next.push({
-                id: `assistant-seg-${newToolId}`,
-                role: "assistant",
-                content: intermediateChunk,
-                intermediate: true,
-                timestamp: Date.now(),
-              });
-            }
             next.push(toolMsg);
             return next;
           });
@@ -3300,10 +3519,10 @@ export function Chat({ sessionId }: ChatProps) {
           if (!sid || !mid || !tuid || !Array.isArray(qs) || qs.length === 0) {
             break;
           }
-          if (lastReactFoldIdRef.current) {
+          if (activeReactFoldIdRef.current) {
             setExpandedToolGroups((prev) => {
               const next = new Set(prev);
-              next.add(lastReactFoldIdRef.current!);
+              next.add(activeReactFoldIdRef.current!);
               return next;
             });
           }
@@ -3442,6 +3661,7 @@ export function Chat({ sessionId }: ChatProps) {
           break;
         }
         case "error": {
+          clearCancelFallbackTimer();
           flushPendingText();
           const errorData = payload.data as
             | { message: string; code?: string }
@@ -3461,6 +3681,8 @@ export function Chat({ sessionId }: ChatProps) {
           currentResponseRef.current = "";
           setCurrentFoldIntermediate("");
           currentFoldIntermediateRef.current = "";
+          activeReactFoldIdRef.current = null;
+          if (ownerSessionId) clearStreamSnapshot(ownerSessionId);
           const errorMsg: Message = {
             id: `error-${Date.now()}`,
             role: "assistant",
@@ -3482,6 +3704,7 @@ export function Chat({ sessionId }: ChatProps) {
           break;
         }
         case "cancelled": {
+          clearCancelFallbackTimer();
           flushPendingText();
           setAwaitingResumeAfterCancel(true);
           isStreamingRef.current = false;
@@ -3518,6 +3741,8 @@ export function Chat({ sessionId }: ChatProps) {
           currentResponseRef.current = "";
           setCurrentFoldIntermediate("");
           currentFoldIntermediateRef.current = "";
+          activeReactFoldIdRef.current = null;
+          if (ownerSessionId) clearStreamSnapshot(ownerSessionId);
           if (isDev) {
             console.debug("[OmigaDev][AgentCancelled]", {
               streamId,
@@ -3609,6 +3834,7 @@ export function Chat({ sessionId }: ChatProps) {
           break;
         }
         case "complete": {
+          clearCancelFallbackTimer();
           flushPendingText();
           flushPendingFoldIntermediate();
           setAwaitingResumeAfterCancel(false);
@@ -3634,8 +3860,8 @@ export function Chat({ sessionId }: ChatProps) {
           const tok = pendingTokenUsageRef.current;
           pendingTokenUsageRef.current = null;
           setMessages((prev) => {
-            let next = prev;
-            if (finalFoldIntermediate && lastReactFoldIdRef.current) {
+            let next = settleRunningToolCalls(prev);
+            if (finalFoldIntermediate && activeReactFoldIdRef.current) {
               next = [
                 ...next,
                 {
@@ -3668,7 +3894,7 @@ export function Chat({ sessionId }: ChatProps) {
                     }
                   : {}),
               };
-              next = [...prev, assistantMsg];
+              next = [...next, assistantMsg];
             }
             // Full transcript (user + tools + assistant) so useEffect does not drop tool rows
             replaceStoreMessagesSnapshot(next.map(chatMessageToStore));
@@ -3678,6 +3904,13 @@ export function Chat({ sessionId }: ChatProps) {
           currentResponseRef.current = "";
           setCurrentFoldIntermediate("");
           currentFoldIntermediateRef.current = "";
+          activeReactFoldIdRef.current = null;
+
+          // Stream is done: remove the snapshot so switching back to this
+          // session starts fresh (no stale "streaming" state to restore).
+          if (ownerSessionId) {
+            clearStreamSnapshot(ownerSessionId);
+          }
 
           // Memory indexing status is driven by chat-index-* Tauri events below.
 
@@ -3693,6 +3926,12 @@ export function Chat({ sessionId }: ChatProps) {
       }
     });
 
+    // Register in the per-session map so session switches don't cancel it,
+    // and so it is properly cleaned up when THIS session starts a new stream
+    // or the component unmounts.
+    if (ownerSessionId) {
+      registerStreamListener(ownerSessionId, unlisten);
+    }
     unlistenRef.current = unlisten;
   };
 
@@ -3748,13 +3987,14 @@ export function Chat({ sessionId }: ChatProps) {
 
     /** Prefer ref payload after queue flush — `getValue` reads the latest composer state. */
     const trimmed = flushPayload ? flushPayload.body.trim() : (composerRef.current?.getValue() ?? "").trim();
+    const researchParsed = parseResearchCommand(trimmed);
 
     if (!trimmed && composerAttachedPaths.length === 0) {
       if (flushPayload) restoreFlushToQueue(flushPayload);
       return;
     }
     /** Composer is still in bare `/…` or `@…` picker mode — do not send as message */
-    if (trimmed && /^\/[^\s]*$/u.test(trimmed)) {
+    if (trimmed && /^\/[^\s]*$/u.test(trimmed) && !researchParsed) {
       if (flushPayload) restoreFlushToQueue(flushPayload);
       return;
     }
@@ -3848,6 +4088,199 @@ export function Chat({ sessionId }: ChatProps) {
       return;
     }
 
+    if (researchParsed) {
+      const operationId =
+        typeof crypto !== "undefined" &&
+        typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `research-${Date.now()}`;
+      const pendingFeedback = buildPendingExecutionFeedback({
+        workflowCommand: "research",
+        composerAgentType,
+      });
+
+      setIndexingStatus("idle");
+      setPendingAssistantHint(pendingFeedback.assistantHint);
+      setCurrentResponse("");
+      currentResponseRef.current = "";
+      setCurrentFoldIntermediate("");
+      currentFoldIntermediateRef.current = "";
+      pendingTextBufferRef.current = "";
+      pendingFoldIntermediateBufferRef.current = "";
+      activeReactFoldIdRef.current = null;
+
+      useActivityStore.getState().beginExecutionRun(pendingFeedback.connectLabel);
+      useActivityStore.getState().setConnecting(true);
+      useActivityStore.getState().setStreaming(false, false);
+      useActivityStore.getState().clearActiveTodos();
+      useActivityStore.getState().onOperationStart(
+        operationId,
+        "Research System",
+        {
+          summary: researchParsed.body || "显示 Research System 帮助",
+        },
+      );
+
+      const isFirstMessageInSession = storeMessages.length === 0;
+      const messageContent = mergeComposerPathsAndBody(
+        composerAttachedPaths,
+        trimmed,
+      );
+      const workflowTitleSeed =
+        researchParsed.body ||
+        trimmed.replace(/^\/research\s*/iu, "").trim() ||
+        trimmed;
+      const bubbleAttachedPaths =
+        composerAttachedPaths.length > 0 ? [...composerAttachedPaths] : undefined;
+      const userMessage: Message = {
+        id: `user-${Date.now()}`,
+        role: "user",
+        content: messageContent,
+        timestamp: Date.now(),
+        composerAgentType: undefined,
+        composerAttachedPaths: bubbleAttachedPaths,
+      };
+
+      setMessages((prev) => [...prev, userMessage]);
+      addMessage({
+        role: "user",
+        content: messageContent,
+        composerAgentType: undefined,
+        composerAttachedPaths: bubbleAttachedPaths,
+        id: userMessage.id,
+        timestamp: userMessage.timestamp,
+      });
+
+      composerRef.current?.setValue("");
+      useChatComposerStore.getState().clearComposerAttachedPaths();
+
+      const requestSessionId = sessionId;
+      try {
+        const requestSessionId = sessionId;
+        if (
+          isFirstMessageInSession &&
+          isPlaceholderSessionTitle(currentSession?.name)
+        ) {
+          const heuristicTitle = titleFromFirstUserMessage(workflowTitleSeed);
+          await renameSession(sessionId, heuristicTitle);
+        }
+
+        const response = await invoke<ResearchCommandResponse>(
+          "run_research_command",
+          {
+            request: {
+              sessionId: sessionId,
+              projectPath:
+                currentSession?.workingDirectory ??
+                currentSession?.projectPath ??
+                ".",
+              content: messageContent,
+              body: researchParsed.body,
+            },
+          },
+        );
+
+        if (sessionIdRef.current !== requestSessionId) {
+          return;
+        }
+
+        const persistedUserMessage = {
+          ...userMessage,
+          id: response.userMessageId,
+        };
+        const assistantMessage = {
+          id: response.assistantMessageId,
+          role: "assistant" as const,
+          content: response.assistantContent,
+          timestamp: Date.now(),
+          roundId: response.roundId,
+        };
+        let nextMessages: Message[] = [];
+        setMessages((prev) => {
+          nextMessages = finalizeResearchCommandMessages(
+            prev,
+            userMessage.id,
+            persistedUserMessage,
+            assistantMessage,
+          );
+          return nextMessages;
+        });
+        replaceStoreMessagesSnapshot(nextMessages.map(chatMessageToStore));
+        useActivityStore.getState().onOperationDone(
+          operationId,
+          "Research System",
+          {
+            summary: `/research ${researchParsed.body || "help"}`,
+            output: response.assistantContent,
+          },
+        );
+        useActivityStore.getState().finalizeExecutionRun();
+        useChatComposerStore.getState().setComposerAgentType("general-purpose");
+      } catch (error: unknown) {
+        if (sessionIdRef.current !== requestSessionId) {
+          return;
+        }
+        console.error("Failed to execute /research command:", error);
+
+        let errorMessage = "Unknown error";
+        if (typeof error === "string") {
+          errorMessage = error;
+        } else if (error && typeof error === "object") {
+          const err = error as Record<string, unknown>;
+          if (
+            err.type === "Chat" &&
+            err.details &&
+            typeof err.details === "object"
+          ) {
+            const details = err.details as Record<string, unknown>;
+            if (typeof details.message === "string") {
+              errorMessage = details.message;
+            }
+          } else if (typeof err.message === "string") {
+            errorMessage = err.message;
+          } else {
+            errorMessage = JSON.stringify(error);
+          }
+        }
+
+        const errorMsg: Message = {
+          id: `error-${Date.now()}`,
+          role: "assistant",
+          content: `Failed to execute /research: ${errorMessage}`,
+          timestamp: Date.now(),
+        };
+        setMessages((prev) => [...prev, errorMsg]);
+        replaceStoreMessagesSnapshot(
+          [...useSessionStore.getState().storeMessages, errorMsg].map(
+            chatMessageToStore,
+          ),
+        );
+        useActivityStore.getState().onOperationDone(
+          operationId,
+          "Research System",
+          {
+            summary: `/research ${researchParsed.body || "help"}`,
+            output: errorMessage,
+            failed: true,
+          },
+        );
+        useActivityStore.getState().finalizeExecutionRun();
+      } finally {
+        useActivityStore.getState().clearTransient();
+        setCurrentStreamId(null);
+        setCurrentRoundId(null);
+        queueMicrotask(() => {
+          isStreamingRef.current = false;
+          setIsStreaming(false);
+          setPendingAskUser(null);
+          setAskUserSelections({});
+          pendingTokenUsageRef.current = null;
+          flushQueuedMainSendIfAnyRef.current();
+        });
+      }
+      return;
+    }
+
     const workflowPrepared = rewriteWorkflowBodyForBackend(trimmed);
     const pendingFeedback = buildPendingExecutionFeedback({
       workflowCommand: workflowPrepared.workflowCommand,
@@ -3863,6 +4296,7 @@ export function Chat({ sessionId }: ChatProps) {
     currentFoldIntermediateRef.current = "";
     pendingTextBufferRef.current = "";
     pendingFoldIntermediateBufferRef.current = "";
+    activeReactFoldIdRef.current = null;
 
     useActivityStore.getState().beginExecutionRun(pendingFeedback.connectLabel);
     useActivityStore.getState().setConnecting(true);
@@ -3918,6 +4352,7 @@ export function Chat({ sessionId }: ChatProps) {
     composerRef.current?.setValue("");
     useChatComposerStore.getState().clearComposerAttachedPaths();
 
+    const requestSessionId = sessionId;
     try {
       if (
         isFirstMessageInSession &&
@@ -3960,6 +4395,10 @@ export function Chat({ sessionId }: ChatProps) {
           activeProviderEntryName,
         },
       });
+
+      if (sessionIdRef.current !== requestSessionId) {
+        return;
+      }
 
       if (sendCancelledDuringRequestRef.current) {
         sendCancelledDuringRequestRef.current = false;
@@ -4030,6 +4469,9 @@ export function Chat({ sessionId }: ChatProps) {
       setCurrentStreamId(response.message_id);
       await setupStreamListener(response.message_id);
     } catch (error: unknown) {
+      if (sessionIdRef.current !== requestSessionId) {
+        return;
+      }
       sendCancelledDuringRequestRef.current = false;
       console.error("Failed to send message:", error);
       useActivityStore.getState().clearTransient();
@@ -4152,7 +4594,13 @@ export function Chat({ sessionId }: ChatProps) {
         messageContent,
         message.composerAttachedPaths ?? [],
       );
+      const researchRetry = parseResearchCommand(rawRetryBody);
       const composeAgent = message.composerAgentType ?? "general-purpose";
+      if (researchRetry) {
+        setBgToast("`/research` 暂不支持通过“重试”按钮重放，请重新发送命令。");
+        retrySendInFlightRef.current = false;
+        return;
+      }
       const retryPrepared = rewriteWorkflowBodyForBackend(rawRetryBody);
       const pendingFeedback = buildPendingExecutionFeedback({
         workflowCommand: retryPrepared.workflowCommand,
@@ -4184,6 +4632,7 @@ export function Chat({ sessionId }: ChatProps) {
       currentFoldIntermediateRef.current = "";
       pendingTextBufferRef.current = "";
       pendingFoldIntermediateBufferRef.current = "";
+      activeReactFoldIdRef.current = null;
       if (textFlushRafRef.current !== null) {
         cancelAnimationFrame(textFlushRafRef.current);
         textFlushRafRef.current = null;
@@ -4208,6 +4657,7 @@ export function Chat({ sessionId }: ChatProps) {
       const { permissionMode } = useChatComposerStore.getState();
 
       const userMessageId = message.id;
+      const requestSessionId = sessionId;
 
       try {
         const response = await invoke<{
@@ -4239,6 +4689,10 @@ export function Chat({ sessionId }: ChatProps) {
               : {}),
           },
         });
+
+        if (sessionIdRef.current !== requestSessionId) {
+          return;
+        }
 
         useChatComposerStore.getState().setComposerAgentType("general-purpose");
 
@@ -4288,6 +4742,9 @@ export function Chat({ sessionId }: ChatProps) {
         setCurrentStreamId(response.message_id);
         await setupStreamListener(response.message_id);
       } catch (error: unknown) {
+        if (sessionIdRef.current !== requestSessionId) {
+          return;
+        }
         console.error("Failed to retry message:", error);
         useActivityStore.getState().clearTransient();
         useActivityStore.getState().resetExecutionState();
@@ -4485,7 +4942,50 @@ export function Chat({ sessionId }: ChatProps) {
     if (streamId) {
       try {
         await invoke("cancel_stream", { messageId: streamId });
-        // On success, wait for the stream `cancelled` event to clean up state
+        clearCancelFallbackTimer();
+        cancelFallbackTimerRef.current = window.setTimeout(() => {
+          cancelFallbackTimerRef.current = null;
+          if (currentStreamIdRef.current !== streamId) return;
+          const sid = sessionIdRef.current ?? "";
+          cancelStreamListener(sid);
+          unlistenRef.current = null;
+          if (sid) clearStreamSnapshot(sid);
+          setCurrentStreamId(null);
+          currentStreamIdRef.current = null;
+          setCurrentRoundId(null);
+          currentRoundIdRef.current = null;
+          setIsStreaming(false);
+          isStreamingRef.current = false;
+          retrySendInFlightRef.current = false;
+          sendCancelledDuringRequestRef.current = false;
+          setCurrentResponse("");
+          currentResponseRef.current = "";
+          setCurrentFoldIntermediate("");
+          currentFoldIntermediateRef.current = "";
+          activeReactFoldIdRef.current = null;
+          pendingTextBufferRef.current = "";
+          pendingFoldIntermediateBufferRef.current = "";
+          if (textFlushRafRef.current !== null) {
+            cancelAnimationFrame(textFlushRafRef.current);
+            textFlushRafRef.current = null;
+          }
+          if (foldIntermediateFlushRafRef.current !== null) {
+            cancelAnimationFrame(foldIntermediateFlushRafRef.current);
+            foldIntermediateFlushRafRef.current = null;
+          }
+          setPendingAssistantHint(null);
+          setPendingAskUser(null);
+          setAskUserSelections({});
+          pendingFollowUpSuggestionsRef.current = null;
+          pendingTurnSummaryRef.current = null;
+          pendingTokenUsageRef.current = null;
+          setSuggestionsGenerating(false);
+          setAwaitingResumeAfterCancel(true);
+          const act = useActivityStore.getState();
+          act.clearTransient();
+          act.resetExecutionState();
+        }, CANCEL_STREAM_LOCAL_FALLBACK_MS);
+        // Prefer the backend `cancelled` event; the timer above prevents a stuck UI if it is lost.
         return;
       } catch (error) {
         console.error("Failed to cancel stream:", error);
@@ -4502,9 +5002,11 @@ export function Chat({ sessionId }: ChatProps) {
     if (!busy) return;
 
     sendCancelledDuringRequestRef.current = true;
-    if (unlistenRef.current) {
-      unlistenRef.current();
+    {
+      const sid = sessionIdRef.current ?? "";
+      cancelStreamListener(sid);
       unlistenRef.current = null;
+      if (sid) clearStreamSnapshot(sid);
     }
     setCurrentStreamId(null);
     setIsStreaming(false);
@@ -4515,6 +5017,7 @@ export function Chat({ sessionId }: ChatProps) {
     currentFoldIntermediateRef.current = "";
     pendingTextBufferRef.current = "";
     pendingFoldIntermediateBufferRef.current = "";
+    activeReactFoldIdRef.current = null;
     if (textFlushRafRef.current !== null) {
       cancelAnimationFrame(textFlushRafRef.current);
       textFlushRafRef.current = null;
@@ -4583,6 +5086,7 @@ export function Chat({ sessionId }: ChatProps) {
     setPathRequiredToast(null);
     setCopySuccessToast(false);
     setCurrentRoundId(null);
+    clearCancelFallbackTimer();
     useChatComposerStore.getState().clearComposerAttachedPaths();
     useChatComposerStore.getState().setComposerAgentType("general-purpose");
 
@@ -4598,9 +5102,11 @@ export function Chat({ sessionId }: ChatProps) {
       }
     }
 
-    if (unlistenRef.current) {
-      unlistenRef.current();
+    {
+      const sid = sessionIdRef.current ?? "";
+      cancelStreamListener(sid);
       unlistenRef.current = null;
+      if (sid) clearStreamSnapshot(sid);
     }
     setCurrentStreamId(null);
     setIsStreaming(false);
@@ -4630,7 +5136,7 @@ export function Chat({ sessionId }: ChatProps) {
     } catch (e) {
       console.error("[Chat] setCurrentSession(null) failed:", e);
     }
-  }, [currentStreamId, clearQueuedMainSends]);
+  }, [currentStreamId, clearQueuedMainSends, clearCancelFallbackTimer]);
 
   const handleResumeAfterCancel = async () => {
     if (
@@ -4647,6 +5153,7 @@ export function Chat({ sessionId }: ChatProps) {
     setIndexingStatus("idle");
 
     setPendingAssistantHint(null);
+    activeReactFoldIdRef.current = null;
     useActivityStore.getState().beginExecutionRun();
     useActivityStore.getState().setConnecting(true);
     useActivityStore.getState().setStreaming(false, false);
@@ -4668,6 +5175,7 @@ export function Chat({ sessionId }: ChatProps) {
 
     const { composerAgentType, permissionMode, environment, sshServer, sandboxBackend } =
       useChatComposerStore.getState();
+    const requestSessionId = sessionId;
 
     try {
       const response = await invoke<{
@@ -4694,6 +5202,10 @@ export function Chat({ sessionId }: ChatProps) {
         },
       });
 
+      if (sessionIdRef.current !== requestSessionId) {
+        return;
+      }
+
       useChatComposerStore.getState().setComposerAgentType("general-purpose");
 
       if (response.user_message_id) {
@@ -4718,6 +5230,9 @@ export function Chat({ sessionId }: ChatProps) {
       setCurrentStreamId(response.message_id);
       await setupStreamListener(response.message_id);
     } catch (error: unknown) {
+      if (sessionIdRef.current !== requestSessionId) {
+        return;
+      }
       console.error("Failed to resume after cancel:", error);
       setAwaitingResumeAfterCancel(true);
       useActivityStore.getState().clearTransient();
@@ -4969,27 +5484,18 @@ export function Chat({ sessionId }: ChatProps) {
               position: "relative",
             }}
           >
-            {/* Session-switch loading overlay: keeps previous messages visible
-                instead of going blank. Fades in/out smoothly. */}
-            <Fade in={isSwitchingSession} timeout={120} unmountOnExit>
-              <Box
-                sx={{
-                  position: "absolute",
-                  inset: 0,
-                  zIndex: 10,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  bgcolor: (t) => alpha(t.palette.background.default, 0.6),
-                  pointerEvents: "none",
-                }}
-              >
-                <CircularProgress size={28} thickness={3} />
+            {/* ── Session switch: skeleton loader ────────────────────────────
+                While isSwitchingSession is true (IPC cache miss) we show
+                message-shaped shimmer rows instead of a blank area + spinner.
+                Fades in immediately on switch, fades out when content arrives. */}
+            <Fade in={isSwitchingSession} timeout={100} unmountOnExit>
+              <Box sx={{ width: "100%", pt: 0.5 }}>
+                <SessionSwitchSkeleton />
               </Box>
             </Fade>
 
             {/* Pagination: "load older messages" indicator at the top of the list */}
-            {(hasMoreMessages || isLoadingMoreMessages) && (
+            {!isSwitchingSession && (hasMoreMessages || isLoadingMoreMessages) && (
               <Box sx={{ display: "flex", justifyContent: "center", py: 1 }}>
                 {isLoadingMoreMessages ? (
                   <CircularProgress size={20} thickness={3} />
@@ -5003,7 +5509,9 @@ export function Chat({ sessionId }: ChatProps) {
                 )}
               </Box>
             )}
-            {messages.length === 0 && !currentResponse && (
+
+            {/* Empty state — only when genuinely empty (not while skeleton is showing) */}
+            {!isSwitchingSession && messages.length === 0 && !currentResponse && (
               <Box
                 sx={{
                   display: "flex",
@@ -5026,11 +5534,58 @@ export function Chat({ sessionId }: ChatProps) {
               </Box>
             )}
 
+            {/* ── Content enter animation ────────────────────────────────────
+                key changes when:
+                  • isSwitchingSession flips false (cache miss load complete)
+                  • sessionId changes while not switching (cache hit)
+                React remounts this wrapper on key change → @keyframes fires.
+                Uses transform+opacity only: zero layout repaints (GPU path).
+                prefers-reduced-motion: the animation is gated below. */}
+            <Box
+              key={isSwitchingSession ? "skeleton" : (sessionId ?? "none")}
+              sx={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+                width: "100%",
+                "@media (prefers-reduced-motion: no-preference)": {
+                  "@keyframes omigaFadeUp": {
+                    from: {
+                      opacity: 0,
+                      transform: "translateY(10px)",
+                    },
+                    to: {
+                      opacity: 1,
+                      transform: "translateY(0)",
+                    },
+                  },
+                  animation: "omigaFadeUp 220ms cubic-bezier(0.16, 1, 0.3, 1) both",
+                },
+              }}
+            >
             {displayedItems.map((item, itemIndex) => {
               const itemKey =
                 item.kind === "react_fold" ? item.id : item.message.id;
+              // Per-message entrance animation.
+              // Stagger: 35 ms per item, capped at 280 ms so long sessions
+              // don't feel sluggish. Animation is gated on reduced-motion.
+              // During streaming, each new message pops in cleanly;
+              // on session switch the container's omigaFadeUp runs first.
+              const msgStagger = Math.min(itemIndex * 35, 280);
               return (
-                <Box key={itemKey} sx={{ width: "100%" }}>
+                <Box
+                  key={itemKey}
+                  sx={{
+                    width: "100%",
+                    "@media (prefers-reduced-motion: no-preference)": {
+                      "@keyframes omigaMsgIn": {
+                        from: { opacity: 0, transform: "translateY(5px)" },
+                        to:   { opacity: 1, transform: "translateY(0)" },
+                      },
+                      animation: `omigaMsgIn 180ms ${msgStagger}ms ease-out both`,
+                    },
+                  }}
+                >
                   {(() => {
                     if (item.kind === "react_fold") {
                 const { id, fold } = item;
@@ -5042,7 +5597,7 @@ export function Chat({ sessionId }: ChatProps) {
                 const showGroupDone = toolGroupFlowComplete(toolMsgs);
                 const runningToolName = firstRunningToolName(toolMsgs);
                 const runningToolCount = toolMsgs.filter(m => m.toolCall?.status === "running").length;
-                const isLastFold = id === lastReactFoldId;
+                const isLastFold = id === activeReactFoldId;
                 const liveIntermediateText =
                   isLastFold && shouldRenderCurrentResponseInFold
                     ? [currentFoldIntermediate.trim(), currentResponse.trim()]
@@ -5070,8 +5625,13 @@ export function Chat({ sessionId }: ChatProps) {
                           px: 1.75,
                           py: 1.25,
                           fontFamily: CHAT.font,
-                          /* 勿用 overflow:hidden：流式输出时圆角裁剪会导致新文本被边框/圆角遮住，重绘后才撑开 */
                           overflow: "visible",
+                          // Outer bubble: border shimmers to accent on hover,
+                          // signalling the whole fold is interactive.
+                          transition: "border-color 200ms ease",
+                          "&:hover": {
+                            borderColor: alpha(CHAT.accent, 0.28),
+                          },
                         }}
                       >
                         <Stack
@@ -5083,16 +5643,36 @@ export function Chat({ sessionId }: ChatProps) {
                             cursor: "pointer",
                             userSelect: "none",
                             minWidth: 0,
+                            // Hover hit-area: rounded pill that hugs the row.
+                            borderRadius: "8px",
+                            mx: -0.75,
+                            px: 0.75,
+                            py: 0.5,
+                            transition: "background-color 150ms ease",
+                            "&:hover": {
+                              bgcolor: alpha(CHAT.accent, 0.07),
+                              // Brighten the ExpandMore icon to accent on hover.
+                              "& > svg:first-of-type": {
+                                color: CHAT.accent,
+                                opacity: 1,
+                              },
+                              // Lift summary text from muted → primary.
+                              "& > .MuiTypography-root:first-of-type": {
+                                color: CHAT.textPrimary,
+                              },
+                            },
                           }}
                         >
                           <ExpandMore
                             sx={{
                               fontSize: 14,
                               color: CHAT.toolIcon,
+                              opacity: 0.65,
                               transform: expandedToolGroups.has(id)
                                 ? "rotate(0deg)"
                                 : "rotate(-90deg)",
-                              transition: "transform 0.15s",
+                              // Animate rotation + colour + opacity together.
+                              transition: "transform 0.2s ease, color 150ms ease, opacity 150ms ease",
                             }}
                           />
                           <Typography
@@ -5103,6 +5683,7 @@ export function Chat({ sessionId }: ChatProps) {
                               minWidth: 0,
                               overflowWrap: "anywhere",
                               wordBreak: "break-word",
+                              transition: "color 150ms ease",
                             }}
                           >
                             {summary}
@@ -5330,6 +5911,11 @@ export function Chat({ sessionId }: ChatProps) {
                                       border: `1px solid ${CHAT.agentBubbleBorder}`,
                                       bgcolor: CHAT.toolCallCardBg,
                                       overflow: "hidden",
+                                      // Card border shimmers on hover like the outer fold.
+                                      transition: "border-color 200ms ease",
+                                      "&:hover": {
+                                        borderColor: alpha(CHAT.accent, 0.22),
+                                      },
                                     }}
                                   >
                                     <Stack
@@ -5348,8 +5934,22 @@ export function Chat({ sessionId }: ChatProps) {
                                         userSelect: "none",
                                         px: 1.25,
                                         py: 0.85,
+                                        transition: "background-color 150ms ease",
                                         "&:hover": {
-                                          bgcolor: "action.hover",
+                                          bgcolor: alpha(CHAT.accent, 0.06),
+                                          // Icon brightens to accent.
+                                          "& > svg:first-of-type": {
+                                            color: CHAT.accent,
+                                            opacity: 1,
+                                          },
+                                          // Step icon also brightens.
+                                          "& > svg:nth-of-type(2)": {
+                                            color: CHAT.accent,
+                                          },
+                                          // Title text lifts to primary.
+                                          "& > .MuiTypography-root": {
+                                            color: CHAT.textPrimary,
+                                          },
                                         },
                                       }}
                                     >
@@ -5357,11 +5957,12 @@ export function Chat({ sessionId }: ChatProps) {
                                         sx={{
                                           fontSize: 18,
                                           color: CHAT.toolIcon,
+                                          opacity: 0.65,
                                           flexShrink: 0,
                                           transform: nestedOpen
                                             ? "rotate(0deg)"
                                             : "rotate(-90deg)",
-                                          transition: "transform 0.15s",
+                                          transition: "transform 0.2s ease, color 150ms ease, opacity 150ms ease",
                                         }}
                                       />
                                       <Chip
@@ -5379,6 +5980,7 @@ export function Chat({ sessionId }: ChatProps) {
                                           fontSize: 16,
                                           color: CHAT.toolIcon,
                                           flexShrink: 0,
+                                          transition: "color 150ms ease",
                                         }}
                                       />
                                       <Typography
@@ -5389,6 +5991,7 @@ export function Chat({ sessionId }: ChatProps) {
                                           flex: 1,
                                           lineHeight: 1.35,
                                           wordBreak: "break-word",
+                                          transition: "color 150ms ease",
                                         }}
                                       >
                                         {panelTitle}
@@ -6515,6 +7118,9 @@ export function Chat({ sessionId }: ChatProps) {
                 </Box>
               </Fade>
             )}
+
+            {/* ── Close animated content wrapper ─────────────────────── */}
+            </Box>
 
             <div ref={messagesEndRef} />
           </Box>
