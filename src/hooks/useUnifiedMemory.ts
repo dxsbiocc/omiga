@@ -56,6 +56,8 @@ export interface SessionWorkingMemoryStatus {
 export interface LongTermStatus {
   project_entry_count: number;
   global_entry_count: number;
+  /** Entries not reused in >90 days with stability < 0.4 (project + global). */
+  stale_entry_count: number;
 }
 
 export interface KnowledgeBaseStatus {

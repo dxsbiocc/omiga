@@ -53,6 +53,9 @@ import {
   FileUpload as UploadIcon,
   TextFields as TextIcon,
   Folder as FolderUploadIcon,
+  Psychology as LongTermIcon,
+  HealthAndSafety as HealthIcon,
+  Warning as WarnIcon,
 } from "@mui/icons-material";
 import { useUnifiedMemory } from "../../hooks/useUnifiedMemory";
 
@@ -377,6 +380,96 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                   </CardContent>
                 </Card>
               </Grid>
+
+              {/* Long-term memory card */}
+              <Grid item xs={12} sm={6}>
+                <Card
+                  elevation={0}
+                  sx={{
+                    height: "100%",
+                    borderRadius: 2,
+                    border: `1px solid ${alpha(theme.palette.info.main, 0.22)}`,
+                    bgcolor: alpha(theme.palette.info.main, 0.04),
+                    transition: "transform 0.2s ease, box-shadow 0.2s ease",
+                    "&:hover": {
+                      boxShadow: `0 8px 24px ${alpha(theme.palette.info.main, 0.12)}`,
+                    },
+                  }}
+                >
+                  <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
+                    <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+                      <Stack direction="row" alignItems="center" spacing={1}>
+                        <LongTermIcon sx={{ color: "info.main", fontSize: 22 }} />
+                        <Typography variant="subtitle2" fontWeight={700}>
+                          长期记忆
+                        </Typography>
+                      </Stack>
+                      {(memory.status.long_term.project_entry_count + memory.status.long_term.global_entry_count) > 0 ? (
+                        <Chip size="small" icon={<OkIcon />} label="已积累" color="info" variant="outlined" />
+                      ) : (
+                        <Chip size="small" icon={<MissingIcon />} label="空" variant="outlined" />
+                      )}
+                    </Stack>
+                    <Typography variant="h4" fontWeight={800} sx={{ fontFeatureSettings: '"tnum"', color: "text.primary" }}>
+                      {memory.status.long_term.project_entry_count + memory.status.long_term.global_entry_count || "—"}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" display="block">
+                      {`项目 ${memory.status.long_term.project_entry_count} · 全局 ${memory.status.long_term.global_entry_count}`}
+                    </Typography>
+                  </CardContent>
+                </Card>
+              </Grid>
+
+              {/* Memory health card */}
+              <Grid item xs={12} sm={6}>
+                {(() => {
+                  const stale = memory.status.long_term.stale_entry_count ?? 0;
+                  const total = memory.status.long_term.project_entry_count + memory.status.long_term.global_entry_count;
+                  const isHealthy = stale === 0;
+                  const stalePct = total > 0 ? Math.round((stale / total) * 100) : 0;
+                  return (
+                    <Card
+                      elevation={0}
+                      sx={{
+                        height: "100%",
+                        borderRadius: 2,
+                        border: `1px solid ${alpha(isHealthy ? theme.palette.success.main : theme.palette.warning.main, 0.28)}`,
+                        bgcolor: alpha(isHealthy ? theme.palette.success.main : theme.palette.warning.main, 0.04),
+                        transition: "transform 0.2s ease, box-shadow 0.2s ease",
+                        "&:hover": {
+                          boxShadow: `0 8px 24px ${alpha(isHealthy ? theme.palette.success.main : theme.palette.warning.main, 0.12)}`,
+                        },
+                      }}
+                    >
+                      <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
+                        <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+                          <Stack direction="row" alignItems="center" spacing={1}>
+                            <HealthIcon sx={{ color: isHealthy ? "success.main" : "warning.main", fontSize: 22 }} />
+                            <Typography variant="subtitle2" fontWeight={700}>
+                              记忆健康
+                            </Typography>
+                          </Stack>
+                          <Chip
+                            size="small"
+                            icon={isHealthy ? <OkIcon /> : <WarnIcon />}
+                            label={isHealthy ? "健康" : `${stalePct}% 陈旧`}
+                            color={isHealthy ? "success" : "warning"}
+                            variant="outlined"
+                          />
+                        </Stack>
+                        <Typography variant="h4" fontWeight={800} sx={{ fontFeatureSettings: '"tnum"', color: isHealthy ? "success.main" : "warning.main" }}>
+                          {stale === 0 ? "良好" : stale}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" display="block">
+                          {isHealthy
+                            ? "长期记忆无陈旧条目"
+                            : `${stale} 条 90 天未访问且稳定性低，下次启动自动清理`}
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  );
+                })()}
+              </Grid>
             </Grid>
 
             <Box
@@ -498,13 +591,14 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                 <code>{memory.status?.paths.permanent_long_term || "~/.omiga/memory/permanent/long_term"}</code>
               </li>
               <li>
-                <strong>工作记忆</strong>：session scratchpad，保存在 SQLite，会在当前轮按需注入
+                <strong>工作记忆</strong>：session scratchpad，保存在 SQLite，每轮自动提炼，每 15 轮归档一次会话摘要
               </li>
               <li>
                 <strong>隐性记忆</strong>：自动索引的聊天历史，每次对话后更新
               </li>
-              <li>每次对话前自动检索相关上下文</li>
-              <li>显性记忆优先于隐性记忆</li>
+              <li>每次对话前自动检索相关上下文（working memory 主题词同步用于增强长期记忆召回）</li>
+              <li>优先级：工作记忆 &gt; 长期项目 &gt; 长期全局 &gt; 知识库 &gt; 隐性记忆</li>
+              <li>陈旧的长期条目（90 天未访问 + 稳定性低）在下次启动时概率性自动清理</li>
             </Box>
 
             <Divider sx={{ my: 2 }} />
