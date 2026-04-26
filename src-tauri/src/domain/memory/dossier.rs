@@ -54,6 +54,40 @@ impl Dossier {
         self.updated_at = chrono::Utc::now().to_rfc3339();
     }
 
+    /// Render as a compact Hot-memory section injected into every turn's system prompt.
+    pub fn render_for_hot_memory(&self) -> String {
+        let mut out = String::from("## Project Brief\n\n");
+        out.push_str(&format!("**{}**: {}\n\n", self.title, self.brief));
+        if !self.current_beliefs.is_empty() {
+            out.push_str("**Current beliefs:**\n");
+            for b in self.current_beliefs.iter().take(5) {
+                out.push_str(&format!("- {}\n", b));
+            }
+            out.push('\n');
+        }
+        if !self.decisions.is_empty() {
+            out.push_str("**Decisions:**\n");
+            for d in self.decisions.iter().take(5) {
+                out.push_str(&format!("- {}\n", d));
+            }
+            out.push('\n');
+        }
+        if !self.open_questions.is_empty() {
+            out.push_str("**Open questions:**\n");
+            for q in self.open_questions.iter().take(3) {
+                out.push_str(&format!("- {}\n", q));
+            }
+            out.push('\n');
+        }
+        if !self.next_steps.is_empty() {
+            out.push_str("**Next steps:**\n");
+            for s in self.next_steps.iter().take(3) {
+                out.push_str(&format!("- {}\n", s));
+            }
+        }
+        out.trim().to_string()
+    }
+
     /// Render as a `LongTermMemoryEntry` for unified retrieval.
     pub fn as_long_term_entry(&self) -> LongTermMemoryEntry {
         let summary = format!(
@@ -69,13 +103,13 @@ impl Dossier {
             kind: LongTermMemoryKind::ProjectExperience,
             entities: derive_query_terms(&self.title).into_iter().take(5).collect(),
             source_sessions: vec![],
-            source_artifacts: vec![],
             confidence: 0.85,
             stability: 0.80,
             importance: 0.80,
+            reuse_probability: 0.85,
             retention_class: RetentionClass::Permanent,
-            created_at: self.updated_at.clone(),
             last_reused_at: Some(self.updated_at.clone()),
+            ..Default::default()
         }
     }
 }

@@ -4,6 +4,19 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+/// Lifecycle status of a long-term memory entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryStatus {
+    /// Entry is live and used in retrieval (default).
+    #[default]
+    Active,
+    /// Intentionally hidden from retrieval but kept for audit.
+    Archived,
+    /// Replaced by a newer, higher-quality entry on the same topic.
+    Superseded,
+}
+
 /// Governs auto-deletion policy for a long-term memory entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -59,17 +72,25 @@ pub struct LongTermMemoryEntry {
     /// Subjective importance of this entry (0–1). Higher = ranked first during retrieval.
     #[serde(default = "default_importance")]
     pub importance: f32,
+    /// Predicted probability this entry will be reused in a future similar task (0–1).
+    #[serde(default = "default_reuse_probability")]
+    pub reuse_probability: f32,
     /// Controls auto-deletion behaviour.
     #[serde(default)]
     pub retention_class: RetentionClass,
+    /// Lifecycle status — only Active entries appear in search results.
+    #[serde(default)]
+    pub status: EntryStatus,
+    /// ISO-8601 expiry timestamp for Ephemeral entries; None = no TTL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reused_at: Option<String>,
 }
 
-fn default_importance() -> f32 {
-    0.5
-}
+fn default_importance() -> f32 { 0.5 }
+fn default_reuse_probability() -> f32 { 0.5 }
 
 impl Default for LongTermMemoryEntry {
     fn default() -> Self {
@@ -83,12 +104,19 @@ impl Default for LongTermMemoryEntry {
             confidence: 0.5,
             stability: 0.5,
             importance: 0.5,
+            reuse_probability: 0.5,
             retention_class: RetentionClass::LongTerm,
+            status: EntryStatus::Active,
+            expires_at: None,
             created_at: chrono::Utc::now().to_rfc3339(),
             last_reused_at: None,
         }
     }
 }
+
+/// Write Gate constants — prevent unbounded memory growth.
+const MAX_ENTRIES_PER_TOPIC: usize = 5;
+const GLOBAL_SOFT_CAP: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LongTermStatus {
@@ -175,7 +203,20 @@ pub async fn search_entries(
         return vec![];
     }
     let mut matches = Vec::new();
+    let now = chrono::Utc::now();
     for (path, entry) in list_entries(root).await {
+        // Skip non-active entries (archived / superseded).
+        if entry.status != EntryStatus::Active {
+            continue;
+        }
+        // Honour TTL expiry for Ephemeral entries.
+        if let Some(ref exp) = entry.expires_at {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(exp) {
+                if dt.with_timezone(&chrono::Utc) < now {
+                    continue;
+                }
+            }
+        }
         let search_text = format!(
             "{}\n{}\n{}",
             entry.topic,
@@ -186,12 +227,12 @@ pub async fn search_entries(
         if base_score <= 0.0 {
             continue;
         }
-        // Blend TF-IDF with quality: confidence, stability, importance
-        let quality = (entry.confidence as f64 * 0.4
-            + entry.stability as f64 * 0.3
-            + entry.importance as f64 * 0.3)
+        // Blend TF-IDF with quality: confidence, stability, importance, reuse_probability
+        let quality = (entry.confidence as f64 * 0.35
+            + entry.stability as f64 * 0.25
+            + entry.importance as f64 * 0.25
+            + entry.reuse_probability as f64 * 0.15)
             .clamp(0.3, 1.0);
-        // Boost recently reused memories
         let recency = recency_bonus(entry.last_reused_at.as_deref());
         let score = base_score * quality + recency;
         matches.push(LongTermMatch {
@@ -258,9 +299,30 @@ pub async fn prune_stale_entries(root: &Path, dry_run: bool) -> usize {
 }
 
 fn is_stale(entry: &LongTermMemoryEntry, cutoff: chrono::DateTime<chrono::Utc>) -> bool {
+    // Non-active entries are handled separately (archive/supersede), not stale.
+    if entry.status != EntryStatus::Active {
+        return false;
+    }
     // Permanent entries are never stale.
     if entry.retention_class == RetentionClass::Permanent {
         return false;
+    }
+    // Ephemeral entries: check hard TTL first.
+    if entry.retention_class == RetentionClass::Ephemeral {
+        if let Some(ref exp) = entry.expires_at {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(exp) {
+                return dt.with_timezone(&chrono::Utc) < chrono::Utc::now();
+            }
+        }
+        // Ephemeral without explicit expiry: 30-day window.
+        let eph_cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        let old = entry
+            .last_reused_at
+            .as_deref()
+            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc) < eph_cutoff)
+            .unwrap_or(true);
+        return old;
     }
     // Session-class entries use a shorter 30-day window.
     let effective_cutoff = if entry.retention_class == RetentionClass::Session {
@@ -331,13 +393,16 @@ pub async fn create_session_summary(
         kind: LongTermMemoryKind::SessionSummary,
         entities: derive_query_terms(topic).into_iter().take(5).collect(),
         source_sessions: vec![session_id.to_string()],
-        source_artifacts: vec![],
         confidence: 0.70,
         stability: 0.55,
         importance: 0.60,
+        reuse_probability: 0.55,
         retention_class: RetentionClass::Session,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        last_reused_at: None,
+        status: EntryStatus::Active,
+        expires_at: Some(
+            (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339()
+        ),
+        ..Default::default()
     };
 
     let _ = upsert_entry(root, entry.clone()).await;
@@ -346,7 +411,66 @@ pub async fn create_session_summary(
 
 async fn upsert_entry(root: &Path, entry: LongTermMemoryEntry) -> Result<(), std::io::Error> {
     fs::create_dir_all(root).await?;
-    let path = root.join(format!("{}.json", slugify(&entry.topic)));
+
+    // ── Write Gate ──────────────────────────────────────────────────────────
+    let all_entries = list_entries(root).await;
+    let total_active = all_entries
+        .iter()
+        .filter(|(_, e)| e.status == EntryStatus::Active)
+        .count();
+
+    // If global soft cap exceeded, evict the weakest active entry.
+    if total_active >= GLOBAL_SOFT_CAP {
+        let weakest = all_entries
+            .iter()
+            .filter(|(_, e)| e.status == EntryStatus::Active && e.retention_class != RetentionClass::Permanent)
+            .min_by(|(_, a), (_, b)| {
+                let qa = a.confidence * 0.5 + a.stability * 0.3 + a.importance * 0.2;
+                let qb = b.confidence * 0.5 + b.stability * 0.3 + b.importance * 0.2;
+                qa.partial_cmp(&qb).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        if let Some((evict_path, _)) = weakest {
+            let _ = fs::remove_file(evict_path).await;
+            tracing::info!("write_gate: global cap {}, evicted {:?}", GLOBAL_SOFT_CAP, evict_path);
+        }
+    }
+
+    // Per-topic cap: if this topic family already has MAX_ENTRIES_PER_TOPIC active
+    // entries, supersede the lowest-quality one.
+    // "Topic family" = first 2 hyphen-components of the full slug, so that
+    // "recall ordering approach A" and "recall ordering approach B" are grouped.
+    let slug = slugify(&entry.topic);
+    let family_prefix = slug.splitn(3, '-').take(2).collect::<Vec<_>>().join("-");
+    let topic_entries: Vec<_> = all_entries
+        .iter()
+        .filter(|(path, e)| {
+            e.status == EntryStatus::Active
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with(&family_prefix))
+                    .unwrap_or(false)
+        })
+        .collect();
+
+    if topic_entries.len() >= MAX_ENTRIES_PER_TOPIC {
+        let weakest = topic_entries.iter().min_by(|(_, a), (_, b)| {
+            let qa = a.confidence * 0.5 + a.stability * 0.3 + a.importance * 0.2;
+            let qb = b.confidence * 0.5 + b.stability * 0.3 + b.importance * 0.2;
+            qa.partial_cmp(&qb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if let Some((supersede_path, old)) = weakest {
+            let mut updated = (*old).clone();
+            updated.status = EntryStatus::Superseded;
+            if let Ok(json) = serde_json::to_string_pretty(&updated) {
+                let _ = fs::write(supersede_path, json).await;
+            }
+            tracing::debug!("write_gate: superseded {:?} for topic '{}'", supersede_path, entry.topic);
+        }
+    }
+    // ── End Write Gate ───────────────────────────────────────────────────────
+
+    let path = root.join(format!("{}.json", slug));
     let existing = if path.exists() {
         fs::read_to_string(&path)
             .await
@@ -434,14 +558,27 @@ fn build_promotion_candidates(
     for item in state.decisions.iter().chain(state.working_facts.iter()) {
         let kind = infer_long_term_kind(item.kind.as_deref());
         if !should_promote_item(item, &kind) {
+            // Reject log: surface borderline rejects for observability.
+            if item.confidence >= 0.70 && item.status == crate::domain::memory::working_memory::WorkingMemoryItemStatus::Active {
+                tracing::debug!(
+                    target: "omiga::memory::write_gate",
+                    topic = %truncate_chars(&item.text, 60),
+                    confidence = item.confidence,
+                    touch_count = item.touch_count,
+                    "write_gate: rejected promotion candidate"
+                );
+            }
             continue;
         }
-        let retention = match kind {
-            LongTermMemoryKind::ResearchInsight | LongTermMemoryKind::MethodLesson => RetentionClass::LongTerm,
-            LongTermMemoryKind::ProjectExperience => RetentionClass::LongTerm,
-            LongTermMemoryKind::SessionSummary => RetentionClass::Session,
-            LongTermMemoryKind::TaskConclusion => RetentionClass::LongTerm,
+        let (retention, ttl_days) = match kind {
+            LongTermMemoryKind::ResearchInsight | LongTermMemoryKind::MethodLesson |
+            LongTermMemoryKind::ProjectExperience | LongTermMemoryKind::TaskConclusion => (RetentionClass::LongTerm, None),
+            LongTermMemoryKind::SessionSummary => (RetentionClass::Session, Some(30u32)),
         };
+        let expires_at = ttl_days.map(|days| {
+            (chrono::Utc::now() + chrono::Duration::days(days as i64)).to_rfc3339()
+        });
+        let touch_ratio = (item.touch_count as f32 / 6.0).min(0.3);
         candidates.push(LongTermMemoryEntry {
             topic: truncate_chars(&item.text, 120),
             summary: truncate_chars(&item.text, 280),
@@ -451,8 +588,11 @@ fn build_promotion_candidates(
             source_artifacts: item.source_message_ids.clone(),
             confidence: item.confidence.clamp(0.0, 1.0),
             stability: ((item.touch_count as f32) / 4.0).clamp(0.45, 1.0),
-            importance: (item.confidence * 0.7 + (item.touch_count as f32 / 6.0).min(0.3)).clamp(0.0, 1.0),
+            importance: (item.confidence * 0.7 + touch_ratio).clamp(0.0, 1.0),
+            reuse_probability: (item.confidence * 0.6 + touch_ratio * 1.5).clamp(0.0, 1.0),
             retention_class: retention,
+            status: EntryStatus::Active,
+            expires_at,
             created_at: chrono::Utc::now().to_rfc3339(),
             last_reused_at: Some(chrono::Utc::now().to_rfc3339()),
         });
@@ -706,6 +846,88 @@ mod tests {
         );
         let remaining = list_entries(temp.path()).await;
         assert_eq!(remaining[0].1.topic, "keeper-fact");
+    }
+
+    #[tokio::test]
+    async fn write_gate_supersedes_weakest_entry_when_topic_cap_reached() {
+        let temp = tempfile::tempdir().unwrap();
+        // Write MAX_ENTRIES_PER_TOPIC + 1 entries with the same slug *prefix*
+        // but distinct topic names — simulating a family of related conclusions.
+        for i in 0..=MAX_ENTRIES_PER_TOPIC {
+            let entry = LongTermMemoryEntry {
+                topic: format!("recall ordering variant {}", i),
+                summary: format!("recall ordering fact variant {}", i),
+                confidence: 0.5 + i as f32 * 0.05,
+                stability: 0.5,
+                ..Default::default()
+            };
+            upsert_entry(temp.path(), entry).await.unwrap();
+        }
+        let all = list_entries(temp.path()).await;
+        // After the cap is reached, at least one entry must be Superseded.
+        let superseded = all.iter().filter(|(_, e)| e.status == EntryStatus::Superseded).count();
+        assert!(
+            superseded >= 1,
+            "at least one entry should be superseded when per-topic cap is exceeded; all statuses: {:?}",
+            all.iter().map(|(_, e)| (&e.topic, &e.status)).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn search_excludes_superseded_and_archived_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let active = LongTermMemoryEntry {
+            topic: "active-entry".to_string(),
+            summary: "active memory fact about recall ordering".to_string(),
+            status: EntryStatus::Active,
+            ..Default::default()
+        };
+        let superseded = LongTermMemoryEntry {
+            topic: "superseded-entry".to_string(),
+            summary: "superseded memory fact about recall ordering".to_string(),
+            status: EntryStatus::Superseded,
+            ..Default::default()
+        };
+        upsert_entry(temp.path(), active).await.unwrap();
+        // Write superseded directly (bypassing gate) by slug name
+        let path = temp.path().join("superseded-entry.json");
+        let json = serde_json::to_string_pretty(&superseded).unwrap();
+        tokio::fs::write(path, json).await.unwrap();
+
+        let matches = search_entries(temp.path(), "recall ordering", 10, false).await;
+        assert_eq!(matches.len(), 1, "superseded entry must not appear in search");
+        assert_eq!(matches[0].title, "active-entry");
+    }
+
+    #[tokio::test]
+    async fn ephemeral_entry_expires_correctly() {
+        let temp = tempfile::tempdir().unwrap();
+        // Already expired
+        let expired = LongTermMemoryEntry {
+            topic: "ephemeral-old".to_string(),
+            summary: "ephemeral memory fact about recall ordering".to_string(),
+            retention_class: RetentionClass::Ephemeral,
+            expires_at: Some("2024-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+        // Not yet expired
+        let valid = LongTermMemoryEntry {
+            topic: "ephemeral-valid".to_string(),
+            summary: "ephemeral memory valid about recall ordering".to_string(),
+            retention_class: RetentionClass::Ephemeral,
+            expires_at: Some(
+                (chrono::Utc::now() + chrono::Duration::days(10)).to_rfc3339()
+            ),
+            ..Default::default()
+        };
+        let path_exp = temp.path().join("ephemeral-old.json");
+        let path_val = temp.path().join("ephemeral-valid.json");
+        tokio::fs::write(path_exp, serde_json::to_string_pretty(&expired).unwrap()).await.unwrap();
+        tokio::fs::write(path_val, serde_json::to_string_pretty(&valid).unwrap()).await.unwrap();
+
+        let results = search_entries(temp.path(), "recall ordering", 10, false).await;
+        assert_eq!(results.len(), 1, "expired Ephemeral must not appear");
+        assert_eq!(results[0].title, "ephemeral-valid");
     }
 
     #[tokio::test]

@@ -1510,6 +1510,44 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                 None => base,
             }
         };
+        // ── Source Registry pre-check harness ──────────────────────────────────
+        // Before web_fetch, check if this URL has been previously accessed and
+        // has a cached gist.  If so, prepend it so the model can avoid redundant fetches.
+        let src_prefix: Option<String> = if matches!(tool_name.as_str(), "web_fetch" | "WebFetch") {
+            let url = serde_json::from_str::<serde_json::Value>(arguments)
+                .ok()
+                .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(str::to_owned));
+            if let Some(url) = url {
+                if let Ok(cfg) = crate::domain::memory::load_resolved_config(project_root).await {
+                    let lt_root = cfg.long_term_path(project_root);
+                    let hits = crate::domain::memory::source_registry::search_sources(
+                        &lt_root, &url, 1,
+                    )
+                    .await;
+                    hits.into_iter().next().and_then(|m| {
+                        m.gist.map(|gist| {
+                            format!(
+                                "## Previously accessed source\n\
+                                 **URL**: {}\n**Title**: {}\n\
+                                 **Cached summary**: {}\n\n\
+                                 ---\n## Current fetch results\n",
+                                m.url,
+                                m.title.as_deref().unwrap_or("(no title)"),
+                                gist
+                            )
+                        })
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        // ── End Source Registry pre-check harness ───────────────────────────────
+
         // ── Knowledge-base search harness ───────────────────────────────────────
         // Every web_search call first queries the local knowledge base (wiki +
         // implicit memory).  Results, if any, are prepended to the tool output so
@@ -1577,6 +1615,10 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                             stream_error || exit_code.map(|c| c != 0).unwrap_or(false),
                         );
 
+                        // Prepend source registry prefix (web_fetch only).
+                        if let Some(prefix) = src_prefix {
+                            output_text = format!("{prefix}{output_text}");
+                        }
                         // Prepend KB harness prefix (web_search only).
                         if let Some(prefix) = kb_prefix {
                             output_text = format!("{prefix}{output_text}");

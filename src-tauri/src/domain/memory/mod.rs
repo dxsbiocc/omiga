@@ -305,6 +305,7 @@ impl MemorySystem {
 
         sort_memory_results(&mut results);
         dedupe_matches(&mut results);
+        two_phase_rerank(&mut results, working_memory_excerpt);
         let total_matches = results.len();
         results.truncate(limit);
 
@@ -393,6 +394,7 @@ impl MemorySystem {
 
         sort_memory_results(&mut results);
         dedupe_matches(&mut results);
+        two_phase_rerank(&mut results, working_memory_excerpt);
         let total_matches = results.len();
         results.truncate(limit);
 
@@ -766,6 +768,24 @@ fn dedupe_matches(results: &mut Vec<MemoryQueryMatch>) {
         deduped.push(item);
     }
     *results = deduped;
+}
+
+/// Phase-2 rerank: boost results whose content overlaps with the current session context
+/// (working memory excerpt), blending 70% original score + 30% context overlap.
+fn two_phase_rerank(results: &mut Vec<MemoryQueryMatch>, working_memory_excerpt: Option<&str>) {
+    let Some(excerpt) = working_memory_excerpt else { return };
+    let ctx_terms = crate::domain::pageindex::derive_query_terms(excerpt);
+    if ctx_terms.is_empty() {
+        return;
+    }
+    for result in results.iter_mut() {
+        let ctx_score = crate::domain::pageindex::score_terms_against_text(
+            &format!("{} {}", result.title, result.excerpt),
+            &ctx_terms,
+        );
+        result.score = result.score * 0.70 + ctx_score * 0.30;
+    }
+    sort_memory_results(results);
 }
 
 /// Returns true with probability 1/n using the current timestamp as a cheap entropy source.

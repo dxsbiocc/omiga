@@ -637,29 +637,57 @@ pub async fn get_memory_context(
 ) -> Option<String> {
     let mem_cfg = load_resolved_config(project_path).await.ok()?;
     let memory = MemorySystem::with_config(project_path, mem_cfg.clone());
-    let working_memory_excerpt = if let Some(session_id) = session_id {
-        crate::domain::memory::working_memory::render_context(
+
+    // Load working memory for excerpt AND active topic (needed for dossier lookup).
+    let (working_memory_excerpt, active_topic) = if let Some(sid) = session_id {
+        let excerpt = crate::domain::memory::working_memory::render_context(
             repo,
-            session_id,
+            sid,
             query,
             crate::domain::memory::working_memory::DEFAULT_CONTEXT_TOKENS,
         )
         .await
         .ok()
-        .flatten()
+        .flatten();
+        let topic = crate::domain::memory::working_memory::load_state(repo, sid)
+            .await
+            .ok()
+            .and_then(|s| s.active_topic.or(s.session_goal));
+        (excerpt, topic)
+    } else {
+        (None, None)
+    };
+
+    // ── Hot: Project dossier brief (injected unconditionally when present) ──
+    let dossier_section = if let Some(topic) = active_topic.as_deref() {
+        let lt_root = mem_cfg.long_term_path(project_path);
+        let slug = crate::domain::memory::long_term::slugify_pub(topic);
+        let dossier = crate::domain::memory::dossier::load_dossier(&lt_root, &slug).await;
+        if !dossier.title.is_empty() {
+            Some(dossier.render_for_hot_memory())
+        } else {
+            None
+        }
     } else {
         None
     };
-    // Use warm-only query for preflight — implicit (raw chat logs) is Cold and
-    // excluded here; it is only accessible via explicit `recall` tool calls.
+
+    // ── Warm: query knowledge bases and long-term memory ───────────────────
+    // Use warm-only query — implicit (raw chat logs) is Cold, excluded here.
     let unified = memory
         .query_warm(working_memory_excerpt.as_deref(), query, limit)
         .await;
-    if unified.results.is_empty() {
+
+    if dossier_section.is_none() && unified.results.is_empty() {
         return None;
     }
 
-    let mut out = String::from("## Relevant Context from Memory Layers\n\n");
+    let mut out = String::new();
+    if let Some(brief) = dossier_section {
+        out.push_str(&brief);
+        out.push_str("\n\n---\n\n");
+    }
+    out.push_str("## Relevant Context from Memory Layers\n\n");
     for (index, result) in unified.results.iter().enumerate() {
         out.push_str(&format!(
             "### {}. {} [{}]\n*Source: `{}`*\n\n{}\n\n---\n\n",
