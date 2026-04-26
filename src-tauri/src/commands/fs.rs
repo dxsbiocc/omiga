@@ -1,20 +1,22 @@
 //! File system commands
 
 use super::CommandResult;
+use crate::app_state::OmigaAppState;
 use crate::errors::{AppError, FsError};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::{
+    ffi::OsString,
+    path::{Component, Path, PathBuf},
+};
+use tauri::State;
 
 /// Read file as raw bytes - fastest way to get content for Monaco
-#[tauri::command]
-pub async fn read_file_bytes_fast(path: String) -> CommandResult<Vec<u8>> {
-    let path_buf = PathBuf::from(&path);
-    let canonical = path_buf.canonicalize().map_err(|e| {
-        AppError::Fs(FsError::IoError {
-            message: format!("{}: {}", path, e),
-        })
-    })?;
+pub async fn read_file_bytes_scoped(
+    path: String,
+    workspace_root: Option<String>,
+) -> CommandResult<Vec<u8>> {
+    let canonical = canonicalize_scoped_read_target(&path, workspace_root.as_deref())?;
 
     if !canonical.is_file() {
         return Err(AppError::Fs(FsError::InvalidPath { path: path.clone() }));
@@ -41,18 +43,13 @@ pub async fn read_file_bytes_fast(path: String) -> CommandResult<Vec<u8>> {
 }
 
 /// Read a file with optional line-based pagination (`offset` / `limit` lines).
-#[tauri::command]
-pub async fn read_file(
+pub async fn read_file_scoped(
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
+    workspace_root: Option<String>,
 ) -> CommandResult<FileReadResponse> {
-    let path_buf = PathBuf::from(&path);
-    let canonical = path_buf.canonicalize().map_err(|e| {
-        AppError::Fs(FsError::IoError {
-            message: format!("{}: {}", path, e),
-        })
-    })?;
+    let canonical = canonicalize_scoped_read_target(&path, workspace_root.as_deref())?;
 
     if !canonical.is_file() {
         return Err(AppError::Fs(FsError::InvalidPath { path: path.clone() }));
@@ -92,19 +89,15 @@ pub async fn read_file(
 }
 
 /// Write a file
-#[tauri::command]
-pub async fn write_file(
+pub async fn write_file_scoped(
     path: String,
     content: String,
     _expected_hash: Option<String>,
+    workspace_root: String,
 ) -> CommandResult<FileWriteResponse> {
-    let path_buf = PathBuf::from(&path);
-    // Require the file to already exist (no creating arbitrary paths)
-    let canonical = path_buf.canonicalize().map_err(|e| {
-        AppError::Fs(FsError::IoError {
-            message: format!("{}: {}", path, e),
-        })
-    })?;
+    let workspace_root = canonicalize_mutation_scope(&workspace_root)?;
+    // Require the file to already exist and stay inside the selected workspace.
+    let canonical = canonicalize_existing_mutation_target(&path, &workspace_root)?;
     if !canonical.is_file() {
         return Err(AppError::Fs(FsError::InvalidPath { path: path.clone() }));
     }
@@ -120,14 +113,11 @@ pub async fn write_file(
 
 /// Read an image file and return it as a base64-encoded data URL.
 /// Supports common raster/vector formats; rejects files larger than 20 MB.
-#[tauri::command]
-pub async fn read_image_base64(path: String) -> CommandResult<ImageReadResponse> {
-    let path_buf = PathBuf::from(&path);
-    let canonical = path_buf.canonicalize().map_err(|e| {
-        AppError::Fs(FsError::IoError {
-            message: format!("{}: {}", path, e),
-        })
-    })?;
+pub async fn read_image_base64_scoped(
+    path: String,
+    workspace_root: Option<String>,
+) -> CommandResult<ImageReadResponse> {
+    let canonical = canonicalize_scoped_read_target(&path, workspace_root.as_deref())?;
     if !canonical.is_file() {
         return Err(AppError::Fs(FsError::InvalidPath { path: path.clone() }));
     }
@@ -191,18 +181,13 @@ pub fn agent_tools_directory() -> String {
 }
 
 /// List directory contents
-#[tauri::command]
-pub async fn list_directory(
+pub async fn list_directory_scoped(
     path: String,
     _offset: Option<usize>,
     _limit: Option<usize>,
+    workspace_root: Option<String>,
 ) -> CommandResult<DirectoryListResponse> {
-    let path_buf = PathBuf::from(&path);
-    let canonical = path_buf.canonicalize().map_err(|e| {
-        AppError::Fs(FsError::IoError {
-            message: format!("{}: {}", path, e),
-        })
-    })?;
+    let canonical = canonicalize_scoped_read_target(&path, workspace_root.as_deref())?;
 
     if !canonical.is_dir() {
         return Err(AppError::Fs(FsError::InvalidPath { path: path.clone() }));
@@ -297,90 +282,545 @@ pub struct DirectoryListResponse {
     pub has_more: bool,
 }
 
+async fn workspace_root_from_session(
+    state: &OmigaAppState,
+    session_id: &str,
+) -> CommandResult<String> {
+    let trimmed = session_id.trim();
+    if trimmed.is_empty() {
+        return Err(fs_io_error("Session id must not be empty"));
+    }
+    let session = state
+        .repo
+        .get_session_meta(trimmed)
+        .await
+        .map_err(|e| AppError::Persistence(format!("Failed to load session: {}", e)))?
+        .ok_or_else(|| AppError::NotFound {
+            resource: format!("Session {}", trimmed),
+        })?;
+    let root = session.project_path.trim();
+    if root.is_empty() || root == "." {
+        return Err(fs_io_error(format!(
+            "Session '{}' does not have a local workspace root",
+            trimmed
+        )));
+    }
+    Ok(root.to_string())
+}
+
+fn assert_trusted_unscoped_root(canonical_root: &Path, original: &str) -> CommandResult<()> {
+    for trusted in trusted_unscoped_read_roots() {
+        if canonical_root == trusted || canonical_root.starts_with(&trusted) {
+            return Ok(());
+        }
+    }
+    Err(fs_io_error(format!(
+        "Workspace root '{}' requires a valid session id",
+        original
+    )))
+}
+
+async fn resolve_read_workspace_root(
+    state: &OmigaAppState,
+    session_id: Option<String>,
+    workspace_root: Option<String>,
+) -> CommandResult<Option<String>> {
+    if let Some(session_id) = session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return workspace_root_from_session(state, session_id)
+            .await
+            .map(Some);
+    }
+
+    if let Some(root) = workspace_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let canonical = canonicalize_read_scope(root)?;
+        assert_trusted_unscoped_root(&canonical, root)?;
+        return Ok(Some(root.to_string()));
+    }
+
+    Ok(None)
+}
+
+async fn resolve_mutation_workspace_root(
+    state: &OmigaAppState,
+    session_id: String,
+) -> CommandResult<String> {
+    workspace_root_from_session(state, &session_id).await
+}
+
+#[tauri::command]
+pub async fn read_file_bytes(
+    path: String,
+    session_id: Option<String>,
+    workspace_root: Option<String>,
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<Vec<u8>> {
+    let workspace_root = resolve_read_workspace_root(&state, session_id, workspace_root).await?;
+    read_file_bytes_scoped(path, workspace_root).await
+}
+
+#[tauri::command]
+pub async fn read_file_bytes_fast(
+    path: String,
+    session_id: Option<String>,
+    workspace_root: Option<String>,
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<Vec<u8>> {
+    let workspace_root = resolve_read_workspace_root(&state, session_id, workspace_root).await?;
+    read_file_bytes_scoped(path, workspace_root).await
+}
+
+#[tauri::command]
+pub async fn read_file(
+    path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    session_id: Option<String>,
+    workspace_root: Option<String>,
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<FileReadResponse> {
+    let workspace_root = resolve_read_workspace_root(&state, session_id, workspace_root).await?;
+    read_file_scoped(path, offset, limit, workspace_root).await
+}
+
+#[tauri::command]
+pub async fn write_file(
+    path: String,
+    content: String,
+    expected_hash: Option<String>,
+    session_id: String,
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<FileWriteResponse> {
+    let workspace_root = resolve_mutation_workspace_root(&state, session_id).await?;
+    write_file_scoped(path, content, expected_hash, workspace_root).await
+}
+
+#[tauri::command]
+pub async fn read_image_base64(
+    path: String,
+    session_id: Option<String>,
+    workspace_root: Option<String>,
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<ImageReadResponse> {
+    let workspace_root = resolve_read_workspace_root(&state, session_id, workspace_root).await?;
+    read_image_base64_scoped(path, workspace_root).await
+}
+
+#[tauri::command]
+pub async fn list_directory(
+    path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    session_id: Option<String>,
+    workspace_root: Option<String>,
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<DirectoryListResponse> {
+    let workspace_root = resolve_read_workspace_root(&state, session_id, workspace_root).await?;
+    list_directory_scoped(path, offset, limit, workspace_root).await
+}
+
 // ─── Filesystem mutation commands ─────────────────────────────────────────────
 
-/// Create a new empty directory (all intermediate parent directories are created).
-#[tauri::command]
-pub async fn create_directory(path: String) -> CommandResult<String> {
-    let p = PathBuf::from(&path);
-    tokio::fs::create_dir_all(&p)
-        .await
-        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+fn fs_io_error(message: impl Into<String>) -> AppError {
+    AppError::Fs(FsError::IoError {
+        message: message.into(),
+    })
+}
+
+fn normal_component_count(path: &Path) -> usize {
+    path.components()
+        .filter(|component| matches!(component, Component::Normal(_)))
+        .count()
+}
+
+fn contains_parent_dir(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn project_root() -> Option<PathBuf> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(Path::to_path_buf)
+}
+
+fn protected_mutation_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(canonical) = home.canonicalize() {
+            roots.push(canonical);
+        }
+    }
+    if let Some(project) = project_root() {
+        if let Ok(canonical) = project.canonicalize() {
+            roots.push(canonical);
+        }
+    }
+    roots
+}
+
+fn push_canonical_if_dir(roots: &mut Vec<PathBuf>, path: PathBuf) {
+    if let Ok(canonical) = path.canonicalize() {
+        if canonical.is_dir() && !roots.iter().any(|root| root == &canonical) {
+            roots.push(canonical);
+        }
+    }
+}
+
+fn trusted_unscoped_read_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        // Skill previews may read installed skill bundles, but not the whole
+        // ~/.codex tree where sessions and credentials can live.
+        push_canonical_if_dir(&mut roots, home.join(".codex").join("skills"));
+        push_canonical_if_dir(&mut roots, home.join(".codex").join("plugins"));
+    }
+    if let Some(data_dir) = dirs::data_dir() {
+        // Background agent output is written under the Tauri app data dir.
+        for app_dir in ["com.omiga.desktop", "com.omiga.app", "Omiga", "omiga"] {
+            push_canonical_if_dir(&mut roots, data_dir.join(app_dir));
+        }
+    }
+    if let Some(cache_dir) = dirs::cache_dir() {
+        for app_dir in ["com.omiga.desktop", "com.omiga.app", "Omiga", "omiga"] {
+            push_canonical_if_dir(&mut roots, cache_dir.join(app_dir));
+        }
+    }
+    roots
+}
+
+fn validate_read_path_shape(path: &str, p: &Path) -> CommandResult<()> {
+    validate_mutation_path_shape(path, p)
+}
+
+fn canonicalize_read_scope(workspace_root: &str) -> CommandResult<PathBuf> {
+    canonicalize_mutation_scope(workspace_root)
+}
+
+fn ensure_read_target_in_scope(
+    canonical: &Path,
+    workspace_root: Option<&Path>,
+    original: &str,
+) -> CommandResult<()> {
+    if let Some(root) = workspace_root {
+        if canonical == root || canonical.starts_with(root) {
+            return Ok(());
+        }
+        return Err(fs_io_error(format!(
+            "Filesystem read '{}' is outside workspace root '{}'",
+            original,
+            root.to_string_lossy()
+        )));
+    }
+
+    for root in trusted_unscoped_read_roots() {
+        if canonical == root || canonical.starts_with(&root) {
+            return Ok(());
+        }
+    }
+
+    Err(fs_io_error(format!(
+        "Filesystem read '{}' requires a workspace root",
+        original
+    )))
+}
+
+fn canonicalize_scoped_read_target(
+    path: &str,
+    workspace_root: Option<&str>,
+) -> CommandResult<PathBuf> {
+    let p = PathBuf::from(path);
+    validate_read_path_shape(path, &p)?;
     let canonical = p
         .canonicalize()
-        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+        .map_err(|e| fs_io_error(format!("Could not resolve read target '{}': {}", path, e)))?;
+    if canonical.parent().is_none() || normal_component_count(&canonical) < 2 {
+        return Err(fs_io_error(format!(
+            "Refusing to read high-level filesystem path '{}'",
+            path
+        )));
+    }
+
+    let root = match workspace_root.and_then(|root| {
+        let trimmed = root.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }) {
+        Some(root) => Some(canonicalize_read_scope(root)?),
+        None => None,
+    };
+    ensure_read_target_in_scope(&canonical, root.as_deref(), path)?;
+    Ok(canonical)
+}
+
+fn canonicalize_mutation_scope(workspace_root: &str) -> CommandResult<PathBuf> {
+    let root = PathBuf::from(workspace_root);
+    validate_mutation_path_shape(workspace_root, &root)?;
+    let canonical = root.canonicalize().map_err(|e| {
+        fs_io_error(format!(
+            "Could not resolve workspace root '{}': {}",
+            workspace_root, e
+        ))
+    })?;
+    if !canonical.is_dir() {
+        return Err(fs_io_error(format!(
+            "Workspace root '{}' is not a directory",
+            workspace_root
+        )));
+    }
+    if let Some(home) = dirs::home_dir().and_then(|path| path.canonicalize().ok()) {
+        if canonical == home {
+            return Err(fs_io_error(format!(
+                "Refusing to use home directory '{}' as a mutation root",
+                workspace_root
+            )));
+        }
+    }
+    Ok(canonical)
+}
+
+fn reject_protected_mutation_target(path: &Path, original: &str) -> CommandResult<()> {
+    if path.parent().is_none() || normal_component_count(path) < 2 {
+        return Err(fs_io_error(format!(
+            "Refusing to mutate high-level filesystem path '{}'",
+            original
+        )));
+    }
+
+    for protected in protected_mutation_roots() {
+        if path == protected {
+            return Err(fs_io_error(format!(
+                "Refusing to mutate protected directory '{}'",
+                original
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_mutation_path_shape(path: &str, p: &Path) -> CommandResult<()> {
+    if path.trim().is_empty() {
+        return Err(fs_io_error("Path must not be empty"));
+    }
+    if !p.is_absolute() {
+        return Err(fs_io_error(format!(
+            "Filesystem mutations require an absolute path: '{}'",
+            path
+        )));
+    }
+    if contains_parent_dir(p) {
+        return Err(fs_io_error(format!(
+            "Filesystem mutation paths must not contain '..': '{}'",
+            path
+        )));
+    }
+    if normal_component_count(p) < 2 {
+        return Err(fs_io_error(format!(
+            "Refusing to mutate high-level filesystem path '{}'",
+            path
+        )));
+    }
+    Ok(())
+}
+
+fn reject_outside_mutation_scope(
+    path: &Path,
+    workspace_root: &Path,
+    original: &str,
+) -> CommandResult<()> {
+    if path == workspace_root {
+        return Err(fs_io_error(format!(
+            "Refusing to mutate workspace root '{}'",
+            original
+        )));
+    }
+    if !path.starts_with(workspace_root) {
+        return Err(fs_io_error(format!(
+            "Filesystem mutation '{}' is outside workspace root '{}'",
+            original,
+            workspace_root.to_string_lossy()
+        )));
+    }
+    Ok(())
+}
+
+fn canonicalize_existing_mutation_target(
+    path: &str,
+    workspace_root: &Path,
+) -> CommandResult<PathBuf> {
+    let p = PathBuf::from(path);
+    validate_mutation_path_shape(path, &p)?;
+    let canonical = p.canonicalize().map_err(|e| fs_io_error(e.to_string()))?;
+    reject_outside_mutation_scope(&canonical, workspace_root, path)?;
+    reject_protected_mutation_target(&canonical, path)?;
+    Ok(canonical)
+}
+
+fn resolve_mutation_target(path: &str, workspace_root: &Path) -> CommandResult<PathBuf> {
+    let p = PathBuf::from(path);
+    validate_mutation_path_shape(path, &p)?;
+
+    if p.exists() {
+        return canonicalize_existing_mutation_target(path, workspace_root);
+    }
+
+    let mut cursor = p.as_path();
+    let mut suffix: Vec<OsString> = Vec::new();
+    while !cursor.exists() {
+        let name = cursor.file_name().ok_or_else(|| {
+            fs_io_error(format!(
+                "Could not resolve parent directory for mutation path '{}'",
+                path
+            ))
+        })?;
+        suffix.push(name.to_os_string());
+        cursor = cursor.parent().ok_or_else(|| {
+            fs_io_error(format!(
+                "Could not resolve parent directory for mutation path '{}'",
+                path
+            ))
+        })?;
+    }
+
+    let mut resolved = cursor
+        .canonicalize()
+        .map_err(|e| fs_io_error(e.to_string()))?;
+    for part in suffix.iter().rev() {
+        resolved.push(part);
+    }
+    reject_outside_mutation_scope(&resolved, workspace_root, path)?;
+    reject_protected_mutation_target(&resolved, path)?;
+    Ok(resolved)
+}
+
+/// Create a new empty directory (all intermediate parent directories are created).
+pub async fn create_directory_scoped(
+    path: String,
+    workspace_root: String,
+) -> CommandResult<String> {
+    let workspace_root = canonicalize_mutation_scope(&workspace_root)?;
+    let target = resolve_mutation_target(&path, &workspace_root)?;
+    tokio::fs::create_dir_all(&target)
+        .await
+        .map_err(|e| fs_io_error(e.to_string()))?;
+    let canonical = canonicalize_existing_mutation_target(&path, &workspace_root)?;
     Ok(canonical.to_string_lossy().into_owned())
 }
 
 /// Create a new empty file. Fails if the file already exists.
-#[tauri::command]
-pub async fn create_file(path: String) -> CommandResult<String> {
-    let p = PathBuf::from(&path);
-    if p.exists() {
-        return Err(AppError::Fs(FsError::IoError {
-            message: format!("'{}' already exists", path),
-        }));
+pub async fn create_file_scoped(path: String, workspace_root: String) -> CommandResult<String> {
+    let workspace_root = canonicalize_mutation_scope(&workspace_root)?;
+    let target = resolve_mutation_target(&path, &workspace_root)?;
+    if target.exists() {
+        return Err(fs_io_error(format!("'{}' already exists", path)));
     }
-    // Create parent directories if missing.
-    if let Some(parent) = p.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
-        }
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| fs_io_error(e.to_string()))?;
     }
-    tokio::fs::File::create(&p)
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
         .await
-        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
-    let canonical = p
-        .canonicalize()
-        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+        .map_err(|e| fs_io_error(e.to_string()))?;
+    let canonical = canonicalize_existing_mutation_target(&path, &workspace_root)?;
     Ok(canonical.to_string_lossy().into_owned())
 }
 
 /// Delete a file or directory. Directories are removed recursively.
-#[tauri::command]
-pub async fn delete_fs_entry(path: String) -> CommandResult<()> {
-    let p = PathBuf::from(&path);
-    if !p.exists() {
-        return Err(AppError::Fs(FsError::IoError {
-            message: format!("'{}' does not exist", path),
-        }));
-    }
-    if p.is_dir() {
-        tokio::fs::remove_dir_all(&p)
+pub async fn delete_fs_entry_scoped(path: String, workspace_root: String) -> CommandResult<()> {
+    let workspace_root = canonicalize_mutation_scope(&workspace_root)?;
+    let target = canonicalize_existing_mutation_target(&path, &workspace_root)?;
+    if target.is_dir() {
+        tokio::fs::remove_dir_all(&target)
             .await
-            .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+            .map_err(|e| fs_io_error(e.to_string()))?;
     } else {
-        tokio::fs::remove_file(&p)
+        tokio::fs::remove_file(&target)
             .await
-            .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+            .map_err(|e| fs_io_error(e.to_string()))?;
     }
     Ok(())
 }
 
 /// Rename (or move) a filesystem entry. `to_path` must not already exist.
-#[tauri::command]
-pub async fn rename_fs_entry(from_path: String, to_path: String) -> CommandResult<String> {
-    let from = PathBuf::from(&from_path);
-    let to = PathBuf::from(&to_path);
-    if !from.exists() {
-        return Err(AppError::Fs(FsError::IoError {
-            message: format!("'{}' does not exist", from_path),
-        }));
-    }
+pub async fn rename_fs_entry_scoped(
+    from_path: String,
+    to_path: String,
+    workspace_root: String,
+) -> CommandResult<String> {
+    let workspace_root = canonicalize_mutation_scope(&workspace_root)?;
+    let from = canonicalize_existing_mutation_target(&from_path, &workspace_root)?;
+    let to = resolve_mutation_target(&to_path, &workspace_root)?;
     if to.exists() {
-        return Err(AppError::Fs(FsError::IoError {
-            message: format!("'{}' already exists", to_path),
-        }));
+        return Err(fs_io_error(format!("'{}' already exists", to_path)));
+    }
+    if let Some(parent) = to.parent() {
+        if !parent.exists() {
+            return Err(fs_io_error(format!(
+                "Parent directory '{}' does not exist",
+                parent.to_string_lossy()
+            )));
+        }
     }
     tokio::fs::rename(&from, &to)
         .await
-        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
-    let canonical = to
-        .canonicalize()
-        .map_err(|e| AppError::Fs(FsError::IoError { message: e.to_string() }))?;
+        .map_err(|e| fs_io_error(e.to_string()))?;
+    let canonical = to.canonicalize().map_err(|e| fs_io_error(e.to_string()))?;
     Ok(canonical.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn create_directory(
+    path: String,
+    session_id: String,
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<String> {
+    let workspace_root = resolve_mutation_workspace_root(&state, session_id).await?;
+    create_directory_scoped(path, workspace_root).await
+}
+
+#[tauri::command]
+pub async fn create_file(
+    path: String,
+    session_id: String,
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<String> {
+    let workspace_root = resolve_mutation_workspace_root(&state, session_id).await?;
+    create_file_scoped(path, workspace_root).await
+}
+
+#[tauri::command]
+pub async fn delete_fs_entry(
+    path: String,
+    session_id: String,
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<()> {
+    let workspace_root = resolve_mutation_workspace_root(&state, session_id).await?;
+    delete_fs_entry_scoped(path, workspace_root).await
+}
+
+#[tauri::command]
+pub async fn rename_fs_entry(
+    from_path: String,
+    to_path: String,
+    session_id: String,
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<String> {
+    let workspace_root = resolve_mutation_workspace_root(&state, session_id).await?;
+    rename_fs_entry_scoped(from_path, to_path, workspace_root).await
 }
 
 // ─── Local file viewer ────────────────────────────────────────────────────────
@@ -405,14 +845,11 @@ pub enum LocalFileViewResponse {
 /// - PDF   → returns base64 data URI for iframe embed
 ///
 /// Size caps: HTML 1 MB · images 20 MB · PDF 50 MB.
-#[tauri::command]
-pub async fn read_local_file_for_view(path: String) -> CommandResult<LocalFileViewResponse> {
-    let path_buf = PathBuf::from(&path);
-    let canonical = path_buf.canonicalize().map_err(|e| {
-        AppError::Fs(FsError::IoError {
-            message: format!("{}: {}", path, e),
-        })
-    })?;
+pub async fn read_local_file_for_view_scoped(
+    path: String,
+    workspace_root: Option<String>,
+) -> CommandResult<LocalFileViewResponse> {
+    let canonical = canonicalize_scoped_read_target(&path, workspace_root.as_deref())?;
 
     if !canonical.is_file() {
         return Err(AppError::Fs(FsError::InvalidPath { path: path.clone() }));
@@ -430,7 +867,7 @@ pub async fn read_local_file_for_view(path: String) -> CommandResult<LocalFileVi
 
     match ext.as_str() {
         "html" | "htm" => {
-            const MAX: u64 = 1 * 1024 * 1024;
+            const MAX: u64 = 1024 * 1024;
             if meta.len() > MAX {
                 return Err(AppError::Fs(FsError::FileTooLarge {
                     path: path.clone(),
@@ -509,4 +946,15 @@ pub async fn read_local_file_for_view(path: String) -> CommandResult<LocalFileVi
 
         _ => Ok(LocalFileViewResponse::Unsupported { ext }),
     }
+}
+
+#[tauri::command]
+pub async fn read_local_file_for_view(
+    path: String,
+    session_id: Option<String>,
+    workspace_root: Option<String>,
+    state: State<'_, OmigaAppState>,
+) -> CommandResult<LocalFileViewResponse> {
+    let workspace_root = resolve_read_workspace_root(&state, session_id, workspace_root).await?;
+    read_local_file_for_view_scoped(path, workspace_root).await
 }

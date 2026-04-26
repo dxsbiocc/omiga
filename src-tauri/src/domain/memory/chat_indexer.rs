@@ -310,7 +310,7 @@ fn format_single_message(msg: &ChatMessage) -> String {
             for call in calls {
                 formatted.push_str(&format!("- `{}` ({}\n", call.name, call.id));
             }
-            formatted.push_str("\n");
+            formatted.push('\n');
         }
     }
 

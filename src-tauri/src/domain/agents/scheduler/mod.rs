@@ -293,7 +293,7 @@ impl AgentScheduler {
              预计执行时间: ~{} 分钟。是否继续？",
             task_count,
             agent_list,
-            (self.estimate_duration(plan, agents) + 59) / 60
+            self.estimate_duration(plan, agents).div_ceil(60)
         )
     }
 

@@ -233,16 +233,15 @@ impl MemoryConfig {
             ));
         }
 
-        if self.memory_mode == MemoryMode::ProjectRelative {
-            if self.root_dir.as_os_str() == "/"
+        if self.memory_mode == MemoryMode::ProjectRelative
+            && (self.root_dir.as_os_str() == "/"
                 || self.root_dir.as_os_str() == "\\"
                 || root_str == "~"
-                || root_str == "$HOME"
-            {
-                return Err(AppError::Unknown(
-                    "Memory root directory cannot be a system root directory".to_string(),
-                ));
-            }
+                || root_str == "$HOME")
+        {
+            return Err(AppError::Unknown(
+                "Memory root directory cannot be a system root directory".to_string(),
+            ));
         }
 
         Ok(())

@@ -172,9 +172,7 @@ impl super::ToolImpl for GlobTool {
 /// Build a glob matcher from pattern
 fn build_glob_matcher(pattern: &str) -> Result<glob::Pattern, String> {
     // Convert pattern to proper glob format if needed
-    let glob_pattern = if pattern.contains("**") {
-        pattern.to_string()
-    } else if pattern.contains('*') || pattern.contains('?') {
+    let glob_pattern = if pattern.contains("**") || pattern.contains('*') || pattern.contains('?') {
         pattern.to_string()
     } else {
         // No wildcards - treat as exact match or directory

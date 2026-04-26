@@ -122,8 +122,10 @@ export function toolDisplayOutputText(
 ): string {
   const fromTc = tc.output?.trim();
   if (fromTc) return fromTc;
+  if (tc.status === "running") return "";
   if (message.role !== "tool" || !message.content?.trim()) return "";
   const c = message.content.trim();
+  if (/^`[^`]+`$/i.test(c)) return "";
   if (/^`[^`]+`\s+(completed|failed)$/i.test(c)) return "";
   return c;
 }

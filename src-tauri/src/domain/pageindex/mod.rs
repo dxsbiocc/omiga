@@ -332,7 +332,7 @@ impl PageIndex {
 
         // Create document node
         let doc_node = DocumentNode {
-            id: format!("doc_{}", hash[..16].to_string()),
+            id: format!("doc_{}", &hash[..16]),
             path: relative_path.clone(),
             title: parse_result.title,
             content: parse_result.content,

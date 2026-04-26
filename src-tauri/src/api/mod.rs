@@ -334,7 +334,10 @@ async fn parse_sse_stream(
                             let event = buffer[..pos].to_string();
                             buffer = buffer[pos + 2..].to_string();
 
-                            if let Err(_) = process_sse_event(&event, &tx, &mut usage_acc).await {
+                            if process_sse_event(&event, &tx, &mut usage_acc)
+                                .await
+                                .is_err()
+                            {
                                 return; // Channel closed
                             }
                         }
@@ -378,8 +381,8 @@ async fn process_sse_event(
     // Parse SSE format (data: {...})
     let mut data = None;
     for line in event.lines() {
-        if line.starts_with("data: ") {
-            data = Some(&line[6..]);
+        if let Some(stripped) = line.strip_prefix("data: ") {
+            data = Some(stripped);
             break;
         }
     }

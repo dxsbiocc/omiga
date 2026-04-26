@@ -261,7 +261,7 @@ pub async fn permission_approve(
     manager
         .approve_request(&request.session_id, mode, &context)
         .await
-        .map_err(|e| crate::errors::AppError::Unknown(e))?;
+        .map_err(crate::errors::AppError::Unknown)?;
 
     if let Some(rid) = request.request_id.as_ref() {
         let mut map = app_state.chat.permission_tool_waiters.lock().await;
@@ -301,7 +301,7 @@ pub async fn permission_deny(
     manager
         .deny_request(&context, &request.reason)
         .await
-        .map_err(|e| crate::errors::AppError::Unknown(e))?;
+        .map_err(crate::errors::AppError::Unknown)?;
 
     if let Some(rid) = request.request_id.as_ref() {
         let mut map = app_state.chat.permission_tool_waiters.lock().await;
@@ -332,7 +332,7 @@ pub async fn permission_add_rule(
     manager
         .add_rule(request.rule)
         .await
-        .map_err(|e| crate::errors::AppError::Unknown(e))?;
+        .map_err(crate::errors::AppError::Unknown)?;
     Ok(())
 }
 
@@ -345,7 +345,7 @@ pub async fn permission_delete_rule(
     manager
         .delete_rule(&id)
         .await
-        .map_err(|e| crate::errors::AppError::Unknown(e))?;
+        .map_err(crate::errors::AppError::Unknown)?;
     Ok(())
 }
 
@@ -358,7 +358,7 @@ pub async fn permission_update_rule(
     manager
         .update_rule(request.rule)
         .await
-        .map_err(|e| crate::errors::AppError::Unknown(e))?;
+        .map_err(crate::errors::AppError::Unknown)?;
     Ok(())
 }
 

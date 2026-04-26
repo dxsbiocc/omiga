@@ -66,9 +66,8 @@ pub struct PromptFile {
 /// delimited by `---` lines.
 fn parse_prompt_file(content: &str) -> PromptFile {
     let content = content.trim_start();
-    if content.starts_with("---") {
+    if let Some(after_open) = content.strip_prefix("---") {
         // Find the closing ---
-        let after_open = &content[3..];
         if let Some(close_pos) = after_open.find("\n---") {
             let yaml_src = after_open[..close_pos].trim();
             let body = after_open[close_pos + 4..].trim_start();

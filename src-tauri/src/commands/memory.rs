@@ -780,7 +780,7 @@ fn list_wiki_pages(wiki_dir: &std::path::Path) -> Vec<String> {
                 .filter(|e| {
                     e.path()
                         .extension()
-                        .map_or(false, |x| x.eq_ignore_ascii_case("md"))
+                        .is_some_and(|x| x.eq_ignore_ascii_case("md"))
                 })
                 .map(|e| e.file_name().to_string_lossy().into_owned())
                 .collect()

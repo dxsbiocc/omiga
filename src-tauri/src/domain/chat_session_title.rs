@@ -103,7 +103,7 @@ pub fn sanitize_session_title(raw: &str) -> String {
         )
     });
     s = s.trim();
-    s = s.trim_start_matches(|c| matches!(c, '#' | '*' | '-' | '•' | '·'));
+    s = s.trim_start_matches(['#', '*', '-', '•', '·']);
     s = s.trim();
     if s.is_empty() {
         return String::new();

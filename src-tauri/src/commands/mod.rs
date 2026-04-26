@@ -84,16 +84,16 @@ pub async fn test_notification(app: tauri::AppHandle) -> Result<String, String> 
         }
     };
 
-    if has_permission {
-        if let Ok(_) = app
+    if has_permission
+        && app
             .notification()
             .builder()
             .title("测试通知 (Backend)")
             .body("这是一条来自后端的测试通知")
             .show()
-        {
-            return Ok("Native notification sent".to_string());
-        }
+            .is_ok()
+    {
+        return Ok("Native notification sent".to_string());
     }
 
     #[cfg(target_os = "macos")]
@@ -125,21 +125,21 @@ pub async fn send_notification(
         Ok(tauri_plugin_notification::PermissionState::Granted)
     );
 
-    if has_permission {
-        if let Ok(_) = app
+    if has_permission
+        && app
             .notification()
             .builder()
             .title(&title)
             .body(&body)
             .show()
-        {
-            return Ok("native".to_string());
-        }
+            .is_ok()
+    {
+        return Ok("native".to_string());
     }
 
     #[cfg(target_os = "macos")]
     {
-        if let Ok(_) = send_notification_via_osascript(&title, &body) {
+        if send_notification_via_osascript(&title, &body).is_ok() {
             return Ok("osascript".to_string());
         }
     }

@@ -60,7 +60,7 @@ fn extract_task_tokens(text: &str) -> Vec<String> {
     let lower = text.to_lowercase();
     for m in latin_re.find_iter(&lower) {
         let t = m.as_str();
-        if !STOP.iter().any(|&s| s == t) {
+        if !STOP.contains(&t) {
             out.push(t.to_string());
         }
     }
@@ -310,16 +310,16 @@ pub fn skill_matches_conditions(skill: &SkillEntry, available_tools: &[&str]) ->
     let has = |name: &str| available_tools.iter().any(|t| t.eq_ignore_ascii_case(name));
 
     // requires_tools: all must be present.
-    if !skill.conditions.requires_tools.is_empty() {
-        if !skill.conditions.requires_tools.iter().all(|t| has(t)) {
-            return false;
-        }
+    if !skill.conditions.requires_tools.is_empty()
+        && !skill.conditions.requires_tools.iter().all(|t| has(t))
+    {
+        return false;
     }
     // requires_toolsets: all must be present.
-    if !skill.conditions.requires_toolsets.is_empty() {
-        if !skill.conditions.requires_toolsets.iter().all(|t| has(t)) {
-            return false;
-        }
+    if !skill.conditions.requires_toolsets.is_empty()
+        && !skill.conditions.requires_toolsets.iter().all(|t| has(t))
+    {
+        return false;
     }
     true
 }
@@ -1472,7 +1472,7 @@ ok
         let skills = load_skills_for_project(dir.path()).await;
         let names: Vec<_> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(
-            names.iter().any(|n| *n == "nested-demo"),
+            names.contains(&"nested-demo"),
             "expected nested-demo, got {names:?}"
         );
     }

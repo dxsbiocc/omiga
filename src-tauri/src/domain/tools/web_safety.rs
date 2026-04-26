@@ -56,11 +56,12 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
                 || v4.octets()[0] == 0
         }
         IpAddr::V6(v6) => {
+            let first_segment = v6.segments()[0];
             v6.is_loopback()
                 || v6.is_multicast()
                 || v6.is_unspecified()
-                || v6.is_unique_local()
-                || ((v6.segments()[0] & 0xffc0) == 0xfe80)
+                || ((first_segment & 0xfe00) == 0xfc00)
+                || ((first_segment & 0xffc0) == 0xfe80)
         }
     }
 }

@@ -148,12 +148,12 @@ impl SessionCodec {
     pub fn to_api_messages(messages: &[Message]) -> Vec<ApiMessage> {
         messages
             .iter()
-            .filter_map(|msg| match msg {
-                Message::User { content } => Some(ApiMessage {
+            .map(|msg| match msg {
+                Message::User { content } => ApiMessage {
                     role: Role::User,
                     content: vec![ContentBlock::text(content.clone())],
                     reasoning_content: None,
-                }),
+                },
                 Message::Assistant {
                     content,
                     tool_calls,
@@ -175,16 +175,16 @@ impl SessionCodec {
                         }
                     }
 
-                    Some(ApiMessage {
+                    ApiMessage {
                         role: Role::Assistant,
                         content: blocks,
                         reasoning_content: reasoning_content.clone(),
-                    })
+                    }
                 }
                 Message::Tool {
                     tool_call_id,
                     output,
-                } => Some(ApiMessage {
+                } => ApiMessage {
                     role: Role::User,
                     content: vec![ContentBlock::ToolResult {
                         tool_use_id: tool_call_id.clone(),
@@ -192,7 +192,7 @@ impl SessionCodec {
                         is_error: None,
                     }],
                     reasoning_content: None,
-                }),
+                },
             })
             .collect()
     }
@@ -225,7 +225,7 @@ impl SessionCodec {
 
     /// Build a Message::Assistant from content and optional tool calls JSON
     pub fn build_assistant_message(content: &str, tool_calls_json: Option<&str>) -> Message {
-        let tool_calls = tool_calls_json.and_then(|tc| Self::parse_tool_calls(tc));
+        let tool_calls = tool_calls_json.and_then(Self::parse_tool_calls);
         Message::Assistant {
             content: content.to_string(),
             tool_calls,

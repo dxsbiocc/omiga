@@ -5,9 +5,10 @@
 use serde::{Deserialize, Serialize};
 
 /// 调度策略
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum SchedulingStrategy {
     /// 自动选择最佳策略
+    #[default]
     Auto,
     /// 单 Agent 执行（简单任务）
     Single,
@@ -107,12 +108,6 @@ impl SchedulingStrategy {
             "single" => Self::Single,
             _ => Self::Auto,
         }
-    }
-}
-
-impl Default for SchedulingStrategy {
-    fn default() -> Self {
-        SchedulingStrategy::Auto
     }
 }
 

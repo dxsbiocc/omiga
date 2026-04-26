@@ -24,15 +24,12 @@ const MIN_MESSAGES: usize = 1;
 const MIN_TOOL_OUTPUT_KEEP_BYTES: usize = 2_048;
 
 fn env_truthy(key: &str) -> bool {
-    matches!(
-        std::env::var(key)
-            .map(|s| {
-                let l = s.to_ascii_lowercase();
-                l == "1" || l == "true" || l == "yes"
-            })
-            .unwrap_or(false),
-        true
-    )
+    std::env::var(key)
+        .map(|s| {
+            let l = s.to_ascii_lowercase();
+            l == "1" || l == "true" || l == "yes"
+        })
+        .unwrap_or(false)
 }
 
 fn auto_compact_threshold_percent() -> u32 {
@@ -151,24 +148,22 @@ fn take_head_message_block(messages: &mut Vec<Message>) -> Vec<Message> {
     }
     let first = messages.remove(0);
     let mut removed = vec![first.clone()];
-    match first {
-        Message::Assistant {
-            tool_calls: Some(calls),
-            ..
-        } => {
-            let mut pending: HashSet<String> = calls.iter().map(|c| c.id.clone()).collect();
-            while !messages.is_empty() && !pending.is_empty() {
-                match &messages[0] {
-                    Message::Tool { tool_call_id, .. } if pending.contains(tool_call_id) => {
-                        let id = tool_call_id.clone();
-                        removed.push(messages.remove(0));
-                        pending.remove(&id);
-                    }
-                    _ => break,
+    if let Message::Assistant {
+        tool_calls: Some(calls),
+        ..
+    } = first
+    {
+        let mut pending: HashSet<String> = calls.iter().map(|c| c.id.clone()).collect();
+        while !messages.is_empty() && !pending.is_empty() {
+            match &messages[0] {
+                Message::Tool { tool_call_id, .. } if pending.contains(tool_call_id) => {
+                    let id = tool_call_id.clone();
+                    removed.push(messages.remove(0));
+                    pending.remove(&id);
                 }
+                _ => break,
             }
         }
-        _ => {}
     }
     removed
 }
@@ -178,7 +173,7 @@ fn pop_head_message(messages: &mut Vec<Message>) -> bool {
 }
 
 fn truncate_tool_results_for_budget(
-    messages: &mut Vec<Message>,
+    messages: &mut [Message],
     cfg: &LlmConfig,
     tools_enabled: bool,
 ) {
@@ -223,28 +218,24 @@ fn truncate_tool_results_for_budget(
 }
 
 fn truncate_text_messages_for_budget(
-    messages: &mut Vec<Message>,
+    messages: &mut [Message],
     cfg: &LlmConfig,
     tools_enabled: bool,
 ) {
     let budget = messages_budget_tokens(cfg, tools_enabled);
-    for _ in 0..64 {
-        let api = SessionCodec::to_api_messages(messages);
-        let est = estimate_tokens_api_messages(&api);
-        if est <= budget {
-            return;
+    let api = SessionCodec::to_api_messages(messages);
+    let est = estimate_tokens_api_messages(&api);
+    if est <= budget {
+        return;
+    }
+    let excess = est.saturating_sub(budget);
+    let drop_chars = (excess as usize).saturating_mul(4).saturating_add(256);
+    if let Some(Message::User { content }) = messages.first_mut() {
+        if content.len() > 512 {
+            let new_len = content.len().saturating_sub(drop_chars).max(256);
+            let prefix = truncate_utf8_prefix(content.as_str(), new_len);
+            *content = format!("{prefix}\n\n[Omiga: message truncated by auto-compact]");
         }
-        let excess = est.saturating_sub(budget);
-        let drop_chars = (excess as usize).saturating_mul(4).saturating_add(256);
-        if let Some(Message::User { content }) = messages.first_mut() {
-            if content.len() > 512 {
-                let new_len = content.len().saturating_sub(drop_chars).max(256);
-                let prefix = truncate_utf8_prefix(content.as_str(), new_len);
-                *content = format!("{prefix}\n\n[Omiga: message truncated by auto-compact]");
-            }
-            break;
-        }
-        break;
     }
 }
 

@@ -38,9 +38,9 @@ pub async fn load_skill_body(
         };
 
         // Strip YAML frontmatter (--- ... ---) to get the body
-        let body = if raw.starts_with("---") {
-            if let Some(end) = raw[3..].find("\n---") {
-                raw[3 + end + 4..].trim_start().to_string()
+        let body = if let Some(stripped) = raw.strip_prefix("---") {
+            if let Some(end) = stripped.find("\n---") {
+                stripped[end + 4..].trim_start().to_string()
             } else {
                 raw.clone()
             }

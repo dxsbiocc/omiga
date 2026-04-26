@@ -28,9 +28,11 @@ pub fn get_status(path: &Path) -> Result<GitStatus, git2::Error> {
             untracked.push(path);
         } else if status.is_index_deleted() || status.is_wt_deleted() {
             deleted.push(path);
-        } else if status.is_index_modified() || status.is_wt_modified() {
-            modified.push(path);
-        } else if status.is_index_renamed() || status.is_wt_renamed() {
+        } else if status.is_index_modified()
+            || status.is_wt_modified()
+            || status.is_index_renamed()
+            || status.is_wt_renamed()
+        {
             modified.push(path);
         }
     }

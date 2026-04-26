@@ -22,6 +22,7 @@ import NavigateNextRoundedIcon from "@mui/icons-material/NavigateNextRounded";
 import ZoomInRoundedIcon from "@mui/icons-material/ZoomInRounded";
 import ZoomOutRoundedIcon from "@mui/icons-material/ZoomOutRounded";
 import FitScreenRoundedIcon from "@mui/icons-material/FitScreenRounded";
+import { getLocalWorkspaceSessionId } from "../../utils/sshWorkspace";
 
 interface ImageReadResponse {
   data: string;
@@ -62,7 +63,14 @@ export function PdfViewer({ filePath }: PdfViewerProps) {
     setPageInput("1");
     setZoom(100);
 
-    invoke<ImageReadResponse>("read_image_base64", { path: filePath })
+    const sessionId = getLocalWorkspaceSessionId();
+    if (!sessionId) {
+      setLoadError("请先选择本地工作区后再读取 PDF");
+      setIsLoading(false);
+      return () => { cancelled = true; };
+    }
+
+    invoke<ImageReadResponse>("read_image_base64", { path: filePath, sessionId })
       .then((res) => {
         if (cancelled) return;
         // pdf.js requires raw binary bytes (Uint8Array), NOT a base64 string.

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import { getWorkspaceFileContext } from "../utils/sshWorkspace";
+import { getLocalWorkspaceSessionId, getWorkspaceFileContext } from "../utils/sshWorkspace";
 import { extractErrorMessage } from "../utils/errorMessage";
 
 // File types that must NOT be read as text — handled by their own viewers
@@ -93,19 +93,23 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     
     try {
       const ctx = getWorkspaceFileContext();
+      const sessionId = ctx.mode === "local" ? getLocalWorkspaceSessionId() : null;
+      if (ctx.mode === "local" && !sessionId) {
+        throw new Error("请先选择本地工作区后再读取文件");
+      }
       const readFirst = () => {
         if (ctx.mode === "ssh")
           return invoke<FileReadResponse>("ssh_read_file", { sshProfileName: ctx.profile, path, offset: 0, limit: 500 });
         if (ctx.mode === "sandbox")
           return invoke<FileReadResponse>("sandbox_read_file", { sessionId: ctx.sessionId, sandboxBackend: ctx.backend, path, offset: 0, limit: 500 });
-        return invoke<FileReadResponse>("read_file", { path, offset: 0, limit: 500 });
+        return invoke<FileReadResponse>("read_file", { path, offset: 0, limit: 500, sessionId });
       };
       const readRest = () => {
         if (ctx.mode === "ssh")
           return invoke<FileReadResponse>("ssh_read_file", { sshProfileName: ctx.profile, path, offset: 500, limit: 10000 });
         if (ctx.mode === "sandbox")
           return invoke<FileReadResponse>("sandbox_read_file", { sessionId: ctx.sessionId, sandboxBackend: ctx.backend, path, offset: 500, limit: 10000 });
-        return invoke<FileReadResponse>("read_file", { path, offset: 500, limit: 10000 });
+        return invoke<FileReadResponse>("read_file", { path, offset: 500, limit: 10000, sessionId });
       };
 
       // Use chunked reading for faster initial display of large files
@@ -178,7 +182,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       } else if (ctx.mode === "sandbox") {
         await invoke<FileWriteResponse>("sandbox_write_file", { sessionId: ctx.sessionId, sandboxBackend: ctx.backend, path: filePath, content, expectedHash: null });
       } else {
-        await invoke<FileWriteResponse>("write_file", { path: filePath, content, expectedHash: null });
+        const sessionId = getLocalWorkspaceSessionId();
+        if (!sessionId) {
+          throw new Error("请先选择本地工作区后再保存文件");
+        }
+        await invoke<FileWriteResponse>("write_file", { path: filePath, content, expectedHash: null, sessionId });
       }
       set({
         savedContent: content,

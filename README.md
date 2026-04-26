@@ -1,111 +1,275 @@
-# Research System MVP
+# Omiga
 
-本仓库现在包含一套 Rust/Tauri 实现的分层 Research System，代码位于 [src-tauri/src/domain/research_system](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/src-tauri/src/domain/research_system)。它不是玩具 demo，而是可扩展、可测试、默认离线可运行的工程骨架：Agent Cards 落盘管理、执行受 Reviewer 和 PermissionManager 约束、Runner 可在 mock 与未来 LLM provider 间切换。
+Omiga 是一个基于 **Tauri + React + Rust** 的桌面 AI Coding Agent 工作台。它把聊天、代码上下文、文件操作、工具调用、记忆系统和多 Agent 编排放在同一个本地桌面应用里，目标是成为一个可审计、可扩展、面向真实开发工作的 Agent IDE。
 
-## 系统目标
+> 当前版本：`0.2.0`。项目正处于第一版发布前的硬化阶段：核心前端、Tauri 后端、LLM 配置、工具调用、文件树操作、长会话渲染和 mock/real LLM 验证路径已具备基础自动化覆盖；打包发布、签名、公证、GUI E2E 和安全策略仍在持续完善。
 
-- 把 Intake、Planner、Executor、Specialist、Reviewer、Creator 分层。
-- 用 `ContextAssembler` 控制最小上下文，减少污染。
-- 用 `PermissionManager` 阻止越权工具和高风险动作绕过审批。
-- 用 deterministic `MockAgentRunner`、stores、traces 和 reviewer rules 支撑离线测试。
-- 允许未来接入真实 LLM provider，但默认不需要 API key。
+## 目录
+
+- [核心能力](#核心能力)
+- [快速开始](#快速开始)
+- [配置真实 LLM](#配置真实-llm)
+- [常用命令](#常用命令)
+- [测试与验证](#测试与验证)
+- [架构概览](#架构概览)
+- [Research System](#research-system)
+- [安全与隐私](#安全与隐私)
+- [发布前检查清单](#发布前检查清单)
+- [项目结构](#项目结构)
+
+## 核心能力
+
+- **桌面 AI 编程工作台**：Tauri 原生壳 + React 前端，适合长时间本地开发会话。
+- **多 Provider LLM**：通过 `omiga.yaml` 支持 DeepSeek、OpenAI/OpenAI-compatible、自定义 endpoint 等配置。
+- **工具调用与流式状态**：支持 shell、文件读写、搜索、网页检索、MCP/Agent-browser fallback 等工具调用，并在聊天 UI 中展示执行步骤。
+- **Agent 编排**：支持 `/schedule`、`/team`、`/autopilot`、`/research` 等编排入口，包含 mock 离线验证和 real LLM 手动验收路径。
+- **本地文件体验**：文件树、目录列表、文件创建/重命名/删除、Monaco 编辑器、PDF/图片/HTML 本地预览。
+- **记忆与知识库**：项目级 wiki、implicit memory、working memory、long-term/permanent profile，用于跨会话上下文恢复。
+- **性能硬化**：长聊天渐进渲染、工具折叠、Monaco/PDF/Plotly/ECharts 等大依赖 chunk 拆分，配套渲染基准测试。
+- **发布前可验证性**：前端 Vitest、Rust 单元/集成测试、mock LLM orchestration harness、real LLM ignored tests 和 CI 基础流水线。
+
+## 快速开始
+
+### 前置要求
+
+- Node.js 20+
+- Rust 1.75+
+- npm
+- 系统侧 Tauri 依赖（Linux 需要 WebKit/GTK 相关包；macOS/Windows 按 Tauri 2 默认环境准备）
+
+### 安装依赖
+
+```bash
+npm ci
+```
+
+### 启动前端开发服务
+
+```bash
+npm run dev
+```
+
+### 启动 Tauri 桌面应用
+
+```bash
+npm run tauri -- dev
+```
+
+### 构建前端
+
+```bash
+npm run build
+```
+
+### 构建桌面安装包/应用包
+
+```bash
+npm run tauri -- build
+```
+
+## 配置真实 LLM
+
+Omiga 运行时会通过 `omiga_lib::llm::load_config()` 查找 LLM 配置。推荐从模板开始：
+
+```bash
+cp config.example.yaml omiga.yaml
+```
+
+常用配置示例：
+
+```yaml
+version: "1.0"
+default: "deepseek"
+
+providers:
+  deepseek:
+    type: deepseek
+    api_key: ${DEEPSEEK_API_KEY}
+    model: deepseek-chat
+    enabled: true
+
+  custom:
+    type: custom
+    api_key: ${LLM_API_KEY}
+    base_url: ${LLM_BASE_URL}
+    model: ${LLM_MODEL}
+    enabled: false
+
+settings:
+  max_tokens: 4096
+  temperature: 0.7
+  timeout: 600
+  enable_tools: true
+```
+
+配置查找顺序包括：
+
+1. 项目根目录：`omiga.yaml` / `omiga.yml` / `omiga.json` / `omiga.toml`
+2. 从 `src-tauri` 运行时的父项目根目录
+3. 用户配置目录：`~/.config/omiga/omiga.yaml` 等
+4. Legacy Omiga home：`~/.omiga/omiga.yaml` 等
+
+也支持简单 dotenv 风格文件，例如 `~/.omiga/omiga.yaml`：
+
+```bash
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_MODEL=deepseek-chat
+```
+
+不要提交真实 API key。更多 real LLM 验证说明见 [`docs/REAL_LLM_VALIDATION.md`](docs/REAL_LLM_VALIDATION.md)。
+
+## 常用命令
+
+| 目标 | 命令 |
+| --- | --- |
+| 安装依赖 | `npm ci` |
+| 前端开发 | `npm run dev` |
+| Tauri 开发 | `npm run tauri -- dev` |
+| 前端测试 | `npm test` |
+| 前端构建 | `npm run build` |
+| Rust 测试 | `cargo test --manifest-path src-tauri/Cargo.toml` |
+| Rust 格式化检查 | `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check` |
+| Rust lint | `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets` |
+| Mock LLM 验证 | `./scripts/mock-llm-validation.sh all` |
+| Real LLM 验证 | `./scripts/real-llm-validation.sh all` |
+| Tauri 打包 | `npm run tauri -- build` |
+
+## 测试与验证
+
+### 默认离线路径
+
+默认测试不依赖真实 API key：
+
+```bash
+npm test
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+`cargo test` 包含 deterministic mock LLM orchestration harness，用于验证 `/schedule`、`/team`、`/autopilot` 等编排路径的核心结构。
+
+### Real LLM 手动验收
+
+真实 provider 验证默认被 `#[ignore]` 跳过，因为它依赖网络、密钥、账单和 provider 可用性。配置好 LLM 后运行：
+
+```bash
+./scripts/real-llm-validation.sh smoke
+./scripts/real-llm-validation.sh schedule
+./scripts/real-llm-validation.sh team
+./scripts/real-llm-validation.sh autopilot
+./scripts/real-llm-validation.sh all
+```
+
+### 性能回归
+
+前端包含长会话渲染基准和渐进渲染工具测试：
+
+```bash
+npm test -- src/components/Chat/chatRenderBenchmark.test.tsx
+npm test -- src/components/Chat/renderPerfUtils.test.ts src/components/Chat/renderItemUtils.test.ts
+```
+
+构建输出中的大 chunk 主要来自 Monaco、Plotly、ECharts、PDF worker、TypeScript worker 等桌面 IDE/可视化依赖。它们已拆分为 vendor chunks，后续仍会继续推进更细粒度按需加载。
 
 ## 架构概览
 
 ```mermaid
 flowchart LR
-  U["User Request"] --> I["Mind Hunter / Intake"]
-  I --> P["Planner -> TaskGraph"]
-  P --> E["Executor / Supervisor"]
-  E --> S["Specialist Agents"]
-  S --> R["Reviewer / Verifier"]
-  R --> E
-  E --> T["Trace / Evidence / Artifact Stores"]
-  T --> C["Creator / Capability Refactorer"]
+  UI["React / MUI / Monaco UI"] --> Tauri["Tauri commands"]
+  Tauri --> Chat["Chat runtime"]
+  Tauri --> Tools["Tool runtime"]
+  Tauri --> Memory["Memory / PageIndex"]
+  Tauri --> Sessions["Session persistence"]
+  Chat --> LLM["LLM providers"]
+  Tools --> FS["Filesystem"]
+  Tools --> Shell["Shell / execution envs"]
+  Tools --> Web["web_search / web_fetch / MCP"]
+  Chat --> Agents["Schedule / Team / Autopilot / Research"]
 ```
 
-更多说明见 [docs/architecture.md](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/docs/architecture.md)。
+核心分层：
 
-## 快速开始
+- **Frontend**：聊天、文件树、设置、执行进度、Agent 状态、可视化组件。
+- **Tauri Commands**：前端 IPC 边界，负责会话、文件、设置、工具和 Agent 编排入口。
+- **Domain**：LLM、工具、Agent scheduler、Research System、memory、permissions、runtime constraints。
+- **Persistence**：会话、消息、orchestration events、memory index、research artifacts/evidence/traces。
+- **Execution**：local/docker/ssh/modal/daytona/singularity 等执行环境抽象。
 
-Research System 通过聊天命令 `/research` 暴露：
+更多设计文档见 [`docs/architecture.md`](docs/architecture.md)。
+
+## Research System
+
+Omiga 内置一套 Rust 实现的分层 Research System，位于 [`src-tauri/src/domain/research_system`](src-tauri/src/domain/research_system)。它提供：
+
+- `Intake`：理解用户请求、记录 assumptions/ambiguities。
+- `Planner`：生成带 success criteria、verification、budget 的 `TaskGraph`。
+- `Executor / Supervisor`：按依赖调度任务，调用 specialist agent。
+- `Reviewer`：检查输出、证据、权限状态和成功标准覆盖。
+- `Creator`：根据 traces 生成 agent capability refactor proposal。
+
+聊天中可使用：
 
 ```text
 /research init
 /research list-agents
 /research list-proposals
-/research plan 帮我检索单细胞 RNA-seq 差异分析方法，分析适用场景，生成可视化建议和报告
-/research run 帮我检索单细胞 RNA-seq 差异分析方法，分析适用场景，生成可视化建议和报告
+/research plan <request>
+/research run <request>
 /research review-traces
-/research approve-proposal proposal-id
+/research approve-proposal <proposal-id>
 ```
 
-后端同样保留了可测试的内部入口 [run_research_cli](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/src-tauri/src/domain/research_system/cli.rs)，供 Rust 测试和后续接线复用。
+Research System 当前仍以 deterministic heuristic planner 和 mock runner 为默认安全路径；provider-backed planner 和更完整的 GUI 接线会持续演进。
 
-`/research init` 会创建：
+## 安全与隐私
 
-- `agents/`
-- `.research/graphs`
-- `.research/artifacts`
-- `.research/evidence`
-- `.research/traces`
-- `.research/proposals`
+- Omiga 默认是本地桌面应用；会话、memory、research artifacts 等数据主要保存在本机。
+- 真实 LLM 调用会把必要的消息、上下文和工具结果发送给你配置的 provider；请根据 provider 的隐私策略选择模型。
+- 不要把真实 API key 提交进仓库；推荐使用环境变量或用户级私有配置文件。
+- 文件系统、shell、web、MCP 等工具是高风险边界，第一版发布前需要持续强化审批、路径边界、审计和错误可见性。
+- 当前 Tauri CSP、打包签名、公证、GUI E2E 和更完整的审计日志仍属于发布前重点工作。
 
-## `/research` 子命令
+## 发布前检查清单
 
-- `init`：初始化默认 Agent Cards 与状态目录
-- `list-agents`：列出当前 registry 中的有效 Agent
-- `list-proposals`：列出 `.research/proposals` 中的 Creator proposals
-- `plan <request>`：输出结构化 `TaskGraph`
-- `run <request>`：用 `MockAgentRunner` 执行完整编排流程
-- `review-traces`：让 Creator 读取 traces 并生成 `AgentPatchProposal`
-- `approve-proposal <proposal_id>`：审批 proposal，并应用 `create/retire` 或输出 `split/merge` 的 `registry_patch`
+第一版发布前建议至少完成：
 
-## 如何新增 Agent
+- [ ] 工作区干净，版本号、changelog、release notes 对齐。
+- [ ] `npm test`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml` 通过。
+- [ ] `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check` 通过。
+- [ ] `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets` warning debt 已评估或清零。
+- [ ] `./scripts/mock-llm-validation.sh all` 通过。
+- [ ] 至少一次 real LLM `smoke` + 关键编排路径验收通过。
+- [ ] `npm run tauri -- build` 在目标平台通过。
+- [ ] 打包后的桌面应用完成 GUI smoke：新建会话、发送消息、取消、文件树操作、设置 provider、长会话滚动。
+- [ ] CSP、权限说明、隐私说明、错误诊断导出和已知限制更新。
 
-1. 在 `agents/` 下新增一个 Markdown 文件。
-2. 文件头使用 YAML front matter，正文写 instructions。
-3. 字段约定见 [docs/agent-card-spec.md](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/docs/agent-card-spec.md)。
-4. 通过 `/research list-agents`、`/research plan` 或 `/research run` 验证加载结果。
+## 项目结构
 
-Registry 当前支持：
-
-- 按 Markdown + YAML front matter 加载
-- 按 `id` 获取
-- 按 `category` / `capability` / `use_when` 搜索
-- 版本提升与禁用
-- `create` / `retire` 在显式审批后可直接写入 registry
-- `split` / `merge` 在显式审批后会生成结构化 `registry_patch` 计划，供人工应用
-
-## 运行测试
-
-Research System 采用现有 Rust 测试栈，核心套件如下：
-
-```bash
-cargo test --manifest-path src-tauri/Cargo.toml \
-  --test research_registry \
-  --test research_planner \
-  --test research_context_permissions \
-  --test research_executor \
-  --test research_reviewer_creator \
-  --test research_cli
+```text
+.
+├── src/                         # React frontend
+│   ├── components/              # Chat, settings, file tree, task status, visualizations
+│   ├── state/                   # Zustand stores and session/activity state
+│   ├── hooks/                   # UI/runtime hooks
+│   ├── lib/                     # Monaco/PDF workers, helpers
+│   └── utils/                   # frontend utility functions and tests
+├── src-tauri/                   # Rust/Tauri backend
+│   ├── src/commands/            # Tauri IPC commands
+│   ├── src/domain/              # tools, agents, memory, research, permissions
+│   ├── src/execution/           # execution environment adapters
+│   ├── src/llm/                 # provider clients and config loader
+│   └── tests/                   # Rust integration tests
+├── docs/                        # architecture, validation and implementation notes
+├── scripts/                     # validation/dev helper scripts
+├── config.example.yaml          # LLM config template
+├── package.json                 # frontend scripts/dependencies
+└── vite.config.ts               # Vite build/chunk configuration
 ```
 
-前端命令解析相关测试：
+## 相关文档
 
-```bash
-npm test -- workflowCommands.test.ts
-```
-
-## 关键文件
-
-- [models.rs](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/src-tauri/src/domain/research_system/models.rs)
-- [intake.rs](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/src-tauri/src/domain/research_system/intake.rs)
-- [registry.rs](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/src-tauri/src/domain/research_system/registry.rs)
-- [context.rs](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/src-tauri/src/domain/research_system/context.rs)
-- [planner.rs](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/src-tauri/src/domain/research_system/planner.rs)
-- [runner.rs](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/src-tauri/src/domain/research_system/runner.rs)
-- [reviewer.rs](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/src-tauri/src/domain/research_system/reviewer.rs)
-- [executor.rs](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/src-tauri/src/domain/research_system/executor.rs)
-- [creator.rs](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/src-tauri/src/domain/research_system/creator.rs)
-- [cli.rs](/Users/dengxsh/Downloads/Work/Agent/claude-code-main/omiga/src-tauri/src/domain/research_system/cli.rs)
+- [`docs/REAL_LLM_VALIDATION.md`](docs/REAL_LLM_VALIDATION.md)
+- [`docs/MOCK_LLM_RUNTIME_VALIDATION.md`](docs/MOCK_LLM_RUNTIME_VALIDATION.md)
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/agent-card-spec.md`](docs/agent-card-spec.md)
+- [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md)
+- [`docs/OMIGA_ENHANCEMENT_PLAN.md`](docs/OMIGA_ENHANCEMENT_PLAN.md)

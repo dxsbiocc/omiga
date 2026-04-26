@@ -69,11 +69,7 @@ pub fn spawn_background_bash_task(
             ),
             Err(e) => {
                 let msg = e.to_string();
-                let code = if msg.contains("timed out") || msg.contains("Timeout") {
-                    -1
-                } else {
-                    -1
-                };
+                let code = -1;
                 (
                     code,
                     String::new(),
@@ -88,12 +84,10 @@ pub fn spawn_background_bash_task(
             stdout,
             if stderr.is_empty() {
                 String::new()
+            } else if !stdout.is_empty() && !stdout.ends_with('\n') {
+                format!("\n{}", stderr)
             } else {
-                if !stdout.is_empty() && !stdout.ends_with('\n') {
-                    format!("\n{}", stderr)
-                } else {
-                    stderr
-                }
+                stderr
             }
         );
 

@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
 
-const PARALLEL_TOOL_TIMEOUT_SECS: u64 = 60;
+const PARALLEL_TOOL_TIMEOUT_SECS: u64 = 45;
 
 fn parallel_tool_timeout_message(tool_name: &str) -> String {
     format!("Tool `{tool_name}` timed out after {PARALLEL_TOOL_TIMEOUT_SECS}s")
@@ -227,7 +227,7 @@ pub(super) async fn execute_tool_calls(
             })
             .collect();
 
-        // Wrap each future with a 60 s timeout so one slow web_fetch can't stall
+        // Wrap each future with a bounded timeout so one slow web_fetch can't stall
         // the whole batch.  On timeout we return an error result for that tool slot
         // instead of blocking every other tool indefinitely.
         let timed_futures: Vec<_> = parallel_futures
@@ -419,7 +419,7 @@ pub(super) async fn execute_one_tool(
 
         loop {
             let perm_decision = permission_manager
-                .check_tool_with_root(session_id, &tool_name, &args_value, Some(project_root))
+                .check_tool_with_root(session_id, tool_name, &args_value, Some(project_root))
                 .await;
 
             match perm_decision {
@@ -955,7 +955,7 @@ pub(super) async fn execute_one_tool(
                                 });
 
                             // Need Agent runtime for forked execution
-                            if let Some(ref ar) = agent_runtime {
+                            if let Some(ar) = agent_runtime {
                                 match run_skill_forked(
                                     &app,
                                     message_id,
@@ -1414,7 +1414,7 @@ pub(super) async fn execute_one_tool(
             let state = app.state::<OmigaAppState>();
             crate::domain::memory::working_memory::render_context(
                 &state.repo,
-                &session_id,
+                session_id,
                 query_text,
                 crate::domain::memory::working_memory::DEFAULT_CONTEXT_TOKENS,
             )
@@ -1476,7 +1476,7 @@ pub(super) async fn execute_one_tool(
                 crate::commands::memory::get_memory_context(
                     &app.state::<OmigaAppState>().repo,
                     project_root,
-                    Some(&session_id),
+                    Some(session_id),
                     &query,
                     5,
                 )
@@ -1644,7 +1644,7 @@ mod tests {
     fn parallel_tool_timeout_message_names_tool_and_budget() {
         assert_eq!(
             parallel_tool_timeout_message("web_search"),
-            "Tool `web_search` timed out after 60s"
+            "Tool `web_search` timed out after 45s"
         );
     }
 }

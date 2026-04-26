@@ -54,7 +54,7 @@ pub async fn list_provider_configs(
             // cannot both show "In use".
             let matches_runtime = match active_entry.as_deref() {
                 Some(active) => name == active,
-                None => runtime.as_ref().map_or(false, |c| {
+                None => runtime.as_ref().is_some_and(|c| {
                     let Ok(pt) = config.provider_type.parse::<LlmProvider>() else {
                         return false;
                     };
@@ -649,7 +649,7 @@ pub(crate) async fn run_agent_schedule_inner(
                 "summary": sched_result.confirmation_message
                     .as_deref()
                     .unwrap_or("此计划需要用户确认后才能执行"),
-                "estimatedMinutes": (sched_result.estimated_duration_secs + 59) / 60,
+                "estimatedMinutes": sched_result.estimated_duration_secs.div_ceil(60),
                 "agents": sched_result.selected_agents,
                 // Echo back the original request so the frontend can re-fire with skip_confirmation=true
                 "originalRequest": {
@@ -1212,7 +1212,7 @@ pub(crate) async fn inject_schedule_summary_message(
     }
 
     let (summary_enabled, follow_enabled) =
-        crate::domain::post_turn_settings::load_post_turn_meta_flags(&*state.repo)
+        crate::domain::post_turn_settings::load_post_turn_meta_flags(&state.repo)
             .await
             .unwrap_or((true, true));
 

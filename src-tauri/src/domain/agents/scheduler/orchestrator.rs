@@ -302,67 +302,6 @@ impl Default for AgentOrchestrator {
     }
 }
 
-#[cfg(test)]
-mod finalize_tests {
-    use super::*;
-
-    fn subtask(agent_type: &str, output: &str) -> SubTaskResult {
-        SubTaskResult {
-            subtask_id: format!("{}-1", agent_type),
-            agent_type: Some(agent_type.to_string()),
-            status: ExecutionStatus::Completed,
-            output: Some(output.to_string()),
-            error: None,
-            started_at: None,
-            completed_at: None,
-        }
-    }
-
-    #[test]
-    fn soft_reviewer_findings_downgrade_completed_to_partial() {
-        let mut result = OrchestrationResult {
-            plan_id: "p".to_string(),
-            status: ExecutionStatus::Running,
-            subtask_results: HashMap::from([
-                ("exec".to_string(), subtask("executor", "done")),
-                (
-                    "review".to_string(),
-                    subtask("quality-reviewer", "VERDICT: PARTIAL\nNeed follow-up"),
-                ),
-            ]),
-            execution_log: vec![],
-            started_at: None,
-            completed_at: None,
-            final_summary: String::new(),
-        };
-        AgentOrchestrator::new().finalize_result(&mut result, 2);
-        assert_eq!(result.status, ExecutionStatus::PartiallyCompleted);
-        assert!(result.final_summary.contains("soft"));
-    }
-
-    #[test]
-    fn hard_reviewer_findings_fail_the_result() {
-        let mut result = OrchestrationResult {
-            plan_id: "p".to_string(),
-            status: ExecutionStatus::Running,
-            subtask_results: HashMap::from([
-                ("exec".to_string(), subtask("executor", "done")),
-                (
-                    "review".to_string(),
-                    subtask("security-reviewer", "CRITICAL: secret exposed"),
-                ),
-            ]),
-            execution_log: vec![],
-            started_at: None,
-            completed_at: None,
-            final_summary: String::new(),
-        };
-        AgentOrchestrator::new().finalize_result(&mut result, 2);
-        assert_eq!(result.status, ExecutionStatus::Failed);
-        assert!(result.final_summary.contains("hard"));
-    }
-}
-
 /// 核心执行路径：使用 `spawn_background_agent` 驱动并行子 Agent。
 ///
 /// 需要调用方提供已构建好的 `AgentLlmRuntime`（携带 LLM config 和执行环境）。
@@ -1409,7 +1348,7 @@ impl AgentOrchestrator {
                 let fix_id = format!("team-fix-{}", fix_round);
                 let fix_subtask = crate::domain::agents::scheduler::SubTask::new(
                     &fix_id,
-                    &format!(
+                    format!(
                         "【修复 {}/{}】根据验证失败原因修复问题",
                         fix_round, MAX_FIX_ROUNDS
                     ),
@@ -1970,5 +1909,66 @@ async fn poll_background_agent(
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(500)) => {}
             _ = cancel.cancelled() => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod finalize_tests {
+    use super::*;
+
+    fn subtask(agent_type: &str, output: &str) -> SubTaskResult {
+        SubTaskResult {
+            subtask_id: format!("{}-1", agent_type),
+            agent_type: Some(agent_type.to_string()),
+            status: ExecutionStatus::Completed,
+            output: Some(output.to_string()),
+            error: None,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn soft_reviewer_findings_downgrade_completed_to_partial() {
+        let mut result = OrchestrationResult {
+            plan_id: "p".to_string(),
+            status: ExecutionStatus::Running,
+            subtask_results: HashMap::from([
+                ("exec".to_string(), subtask("executor", "done")),
+                (
+                    "review".to_string(),
+                    subtask("quality-reviewer", "VERDICT: PARTIAL\nNeed follow-up"),
+                ),
+            ]),
+            execution_log: vec![],
+            started_at: None,
+            completed_at: None,
+            final_summary: String::new(),
+        };
+        AgentOrchestrator::new().finalize_result(&mut result, 2);
+        assert_eq!(result.status, ExecutionStatus::PartiallyCompleted);
+        assert!(result.final_summary.contains("soft"));
+    }
+
+    #[test]
+    fn hard_reviewer_findings_fail_the_result() {
+        let mut result = OrchestrationResult {
+            plan_id: "p".to_string(),
+            status: ExecutionStatus::Running,
+            subtask_results: HashMap::from([
+                ("exec".to_string(), subtask("executor", "done")),
+                (
+                    "review".to_string(),
+                    subtask("security-reviewer", "CRITICAL: secret exposed"),
+                ),
+            ]),
+            execution_log: vec![],
+            started_at: None,
+            completed_at: None,
+            final_summary: String::new(),
+        };
+        AgentOrchestrator::new().finalize_result(&mut result, 2);
+        assert_eq!(result.status, ExecutionStatus::Failed);
+        assert!(result.final_summary.contains("hard"));
     }
 }

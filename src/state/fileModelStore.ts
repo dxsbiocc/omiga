@@ -10,7 +10,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import * as monaco from "monaco-editor";
-import { getWorkspaceFileContext } from "../utils/sshWorkspace";
+import { getLocalWorkspaceSessionId, getWorkspaceFileContext } from "../utils/sshWorkspace";
 import { extractErrorMessage } from "../utils/errorMessage";
 
 // File types that must NOT be read as text
@@ -84,9 +84,13 @@ async function readFileFast(path: string): Promise<string> {
     });
     return result.content;
   }
+  const sessionId = getLocalWorkspaceSessionId();
+  if (!sessionId) {
+    throw new Error("请先选择本地工作区后再读取文件");
+  }
   // Use read_file_bytes from sidex-style backend
   try {
-    const bytes: number[] = await invoke("read_file_bytes", { path });
+    const bytes: number[] = await invoke("read_file_bytes", { path, sessionId });
     const decoder = new TextDecoder("utf-8", { fatal: false });
     return decoder.decode(new Uint8Array(bytes));
   } catch {
@@ -95,6 +99,7 @@ async function readFileFast(path: string): Promise<string> {
       path,
       offset: null,
       limit: null,
+      sessionId,
     });
     return result.content;
   }
@@ -225,7 +230,11 @@ export const useFileModelStore = create<FileModelState>((set, get) => ({
       } else if (ctx.mode === "sandbox") {
         await invoke("sandbox_write_file", { sessionId: ctx.sessionId, sandboxBackend: ctx.backend, path, content: model.content, expectedHash: null });
       } else {
-        await invoke("write_file", { path, content: model.content });
+        const sessionId = getLocalWorkspaceSessionId();
+        if (!sessionId) {
+          throw new Error("请先选择本地工作区后再保存文件");
+        }
+        await invoke("write_file", { path, content: model.content, expectedHash: null, sessionId });
       }
       
       const newModel = { ...model, isDirty: false, version: model.version + 1 };

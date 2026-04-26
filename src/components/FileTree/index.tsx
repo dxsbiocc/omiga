@@ -279,6 +279,7 @@ export function FileTree() {
   const environment = useChatComposerStore((s) => s.environment);
   const sshServer = useChatComposerStore((s) => s.sshServer);
   const sandboxBackend = useChatComposerStore((s) => s.sandboxBackend);
+  const isRemoteWorkspace = environment === "ssh" || environment === "sandbox";
 
   const [files, setFiles] = useState<FileNode[]>([]);
   const [sessionRoot, setSessionRoot] = useState<string | null>(null);
@@ -332,6 +333,13 @@ export function FileTree() {
           setError("请先在聊天输入区选择 SSH 服务器");
           return;
         }
+        if (!useSsh && !useSandbox && (!projectPath || projectPath === ".")) {
+          setFiles([]);
+          setCurrentDir(null);
+          setSessionRoot(null);
+          setError("请先选择本地工作区");
+          return;
+        }
 
         // Remote envs require absolute paths; fall back to sensible defaults.
         let remotePath = path;
@@ -347,7 +355,7 @@ export function FileTree() {
         } else if (useSandbox) {
           result = await invoke("sandbox_list_directory", { sessionId, sandboxBackend: sandboxBackend!.trim(), path: remotePath });
         } else {
-          result = await invoke("list_directory", { path });
+          result = await invoke("list_directory", { path, sessionId });
         }
         if (requestSeq !== directoryLoadSeq.current) return;
         const parsed = parseListResult(result);
@@ -363,7 +371,7 @@ export function FileTree() {
         setIsLoading(false);
       }
     },
-    [sessionId, environment, sshServer, sandboxBackend],
+    [sessionId, projectPath, environment, sshServer, sandboxBackend],
   );
 
   useEffect(() => {
@@ -423,6 +431,17 @@ export function FileTree() {
     currentDir &&
     normalizePath(currentDir) !== normalizePath(sessionRoot);
 
+  const canMutateLocalWorkspace = Boolean(
+    !isRemoteWorkspace &&
+      sessionId &&
+      sessionRoot &&
+      currentDir &&
+      isUnderOrEqual(currentDir, sessionRoot),
+  );
+  const mutationUnavailableMessage = isRemoteWorkspace
+    ? "远程/沙箱文件树暂不支持通过本地文件操作修改，请在对应环境内执行命令。"
+    : "文件操作仅允许在当前工作区内执行。";
+
   const parentPath =
     sessionRoot && currentDir ? parentWithinRoot(currentDir, sessionRoot) : null;
 
@@ -476,6 +495,10 @@ export function FileTree() {
   const handleNewFolder = useCallback(async () => {
     const name = dialogInput.trim();
     if (!name || !currentDir) return;
+    if (!canMutateLocalWorkspace || !sessionRoot) {
+      setDialogError(mutationUnavailableMessage);
+      return;
+    }
     if (name.includes("/") || name.includes("\\")) {
       setDialogError("名称不能包含路径分隔符");
       return;
@@ -483,7 +506,10 @@ export function FileTree() {
     setDialogBusy(true);
     setDialogError(null);
     try {
-      await invoke("create_directory", { path: `${currentDir}/${name}` });
+      await invoke("create_directory", {
+        path: `${currentDir}/${name}`,
+        sessionId,
+      });
       closeDialog();
       void loadDirectory(currentDir);
     } catch (e) {
@@ -491,11 +517,15 @@ export function FileTree() {
     } finally {
       setDialogBusy(false);
     }
-  }, [dialogInput, currentDir, closeDialog, loadDirectory]);
+  }, [dialogInput, currentDir, canMutateLocalWorkspace, sessionRoot, mutationUnavailableMessage, closeDialog, loadDirectory]);
 
   const handleNewFile = useCallback(async () => {
     const name = dialogInput.trim();
     if (!name || !currentDir) return;
+    if (!canMutateLocalWorkspace || !sessionRoot) {
+      setDialogError(mutationUnavailableMessage);
+      return;
+    }
     if (name.includes("/") || name.includes("\\")) {
       setDialogError("名称不能包含路径分隔符");
       return;
@@ -503,7 +533,10 @@ export function FileTree() {
     setDialogBusy(true);
     setDialogError(null);
     try {
-      await invoke("create_file", { path: `${currentDir}/${name}` });
+      await invoke("create_file", {
+        path: `${currentDir}/${name}`,
+        sessionId,
+      });
       closeDialog();
       void loadDirectory(currentDir);
     } catch (e) {
@@ -511,12 +544,16 @@ export function FileTree() {
     } finally {
       setDialogBusy(false);
     }
-  }, [dialogInput, currentDir, closeDialog, loadDirectory]);
+  }, [dialogInput, currentDir, canMutateLocalWorkspace, sessionRoot, mutationUnavailableMessage, closeDialog, loadDirectory]);
 
   const handleRename = useCallback(async () => {
     const newName = dialogInput.trim();
     const sel = Object.keys(rowSelection).filter((p) => tableData.find((n) => n.path === p && n.name !== ".."));
     if (!newName || sel.length !== 1 || !currentDir) return;
+    if (!canMutateLocalWorkspace || !sessionRoot) {
+      setDialogError(mutationUnavailableMessage);
+      return;
+    }
     if (newName.includes("/") || newName.includes("\\")) {
       setDialogError("名称不能包含路径分隔符");
       return;
@@ -527,7 +564,11 @@ export function FileTree() {
     setDialogBusy(true);
     setDialogError(null);
     try {
-      await invoke("rename_fs_entry", { fromPath, toPath });
+      await invoke("rename_fs_entry", {
+        fromPath,
+        toPath,
+        sessionId,
+      });
       setRowSelection({});
       closeDialog();
       void loadDirectory(currentDir);
@@ -536,15 +577,23 @@ export function FileTree() {
     } finally {
       setDialogBusy(false);
     }
-  }, [dialogInput, rowSelection, tableData, currentDir, closeDialog, loadDirectory]);
+  }, [dialogInput, rowSelection, tableData, currentDir, canMutateLocalWorkspace, sessionRoot, mutationUnavailableMessage, closeDialog, loadDirectory]);
 
   const handleDelete = useCallback(async () => {
     const sel = Object.keys(rowSelection).filter((p) => tableData.find((n) => n.path === p && n.name !== ".."));
     if (!sel.length || !currentDir) return;
+    if (!canMutateLocalWorkspace || !sessionRoot) {
+      setDialogError(mutationUnavailableMessage);
+      return;
+    }
     setDialogBusy(true);
     setDialogError(null);
     try {
-      await Promise.all(sel.map((p) => invoke("delete_fs_entry", { path: p })));
+      await Promise.all(
+        sel.map((p) =>
+          invoke("delete_fs_entry", { path: p, sessionId }),
+        ),
+      );
       setRowSelection({});
       closeDialog();
       void loadDirectory(currentDir);
@@ -553,7 +602,7 @@ export function FileTree() {
     } finally {
       setDialogBusy(false);
     }
-  }, [rowSelection, tableData, currentDir, closeDialog, loadDirectory]);
+  }, [rowSelection, tableData, currentDir, canMutateLocalWorkspace, sessionRoot, mutationUnavailableMessage, closeDialog, loadDirectory]);
 
   const handleCopyPath = useCallback(async (relative = false) => {
     const sel = Object.keys(rowSelection).filter((p) => tableData.find((n) => n.path === p && n.name !== ".."));
@@ -1041,7 +1090,7 @@ export function FileTree() {
               <IconButton
                 size="small"
                 onClick={() => openDialog("new_folder")}
-                disabled={!currentDir}
+                disabled={!canMutateLocalWorkspace}
                 sx={toolbarBtnSx}
               >
                 <CreateNewFolder sx={{ fontSize: 18 }} />
@@ -1051,7 +1100,7 @@ export function FileTree() {
               <IconButton
                 size="small"
                 onClick={() => openDialog("new_file")}
-                disabled={!currentDir}
+                disabled={!canMutateLocalWorkspace}
                 sx={toolbarBtnSx}
               >
                 <PostAdd sx={{ fontSize: 18 }} />
@@ -1062,7 +1111,7 @@ export function FileTree() {
                 <IconButton
                   size="small"
                   onClick={() => openDialog("delete")}
-                  disabled={!hasSelection}
+                  disabled={!hasSelection || !canMutateLocalWorkspace}
                   sx={{
                     ...toolbarBtnSx,
                     "&:hover": {
@@ -1080,7 +1129,7 @@ export function FileTree() {
                 <IconButton
                   size="small"
                   onClick={() => openDialog("rename")}
-                  disabled={!isSingleSelection}
+                  disabled={!isSingleSelection || !canMutateLocalWorkspace}
                   sx={toolbarBtnSx}
                 >
                   <DriveFileRenameOutline sx={{ fontSize: 18 }} />
@@ -1326,7 +1375,7 @@ export function FileTree() {
         </MenuItem>
         <MenuItem
           onClick={() => void handleRevealInFinder()}
-          disabled={!hasSelection && !currentDir}
+          disabled={isRemoteWorkspace || (!hasSelection && !currentDir)}
         >
           <ListItemIcon>
             <FolderOpen fontSize="small" />

@@ -270,7 +270,7 @@ impl BashArgs {
 }
 
 fn max_timeout_secs() -> u64 {
-    (max_timeout_ms() + 999) / 1000
+    max_timeout_ms().div_ceil(1000)
 }
 
 pub(crate) struct BashRawOutput {
@@ -307,7 +307,7 @@ fn pick_ssh_profile(cfg: &LlmConfigFile) -> Option<(&String, &SshExecConfig)> {
         if let Some(c) = ssh_map.get(&name) {
             if c.enabled
                 && c.effective_hostname().is_some()
-                && c.user.as_ref().map_or(false, |u| !u.is_empty())
+                && c.user.as_ref().is_some_and(|u| !u.is_empty())
             {
                 return ssh_map.get_key_value(&name);
             }
@@ -316,7 +316,7 @@ fn pick_ssh_profile(cfg: &LlmConfigFile) -> Option<(&String, &SshExecConfig)> {
     let mut pairs: Vec<_> = ssh_map.iter().filter(|(_, c)| c.enabled).collect();
     pairs.sort_by(|a, b| a.0.cmp(b.0));
     for (name, c) in pairs {
-        if c.effective_hostname().is_some() && c.user.as_ref().map_or(false, |u| !u.is_empty()) {
+        if c.effective_hostname().is_some() && c.user.as_ref().is_some_and(|u| !u.is_empty()) {
             return Some((name, c));
         }
     }
@@ -967,7 +967,7 @@ pub(crate) async fn run_bash_command(
 
     let work = async move { tokio::try_join!(read_out, read_err, wait_child) };
 
-    let timeout_secs = (timeout_ms + 999) / 1000;
+    let timeout_secs = timeout_ms.div_ceil(1000);
     let outcome = tokio::select! {
         _ = cancel.cancelled() => {
             if let Some(pid) = pid {

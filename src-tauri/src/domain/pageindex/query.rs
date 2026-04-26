@@ -13,6 +13,14 @@ use tracing::debug;
 use super::tree::{DocumentNode, DocumentTree, SectionNode};
 use crate::errors::AppError;
 
+fn floor_char_boundary(s: &str, mut index: usize) -> usize {
+    index = index.min(s.len());
+    while index > 0 && !s.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
 /// Query result containing matched content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
@@ -260,12 +268,12 @@ impl QueryEngine {
 
         // Extract the window - ensure byte indices are at char boundaries for UTF-8 safety
         let start = best_pos;
-        let window_size = content.floor_char_boundary(max_length).min(content.len());
+        let window_size = floor_char_boundary(content, max_length).min(content.len());
         let end = (start + window_size).min(content.len());
 
         // Adjust to char boundaries to avoid panics on multi-byte UTF-8 characters
-        let start = content.floor_char_boundary(start);
-        let end = content.floor_char_boundary(end);
+        let start = floor_char_boundary(content, start);
+        let end = floor_char_boundary(content, end);
 
         // Adjust to word boundaries
         let adjusted_start = if start > 0 {
@@ -282,8 +290,8 @@ impl QueryEngine {
             .unwrap_or(end);
 
         // Ensure final indices are at char boundaries
-        let adjusted_start = content.floor_char_boundary(adjusted_start);
-        let adjusted_end = content.floor_char_boundary(adjusted_end);
+        let adjusted_start = floor_char_boundary(content, adjusted_start);
+        let adjusted_end = floor_char_boundary(content, adjusted_end);
 
         let mut excerpt = content[adjusted_start..adjusted_end].to_string();
 

@@ -982,17 +982,17 @@ pub async fn prewarm_session(
             drop(current);
             if !already_active {
                 if let Err(e) =
-                    crate::commands::chat::apply_named_provider_runtime(&*state, name).await
+                    crate::commands::chat::apply_named_provider_runtime(&state, name).await
                 {
                     tracing::debug!(target: "omiga::prewarm", "provider warm skipped: {}", e);
                 }
             } else {
                 // Provider already matches — still warm the config file cache.
-                let _ = crate::commands::chat::get_config_file(&*state).await;
+                let _ = crate::commands::chat::get_config_file(&state).await;
             }
         }
     } else {
-        let _ = crate::commands::chat::get_config_file(&*state).await;
+        let _ = crate::commands::chat::get_config_file(&state).await;
     }
 
     // 2. Pre-warm integrations config cache (file read, synchronous but fast).

@@ -31,3 +31,18 @@ export function getWorkspaceFileContext():
 
   return { mode: "local" };
 }
+
+/** Current local workspace root for file mutations. Empty/`.` means no explicit local root. */
+export function getLocalWorkspaceRoot(): string | null {
+  const root = useSessionStore.getState().currentSession?.projectPath?.trim() ?? "";
+  if (!root || root === ".") return null;
+  return root;
+}
+
+/** Current local session id used by the backend to resolve the authoritative workspace root. */
+export function getLocalWorkspaceSessionId(): string | null {
+  const session = useSessionStore.getState().currentSession;
+  const root = session?.projectPath?.trim() ?? "";
+  if (!session?.id || !root || root === ".") return null;
+  return session.id;
+}

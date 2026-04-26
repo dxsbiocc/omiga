@@ -60,7 +60,7 @@ pub fn truncate_utf8_prefix(s: &str, max_bytes: usize) -> &str {
 pub fn is_env_defined_falsy(var: Option<&str>) -> bool {
     match var {
         None => false,
-        Some(s) if s.is_empty() => false,
+        Some("") => false,
         Some(s) => matches!(s.to_lowercase().trim(), "0" | "false" | "no" | "off"),
     }
 }

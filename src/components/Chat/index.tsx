@@ -1,6 +1,5 @@
-import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, startTransition, memo } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, startTransition, memo, lazy, Suspense } from "react";
 import { flushSync } from "react-dom";
-import type { CSSProperties } from "react";
 import type { Components } from "react-markdown";
 import type { Theme } from "@mui/material/styles";
 import { invoke } from "@tauri-apps/api/core";
@@ -41,11 +40,6 @@ import {
   Groups as GroupsIcon,
   RocketLaunch as RocketLaunchIcon,
 } from "@mui/icons-material";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import {
-  oneDark,
-  oneLight,
-} from "react-syntax-highlighter/dist/esm/styles/prism";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "katex/dist/katex.min.css";
@@ -80,15 +74,13 @@ import {
   toolGroupAnyRunning,
   toolGroupFlowComplete,
 } from "./ToolFoldSummary";
+import { toolTracePrefaceFromText } from "./toolTracePreface";
 import { UserMessageBubble } from "./UserMessageBubble";
 import type { AskUserQuestionItem } from "./AskUserQuestionWizard";
 import { getChatTokens } from "./chatTokens";
 import type { BackgroundAgentTask } from "./backgroundAgentTypes";
-import { VisualizationRenderer } from "./viz/VisualizationRenderer";
-import { DagFlow, type OmigaDagPayload } from "./DagFlow";
-import { OmigaFlowchart, type OmigaFlowchartPayload } from "./OmigaFlowchart";
-import { MermaidFlow } from "./viz/MermaidFlow";
-import { DotFlow } from "./viz/DotFlow";
+import type { OmigaDagPayload } from "./DagFlow";
+import type { OmigaFlowchartPayload } from "./OmigaFlowchart";
 import {
   canSendFollowUpToTask,
   shortBgTaskLabel,
@@ -114,7 +106,6 @@ import { SessionSwitchSkeleton } from "./SessionSwitchSkeleton";
 import { AgentSessionStatus } from "./AgentSessionStatus";
 import { SshDirectoryTreeDialog } from "./SshDirectoryTreeDialog";
 import { ReviewerVerdictList } from "../ReviewerVerdictList";
-import { formatToolDisplayName } from "../../utils/executionSurfaceLabel";
 import { buildPendingExecutionFeedback } from "../../utils/pendingExecutionFeedback";
 import { parseNextStepSuggestionsFromMarkdown } from "../../utils/parseAssistantNextSteps";
 import { extractSuggestionTooltipMarkdown } from "../../utils/suggestionTooltip";
@@ -139,6 +130,7 @@ import {
 import { listenTauriEvent } from "../../utils/tauriEvents";
 import { CitationLink } from "../CitationLink";
 import { normalizeAgentDisplayName, useAgentStore } from "../../state/agentStore";
+
 import {
   saveStreamSnapshot,
   loadStreamSnapshot,
@@ -149,6 +141,29 @@ import {
   cancelAllStreamListeners,
 } from "../../state/sessionStreamRegistry";
 
+const FencedCodeBlock = lazy(() => import("./FencedCodeBlock"));
+const VisualizationRenderer = lazy(() =>
+  import("./viz/VisualizationRenderer").then((mod) => ({
+    default: mod.VisualizationRenderer,
+  })),
+);
+const DagFlow = lazy(() =>
+  import("./DagFlow").then((mod) => ({ default: mod.DagFlow })),
+);
+const OmigaFlowchart = lazy(() =>
+  import("./OmigaFlowchart").then((mod) => ({
+    default: mod.OmigaFlowchart,
+  })),
+);
+const MermaidFlow = lazy(() =>
+  import("./viz/MermaidFlow").then((mod) => ({
+    default: mod.MermaidFlow,
+  })),
+);
+const DotFlow = lazy(() =>
+  import("./viz/DotFlow").then((mod) => ({ default: mod.DotFlow })),
+);
+
 /** SQLite `messages.id` shape — used to pass `retryFromUserMessageId` (not temp `user-…` ids). */
 function isPersistedMessageIdForRetry(id: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
@@ -158,6 +173,13 @@ function isPersistedMessageIdForRetry(id: string): boolean {
 
 interface ChatProps {
   sessionId: string;
+}
+
+const WEB_SEARCH_CLIENT_WATCHDOG_MS = 45_000;
+
+function isWebSearchToolName(name?: string): boolean {
+  const n = (name ?? "").toLowerCase();
+  return n.includes("web_search") || n.includes("websearch");
 }
 
 interface SchedulerPlan {
@@ -196,7 +218,7 @@ interface Message {
   composerAttachedPaths?: string[];
   /** From DB: full assistant tool_calls — rebuild trace if tool rows are incomplete */
   toolCallsList?: Array<{ id: string; name: string; arguments: string }>;
-  /** Assistant text streamed before the first tool in this round (shown inside tool block, not in final summary). */
+  /** Assistant text streamed before a tool in this round (shown inside tool block, not in final summary). */
   prefaceBeforeTools?: string;
   /** Assistant/tool-gap text that belongs inside the ReAct fold, not as the final answer row. */
   intermediate?: boolean;
@@ -418,28 +440,6 @@ const MD_BLOCK_RADIUS_PX = 1;
 /** Inline `code` longer than this: no fill (e.g. protein sequences) */
 const INLINE_CODE_LONG_LEN = 80;
 
-const PRISM_CODE_SEL = 'code[class*="language-"]';
-const PRISM_PRE_SEL = 'pre[class*="language-"]';
-
-/** Prism oneLight/oneDark set a fill on `code`/`pre`; we only want the outer chat box background. */
-function prismStyleTransparentCodeSurface(
-  style: Record<string, CSSProperties>,
-): Record<string, CSSProperties> {
-  return {
-    ...style,
-    [PRISM_CODE_SEL]: {
-      ...(style[PRISM_CODE_SEL] ?? {}),
-      background: "transparent",
-      backgroundColor: "transparent",
-    },
-    [PRISM_PRE_SEL]: {
-      ...(style[PRISM_PRE_SEL] ?? {}),
-      background: "transparent",
-      backgroundColor: "transparent",
-    },
-  };
-}
-
 /**
  * Skip adding a tool row when the payload has no tool name / id and no usable input.
  * The backend sends `tool_use` twice: first with empty `arguments`, then with full JSON at block end.
@@ -501,7 +501,7 @@ function humanizeToolStepTitle(name: string, args?: string): string {
   if (n.includes("todo_write") || n.includes("todowrite"))
     return "更新任务清单";
   if (n === "recall") return "检索知识库";
-  if (n.includes("web_search")) return "网络搜索";
+  if (isWebSearchToolName(name)) return "网络搜索";
   if (n.includes("web_fetch") || n.includes("fetch")) return "获取网页";
   if (n.includes("glob")) return "搜索文件";
   if (n.includes("ripgrep") || n.includes("grep")) return "代码搜索";
@@ -554,7 +554,7 @@ function executionStepSummary(name: string, args?: string): string {
       const pat = String(j.glob_pattern ?? j.pattern ?? "");
       if (pat) return `Find files: ${pat}`;
     }
-    if (n.includes("web_search")) {
+    if (isWebSearchToolName(name)) {
       const q = String(j.query ?? "");
       if (q) return `Search web: ${q.slice(0, 80)}`;
     }
@@ -695,108 +695,6 @@ function groupMessagesForRender(messages: Message[]): RenderMsgItem[] {
     }
   }
   return out;
-}
-
-function shortToolValue(value: unknown, max = 120): string {
-  if (value == null) return "";
-  const text = String(value).trim().replace(/\s+/g, " ");
-  if (!text) return "";
-  return text.length > max ? `${text.slice(0, max)}…` : text;
-}
-
-function lastPathSegments(path: unknown, count = 3): string {
-  const text = shortToolValue(path, 180);
-  if (!text) return "";
-  return text.split("/").filter(Boolean).slice(-count).join("/") || text;
-}
-
-/**
- * UI-generated action intent, not private hidden chain-of-thought.
- * When the model jumps straight to a tool call, this keeps the visible trace as
- * "思考摘要 → 行动" instead of a bare action list.
- */
-function toolActionThoughtSummary(
-  toolName: string,
-  input: string | undefined,
-): string {
-  const n = (toolName || "").toLowerCase();
-  let args: Record<string, unknown> | null = null;
-  if (input?.trim()) {
-    try {
-      args = JSON.parse(input) as Record<string, unknown>;
-    } catch {
-      args = null;
-    }
-  }
-
-  const query = shortToolValue(
-    args?.query ?? args?.q ?? args?.search_query ?? args?.pattern,
-  );
-  const url = shortToolValue(args?.url ?? args?.href ?? args?.link);
-  const path = lastPathSegments(
-    args?.path ?? args?.file_path ?? args?.target_file ?? args?.cwd,
-  );
-  const description = shortToolValue(args?.description);
-  const command = shortToolValue(args?.command, 140);
-
-  if (description) return description;
-  if (n === "recall") {
-    return query
-      ? `先从记忆/知识库查找「${query}」的相关上下文。`
-      : "先从记忆/知识库查找可复用的上下文。";
-  }
-  if (n.includes("web_search")) {
-    return query
-      ? `需要搜索「${query}」来补充外部依据。`
-      : "需要先搜索外部资料，确认可用信息源。";
-  }
-  if (n.includes("web_fetch") || n.includes("fetch")) {
-    return url
-      ? `需要打开来源验证细节：${url}`
-      : "需要打开候选来源，核对正文细节。";
-  }
-  if (n.includes("bash")) {
-    return command
-      ? `需要执行命令来推进验证或实现：${command}`
-      : "需要执行命令来推进验证或实现。";
-  }
-  if (n.includes("file_read") || n === "read_file") {
-    return path
-      ? `需要读取 ${path}，确认当前实现细节。`
-      : "需要读取相关文件，确认当前实现细节。";
-  }
-  if (n.includes("ripgrep") || n.includes("grep")) {
-    return query || path
-      ? `需要在代码中定位 ${query || path} 的相关位置。`
-      : "需要在代码中定位相关符号或调用点。";
-  }
-  if (n.includes("glob")) {
-    return query
-      ? `需要按模式查找文件：${query}`
-      : "需要先查找候选文件。";
-  }
-  if (n.includes("file_write") || n.includes("write")) {
-    return path
-      ? `需要写入 ${path}，落地当前改动。`
-      : "需要写入文件，落地当前改动。";
-  }
-  if (n.includes("file_edit") || n.includes("edit")) {
-    return path
-      ? `需要编辑 ${path}，调整当前实现。`
-      : "需要编辑文件，调整当前实现。";
-  }
-  if (n.includes("todo_write") || n.includes("todowrite")) {
-    return "需要更新任务清单，让后续执行状态保持同步。";
-  }
-  if (n === "taskcreate") return "需要创建后台任务，把执行交给专门 Agent。";
-  if (n === "taskget") return "需要读取任务状态，判断是否继续或汇总。";
-  if (n === "tasklist") return "需要查看任务列表，掌握并行执行进展。";
-  if (n === "taskupdate") return "需要更新任务状态，保持调度面板一致。";
-
-  const summary = executionStepSummary(toolName, input);
-  return summary === toolName
-    ? `需要调用 ${formatToolDisplayName(toolName)} 推进下一步。`
-    : summary;
 }
 
 /** 调度计划显示组件 */
@@ -1376,9 +1274,16 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
                 fold[foldIndex - 1]?.role === "assistant" &&
                   fold[foldIndex - 1]?.content?.trim(),
               );
+              const isAskUserTool = /ask_user|askuserquestion/i.test(tc.name);
+              const hasNestedOpenOverride = message.id in nestedToolPanelOpenForFold;
               const nestedOpen =
-                getNestedToolPanelOpen(message.id, tc, nestedToolPanelOpenForFold) ||
-                showAskUserPanel;
+                showAskUserPanel && isAskUserTool && !hasNestedOpenOverride
+                  ? false
+                  : getNestedToolPanelOpen(
+                      message.id,
+                      tc,
+                      nestedToolPanelOpenForFold,
+                    );
 
               return (
                 <ToolCallCard
@@ -1390,11 +1295,6 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
                   prefaceBeforeTools={message.prefaceBeforeTools}
                   toolCall={tc}
                   previousAssistantHasText={previousAssistantHasText}
-                  generatedThoughtSummary={
-                    previousAssistantHasText
-                      ? ""
-                      : toolActionThoughtSummary(tc.name, tc.input)
-                  }
                   nestedOpen={nestedOpen}
                   showAskUserPanel={showAskUserPanel}
                   chat={chat}
@@ -1591,6 +1491,25 @@ const MessageRowRenderItem = memo(function MessageRowRenderItem({
 /** How close to the bottom (px) before auto-scroll kicks in */
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 100;
 
+function LazyMarkdownBlockFallback({ label = "正在加载内容…" }: { label?: string }) {
+  return (
+    <Box
+      sx={{
+        my: 1.25,
+        px: 1.25,
+        py: 1,
+        borderRadius: `${MD_BLOCK_RADIUS_PX}px`,
+        border: 1,
+        borderColor: "divider",
+        color: "text.secondary",
+        fontSize: 12,
+      }}
+    >
+      {label}
+    </Box>
+  );
+}
+
 function buildMarkdownComponents(
   isAgent: boolean,
   theme: Theme,
@@ -1598,10 +1517,6 @@ function buildMarkdownComponents(
   onImageClick: (src: string, alt: string) => void,
   onNodeClick?: (text: string) => void,
 ) {
-  const prismStyleRaw = theme.palette.mode === "dark" ? oneDark : oneLight;
-  const prismStyleFenced = prismStyleTransparentCodeSurface(
-    prismStyleRaw as Record<string, CSSProperties>,
-  );
   return {
   code({
     className,
@@ -1629,7 +1544,11 @@ function buildMarkdownComponents(
           );
         }
         if (!config) return null;
-        return <VisualizationRenderer config={config} onNodeClick={onNodeClick} />;
+        return (
+          <Suspense fallback={<LazyMarkdownBlockFallback label="正在加载可视化…" />}>
+            <VisualizationRenderer config={config} onNodeClick={onNodeClick} />
+          </Suspense>
+        );
       }
 
       if (language === "omiga-dag") {
@@ -1644,7 +1563,11 @@ function buildMarkdownComponents(
           );
         }
         if (!dag?.nodes?.length) return null;
-        return <DagFlow data={dag} onNodeClick={onNodeClick} />;
+        return (
+          <Suspense fallback={<LazyMarkdownBlockFallback label="正在加载 DAG…" />}>
+            <DagFlow data={dag} onNodeClick={onNodeClick} />
+          </Suspense>
+        );
       }
 
       if (language === "omiga-flowchart") {
@@ -1660,130 +1583,39 @@ function buildMarkdownComponents(
         }
         if (!fc?.stages?.length) return null;
         return (
-          <OmigaFlowchart
-            data={fc}
-            isAgent={isAgent}
-            onStepClick={onNodeClick ? (text) => onNodeClick(text) : undefined}
-          />
+          <Suspense fallback={<LazyMarkdownBlockFallback label="正在加载流程图…" />}>
+            <OmigaFlowchart
+              data={fc}
+              isAgent={isAgent}
+              onStepClick={onNodeClick ? (text) => onNodeClick(text) : undefined}
+            />
+          </Suspense>
         );
       }
 
       // Raw ```mermaid fenced block → React Flow
       if (language === "mermaid") {
-        return <MermaidFlow source={blockBody} onNodeClick={onNodeClick} />;
+        return (
+          <Suspense fallback={<LazyMarkdownBlockFallback label="正在加载 Mermaid 图…" />}>
+            <MermaidFlow source={blockBody} onNodeClick={onNodeClick} />
+          </Suspense>
+        );
       }
 
       // Raw ```dot / ```graphviz fenced block → React Flow
       if (language === "dot" || language === "graphviz") {
-        return <DotFlow dot={blockBody} onNodeClick={onNodeClick} />;
+        return (
+          <Suspense fallback={<LazyMarkdownBlockFallback label="正在加载 Graphviz 图…" />}>
+            <DotFlow dot={blockBody} onNodeClick={onNodeClick} />
+          </Suspense>
+        );
       }
 
       const lang = language || "text";
-      const fencedScrollStyle = {
-        margin: 0,
-        borderRadius: 0,
-        background: "transparent",
-        whiteSpace: "pre" as const,
-        wordBreak: "normal" as const,
-        overflowWrap: "normal" as const,
-        minWidth: "min-content",
-      };
-      if (isAgent) {
-        return (
-          <Box sx={{ my: 1.25 }}>
-            <Typography
-              sx={{
-                fontSize: 10,
-                color: CHAT.labelMuted,
-                fontWeight: 400,
-                mb: 0.5,
-                display: "block",
-              }}
-            >
-              {lang}
-            </Typography>
-            <Box
-              sx={{
-                borderRadius: `${MD_BLOCK_RADIUS_PX}px`,
-                border: `1px solid ${CHAT.agentBubbleBorder}`,
-                bgcolor: CHAT.codeBg,
-                maxHeight: 320,
-                maxWidth: "100%",
-                overflow: "auto",
-                [`& ${PRISM_PRE_SEL}, & ${PRISM_CODE_SEL}`]: {
-                  background: "transparent !important",
-                  backgroundColor: "transparent !important",
-                },
-              }}
-            >
-              <SyntaxHighlighter
-                style={prismStyleFenced}
-                language={lang}
-                PreTag="div"
-                customStyle={{
-                  ...fencedScrollStyle,
-                  padding: "8px 12px",
-                  fontSize: 11,
-                  lineHeight: 1.45,
-                }}
-              >
-                {blockBody}
-              </SyntaxHighlighter>
-            </Box>
-          </Box>
-        );
-      }
       return (
-        <Box
-          component="div"
-          sx={{
-            my: 1.5,
-            borderRadius: `${MD_BLOCK_RADIUS_PX}px`,
-            overflow: "hidden",
-            border: 1,
-            borderColor: alpha(theme.palette.divider, 0.5),
-          }}
-        >
-          <Box
-            sx={{
-              px: 2,
-              py: 0.5,
-              bgcolor: alpha(theme.palette.background.paper, 0.5),
-              borderBottom: 1,
-              borderColor: alpha(theme.palette.divider, 0.3),
-            }}
-          >
-            <Typography variant="caption" color="text.secondary">
-              {lang}
-            </Typography>
-          </Box>
-          <Box
-            sx={{
-              bgcolor: CHAT.codeBg,
-              maxHeight: 360,
-              maxWidth: "100%",
-              overflow: "auto",
-              [`& ${PRISM_PRE_SEL}, & ${PRISM_CODE_SEL}`]: {
-                background: "transparent !important",
-                backgroundColor: "transparent !important",
-              },
-            }}
-          >
-            <SyntaxHighlighter
-              style={prismStyleFenced}
-              language={lang}
-              PreTag="div"
-              customStyle={{
-                ...fencedScrollStyle,
-                padding: "12px 16px",
-                fontSize: "0.8125rem",
-                lineHeight: 1.6,
-              }}
-            >
-              {blockBody}
-            </SyntaxHighlighter>
-          </Box>
-        </Box>
+        <Suspense fallback={<LazyMarkdownBlockFallback label={`正在加载 ${lang} 代码块…`} />}>
+          <FencedCodeBlock code={blockBody} lang={lang} isAgent={isAgent} chat={CHAT} />
+        </Suspense>
       );
     }
     const inlineRaw = String(children);
@@ -2316,10 +2148,15 @@ export function Chat({ sessionId }: ChatProps) {
   const currentFoldIntermediateRef = useRef(currentFoldIntermediate);
   const currentRoundIdRef = useRef(currentRoundId);
   const cancelFallbackTimerRef = useRef<number | null>(null);
+  const toolWatchdogTimersRef = useRef<Map<string, number>>(new Map());
   /** Buffered text chunks waiting to be batched into React state */
   const pendingTextBufferRef = useRef("");
   /** Buffered provider reasoning/tool-gap chunks shown inside the active ReAct fold. */
   const pendingFoldIntermediateBufferRef = useRef("");
+  /** Ordinary text emitted since the last tool call; captured as the next tool's visible preface. */
+  const pendingToolTraceTextRef = useRef("");
+  const activeRunningToolIdsRef = useRef<Set<string>>(new Set());
+  const activeReactFoldIdRef = useRef<string | null>(null);
   /** RAF handle for scheduled text flush */
   const textFlushRafRef = useRef<number | null>(null);
   /** RAF handle for scheduled fold-intermediate flush */
@@ -2333,6 +2170,19 @@ export function Chat({ sessionId }: ChatProps) {
   }, []);
 
   // Keep refs in sync with state for access in event listeners
+  useEffect(() => {
+    activeRunningToolIdsRef.current = new Set(
+      messages
+        .filter(
+          (m) =>
+            m.role === "tool" &&
+            m.toolCall?.status === "running" &&
+            Boolean(m.toolCall.id),
+        )
+        .map((m) => m.toolCall!.id!),
+    );
+  }, [messages]);
+
   useEffect(() => {
     currentResponseRef.current = currentResponse;
   }, [currentResponse]);
@@ -2408,6 +2258,92 @@ export function Chat({ sessionId }: ChatProps) {
     activeProviderEntryName,
   } = useSessionStore();
 
+  const clearToolWatchdog = useCallback((toolUseId: string) => {
+    const timer = toolWatchdogTimersRef.current.get(toolUseId);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      toolWatchdogTimersRef.current.delete(toolUseId);
+    }
+  }, []);
+
+  const clearAllToolWatchdogs = useCallback(() => {
+    for (const timer of toolWatchdogTimersRef.current.values()) {
+      window.clearTimeout(timer);
+    }
+    toolWatchdogTimersRef.current.clear();
+  }, []);
+
+  const markToolRunning = useCallback((toolUseId: string | undefined | null) => {
+    const id = toolUseId?.trim();
+    if (!id) return;
+    activeRunningToolIdsRef.current.add(id);
+  }, []);
+
+  const markToolSettled = useCallback((toolUseId: string | undefined | null) => {
+    const id = toolUseId?.trim();
+    if (!id) return;
+    activeRunningToolIdsRef.current.delete(id);
+  }, []);
+
+  const clearRunningToolTracking = useCallback(() => {
+    activeRunningToolIdsRef.current.clear();
+    pendingToolTraceTextRef.current = "";
+  }, []);
+
+  const startToolWatchdog = useCallback(
+    (toolUseId: string, toolName: string) => {
+      if (!toolUseId || !isWebSearchToolName(toolName)) return;
+      clearToolWatchdog(toolUseId);
+      const timer = window.setTimeout(() => {
+        toolWatchdogTimersRef.current.delete(toolUseId);
+        markToolSettled(toolUseId);
+        const timeoutSeconds = Math.round(WEB_SEARCH_CLIENT_WATCHDOG_MS / 1000);
+        const watchdogOutput =
+          `web_search has been running for ${timeoutSeconds}s without a result. ` +
+          "Stopped showing it as running to avoid a stuck UI; cancel and retry with a narrower query if the backend does not continue.";
+        setMessages((prev) => {
+          let didMark = false;
+          const next = prev.map((m) => {
+            if (
+              m.role !== "tool" ||
+              m.toolCall?.id !== toolUseId ||
+              m.toolCall.status !== "running"
+            ) {
+              return m;
+            }
+            didMark = true;
+            const name = m.toolCall.name || toolName || "web_search";
+            return {
+              ...m,
+              content: `\`${name}\` timed out`,
+              toolCall: {
+                ...m.toolCall,
+                name,
+                status: "error" as const,
+                output: watchdogOutput,
+                completedAt: Date.now(),
+              },
+            };
+          });
+          if (didMark) {
+            replaceStoreMessagesSnapshot(next.map(chatMessageToStore));
+            queueMicrotask(() => {
+              useActivityStore.getState().onToolResultDone(toolUseId, {
+                output: watchdogOutput,
+                failed: true,
+              });
+            });
+          }
+          return didMark ? next : prev;
+        });
+      }, WEB_SEARCH_CLIENT_WATCHDOG_MS);
+      toolWatchdogTimersRef.current.set(toolUseId, timer);
+    },
+    [clearToolWatchdog, markToolSettled, replaceStoreMessagesSnapshot],
+  );
+
+  useEffect(() => clearAllToolWatchdogs, [clearAllToolWatchdogs, sessionId]);
+
   // ── Synchronous messages reset on session change ───────────────────────────
   // When sessionId changes, reset local messages during the CURRENT render
   // instead of waiting for a useEffect → setMessages → second render cycle.
@@ -2473,6 +2409,7 @@ export function Chat({ sessionId }: ChatProps) {
     pendingFollowUpSuggestionsRef.current = null;
     pendingTurnSummaryRef.current = null;
     pendingTokenUsageRef.current = null;
+    clearRunningToolTracking();
     retrySendInFlightRef.current = false;
     sendCancelledDuringRequestRef.current = false;
     queuedMainSendQueueRef.current = [];
@@ -2518,6 +2455,7 @@ export function Chat({ sessionId }: ChatProps) {
       // ── Fresh / idle session — reset all stream state ─────────────────────
       pendingTextBufferRef.current = "";
       pendingFoldIntermediateBufferRef.current = "";
+      pendingToolTraceTextRef.current = "";
       setCurrentStreamId(null);
       currentStreamIdRef.current = null;
       setCurrentRoundId(null);
@@ -2558,7 +2496,7 @@ export function Chat({ sessionId }: ChatProps) {
         backgroundJobs: [...act.backgroundJobs],
       });
     };
-  }, [sessionId, bumpQueueUi, clearCancelFallbackTimer]);
+  }, [sessionId, bumpQueueUi, clearCancelFallbackTimer, clearRunningToolTracking]);
 
   // ── Progressive rendering: phase-2 scheduler ─────────────────────────────
   // When allItemsVisible is false (long session, phase 1 rendered), schedule
@@ -2982,7 +2920,6 @@ export function Chat({ sessionId }: ChatProps) {
     }
     return foldId;
   }, [latestUserMessageId, messageRenderItems]);
-  const activeReactFoldIdRef = useRef<string | null>(null);
   useEffect(() => {
     activeReactFoldIdRef.current = activeReactFoldId;
   }, [activeReactFoldId]);
@@ -3482,8 +3419,10 @@ export function Chat({ sessionId }: ChatProps) {
         segmentStartRef.current = true;
         act.onStreamStart();
         if (clearAssistantDraft) {
+          clearRunningToolTracking();
           pendingTextBufferRef.current = "";
           pendingFoldIntermediateBufferRef.current = "";
+          pendingToolTraceTextRef.current = "";
           if (textFlushRafRef.current !== null) {
             cancelAnimationFrame(textFlushRafRef.current);
             textFlushRafRef.current = null;
@@ -3523,6 +3462,7 @@ export function Chat({ sessionId }: ChatProps) {
               currentResponseRef.current.length === 0 &&
               pendingTextBufferRef.current.length === 0;
             pendingTextBufferRef.current += text;
+            pendingToolTraceTextRef.current += text;
             scheduleFlush();
             if (isFirstChunk) {
               useActivityStore.getState().setStreaming(true, false);
@@ -3570,6 +3510,10 @@ export function Chat({ sessionId }: ChatProps) {
             .getState()
             .setCurrentToolHint((toolData?.name ?? "tool").slice(0, 96));
           const tuId = (toolData?.id ?? "").trim();
+          markToolRunning(tuId);
+          const newToolId = `tool-${Date.now()}`;
+          activeReactFoldIdRef.current =
+            activeReactFoldIdRef.current ?? `rf-${newToolId}`;
           setMessages((prev) => {
             if (tuId) {
               const ex = prev.findIndex(
@@ -3596,19 +3540,26 @@ export function Chat({ sessionId }: ChatProps) {
                 return next;
               }
             }
-            const visibleChunk = currentResponseRef.current.trim();
+            const visibleChunk = toolTracePrefaceFromText(
+              currentResponseRef.current,
+            );
             const foldIntermediateChunk = currentFoldIntermediateRef.current.trim();
-            const intermediateChunk = [foldIntermediateChunk, visibleChunk]
+            const tracePreface = toolTracePrefaceFromText(
+              pendingToolTraceTextRef.current,
+            );
+            pendingToolTraceTextRef.current = "";
+            const intermediateChunk = [
+              foldIntermediateChunk,
+              visibleChunk || tracePreface,
+            ]
               .filter(Boolean)
               .join("\n\n");
-            // Clear immediately so parallel tool_use events don't capture the same intermediate text twice.
+            // Clear immediately so pre-tool text is rendered exactly once in the
+            // ReAct fold instead of being replayed as the final assistant answer.
             currentResponseRef.current = "";
             currentFoldIntermediateRef.current = "";
             queueMicrotask(() => setCurrentResponse(""));
             queueMicrotask(() => setCurrentFoldIntermediate(""));
-            const newToolId = `tool-${Date.now()}`;
-            activeReactFoldIdRef.current =
-              activeReactFoldIdRef.current ?? `rf-${newToolId}`;
             const toolMsg: Message = {
               id: newToolId,
               role: "tool",
@@ -3644,6 +3595,7 @@ export function Chat({ sessionId }: ChatProps) {
                 input: rawArgs,
                 toolName: tn,
               });
+            startToolWatchdog(tuId, tn);
           }
           break;
         }
@@ -3662,13 +3614,6 @@ export function Chat({ sessionId }: ChatProps) {
           const qs = raw?.questions;
           if (!sid || !mid || !tuid || !Array.isArray(qs) || qs.length === 0) {
             break;
-          }
-          if (activeReactFoldIdRef.current) {
-            setExpandedToolGroups((prev) => {
-              const next = new Set(prev);
-              next.add(activeReactFoldIdRef.current!);
-              return next;
-            });
           }
           setAskUserSelections({});
           setPendingAskUser({
@@ -3749,6 +3694,8 @@ export function Chat({ sessionId }: ChatProps) {
             return updated;
           });
           if (toolResultMatchId) {
+            markToolSettled(toolResultMatchId);
+            clearToolWatchdog(toolResultMatchId);
             useActivityStore.getState().onToolResultDone(toolResultMatchId, {
               output: resultData?.output,
               failed: Boolean(resultData?.is_error),
@@ -3806,6 +3753,7 @@ export function Chat({ sessionId }: ChatProps) {
         }
         case "error": {
           clearCancelFallbackTimer();
+          clearAllToolWatchdogs();
           flushPendingText();
           const errorData = payload.data as
             | { message: string; code?: string }
@@ -3825,6 +3773,8 @@ export function Chat({ sessionId }: ChatProps) {
           currentResponseRef.current = "";
           setCurrentFoldIntermediate("");
           currentFoldIntermediateRef.current = "";
+          pendingToolTraceTextRef.current = "";
+          clearRunningToolTracking();
           activeReactFoldIdRef.current = null;
           if (ownerSessionId) clearStreamSnapshot(ownerSessionId);
           const errorMsg: Message = {
@@ -3849,6 +3799,7 @@ export function Chat({ sessionId }: ChatProps) {
         }
         case "cancelled": {
           clearCancelFallbackTimer();
+          clearAllToolWatchdogs();
           flushPendingText();
           setAwaitingResumeAfterCancel(true);
           isStreamingRef.current = false;
@@ -3885,6 +3836,8 @@ export function Chat({ sessionId }: ChatProps) {
           currentResponseRef.current = "";
           setCurrentFoldIntermediate("");
           currentFoldIntermediateRef.current = "";
+          pendingToolTraceTextRef.current = "";
+          clearRunningToolTracking();
           activeReactFoldIdRef.current = null;
           if (ownerSessionId) clearStreamSnapshot(ownerSessionId);
           if (isDev) {
@@ -3979,6 +3932,7 @@ export function Chat({ sessionId }: ChatProps) {
         }
         case "complete": {
           clearCancelFallbackTimer();
+          clearAllToolWatchdogs();
           flushPendingText();
           flushPendingFoldIntermediate();
           setAwaitingResumeAfterCancel(false);
@@ -4048,6 +4002,8 @@ export function Chat({ sessionId }: ChatProps) {
           currentResponseRef.current = "";
           setCurrentFoldIntermediate("");
           currentFoldIntermediateRef.current = "";
+          pendingToolTraceTextRef.current = "";
+          clearRunningToolTracking();
           activeReactFoldIdRef.current = null;
 
           // Stream is done: remove the snapshot so switching back to this
@@ -4251,6 +4207,7 @@ export function Chat({ sessionId }: ChatProps) {
       currentFoldIntermediateRef.current = "";
       pendingTextBufferRef.current = "";
       pendingFoldIntermediateBufferRef.current = "";
+      pendingToolTraceTextRef.current = "";
       activeReactFoldIdRef.current = null;
 
       useActivityStore.getState().beginExecutionRun(pendingFeedback.connectLabel);
@@ -4440,6 +4397,8 @@ export function Chat({ sessionId }: ChatProps) {
     currentFoldIntermediateRef.current = "";
     pendingTextBufferRef.current = "";
     pendingFoldIntermediateBufferRef.current = "";
+    pendingToolTraceTextRef.current = "";
+    clearRunningToolTracking();
     activeReactFoldIdRef.current = null;
 
     useActivityStore.getState().beginExecutionRun(pendingFeedback.connectLabel);
@@ -4776,6 +4735,8 @@ export function Chat({ sessionId }: ChatProps) {
       currentFoldIntermediateRef.current = "";
       pendingTextBufferRef.current = "";
       pendingFoldIntermediateBufferRef.current = "";
+      pendingToolTraceTextRef.current = "";
+      clearRunningToolTracking();
       activeReactFoldIdRef.current = null;
       if (textFlushRafRef.current !== null) {
         cancelAnimationFrame(textFlushRafRef.current);
@@ -4964,6 +4925,7 @@ export function Chat({ sessionId }: ChatProps) {
       replaceStoreMessagesSnapshot,
       bumpQueueUi,
       clearStaleRetryBusyFlag,
+      clearRunningToolTracking,
     ],
   );
 
@@ -5109,6 +5071,7 @@ export function Chat({ sessionId }: ChatProps) {
           activeReactFoldIdRef.current = null;
           pendingTextBufferRef.current = "";
           pendingFoldIntermediateBufferRef.current = "";
+          pendingToolTraceTextRef.current = "";
           if (textFlushRafRef.current !== null) {
             cancelAnimationFrame(textFlushRafRef.current);
             textFlushRafRef.current = null;
@@ -5161,6 +5124,8 @@ export function Chat({ sessionId }: ChatProps) {
     currentFoldIntermediateRef.current = "";
     pendingTextBufferRef.current = "";
     pendingFoldIntermediateBufferRef.current = "";
+    pendingToolTraceTextRef.current = "";
+    clearRunningToolTracking();
     activeReactFoldIdRef.current = null;
     if (textFlushRafRef.current !== null) {
       cancelAnimationFrame(textFlushRafRef.current);
@@ -5261,6 +5226,8 @@ export function Chat({ sessionId }: ChatProps) {
     currentFoldIntermediateRef.current = "";
     pendingTextBufferRef.current = "";
     pendingFoldIntermediateBufferRef.current = "";
+    pendingToolTraceTextRef.current = "";
+    clearRunningToolTracking();
     if (textFlushRafRef.current !== null) {
       cancelAnimationFrame(textFlushRafRef.current);
       textFlushRafRef.current = null;
@@ -5280,7 +5247,12 @@ export function Chat({ sessionId }: ChatProps) {
     } catch (e) {
       console.error("[Chat] setCurrentSession(null) failed:", e);
     }
-  }, [currentStreamId, clearQueuedMainSends, clearCancelFallbackTimer]);
+  }, [
+    currentStreamId,
+    clearQueuedMainSends,
+    clearCancelFallbackTimer,
+    clearRunningToolTracking,
+  ]);
 
   const handleResumeAfterCancel = async () => {
     if (
@@ -5297,6 +5269,7 @@ export function Chat({ sessionId }: ChatProps) {
     setIndexingStatus("idle");
 
     setPendingAssistantHint(null);
+    clearRunningToolTracking();
     activeReactFoldIdRef.current = null;
     useActivityStore.getState().beginExecutionRun();
     useActivityStore.getState().setConnecting(true);

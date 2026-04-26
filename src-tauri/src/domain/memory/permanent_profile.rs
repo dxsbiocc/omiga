@@ -187,7 +187,6 @@ fn render_section(heading: &str, items: &[String]) -> String {
 fn filtered_user_background_lines_from_lines(lines: Vec<String>) -> Vec<String> {
     lines
         .into_iter()
-        .into_iter()
         .filter(|line| {
             let lower = line.to_lowercase();
             !lower.contains("当前")
@@ -200,7 +199,6 @@ fn filtered_user_background_lines_from_lines(lines: Vec<String>) -> Vec<String> 
 
 fn filtered_pitfall_lines_from_lines(lines: Vec<String>) -> Vec<String> {
     lines
-        .into_iter()
         .into_iter()
         .map(|line| {
             if line.starts_with("容易") || line.starts_with("不要") {
@@ -486,11 +484,13 @@ mod tests {
 
     #[test]
     fn render_respects_priority_budget() {
-        let mut profile = PermanentProfile::default();
-        profile.agent_identity = vec!["Agent identity".to_string()];
-        profile.persona = vec!["Persona".to_string()];
-        profile.boundaries = vec!["Boundary".to_string()];
-        profile.stable_project_conventions = vec!["Convention".repeat(400)];
+        let profile = PermanentProfile {
+            agent_identity: vec!["Agent identity".to_string()],
+            persona: vec!["Persona".to_string()],
+            boundaries: vec!["Boundary".to_string()],
+            stable_project_conventions: vec!["Convention".repeat(400)],
+            ..Default::default()
+        };
 
         let rendered = profile.render_for_system_prompt(60).unwrap();
 

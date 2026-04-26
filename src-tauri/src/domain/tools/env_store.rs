@@ -36,6 +36,12 @@ struct StoreInner {
     envs: Mutex<HashMap<String, Arc<Mutex<dyn BaseEnvironment>>>>,
 }
 
+impl Default for EnvStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EnvStore {
     pub fn new() -> Self {
         Self(Arc::new(StoreInner {

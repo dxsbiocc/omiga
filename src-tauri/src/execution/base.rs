@@ -296,13 +296,17 @@ pub trait BaseEnvironment: Send + Sync {
         let effective_cwd = options.cwd.unwrap_or_else(|| self.cwd().to_string());
 
         // 准备命令
-        let (exec_command, effective_stdin): (String, Option<String>) =
-            if options.stdin_data.is_some() && self.stdin_mode() == "heredoc" {
-                let cmd = self.embed_stdin_heredoc(command, options.stdin_data.as_ref().unwrap());
-                (cmd, None)
-            } else {
-                (command.to_string(), options.stdin_data)
-            };
+        let (exec_command, effective_stdin): (String, Option<String>) = if let Some(stdin_data) =
+            options
+                .stdin_data
+                .as_ref()
+                .filter(|_| self.stdin_mode() == "heredoc")
+        {
+            let cmd = self.embed_stdin_heredoc(command, stdin_data);
+            (cmd, None)
+        } else {
+            (command.to_string(), options.stdin_data)
+        };
 
         let wrapped = self.wrap_command(&exec_command, &effective_cwd);
         let login = !self.snapshot_ready();
@@ -385,7 +389,7 @@ where
 {
     use tokio::io::AsyncReadExt;
     let mut buffer = Vec::new();
-    if let Ok(_) = reader.read_to_end(&mut buffer).await {
+    if reader.read_to_end(&mut buffer).await.is_ok() {
         let _ = tx.send(buffer).await;
     }
 }

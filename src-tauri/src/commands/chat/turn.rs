@@ -361,7 +361,7 @@ pub(super) async fn sync_memory_layers_after_turn(
     };
 
     match crate::domain::memory::working_memory::sync_after_turn(
-        &**repo,
+        repo,
         session_id,
         client,
         user_message,
@@ -444,7 +444,7 @@ pub(super) async fn emit_post_turn_meta_then_complete(
     suggestions_reply: &str,
     repo: Arc<crate::domain::persistence::SessionRepository>,
 ) {
-    let flags = crate::domain::post_turn_settings::load_post_turn_meta_flags(&*repo)
+    let flags = crate::domain::post_turn_settings::load_post_turn_meta_flags(&repo)
         .await
         .unwrap_or((true, true));
     let (summary_enabled, follow_enabled) = flags;
@@ -477,7 +477,7 @@ pub(super) async fn emit_post_turn_meta_then_complete(
 
     if let Some(summary) = summary_text.as_deref() {
         if let Err(e) = repo
-            .update_message_turn_summary(&assistant_message_id, Some(summary))
+            .update_message_turn_summary(assistant_message_id, Some(summary))
             .await
         {
             tracing::warn!("Failed to persist turn summary: {}", e);

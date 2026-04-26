@@ -722,10 +722,8 @@ impl PermissionManager {
                 }
             }
             // 如果没有文件路径信息，WithinProject 视为通过，其他路径匹配器视为不通过
-            else {
-                if !matches!(path_matcher, PathMatcher::WithinProject) {
-                    return false;
-                }
+            else if !matches!(path_matcher, PathMatcher::WithinProject) {
+                return false;
             }
         }
 

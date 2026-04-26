@@ -124,7 +124,7 @@ pub async fn execute_skill_view(
             let content = tokio::fs::read_to_string(&path)
                 .await
                 .map_err(|e| format!("skill_view: read: {e}"))?;
-            return Ok(serde_json::to_value(SkillViewOk {
+            return serde_json::to_value(SkillViewOk {
                 success: true,
                 skill: entry.name.clone(),
                 file_path: Some(rel.to_string()),
@@ -133,7 +133,7 @@ pub async fn execute_skill_view(
                 linked_files: vec![],
                 hint: "Use `skill` to execute this skill with arguments when you need the workflow, not just the text.",
             })
-            .map_err(|e| e.to_string())?);
+            .map_err(|e| e.to_string());
         }
     }
 
@@ -153,7 +153,7 @@ pub async fn execute_skill_view(
         source: entry.source.clone(),
     };
 
-    Ok(serde_json::to_value(SkillViewOk {
+    serde_json::to_value(SkillViewOk {
         success: true,
         skill: entry.name.clone(),
         file_path: None,
@@ -162,5 +162,5 @@ pub async fn execute_skill_view(
         linked_files,
         hint: "For a reference file, call skill_view with `file_path`. To run the workflow, use `skill`.",
     })
-    .map_err(|e| e.to_string())?)
+    .map_err(|e| e.to_string())
 }

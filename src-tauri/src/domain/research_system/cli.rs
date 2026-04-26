@@ -42,13 +42,13 @@ pub fn run_research_cli(args: &[String], cwd: &Path) -> Result<String, String> {
 fn init_workspace(layout: &WorkspaceLayout) -> Result<String, String> {
     layout.ensure_dirs()?;
     let written = write_default_agent_cards(&layout.agents_dir)?;
-    Ok(serde_json::to_string_pretty(&json!({
+    serde_json::to_string_pretty(&json!({
         "workspace_root": layout.root,
         "agents_dir": layout.agents_dir,
         "state_dir": layout.state_dir,
         "written_files": written,
     }))
-    .map_err(|err| err.to_string())?)
+    .map_err(|err| err.to_string())
 }
 
 fn list_agents(layout: &WorkspaceLayout) -> Result<String, String> {

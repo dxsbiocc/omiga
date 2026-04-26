@@ -9,7 +9,7 @@ use crate::errors::{AppError, FsError};
 use regex::Regex;
 use serde::Serialize;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 use tokio::process::Command;
@@ -210,7 +210,7 @@ pub async fn render_quarto(path: String) -> CommandResult<RmdRenderResponse> {
 }
 
 /// `quarto::quarto_render()` — requires R and the **quarto** R package (`install.packages("quarto")`).
-async fn render_quarto_via_r(canonical: &PathBuf) -> CommandResult<RmdRenderResponse> {
+async fn render_quarto_via_r(canonical: &Path) -> CommandResult<RmdRenderResponse> {
     let path_str = canonical.to_string_lossy().to_string();
     let r_expr = format!("quarto::quarto_render({})", r_double_quoted_path(&path_str));
 

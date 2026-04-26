@@ -183,14 +183,8 @@ fn collapse_whitespace(s: &str) -> String {
 
 fn strategy_whitespace_normalized(content: &str, pattern: &str) -> Vec<ByteRange> {
     let offsets = line_start_offsets(content);
-    let content_norm: Vec<String> = content
-        .split('\n')
-        .map(|l| collapse_whitespace(l))
-        .collect();
-    let pat_norm: Vec<String> = pattern
-        .split('\n')
-        .map(|l| collapse_whitespace(l))
-        .collect();
+    let content_norm: Vec<String> = content.split('\n').map(collapse_whitespace).collect();
+    let pat_norm: Vec<String> = pattern.split('\n').map(collapse_whitespace).collect();
     find_line_pattern(content, &offsets, &content_norm, &pat_norm)
 }
 
@@ -303,10 +297,8 @@ fn similarity_ratio(a: &str, b: &str) -> f64 {
 }
 
 fn unicode_normalize(s: &str) -> String {
-    s.replace('\u{201c}', "\"")
-        .replace('\u{201d}', "\"")
-        .replace('\u{2018}', "'")
-        .replace('\u{2019}', "'")
+    s.replace(['\u{201c}', '\u{201d}'], "\"")
+        .replace(['\u{2018}', '\u{2019}'], "'")
         .replace('\u{2014}', "--")
         .replace('\u{2013}', "-")
         .replace('\u{2026}', "...")

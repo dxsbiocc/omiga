@@ -36,8 +36,10 @@ pub use types::*;
 /// Supported LLM providers
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum LlmProvider {
     /// Anthropic Claude API
+    #[default]
     Anthropic,
     /// OpenAI API
     OpenAi,
@@ -57,12 +59,6 @@ pub enum LlmProvider {
     Moonshot,
     /// Custom OpenAI-compatible endpoint
     Custom,
-}
-
-impl Default for LlmProvider {
-    fn default() -> Self {
-        LlmProvider::Anthropic
-    }
 }
 
 impl std::fmt::Display for LlmProvider {

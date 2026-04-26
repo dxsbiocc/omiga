@@ -434,7 +434,7 @@ impl ExplicitImporter {
                     slugify(&section.title)
                 ));
             }
-            content.push_str("\n");
+            content.push('\n');
             for section in &parse_result.sections {
                 content.push_str(&self.format_section(section, 4));
             }

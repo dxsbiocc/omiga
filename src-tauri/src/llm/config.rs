@@ -172,9 +172,7 @@ impl SshExecConfig {
             // Parse other config options
             else if let Some(_host) = current_host.as_ref() {
                 // SSH config allows "Key Value", "Key=Value", and multiple spaces/tabs
-                let parts: Vec<&str> = line
-                    .splitn(2, |c: char| c == '=' || c == ' ' || c == '\t')
-                    .collect();
+                let parts: Vec<&str> = line.splitn(2, ['=', ' ', '\t']).collect();
                 if parts.len() == 2 {
                     let key = parts[0].trim();
                     let value = parts[1].trim().trim_start_matches('=').trim();

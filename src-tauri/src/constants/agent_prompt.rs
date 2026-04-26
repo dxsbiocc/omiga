@@ -12,8 +12,7 @@ const CYBER_RISK_INSTRUCTION: &str = "IMPORTANT: Assist with authorized security
 
 /// Tool names match `domain/tools/*/schema()` (`bash`, `file_read`, …).
 fn section_using_tools() -> String {
-    format!(
-        r#"## Using your tools
+    r#"## Using your tools
 
 - Do NOT use `bash` to run commands when a relevant dedicated tool is provided. Using dedicated tools allows the user to better understand and review your work.
 - To read files use `file_read` instead of cat, head, tail, or sed.
@@ -47,8 +46,7 @@ fn section_using_tools() -> String {
 
 - **Never** run multi-line logic through one-off shell invocations (`python -c`, heredocs, long `Rscript -e` strings, or pasting multi-line code into `bash`). Always write the code to a script file first, then execute the file. This applies to all code — not just data processing.
 - **Python**: Prefer a Jupyter notebook (`.ipynb`). Use `notebook_edit` to add or update cells incrementally (one logical step per cell when practical). If a notebook is not a good fit, use a `.py` script with `file_write` / `file_edit` instead of ephemeral shell-only code.
-- **R**: Prefer R Markdown (`.Rmd`) when the work benefits from narrative plus code (reports, reproducible analysis). Use `file_write` / `file_edit` on the `.Rmd`. If a literate document is not appropriate, use a plain `.R` script file. Avoid large analysis living only in one-line `Rscript -e` shell calls."#
-    )
+- **R**: Prefer R Markdown (`.Rmd`) when the work benefits from narrative plus code (reports, reproducible analysis). Use `file_write` / `file_edit` on the `.Rmd`. If a literate document is not appropriate, use a plain `.R` script file. Avoid large analysis living only in one-line `Rscript -e` shell calls."#.to_string()
 }
 
 /// Mirrors Claude Code plan-mode behavior (`getPlanModeV2Instructions`, `EnterPlanModeTool` / `ExitPlanModeTool` prompts in the main TypeScript repo).

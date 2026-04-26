@@ -466,9 +466,10 @@ pub async fn get_api_key_status(state: State<'_, OmigaAppState>) -> CommandResul
             configured: false,
             source: None,
             provider: None,
-            message: Some(format!(
+            message: Some(
                 "未配置 API key。请设置环境变量: ANTHROPIC_API_KEY, OPENAI_API_KEY, 或 LLM_API_KEY"
-            )),
+                    .to_string(),
+            ),
         }),
     }
 }
@@ -1271,9 +1272,7 @@ pub async fn cancel_background_agent_task(
     match task.status {
         BackgroundAgentStatus::Completed
         | BackgroundAgentStatus::Failed
-        | BackgroundAgentStatus::Cancelled => {
-            return Ok(task);
-        }
+        | BackgroundAgentStatus::Cancelled => Ok(task),
         BackgroundAgentStatus::Pending | BackgroundAgentStatus::Running => {
             task.status = BackgroundAgentStatus::Cancelled;
             task.completed_at = Some(

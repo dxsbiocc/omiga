@@ -415,10 +415,11 @@ async fn clear_all_blackboards(project_root: &std::path::Path) -> usize {
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.starts_with("blackboard-") && name.ends_with(".json") {
-            if tokio::fs::remove_file(&path).await.is_ok() {
-                count += 1;
-            }
+        if name.starts_with("blackboard-")
+            && name.ends_with(".json")
+            && tokio::fs::remove_file(&path).await.is_ok()
+        {
+            count += 1;
         }
     }
     count

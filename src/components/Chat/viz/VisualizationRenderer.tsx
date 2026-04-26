@@ -56,6 +56,8 @@ function IframeView({ src }: { src: string }) {
       component="iframe"
       src={src}
       sandbox="allow-scripts"
+      referrerPolicy="no-referrer"
+      loading="lazy"
       sx={{
         width: "100%",
         height: 400,

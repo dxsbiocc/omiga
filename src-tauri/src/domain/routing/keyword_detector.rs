@@ -378,10 +378,8 @@ pub fn detect_skill_route(message: &str) -> Option<SkillRoute> {
                 .any(|kw| lower.contains(&kw.to_lowercase()))
         };
 
-        if matches {
-            if best.map(|(p, _)| rule.priority > p).unwrap_or(true) {
-                best = Some((rule.priority, rule));
-            }
+        if matches && best.map(|(p, _)| rule.priority > p).unwrap_or(true) {
+            best = Some((rule.priority, rule));
         }
     }
 

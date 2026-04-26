@@ -56,6 +56,12 @@ describe("ToolFoldSummary helpers", () => {
     ).toBe("");
     expect(
       toolDisplayOutputText(
+        { role: "tool", content: "`web_search`" },
+        { name: "web_search", status: "running" },
+      ),
+    ).toBe("");
+    expect(
+      toolDisplayOutputText(
         { role: "tool", content: "real output" },
         { name: "bash", output: " from tool " },
       ),

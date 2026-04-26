@@ -73,7 +73,6 @@ export interface ToolCallCardProps {
   prefaceBeforeTools?: string;
   toolCall: ToolCallLike;
   previousAssistantHasText: boolean;
-  generatedThoughtSummary: string;
   nestedOpen: boolean;
   showAskUserPanel: boolean;
   chat: ChatTokens;
@@ -89,7 +88,6 @@ export const ToolCallCard = memo(function ToolCallCard({
   prefaceBeforeTools,
   toolCall,
   previousAssistantHasText,
-  generatedThoughtSummary,
   nestedOpen,
   showAskUserPanel,
   chat,
@@ -108,13 +106,11 @@ export const ToolCallCard = memo(function ToolCallCard({
   const commandSectionLabel = isBash ? "Command" : toolCall.name;
   const panelTitle = toolCallPanelTitle(toolCall.input, toolCall.name);
   const prefaceThought = prefaceBeforeTools?.trim() ?? "";
-  const thoughtText =
-    prefaceThought || (!previousAssistantHasText ? generatedThoughtSummary : "");
   const toolDurationLabel = formatToolDuration(timestamp, toolCall.completedAt);
 
   return (
     <Box>
-      {thoughtText ? (
+      {prefaceThought && !previousAssistantHasText ? (
         <Box
           sx={{
             px: 1,
@@ -133,14 +129,9 @@ export const ToolCallCard = memo(function ToolCallCard({
           >
             <Chip
               size="small"
-              label={prefaceThought ? "思考" : "思考摘要"}
+              label="思考"
               sx={{ height: 18, fontSize: 9, color: chat.textMuted }}
             />
-            {!prefaceThought && (
-              <Typography sx={{ fontSize: 10, color: chat.labelMuted }}>
-                由工具意图生成，不是隐藏推理原文
-              </Typography>
-            )}
           </Stack>
           <Box
             sx={{
@@ -151,16 +142,12 @@ export const ToolCallCard = memo(function ToolCallCard({
               wordBreak: "break-word",
             }}
           >
-            {prefaceThought ? (
-              <ChatMarkdownContent
-                content={thoughtText}
-                tone="agent"
-                components={components}
-                chat={chat}
-              />
-            ) : (
-              thoughtText
-            )}
+            <ChatMarkdownContent
+              content={prefaceThought}
+              tone="agent"
+              components={components}
+              chat={chat}
+            />
           </Box>
         </Box>
       ) : null}

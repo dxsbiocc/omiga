@@ -284,7 +284,7 @@ pub(super) async fn run_skill_forked(
                 content: assistant_text,
                 tool_calls: tc,
                 token_usage: None,
-                reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text),
+                reasoning_content: (!reasoning_text.is_empty()).then_some(reasoning_text),
                 follow_up_suggestions: None,
                 turn_summary: None,
             });
@@ -355,7 +355,7 @@ pub(super) async fn run_skill_forked(
                         content: retry_text.clone(),
                         tool_calls: None,
                         token_usage: None,
-                        reasoning_content: (!retry_reasoning.is_empty()).then(|| retry_reasoning),
+                        reasoning_content: (!retry_reasoning.is_empty()).then_some(retry_reasoning),
                         follow_up_suggestions: None,
                         turn_summary: None,
                     });
@@ -650,7 +650,7 @@ pub(super) async fn run_subagent_session_foreground_inner(
                 content: assistant_text,
                 tool_calls: tc,
                 token_usage: None,
-                reasoning_content: (!reasoning_text.is_empty()).then(|| reasoning_text),
+                reasoning_content: (!reasoning_text.is_empty()).then_some(reasoning_text),
                 follow_up_suggestions: None,
                 turn_summary: None,
             };
@@ -754,7 +754,7 @@ pub(super) async fn run_subagent_session_foreground_inner(
                         content: retry_text.clone(),
                         tool_calls: None,
                         token_usage: None,
-                        reasoning_content: (!retry_reasoning.is_empty()).then(|| retry_reasoning),
+                        reasoning_content: (!retry_reasoning.is_empty()).then_some(retry_reasoning),
                         follow_up_suggestions: None,
                         turn_summary: None,
                     };

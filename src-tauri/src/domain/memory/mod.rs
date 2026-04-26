@@ -152,13 +152,14 @@ impl MemorySystem {
 
     /// Get unified memory statistics
     pub async fn stats(&self) -> MemoryStats {
-        let mut stats = MemoryStats::default();
-
-        stats.project_knowledge_pages = count_markdown_pages(&self.wiki_path()).await;
-        stats.global_knowledge_pages = count_markdown_pages(&config::permanent_wiki_path()).await;
-        stats.long_term_project_entries = long_term::count_entries(&self.long_term_path()).await;
-        stats.long_term_global_entries =
-            long_term::count_entries(&config::permanent_long_term_path()).await;
+        let mut stats = MemoryStats {
+            project_knowledge_pages: count_markdown_pages(&self.wiki_path()).await,
+            global_knowledge_pages: count_markdown_pages(&config::permanent_wiki_path()).await,
+            long_term_project_entries: long_term::count_entries(&self.long_term_path()).await,
+            long_term_global_entries: long_term::count_entries(&config::permanent_long_term_path())
+                .await,
+            ..Default::default()
+        };
 
         // Check explicit memory (wiki): project + permanent
         for wiki_root in [self.wiki_path(), config::permanent_wiki_path()] {
@@ -415,10 +416,11 @@ pub async fn load_resolved_config(
         || legacy.join("implicit").join("tree.json").exists()
         || legacy.join("tree.json").exists();
     if has_legacy {
-        let mut c = MemoryConfig::default();
-        c.memory_mode = MemoryMode::ProjectRelative;
-        c.root_dir = PathBuf::from(".omiga/memory");
-        return Ok(c);
+        return Ok(MemoryConfig {
+            memory_mode: MemoryMode::ProjectRelative,
+            root_dir: PathBuf::from(".omiga/memory"),
+            ..Default::default()
+        });
     }
     Ok(MemoryConfig::default())
 }
@@ -527,7 +529,7 @@ fn markdown_files(root: &Path) -> Vec<PathBuf> {
             entry
                 .path()
                 .extension()
-                .map_or(false, |ext| ext.eq_ignore_ascii_case("md"))
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
         })
         .map(|entry| entry.into_path())
         .collect()

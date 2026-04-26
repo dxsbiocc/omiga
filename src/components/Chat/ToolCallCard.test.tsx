@@ -22,7 +22,6 @@ describe("ToolCallCard", () => {
           completedAt: 2450,
         }}
         previousAssistantHasText
-        generatedThoughtSummary=""
         nestedOpen
         showAskUserPanel={false}
         chat={chat}
@@ -39,16 +38,15 @@ describe("ToolCallCard", () => {
     expect(html).toContain("1.4s");
   });
 
-  it("renders generated thought summaries and pending ask-user state", () => {
+  it("does not invent thought summaries for running tool placeholders", () => {
     const html = renderToStaticMarkup(
       <ToolCallCard
         foldId="rf-1"
         messageId="tool-2"
-        content=""
+        content="`ask_user_question`"
         timestamp={1000}
         toolCall={{ name: "ask_user_question", status: "running" }}
         previousAssistantHasText={false}
-        generatedThoughtSummary="需要向用户确认下一步。"
         nestedOpen
         showAskUserPanel
         chat={chat}
@@ -57,8 +55,32 @@ describe("ToolCallCard", () => {
       />,
     );
 
-    expect(html).toContain("思考摘要");
-    expect(html).toContain("需要向用户确认下一步。");
+    expect(html).not.toContain("思考摘要");
+    expect(html).not.toContain("Output");
+    expect(html).not.toContain("`ask_user_question`");
     expect(html).toContain("等待你的回答");
+  });
+
+  it("renders only real assistant preface text before a tool", () => {
+    const html = renderToStaticMarkup(
+      <ToolCallCard
+        foldId="rf-1"
+        messageId="tool-3"
+        content=""
+        timestamp={1000}
+        prefaceBeforeTools="先查看最新资料。"
+        toolCall={{ name: "web_search", status: "running" }}
+        previousAssistantHasText={false}
+        nestedOpen={false}
+        showAskUserPanel={false}
+        chat={chat}
+        components={{}}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("思考");
+    expect(html).toContain("先查看最新资料。");
+    expect(html).not.toContain("思考摘要");
   });
 });

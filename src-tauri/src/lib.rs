@@ -5,6 +5,16 @@
 //! - domain/: Core business logic (tools, session management, persistence)
 //! - infrastructure/: Technical details (filesystem, streaming, git)
 
+// Some public command/orchestration APIs intentionally mirror Tauri, LLM, or
+// persistence boundaries where grouping parameters would make call sites less
+// explicit. Keep these architectural lints non-blocking while allowing Clippy to
+// enforce behavior-oriented warnings.
+#![allow(
+    clippy::large_enum_variant,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+
 pub mod api;
 pub mod app_state;
 pub mod commands;
@@ -192,6 +202,7 @@ pub fn run() {
             commands::session::get_setting,
             commands::session::set_setting,
             commands::fs::read_file,
+            commands::fs::read_file_bytes,
             commands::fs::read_file_bytes_fast,
             commands::fs::read_local_file_for_view,
             commands::fs::write_file,

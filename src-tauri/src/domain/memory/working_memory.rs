@@ -14,17 +14,13 @@ const LONG_REPLY_REFRESH_CHARS: usize = 600;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum WorkingMemoryItemStatus {
+    #[default]
     Active,
     Resolved,
     Replaced,
     Expired,
-}
-
-impl Default for WorkingMemoryItemStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

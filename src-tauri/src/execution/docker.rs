@@ -481,8 +481,8 @@ impl BaseEnvironment for DockerEnvironment {
         let effective_cwd = options.cwd.unwrap_or_else(|| self.cwd.clone());
 
         // 准备命令：heredoc 模式将 stdin 嵌入命令，pipe 模式暂不支持（exec 不接受 stdin）
-        let exec_command = if options.stdin_data.is_some() {
-            self.embed_stdin_heredoc(command, options.stdin_data.as_ref().unwrap())
+        let exec_command = if let Some(stdin_data) = options.stdin_data.as_ref() {
+            self.embed_stdin_heredoc(command, stdin_data)
         } else {
             command.to_string()
         };
@@ -508,14 +508,14 @@ impl BaseEnvironment for DockerEnvironment {
 
             // 停止容器
             let _ = Command::new(&self.docker_exe)
-                .args(&["stop", "-t", "60", container_id])
+                .args(["stop", "-t", "60", container_id])
                 .output()
                 .await;
 
             if !self.persistent {
                 // 删除容器
                 let _ = Command::new(&self.docker_exe)
-                    .args(&["rm", "-f", container_id])
+                    .args(["rm", "-f", container_id])
                     .output()
                     .await;
 

@@ -940,13 +940,22 @@ export const ChatComposer = memo(function ChatComposer({
       setFileGlobMatches([]);
       return;
     }
-    if (environment === "ssh" && !sshServer?.trim()) {
+    const useSsh = environment === "ssh" && Boolean(sshServer?.trim());
+    const useSandbox = environment === "sandbox" && Boolean(sandboxBackend?.trim());
+    if (environment === "ssh" && !useSsh) {
+      setFileGlobMatches([]);
+      return;
+    }
+    if (environment === "sandbox" && (!useSandbox || !sessionId)) {
+      setFileGlobMatches([]);
+      return;
+    }
+    if (environment === "local" && !sessionId) {
       setFileGlobMatches([]);
       return;
     }
     let cancelled = false;
     setFileGlobLoading(true);
-    const useSsh = environment === "ssh" && Boolean(sshServer?.trim());
     const listPromise = useSsh
       ? invoke<{
           entries: Array<{
@@ -959,14 +968,27 @@ export const ChatComposer = memo(function ChatComposer({
           sshProfileName: sshServer!.trim(),
           path: workspacePath,
         })
-      : invoke<{
-          entries: Array<{
-            name: string;
-            path: string;
-            is_directory: boolean;
-            size?: number | null;
-          }>;
-        }>("list_directory", { path: workspacePath });
+      : useSandbox
+        ? invoke<{
+            entries: Array<{
+              name: string;
+              path: string;
+              is_directory: boolean;
+              size?: number | null;
+            }>;
+          }>("sandbox_list_directory", {
+            sessionId,
+            sandboxBackend: sandboxBackend!.trim(),
+            path: workspacePath,
+          })
+        : invoke<{
+            entries: Array<{
+              name: string;
+              path: string;
+              is_directory: boolean;
+              size?: number | null;
+            }>;
+          }>("list_directory", { path: workspacePath, sessionId });
     listPromise
       .then((res) => {
         if (cancelled) return;
@@ -994,8 +1016,10 @@ export const ChatComposer = memo(function ChatComposer({
     fileParse.active,
     needsWorkspacePath,
     workspacePath,
+    sessionId,
     environment,
     sshServer,
+    sandboxBackend,
   ]);
 
   const filteredFilePaths = useMemo(() => {

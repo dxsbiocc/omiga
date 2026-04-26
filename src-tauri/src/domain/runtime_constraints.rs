@@ -20,21 +20,12 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RuntimeConstraintRuleConfig {
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
     pub severity: Option<ConstraintSeverity>,
-}
-
-impl Default for RuntimeConstraintRuleConfig {
-    fn default() -> Self {
-        Self {
-            enabled: None,
-            severity: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1083,8 +1074,10 @@ mod tests {
 
     #[test]
     fn harness_applies_config_overrides() {
-        let mut cfg = ResolvedRuntimeConstraintConfig::default();
-        cfg.buffer_responses = false;
+        let mut cfg = ResolvedRuntimeConstraintConfig {
+            buffer_responses: false,
+            ..Default::default()
+        };
         cfg.rules.insert(
             "clarification_first".to_string(),
             RuntimeConstraintRuleConfig {

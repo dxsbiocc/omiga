@@ -161,8 +161,7 @@ impl AgentLlmRuntime {
                     .unwrap_or_else(|| "docker".to_string()),
                 s.map(|x| x.local_venv_type.clone()).unwrap_or_default(),
                 s.map(|x| x.local_venv_name.clone()).unwrap_or_default(),
-                s.map(|x| x.env_store.clone())
-                    .unwrap_or_else(crate::domain::tools::env_store::EnvStore::new),
+                s.map(|x| x.env_store.clone()).unwrap_or_default(),
             )
         };
 
@@ -1457,7 +1456,6 @@ pub async fn send_message(
     // The user message is left unchanged — the skill instructions arrive via the system prompt,
     // which means the LLM's very first token is already operating under skill guidance (OMX-style
     // auto-invocation) rather than having to decide whether to call the Skill tool.
-    let request = request;
     let routing_content = request
         .routing_content
         .as_deref()
@@ -2292,7 +2290,7 @@ pub async fn send_message(
             cfg
         })
     };
-    crate::domain::memory::working_memory::mark_user_turn_started(&repo, &session_id)
+    crate::domain::memory::working_memory::mark_user_turn_started(repo, &session_id)
         .await
         .map_err(|e| {
             OmigaError::Chat(ChatError::StreamError(format!(
@@ -2305,7 +2303,7 @@ pub async fn send_message(
     let (skills_exist, memory_ctx, memory_nav) = tokio::join!(
         skills::skills_any_exist(&project_root, skill_cache_ref),
         crate::commands::memory::get_memory_context(
-            &*repo,
+            repo,
             &project_root,
             Some(&session_id),
             &request.content,
@@ -2530,7 +2528,7 @@ pub async fn send_message(
             )),
         );
         crate::domain::memory::working_memory::prepare_for_auto_compact(
-            &repo,
+            repo,
             &session_id,
             &removed_messages,
         )
@@ -2560,7 +2558,7 @@ pub async fn send_message(
     }
 
     let compact_outcome = crate::domain::auto_compact::compact_session_and_persist(
-        &repo,
+        repo,
         &session_id,
         &mut session,
         &llm_config,
@@ -2947,7 +2945,7 @@ pub async fn send_message(
                 .map(|r| resolve_session_project_root(&r.session.project_path));
             drop(sessions);
             match pr {
-                Some(p) if p != std::path::PathBuf::from(".") => p
+                Some(p) if p.as_os_str() != std::ffi::OsStr::new(".") => p
                     .join(".omiga")
                     .join("tool-results")
                     .join(&session_id_clone),
@@ -3475,7 +3473,7 @@ pub async fn send_message(
                     &project_path,
                     &session_id_clone,
                     &session_name,
-                    &repo,
+                    repo,
                 )
                 .await;
             }
@@ -3790,7 +3788,7 @@ pub async fn send_message(
                         }
                     }
                     if let Err(e) = crate::domain::auto_compact::compact_session_and_persist(
-                        &repo,
+                        repo,
                         &session_id_clone,
                         &mut runtime.session,
                         &llm_config_for_spawn,
@@ -4212,7 +4210,7 @@ pub async fn send_message(
                         &project_path,
                         &session_id_clone,
                         &session_name,
-                        &repo,
+                        repo,
                     )
                     .await;
                 }
@@ -4389,7 +4387,7 @@ pub async fn send_message(
                             "summary": sched.confirmation_message
                                 .as_deref()
                                 .unwrap_or("此计划需要用户确认后才能执行"),
-                            "estimatedMinutes": (sched.estimated_duration_secs + 59) / 60,
+                            "estimatedMinutes": sched.estimated_duration_secs.div_ceil(60),
                             "agents": sched.selected_agents,
                             "originalRequest": {
                                 "userRequest": sched.plan.original_request,

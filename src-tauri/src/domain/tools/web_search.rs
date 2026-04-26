@@ -32,6 +32,10 @@ const MAX_SNIPPET_CHARS: usize = 512;
 const MAX_TITLE_CHARS: usize = 220;
 const DDG_HTML_RETRY_DELAY_MS: u64 = 450;
 const TAVILY_RETRY_DELAY_MS: u64 = 400;
+/// `web_search` is an interactive chat tool: a search that cannot return within
+/// this budget is not useful enough to keep the turn blocked.
+const WEB_SEARCH_MAX_TIMEOUT_SECS: u64 = 30;
+const WEB_SEARCH_MCP_MAX_TIMEOUT_SECS: u64 = 10;
 
 pub const DESCRIPTION: &str = r#"Search the public web for up-to-date information.
 
@@ -41,7 +45,7 @@ pub const DESCRIPTION: &str = r#"Search the public web for up-to-date informatio
 - `max_results` (default 5, max 10) limits how many hits are returned.
 - Optional `search_url` overrides the DuckDuckGo HTML endpoint (for private search proxies or tests).
 - Unsafe/private result URLs are filtered out; `search_url` must also be a public-safe HTTP(S) URL.
-- The full search attempt respects the tool timeout (default 60s, clamped to 5–120s) so fallback chains cannot hang indefinitely.
+- The full search attempt respects a short interactive timeout (default/global setting, hard-capped at 30s) so fallback chains cannot hang indefinitely.
 - After answering, cite sources with markdown links when you use this tool."#;
 
 fn default_max_results() -> Option<u32> {
@@ -797,6 +801,14 @@ fn effective_max_results(args: &WebSearchArgs) -> usize {
     m.min(MAX_RESULTS_CAP)
 }
 
+fn effective_web_search_timeout(timeout_secs: u64) -> Duration {
+    Duration::from_secs(timeout_secs.clamp(5, WEB_SEARCH_MAX_TIMEOUT_SECS))
+}
+
+fn effective_web_search_mcp_timeout(timeout_secs: u64) -> Duration {
+    Duration::from_secs(timeout_secs.clamp(5, WEB_SEARCH_MCP_MAX_TIMEOUT_SECS))
+}
+
 fn web_search_timeout_error(timeout: Duration) -> ToolError {
     let timeout_secs = timeout.as_secs().max(1);
     ToolError::ExecutionFailed {
@@ -959,7 +971,7 @@ async fn search_pubmed_mcp(
         return Ok(None);
     }
 
-    let timeout = Duration::from_secs(ctx.timeout_secs.clamp(5, 120));
+    let timeout = effective_web_search_mcp_timeout(ctx.timeout_secs);
     let tools = match list_tools_for_server(&ctx.project_root, PUBMED_SERVER, timeout).await {
         Ok(tools) => tools,
         Err(err) => {
@@ -1033,7 +1045,7 @@ async fn search_via_browser_mcp(
     query: &str,
     max_results: usize,
 ) -> Result<Option<SearchExecution>, ToolError> {
-    let timeout = Duration::from_secs(ctx.timeout_secs.clamp(5, 120));
+    let timeout = effective_web_search_mcp_timeout(ctx.timeout_secs);
     let merged = merged_mcp_servers(&ctx.project_root);
     if merged.is_empty() {
         return Ok(None);
@@ -1145,7 +1157,7 @@ async fn search_via_browser_mcp(
     }
 
     if let Some(candidate) = best_candidate {
-        let result = match call_tool_on_server(
+        let result = call_tool_on_server(
             &ctx.project_root,
             &best_server,
             &candidate.tool_name,
@@ -1153,10 +1165,7 @@ async fn search_via_browser_mcp(
             timeout,
         )
         .await
-        {
-            Ok(result) => Some(result),
-            Err(_) => None,
-        };
+        .ok();
         if let Some(result) = result {
             if let Some(value) = call_tool_result_to_json(&result) {
                 let hits = search_hits_from_browser_result(&value, max_results);
@@ -1598,7 +1607,7 @@ async fn search_exa_once(
     query: &str,
     max_results: u32,
 ) -> Result<Vec<SearchHit>, ToolError> {
-    let n = max_results.min(20).max(1);
+    let n = max_results.clamp(1, 20);
     let body = serde_json::json!({
         "query": query,
         "numResults": n,
@@ -1662,7 +1671,7 @@ async fn search_firecrawl_once(
     query: &str,
     max_results: u32,
 ) -> Result<Vec<SearchHit>, ToolError> {
-    let n = max_results.min(20).max(1);
+    let n = max_results.clamp(1, 20);
     let url = format!("{}/v1/search", base_url);
     let body = serde_json::json!({
         "query": query,
@@ -1730,7 +1739,7 @@ async fn search_parallel_once(
     query: &str,
     max_results: u32,
 ) -> Result<Vec<SearchHit>, ToolError> {
-    let n = max_results.min(20).max(1);
+    let n = max_results.clamp(1, 20);
     let body = serde_json::json!({
         "objective": query,
         "search_queries": [query],
@@ -2102,10 +2111,7 @@ async fn search_ddg(
         .unwrap_or("https://html.duckduckgo.com/html/");
 
     let mut hits = match fetch_ddg_instant_answer_body(client, query).await {
-        Ok(body) => match parse_ddg_instant_answer_json(&body, max_results) {
-            Ok(h) => h,
-            Err(_) => Vec::new(),
-        },
+        Ok(body) => parse_ddg_instant_answer_json(&body, max_results).unwrap_or_default(),
         Err(_) => Vec::new(),
     };
 
@@ -2378,6 +2384,16 @@ mod ddg_tests {
         assert_eq!(filtered[0].url, "https://example.org");
     }
 
+    #[test]
+    fn web_search_timeout_is_hard_capped_for_interactive_use() {
+        assert_eq!(effective_web_search_timeout(600), Duration::from_secs(30));
+        assert_eq!(effective_web_search_timeout(1), Duration::from_secs(5));
+        assert_eq!(
+            effective_web_search_mcp_timeout(600),
+            Duration::from_secs(10)
+        );
+    }
+
     #[tokio::test]
     async fn web_search_global_timeout_returns_error() {
         let result = enforce_web_search_timeout(Duration::from_millis(1), async {
@@ -2408,7 +2424,7 @@ impl super::ToolImpl for WebSearchTool {
         validate(&args)?;
         let start = Instant::now();
 
-        let timeout = std::time::Duration::from_secs(ctx.timeout_secs.clamp(5, 120));
+        let timeout = effective_web_search_timeout(ctx.timeout_secs);
         let mut client_builder = reqwest::Client::builder()
             .timeout(timeout)
             .user_agent(concat!("Omiga/", env!("CARGO_PKG_VERSION"), " WebSearch"));
@@ -2443,7 +2459,7 @@ impl super::ToolImpl for WebSearchTool {
                     SearchIntent::Research => {
                         let research_fut = run_research_search(&client, ctx, &args, max_n, search_url);
                         tokio::select! {
-                            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                            _ = ctx.cancel.cancelled() => Err(ToolError::Cancelled),
                             r = research_fut => r,
                         }
                     }

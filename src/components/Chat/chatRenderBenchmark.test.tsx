@@ -71,7 +71,6 @@ describe("chat large transcript render benchmark", () => {
                   completedAt: 1_700_000_000_050 + index,
                 }}
                 previousAssistantHasText
-                generatedThoughtSummary=""
                 nestedOpen={index % 8 === 0}
                 showAskUserPanel={false}
                 chat={chat}

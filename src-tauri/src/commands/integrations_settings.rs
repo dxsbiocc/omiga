@@ -182,7 +182,7 @@ pub fn save_integrations_state(
         disabled_skills,
     };
     integrations_config::save_integrations_config(&root, &config)
-        .map_err(|e| crate::errors::AppError::Config(e))?;
+        .map_err(crate::errors::AppError::Config)?;
     invalidate_integrations_catalog_cache(&app_state, &root);
     // MCP enable/disable changes invalidate the tool schema cache and connection pool.
     if let Ok(mut cache) = app_state.chat.mcp_tool_cache.try_lock() {
