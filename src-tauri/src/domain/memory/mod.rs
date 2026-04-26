@@ -103,6 +103,22 @@ impl MemorySystem {
         let _ = migration::backfill_wiki_metadata(&self.wiki_path()).await;
         let _ = migration::backfill_wiki_metadata(&config::permanent_wiki_path()).await;
 
+        // Probabilistic cleanup: prune stale long-term entries ~10% of the time on init.
+        if rand_one_in_n(10) {
+            let lt = self.long_term_path();
+            let perm_lt = config::permanent_long_term_path();
+            let removed_project = long_term::prune_stale_entries(&lt, false).await;
+            let removed_global = long_term::prune_stale_entries(&perm_lt, false).await;
+            if removed_project + removed_global > 0 {
+                info!(
+                    "Pruned {} stale long-term entries ({} project, {} global)",
+                    removed_project + removed_global,
+                    removed_project,
+                    removed_global
+                );
+            }
+        }
+
         info!("Initialized memory system at {:?}", root);
         Ok(())
     }
@@ -213,8 +229,11 @@ impl MemorySystem {
             results.extend(query_working_memory(excerpt, query));
         }
 
+        // Augment long-term query with active topic from working memory for context boost.
+        let lt_query = enrich_query_with_working_memory(query, working_memory_excerpt);
+
         results.extend(
-            long_term::search_entries(&self.long_term_path(), query, limit, false)
+            long_term::search_entries(&self.long_term_path(), &lt_query, limit, false)
                 .await
                 .into_iter()
                 .map(|result| MemoryQueryMatch {
@@ -228,7 +247,7 @@ impl MemorySystem {
                 }),
         );
         results.extend(
-            long_term::search_entries(&config::permanent_long_term_path(), query, limit, true)
+            long_term::search_entries(&config::permanent_long_term_path(), &lt_query, limit, true)
                 .await
                 .into_iter()
                 .map(|result| MemoryQueryMatch {
@@ -648,6 +667,50 @@ fn dedupe_matches(results: &mut Vec<MemoryQueryMatch>) {
     *results = deduped;
 }
 
+/// Returns true with probability 1/n using the current timestamp as a cheap entropy source.
+fn rand_one_in_n(n: u64) -> bool {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 % n == 0)
+        .unwrap_or(false)
+}
+
+/// Enrich a long-term search query with signals from the current working memory excerpt.
+///
+/// Extracts `### Session Goal` and `### Active Topic` lines from the rendered excerpt and
+/// appends them to the query so that long-term entries matching the current session context
+/// receive a higher TF-IDF score.
+fn enrich_query_with_working_memory(query: &str, excerpt: Option<&str>) -> String {
+    let Some(excerpt) = excerpt else {
+        return query.to_string();
+    };
+
+    let mut extra_terms = Vec::new();
+    for line in excerpt.lines() {
+        let trimmed = line.trim();
+        // Capture the value that follows "- " under Session Goal / Active Topic sections.
+        if trimmed.starts_with("- ") {
+            extra_terms.push(trimmed.trim_start_matches("- ").trim().to_string());
+            if extra_terms.len() >= 2 {
+                break;
+            }
+        }
+    }
+
+    if extra_terms.is_empty() {
+        return query.to_string();
+    }
+
+    // Cap total enriched query to ~300 chars to avoid diluting the original signal.
+    let suffix = extra_terms.join(" ");
+    let combined = format!("{} {}", query.trim(), suffix.trim());
+    if combined.chars().count() > 300 {
+        combined.chars().take(300).collect()
+    } else {
+        combined
+    }
+}
+
 pub fn sort_memory_results(results: &mut [MemoryQueryMatch]) {
     results.sort_by(|a, b| {
         b.source_type
@@ -785,5 +848,38 @@ mod tests {
         assert_eq!(results[0].title, "Working hit");
         assert_eq!(results[1].title, "Knowledge hit");
         assert_eq!(results[2].title, "Implicit hit");
+    }
+
+    #[test]
+    fn enrich_query_appends_working_memory_topic() {
+        let excerpt = "## Working Memory (session scratchpad)\n\n\
+                       ### Session Goal\n- 优化记忆分层检索效率\n\n\
+                       ### Active Topic\n- memory recall ranking\n";
+        let enriched = enrich_query_with_working_memory("recall", Some(excerpt));
+        assert!(
+            enriched.contains("recall"),
+            "original query must be preserved"
+        );
+        assert!(
+            enriched.len() > "recall".len(),
+            "enriched query should be longer than original"
+        );
+    }
+
+    #[test]
+    fn enrich_query_returns_original_when_no_excerpt() {
+        let result = enrich_query_with_working_memory("my query", None);
+        assert_eq!(result, "my query");
+    }
+
+    #[test]
+    fn enrich_query_caps_at_300_chars() {
+        let long_line = "x".repeat(400);
+        let excerpt = format!("### Session Goal\n- {}\n", long_line);
+        let result = enrich_query_with_working_memory("q", Some(&excerpt));
+        assert!(
+            result.chars().count() <= 300,
+            "enriched query must not exceed 300 chars"
+        );
     }
 }

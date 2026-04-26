@@ -49,6 +49,8 @@ pub struct LongTermMemoryEntry {
 pub struct LongTermStatus {
     pub project_entry_count: usize,
     pub global_entry_count: usize,
+    /// Entries not reused in >90 days with stability < 0.4 (across project + global).
+    pub stale_entry_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -178,16 +180,43 @@ pub async fn count_stale_entries(root: &Path) -> usize {
     list_entries(root)
         .await
         .into_iter()
-        .filter(|(_, entry)| {
-            let old = entry
-                .last_reused_at
-                .as_deref()
-                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-                .map(|dt| dt.with_timezone(&chrono::Utc) < cutoff)
-                .unwrap_or(true);
-            old && entry.stability < 0.4
-        })
+        .filter(|(_, entry)| is_stale(entry, cutoff))
         .count()
+}
+
+/// Delete stale entries and return the number removed.
+///
+/// An entry is stale if it has not been reused in >90 days AND has stability < 0.4.
+/// Pass `dry_run = true` to count without deleting.
+pub async fn prune_stale_entries(root: &Path, dry_run: bool) -> usize {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(90);
+    let mut removed = 0;
+    for (path, entry) in list_entries(root).await {
+        if !is_stale(&entry, cutoff) {
+            continue;
+        }
+        if dry_run {
+            removed += 1;
+            continue;
+        }
+        if let Err(e) = fs::remove_file(&path).await {
+            tracing::warn!("prune_stale_entries: failed to remove {:?}: {}", path, e);
+        } else {
+            tracing::info!("prune_stale_entries: removed {:?}", path);
+            removed += 1;
+        }
+    }
+    removed
+}
+
+fn is_stale(entry: &LongTermMemoryEntry, cutoff: chrono::DateTime<chrono::Utc>) -> bool {
+    let old = entry
+        .last_reused_at
+        .as_deref()
+        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc) < cutoff)
+        .unwrap_or(true);
+    old && entry.stability < 0.4
 }
 
 /// Create and persist a session-level summary in long-term memory.
@@ -563,6 +592,59 @@ mod tests {
 
         let stale_count = count_stale_entries(temp.path()).await;
         assert_eq!(stale_count, 1, "only the old weak entry should be stale");
+    }
+
+    #[tokio::test]
+    async fn prune_stale_entries_removes_only_weak_old_entries() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let stale = LongTermMemoryEntry {
+            topic: "stale-fact".to_string(),
+            summary: "Outdated and weak fact.".to_string(),
+            kind: LongTermMemoryKind::TaskConclusion,
+            entities: vec![],
+            source_sessions: vec!["s1".to_string()],
+            source_artifacts: vec![],
+            confidence: 0.4,
+            stability: 0.15,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            last_reused_at: Some("2024-01-01T00:00:00Z".to_string()),
+        };
+        let keeper = LongTermMemoryEntry {
+            topic: "keeper-fact".to_string(),
+            summary: "Strong, recently used insight.".to_string(),
+            kind: LongTermMemoryKind::ResearchInsight,
+            entities: vec![],
+            source_sessions: vec!["s2".to_string()],
+            source_artifacts: vec![],
+            confidence: 0.9,
+            stability: 0.85,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_reused_at: Some(chrono::Utc::now().to_rfc3339()),
+        };
+
+        upsert_entry(temp.path(), stale).await.unwrap();
+        upsert_entry(temp.path(), keeper).await.unwrap();
+
+        assert_eq!(count_entries(temp.path()).await, 2);
+
+        let dry_removed = prune_stale_entries(temp.path(), true).await;
+        assert_eq!(dry_removed, 1, "dry run should report 1 stale entry");
+        assert_eq!(
+            count_entries(temp.path()).await,
+            2,
+            "dry run must not delete anything"
+        );
+
+        let removed = prune_stale_entries(temp.path(), false).await;
+        assert_eq!(removed, 1);
+        assert_eq!(
+            count_entries(temp.path()).await,
+            1,
+            "only the keeper should remain"
+        );
+        let remaining = list_entries(temp.path()).await;
+        assert_eq!(remaining[0].1.topic, "keeper-fact");
     }
 
     #[tokio::test]

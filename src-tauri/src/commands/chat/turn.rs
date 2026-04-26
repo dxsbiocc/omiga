@@ -82,6 +82,19 @@ pub(super) fn merge_turn_token_usage(acc: &mut Option<TokenUsage>, stream: Optio
     t.total_tokens = t.prompt_tokens.saturating_add(t.completion_tokens);
 }
 
+pub(super) struct StreamLlmRequest<'a> {
+    pub client: &'a dyn LlmClient,
+    pub app: &'a AppHandle,
+    pub message_id: &'a str,
+    pub round_id: &'a str,
+    pub messages: &'a [LlmMessage],
+    pub tools: &'a [ToolSchema],
+    pub emit_text_chunks: bool,
+    pub pending_tools: &'a Arc<Mutex<HashMap<String, PendingToolCall>>>,
+    pub cancel_flag: &'a Arc<RwLock<bool>>,
+    pub repo: Arc<crate::domain::persistence::SessionRepository>,
+}
+
 const MAX_RETRIES: u32 = 3;
 const BASE_BACKOFF_SECS: u64 = 1;
 
@@ -128,16 +141,7 @@ async fn connect_with_retry(
 /// Stream LLM response and collect tool calls with cancellation support
 /// Returns: (tool_calls, assistant_text, reasoning_content, was_cancelled, usage_this_request)
 pub(super) async fn stream_llm_response_with_cancel(
-    client: &dyn LlmClient,
-    app: &AppHandle,
-    message_id: &str,
-    round_id: &str,
-    messages: &[LlmMessage],
-    tools: &[ToolSchema],
-    emit_text_chunks: bool,
-    pending_tools: &Arc<Mutex<HashMap<String, PendingToolCall>>>,
-    cancel_flag: &Arc<RwLock<bool>>,
-    repo: Arc<crate::domain::persistence::SessionRepository>,
+    request: StreamLlmRequest<'_>,
 ) -> Result<
     (
         Vec<(String, String, String)>,
@@ -150,7 +154,12 @@ pub(super) async fn stream_llm_response_with_cancel(
 > {
     use futures::StreamExt;
 
-    let stream = connect_with_retry(client, messages.to_vec(), tools.to_vec()).await?;
+    let stream = connect_with_retry(
+        request.client,
+        request.messages.to_vec(),
+        request.tools.to_vec(),
+    )
+    .await?;
 
     let mut stream = stream;
     let mut assistant_text = String::new();
@@ -165,10 +174,13 @@ pub(super) async fn stream_llm_response_with_cancel(
 
     while let Some(result) = stream.next().await {
         // Check cancellation flag
-        if *cancel_flag.read().await {
+        if *request.cancel_flag.read().await {
             was_cancelled = true;
             // Mark round as cancelled in database
-            let _ = repo.cancel_round(round_id, Some("User cancelled")).await;
+            let _ = request
+                .repo
+                .cancel_round(request.round_id, Some("User cancelled"))
+                .await;
             break;
         }
 
@@ -177,21 +189,24 @@ pub(super) async fn stream_llm_response_with_cancel(
                 LlmStreamChunk::Text(text) => {
                     if !marked_partial && !text.is_empty() {
                         // Mark as partial in database
-                        let _ = repo.mark_round_partial(round_id, None).await;
+                        let _ = request
+                            .repo
+                            .mark_round_partial(request.round_id, None)
+                            .await;
                         marked_partial = true;
                     }
                     assistant_text.push_str(&text);
-                    if emit_text_chunks {
-                        let _ = app.emit(
-                            &format!("chat-stream-{}", message_id),
+                    if request.emit_text_chunks {
+                        let _ = request.app.emit(
+                            &format!("chat-stream-{}", request.message_id),
                             &StreamOutputItem::Text(text),
                         );
                     }
                 }
                 LlmStreamChunk::ReasoningContent(text) => {
                     reasoning_content.push_str(&text);
-                    let _ = app.emit(
-                        &format!("chat-stream-{}", message_id),
+                    let _ = request.app.emit(
+                        &format!("chat-stream-{}", request.message_id),
                         &StreamOutputItem::Thinking(text),
                     );
                 }
@@ -200,16 +215,16 @@ pub(super) async fn stream_llm_response_with_cancel(
                     if let Some(prev_id) = current_tool_id.take() {
                         if prev_id != id {
                             let _ = finalize_pending_tool_by_id(
-                                app,
-                                message_id,
-                                pending_tools,
+                                request.app,
+                                request.message_id,
+                                request.pending_tools,
                                 &prev_id,
                                 &mut completed_tool_calls,
                             )
                             .await;
                         }
                     }
-                    let mut pending = pending_tools.lock().await;
+                    let mut pending = request.pending_tools.lock().await;
                     pending.insert(
                         id.clone(),
                         PendingToolCall {
@@ -220,8 +235,8 @@ pub(super) async fn stream_llm_response_with_cancel(
                     );
                     current_tool_id = Some(id.clone());
 
-                    let _ = app.emit(
-                        &format!("chat-stream-{}", message_id),
+                    let _ = request.app.emit(
+                        &format!("chat-stream-{}", request.message_id),
                         &StreamOutputItem::ToolUse {
                             id: id.clone(),
                             name: name.clone(),
@@ -232,7 +247,7 @@ pub(super) async fn stream_llm_response_with_cancel(
                 LlmStreamChunk::ToolArguments(json) => {
                     // Collect JSON fragments
                     if let Some(ref id) = current_tool_id {
-                        let mut pending = pending_tools.lock().await;
+                        let mut pending = request.pending_tools.lock().await;
                         if let Some(tool) = pending.get_mut(id) {
                             tool.arguments.push(json);
                         }
@@ -241,9 +256,9 @@ pub(super) async fn stream_llm_response_with_cancel(
                 LlmStreamChunk::BlockStop => {
                     if let Some(id) = current_tool_id.take() {
                         let _ = finalize_pending_tool_by_id(
-                            app,
-                            message_id,
-                            pending_tools,
+                            request.app,
+                            request.message_id,
+                            request.pending_tools,
                             &id,
                             &mut completed_tool_calls,
                         )
@@ -265,14 +280,14 @@ pub(super) async fn stream_llm_response_with_cancel(
     // Stream ended without BlockStop for the last tool (e.g. OpenAI sends [DONE] before finish_reason in some buffers).
     if !was_cancelled {
         let leftover_ids: Vec<String> = {
-            let pending = pending_tools.lock().await;
+            let pending = request.pending_tools.lock().await;
             pending.keys().cloned().collect()
         };
         for lid in leftover_ids {
             let _ = finalize_pending_tool_by_id(
-                app,
-                message_id,
-                pending_tools,
+                request.app,
+                request.message_id,
+                request.pending_tools,
                 &lid,
                 &mut completed_tool_calls,
             )
@@ -342,30 +357,35 @@ pub(super) async fn persist_and_emit_turn_token_usage(
     );
 }
 
-pub(super) async fn sync_memory_layers_after_turn(
-    app: &AppHandle,
-    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
-    repo: &Arc<crate::domain::persistence::SessionRepository>,
-    session_id: &str,
-    client: &dyn LlmClient,
-    user_message: &str,
-    assistant_reply: &str,
-    allow_long_term_promotion: bool,
-) {
+pub(super) struct MemorySyncRequest<'a> {
+    pub app: &'a AppHandle,
+    pub sessions: &'a Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    pub repo: &'a Arc<crate::domain::persistence::SessionRepository>,
+    pub session_id: &'a str,
+    pub client: &'a dyn LlmClient,
+    pub user_message: &'a str,
+    pub assistant_reply: &'a str,
+    pub allow_long_term_promotion: bool,
+}
+
+/// Every N turns, distill current working memory into a `SessionSummary` long-term entry.
+const SESSION_SUMMARY_INTERVAL: u32 = 15;
+
+pub(super) async fn sync_memory_layers_after_turn(request: MemorySyncRequest<'_>) {
     let project_root = {
-        let sessions_guard = sessions.read().await;
+        let sessions_guard = request.sessions.read().await;
         sessions_guard
-            .get(session_id)
+            .get(request.session_id)
             .map(|runtime| super::resolve_session_project_root(&runtime.session.project_path))
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     };
 
     match crate::domain::memory::working_memory::sync_after_turn(
-        repo,
-        session_id,
-        client,
-        user_message,
-        assistant_reply,
+        request.repo,
+        request.session_id,
+        request.client,
+        request.user_message,
+        request.assistant_reply,
     )
     .await
     {
@@ -373,22 +393,20 @@ pub(super) async fn sync_memory_layers_after_turn(
             if !state.dirty {
                 let op_id = format!("memory-sync-{}", uuid::Uuid::new_v4());
                 emit_activity_operation(
-                    app,
-                    session_id,
+                    request.app,
+                    request.session_id,
                     &op_id,
                     "更新工作记忆",
                     "done",
                     Some("已提炼并更新 session scratchpad".to_string()),
                 );
             }
-            if !allow_long_term_promotion {
+
+            if !request.allow_long_term_promotion {
                 return;
             }
-            let candidate_count =
-                crate::domain::memory::long_term::promotion_candidate_count(session_id, &state);
-            if candidate_count == 0 {
-                return;
-            }
+
+            // Load config once for both promotion and session summary.
             let config = match crate::domain::memory::load_resolved_config(&project_root).await {
                 Ok(cfg) => cfg,
                 Err(e) => {
@@ -396,36 +414,103 @@ pub(super) async fn sync_memory_layers_after_turn(
                     return;
                 }
             };
-            let op_id = format!("memory-promote-{}", uuid::Uuid::new_v4());
-            emit_activity_operation(
-                app,
-                session_id,
-                &op_id,
-                "晋升长期记忆",
-                "running",
-                Some(format!("准备晋升 {} 条候选摘要", candidate_count)),
-            );
-            let promoted = crate::domain::memory::long_term::promote_from_working_memory(
-                &config,
-                &project_root,
-                session_id,
+
+            // Promote high-signal working memory items to long-term.
+            let candidate_count = crate::domain::memory::long_term::promotion_candidate_count(
+                request.session_id,
                 &state,
-            )
-            .await;
-            emit_activity_operation(
-                app,
-                session_id,
-                &op_id,
-                "晋升长期记忆",
-                "done",
-                Some(format!("已晋升 {} 条长期记忆", promoted)),
             );
+            if candidate_count > 0 {
+                let op_id = format!("memory-promote-{}", uuid::Uuid::new_v4());
+                emit_activity_operation(
+                    request.app,
+                    request.session_id,
+                    &op_id,
+                    "晋升长期记忆",
+                    "running",
+                    Some(format!("准备晋升 {} 条候选摘要", candidate_count)),
+                );
+                let promoted = crate::domain::memory::long_term::promote_from_working_memory(
+                    &config,
+                    &project_root,
+                    request.session_id,
+                    &state,
+                )
+                .await;
+                emit_activity_operation(
+                    request.app,
+                    request.session_id,
+                    &op_id,
+                    "晋升长期记忆",
+                    "done",
+                    Some(format!("已晋升 {} 条长期记忆", promoted)),
+                );
+            }
+
+            // Every SESSION_SUMMARY_INTERVAL turns, snapshot working memory as a session summary.
+            if state.user_turn_count > 0
+                && state.user_turn_count % SESSION_SUMMARY_INTERVAL == 0
+            {
+                let lt_path = config.long_term_path(&project_root);
+                maybe_archive_session_summary(
+                    request.app,
+                    request.session_id,
+                    &lt_path,
+                    &state,
+                )
+                .await;
+            }
         }
         Err(e) => {
             tracing::warn!(target: "omiga::working_memory", "sync_after_turn: {}", e);
             let op_id = format!("memory-sync-{}", uuid::Uuid::new_v4());
-            emit_activity_operation(app, session_id, &op_id, "更新工作记忆", "error", Some(e));
+            emit_activity_operation(
+                request.app,
+                request.session_id,
+                &op_id,
+                "更新工作记忆",
+                "error",
+                Some(e),
+            );
         }
+    }
+}
+
+/// Archive the current working memory state as a `SessionSummary` long-term entry.
+async fn maybe_archive_session_summary(
+    app: &AppHandle,
+    session_id: &str,
+    lt_path: &std::path::Path,
+    state: &crate::domain::memory::working_memory::WorkingMemoryState,
+) {
+    let op_id = format!("memory-summary-{}", uuid::Uuid::new_v4());
+    emit_activity_operation(
+        app,
+        session_id,
+        &op_id,
+        "归档会话摘要",
+        "running",
+        Some("正在提炼本次会话精华…".to_string()),
+    );
+    match crate::domain::memory::long_term::create_session_summary(lt_path, session_id, state)
+        .await
+    {
+        Some(_) => emit_activity_operation(
+            app,
+            session_id,
+            &op_id,
+            "归档会话摘要",
+            "done",
+            Some("已归档会话摘要到长期记忆".to_string()),
+        ),
+        None => emit_activity_operation(
+            app,
+            session_id,
+            &op_id,
+            "归档会话摘要",
+            "done",
+            Some("内容不足，跳过摘要归档".to_string()),
+        ),
     }
 }
 
@@ -434,28 +519,30 @@ pub(super) async fn sync_memory_layers_after_turn(
 /// - `skip_summary`：跳过摘要 LLM 调用（preflight 判定为无需摘要，或本轮已通过 SendUserMessage 直接交付内容）。
 /// - `suggestions_reply`：生成 follow-up suggestions 所用的文本；当本轮使用了 SendUserMessage 时传其 message 内容，
 ///   而非 LLM 的空壳收尾文本；其余情况与 `final_reply` 相同。
-pub(super) async fn emit_post_turn_meta_then_complete(
-    app: &AppHandle,
-    stream_message_id: &str,
-    assistant_message_id: &str,
-    client: &dyn LlmClient,
-    final_reply: &str,
-    skip_summary: bool,
-    suggestions_reply: &str,
-    repo: Arc<crate::domain::persistence::SessionRepository>,
-) {
-    let flags = crate::domain::post_turn_settings::load_post_turn_meta_flags(&repo)
+pub(super) struct PostTurnCompletionRequest<'a> {
+    pub app: &'a AppHandle,
+    pub stream_message_id: &'a str,
+    pub assistant_message_id: &'a str,
+    pub client: &'a dyn LlmClient,
+    pub final_reply: &'a str,
+    pub skip_summary: bool,
+    pub suggestions_reply: &'a str,
+    pub repo: Arc<crate::domain::persistence::SessionRepository>,
+}
+
+pub(super) async fn emit_post_turn_meta_then_complete(request: PostTurnCompletionRequest<'_>) {
+    let flags = crate::domain::post_turn_settings::load_post_turn_meta_flags(&request.repo)
         .await
         .unwrap_or((true, true));
     let (summary_enabled, follow_enabled) = flags;
 
     // Run summary synchronously (needed before Complete so the frontend can render it)
-    let summary_res = if skip_summary {
+    let summary_res = if request.skip_summary {
         Ok(None)
     } else {
         crate::domain::agents::output_formatter::run_turn_summary_pass(
-            client,
-            final_reply,
+            request.client,
+            request.final_reply,
             summary_enabled,
         )
         .await
@@ -468,16 +555,17 @@ pub(super) async fn emit_post_turn_meta_then_complete(
             None
         }
     };
-    let _ = app.emit(
-        &format!("chat-stream-{}", stream_message_id),
+    let _ = request.app.emit(
+        &format!("chat-stream-{}", request.stream_message_id),
         &StreamOutputItem::TurnSummary {
             text: summary_text.clone(),
         },
     );
 
     if let Some(summary) = summary_text.as_deref() {
-        if let Err(e) = repo
-            .update_message_turn_summary(assistant_message_id, Some(summary))
+        if let Err(e) = request
+            .repo
+            .update_message_turn_summary(request.assistant_message_id, Some(summary))
             .await
         {
             tracing::warn!("Failed to persist turn summary: {}", e);
@@ -485,28 +573,27 @@ pub(super) async fn emit_post_turn_meta_then_complete(
     }
 
     if !follow_enabled {
-        let _ = app.emit(
-            &format!("chat-stream-{}", stream_message_id),
+        let _ = request.app.emit(
+            &format!("chat-stream-{}", request.stream_message_id),
             &StreamOutputItem::Complete,
         );
         return;
     }
 
     // Emit indicator that suggestions are being generated in background
-    if follow_enabled {
-        let _ = app.emit(
-            &format!("chat-stream-{}", stream_message_id),
-            &StreamOutputItem::SuggestionsGenerating,
-        );
-    }
+    let _ = request.app.emit(
+        &format!("chat-stream-{}", request.stream_message_id),
+        &StreamOutputItem::SuggestionsGenerating,
+    );
 
     // Spawn background task for follow-up suggestions so they don't block the frontend
-    let app_bg = app.clone();
-    let stream_id = stream_message_id.to_string();
-    let assistant_id = assistant_message_id.to_string();
-    let suggestions_text = suggestions_reply.to_string();
+    let app_bg = request.app.clone();
+    let stream_id = request.stream_message_id.to_string();
+    let assistant_id = request.assistant_message_id.to_string();
+    let suggestions_text = request.suggestions_reply.to_string();
+    let repo = request.repo.clone();
     // Clone client config for background use
-    let client_config = client.config().clone();
+    let client_config = request.client.config().clone();
     tokio::spawn(async move {
         let bg_client = match crate::llm::create_client(client_config) {
             Ok(c) => c,

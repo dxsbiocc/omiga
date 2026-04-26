@@ -308,6 +308,7 @@ pub async fn memory_get_unified_status(
         long_term: LongTermStatus {
             project_entry_count: stats.long_term_project_entries,
             global_entry_count: stats.long_term_global_entries,
+            stale_entry_count: stats.stale_long_term_entries,
         },
         knowledge_base: KnowledgeBaseStatus {
             project_page_count: stats.project_knowledge_pages,
