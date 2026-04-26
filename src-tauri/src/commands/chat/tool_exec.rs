@@ -2,10 +2,11 @@
 
 use super::permissions::{
     execute_ask_user_question_interactive, matches_ask_user_question_name,
-    wait_for_permission_tool_resolution,
+    wait_for_permission_tool_resolution, AskUserQuestionExecution, PermissionToolResolutionRequest,
 };
 use super::subagent::{
     is_agent_tool_name, is_parallelizable_tool, run_skill_forked, run_subagent_session,
+    ForkedSkillRequest, SubagentSessionRequest,
 };
 use super::{
     append_truncated_results_note, apply_empty_structured_tool_placeholder,
@@ -83,32 +84,110 @@ fn extract_first_string_field(value: &serde_json::Value, keys: &[&str]) -> Optio
     None
 }
 
-pub(super) async fn execute_tool_calls(
-    tool_calls: &[(String, String, String)], // (id, name, arguments)
-    app: &AppHandle,
-    message_id: &str,
-    session_id: &str,
-    tool_results_dir: &Path,
-    project_root: &std::path::Path,
+pub(super) struct ToolExecutionRequest<'a> {
+    pub tool_calls: &'a [(String, String, String)], // (id, name, arguments)
+    pub app: &'a AppHandle,
+    pub message_id: &'a str,
+    pub session_id: &'a str,
+    pub tool_results_dir: &'a Path,
+    pub project_root: &'a std::path::Path,
+    pub session_todos: Option<Arc<tokio::sync::Mutex<Vec<TodoItem>>>>,
+    pub session_agent_tasks: Option<Arc<tokio::sync::Mutex<Vec<AgentTask>>>>,
+    pub agent_runtime: Option<&'a AgentLlmRuntime>,
+    pub subagent_depth: u8,
+    /// Task text for `list_skills` ordering (main user message or sub-agent description+prompt).
+    pub skill_task_context: Option<&'a str>,
+    pub web_search_api_keys: WebSearchApiKeys,
+    pub skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+    pub execution_environment: String,
+    pub ssh_server: Option<String>,
+    pub sandbox_backend: String,
+    pub local_venv_type: String,
+    pub local_venv_name: String,
+    pub env_store: crate::domain::tools::env_store::EnvStore,
+}
+
+#[derive(Clone)]
+struct ToolExecutionShared {
+    app: AppHandle,
+    message_id: String,
+    session_id: String,
+    tool_results_dir: PathBuf,
+    project_root: PathBuf,
     session_todos: Option<Arc<tokio::sync::Mutex<Vec<TodoItem>>>>,
     session_agent_tasks: Option<Arc<tokio::sync::Mutex<Vec<AgentTask>>>>,
-    agent_runtime: Option<&AgentLlmRuntime>,
     subagent_depth: u8,
-    // Task text for `list_skills` ordering (main user message or sub-agent description+prompt).
-    skill_task_context: Option<&str>,
+    skill_task_context: Option<String>,
     web_search_api_keys: WebSearchApiKeys,
     skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+    cancel_flag: Option<Arc<RwLock<bool>>>,
+    round_cancel: Option<tokio_util::sync::CancellationToken>,
     execution_environment: String,
     ssh_server: Option<String>,
     sandbox_backend: String,
     local_venv_type: String,
     local_venv_name: String,
     env_store: crate::domain::tools::env_store::EnvStore,
+}
+
+struct SingleToolExecution {
+    tool_use_id: String,
+    tool_name: String,
+    arguments: String,
+    shared: ToolExecutionShared,
+    agent_runtime: Option<AgentLlmRuntime>,
+}
+
+pub(super) async fn execute_tool_calls(
+    request: ToolExecutionRequest<'_>,
 ) -> Vec<(String, String, bool)> {
     use futures::future::join_all;
 
+    let ToolExecutionRequest {
+        tool_calls,
+        app,
+        message_id,
+        session_id,
+        tool_results_dir,
+        project_root,
+        session_todos,
+        session_agent_tasks,
+        agent_runtime,
+        subagent_depth,
+        skill_task_context,
+        web_search_api_keys,
+        skill_cache,
+        execution_environment,
+        ssh_server,
+        sandbox_backend,
+        local_venv_type,
+        local_venv_name,
+        env_store,
+    } = request;
+
     let cancel_flag = agent_runtime.map(|r| r.cancel_flag.clone());
     let round_cancel = agent_runtime.map(|r| r.round_cancel.clone());
+    let shared = ToolExecutionShared {
+        app: app.clone(),
+        message_id: message_id.to_string(),
+        session_id: session_id.to_string(),
+        tool_results_dir: tool_results_dir.to_path_buf(),
+        project_root: project_root.to_path_buf(),
+        session_todos,
+        session_agent_tasks,
+        subagent_depth,
+        skill_task_context: skill_task_context.map(str::to_owned),
+        web_search_api_keys,
+        skill_cache,
+        cancel_flag,
+        round_cancel,
+        execution_environment,
+        ssh_server,
+        sandbox_backend,
+        local_venv_type,
+        local_venv_name,
+        env_store,
+    };
 
     // (tool_use_id, output, is_error)
     let mut results = Vec::new();
@@ -199,31 +278,13 @@ pub(super) async fn execute_tool_calls(
             .iter()
             .map(|&idx| {
                 let (tool_use_id, tool_name, arguments) = &tool_calls[idx];
-                execute_one_tool(
-                    tool_use_id.clone(),
-                    tool_name.clone(),
-                    arguments.clone(),
-                    app.clone(),
-                    message_id.to_string(),
-                    session_id.to_string(),
-                    tool_results_dir.to_path_buf(),
-                    project_root.to_path_buf(),
-                    session_todos.clone(),
-                    session_agent_tasks.clone(),
-                    None, // parallelizable tools don't need agent_runtime
-                    subagent_depth,
-                    skill_task_context.map(str::to_owned),
-                    web_search_api_keys.clone(),
-                    skill_cache.clone(),
-                    cancel_flag.clone(),
-                    round_cancel.clone(),
-                    execution_environment.clone(),
-                    ssh_server.clone(),
-                    sandbox_backend.clone(),
-                    local_venv_type.clone(),
-                    local_venv_name.clone(),
-                    env_store.clone(),
-                )
+                execute_one_tool(SingleToolExecution {
+                    tool_use_id: tool_use_id.clone(),
+                    tool_name: tool_name.clone(),
+                    arguments: arguments.clone(),
+                    shared: shared.clone(),
+                    agent_runtime: None, // parallelizable tools don't need agent_runtime
+                })
             })
             .collect();
 
@@ -286,31 +347,13 @@ pub(super) async fn execute_tool_calls(
     // --- Sequential batch: stateful tools run one-by-one ---
     for idx in sequential_indices {
         let (tool_use_id, tool_name, arguments) = &tool_calls[idx];
-        let res = execute_one_tool(
-            tool_use_id.clone(),
-            tool_name.clone(),
-            arguments.clone(),
-            app.clone(),
-            message_id.to_string(),
-            session_id.to_string(),
-            tool_results_dir.to_path_buf(),
-            project_root.to_path_buf(),
-            session_todos.clone(),
-            session_agent_tasks.clone(),
-            agent_runtime,
-            subagent_depth,
-            skill_task_context.map(str::to_owned),
-            web_search_api_keys.clone(),
-            skill_cache.clone(),
-            cancel_flag.clone(),
-            round_cancel.clone(),
-            execution_environment.clone(),
-            ssh_server.clone(),
-            sandbox_backend.clone(),
-            local_venv_type.clone(),
-            local_venv_name.clone(),
-            env_store.clone(),
-        )
+        let res = execute_one_tool(SingleToolExecution {
+            tool_use_id: tool_use_id.clone(),
+            tool_name: tool_name.clone(),
+            arguments: arguments.clone(),
+            shared: shared.clone(),
+            agent_runtime: agent_runtime.cloned(),
+        })
         .await;
         ordered_results[idx] = Some(res);
     }
@@ -321,31 +364,36 @@ pub(super) async fn execute_tool_calls(
 
 /// Execute a single tool call. Called from both the parallel and sequential paths.
 #[async_recursion::async_recursion]
-pub(super) async fn execute_one_tool(
-    tool_use_id: String,
-    tool_name: String,
-    arguments: String,
-    app: AppHandle,
-    message_id: String,
-    session_id: String,
-    tool_results_dir: PathBuf,
-    project_root: PathBuf,
-    session_todos: Option<Arc<tokio::sync::Mutex<Vec<TodoItem>>>>,
-    session_agent_tasks: Option<Arc<tokio::sync::Mutex<Vec<AgentTask>>>>,
-    agent_runtime: Option<&AgentLlmRuntime>,
-    subagent_depth: u8,
-    skill_task_context: Option<String>,
-    web_search_api_keys: WebSearchApiKeys,
-    skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
-    cancel_flag: Option<Arc<RwLock<bool>>>,
-    round_cancel: Option<tokio_util::sync::CancellationToken>,
-    execution_environment: String,
-    ssh_server: Option<String>,
-    sandbox_backend: String,
-    local_venv_type: String,
-    local_venv_name: String,
-    env_store: crate::domain::tools::env_store::EnvStore,
-) -> (String, String, bool) {
+async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool) {
+    let SingleToolExecution {
+        tool_use_id,
+        tool_name,
+        arguments,
+        shared,
+        agent_runtime,
+    } = request;
+    let agent_runtime = agent_runtime.as_ref();
+    let ToolExecutionShared {
+        app,
+        message_id,
+        session_id,
+        tool_results_dir,
+        project_root,
+        session_todos,
+        session_agent_tasks,
+        subagent_depth,
+        skill_task_context,
+        web_search_api_keys,
+        skill_cache,
+        cancel_flag,
+        round_cancel,
+        execution_environment,
+        ssh_server,
+        sandbox_backend,
+        local_venv_type,
+        local_venv_name,
+        env_store,
+    } = shared;
     let tool_use_id = &tool_use_id;
     let tool_name = &tool_name;
     let arguments = &arguments;
@@ -448,19 +496,19 @@ pub(super) async fn execute_one_tool(
                         risk_level = ?req.risk.level,
                         "Tool requires user approval — blocking until UI resolves"
                     );
-                    match wait_for_permission_tool_resolution(
-                        &app,
-                        &app_state,
+                    match wait_for_permission_tool_resolution(PermissionToolResolutionRequest {
+                        app: &app,
+                        app_state: &app_state,
                         session_id,
                         message_id,
                         tool_use_id,
-                        tool_name,
-                        tool_name,
-                        arguments,
-                        &args_value,
+                        stream_tool_name: tool_name,
+                        tool_name_for_event: tool_name,
+                        arguments_display: arguments,
+                        args_value: &args_value,
                         req,
-                        cancel_flag.clone(),
-                    )
+                        cancel_flag: cancel_flag.clone(),
+                    })
                     .await
                     {
                         Ok(()) => continue,
@@ -876,17 +924,19 @@ pub(super) async fn execute_one_tool(
                                         "Skill requires user approval — blocking until UI resolves"
                                     );
                                     match wait_for_permission_tool_resolution(
-                                        &app,
-                                        &app_state_skill,
-                                        session_id,
-                                        message_id,
-                                        tool_use_id,
-                                        tool_name,
-                                        skill_display.as_str(),
-                                        arguments,
-                                        &args_value,
-                                        req,
-                                        cancel_flag.clone(),
+                                        PermissionToolResolutionRequest {
+                                            app: &app,
+                                            app_state: &app_state_skill,
+                                            session_id,
+                                            message_id,
+                                            tool_use_id,
+                                            stream_tool_name: tool_name,
+                                            tool_name_for_event: skill_display.as_str(),
+                                            arguments_display: arguments,
+                                            args_value: &args_value,
+                                            req,
+                                            cancel_flag: cancel_flag.clone(),
+                                        },
                                     )
                                     .await
                                     {
@@ -956,23 +1006,23 @@ pub(super) async fn execute_one_tool(
 
                             // Need Agent runtime for forked execution
                             if let Some(ar) = agent_runtime {
-                                match run_skill_forked(
-                                    &app,
+                                match run_skill_forked(ForkedSkillRequest {
+                                    app: &app,
                                     message_id,
                                     session_id,
                                     tool_results_dir,
                                     project_root,
-                                    session_todos.clone(),
-                                    session_agent_tasks.clone(),
-                                    &skill_display,
-                                    &args.args,
-                                    &skill_content,
-                                    skill_allowed_tools,
-                                    ar,
-                                    subagent_depth.saturating_add(1),
-                                    web_search_api_keys.clone(),
-                                    skill_cache.clone(),
-                                )
+                                    session_todos: session_todos.clone(),
+                                    session_agent_tasks: session_agent_tasks.clone(),
+                                    skill_name: &skill_display,
+                                    skill_args: &args.args,
+                                    skill_content: &skill_content,
+                                    allowed_tools: skill_allowed_tools,
+                                    runtime: ar,
+                                    subagent_execute_depth: subagent_depth.saturating_add(1),
+                                    web_search_api_keys: web_search_api_keys.clone(),
+                                    skill_cache: skill_cache.clone(),
+                                })
                                 .await
                                 {
                                     Ok(output_text) => {
@@ -1195,20 +1245,20 @@ pub(super) async fn execute_one_tool(
         } else if let Some(ar) = agent_runtime {
             match serde_json::from_str::<crate::domain::tools::agent::AgentArgs>(arguments) {
                 Ok(agent_args) => {
-                    match run_subagent_session(
-                        &app,
+                    match run_subagent_session(SubagentSessionRequest {
+                        app: &app,
                         message_id,
                         session_id,
                         tool_results_dir,
                         project_root,
-                        session_todos.clone(),
-                        session_agent_tasks.clone(),
-                        &agent_args,
-                        ar,
-                        subagent_depth.saturating_add(1),
-                        web_search_api_keys.clone(),
-                        skill_cache.clone(),
-                    )
+                        session_todos: session_todos.clone(),
+                        session_agent_tasks: session_agent_tasks.clone(),
+                        args: &agent_args,
+                        runtime: ar,
+                        subagent_execute_depth: subagent_depth.saturating_add(1),
+                        web_search_api_keys: web_search_api_keys.clone(),
+                        skill_cache: skill_cache.clone(),
+                    })
                     .await
                     {
                         Ok(output_text) => {
@@ -1394,17 +1444,17 @@ pub(super) async fn execute_one_tool(
     } else {
         if matches_ask_user_question_name(tool_name) {
             if let Some(state) = app.try_state::<OmigaAppState>() {
-                return execute_ask_user_question_interactive(
-                    tool_use_id.to_string(),
-                    tool_name.to_string(),
-                    arguments.to_string(),
-                    app.clone(),
-                    message_id.to_string(),
-                    session_id.to_string(),
+                return execute_ask_user_question_interactive(AskUserQuestionExecution {
+                    tool_use_id: tool_use_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    arguments: arguments.to_string(),
+                    app: app.clone(),
+                    message_id: message_id.to_string(),
+                    session_id: session_id.to_string(),
                     tool_results_dir,
-                    state.chat.ask_user_waiters.clone(),
-                    cancel_flag.clone(),
-                )
+                    waiters: state.chat.ask_user_waiters.clone(),
+                    cancel_flag: cancel_flag.clone(),
+                })
                 .await;
             }
         }
@@ -1572,6 +1622,17 @@ pub(super) async fn execute_one_tool(
                             },
                         );
 
+                        // Source Registry: record web sources used in this turn.
+                        if !is_error {
+                            register_web_source_async(
+                                tool_name,
+                                arguments,
+                                &output_text,
+                                session_id,
+                                project_root,
+                            );
+                        }
+
                         let model_output = process_tool_output_for_model(
                             output_text.clone(),
                             tool_use_id,
@@ -1615,6 +1676,63 @@ pub(super) async fn execute_one_tool(
     };
 
     result
+}
+
+/// Fire-and-forget: register a web source after a successful tool call.
+/// Spawns a Tokio task so it never blocks the tool execution pipeline.
+fn register_web_source_async(
+    tool_name: &str,
+    arguments: &str,
+    output_text: &str,
+    session_id: &str,
+    project_root: &std::path::Path,
+) {
+    let tool_name = tool_name.to_string();
+    let arguments = arguments.to_string();
+    let output = output_text.to_string();
+    let session_id = session_id.to_string();
+    let project_root = project_root.to_path_buf();
+
+    tokio::spawn(async move {
+        let Ok(cfg) = crate::domain::memory::load_resolved_config(&project_root).await else {
+            return;
+        };
+        let lt_root = cfg.long_term_path(&project_root);
+
+        match tool_name.as_str() {
+            "web_fetch" | "WebFetch" => {
+                // Extract URL from args: {"url":"...", "prompt":"..."}
+                let url = serde_json::from_str::<serde_json::Value>(&arguments)
+                    .ok()
+                    .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(str::to_owned));
+                if let Some(url) = url {
+                    let entry = crate::domain::memory::source_registry::entry_from_fetch(
+                        &url,
+                        &output,
+                        Some(&session_id),
+                        None,
+                    );
+                    crate::domain::memory::source_registry::upsert_source(&lt_root, entry).await;
+                }
+            }
+            "web_search" | "WebSearch" => {
+                // Extract query from args: {"query":"..."}
+                let query = serde_json::from_str::<serde_json::Value>(&arguments)
+                    .ok()
+                    .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(str::to_owned))
+                    .unwrap_or_default();
+                let entries = crate::domain::memory::source_registry::entries_from_search_output(
+                    &output,
+                    Some(&session_id),
+                    &query,
+                );
+                for entry in entries {
+                    crate::domain::memory::source_registry::upsert_source(&lt_root, entry).await;
+                }
+            }
+            _ => {}
+        }
+    });
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@ Use this tool BEFORE web_search whenever you need to find information about:
 - Project-specific knowledge or notes
 - Prior analyses, findings, or summaries
 - Any information the user may have shared in previous sessions
+- Previously accessed web pages or papers (scope="sources")
 
 Arguments:
 - `query`: natural-language query or keyword phrase
@@ -29,6 +30,7 @@ Arguments:
     "wiki"       — project wiki pages
     "long_term"  — promoted decisions/insights (project + global)
     "permanent"  — cross-project wiki + global long-term
+    "sources"    — web pages and papers previously fetched in this project
     "all"        — everything (default)
 
 Returns a formatted excerpt of matching content with source paths."#;
@@ -105,6 +107,23 @@ impl super::ToolImpl for RecallTool {
                 message: format!("failed to load memory config: {}", e),
             })?;
         let memory = crate::domain::memory::MemorySystem::with_config(project_root, mem_cfg);
+
+        // "sources" scope: query the source registry directly.
+        if scope == "sources" {
+            let lt_root = memory.long_term_path();
+            let matches = crate::domain::memory::source_registry::search_sources(
+                &lt_root, &query, limit,
+            )
+            .await;
+            let content = format_source_results(&matches);
+            let out = RecallOutput {
+                query,
+                results_found: matches.len(),
+                content,
+            };
+            return Ok(out.into_stream());
+        }
+
         let mut unified = memory
             .query_with_session(ctx.working_memory_context.as_deref(), &query, limit)
             .await;
@@ -141,6 +160,23 @@ impl super::ToolImpl for RecallTool {
         };
         Ok(out.into_stream())
     }
+}
+
+fn format_source_results(matches: &[crate::domain::memory::source_registry::SourceMatch]) -> String {
+    if matches.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for m in matches {
+        out.push_str(&format!(
+            "### {} [SourceRegistry]\n\n*URL: `{}`*  *Domain: {}*\n\n{}\n\n---\n\n",
+            m.title.as_deref().unwrap_or(&m.url),
+            m.url,
+            m.domain,
+            m.gist.as_deref().unwrap_or("(no summary available)"),
+        ));
+    }
+    out
 }
 
 fn format_unified_results(results: &[crate::domain::memory::MemoryQueryMatch]) -> String {
@@ -180,8 +216,8 @@ pub fn schema() -> ToolSchema {
                 },
                 "scope": {
                     "type": "string",
-                    "description": "Which memory stores to search: \"implicit\" (session history), \"wiki\" (project wiki), \"long_term\" (promoted decisions+insights), \"permanent\" (cross-project wiki+long-term), or \"all\" (default)",
-                    "enum": ["all", "implicit", "wiki", "long_term", "permanent"]
+                    "description": "Which memory stores to search: \"implicit\" (session history), \"wiki\" (project wiki), \"long_term\" (promoted decisions+insights), \"permanent\" (cross-project wiki+long-term), \"sources\" (previously fetched web pages/papers), or \"all\" (default)",
+                    "enum": ["all", "implicit", "wiki", "long_term", "permanent", "sources"]
                 }
             },
             "required": ["query"]

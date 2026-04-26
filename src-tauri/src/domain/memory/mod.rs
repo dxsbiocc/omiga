@@ -24,6 +24,7 @@ pub mod long_term;
 pub mod migration;
 pub mod permanent_profile;
 pub mod registry;
+pub mod source_registry;
 pub mod working_memory;
 
 use std::path::{Path, PathBuf};
@@ -86,6 +87,11 @@ impl MemorySystem {
     /// Get project-scoped long-term memory path
     pub fn long_term_path(&self) -> PathBuf {
         self.config.long_term_path(&self.project_root)
+    }
+
+    /// Get project-scoped source registry directory
+    pub fn sources_path(&self) -> PathBuf {
+        source_registry::sources_dir(&self.long_term_path())
     }
 
     /// Initialize memory directory structure
@@ -173,12 +179,14 @@ impl MemorySystem {
         let lt_global_path = config::permanent_long_term_path();
         let stale_project = long_term::count_stale_entries(&lt_project_path).await;
         let stale_global = long_term::count_stale_entries(&lt_global_path).await;
+        let src_count = source_registry::count_sources(&lt_project_path).await;
         let mut stats = MemoryStats {
             project_knowledge_pages: count_markdown_pages(&self.wiki_path()).await,
             global_knowledge_pages: count_markdown_pages(&config::permanent_wiki_path()).await,
             long_term_project_entries: long_term::count_entries(&lt_project_path).await,
             long_term_global_entries: long_term::count_entries(&lt_global_path).await,
             stale_long_term_entries: stale_project + stale_global,
+            source_registry_count: src_count,
             ..Default::default()
         };
 
@@ -409,6 +417,8 @@ pub struct MemoryStats {
     pub long_term_global_entries: usize,
     /// Long-term entries not reused in >90 days with stability < 0.4.
     pub stale_long_term_entries: usize,
+    /// Number of web sources tracked in the source registry.
+    pub source_registry_count: usize,
 }
 
 /// Unified query result

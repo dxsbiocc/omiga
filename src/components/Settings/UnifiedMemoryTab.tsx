@@ -20,7 +20,6 @@ import {
   TextField,
   Paper,
   Tooltip,
-  Snackbar,
   LinearProgress,
   Tabs,
   Tab,
@@ -36,6 +35,7 @@ import {
   useTheme,
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
+import { NotificationToast } from "../NotificationToast";
 import {
   Storage as MemoryIcon,
   Search as SearchIcon,
@@ -56,6 +56,7 @@ import {
   Psychology as LongTermIcon,
   HealthAndSafety as HealthIcon,
   Warning as WarnIcon,
+  Language as SourceIcon,
 } from "@mui/icons-material";
 import { useUnifiedMemory } from "../../hooks/useUnifiedMemory";
 
@@ -420,6 +421,45 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                 </Card>
               </Grid>
 
+              {/* Source Registry card */}
+              <Grid item xs={12} sm={6}>
+                <Card
+                  elevation={0}
+                  sx={{
+                    height: "100%",
+                    borderRadius: 2,
+                    border: `1px solid ${alpha(theme.palette.primary.main, 0.18)}`,
+                    bgcolor: alpha(theme.palette.primary.main, 0.03),
+                    transition: "transform 0.2s ease, box-shadow 0.2s ease",
+                    "&:hover": {
+                      boxShadow: `0 8px 24px ${alpha(theme.palette.primary.main, 0.10)}`,
+                    },
+                  }}
+                >
+                  <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
+                    <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+                      <Stack direction="row" alignItems="center" spacing={1}>
+                        <SourceIcon sx={{ color: "primary.main", fontSize: 22 }} />
+                        <Typography variant="subtitle2" fontWeight={700}>
+                          来源记录
+                        </Typography>
+                      </Stack>
+                      {(memory.status.source_registry?.entry_count ?? 0) > 0 ? (
+                        <Chip size="small" icon={<OkIcon />} label="有记录" color="primary" variant="outlined" />
+                      ) : (
+                        <Chip size="small" icon={<MissingIcon />} label="空" variant="outlined" />
+                      )}
+                    </Stack>
+                    <Typography variant="h4" fontWeight={800} sx={{ fontFeatureSettings: '"tnum"', color: "text.primary" }}>
+                      {(memory.status.source_registry?.entry_count ?? 0) || "—"}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" display="block">
+                      已登记的网页 / 论文来源，可用 recall scope=sources 检索
+                    </Typography>
+                  </CardContent>
+                </Card>
+              </Grid>
+
               {/* Memory health card */}
               <Grid item xs={12} sm={6}>
                 {(() => {
@@ -599,6 +639,9 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
               <li>每次对话前自动检索相关上下文（working memory 主题词同步用于增强长期记忆召回）</li>
               <li>优先级：工作记忆 &gt; 长期项目 &gt; 长期全局 &gt; 知识库 &gt; 隐性记忆</li>
               <li>陈旧的长期条目（90 天未访问 + 稳定性低）在下次启动时概率性自动清理</li>
+              <li>
+                <strong>来源登记（Source Registry）</strong>：每次 <code>web_fetch</code> / <code>web_search</code> 成功后自动记录 URL、标题、摘要，可通过 <code>recall scope=sources</code> 检索历史来源，避免重复抓取
+              </li>
             </Box>
 
             <Divider sx={{ my: 2 }} />
@@ -1331,12 +1374,13 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
         </Alert>
       )}
 
-      <Snackbar
+      <NotificationToast
         open={!!toast}
         autoHideDuration={4000}
         onClose={() => setToast(null)}
         message={toast}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+        severity={toast?.includes("失败") ? "error" : "success"}
+        title={toast?.includes("失败") ? "内存操作失败" : "内存设置已更新"}
       />
     </Box>
   );

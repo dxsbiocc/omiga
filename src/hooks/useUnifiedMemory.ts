@@ -75,6 +75,12 @@ export interface MemoryPaths {
   permanent_long_term: string;
   /** ~/.omiga/memory/raw (configurable) */
   raw: string;
+  /** long_term/sources — web pages and papers registry */
+  sources: string;
+}
+
+export interface SourceRegistryStatus {
+  entry_count: number;
 }
 
 export interface UnifiedMemoryStatus {
@@ -87,6 +93,7 @@ export interface UnifiedMemoryStatus {
   working_memory: SessionWorkingMemoryStatus;
   long_term: LongTermStatus;
   knowledge_base: KnowledgeBaseStatus;
+  source_registry: SourceRegistryStatus;
   paths: MemoryPaths;
 }
 

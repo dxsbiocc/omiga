@@ -117,6 +117,7 @@ pub struct UnifiedMemoryStatus {
     pub working_memory: SessionWorkingMemoryStatus,
     pub long_term: LongTermStatus,
     pub knowledge_base: KnowledgeBaseStatus,
+    pub source_registry: SourceRegistryStatus,
     pub paths: MemoryPaths,
 }
 
@@ -154,6 +155,13 @@ pub struct MemoryPaths {
     pub permanent_long_term: String,
     /// Raw original file storage (`~/.omiga/memory/raw` by default)
     pub raw: String,
+    /// Source registry directory (`.../long_term/sources`)
+    pub sources: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SourceRegistryStatus {
+    pub entry_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +322,9 @@ pub async fn memory_get_unified_status(
             project_page_count: stats.project_knowledge_pages,
             global_page_count: stats.global_knowledge_pages,
         },
+        source_registry: SourceRegistryStatus {
+            entry_count: stats.source_registry_count,
+        },
         paths: MemoryPaths {
             root: memory.root_path().to_string_lossy().to_string(),
             wiki: memory.wiki_path().to_string_lossy().to_string(),
@@ -322,6 +333,7 @@ pub async fn memory_get_unified_status(
             long_term: memory.long_term_path().to_string_lossy().to_string(),
             permanent_long_term: permanent_long_term_path().to_string_lossy().to_string(),
             raw: config.raw_path().to_string_lossy().to_string(),
+            sources: memory.sources_path().to_string_lossy().to_string(),
         },
     })
 }
