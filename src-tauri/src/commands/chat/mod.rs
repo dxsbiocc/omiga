@@ -22,6 +22,7 @@ use crate::domain::permissions::{
     filter_tool_schemas_by_deny_rule_entries, load_merged_permission_deny_rule_entries,
     validate_permission_deny_entries,
 };
+use crate::domain::persistence::{NewMessageRecord, NewOrchestrationEventRecord};
 use crate::domain::runtime_constraints::{
     ModelConstraintContext, RuntimeConstraintHarness, RuntimeConstraintState, ToolConstraintContext,
 };
@@ -399,42 +400,64 @@ async fn emit_runtime_constraint_metadata(
     }
 }
 
-async fn handle_runtime_constraint_block_main(
-    app: &AppHandle,
-    client: &dyn LlmClient,
+struct RuntimeConstraintBlockRequest<'a> {
+    app: &'a AppHandle,
+    client: &'a dyn LlmClient,
     repo: Arc<crate::domain::persistence::SessionRepository>,
-    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
-    session_id: &str,
-    round_id: &str,
-    message_id: &str,
-    user_message: &str,
-    assistant_text: &str,
-    assistant_reasoning: &str,
-    tool_calls: &[(String, String, String)],
-    block: &crate::domain::runtime_constraints::ConstraintToolBlock,
-    tool_results_dir: &Path,
+    sessions: &'a Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    session_id: &'a str,
+    round_id: &'a str,
+    message_id: &'a str,
+    user_message: &'a str,
+    assistant_text: &'a str,
+    assistant_reasoning: &'a str,
+    tool_calls: &'a [(String, String, String)],
+    block: &'a crate::domain::runtime_constraints::ConstraintToolBlock,
+    tool_results_dir: &'a Path,
     ask_user_waiters: Arc<Mutex<HashMap<String, AskUserWaiter>>>,
     cancel_flag: Arc<RwLock<bool>>,
     preflight_skip_turn_summary: bool,
-    turn_token_usage: &Option<crate::llm::TokenUsage>,
-    provider_name: &str,
-) {
+    turn_token_usage: &'a Option<crate::llm::TokenUsage>,
+    provider_name: &'a str,
+}
+
+async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockRequest<'_>) {
+    let RuntimeConstraintBlockRequest {
+        app,
+        client,
+        repo,
+        sessions,
+        session_id,
+        round_id,
+        message_id,
+        user_message,
+        assistant_text,
+        assistant_reasoning,
+        tool_calls,
+        block,
+        tool_results_dir,
+        ask_user_waiters,
+        cancel_flag,
+        preflight_skip_turn_summary,
+        turn_token_usage,
+        provider_name,
+    } = request;
     let assistant_msg_id = uuid::Uuid::new_v4().to_string();
     let tool_calls_json = tool_calls_json_opt(tool_calls);
     let reasoning_save = (!assistant_reasoning.is_empty()).then_some(assistant_reasoning);
     if let Err(e) = repo
-        .save_message(
-            &assistant_msg_id,
+        .save_message(NewMessageRecord {
+            id: &assistant_msg_id,
             session_id,
-            "assistant",
-            assistant_text,
-            tool_calls_json.as_deref(),
-            None,
-            None,
-            reasoning_save,
-            None,
-            None,
-        )
+            role: "assistant",
+            content: assistant_text,
+            tool_calls: tool_calls_json.as_deref(),
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: reasoning_save,
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
         .await
     {
         tracing::warn!(
@@ -517,19 +540,20 @@ async fn handle_runtime_constraint_block_main(
                 &StreamOutputItem::Text(format!("\n\n{}", block.assistant_response)),
             );
 
+            let ask_tool_calls_json = serde_json::to_string(&ask_tool_calls).ok();
             if let Err(e) = repo
-                .save_message(
-                    &ask_assistant_id,
+                .save_message(NewMessageRecord {
+                    id: &ask_assistant_id,
                     session_id,
-                    "assistant",
-                    &block.assistant_response,
-                    serde_json::to_string(&ask_tool_calls).ok().as_deref(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
+                    role: "assistant",
+                    content: &block.assistant_response,
+                    tool_calls: ask_tool_calls_json.as_deref(),
+                    tool_call_id: None,
+                    token_usage_json: None,
+                    reasoning_content: None,
+                    follow_up_suggestions_json: None,
+                    turn_summary: None,
+                })
                 .await
             {
                 tracing::warn!(
@@ -548,18 +572,19 @@ async fn handle_runtime_constraint_block_main(
                 }
             }
 
-            let (returned_tool_id, output, is_error) = execute_ask_user_question_interactive(
-                tool_use_id.clone(),
-                tool_name,
-                ask_arguments,
-                app.clone(),
-                message_id.to_string(),
-                session_id.to_string(),
-                tool_results_dir,
-                ask_user_waiters,
-                Some(cancel_flag),
-            )
-            .await;
+            let (returned_tool_id, output, is_error) =
+                execute_ask_user_question_interactive(AskUserQuestionExecution {
+                    tool_use_id: tool_use_id.clone(),
+                    tool_name,
+                    arguments: ask_arguments,
+                    app: app.clone(),
+                    message_id: message_id.to_string(),
+                    session_id: session_id.to_string(),
+                    tool_results_dir,
+                    waiters: ask_user_waiters,
+                    cancel_flag: Some(cancel_flag),
+                })
+                .await;
 
             if let Err(e) = repo
                 .save_tool_results_batch(
@@ -584,18 +609,18 @@ async fn handle_runtime_constraint_block_main(
                     final_response = post_answer_response.clone();
                     let follow_up_id = uuid::Uuid::new_v4().to_string();
                     if let Err(e) = repo
-                        .save_message(
-                            &follow_up_id,
+                        .save_message(NewMessageRecord {
+                            id: &follow_up_id,
                             session_id,
-                            "assistant",
-                            post_answer_response,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
+                            role: "assistant",
+                            content: post_answer_response,
+                            tool_calls: None,
+                            tool_call_id: None,
+                            token_usage_json: None,
+                            reasoning_content: None,
+                            follow_up_suggestions_json: None,
+                            turn_summary: None,
+                        })
                         .await
                     {
                         tracing::warn!(
@@ -626,18 +651,18 @@ async fn handle_runtime_constraint_block_main(
         );
         let clarification_id = uuid::Uuid::new_v4().to_string();
         if let Err(e) = repo
-            .save_message(
-                &clarification_id,
+            .save_message(NewMessageRecord {
+                id: &clarification_id,
                 session_id,
-                "assistant",
-                &block.assistant_response,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+                role: "assistant",
+                content: &block.assistant_response,
+                tool_calls: None,
+                tool_call_id: None,
+                token_usage_json: None,
+                reasoning_content: None,
+                follow_up_suggestions_json: None,
+                turn_summary: None,
+            })
             .await
         {
             tracing::warn!(
@@ -694,59 +719,75 @@ async fn handle_runtime_constraint_block_main(
         provider_name,
     )
     .await;
-    sync_memory_layers_after_turn(
+    sync_memory_layers_after_turn(MemorySyncRequest {
         app,
         sessions,
-        &repo,
+        repo: &repo,
         session_id,
         client,
         user_message,
-        &final_response,
-        false,
-    )
+        assistant_reply: &final_response,
+        allow_long_term_promotion: false,
+    })
     .await;
-    emit_post_turn_meta_then_complete(
+    emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
         app,
-        message_id,
-        &last_assistant_id,
+        stream_message_id: message_id,
+        assistant_message_id: &last_assistant_id,
         client,
-        &final_response,
-        preflight_skip_turn_summary,
-        &final_response,
+        final_reply: &final_response,
+        skip_summary: preflight_skip_turn_summary,
+        suggestions_reply: &final_response,
         repo,
-    )
+    })
     .await;
 }
 
+pub(super) struct PostResponseRetryRequest<'a> {
+    pub client: &'a dyn LlmClient,
+    pub app: &'a AppHandle,
+    pub message_id: &'a str,
+    pub round_id: &'a str,
+    pub base_messages: &'a [LlmMessage],
+    pub instruction: &'a str,
+    pub pending_tools: &'a Arc<Mutex<HashMap<String, PendingToolCall>>>,
+    pub cancel_flag: &'a Arc<RwLock<bool>>,
+    pub repo: Arc<crate::domain::persistence::SessionRepository>,
+}
+
 async fn run_post_response_retry_text_only(
-    client: &dyn LlmClient,
-    app: &AppHandle,
-    message_id: &str,
-    round_id: &str,
-    base_messages: &[LlmMessage],
-    instruction: &str,
-    pending_tools: &Arc<Mutex<HashMap<String, PendingToolCall>>>,
-    cancel_flag: &Arc<RwLock<bool>>,
-    repo: Arc<crate::domain::persistence::SessionRepository>,
+    request: PostResponseRetryRequest<'_>,
 ) -> Result<(String, String, Option<crate::llm::TokenUsage>), OmigaError> {
+    let PostResponseRetryRequest {
+        client,
+        app,
+        message_id,
+        round_id,
+        base_messages,
+        instruction,
+        pending_tools,
+        cancel_flag,
+        repo,
+    } = request;
     let mut retry_messages = base_messages.to_vec();
     retry_messages.push(LlmMessage::system(format!(
         "## Runtime validator correction\n{}",
         instruction
     )));
-    let (tool_calls, text, reasoning, cancelled, usage) = stream_llm_response_with_cancel(
-        client,
-        app,
-        message_id,
-        round_id,
-        &retry_messages,
-        &[],
-        false,
-        pending_tools,
-        cancel_flag,
-        repo,
-    )
-    .await?;
+    let (tool_calls, text, reasoning, cancelled, usage) =
+        stream_llm_response_with_cancel(StreamLlmRequest {
+            client,
+            app,
+            message_id,
+            round_id,
+            messages: &retry_messages,
+            tools: &[],
+            emit_text_chunks: false,
+            pending_tools,
+            cancel_flag,
+            repo,
+        })
+        .await?;
 
     if cancelled {
         return Ok((String::new(), String::new(), usage));
@@ -908,16 +949,29 @@ async fn persist_session_tool_state(
 
 mod orchestration;
 use orchestration::*;
+macro_rules! mode_lifecycle_context {
+    ($is_active:expr, $sessions:expr, $repo:expr, $project_root:expr, $session_id:expr, $env_label:expr, $round_id:expr $(,)?) => {
+        ModeLifecycleContext {
+            is_active: $is_active,
+            sessions: $sessions,
+            repo: $repo,
+            project_root: $project_root,
+            session_id: $session_id,
+            env_label: $env_label,
+            round_id: $round_id,
+        }
+    };
+}
 mod turn;
 use turn::*;
 mod commands;
 pub use commands::*;
 mod permissions;
-use self::permissions::execute_ask_user_question_interactive;
+use self::permissions::{execute_ask_user_question_interactive, AskUserQuestionExecution};
 mod subagent;
-pub(crate) use self::subagent::spawn_background_agent;
+pub(crate) use self::subagent::{spawn_background_agent, BackgroundAgentRequest};
 mod tool_exec;
-use self::tool_exec::execute_tool_calls;
+use self::tool_exec::{execute_tool_calls, ToolExecutionRequest};
 
 /// One built-in or custom agent entry for the composer picker.
 #[derive(Debug, Clone, Serialize)]
@@ -1021,18 +1075,18 @@ pub async fn run_research_command(
     let assistant_content = format_research_output(&args, &output);
 
     let user_message_id = uuid::Uuid::new_v4().to_string();
-    repo.save_message(
-        &user_message_id,
-        &request.session_id,
-        "user",
-        &request.content,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+    repo.save_message(NewMessageRecord {
+        id: &user_message_id,
+        session_id: &request.session_id,
+        role: "user",
+        content: &request.content,
+        tool_calls: None,
+        tool_call_id: None,
+        token_usage_json: None,
+        reasoning_content: None,
+        follow_up_suggestions_json: None,
+        turn_summary: None,
+    })
     .await
     .map_err(|e| {
         OmigaError::Chat(ChatError::StreamError(format!(
@@ -1057,18 +1111,18 @@ pub async fn run_research_command(
         )))
     })?;
 
-    repo.save_message(
-        &assistant_message_id,
-        &request.session_id,
-        "assistant",
-        &assistant_content,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+    repo.save_message(NewMessageRecord {
+        id: &assistant_message_id,
+        session_id: &request.session_id,
+        role: "assistant",
+        content: &assistant_content,
+        tool_calls: None,
+        tool_call_id: None,
+        token_usage_json: None,
+        reasoning_content: None,
+        follow_up_suggestions_json: None,
+        turn_summary: None,
+    })
     .await
     .map_err(|e| {
         OmigaError::Chat(ChatError::StreamError(format!(
@@ -1099,17 +1153,19 @@ pub async fn run_research_command(
 
     append_orchestration_event(
         repo,
-        &request.session_id,
-        Some(&round_id),
-        Some(&assistant_message_id),
-        Some("research"),
-        "research_command_completed",
-        Some("complete"),
-        None,
-        serde_json::json!({
-            "cwd": cwd,
-            "args": args,
-        }),
+        ChatOrchestrationEvent {
+            session_id: &request.session_id,
+            round_id: Some(&round_id),
+            message_id: Some(&assistant_message_id),
+            mode: Some("research"),
+            event_type: "research_command_completed",
+            phase: Some("complete"),
+            task_id: None,
+            payload: serde_json::json!({
+                "cwd": cwd,
+                "args": args,
+            }),
+        },
     )
     .await;
 
@@ -1330,32 +1386,36 @@ fn looks_like_resume_request(text: &str) -> bool {
     .any(|token| lower.contains(token))
 }
 
+struct ChatOrchestrationEvent<'a> {
+    session_id: &'a str,
+    round_id: Option<&'a str>,
+    message_id: Option<&'a str>,
+    mode: Option<&'a str>,
+    event_type: &'a str,
+    phase: Option<&'a str>,
+    task_id: Option<&'a str>,
+    payload: serde_json::Value,
+}
+
 async fn append_orchestration_event(
     repo: &crate::domain::persistence::SessionRepository,
-    session_id: &str,
-    round_id: Option<&str>,
-    message_id: Option<&str>,
-    mode: Option<&str>,
-    event_type: &str,
-    phase: Option<&str>,
-    task_id: Option<&str>,
-    payload: serde_json::Value,
+    event: ChatOrchestrationEvent<'_>,
 ) {
-    let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+    let payload_json = serde_json::to_string(&event.payload).unwrap_or_else(|_| "{}".to_string());
     if let Err(e) = repo
-        .append_orchestration_event(
-            session_id,
-            round_id,
-            message_id,
-            mode,
-            event_type,
-            phase,
-            task_id,
-            &payload_json,
-        )
+        .append_orchestration_event(NewOrchestrationEventRecord {
+            session_id: event.session_id,
+            round_id: event.round_id,
+            message_id: event.message_id,
+            mode: event.mode,
+            event_type: event.event_type,
+            phase: event.phase,
+            task_id: event.task_id,
+            payload_json: &payload_json,
+        })
         .await
     {
-        tracing::warn!(target: "omiga::orchestration_events", session_id, event_type, error = %e, "append_orchestration_event failed");
+        tracing::warn!(target: "omiga::orchestration_events", session_id = event.session_id, event_type = event.event_type, error = %e, "append_orchestration_event failed");
     }
 }
 
@@ -1370,18 +1430,20 @@ async fn append_preflight_stage_event(
 ) {
     append_orchestration_event(
         repo,
-        session_id,
-        None,
-        Some(message_id),
-        mode,
-        "preflight_stage_completed",
-        Some("preflight"),
-        None,
-        serde_json::json!({
-            "stage": stage,
-            "durationMs": duration_ms,
-            "payload": payload,
-        }),
+        ChatOrchestrationEvent {
+            session_id,
+            round_id: None,
+            message_id: Some(message_id),
+            mode,
+            event_type: "preflight_stage_completed",
+            phase: Some("preflight"),
+            task_id: None,
+            payload: serde_json::json!({
+                "stage": stage,
+                "durationMs": duration_ms,
+                "payload": payload,
+            }),
+        },
     )
     .await;
 }
@@ -1397,18 +1459,20 @@ async fn append_preflight_stage_failed_event(
 ) {
     append_orchestration_event(
         repo,
-        session_id,
-        None,
-        Some(message_id),
-        mode,
-        "preflight_stage_failed",
-        Some("preflight"),
-        None,
-        serde_json::json!({
-            "stage": stage,
-            "durationMs": duration_ms,
-            "error": error,
-        }),
+        ChatOrchestrationEvent {
+            session_id,
+            round_id: None,
+            message_id: Some(message_id),
+            mode,
+            event_type: "preflight_stage_failed",
+            phase: Some("preflight"),
+            task_id: None,
+            payload: serde_json::json!({
+                "stage": stage,
+                "durationMs": duration_ms,
+                "error": error,
+            }),
+        },
     )
     .await;
 }
@@ -1573,18 +1637,18 @@ pub async fn send_message(
                 session.add_user_message(&request.content);
 
                 msg_id = uuid::Uuid::new_v4().to_string();
-                repo.save_message(
-                    &msg_id,
-                    &session.id,
-                    "user",
-                    &request.content,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
+                repo.save_message(NewMessageRecord {
+                    id: &msg_id,
+                    session_id: &session.id,
+                    role: "user",
+                    content: &request.content,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    token_usage_json: None,
+                    reasoning_content: None,
+                    follow_up_suggestions_json: None,
+                    turn_summary: None,
+                })
                 .await
                 .map_err(|e| {
                     OmigaError::Chat(ChatError::StreamError(format!(
@@ -1668,18 +1732,18 @@ pub async fn send_message(
 
         // Save user message
         let msg_id = uuid::Uuid::new_v4().to_string();
-        repo.save_message(
-            &msg_id,
-            &session.id,
-            "user",
-            &request.content,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        repo.save_message(NewMessageRecord {
+            id: &msg_id,
+            session_id: &session.id,
+            role: "user",
+            content: &request.content,
+            tool_calls: None,
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: None,
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
         .await
         .map_err(|e| {
             OmigaError::Chat(ChatError::StreamError(format!(
@@ -1769,43 +1833,49 @@ pub async fn send_message(
         if looks_like_resume_request(routing_content) || has_existing_ralph_state {
             append_orchestration_event(
                 repo,
-                &session_id,
-                None,
-                Some(&user_message_id),
-                Some("ralph"),
-                "resume_requested",
-                None,
-                None,
-                serde_json::json!({ "goal": request.content }),
+                ChatOrchestrationEvent {
+                    session_id: &session_id,
+                    round_id: None,
+                    message_id: Some(&user_message_id),
+                    mode: Some("ralph"),
+                    event_type: "resume_requested",
+                    phase: None,
+                    task_id: None,
+                    payload: serde_json::json!({ "goal": request.content }),
+                },
             )
             .await;
         }
         begin_ralph_turn_if_needed(
-            true,
-            &app_state.chat.sessions,
-            repo,
-            &project_root,
-            &session_id,
-            &request.content,
-            ralph_runtime_env_label(
-                exec_env.as_str(),
-                request.ssh_server.as_deref(),
-                request.local_venv_type.as_deref().unwrap_or(""),
-                request.local_venv_name.as_deref().unwrap_or(""),
+            mode_lifecycle_context!(
+                true,
+                &app_state.chat.sessions,
+                repo,
+                &project_root,
+                &session_id,
+                ralph_runtime_env_label(
+                    exec_env.as_str(),
+                    request.ssh_server.as_deref(),
+                    request.local_venv_type.as_deref().unwrap_or(""),
+                    request.local_venv_name.as_deref().unwrap_or(""),
+                ),
+                None,
             ),
-            None,
+            &request.content,
         )
         .await;
         append_orchestration_event(
             repo,
-            &session_id,
-            None,
-            Some(&user_message_id),
-            Some("ralph"),
-            "mode_requested",
-            Some("planning"),
-            None,
-            serde_json::json!({ "goal": request.content }),
+            ChatOrchestrationEvent {
+                session_id: &session_id,
+                round_id: None,
+                message_id: Some(&user_message_id),
+                mode: Some("ralph"),
+                event_type: "mode_requested",
+                phase: Some("planning"),
+                task_id: None,
+                payload: serde_json::json!({ "goal": request.content }),
+            },
         )
         .await;
     }
@@ -1816,43 +1886,49 @@ pub async fn send_message(
         {
             append_orchestration_event(
                 repo,
-                &session_id,
-                None,
-                Some(&user_message_id),
-                Some("autopilot"),
-                "resume_requested",
-                None,
-                None,
-                serde_json::json!({ "goal": request.content }),
+                ChatOrchestrationEvent {
+                    session_id: &session_id,
+                    round_id: None,
+                    message_id: Some(&user_message_id),
+                    mode: Some("autopilot"),
+                    event_type: "resume_requested",
+                    phase: None,
+                    task_id: None,
+                    payload: serde_json::json!({ "goal": request.content }),
+                },
             )
             .await;
         }
         begin_autopilot_turn_if_needed(
-            true,
-            &app_state.chat.sessions,
-            repo,
-            &project_root,
-            &session_id,
-            &request.content,
-            ralph_runtime_env_label(
-                exec_env.as_str(),
-                request.ssh_server.as_deref(),
-                request.local_venv_type.as_deref().unwrap_or(""),
-                request.local_venv_name.as_deref().unwrap_or(""),
+            mode_lifecycle_context!(
+                true,
+                &app_state.chat.sessions,
+                repo,
+                &project_root,
+                &session_id,
+                ralph_runtime_env_label(
+                    exec_env.as_str(),
+                    request.ssh_server.as_deref(),
+                    request.local_venv_type.as_deref().unwrap_or(""),
+                    request.local_venv_name.as_deref().unwrap_or(""),
+                ),
+                None,
             ),
-            None,
+            &request.content,
         )
         .await;
         append_orchestration_event(
             repo,
-            &session_id,
-            None,
-            Some(&user_message_id),
-            Some("autopilot"),
-            "mode_requested",
-            Some("intake"),
-            None,
-            serde_json::json!({ "goal": request.content }),
+            ChatOrchestrationEvent {
+                session_id: &session_id,
+                round_id: None,
+                message_id: Some(&user_message_id),
+                mode: Some("autopilot"),
+                event_type: "mode_requested",
+                phase: Some("intake"),
+                task_id: None,
+                payload: serde_json::json!({ "goal": request.content }),
+            },
         )
         .await;
     }
@@ -1863,14 +1939,16 @@ pub async fn send_message(
         {
             append_orchestration_event(
                 repo,
-                &session_id,
-                None,
-                Some(&user_message_id),
-                Some("team"),
-                "resume_requested",
-                None,
-                None,
-                serde_json::json!({ "goal": request.content }),
+                ChatOrchestrationEvent {
+                    session_id: &session_id,
+                    round_id: None,
+                    message_id: Some(&user_message_id),
+                    mode: Some("team"),
+                    event_type: "resume_requested",
+                    phase: None,
+                    task_id: None,
+                    payload: serde_json::json!({ "goal": request.content }),
+                },
             )
             .await;
         }
@@ -1885,14 +1963,16 @@ pub async fn send_message(
         .await;
         append_orchestration_event(
             repo,
-            &session_id,
-            None,
-            Some(&user_message_id),
-            Some("team"),
-            "mode_requested",
-            Some("planning"),
-            None,
-            serde_json::json!({ "goal": request.content }),
+            ChatOrchestrationEvent {
+                session_id: &session_id,
+                round_id: None,
+                message_id: Some(&user_message_id),
+                mode: Some("team"),
+                event_type: "mode_requested",
+                phase: Some("planning"),
+                task_id: None,
+                payload: serde_json::json!({ "goal": request.content }),
+            },
         )
         .await;
     }
@@ -2006,34 +2086,35 @@ pub async fn send_message(
                         );
                     append_orchestration_event(
                         repo,
-                        &session_id,
-                        None,
-                        Some(&user_message_id),
-                        keyword_skill_route
-                            .as_ref()
-                            .map(|r| r.skill_name.as_str())
-                            .or(if is_schedule_command {
-                                Some("schedule")
-                            } else if is_plan_command || is_default_general_route {
-                                Some("plan")
+                        ChatOrchestrationEvent {
+                            session_id: &session_id,
+                            round_id: None,
+                            message_id: Some(&user_message_id),
+                            mode: keyword_skill_route.as_ref().map(|r| r.skill_name.as_str()).or(
+                                if is_schedule_command {
+                                    Some("schedule")
+                                } else if is_plan_command || is_default_general_route {
+                                    Some("plan")
+                                } else {
+                                    None
+                                },
+                            ),
+                            event_type: "leader_intent_classified",
+                            phase: if classified_complex {
+                                Some("planning")
                             } else {
-                                None
+                                Some("solo")
+                            },
+                            task_id: None,
+                            payload: serde_json::json!({
+                                "entryAgentType": "general-purpose",
+                                "classification": if classified_complex { "complex" } else { "simple" },
+                                "strategy": format!("{:?}", result.recommended_strategy),
+                                "taskCount": result.plan.subtasks.len(),
+                                "agentCount": result.selected_agents.len(),
+                                "willAutoExecute": is_explicit_execution_workflow,
                             }),
-                        "leader_intent_classified",
-                        if classified_complex {
-                            Some("planning")
-                        } else {
-                            Some("solo")
                         },
-                        None,
-                        serde_json::json!({
-                            "entryAgentType": "general-purpose",
-                            "classification": if classified_complex { "complex" } else { "simple" },
-                            "strategy": format!("{:?}", result.recommended_strategy),
-                            "taskCount": result.plan.subtasks.len(),
-                            "agentCount": result.selected_agents.len(),
-                            "willAutoExecute": is_explicit_execution_workflow,
-                        }),
                     )
                     .await;
                     if trace_mode.is_some() {
@@ -2076,45 +2157,49 @@ pub async fn send_message(
                         );
                         append_orchestration_event(
                             repo,
-                            &session_id,
-                            None,
-                            Some(&user_message_id),
-                            keyword_skill_route
-                                .as_ref()
-                                .map(|r| r.skill_name.as_str())
-                                .or(if is_schedule_command {
-                                    Some("schedule")
-                                } else {
-                                    None
+                            ChatOrchestrationEvent {
+                                session_id: &session_id,
+                                round_id: None,
+                                message_id: Some(&user_message_id),
+                                mode: keyword_skill_route
+                                    .as_ref()
+                                    .map(|r| r.skill_name.as_str())
+                                    .or(if is_schedule_command {
+                                        Some("schedule")
+                                    } else {
+                                        None
+                                    }),
+                                event_type: "schedule_plan_created",
+                                phase: None,
+                                task_id: None,
+                                payload: serde_json::json!({
+                                    "planId": result.plan.plan_id,
+                                    "taskCount": result.plan.subtasks.len(),
+                                    "agents": result.selected_agents,
+                                    "strategy": format!("{:?}", result.recommended_strategy),
                                 }),
-                            "schedule_plan_created",
-                            None,
-                            None,
-                            serde_json::json!({
-                                "planId": result.plan.plan_id,
-                                "taskCount": result.plan.subtasks.len(),
-                                "agents": result.selected_agents,
-                                "strategy": format!("{:?}", result.recommended_strategy),
-                            }),
+                            },
                         )
                         .await;
                         if is_plan_command || is_default_general_route {
                             append_orchestration_event(
                                 repo,
-                                &session_id,
-                                None,
-                                Some(&user_message_id),
-                                Some("plan"),
-                                "plan_ready_for_approval",
-                                Some("planning"),
-                                None,
-                                serde_json::json!({
-                                    "planId": result.plan.plan_id,
-                                    "entryAgentType": result.plan.entry_agent_type.clone(),
-                                    "executionSupervisorAgentType": result.plan.execution_supervisor_agent_type.clone(),
-                                    "taskCount": result.plan.subtasks.len(),
-                                    "approvalSurface": "plan_card_buttons",
-                                }),
+                                ChatOrchestrationEvent {
+                                    session_id: &session_id,
+                                    round_id: None,
+                                    message_id: Some(&user_message_id),
+                                    mode: Some("plan"),
+                                    event_type: "plan_ready_for_approval",
+                                    phase: Some("planning"),
+                                    task_id: None,
+                                    payload: serde_json::json!({
+                                        "planId": result.plan.plan_id,
+                                        "entryAgentType": result.plan.entry_agent_type.clone(),
+                                        "executionSupervisorAgentType": result.plan.execution_supervisor_agent_type.clone(),
+                                        "taskCount": result.plan.subtasks.len(),
+                                        "approvalSurface": "plan_card_buttons",
+                                    }),
+                                },
                             )
                             .await;
                         }
@@ -2143,6 +2228,7 @@ pub async fn send_message(
         } else {
             None
         };
+    let preflight_event_mode = trace_mode.as_deref().or(Some("preflight"));
 
     if is_schedule_command {
         if let Some(schedule_result) = scheduler_result.clone() {
@@ -2213,19 +2299,21 @@ pub async fn send_message(
         .await
         {
             update_autopilot_phase_if_needed(
-                true,
-                &app_state.chat.sessions,
-                repo,
-                &project_root,
-                &session_id,
-                phase,
-                ralph_runtime_env_label(
-                    exec_env.as_str(),
-                    request.ssh_server.as_deref(),
-                    request.local_venv_type.as_deref().unwrap_or(""),
-                    request.local_venv_name.as_deref().unwrap_or(""),
+                mode_lifecycle_context!(
+                    true,
+                    &app_state.chat.sessions,
+                    repo,
+                    &project_root,
+                    &session_id,
+                    ralph_runtime_env_label(
+                        exec_env.as_str(),
+                        request.ssh_server.as_deref(),
+                        request.local_venv_type.as_deref().unwrap_or(""),
+                        request.local_venv_name.as_deref().unwrap_or(""),
+                    ),
+                    None,
                 ),
-                None,
+                phase,
             )
             .await;
         }
@@ -2238,6 +2326,7 @@ pub async fn send_message(
     if let Some(ref desired) = request.active_provider_entry_name {
         let desired = desired.trim();
         if !desired.is_empty() {
+            let provider_restore_started_at = std::time::Instant::now();
             let current = app_state
                 .chat
                 .active_provider_entry_name
@@ -2247,18 +2336,84 @@ pub async fn send_message(
             let matches = current.as_deref().map(str::trim) == Some(desired);
             drop(current);
             if !matches {
-                if let Err(e) = apply_named_provider_runtime(&app_state, desired).await {
-                    tracing::warn!(
-                        target: "omiga::llm",
-                        "Lazy provider restore for session {} failed ({}), using current config",
-                        session_id, e
-                    );
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    apply_named_provider_runtime(&app_state, desired),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {
+                        append_preflight_stage_event(
+                            repo,
+                            &session_id,
+                            &user_message_id,
+                            preflight_event_mode,
+                            "provider_restore",
+                            provider_restore_started_at.elapsed().as_millis(),
+                            serde_json::json!({ "provider": desired, "status": "ok" }),
+                        )
+                        .await;
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            target: "omiga::llm",
+                            "Lazy provider restore for session {} failed ({}), using current config",
+                            session_id, e
+                        );
+                        append_preflight_stage_failed_event(
+                            repo,
+                            &session_id,
+                            &user_message_id,
+                            preflight_event_mode,
+                            "provider_restore",
+                            provider_restore_started_at.elapsed().as_millis(),
+                            &e.to_string(),
+                        )
+                        .await;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "omiga::llm",
+                            "Lazy provider restore for session {} timed out; using current config",
+                            session_id
+                        );
+                        append_preflight_stage_failed_event(
+                            repo,
+                            &session_id,
+                            &user_message_id,
+                            preflight_event_mode,
+                            "provider_restore",
+                            provider_restore_started_at.elapsed().as_millis(),
+                            "provider restore timed out",
+                        )
+                        .await;
+                    }
                 }
             }
         }
     }
 
-    let mut llm_config = get_llm_config(&app_state.chat).await?;
+    let llm_config_started_at = std::time::Instant::now();
+    let mut llm_config = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        get_llm_config(&app_state.chat),
+    )
+    .await
+    .map_err(|_| {
+        OmigaError::Chat(ChatError::StreamError(
+            "Timed out while loading LLM configuration".to_string(),
+        ))
+    })??;
+    append_preflight_stage_event(
+        repo,
+        &session_id,
+        &user_message_id,
+        preflight_event_mode,
+        "llm_config",
+        llm_config_started_at.elapsed().as_millis(),
+        serde_json::json!({ "provider": format!("{:?}", llm_config.provider), "model": llm_config.model }),
+    )
+    .await;
     let session_runtime_cfg = crate::domain::session::load_session_config(&session_id);
     let resolved_runtime_constraints =
         crate::domain::runtime_constraints::resolve_runtime_constraint_config(
@@ -2290,27 +2445,116 @@ pub async fn send_message(
             cfg
         })
     };
-    crate::domain::memory::working_memory::mark_user_turn_started(repo, &session_id)
-        .await
-        .map_err(|e| {
-            OmigaError::Chat(ChatError::StreamError(format!(
-                "Working memory mark_user_turn_started failed: {}",
-                e
-            )))
-        })?;
+    let working_memory_started_at = std::time::Instant::now();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        crate::domain::memory::working_memory::mark_user_turn_started(repo, &session_id),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {
+            append_preflight_stage_event(
+                repo,
+                &session_id,
+                &user_message_id,
+                preflight_event_mode,
+                "working_memory_mark",
+                working_memory_started_at.elapsed().as_millis(),
+                serde_json::json!({ "status": "ok" }),
+            )
+            .await;
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                target: "omiga::memory",
+                session_id = %session_id,
+                error = %e,
+                "Working memory mark_user_turn_started failed; continuing without blocking chat"
+            );
+            append_preflight_stage_failed_event(
+                repo,
+                &session_id,
+                &user_message_id,
+                preflight_event_mode,
+                "working_memory_mark",
+                working_memory_started_at.elapsed().as_millis(),
+                &e.to_string(),
+            )
+            .await;
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "omiga::memory",
+                session_id = %session_id,
+                "Working memory mark_user_turn_started timed out; continuing without blocking chat"
+            );
+            append_preflight_stage_failed_event(
+                repo,
+                &session_id,
+                &user_message_id,
+                preflight_event_mode,
+                "working_memory_mark",
+                working_memory_started_at.elapsed().as_millis(),
+                "working memory mark timed out",
+            )
+            .await;
+        }
+    }
     // Run independent async I/O in parallel to reduce pre-LLM latency.
     let skill_cache_ref = &app_state.skill_cache;
-    let (skills_exist, memory_ctx, memory_nav) = tokio::join!(
-        skills::skills_any_exist(&project_root, skill_cache_ref),
-        crate::commands::memory::get_memory_context(
-            repo,
-            &project_root,
-            Some(&session_id),
-            &request.content,
-            3,
-        ),
-        crate::commands::memory::memory_navigation_section(&project_root),
-    );
+    let memory_lookup_started_at = std::time::Instant::now();
+    let (skills_exist, memory_ctx, memory_nav) =
+        match tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(
+                skills::skills_any_exist(&project_root, skill_cache_ref),
+                crate::commands::memory::get_memory_context(
+                    repo,
+                    &project_root,
+                    Some(&session_id),
+                    &request.content,
+                    3,
+                ),
+                crate::commands::memory::memory_navigation_section(&project_root),
+            )
+        })
+        .await
+        {
+            Ok(result) => {
+                append_preflight_stage_event(
+                    repo,
+                    &session_id,
+                    &user_message_id,
+                    preflight_event_mode,
+                    "memory_context",
+                    memory_lookup_started_at.elapsed().as_millis(),
+                    serde_json::json!({
+                        "skillsExist": result.0,
+                        "memoryContext": result.1.is_some(),
+                        "memoryNavChars": result.2.len(),
+                    }),
+                )
+                .await;
+                result
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "omiga::memory",
+                    session_id = %session_id,
+                    "Memory/skill preflight timed out; continuing with no injected memory context"
+                );
+                append_preflight_stage_failed_event(
+                    repo,
+                    &session_id,
+                    &user_message_id,
+                    preflight_event_mode,
+                    "memory_context",
+                    memory_lookup_started_at.elapsed().as_millis(),
+                    "memory context timed out",
+                )
+                .await;
+                (false, None, String::new())
+            }
+        };
 
     let skills_system_section = if skills_exist {
         "This project has skills available. For non-trivial tasks, use `list_skills` to discover specialized workflows before falling back to generic tools.".to_string()
@@ -2352,8 +2596,44 @@ pub async fn send_message(
     if let Some(ctx) = memory_ctx {
         prompt_parts.push(ctx);
     }
-    if let Some(overlay) = crate::domain::agents::build_runtime_overlay(&project_root).await {
-        prompt_parts.push(overlay);
+    let overlay_started_at = std::time::Instant::now();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        crate::domain::agents::build_runtime_overlay(&project_root),
+    )
+    .await
+    {
+        Ok(Some(overlay)) => {
+            prompt_parts.push(overlay);
+            append_preflight_stage_event(
+                repo,
+                &session_id,
+                &user_message_id,
+                preflight_event_mode,
+                "runtime_overlay",
+                overlay_started_at.elapsed().as_millis(),
+                serde_json::json!({ "status": "ok" }),
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(_) => {
+            tracing::warn!(
+                target: "omiga::overlay",
+                session_id = %session_id,
+                "Runtime overlay preflight timed out; continuing without overlay"
+            );
+            append_preflight_stage_failed_event(
+                repo,
+                &session_id,
+                &user_message_id,
+                preflight_event_mode,
+                "runtime_overlay",
+                overlay_started_at.elapsed().as_millis(),
+                "runtime overlay timed out",
+            )
+            .await;
+        }
     }
     if is_ralph_keyword_route {
         if let Some(resume_ctx) =
@@ -2527,51 +2807,124 @@ pub async fn send_message(
                 removed_messages.len()
             )),
         );
-        crate::domain::memory::working_memory::prepare_for_auto_compact(
-            repo,
-            &session_id,
-            &removed_messages,
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            crate::domain::memory::working_memory::prepare_for_auto_compact(
+                repo,
+                &session_id,
+                &removed_messages,
+            ),
         )
         .await
-        .map_err(|e| {
-            emit_activity_operation(
-                &app,
-                &session_id,
-                &op_id,
-                "压缩前摘要",
-                "error",
-                Some(e.to_string()),
-            );
-            OmigaError::Chat(ChatError::StreamError(format!(
-                "Working memory prepare_for_auto_compact failed: {}",
-                e
-            )))
-        })?;
-        emit_activity_operation(
-            &app,
-            &session_id,
-            &op_id,
-            "压缩前摘要",
-            "done",
-            Some("已提炼即将被压缩的上下文".to_string()),
-        );
+        {
+            Ok(Ok(compact_state)) => {
+                emit_activity_operation(
+                    &app,
+                    &session_id,
+                    &op_id,
+                    "压缩前摘要",
+                    "done",
+                    Some("已提炼即将被压缩的上下文".to_string()),
+                );
+                // Context compression is a semantic trigger: archive session summary now.
+                let project_root_for_compact = resolve_session_project_root(&project_path);
+                if let Ok(cfg) = crate::domain::memory::load_resolved_config(&project_root_for_compact).await {
+                    let lt_path = cfg.long_term_path(&project_root_for_compact);
+                    crate::commands::chat::turn::archive_on_compact(
+                        &app,
+                        &session_id,
+                        &lt_path,
+                        &compact_state,
+                    )
+                    .await;
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    target: "omiga::memory",
+                    session_id = %session_id,
+                    error = %e,
+                    "Working memory prepare_for_auto_compact failed; continuing without blocking chat"
+                );
+                emit_activity_operation(
+                    &app,
+                    &session_id,
+                    &op_id,
+                    "压缩前摘要",
+                    "error",
+                    Some(e.to_string()),
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "omiga::memory",
+                    session_id = %session_id,
+                    "Working memory prepare_for_auto_compact timed out; continuing without blocking chat"
+                );
+                emit_activity_operation(
+                    &app,
+                    &session_id,
+                    &op_id,
+                    "压缩前摘要",
+                    "error",
+                    Some("prepare_for_auto_compact timed out".to_string()),
+                );
+            }
+        }
     }
 
-    let compact_outcome = crate::domain::auto_compact::compact_session_and_persist(
-        repo,
-        &session_id,
-        &mut session,
-        &llm_config,
-        request.use_tools,
-        &user_message_id,
+    let compact_started_at = std::time::Instant::now();
+    let compact_outcome = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::domain::auto_compact::compact_session_and_persist(
+            repo,
+            &session_id,
+            &mut session,
+            &llm_config,
+            request.use_tools,
+            &user_message_id,
+        ),
     )
     .await
-    .map_err(|e| {
-        OmigaError::Chat(ChatError::StreamError(format!(
-            "Auto-compact persist failed: {}",
-            e
-        )))
-    })?;
+    {
+        Ok(Ok(outcome)) => {
+            append_preflight_stage_event(
+                repo,
+                &session_id,
+                &user_message_id,
+                preflight_event_mode,
+                "auto_compact",
+                compact_started_at.elapsed().as_millis(),
+                serde_json::json!({ "compacted": outcome.is_some() }),
+            )
+            .await;
+            outcome
+        }
+        Ok(Err(e)) => {
+            return Err(OmigaError::Chat(ChatError::StreamError(format!(
+                "Auto-compact persist failed: {}",
+                e
+            ))));
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "omiga::auto_compact",
+                session_id = %session_id,
+                "Auto-compact persist timed out; continuing with current transcript"
+            );
+            append_preflight_stage_failed_event(
+                repo,
+                &session_id,
+                &user_message_id,
+                preflight_event_mode,
+                "auto_compact",
+                compact_started_at.elapsed().as_millis(),
+                "auto compact timed out",
+            )
+            .await;
+            None
+        }
+    };
 
     let user_message_id_for_round = compact_outcome
         .as_ref()
@@ -2613,13 +2966,21 @@ pub async fn send_message(
     let message_id = uuid::Uuid::new_v4().to_string();
 
     // Create conversation round record
-    repo.create_round(
-        &round_id,
-        &session_id,
-        &message_id,
-        Some(&user_message_id_for_round),
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        repo.create_round(
+            &round_id,
+            &session_id,
+            &message_id,
+            Some(&user_message_id_for_round),
+        ),
     )
     .await
+    .map_err(|_| {
+        OmigaError::Chat(ChatError::StreamError(
+            "Timed out while creating conversation round".to_string(),
+        ))
+    })?
     .map_err(|e| {
         OmigaError::Chat(ChatError::StreamError(format!(
             "Failed to create round: {}",
@@ -2921,6 +3282,11 @@ pub async fn send_message(
 
     let round_cancel_spawn = round_cancel.clone();
     tokio::spawn(async move {
+        // Give the frontend a short window to receive `message_id` from `send_message`
+        // and subscribe to `chat-stream-{message_id}` before the first stream event.
+        // Without this, very fast failures/responses can be emitted before the listener
+        // exists, leaving the UI stuck on “waiting for response”.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let _ = app_clone.emit(
             &format!("chat-stream-{}", message_id_clone),
             &StreamOutputItem::Start,
@@ -3042,25 +3408,29 @@ pub async fn send_message(
         }
 
         update_ralph_phase_if_needed(
-            is_ralph_mode_for_spawn,
-            &sessions_clone,
-            &repo_clone,
-            &project_root_for_ralph,
-            &session_id_clone,
+            mode_lifecycle_context!(
+                is_ralph_mode_for_spawn,
+                &sessions_clone,
+                &repo_clone,
+                &project_root_for_ralph,
+                &session_id_clone,
+                ralph_env_for_spawn.clone(),
+                Some(&round_id_clone),
+            ),
             crate::domain::ralph_state::RalphPhase::EnvCheck,
-            ralph_env_for_spawn.clone(),
-            Some(&round_id_clone),
         )
         .await;
         update_autopilot_phase_if_needed(
-            is_autopilot_mode_for_spawn,
-            &sessions_clone,
-            &repo_clone,
-            &project_root_for_autopilot,
-            &session_id_clone,
+            mode_lifecycle_context!(
+                is_autopilot_mode_for_spawn,
+                &sessions_clone,
+                &repo_clone,
+                &project_root_for_autopilot,
+                &session_id_clone,
+                autopilot_env_for_spawn.clone(),
+                Some(&round_id_clone),
+            ),
             crate::domain::autopilot_state::AutopilotPhase::Design,
-            autopilot_env_for_spawn.clone(),
-            Some(&round_id_clone),
         )
         .await;
 
@@ -3071,18 +3441,18 @@ pub async fn send_message(
             assistant_reasoning,
             was_cancelled,
             usage_first,
-        ) = match stream_llm_response_with_cancel(
-            client.as_ref(),
-            &app_clone,
-            &message_id_clone,
-            &round_id_clone,
-            &initial_llm_messages,
-            &tools,
-            !agent_runtime.runtime_constraints_config.buffer_responses,
-            &pending_tools_clone,
-            &cancel_flag,
-            repo_clone.clone(),
-        )
+        ) = match stream_llm_response_with_cancel(StreamLlmRequest {
+            client: client.as_ref(),
+            app: &app_clone,
+            message_id: &message_id_clone,
+            round_id: &round_id_clone,
+            messages: &initial_llm_messages,
+            tools: &tools,
+            emit_text_chunks: !agent_runtime.runtime_constraints_config.buffer_responses,
+            pending_tools: &pending_tools_clone,
+            cancel_flag: &cancel_flag,
+            repo: repo_clone.clone(),
+        })
         .await
         {
             Ok(result) => result,
@@ -3092,25 +3462,31 @@ pub async fn send_message(
                     .cancel_round(&round_id_clone, Some(&e.to_string()))
                     .await;
                 fail_ralph_turn_if_needed(
-                    is_ralph_mode_for_spawn,
-                    &sessions_clone,
-                    &repo_clone,
-                    &project_root_for_ralph,
-                    &session_id_clone,
+                    mode_lifecycle_context!(
+                        is_ralph_mode_for_spawn,
+                        &sessions_clone,
+                        &repo_clone,
+                        &project_root_for_ralph,
+                        &session_id_clone,
+                        ralph_env_for_spawn.clone(),
+                        Some(&round_id_clone),
+                    ),
                     crate::domain::ralph_state::RalphPhase::EnvCheck,
                     &e.to_string(),
-                    Some(&round_id_clone),
                 )
                 .await;
                 fail_autopilot_turn_if_needed(
-                    is_autopilot_mode_for_spawn,
-                    &sessions_clone,
-                    &repo_clone,
-                    &project_root_for_autopilot,
-                    &session_id_clone,
+                    mode_lifecycle_context!(
+                        is_autopilot_mode_for_spawn,
+                        &sessions_clone,
+                        &repo_clone,
+                        &project_root_for_autopilot,
+                        &session_id_clone,
+                        autopilot_env_for_spawn.clone(),
+                        Some(&round_id_clone),
+                    ),
                     crate::domain::autopilot_state::AutopilotPhase::Design,
                     &e.to_string(),
-                    Some(&round_id_clone),
                 )
                 .await;
                 fail_team_turn_if_needed(
@@ -3143,25 +3519,29 @@ pub async fn send_message(
         if was_cancelled {
             persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
             update_ralph_phase_if_needed(
-                is_ralph_mode_for_spawn,
-                &sessions_clone,
-                &repo_clone,
-                &project_root_for_ralph,
-                &session_id_clone,
+                mode_lifecycle_context!(
+                    is_ralph_mode_for_spawn,
+                    &sessions_clone,
+                    &repo_clone,
+                    &project_root_for_ralph,
+                    &session_id_clone,
+                    ralph_env_for_spawn.clone(),
+                    Some(&round_id_clone),
+                ),
                 crate::domain::ralph_state::RalphPhase::Executing,
-                ralph_env_for_spawn.clone(),
-                Some(&round_id_clone),
             )
             .await;
             update_autopilot_phase_if_needed(
-                is_autopilot_mode_for_spawn,
-                &sessions_clone,
-                &repo_clone,
-                &project_root_for_autopilot,
-                &session_id_clone,
+                mode_lifecycle_context!(
+                    is_autopilot_mode_for_spawn,
+                    &sessions_clone,
+                    &repo_clone,
+                    &project_root_for_autopilot,
+                    &session_id_clone,
+                    autopilot_env_for_spawn.clone(),
+                    Some(&round_id_clone),
+                ),
                 crate::domain::autopilot_state::AutopilotPhase::Qa,
-                autopilot_env_for_spawn.clone(),
-                Some(&round_id_clone),
             )
             .await;
             let _ = app_clone.emit(
@@ -3204,26 +3584,26 @@ pub async fn send_message(
                 }),
             )
             .await;
-            handle_runtime_constraint_block_main(
-                &app_clone,
-                client.as_ref(),
-                repo_clone.clone(),
-                &sessions_clone,
-                &session_id_clone,
-                &round_id_clone,
-                &message_id_clone,
-                &request_text_for_constraints,
-                &assistant_text,
-                &assistant_reasoning,
-                &pending_tool_calls,
-                &block,
-                &tool_results_dir,
-                ask_user_waiters_clone.clone(),
-                cancel_flag.clone(),
+            handle_runtime_constraint_block_main(RuntimeConstraintBlockRequest {
+                app: &app_clone,
+                client: client.as_ref(),
+                repo: repo_clone.clone(),
+                sessions: &sessions_clone,
+                session_id: &session_id_clone,
+                round_id: &round_id_clone,
+                message_id: &message_id_clone,
+                user_message: &request_text_for_constraints,
+                assistant_text: &assistant_text,
+                assistant_reasoning: &assistant_reasoning,
+                tool_calls: &pending_tool_calls,
+                block: &block,
+                tool_results_dir: &tool_results_dir,
+                ask_user_waiters: ask_user_waiters_clone.clone(),
+                cancel_flag: cancel_flag.clone(),
                 preflight_skip_turn_summary,
-                &turn_token_usage,
-                &llm_config_for_spawn.provider.to_string(),
-            )
+                turn_token_usage: &turn_token_usage,
+                provider_name: &llm_config_for_spawn.provider.to_string(),
+            })
             .await;
             return;
         }
@@ -3255,18 +3635,18 @@ pub async fn send_message(
         {
             let repo = &*repo_clone;
             if let Err(e) = repo
-                .save_message(
-                    &assistant_msg_id,
-                    &session_id_clone,
-                    "assistant",
-                    &assistant_text,
-                    tool_calls_json.as_deref(),
-                    None,
-                    None,
-                    reasoning_save,
-                    None,
-                    None,
-                )
+                .save_message(NewMessageRecord {
+                    id: &assistant_msg_id,
+                    session_id: &session_id_clone,
+                    role: "assistant",
+                    content: &assistant_text,
+                    tool_calls: tool_calls_json.as_deref(),
+                    tool_call_id: None,
+                    token_usage_json: None,
+                    reasoning_content: reasoning_save,
+                    follow_up_suggestions_json: None,
+                    turn_summary: None,
+                })
                 .await
             {
                 tracing::warn!("Failed to save assistant message: {}", e);
@@ -3285,33 +3665,37 @@ pub async fn send_message(
         }
 
         update_ralph_phase_if_needed(
-            is_ralph_mode_for_spawn,
-            &sessions_clone,
-            &repo_clone,
-            &project_root_for_ralph,
-            &session_id_clone,
+            mode_lifecycle_context!(
+                is_ralph_mode_for_spawn,
+                &sessions_clone,
+                &repo_clone,
+                &project_root_for_ralph,
+                &session_id_clone,
+                ralph_env_for_spawn.clone(),
+                Some(&round_id_clone),
+            ),
             if pending_tool_calls.is_empty() {
                 crate::domain::ralph_state::RalphPhase::Verifying
             } else {
                 crate::domain::ralph_state::RalphPhase::Executing
             },
-            ralph_env_for_spawn.clone(),
-            Some(&round_id_clone),
         )
         .await;
         update_autopilot_phase_if_needed(
-            is_autopilot_mode_for_spawn,
-            &sessions_clone,
-            &repo_clone,
-            &project_root_for_autopilot,
-            &session_id_clone,
+            mode_lifecycle_context!(
+                is_autopilot_mode_for_spawn,
+                &sessions_clone,
+                &repo_clone,
+                &project_root_for_autopilot,
+                &session_id_clone,
+                autopilot_env_for_spawn.clone(),
+                Some(&round_id_clone),
+            ),
             if pending_tool_calls.is_empty() {
                 crate::domain::autopilot_state::AutopilotPhase::Validation
             } else {
                 crate::domain::autopilot_state::AutopilotPhase::Implementation
             },
-            autopilot_env_for_spawn.clone(),
-            Some(&round_id_clone),
         )
         .await;
 
@@ -3347,17 +3731,17 @@ pub async fn send_message(
                         .unwrap_or_default()
                 };
                 let updated_llm_messages = api_messages_to_llm(&updated_messages);
-                match run_post_response_retry_text_only(
-                    client.as_ref(),
-                    &app_clone,
-                    &message_id_clone,
-                    &round_id_clone,
-                    &updated_llm_messages,
-                    &action.instruction,
-                    &pending_tools_clone,
-                    &cancel_flag,
-                    repo_clone.clone(),
-                )
+                match run_post_response_retry_text_only(PostResponseRetryRequest {
+                    client: client.as_ref(),
+                    app: &app_clone,
+                    message_id: &message_id_clone,
+                    round_id: &round_id_clone,
+                    base_messages: &updated_llm_messages,
+                    instruction: &action.instruction,
+                    pending_tools: &pending_tools_clone,
+                    cancel_flag: &cancel_flag,
+                    repo: repo_clone.clone(),
+                })
                 .await
                 {
                     Ok((retry_text, retry_reasoning, usage_retry))
@@ -3368,18 +3752,18 @@ pub async fn send_message(
                         let retry_reasoning_save =
                             (!retry_reasoning.is_empty()).then_some(retry_reasoning.as_str());
                         if let Err(e) = repo_clone
-                            .save_message(
-                                &retry_id,
-                                &session_id_clone,
-                                "assistant",
-                                &retry_text,
-                                None,
-                                None,
-                                None,
-                                retry_reasoning_save,
-                                None,
-                                None,
-                            )
+                            .save_message(NewMessageRecord {
+                                id: &retry_id,
+                                session_id: &session_id_clone,
+                                role: "assistant",
+                                content: &retry_text,
+                                tool_calls: None,
+                                tool_call_id: None,
+                                token_usage_json: None,
+                                reasoning_content: retry_reasoning_save,
+                                follow_up_suggestions_json: None,
+                                turn_summary: None,
+                            })
                             .await
                         {
                             tracing::warn!("Failed to save runtime retry assistant message: {}", e);
@@ -3429,25 +3813,29 @@ pub async fn send_message(
 
             persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
             update_ralph_phase_if_needed(
-                is_ralph_mode_for_spawn,
-                &sessions_clone,
-                &repo_clone,
-                &project_root_for_ralph,
-                &session_id_clone,
+                mode_lifecycle_context!(
+                    is_ralph_mode_for_spawn,
+                    &sessions_clone,
+                    &repo_clone,
+                    &project_root_for_ralph,
+                    &session_id_clone,
+                    ralph_env_for_spawn.clone(),
+                    Some(&round_id_clone),
+                ),
                 crate::domain::ralph_state::RalphPhase::Verifying,
-                ralph_env_for_spawn.clone(),
-                Some(&round_id_clone),
             )
             .await;
             update_autopilot_phase_if_needed(
-                is_autopilot_mode_for_spawn,
-                &sessions_clone,
-                &repo_clone,
-                &project_root_for_autopilot,
-                &session_id_clone,
+                mode_lifecycle_context!(
+                    is_autopilot_mode_for_spawn,
+                    &sessions_clone,
+                    &repo_clone,
+                    &project_root_for_autopilot,
+                    &session_id_clone,
+                    autopilot_env_for_spawn.clone(),
+                    Some(&round_id_clone),
+                ),
                 crate::domain::autopilot_state::AutopilotPhase::Validation,
-                autopilot_env_for_spawn.clone(),
-                Some(&round_id_clone),
             )
             .await;
 
@@ -3522,27 +3910,27 @@ pub async fn send_message(
                 Some(&round_id_clone),
             )
             .await;
-            sync_memory_layers_after_turn(
-                &app_clone,
-                &sessions_clone,
-                &repo_clone,
-                &session_id_clone,
-                client.as_ref(),
-                &request_text_for_constraints,
-                &final_reply_for_follow_up,
-                true,
-            )
+            sync_memory_layers_after_turn(MemorySyncRequest {
+                app: &app_clone,
+                sessions: &sessions_clone,
+                repo: &repo_clone,
+                session_id: &session_id_clone,
+                client: client.as_ref(),
+                user_message: &request_text_for_constraints,
+                assistant_reply: &final_reply_for_follow_up,
+                allow_long_term_promotion: true,
+            })
             .await;
-            emit_post_turn_meta_then_complete(
-                &app_clone,
-                &message_id_clone,
-                &last_assistant_id,
-                client.as_ref(),
-                &final_reply_for_follow_up,
-                preflight_skip_turn_summary,
-                &final_reply_for_follow_up,
-                repo_clone.clone(),
-            )
+            emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
+                app: &app_clone,
+                stream_message_id: &message_id_clone,
+                assistant_message_id: &last_assistant_id,
+                client: client.as_ref(),
+                final_reply: &final_reply_for_follow_up,
+                skip_summary: preflight_skip_turn_summary,
+                suggestions_reply: &final_reply_for_follow_up,
+                repo: repo_clone.clone(),
+            })
             .await;
             return;
         }
@@ -3569,27 +3957,27 @@ pub async fn send_message(
                     .map(|(_, tool_name, _)| tool_name.as_str()),
             );
 
-            let tool_results = execute_tool_calls(
-                &pending_tool_calls,
-                &app_clone,
-                &message_id_clone,
-                &session_id_clone,
-                &tool_results_dir,
-                &project_root,
-                todos_for_tools,
-                agent_tasks_for_tools,
-                Some(&agent_runtime),
-                0,
-                Some(skill_task_context.as_str()),
-                web_search_api_keys.clone(),
-                skill_cache_for_spawn.clone(),
-                agent_runtime.execution_environment.clone(),
-                agent_runtime.ssh_server.clone(),
-                agent_runtime.sandbox_backend.clone(),
-                agent_runtime.local_venv_type.clone(),
-                agent_runtime.local_venv_name.clone(),
-                agent_runtime.env_store.clone(),
-            )
+            let tool_results = execute_tool_calls(ToolExecutionRequest {
+                tool_calls: &pending_tool_calls,
+                app: &app_clone,
+                message_id: &message_id_clone,
+                session_id: &session_id_clone,
+                tool_results_dir: &tool_results_dir,
+                project_root: &project_root,
+                session_todos: todos_for_tools,
+                session_agent_tasks: agent_tasks_for_tools,
+                agent_runtime: Some(&agent_runtime),
+                subagent_depth: 0,
+                skill_task_context: Some(skill_task_context.as_str()),
+                web_search_api_keys: web_search_api_keys.clone(),
+                skill_cache: skill_cache_for_spawn.clone(),
+                execution_environment: agent_runtime.execution_environment.clone(),
+                ssh_server: agent_runtime.ssh_server.clone(),
+                sandbox_backend: agent_runtime.sandbox_backend.clone(),
+                local_venv_type: agent_runtime.local_venv_type.clone(),
+                local_venv_name: agent_runtime.local_venv_name.clone(),
+                env_store: agent_runtime.env_store.clone(),
+            })
             .await;
 
             {
@@ -3618,25 +4006,29 @@ pub async fn send_message(
 
             persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
             update_ralph_phase_if_needed(
-                is_ralph_mode_for_spawn,
-                &sessions_clone,
-                &repo_clone,
-                &project_root_for_ralph,
-                &session_id_clone,
+                mode_lifecycle_context!(
+                    is_ralph_mode_for_spawn,
+                    &sessions_clone,
+                    &repo_clone,
+                    &project_root_for_ralph,
+                    &session_id_clone,
+                    ralph_env_for_spawn.clone(),
+                    Some(&round_id_clone),
+                ),
                 crate::domain::ralph_state::RalphPhase::Executing,
-                ralph_env_for_spawn.clone(),
-                Some(&round_id_clone),
             )
             .await;
             let autopilot_state = update_autopilot_phase_if_needed(
-                is_autopilot_mode_for_spawn,
-                &sessions_clone,
-                &repo_clone,
-                &project_root_for_autopilot,
-                &session_id_clone,
+                mode_lifecycle_context!(
+                    is_autopilot_mode_for_spawn,
+                    &sessions_clone,
+                    &repo_clone,
+                    &project_root_for_autopilot,
+                    &session_id_clone,
+                    autopilot_env_for_spawn.clone(),
+                    Some(&round_id_clone),
+                ),
                 crate::domain::autopilot_state::AutopilotPhase::Qa,
-                autopilot_env_for_spawn.clone(),
-                Some(&round_id_clone),
             )
             .await;
 
@@ -3649,18 +4041,18 @@ pub async fn send_message(
                     let stop_msg_id = uuid::Uuid::new_v4().to_string();
                     let reasoning_save = None::<&str>;
                     if let Err(e) = repo_clone
-                        .save_message(
-                            &stop_msg_id,
-                            &session_id_clone,
-                            "assistant",
-                            &stop_text,
-                            None,
-                            None,
-                            None,
-                            reasoning_save,
-                            None,
-                            None,
-                        )
+                        .save_message(NewMessageRecord {
+                            id: &stop_msg_id,
+                            session_id: &session_id_clone,
+                            role: "assistant",
+                            content: &stop_text,
+                            tool_calls: None,
+                            tool_call_id: None,
+                            token_usage_json: None,
+                            reasoning_content: reasoning_save,
+                            follow_up_suggestions_json: None,
+                            turn_summary: None,
+                        })
                         .await
                     {
                         tracing::warn!(
@@ -3680,14 +4072,17 @@ pub async fn send_message(
                     persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone)
                         .await;
                     fail_autopilot_turn_if_needed(
-                        true,
-                        &sessions_clone,
-                        &repo_clone,
-                        &project_root_for_autopilot,
-                        &session_id_clone,
+                        mode_lifecycle_context!(
+                            true,
+                            &sessions_clone,
+                            &repo_clone,
+                            &project_root_for_autopilot,
+                            &session_id_clone,
+                            autopilot_env_for_spawn.clone(),
+                            Some(&round_id_clone),
+                        ),
                         crate::domain::autopilot_state::AutopilotPhase::Qa,
                         &stop_text,
-                        Some(&round_id_clone),
                     )
                     .await;
                     {
@@ -3705,27 +4100,27 @@ pub async fn send_message(
                         &llm_config_for_spawn.provider.to_string(),
                     )
                     .await;
-                    sync_memory_layers_after_turn(
-                        &app_clone,
-                        &sessions_clone,
-                        &repo_clone,
-                        &session_id_clone,
-                        client.as_ref(),
-                        &request_text_for_constraints,
-                        &stop_text,
-                        true,
-                    )
+                    sync_memory_layers_after_turn(MemorySyncRequest {
+                        app: &app_clone,
+                        sessions: &sessions_clone,
+                        repo: &repo_clone,
+                        session_id: &session_id_clone,
+                        client: client.as_ref(),
+                        user_message: &request_text_for_constraints,
+                        assistant_reply: &stop_text,
+                        allow_long_term_promotion: true,
+                    })
                     .await;
-                    emit_post_turn_meta_then_complete(
-                        &app_clone,
-                        &message_id_clone,
-                        &stop_msg_id,
-                        client.as_ref(),
-                        &stop_text,
-                        preflight_skip_turn_summary,
-                        &stop_text,
-                        repo_clone.clone(),
-                    )
+                    emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
+                        app: &app_clone,
+                        stream_message_id: &message_id_clone,
+                        assistant_message_id: &stop_msg_id,
+                        client: client.as_ref(),
+                        final_reply: &stop_text,
+                        skip_summary: preflight_skip_turn_summary,
+                        suggestions_reply: &stop_text,
+                        repo: repo_clone.clone(),
+                    })
                     .await;
                     return;
                 }
@@ -3846,18 +4241,18 @@ pub async fn send_message(
             }
 
             let (next_tools, next_text, next_reasoning, follow_cancelled, usage_next) =
-                match stream_llm_response_with_cancel(
-                    client.as_ref(),
-                    &app_clone,
-                    &message_id_clone,
-                    &round_id_clone,
-                    &constrained_followup_messages,
-                    &tools,
-                    !agent_runtime.runtime_constraints_config.buffer_responses,
-                    &pending_tools_clone,
-                    &cancel_flag,
-                    repo_clone.clone(),
-                )
+                match stream_llm_response_with_cancel(StreamLlmRequest {
+                    client: client.as_ref(),
+                    app: &app_clone,
+                    message_id: &message_id_clone,
+                    round_id: &round_id_clone,
+                    messages: &constrained_followup_messages,
+                    tools: &tools,
+                    emit_text_chunks: !agent_runtime.runtime_constraints_config.buffer_responses,
+                    pending_tools: &pending_tools_clone,
+                    cancel_flag: &cancel_flag,
+                    repo: repo_clone.clone(),
+                })
                 .await
                 {
                     Ok(r) => r,
@@ -3867,25 +4262,31 @@ pub async fn send_message(
                             .cancel_round(&round_id_clone, Some(&e.to_string()))
                             .await;
                         fail_ralph_turn_if_needed(
-                            is_ralph_mode_for_spawn,
-                            &sessions_clone,
-                            &repo_clone,
-                            &project_root_for_ralph,
-                            &session_id_clone,
+                            mode_lifecycle_context!(
+                                is_ralph_mode_for_spawn,
+                                &sessions_clone,
+                                &repo_clone,
+                                &project_root_for_ralph,
+                                &session_id_clone,
+                                ralph_env_for_spawn.clone(),
+                                Some(&round_id_clone),
+                            ),
                             crate::domain::ralph_state::RalphPhase::Executing,
                             &e.to_string(),
-                            Some(&round_id_clone),
                         )
                         .await;
                         fail_autopilot_turn_if_needed(
-                            is_autopilot_mode_for_spawn,
-                            &sessions_clone,
-                            &repo_clone,
-                            &project_root_for_autopilot,
-                            &session_id_clone,
+                            mode_lifecycle_context!(
+                                is_autopilot_mode_for_spawn,
+                                &sessions_clone,
+                                &repo_clone,
+                                &project_root_for_autopilot,
+                                &session_id_clone,
+                                autopilot_env_for_spawn.clone(),
+                                Some(&round_id_clone),
+                            ),
                             crate::domain::autopilot_state::AutopilotPhase::Qa,
                             &e.to_string(),
-                            Some(&round_id_clone),
                         )
                         .await;
                         fail_team_turn_if_needed(
@@ -3936,26 +4337,26 @@ pub async fn send_message(
                     }),
                 )
                 .await;
-                handle_runtime_constraint_block_main(
-                    &app_clone,
-                    client.as_ref(),
-                    repo_clone.clone(),
-                    &sessions_clone,
-                    &session_id_clone,
-                    &round_id_clone,
-                    &message_id_clone,
-                    &request_text_for_constraints,
-                    &next_text,
-                    &next_reasoning,
-                    &next_tools,
-                    &block,
-                    &tool_results_dir,
-                    ask_user_waiters_clone.clone(),
-                    cancel_flag.clone(),
+                handle_runtime_constraint_block_main(RuntimeConstraintBlockRequest {
+                    app: &app_clone,
+                    client: client.as_ref(),
+                    repo: repo_clone.clone(),
+                    sessions: &sessions_clone,
+                    session_id: &session_id_clone,
+                    round_id: &round_id_clone,
+                    message_id: &message_id_clone,
+                    user_message: &request_text_for_constraints,
+                    assistant_text: &next_text,
+                    assistant_reasoning: &next_reasoning,
+                    tool_calls: &next_tools,
+                    block: &block,
+                    tool_results_dir: &tool_results_dir,
+                    ask_user_waiters: ask_user_waiters_clone.clone(),
+                    cancel_flag: cancel_flag.clone(),
                     preflight_skip_turn_summary,
-                    &turn_token_usage,
-                    &llm_config_for_spawn.provider.to_string(),
-                )
+                    turn_token_usage: &turn_token_usage,
+                    provider_name: &llm_config_for_spawn.provider.to_string(),
+                })
                 .await;
                 return;
             }
@@ -3980,25 +4381,29 @@ pub async fn send_message(
             if follow_cancelled {
                 persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
                 update_ralph_phase_if_needed(
-                    is_ralph_mode_for_spawn,
-                    &sessions_clone,
-                    &repo_clone,
-                    &project_root_for_ralph,
-                    &session_id_clone,
+                    mode_lifecycle_context!(
+                        is_ralph_mode_for_spawn,
+                        &sessions_clone,
+                        &repo_clone,
+                        &project_root_for_ralph,
+                        &session_id_clone,
+                        ralph_env_for_spawn.clone(),
+                        Some(&round_id_clone),
+                    ),
                     crate::domain::ralph_state::RalphPhase::Executing,
-                    ralph_env_for_spawn.clone(),
-                    Some(&round_id_clone),
                 )
                 .await;
                 update_autopilot_phase_if_needed(
-                    is_autopilot_mode_for_spawn,
-                    &sessions_clone,
-                    &repo_clone,
-                    &project_root_for_autopilot,
-                    &session_id_clone,
+                    mode_lifecycle_context!(
+                        is_autopilot_mode_for_spawn,
+                        &sessions_clone,
+                        &repo_clone,
+                        &project_root_for_autopilot,
+                        &session_id_clone,
+                        autopilot_env_for_spawn.clone(),
+                        Some(&round_id_clone),
+                    ),
                     crate::domain::autopilot_state::AutopilotPhase::Qa,
-                    autopilot_env_for_spawn.clone(),
-                    Some(&round_id_clone),
                 )
                 .await;
                 let _ = app_clone.emit(
@@ -4019,18 +4424,18 @@ pub async fn send_message(
             {
                 let repo = &*repo_clone;
                 if let Err(e) = repo
-                    .save_message(
-                        &next_assistant_id,
-                        &session_id_clone,
-                        "assistant",
-                        &next_text,
-                        next_tc_json.as_deref(),
-                        None,
-                        None,
-                        next_reasoning_save,
-                        None,
-                        None,
-                    )
+                    .save_message(NewMessageRecord {
+                        id: &next_assistant_id,
+                        session_id: &session_id_clone,
+                        role: "assistant",
+                        content: &next_text,
+                        tool_calls: next_tc_json.as_deref(),
+                        tool_call_id: None,
+                        token_usage_json: None,
+                        reasoning_content: next_reasoning_save,
+                        follow_up_suggestions_json: None,
+                        turn_summary: None,
+                    })
                     .await
                 {
                     tracing::warn!("Failed to save follow-up assistant: {}", e);
@@ -4081,17 +4486,17 @@ pub async fn send_message(
                             .unwrap_or_default()
                     };
                     let updated_llm_messages = api_messages_to_llm(&updated_messages);
-                    match run_post_response_retry_text_only(
-                        client.as_ref(),
-                        &app_clone,
-                        &message_id_clone,
-                        &round_id_clone,
-                        &updated_llm_messages,
-                        &action.instruction,
-                        &pending_tools_clone,
-                        &cancel_flag,
-                        repo_clone.clone(),
-                    )
+                    match run_post_response_retry_text_only(PostResponseRetryRequest {
+                        client: client.as_ref(),
+                        app: &app_clone,
+                        message_id: &message_id_clone,
+                        round_id: &round_id_clone,
+                        base_messages: &updated_llm_messages,
+                        instruction: &action.instruction,
+                        pending_tools: &pending_tools_clone,
+                        cancel_flag: &cancel_flag,
+                        repo: repo_clone.clone(),
+                    })
                     .await
                     {
                         Ok((retry_text, retry_reasoning, usage_retry))
@@ -4102,18 +4507,18 @@ pub async fn send_message(
                             let retry_reasoning_save =
                                 (!retry_reasoning.is_empty()).then_some(retry_reasoning.as_str());
                             if let Err(e) = repo_clone
-                                .save_message(
-                                    &retry_id,
-                                    &session_id_clone,
-                                    "assistant",
-                                    &retry_text,
-                                    None,
-                                    None,
-                                    None,
-                                    retry_reasoning_save,
-                                    None,
-                                    None,
-                                )
+                                .save_message(NewMessageRecord {
+                                    id: &retry_id,
+                                    session_id: &session_id_clone,
+                                    role: "assistant",
+                                    content: &retry_text,
+                                    tool_calls: None,
+                                    tool_call_id: None,
+                                    token_usage_json: None,
+                                    reasoning_content: retry_reasoning_save,
+                                    follow_up_suggestions_json: None,
+                                    turn_summary: None,
+                                })
                                 .await
                             {
                                 tracing::warn!(
@@ -4166,25 +4571,29 @@ pub async fn send_message(
 
                 persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
                 update_ralph_phase_if_needed(
-                    is_ralph_mode_for_spawn,
-                    &sessions_clone,
-                    &repo_clone,
-                    &project_root_for_ralph,
-                    &session_id_clone,
+                    mode_lifecycle_context!(
+                        is_ralph_mode_for_spawn,
+                        &sessions_clone,
+                        &repo_clone,
+                        &project_root_for_ralph,
+                        &session_id_clone,
+                        ralph_env_for_spawn.clone(),
+                        Some(&round_id_clone),
+                    ),
                     crate::domain::ralph_state::RalphPhase::Verifying,
-                    ralph_env_for_spawn.clone(),
-                    Some(&round_id_clone),
                 )
                 .await;
                 update_autopilot_phase_if_needed(
-                    is_autopilot_mode_for_spawn,
-                    &sessions_clone,
-                    &repo_clone,
-                    &project_root_for_autopilot,
-                    &session_id_clone,
+                    mode_lifecycle_context!(
+                        is_autopilot_mode_for_spawn,
+                        &sessions_clone,
+                        &repo_clone,
+                        &project_root_for_autopilot,
+                        &session_id_clone,
+                        autopilot_env_for_spawn.clone(),
+                        Some(&round_id_clone),
+                    ),
                     crate::domain::autopilot_state::AutopilotPhase::Validation,
-                    autopilot_env_for_spawn.clone(),
-                    Some(&round_id_clone),
                 )
                 .await;
 
@@ -4259,53 +4668,60 @@ pub async fn send_message(
                     Some(&round_id_clone),
                 )
                 .await;
-                sync_memory_layers_after_turn(
-                    &app_clone,
-                    &sessions_clone,
-                    &repo_clone,
-                    &session_id_clone,
-                    client.as_ref(),
-                    &request_text_for_constraints,
-                    &final_reply_for_follow_up,
-                    true,
-                )
+                sync_memory_layers_after_turn(MemorySyncRequest {
+                    app: &app_clone,
+                    sessions: &sessions_clone,
+                    repo: &repo_clone,
+                    session_id: &session_id_clone,
+                    client: client.as_ref(),
+                    user_message: &request_text_for_constraints,
+                    assistant_reply: &final_reply_for_follow_up,
+                    allow_long_term_promotion: true,
+                })
                 .await;
-                emit_post_turn_meta_then_complete(
-                    &app_clone,
-                    &message_id_clone,
-                    &last_assistant_id,
-                    client.as_ref(),
-                    &final_reply_for_follow_up,
-                    preflight_skip_turn_summary,
-                    &final_reply_for_follow_up,
-                    repo_clone.clone(),
-                )
+                emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
+                    app: &app_clone,
+                    stream_message_id: &message_id_clone,
+                    assistant_message_id: &last_assistant_id,
+                    client: client.as_ref(),
+                    final_reply: &final_reply_for_follow_up,
+                    skip_summary: preflight_skip_turn_summary,
+                    suggestions_reply: &final_reply_for_follow_up,
+                    repo: repo_clone.clone(),
+                })
                 .await;
                 return;
             }
         }
 
         persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
+        let max_rounds_error = format!("Exceeded maximum tool rounds ({MAX_TOOL_ROUNDS})");
         fail_ralph_turn_if_needed(
-            is_ralph_mode_for_spawn,
-            &sessions_clone,
-            &repo_clone,
-            &project_root_for_ralph,
-            &session_id_clone,
+            mode_lifecycle_context!(
+                is_ralph_mode_for_spawn,
+                &sessions_clone,
+                &repo_clone,
+                &project_root_for_ralph,
+                &session_id_clone,
+                ralph_env_for_spawn.clone(),
+                Some(&round_id_clone),
+            ),
             crate::domain::ralph_state::RalphPhase::Executing,
-            &format!("Exceeded maximum tool rounds ({MAX_TOOL_ROUNDS})"),
-            Some(&round_id_clone),
+            &max_rounds_error,
         )
         .await;
         fail_autopilot_turn_if_needed(
-            is_autopilot_mode_for_spawn,
-            &sessions_clone,
-            &repo_clone,
-            &project_root_for_autopilot,
-            &session_id_clone,
+            mode_lifecycle_context!(
+                is_autopilot_mode_for_spawn,
+                &sessions_clone,
+                &repo_clone,
+                &project_root_for_autopilot,
+                &session_id_clone,
+                autopilot_env_for_spawn.clone(),
+                Some(&round_id_clone),
+            ),
             crate::domain::autopilot_state::AutopilotPhase::Qa,
-            &format!("Exceeded maximum tool rounds ({MAX_TOOL_ROUNDS})"),
-            Some(&round_id_clone),
+            &max_rounds_error,
         )
         .await;
         fail_team_turn_if_needed(
@@ -4313,7 +4729,7 @@ pub async fn send_message(
             &repo_clone,
             &project_root_for_team,
             &session_id_clone,
-            &format!("Exceeded maximum tool rounds ({MAX_TOOL_ROUNDS})"),
+            &max_rounds_error,
             Some(&round_id_clone),
         )
         .await;
@@ -4340,27 +4756,27 @@ pub async fn send_message(
             &llm_config_for_spawn.provider.to_string(),
         )
         .await;
-        sync_memory_layers_after_turn(
-            &app_clone,
-            &sessions_clone,
-            &repo_clone,
-            &session_id_clone,
-            client.as_ref(),
-            &request_text_for_constraints,
-            &final_reply_for_follow_up,
-            true,
-        )
+        sync_memory_layers_after_turn(MemorySyncRequest {
+            app: &app_clone,
+            sessions: &sessions_clone,
+            repo: &repo_clone,
+            session_id: &session_id_clone,
+            client: client.as_ref(),
+            user_message: &request_text_for_constraints,
+            assistant_reply: &final_reply_for_follow_up,
+            allow_long_term_promotion: true,
+        })
         .await;
-        emit_post_turn_meta_then_complete(
-            &app_clone,
-            &message_id_clone,
-            &last_assistant_id,
-            client.as_ref(),
-            &final_reply_for_follow_up,
-            preflight_skip_turn_summary,
-            &final_reply_for_follow_up,
-            repo_clone.clone(),
-        )
+        emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
+            app: &app_clone,
+            stream_message_id: &message_id_clone,
+            assistant_message_id: &last_assistant_id,
+            client: client.as_ref(),
+            final_reply: &final_reply_for_follow_up,
+            skip_summary: preflight_skip_turn_summary,
+            suggestions_reply: &final_reply_for_follow_up,
+            repo: repo_clone.clone(),
+        })
         .await;
 
         // After the main LLM turn completes, fire real multi-agent orchestration if the

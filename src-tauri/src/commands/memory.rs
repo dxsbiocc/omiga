@@ -638,8 +638,10 @@ pub async fn get_memory_context(
     } else {
         None
     };
+    // Use warm-only query for preflight — implicit (raw chat logs) is Cold and
+    // excluded here; it is only accessible via explicit `recall` tool calls.
     let unified = memory
-        .query_with_session(working_memory_excerpt.as_deref(), query, limit)
+        .query_warm(working_memory_excerpt.as_deref(), query, limit)
         .await;
     if unified.results.is_empty() {
         return None;

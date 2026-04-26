@@ -368,8 +368,8 @@ pub(super) struct MemorySyncRequest<'a> {
     pub allow_long_term_promotion: bool,
 }
 
-/// Every N turns, distill current working memory into a `SessionSummary` long-term entry.
-const SESSION_SUMMARY_INTERVAL: u32 = 15;
+/// Periodic session-summary interval (aligns with the link's recommended 6-10 turn cadence).
+const SESSION_SUMMARY_INTERVAL: u32 = 8;
 
 pub(super) async fn sync_memory_layers_after_turn(request: MemorySyncRequest<'_>) {
     let project_root = {
@@ -447,10 +447,13 @@ pub(super) async fn sync_memory_layers_after_turn(request: MemorySyncRequest<'_>
                 );
             }
 
-            // Every SESSION_SUMMARY_INTERVAL turns, snapshot working memory as a session summary.
-            if state.user_turn_count > 0
-                && state.user_turn_count % SESSION_SUMMARY_INTERVAL == 0
-            {
+            // Archive session summary on periodic interval OR on task completion signal.
+            let is_periodic = state.user_turn_count > 0
+                && state.user_turn_count % SESSION_SUMMARY_INTERVAL == 0;
+            let is_task_done = crate::domain::memory::working_memory::contains_task_completion_signal(
+                request.assistant_reply,
+            );
+            if is_periodic || is_task_done {
                 let lt_path = config.long_term_path(&project_root);
                 maybe_archive_session_summary(
                     request.app,
@@ -476,7 +479,18 @@ pub(super) async fn sync_memory_layers_after_turn(request: MemorySyncRequest<'_>
     }
 }
 
-/// Archive the current working memory state as a `SessionSummary` long-term entry.
+/// Called from the auto-compact path as a semantic trigger for session summary.
+pub(crate) async fn archive_on_compact(
+    app: &AppHandle,
+    session_id: &str,
+    lt_path: &std::path::Path,
+    state: &crate::domain::memory::working_memory::WorkingMemoryState,
+) {
+    maybe_archive_session_summary(app, session_id, lt_path, state).await;
+}
+
+/// Archive the current working memory state as a `SessionSummary` long-term entry,
+/// then update the project dossier for the active topic.
 async fn maybe_archive_session_summary(
     app: &AppHandle,
     session_id: &str,
@@ -495,14 +509,48 @@ async fn maybe_archive_session_summary(
     match crate::domain::memory::long_term::create_session_summary(lt_path, session_id, state)
         .await
     {
-        Some(_) => emit_activity_operation(
-            app,
-            session_id,
-            &op_id,
-            "归档会话摘要",
-            "done",
-            Some("已归档会话摘要到长期记忆".to_string()),
-        ),
+        Some(entry) => {
+            emit_activity_operation(
+                app,
+                session_id,
+                &op_id,
+                "归档会话摘要",
+                "done",
+                Some("已归档会话摘要到长期记忆".to_string()),
+            );
+            // Update the project dossier for this topic in the background.
+            let decisions: Vec<String> = state
+                .decisions
+                .iter()
+                .filter(|d| d.confidence >= 0.70)
+                .map(|d| d.text.clone())
+                .collect();
+            let beliefs: Vec<String> = state
+                .working_facts
+                .iter()
+                .filter(|f| f.confidence >= 0.75)
+                .map(|f| f.text.clone())
+                .collect();
+            let questions: Vec<String> = state
+                .open_questions
+                .iter()
+                .map(|q| q.text.clone())
+                .collect();
+            let next_steps: Vec<String> = state
+                .next_steps
+                .iter()
+                .map(|s| s.text.clone())
+                .collect();
+            crate::domain::memory::dossier::update_project_dossier(
+                lt_path,
+                &entry.topic,
+                decisions,
+                beliefs,
+                questions,
+                next_steps,
+            )
+            .await;
+        }
         None => emit_activity_operation(
             app,
             session_id,

@@ -19,6 +19,7 @@
 
 pub mod chat_indexer;
 pub mod config;
+pub mod dossier;
 pub mod long_term;
 pub mod migration;
 pub mod permanent_profile;
@@ -214,6 +215,96 @@ impl MemorySystem {
     /// - **Implicit (PageIndex)**：从磁盘加载 `tree.json`，用 `QueryEngine` 做 TF-IDF 检索。
     pub async fn query(&self, query: &str, limit: usize) -> UnifiedQueryResult {
         self.query_with_session(None, query, limit).await
+    }
+
+    /// Hot + Warm memory only — excludes Implicit (Cold / raw chat logs).
+    ///
+    /// Use this for preflight auto-injection. Cold memory is noisy and large;
+    /// it should only surface through explicit `recall` tool calls.
+    pub async fn query_warm(
+        &self,
+        working_memory_excerpt: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> UnifiedQueryResult {
+        let limit = limit.max(1);
+        let mut results = Vec::new();
+
+        if let Some(excerpt) = working_memory_excerpt {
+            results.extend(query_working_memory(excerpt, query));
+        }
+
+        let lt_query = enrich_query_with_working_memory(query, working_memory_excerpt);
+
+        results.extend(
+            long_term::search_entries(&self.long_term_path(), &lt_query, limit, false)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "summary".to_string(),
+                    source_type: MemorySourceType::LongTermProject,
+                }),
+        );
+        results.extend(
+            long_term::search_entries(&config::permanent_long_term_path(), &lt_query, limit, true)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "summary".to_string(),
+                    source_type: MemorySourceType::LongTermGlobal,
+                }),
+        );
+        results.extend(
+            search_markdown_wiki(&self.wiki_path(), query, limit)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "Wiki".to_string(),
+                    source_type: MemorySourceType::KnowledgeBaseProject,
+                }),
+        );
+        results.extend(
+            search_markdown_wiki(&config::permanent_wiki_path(), query, limit)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "Wiki".to_string(),
+                    source_type: MemorySourceType::KnowledgeBaseGlobal,
+                }),
+        );
+
+        // Implicit (Cold) intentionally excluded — available only via explicit `recall` calls.
+
+        sort_memory_results(&mut results);
+        dedupe_matches(&mut results);
+        let total_matches = results.len();
+        results.truncate(limit);
+
+        UnifiedQueryResult {
+            query: query.to_string(),
+            results,
+            total_matches,
+        }
     }
 
     pub async fn query_with_session(

@@ -4,6 +4,21 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+/// Governs auto-deletion policy for a long-term memory entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionClass {
+    /// Never auto-deleted (core facts, project conventions).
+    Permanent,
+    /// Default — pruned when stability < 0.4 and not reused in 90 days.
+    #[default]
+    LongTerm,
+    /// Lighter entry; survives a few sessions but pruned sooner (30 days).
+    Session,
+    /// Can be deleted after a short TTL.
+    Ephemeral,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LongTermMemoryKind {
@@ -28,6 +43,7 @@ impl std::fmt::Display for LongTermMemoryKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct LongTermMemoryEntry {
     pub topic: String,
     pub summary: String,
@@ -40,9 +56,38 @@ pub struct LongTermMemoryEntry {
     pub source_artifacts: Vec<String>,
     pub confidence: f32,
     pub stability: f32,
+    /// Subjective importance of this entry (0–1). Higher = ranked first during retrieval.
+    #[serde(default = "default_importance")]
+    pub importance: f32,
+    /// Controls auto-deletion behaviour.
+    #[serde(default)]
+    pub retention_class: RetentionClass,
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reused_at: Option<String>,
+}
+
+fn default_importance() -> f32 {
+    0.5
+}
+
+impl Default for LongTermMemoryEntry {
+    fn default() -> Self {
+        Self {
+            topic: String::new(),
+            summary: String::new(),
+            kind: LongTermMemoryKind::TaskConclusion,
+            entities: vec![],
+            source_sessions: vec![],
+            source_artifacts: vec![],
+            confidence: 0.5,
+            stability: 0.5,
+            importance: 0.5,
+            retention_class: RetentionClass::LongTerm,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_reused_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -141,8 +186,11 @@ pub async fn search_entries(
         if base_score <= 0.0 {
             continue;
         }
-        // Blend TF-IDF with memory quality: confidence (0-1) and stability (0-1)
-        let quality = (entry.confidence as f64 * 0.6 + entry.stability as f64 * 0.4).clamp(0.3, 1.0);
+        // Blend TF-IDF with quality: confidence, stability, importance
+        let quality = (entry.confidence as f64 * 0.4
+            + entry.stability as f64 * 0.3
+            + entry.importance as f64 * 0.3)
+            .clamp(0.3, 1.0);
         // Boost recently reused memories
         let recency = recency_bonus(entry.last_reused_at.as_deref());
         let score = base_score * quality + recency;
@@ -210,11 +258,21 @@ pub async fn prune_stale_entries(root: &Path, dry_run: bool) -> usize {
 }
 
 fn is_stale(entry: &LongTermMemoryEntry, cutoff: chrono::DateTime<chrono::Utc>) -> bool {
+    // Permanent entries are never stale.
+    if entry.retention_class == RetentionClass::Permanent {
+        return false;
+    }
+    // Session-class entries use a shorter 30-day window.
+    let effective_cutoff = if entry.retention_class == RetentionClass::Session {
+        chrono::Utc::now() - chrono::Duration::days(30)
+    } else {
+        cutoff
+    };
     let old = entry
         .last_reused_at
         .as_deref()
         .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-        .map(|dt| dt.with_timezone(&chrono::Utc) < cutoff)
+        .map(|dt| dt.with_timezone(&chrono::Utc) < effective_cutoff)
         .unwrap_or(true);
     old && entry.stability < 0.4
 }
@@ -276,6 +334,8 @@ pub async fn create_session_summary(
         source_artifacts: vec![],
         confidence: 0.70,
         stability: 0.55,
+        importance: 0.60,
+        retention_class: RetentionClass::Session,
         created_at: chrono::Utc::now().to_rfc3339(),
         last_reused_at: None,
     };
@@ -334,6 +394,10 @@ fn merge_entry(
     existing
 }
 
+pub fn slugify_pub(value: &str) -> String {
+    slugify(value)
+}
+
 fn slugify(value: &str) -> String {
     let mut out = String::new();
     let mut last_dash = false;
@@ -372,6 +436,12 @@ fn build_promotion_candidates(
         if !should_promote_item(item, &kind) {
             continue;
         }
+        let retention = match kind {
+            LongTermMemoryKind::ResearchInsight | LongTermMemoryKind::MethodLesson => RetentionClass::LongTerm,
+            LongTermMemoryKind::ProjectExperience => RetentionClass::LongTerm,
+            LongTermMemoryKind::SessionSummary => RetentionClass::Session,
+            LongTermMemoryKind::TaskConclusion => RetentionClass::LongTerm,
+        };
         candidates.push(LongTermMemoryEntry {
             topic: truncate_chars(&item.text, 120),
             summary: truncate_chars(&item.text, 280),
@@ -381,6 +451,8 @@ fn build_promotion_candidates(
             source_artifacts: item.source_message_ids.clone(),
             confidence: item.confidence.clamp(0.0, 1.0),
             stability: ((item.touch_count as f32) / 4.0).clamp(0.45, 1.0),
+            importance: (item.confidence * 0.7 + (item.touch_count as f32 / 6.0).min(0.3)).clamp(0.0, 1.0),
+            retention_class: retention,
             created_at: chrono::Utc::now().to_rfc3339(),
             last_reused_at: Some(chrono::Utc::now().to_rfc3339()),
         });
@@ -466,11 +538,9 @@ mod tests {
             kind: LongTermMemoryKind::TaskConclusion,
             entities: vec!["recall".to_string(), "wiki".to_string()],
             source_sessions: vec!["s1".to_string()],
-            source_artifacts: vec![],
             confidence: 0.9,
             stability: 0.8,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            last_reused_at: None,
+            ..Default::default()
         };
 
         upsert_entry(temp.path(), entry).await.unwrap();
@@ -523,24 +593,22 @@ mod tests {
             kind: LongTermMemoryKind::ResearchInsight,
             entities: vec!["memory".to_string(), "search".to_string()],
             source_sessions: vec!["s1".to_string()],
-            source_artifacts: vec![],
             confidence: 0.95,
             stability: 0.9,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            importance: 0.9,
             last_reused_at: Some(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
         };
-        // Low confidence/stability entry with same topic
         let low_quality = LongTermMemoryEntry {
             topic: "memory search weak".to_string(),
             summary: "Memory search result from uncertain source.".to_string(),
             kind: LongTermMemoryKind::TaskConclusion,
             entities: vec!["memory".to_string(), "search".to_string()],
             source_sessions: vec!["s2".to_string()],
-            source_artifacts: vec![],
             confidence: 0.3,
             stability: 0.2,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            last_reused_at: None,
+            importance: 0.2,
+            ..Default::default()
         };
 
         upsert_entry(temp.path(), high_quality).await.unwrap();
@@ -565,26 +633,22 @@ mod tests {
             topic: "old unused insight".to_string(),
             summary: "An old fact no longer relevant.".to_string(),
             kind: LongTermMemoryKind::TaskConclusion,
-            entities: vec![],
             source_sessions: vec!["s1".to_string()],
-            source_artifacts: vec![],
             confidence: 0.5,
             stability: 0.2,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             last_reused_at: Some("2024-01-01T00:00:00Z".to_string()),
+            ..Default::default()
         };
-        // Fresh: recently reused, high stability
         let fresh = LongTermMemoryEntry {
             topic: "active project convention".to_string(),
             summary: "Always run tests before pushing.".to_string(),
             kind: LongTermMemoryKind::ProjectExperience,
-            entities: vec![],
             source_sessions: vec!["s2".to_string()],
-            source_artifacts: vec![],
             confidence: 0.9,
             stability: 0.8,
-            created_at: chrono::Utc::now().to_rfc3339(),
             last_reused_at: Some(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
         };
 
         upsert_entry(temp.path(), stale).await.unwrap();
@@ -602,25 +666,22 @@ mod tests {
             topic: "stale-fact".to_string(),
             summary: "Outdated and weak fact.".to_string(),
             kind: LongTermMemoryKind::TaskConclusion,
-            entities: vec![],
             source_sessions: vec!["s1".to_string()],
-            source_artifacts: vec![],
             confidence: 0.4,
             stability: 0.15,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             last_reused_at: Some("2024-01-01T00:00:00Z".to_string()),
+            ..Default::default()
         };
         let keeper = LongTermMemoryEntry {
             topic: "keeper-fact".to_string(),
             summary: "Strong, recently used insight.".to_string(),
             kind: LongTermMemoryKind::ResearchInsight,
-            entities: vec![],
             source_sessions: vec!["s2".to_string()],
-            source_artifacts: vec![],
             confidence: 0.9,
             stability: 0.85,
-            created_at: chrono::Utc::now().to_rfc3339(),
             last_reused_at: Some(chrono::Utc::now().to_rfc3339()),
+            ..Default::default()
         };
 
         upsert_entry(temp.path(), stale).await.unwrap();

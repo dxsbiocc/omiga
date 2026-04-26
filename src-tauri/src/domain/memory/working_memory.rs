@@ -6,7 +6,8 @@ use crate::llm::{LlmClient, LlmMessage, LlmStreamChunk};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_CONTEXT_TOKENS: usize = 1_000;
+/// Hot-memory budget injected into every turn (≈ 3 000 tokens ≈ 12 000 chars).
+pub const DEFAULT_CONTEXT_TOKENS: usize = 3_000;
 const APPROX_CHARS_PER_TOKEN: usize = 4;
 const HOUSEKEEP_TURN_INTERVAL: u32 = 8;
 const HOUSEKEEP_MINUTES: i64 = 25;
@@ -649,6 +650,28 @@ fn contains_assistant_decision_signal(assistant_reply: &str) -> bool {
         "next step",
         "open question",
         "we should",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// True when the assistant signals that a task/goal has been completed.
+pub fn contains_task_completion_signal(reply: &str) -> bool {
+    let lower = reply.to_lowercase();
+    [
+        "任务完成",
+        "已完成",
+        "all done",
+        "task complete",
+        "completed.",
+        "finished.",
+        "done!",
+        "ready to merge",
+        "pr created",
+        "pr opened",
+        "tests pass",
+        "build succeed",
+        "build passed",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
