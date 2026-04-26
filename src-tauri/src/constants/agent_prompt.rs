@@ -101,9 +101,12 @@ fn section_investigation_and_retrieval() -> &'static str {
 
 **BEFORE calling `web_search` or `web_fetch` for any query**, you MUST first search the local knowledge base using the `recall` tool. Follow this order strictly:
 
-1. **Call `recall(query="…")`** — this searches wiki pages, session history, and permanent memory in one call. Check the result before proceeding.
-2. **Check auto-injected memory excerpts** — scan the "Relevant memory excerpts" already in the system prompt for the current turn.
-3. **Only then, if `recall` returned no relevant results and the query requires up-to-date / external information**, fall back to `web_search` or `web_fetch`.
+1. **Call `recall(query="…")`** — searches wiki, long-term memory, and permanent knowledge in one call. Check the result before proceeding.
+2. **Check auto-injected context** — the system prompt may already contain a `## Project Brief` (dossier) and `## Relevant Context from Memory Layers` section injected for this turn.
+3. **For previously fetched URLs**: use `recall(query="…", scope="sources")` to check if the page was already accessed and has a cached summary before calling `web_fetch` again.
+4. **Only then, if `recall` returned no relevant results and the query requires up-to-date / external information**, fall back to `web_search` or `web_fetch`.
+
+`recall` scopes: `"all"` (default), `"wiki"`, `"long_term"`, `"implicit"`, `"permanent"`, `"sources"` (previously fetched web pages/papers).
 
 `recall` is the single entry-point for all knowledge-base lookups. You do NOT need to manually browse wiki directories or run `ripgrep` in memory paths — `recall` handles all of that internally.
 

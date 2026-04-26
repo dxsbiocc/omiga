@@ -685,18 +685,22 @@ pub async fn get_memory_context(
     let mut out = String::new();
     if let Some(brief) = dossier_section {
         out.push_str(&brief);
-        out.push_str("\n\n---\n\n");
+        if !unified.results.is_empty() {
+            out.push_str("\n\n---\n\n");
+        }
     }
-    out.push_str("## Relevant Context from Memory Layers\n\n");
-    for (index, result) in unified.results.iter().enumerate() {
-        out.push_str(&format!(
-            "### {}. {} [{}]\n*Source: `{}`*\n\n{}\n\n---\n\n",
-            index + 1,
-            result.title,
-            result.source_type.label(),
-            result.path,
-            result.excerpt
-        ));
+    if !unified.results.is_empty() {
+        out.push_str("## Relevant Context from Memory Layers\n\n");
+        for (index, result) in unified.results.iter().enumerate() {
+            out.push_str(&format!(
+                "### {}. {} [{}]\n*Source: `{}`*\n\n{}\n\n---\n\n",
+                index + 1,
+                result.title,
+                result.source_type.label(),
+                result.path,
+                result.excerpt
+            ));
+        }
     }
     Some(out)
 }

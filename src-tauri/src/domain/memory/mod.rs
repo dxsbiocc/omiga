@@ -236,6 +236,8 @@ impl MemorySystem {
         limit: usize,
     ) -> UnifiedQueryResult {
         let limit = limit.max(1);
+        // Phase 1: wider candidate pool — Phase 2 rerank then selects top `limit`.
+        let phase1_limit = (limit * 3).max(12);
         let mut results = Vec::new();
 
         if let Some(excerpt) = working_memory_excerpt {
@@ -245,7 +247,7 @@ impl MemorySystem {
         let lt_query = enrich_query_with_working_memory(query, working_memory_excerpt);
 
         results.extend(
-            long_term::search_entries(&self.long_term_path(), &lt_query, limit, false)
+            long_term::search_entries(&self.long_term_path(), &lt_query, phase1_limit, false)
                 .await
                 .into_iter()
                 .map(|result| MemoryQueryMatch {
@@ -259,7 +261,7 @@ impl MemorySystem {
                 }),
         );
         results.extend(
-            long_term::search_entries(&config::permanent_long_term_path(), &lt_query, limit, true)
+            long_term::search_entries(&config::permanent_long_term_path(), &lt_query, phase1_limit, true)
                 .await
                 .into_iter()
                 .map(|result| MemoryQueryMatch {
@@ -273,7 +275,7 @@ impl MemorySystem {
                 }),
         );
         results.extend(
-            search_markdown_wiki(&self.wiki_path(), query, limit)
+            search_markdown_wiki(&self.wiki_path(), query, phase1_limit)
                 .await
                 .into_iter()
                 .map(|result| MemoryQueryMatch {
@@ -287,7 +289,7 @@ impl MemorySystem {
                 }),
         );
         results.extend(
-            search_markdown_wiki(&config::permanent_wiki_path(), query, limit)
+            search_markdown_wiki(&config::permanent_wiki_path(), query, phase1_limit)
                 .await
                 .into_iter()
                 .map(|result| MemoryQueryMatch {
@@ -323,6 +325,8 @@ impl MemorySystem {
         limit: usize,
     ) -> UnifiedQueryResult {
         let limit = limit.max(1);
+        // Phase 1: wider candidate pool for Phase 2 reranking.
+        let phase1_limit = (limit * 3).max(12);
         let mut results = Vec::new();
 
         if let Some(excerpt) = working_memory_excerpt {
@@ -333,7 +337,7 @@ impl MemorySystem {
         let lt_query = enrich_query_with_working_memory(query, working_memory_excerpt);
 
         results.extend(
-            long_term::search_entries(&self.long_term_path(), &lt_query, limit, false)
+            long_term::search_entries(&self.long_term_path(), &lt_query, phase1_limit, false)
                 .await
                 .into_iter()
                 .map(|result| MemoryQueryMatch {
@@ -347,7 +351,7 @@ impl MemorySystem {
                 }),
         );
         results.extend(
-            long_term::search_entries(&config::permanent_long_term_path(), &lt_query, limit, true)
+            long_term::search_entries(&config::permanent_long_term_path(), &lt_query, phase1_limit, true)
                 .await
                 .into_iter()
                 .map(|result| MemoryQueryMatch {
@@ -362,7 +366,7 @@ impl MemorySystem {
         );
 
         results.extend(
-            search_markdown_wiki(&self.wiki_path(), query, limit)
+            search_markdown_wiki(&self.wiki_path(), query, phase1_limit)
                 .await
                 .into_iter()
                 .map(|result| MemoryQueryMatch {
@@ -376,7 +380,7 @@ impl MemorySystem {
                 }),
         );
         results.extend(
-            search_markdown_wiki(&config::permanent_wiki_path(), query, limit)
+            search_markdown_wiki(&config::permanent_wiki_path(), query, phase1_limit)
                 .await
                 .into_iter()
                 .map(|result| MemoryQueryMatch {

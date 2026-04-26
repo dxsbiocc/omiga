@@ -4150,36 +4150,61 @@ pub async fn send_message(
                                 removed_messages.len()
                             )),
                         );
-                        if let Err(e) =
-                            crate::domain::memory::working_memory::prepare_for_auto_compact(
-                                &repo_clone,
-                                &session_id_clone,
-                                &removed_messages,
-                            )
-                            .await
+                        match crate::domain::memory::working_memory::prepare_for_auto_compact(
+                            &repo_clone,
+                            &session_id_clone,
+                            &removed_messages,
+                        )
+                        .await
                         {
-                            tracing::warn!(
-                                target: "omiga::working_memory",
-                                "tool-loop pre-compact summary failed: {}",
-                                e
-                            );
-                            emit_activity_operation(
-                                &app_clone,
-                                &session_id_clone,
-                                &op_id,
-                                "压缩前摘要",
-                                "error",
-                                Some(e.to_string()),
-                            );
-                        } else {
-                            emit_activity_operation(
-                                &app_clone,
-                                &session_id_clone,
-                                &op_id,
-                                "压缩前摘要",
-                                "done",
-                                Some("已提炼即将被压缩的上下文".to_string()),
-                            );
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "omiga::working_memory",
+                                    "tool-loop pre-compact summary failed: {}",
+                                    e
+                                );
+                                emit_activity_operation(
+                                    &app_clone,
+                                    &session_id_clone,
+                                    &op_id,
+                                    "压缩前摘要",
+                                    "error",
+                                    Some(e.to_string()),
+                                );
+                            }
+                            Ok(compact_state) => {
+                                emit_activity_operation(
+                                    &app_clone,
+                                    &session_id_clone,
+                                    &op_id,
+                                    "压缩前摘要",
+                                    "done",
+                                    Some("已提炼即将被压缩的上下文".to_string()),
+                                );
+                                // Compression is a semantic trigger for session summary.
+                                let project_root_for_compact = {
+                                    let sessions_guard = sessions_clone.read().await;
+                                    sessions_guard
+                                        .get(&session_id_clone)
+                                        .map(|r| resolve_session_project_root(&r.session.project_path))
+                                        .unwrap_or_else(|| std::path::PathBuf::from("."))
+                                };
+                                if let Ok(cfg) = crate::domain::memory::load_resolved_config(
+                                    &project_root_for_compact,
+                                )
+                                .await
+                                {
+                                    let lt_path =
+                                        cfg.long_term_path(&project_root_for_compact);
+                                    crate::commands::chat::turn::archive_on_compact(
+                                        &app_clone,
+                                        &session_id_clone,
+                                        &lt_path,
+                                        &compact_state,
+                                    )
+                                    .await;
+                                }
+                            }
                         }
                     }
                     if let Err(e) = crate::domain::auto_compact::compact_session_and_persist(

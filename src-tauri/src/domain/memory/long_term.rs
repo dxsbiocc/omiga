@@ -493,13 +493,30 @@ fn merge_entry(
     let Some(mut existing) = existing else {
         return incoming;
     };
+    // Take the richer summary.
     if existing.summary.chars().count() < incoming.summary.chars().count() {
         existing.summary = incoming.summary;
     }
+    // Quality signals: take max (new evidence can only raise, not lower).
     existing.confidence = existing.confidence.max(incoming.confidence);
     existing.stability = existing.stability.max(incoming.stability);
+    existing.importance = existing.importance.max(incoming.importance);
+    existing.reuse_probability = existing.reuse_probability.max(incoming.reuse_probability);
+    // Timestamps: keep earliest access, update latest reuse.
     existing.last_reused_at = incoming.last_reused_at;
-
+    // Re-activate if incoming is Active (allows un-archiving via re-promotion).
+    if incoming.status == EntryStatus::Active {
+        existing.status = EntryStatus::Active;
+    }
+    // Extend TTL if incoming has a later expiry.
+    if let Some(new_exp) = incoming.expires_at {
+        existing.expires_at = Some(match &existing.expires_at {
+            Some(old_exp) => {
+                if new_exp > *old_exp { new_exp } else { old_exp.clone() }
+            }
+            None => new_exp,
+        });
+    }
     for entity in incoming.entities {
         if !existing.entities.contains(&entity) {
             existing.entities.push(entity);
