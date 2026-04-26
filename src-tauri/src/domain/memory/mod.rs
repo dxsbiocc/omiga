@@ -152,12 +152,16 @@ impl MemorySystem {
 
     /// Get unified memory statistics
     pub async fn stats(&self) -> MemoryStats {
+        let lt_project_path = self.long_term_path();
+        let lt_global_path = config::permanent_long_term_path();
+        let stale_project = long_term::count_stale_entries(&lt_project_path).await;
+        let stale_global = long_term::count_stale_entries(&lt_global_path).await;
         let mut stats = MemoryStats {
             project_knowledge_pages: count_markdown_pages(&self.wiki_path()).await,
             global_knowledge_pages: count_markdown_pages(&config::permanent_wiki_path()).await,
-            long_term_project_entries: long_term::count_entries(&self.long_term_path()).await,
-            long_term_global_entries: long_term::count_entries(&config::permanent_long_term_path())
-                .await,
+            long_term_project_entries: long_term::count_entries(&lt_project_path).await,
+            long_term_global_entries: long_term::count_entries(&lt_global_path).await,
+            stale_long_term_entries: stale_project + stale_global,
             ..Default::default()
         };
 
@@ -293,6 +297,8 @@ pub struct MemoryStats {
     pub global_knowledge_pages: usize,
     pub long_term_project_entries: usize,
     pub long_term_global_entries: usize,
+    /// Long-term entries not reused in >90 days with stability < 0.4.
+    pub stale_long_term_entries: usize,
 }
 
 /// Unified query result

@@ -24,8 +24,12 @@ Use this tool BEFORE web_search whenever you need to find information about:
 Arguments:
 - `query`: natural-language query or keyword phrase
 - `limit`: max results to return (default 5, max 20)
-- `scope`: which stores to search — "implicit" (session history), "wiki" (explicit pages),
-           "permanent" (cross-project wiki), or "all" (default)
+- `scope`: which stores to search —
+    "implicit"   — auto-indexed session history
+    "wiki"       — project wiki pages
+    "long_term"  — promoted decisions/insights (project + global)
+    "permanent"  — cross-project wiki + global long-term
+    "all"        — everything (default)
 
 Returns a formatted excerpt of matching content with source paths."#;
 
@@ -115,6 +119,11 @@ impl super::ToolImpl for RecallTool {
                 crate::domain::memory::MemorySourceType::KnowledgeBaseProject
                     | crate::domain::memory::MemorySourceType::KnowledgeBaseGlobal
             ),
+            "long_term" => matches!(
+                result.source_type,
+                crate::domain::memory::MemorySourceType::LongTermProject
+                    | crate::domain::memory::MemorySourceType::LongTermGlobal
+            ),
             "permanent" => matches!(
                 result.source_type,
                 crate::domain::memory::MemorySourceType::LongTermGlobal
@@ -171,8 +180,8 @@ pub fn schema() -> ToolSchema {
                 },
                 "scope": {
                     "type": "string",
-                    "description": "Which memory stores to search: \"implicit\" (session history), \"wiki\" (project wiki), \"permanent\" (cross-project wiki), or \"all\" (default)",
-                    "enum": ["all", "implicit", "wiki", "permanent"]
+                    "description": "Which memory stores to search: \"implicit\" (session history), \"wiki\" (project wiki), \"long_term\" (promoted decisions+insights), \"permanent\" (cross-project wiki+long-term), or \"all\" (default)",
+                    "enum": ["all", "implicit", "wiki", "long_term", "permanent"]
                 }
             },
             "required": ["query"]
