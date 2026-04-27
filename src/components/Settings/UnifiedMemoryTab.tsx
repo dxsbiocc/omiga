@@ -57,7 +57,11 @@ import {
   HealthAndSafety as HealthIcon,
   Warning as WarnIcon,
   Language as SourceIcon,
+  Archive as ArchiveIcon,
+  Delete as DeleteIcon,
+  CleaningServices as PruneIcon,
 } from "@mui/icons-material";
+import type { LongTermEntryDto } from "../../hooks/useUnifiedMemory";
 import { useUnifiedMemory } from "../../hooks/useUnifiedMemory";
 
 interface UnifiedMemoryTabProps {
@@ -589,6 +593,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
         <Tab value="overview" label="概览" />
         <Tab value="knowledge" label="知识库" icon={<WikiIcon />} iconPosition="start" />
         <Tab value="implicit" label="隐性记忆" icon={<ImplicitIcon />} iconPosition="start" />
+        <Tab value="long_term" label="长期记忆" icon={<LongTermIcon />} iconPosition="start" />
         <Tab value="config" label="配置" icon={<ConfigIcon />} iconPosition="start" />
       </Tabs>
 
@@ -1041,6 +1046,11 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
         )}
 
 
+        {/* Long-term Memory */}
+        {memory.activeTab === "long_term" && (
+          <LongTermTab memory={memory} theme={theme} glassSurface={glassSurface} alpha={alpha} setToast={setToast} />
+        )}
+
         {/* Config */}
         {memory.activeTab === "config" && (
           <Stack spacing={2}>
@@ -1385,3 +1395,228 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
     </Box>
   );
 }
+
+// ── Long-term Memory Tab ────────────────────────────────────────────────────
+
+interface LongTermTabProps {
+  memory: ReturnType<typeof import("../../hooks/useUnifiedMemory").useUnifiedMemory>;
+  theme: import("@mui/material/styles").Theme;
+  glassSurface: object;
+  alpha: (color: string, opacity: number) => string;
+  setToast: (msg: string | null) => void;
+}
+
+function LongTermTab({ memory, theme, glassSurface, alpha, setToast }: LongTermTabProps) {
+  const [filter, setFilter] = React.useState<"all" | "active" | "archived" | "superseded">("active");
+  const [pruning, setPruning] = React.useState(false);
+
+  React.useEffect(() => {
+    memory.loadLongTermEntries();
+  }, [memory.longTermScope]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handlePrune = async () => {
+    setPruning(true);
+    const removed = await memory.pruneStale();
+    setPruning(false);
+    setToast(removed > 0 ? `已清理 ${removed} 条陈旧记忆` : "没有需要清理的陈旧记忆");
+  };
+
+  const handleArchive = async (entry: LongTermEntryDto) => {
+    await memory.archiveLongTermEntry(entry.path);
+    setToast("已归档");
+  };
+
+  const handleDelete = async (entry: LongTermEntryDto) => {
+    await memory.deleteLongTermEntry(entry.path);
+    setToast("已删除");
+  };
+
+  const filtered = memory.longTermEntries.filter(e => {
+    if (filter === "all") return true;
+    return e.status.toLowerCase() === filter;
+  });
+
+  const kindColor = (kind: string) => {
+    if (kind === "research_insight") return "info";
+    if (kind === "project_experience") return "success";
+    if (kind === "session_summary") return "default";
+    if (kind === "method_lesson") return "warning";
+    return "default";
+  };
+
+  const statusColor = (status: string) => {
+    if (status === "Active") return "success";
+    if (status === "Archived") return "default";
+    if (status === "Superseded") return "warning";
+    return "default";
+  };
+
+  return (
+    <Stack spacing={2}>
+      {/* Header toolbar */}
+      <Paper elevation={0} sx={{ p: 2, ...glassSurface }}>
+        <Stack direction={{ xs: "column", sm: "row" }} alignItems={{ sm: "center" }} justifyContent="space-between" spacing={1.5}>
+          <Box>
+            <Typography variant="subtitle1" fontWeight={700}>
+              长期记忆条目
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              已提炼的决策、洞察和项目经验 · 共 {memory.longTermEntries.length} 条
+            </Typography>
+          </Box>
+          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+            {/* Scope selector */}
+            {(["all", "project", "global"] as const).map(s => (
+              <Chip
+                key={s}
+                label={{ all: "全部", project: "项目", global: "全局" }[s]}
+                size="small"
+                variant={memory.longTermScope === s ? "filled" : "outlined"}
+                color={memory.longTermScope === s ? "primary" : "default"}
+                onClick={() => {
+                  memory.setLongTermScope(s);
+                  memory.loadLongTermEntries(s);
+                }}
+              />
+            ))}
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={memory.longTermLoading ? <CircularProgress size={14} /> : <RefreshIcon />}
+              onClick={() => memory.loadLongTermEntries()}
+              disabled={memory.longTermLoading}
+              sx={{ borderRadius: 2, textTransform: "none", fontWeight: 600 }}
+            >
+              刷新
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              color="warning"
+              startIcon={pruning ? <CircularProgress size={14} /> : <PruneIcon />}
+              onClick={handlePrune}
+              disabled={pruning}
+              sx={{ borderRadius: 2, textTransform: "none", fontWeight: 600 }}
+            >
+              清理陈旧 ({memory.status?.long_term.stale_entry_count ?? 0})
+            </Button>
+          </Stack>
+        </Stack>
+
+        {/* Status filter */}
+        <Stack direction="row" spacing={0.75} mt={1.5} flexWrap="wrap" useFlexGap>
+          {(["all", "active", "archived", "superseded"] as const).map(f => (
+            <Chip
+              key={f}
+              label={{ all: "全部", active: "活跃", archived: "已归档", superseded: "已替代" }[f]}
+              size="small"
+              variant={filter === f ? "filled" : "outlined"}
+              color={filter === f ? "secondary" : "default"}
+              onClick={() => setFilter(f)}
+              sx={{ fontWeight: 600 }}
+            />
+          ))}
+        </Stack>
+      </Paper>
+
+      {/* Entry list */}
+      {memory.longTermLoading ? (
+        <Stack alignItems="center" py={4}>
+          <CircularProgress size={28} />
+        </Stack>
+      ) : filtered.length === 0 ? (
+        <Paper elevation={0} sx={{ p: 3, ...glassSurface, textAlign: "center" }}>
+          <Typography variant="body2" color="text.secondary">
+            {memory.longTermEntries.length === 0
+              ? "暂无长期记忆条目。在对话中提炼关键决策后会自动归档。"
+              : "该筛选条件下没有条目"}
+          </Typography>
+        </Paper>
+      ) : (
+        <Stack spacing={1}>
+          {filtered.map(entry => (
+            <Paper
+              key={entry.path}
+              elevation={0}
+              sx={{
+                p: 1.75,
+                ...glassSurface,
+                border: `1px solid ${alpha(
+                  entry.status === "Active" ? theme.palette.success.main :
+                  entry.status === "Archived" ? theme.palette.divider :
+                  theme.palette.warning.main,
+                  entry.status === "Active" ? 0.2 : 0.3
+                )}`,
+                opacity: entry.status !== "Active" ? 0.65 : 1,
+                transition: "opacity 0.2s",
+              }}
+            >
+              <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1}>
+                <Box sx={{ minWidth: 0, flex: 1 }}>
+                  <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap mb={0.5}>
+                    <Typography variant="subtitle2" fontWeight={700} noWrap sx={{ maxWidth: 300 }}>
+                      {entry.topic}
+                    </Typography>
+                    <Chip size="small" label={entry.kind} color={kindColor(entry.kind) as "info" | "success" | "default" | "warning"} variant="outlined" sx={{ fontWeight: 600, fontSize: "0.7rem" }} />
+                    <Chip size="small" label={entry.status} color={statusColor(entry.status) as "success" | "default" | "warning"} variant="outlined" sx={{ fontWeight: 600, fontSize: "0.7rem" }} />
+                    {entry.global && <Chip size="small" label="全局" variant="outlined" sx={{ fontWeight: 600, fontSize: "0.7rem" }} />}
+                  </Stack>
+                  <Typography variant="body2" color="text.secondary" sx={{ fontSize: "0.8rem", lineHeight: 1.5 }}>
+                    {entry.summary.length > 180 ? entry.summary.slice(0, 180) + "…" : entry.summary}
+                  </Typography>
+                  <Stack direction="row" spacing={1.5} mt={0.75} flexWrap="wrap" useFlexGap>
+                    <Typography variant="caption" color="text.disabled">
+                      置信度 {(entry.confidence * 100).toFixed(0)}%
+                    </Typography>
+                    <Typography variant="caption" color="text.disabled">
+                      稳定性 {(entry.stability * 100).toFixed(0)}%
+                    </Typography>
+                    {entry.last_reused_at && (
+                      <Typography variant="caption" color="text.disabled">
+                        最近使用 {entry.last_reused_at.slice(0, 10)}
+                      </Typography>
+                    )}
+                    {entry.expires_at && (
+                      <Typography variant="caption" color="warning.main">
+                        过期 {entry.expires_at.slice(0, 10)}
+                      </Typography>
+                    )}
+                  </Stack>
+                </Box>
+                <Stack direction="row" spacing={0.5} flexShrink={0}>
+                  {entry.status === "Active" && (
+                    <Tooltip title="归档（隐藏但保留）">
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="inherit"
+                        sx={{ minWidth: 36, p: 0.5, borderRadius: 1.5 }}
+                        onClick={() => handleArchive(entry)}
+                      >
+                        <ArchiveIcon fontSize="small" />
+                      </Button>
+                    </Tooltip>
+                  )}
+                  <Tooltip title="永久删除">
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color="error"
+                      sx={{ minWidth: 36, p: 0.5, borderRadius: 1.5 }}
+                      onClick={() => handleDelete(entry)}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </Button>
+                  </Tooltip>
+                </Stack>
+              </Stack>
+            </Paper>
+          ))}
+        </Stack>
+      )}
+    </Stack>
+  );
+}
+
+// Needed for LongTermTab
+import React from "react";

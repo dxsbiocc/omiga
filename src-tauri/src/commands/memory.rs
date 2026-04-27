@@ -1081,3 +1081,122 @@ pub fn memory_get_import_extensions() -> Vec<String> {
         "htm".to_string(),
     ]
 }
+
+// ── Long-term memory CRUD ──────────────────────────────────────────────────
+
+/// DTO returned to the frontend for each long-term memory entry.
+#[derive(Debug, Serialize)]
+pub struct LongTermEntryDto {
+    pub path: String,
+    pub topic: String,
+    pub summary: String,
+    pub kind: String,
+    pub confidence: f32,
+    pub stability: f32,
+    pub importance: f32,
+    pub reuse_probability: f32,
+    pub retention_class: String,
+    pub status: String,
+    pub created_at: String,
+    pub last_reused_at: Option<String>,
+    pub expires_at: Option<String>,
+    pub source_sessions: Vec<String>,
+    pub entities: Vec<String>,
+    pub global: bool,
+}
+
+impl LongTermEntryDto {
+    fn from_entry(path: std::path::PathBuf, entry: crate::domain::memory::long_term::LongTermMemoryEntry, global: bool) -> Self {
+        Self {
+            path: path.to_string_lossy().to_string(),
+            topic: entry.topic,
+            summary: entry.summary,
+            kind: entry.kind.to_string(),
+            confidence: entry.confidence,
+            stability: entry.stability,
+            importance: entry.importance,
+            reuse_probability: entry.reuse_probability,
+            retention_class: format!("{:?}", entry.retention_class),
+            status: format!("{:?}", entry.status),
+            created_at: entry.created_at,
+            last_reused_at: entry.last_reused_at,
+            expires_at: entry.expires_at,
+            source_sessions: entry.source_sessions,
+            entities: entry.entities,
+            global,
+        }
+    }
+}
+
+/// List all long-term memory entries for a project.
+/// `scope`: "project" | "global" | "all" (default)
+#[tauri::command]
+pub async fn memory_list_long_term(
+    project_path: String,
+    scope: Option<String>,
+) -> Result<Vec<LongTermEntryDto>, AppError> {
+    use crate::domain::memory::{config::permanent_long_term_path, long_term::list_entries};
+    let root = project_root(&project_path);
+    let cfg = load_resolved_config(&root).await.unwrap_or_default();
+    let scope = scope.as_deref().unwrap_or("all");
+    let mut out = Vec::new();
+
+    if scope == "project" || scope == "all" {
+        let lt = cfg.long_term_path(&root);
+        for (path, entry) in list_entries(&lt).await {
+            out.push(LongTermEntryDto::from_entry(path, entry, false));
+        }
+    }
+    if scope == "global" || scope == "all" {
+        let lt = permanent_long_term_path();
+        for (path, entry) in list_entries(&lt).await {
+            out.push(LongTermEntryDto::from_entry(path, entry, true));
+        }
+    }
+
+    // Sort: active first, then by confidence descending.
+    out.sort_by(|a, b| {
+        a.status.cmp(&b.status).then_with(|| {
+            b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal)
+        })
+    });
+    Ok(out)
+}
+
+/// Set an entry's status to Archived (soft delete — still on disk, hidden from search).
+#[tauri::command]
+pub async fn memory_archive_long_term_entry(entry_path: String) -> Result<(), AppError> {
+    use crate::domain::memory::long_term::{EntryStatus, LongTermMemoryEntry};
+    let path = std::path::PathBuf::from(&entry_path);
+    let raw = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| AppError::Unknown(e.to_string()))?;
+    let mut entry: LongTermMemoryEntry =
+        serde_json::from_str(&raw).map_err(|e| AppError::Unknown(e.to_string()))?;
+    entry.status = EntryStatus::Archived;
+    let json = serde_json::to_string_pretty(&entry)
+        .map_err(|e| AppError::Unknown(e.to_string()))?;
+    tokio::fs::write(&path, json)
+        .await
+        .map_err(|e| AppError::Unknown(e.to_string()))
+}
+
+/// Hard-delete a long-term memory entry from disk.
+#[tauri::command]
+pub async fn memory_delete_long_term_entry(entry_path: String) -> Result<(), AppError> {
+    tokio::fs::remove_file(&entry_path)
+        .await
+        .map_err(|e| AppError::Unknown(e.to_string()))
+}
+
+/// Manually trigger stale-entry pruning and return the number removed.
+#[tauri::command]
+pub async fn memory_prune_stale(project_path: String) -> Result<usize, AppError> {
+    use crate::domain::memory::{config::permanent_long_term_path, long_term::prune_stale_entries};
+    let root = project_root(&project_path);
+    let cfg = load_resolved_config(&root).await.unwrap_or_default();
+    let lt = cfg.long_term_path(&root);
+    let perm_lt = permanent_long_term_path();
+    let removed = prune_stale_entries(&lt, false).await + prune_stale_entries(&perm_lt, false).await;
+    Ok(removed)
+}

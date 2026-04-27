@@ -412,53 +412,43 @@ pub async fn create_session_summary(
 async fn upsert_entry(root: &Path, entry: LongTermMemoryEntry) -> Result<(), std::io::Error> {
     fs::create_dir_all(root).await?;
 
-    // ── Write Gate ──────────────────────────────────────────────────────────
-    let all_entries = list_entries(root).await;
-    let total_active = all_entries
-        .iter()
-        .filter(|(_, e)| e.status == EntryStatus::Active)
-        .count();
+    let slug = slugify(&entry.topic);
 
-    // If global soft cap exceeded, evict the weakest active entry.
-    if total_active >= GLOBAL_SOFT_CAP {
-        let weakest = all_entries
+    // ── Write Gate ──────────────────────────────────────────────────────────
+    // Global cap: cheap metadata-only file count first; only do the expensive
+    // full content scan when we're actually at or near the cap.
+    let total_files = count_json_files(root).await;
+    if total_files >= GLOBAL_SOFT_CAP {
+        let all_entries = list_entries(root).await;
+        let total_active = all_entries
             .iter()
-            .filter(|(_, e)| e.status == EntryStatus::Active && e.retention_class != RetentionClass::Permanent)
-            .min_by(|(_, a), (_, b)| {
-                let qa = a.confidence * 0.5 + a.stability * 0.3 + a.importance * 0.2;
-                let qb = b.confidence * 0.5 + b.stability * 0.3 + b.importance * 0.2;
-                qa.partial_cmp(&qb).unwrap_or(std::cmp::Ordering::Equal)
-            });
-        if let Some((evict_path, _)) = weakest {
-            let _ = fs::remove_file(evict_path).await;
-            tracing::info!("write_gate: global cap {}, evicted {:?}", GLOBAL_SOFT_CAP, evict_path);
+            .filter(|(_, e)| e.status == EntryStatus::Active)
+            .count();
+        if total_active >= GLOBAL_SOFT_CAP {
+            let weakest = all_entries
+                .iter()
+                .filter(|(_, e)| e.status == EntryStatus::Active && e.retention_class != RetentionClass::Permanent)
+                .min_by(|(_, a), (_, b)| quality_score(a).partial_cmp(&quality_score(b)).unwrap_or(std::cmp::Ordering::Equal));
+            if let Some((evict_path, _)) = weakest {
+                let _ = fs::remove_file(evict_path).await;
+                tracing::info!("write_gate: global cap {}, evicted {:?}", GLOBAL_SOFT_CAP, evict_path);
+            }
         }
     }
 
-    // Per-topic cap: if this topic family already has MAX_ENTRIES_PER_TOPIC active
-    // entries, supersede the lowest-quality one.
-    // "Topic family" = first 2 hyphen-components of the full slug, so that
-    // "recall ordering approach A" and "recall ordering approach B" are grouped.
-    let slug = slugify(&entry.topic);
-    let family_prefix = slug.splitn(3, '-').take(2).collect::<Vec<_>>().join("-");
-    let topic_entries: Vec<_> = all_entries
+    // Per-topic cap: only load files matching the topic family prefix (typically 1-5
+    // files), not the entire directory. No full content scan unless cap is hit.
+    let family_prefix = family_slug(&slug);
+    let topic_entries = list_entries_with_prefix(root, &family_prefix).await;
+    let active_topic: Vec<_> = topic_entries
         .iter()
-        .filter(|(path, e)| {
-            e.status == EntryStatus::Active
-                && path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with(&family_prefix))
-                    .unwrap_or(false)
-        })
+        .filter(|(_, e)| e.status == EntryStatus::Active)
         .collect();
 
-    if topic_entries.len() >= MAX_ENTRIES_PER_TOPIC {
-        let weakest = topic_entries.iter().min_by(|(_, a), (_, b)| {
-            let qa = a.confidence * 0.5 + a.stability * 0.3 + a.importance * 0.2;
-            let qb = b.confidence * 0.5 + b.stability * 0.3 + b.importance * 0.2;
-            qa.partial_cmp(&qb).unwrap_or(std::cmp::Ordering::Equal)
-        });
+    if active_topic.len() >= MAX_ENTRIES_PER_TOPIC {
+        let weakest = active_topic
+            .iter()
+            .min_by(|(_, a), (_, b)| quality_score(a).partial_cmp(&quality_score(b)).unwrap_or(std::cmp::Ordering::Equal));
         if let Some((supersede_path, old)) = weakest {
             let mut updated = (*old).clone();
             updated.status = EntryStatus::Superseded;
@@ -484,6 +474,47 @@ async fn upsert_entry(root: &Path, entry: LongTermMemoryEntry) -> Result<(), std
     let json = serde_json::to_string_pretty(&merged)
         .map_err(|e| std::io::Error::other(format!("serialize long-term entry: {e}")))?;
     fs::write(path, json).await
+}
+
+/// Composite quality score used for write-gate eviction (higher = keep).
+fn quality_score(e: &LongTermMemoryEntry) -> f32 {
+    e.confidence * 0.5 + e.stability * 0.3 + e.importance * 0.2
+}
+
+/// Topic-family prefix: first 2 hyphen-components of the slug.
+fn family_slug(slug: &str) -> String {
+    slug.splitn(3, '-').take(2).collect::<Vec<_>>().join("-")
+}
+
+/// Count JSON files without reading their content — O(n) metadata scan.
+async fn count_json_files(root: &Path) -> usize {
+    let Ok(mut dir) = fs::read_dir(root).await else { return 0 };
+    let mut count = 0usize;
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        if entry.path().extension().and_then(|e| e.to_str()) == Some("json") {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Load only entries whose filename starts with `prefix` — avoids full-directory scan.
+async fn list_entries_with_prefix(root: &Path, prefix: &str) -> Vec<(PathBuf, LongTermMemoryEntry)> {
+    let Ok(mut dir) = fs::read_dir(root).await else { return vec![] };
+    let mut out = Vec::new();
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !name.starts_with(prefix) || !name.ends_with(".json") {
+            continue;
+        }
+        if let Ok(raw) = fs::read_to_string(&path).await {
+            if let Ok(parsed) = serde_json::from_str::<LongTermMemoryEntry>(&raw) {
+                out.push((path, parsed));
+            }
+        }
+    }
+    out
 }
 
 fn merge_entry(

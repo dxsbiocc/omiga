@@ -5,16 +5,6 @@
 //! - domain/: Core business logic (tools, session management, persistence)
 //! - infrastructure/: Technical details (filesystem, streaming, git)
 
-// Some public command/orchestration APIs intentionally mirror Tauri, LLM, or
-// persistence boundaries where grouping parameters would make call sites less
-// explicit. Keep these architectural lints non-blocking while allowing Clippy to
-// enforce behavior-oriented warnings.
-#![allow(
-    clippy::large_enum_variant,
-    clippy::too_many_arguments,
-    clippy::type_complexity
-)]
-
 pub mod api;
 pub mod app_state;
 pub mod commands;
@@ -266,6 +256,10 @@ pub fn run() {
             commands::memory::memory_get_unified_status,
             commands::memory::memory_import_to_wiki,
             commands::memory::memory_get_import_extensions,
+            commands::memory::memory_list_long_term,
+            commands::memory::memory_archive_long_term_entry,
+            commands::memory::memory_delete_long_term_entry,
+            commands::memory::memory_prune_stale,
             commands::memory::write_user_omiga_file,
             commands::memory::init_user_context_files,
             commands::ralph::list_ralph_sessions,

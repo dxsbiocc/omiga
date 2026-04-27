@@ -127,7 +127,26 @@ export interface QueryResponse {
   total_matches: number;
 }
 
-export type MemoryTab = "overview" | "knowledge" | "implicit" | "config";
+export type MemoryTab = "overview" | "knowledge" | "implicit" | "long_term" | "config";
+
+export interface LongTermEntryDto {
+  path: string;
+  topic: string;
+  summary: string;
+  kind: string;
+  confidence: number;
+  stability: number;
+  importance: number;
+  reuse_probability: number;
+  retention_class: string;
+  status: string;
+  created_at: string;
+  last_reused_at: string | null;
+  expires_at: string | null;
+  source_sessions: string[];
+  entities: string[];
+  global: boolean;
+}
 
 export interface ImportToWikiResult {
   success: boolean;
@@ -366,6 +385,48 @@ export function useUnifiedMemory(projectPath: string) {
     loadSupportedExtensions();
   }, [loadSupportedExtensions]);
 
+  // ── Long-term memory CRUD ────────────────────────────────────────────────
+  const [longTermEntries, setLongTermEntries] = useState<LongTermEntryDto[]>([]);
+  const [longTermLoading, setLongTermLoading] = useState(false);
+  const [longTermScope, setLongTermScope] = useState<"all" | "project" | "global">("all");
+
+  const loadLongTermEntries = useCallback(async (scope?: "all" | "project" | "global") => {
+    setLongTermLoading(true);
+    try {
+      const entries = await invoke<LongTermEntryDto[]>("memory_list_long_term", {
+        projectPath,
+        scope: scope ?? longTermScope,
+      });
+      setLongTermEntries(entries);
+    } catch (e) {
+      console.error("[useUnifiedMemory] loadLongTermEntries:", e);
+    } finally {
+      setLongTermLoading(false);
+    }
+  }, [projectPath, longTermScope]);
+
+  const archiveLongTermEntry = useCallback(async (entryPath: string) => {
+    await invoke("memory_archive_long_term_entry", { entryPath });
+    setLongTermEntries(prev =>
+      prev.map(e => e.path === entryPath ? { ...e, status: "Archived" } : e)
+    );
+  }, []);
+
+  const deleteLongTermEntry = useCallback(async (entryPath: string) => {
+    await invoke("memory_delete_long_term_entry", { entryPath });
+    setLongTermEntries(prev => prev.filter(e => e.path !== entryPath));
+  }, []);
+
+  const pruneStale = useCallback(async (): Promise<number> => {
+    try {
+      const removed = await invoke<number>("memory_prune_stale", { projectPath });
+      await loadLongTermEntries();
+      return removed;
+    } catch {
+      return 0;
+    }
+  }, [projectPath, loadLongTermEntries]);
+
   return {
     // State
     status,
@@ -381,7 +442,11 @@ export function useUnifiedMemory(projectPath: string) {
     importing,
     importResult,
     supportedExtensions,
-    
+    longTermEntries,
+    longTermLoading,
+    longTermScope,
+    setLongTermScope,
+
     // Actions
     refresh,
     updateConfig,
@@ -393,5 +458,9 @@ export function useUnifiedMemory(projectPath: string) {
     isValidPath,
     importToWiki,
     loadSupportedExtensions,
+    loadLongTermEntries,
+    archiveLongTermEntry,
+    deleteLongTermEntry,
+    pruneStale,
   };
 }
