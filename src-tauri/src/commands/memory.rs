@@ -1278,35 +1278,48 @@ pub async fn memory_delete_long_term_entry(entry_path: String) -> Result<(), App
         .map_err(|e| AppError::Unknown(e.to_string()))
 }
 
-/// Return the current project dossier (or a default empty one if none exists yet).
+/// Return the most-recently-updated project dossier (or empty if none exists).
+/// Dossiers are keyed by active_topic slug — this returns the latest one.
 #[tauri::command]
 pub async fn memory_get_dossier(project_path: String) -> Result<DossierDto, AppError> {
-    use crate::domain::memory::dossier::load_dossier;
+    use crate::domain::memory::dossier::load_latest_dossier;
     let root = project_root(&project_path);
     let cfg = load_resolved_config(&root).await.unwrap_or_default();
     let lt = cfg.long_term_path(&root);
-    // Derive the slug from the project root (same as update_project_dossier).
-    let slug = crate::domain::memory::long_term::slugify_pub(
-        root.file_name().and_then(|n| n.to_str()).unwrap_or("project"),
-    );
-    let dossier = load_dossier(&lt, &slug).await;
-    let rendered = dossier.render_for_hot_memory();
-    Ok(DossierDto {
-        title: dossier.title,
-        brief: dossier.brief,
-        current_beliefs: dossier.current_beliefs,
-        decisions: dossier.decisions,
-        open_questions: dossier.open_questions,
-        next_steps: dossier.next_steps,
-        updated_at: dossier.updated_at,
-        rendered,
-    })
+    if let Some((slug, dossier)) = load_latest_dossier(&lt).await {
+        let rendered = dossier.render_for_hot_memory();
+        Ok(DossierDto {
+            slug,
+            title: dossier.title,
+            brief: dossier.brief,
+            current_beliefs: dossier.current_beliefs,
+            decisions: dossier.decisions,
+            open_questions: dossier.open_questions,
+            next_steps: dossier.next_steps,
+            updated_at: dossier.updated_at,
+            rendered,
+        })
+    } else {
+        Ok(DossierDto {
+            slug: String::new(),
+            title: String::new(),
+            brief: String::new(),
+            current_beliefs: vec![],
+            decisions: vec![],
+            open_questions: vec![],
+            next_steps: vec![],
+            updated_at: String::new(),
+            rendered: String::new(),
+        })
+    }
 }
 
-/// Overwrite the project dossier with user-edited content.
+/// Overwrite the project dossier for the given slug (from memory_get_dossier).
+/// If slug is empty, uses the project-root folder name as fallback.
 #[tauri::command]
 pub async fn memory_save_dossier(
     project_path: String,
+    slug: String,
     title: String,
     brief: String,
     current_beliefs: Vec<String>,
@@ -1318,9 +1331,13 @@ pub async fn memory_save_dossier(
     let root = project_root(&project_path);
     let cfg = load_resolved_config(&root).await.unwrap_or_default();
     let lt = cfg.long_term_path(&root);
-    let slug = crate::domain::memory::long_term::slugify_pub(
-        root.file_name().and_then(|n| n.to_str()).unwrap_or("project"),
-    );
+    let slug = if slug.trim().is_empty() {
+        crate::domain::memory::long_term::slugify_pub(
+            root.file_name().and_then(|n| n.to_str()).unwrap_or("project"),
+        )
+    } else {
+        slug
+    };
     let dossier = Dossier {
         title,
         brief,
@@ -1339,6 +1356,8 @@ pub async fn memory_save_dossier(
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DossierDto {
+    /// Slug used as the dossier file key (pass back to memory_save_dossier).
+    pub slug: String,
     pub title: String,
     pub brief: String,
     pub current_beliefs: Vec<String>,

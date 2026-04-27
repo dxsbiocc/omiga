@@ -146,6 +146,7 @@ export interface QueryResponse {
 export type MemoryTab = "overview" | "knowledge" | "implicit" | "long_term" | "sources" | "dossier" | "config";
 
 export interface DossierDto {
+  slug: string;
   title: string;
   brief: string;
   currentBeliefs: string[];
@@ -431,6 +432,7 @@ export function useUnifiedMemory(projectPath: string) {
   const saveDossier = useCallback(async (updated: Omit<DossierDto, "updatedAt" | "rendered">): Promise<void> => {
     await invoke("memory_save_dossier", {
       projectPath,
+      slug: updated.slug,
       title: updated.title,
       brief: updated.brief,
       currentBeliefs: updated.currentBeliefs,

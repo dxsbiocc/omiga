@@ -126,6 +126,38 @@ pub async fn load_dossier(root: &Path, slug: &str) -> Dossier {
     }
 }
 
+/// List all dossier files in `root`, sorted by `updated_at` descending (most recent first).
+pub async fn list_dossiers(root: &Path) -> Vec<(String, Dossier)> {
+    let Ok(mut dir) = tokio::fs::read_dir(root).await else {
+        return vec![];
+    };
+    let mut out = Vec::new();
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !name.starts_with("dossier_") || !name.ends_with(".json") {
+            continue;
+        }
+        let slug = name
+            .strip_prefix("dossier_")
+            .and_then(|s| s.strip_suffix(".json"))
+            .unwrap_or(name)
+            .to_string();
+        if let Ok(raw) = tokio::fs::read_to_string(&path).await {
+            if let Ok(d) = serde_json::from_str::<Dossier>(&raw) {
+                out.push((slug, d));
+            }
+        }
+    }
+    out.sort_by(|a, b| b.1.updated_at.cmp(&a.1.updated_at));
+    out
+}
+
+/// Return the most-recently-updated dossier from `root`, or `None` if none exist.
+pub async fn load_latest_dossier(root: &Path) -> Option<(String, Dossier)> {
+    list_dossiers(root).await.into_iter().next()
+}
+
 /// Persist a dossier to disk.
 pub async fn save_dossier(root: &Path, slug: &str, dossier: &Dossier) -> Result<(), std::io::Error> {
     fs::create_dir_all(root).await?;
@@ -305,5 +337,57 @@ mod tests {
         assert!(d.current_beliefs.contains(&"belief B".to_string()));
         let q_a_count = d.open_questions.iter().filter(|q| q.as_str() == "question A").count();
         assert_eq!(q_a_count, 1, "question A must not be duplicated");
+    }
+
+    #[tokio::test]
+    async fn list_dossiers_returns_all_sorted_by_updated_at() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = Dossier {
+            title: "Old Topic".to_string(),
+            brief: "older".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            ..Default::default()
+        };
+        let new = Dossier {
+            title: "New Topic".to_string(),
+            brief: "newer".to_string(),
+            updated_at: "2025-06-01T00:00:00Z".to_string(),
+            ..Default::default()
+        };
+        save_dossier(temp.path(), "old-topic", &old).await.unwrap();
+        save_dossier(temp.path(), "new-topic", &new).await.unwrap();
+
+        let list = list_dossiers(temp.path()).await;
+        assert_eq!(list.len(), 2, "should find both dossiers");
+        assert_eq!(list[0].0, "new-topic", "most recent first");
+        assert_eq!(list[1].0, "old-topic");
+    }
+
+    #[tokio::test]
+    async fn load_latest_dossier_returns_most_recent() {
+        let temp = tempfile::tempdir().unwrap();
+        save_dossier(temp.path(), "alpha", &Dossier {
+            title: "Alpha".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+            ..Default::default()
+        }).await.unwrap();
+        save_dossier(temp.path(), "beta", &Dossier {
+            title: "Beta".to_string(),
+            updated_at: "2025-03-15T00:00:00Z".to_string(),
+            ..Default::default()
+        }).await.unwrap();
+
+        let latest = load_latest_dossier(temp.path()).await;
+        assert!(latest.is_some());
+        let (slug, d) = latest.unwrap();
+        assert_eq!(slug, "beta");
+        assert_eq!(d.title, "Beta");
+    }
+
+    #[tokio::test]
+    async fn load_latest_dossier_returns_none_for_empty_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let result = load_latest_dossier(temp.path()).await;
+        assert!(result.is_none());
     }
 }

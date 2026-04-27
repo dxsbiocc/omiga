@@ -1877,6 +1877,7 @@ function DossierTab({ memory, theme, glassSurface, alpha, setToast }: DossierTab
     setSaving(true);
     try {
       await memory.saveDossier({
+        slug: memory.dossier?.slug ?? "",
         title: editTitle.trim(),
         brief: editBrief.trim(),
         currentBeliefs: editBeliefs.split("\n").map(s => s.trim()).filter(Boolean),
