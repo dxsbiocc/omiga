@@ -751,26 +751,44 @@ pub async fn memory_navigation_section(project_root: &std::path::Path) -> String
             .to_string(),
     );
     lines.push(
-        "0. Stable persona, user preferences, and hard constraints are already auto-compiled from `~/.omiga/SOUL.md`, `USER.md`, and `MEMORY.md` into the system prompt."
+        "0. Stable persona, user preferences, and hard constraints are already auto-compiled \
+         from `~/.omiga/SOUL.md`, `USER.md`, and `MEMORY.md` into the system prompt."
             .to_string(),
     );
     lines.push(
-        "1. Check the **Relevant memory excerpts** section below (auto-injected from working memory + long-term + knowledge base).".to_string(),
+        "1. If a `## Project Brief` section appears above, read it — it is the project dossier \
+         (auto-updated summary of goals, decisions, and open questions)."
+            .to_string(),
+    );
+    lines.push(
+        "2. Check the **Relevant Context from Memory Layers** section below \
+         (auto-injected Hot+Warm memory: working memory, long-term, knowledge base)."
+            .to_string(),
+    );
+    lines.push(
+        "3. Call `recall(query=\"…\")` to search additional memory layers. \
+         Available scopes: all (default), wiki, long_term, implicit, permanent, sources."
+            .to_string(),
+    );
+    lines.push(
+        "4. For previously fetched URLs: use `recall(query=\"…\", scope=\"sources\")` \
+         to check if the page is cached before calling `web_fetch` again."
+            .to_string(),
     );
     lines.push(format!(
-        "2. Browse project knowledge pages under `{}`.",
+        "5. Browse project knowledge pages under `{}`.",
         wiki_path.display()
     ));
     lines.push(format!(
-        "3. Check project long-term memory under `{}` for reusable prior conclusions.",
+        "6. Check project long-term memory under `{}` for reusable prior conclusions.",
         long_term_path.display()
     ));
     lines.push(format!(
-        "4. Check global knowledge base under `{}` for cross-project knowledge.",
+        "7. Check global knowledge base under `{}` for cross-project knowledge.",
         perm_wiki.display()
     ));
     lines.push(format!(
-        "5. Check global long-term memory under `{}` for reusable prior experience.",
+        "8. Check global long-term memory under `{}` for reusable prior experience.",
         perm_long_term.display()
     ));
     lines.push(String::new());

@@ -6,7 +6,7 @@
  * - Implicit Memory (PageIndex): Auto-indexed chat history
  */
 
-import { useState } from "react";
+import React, { useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   Box,
@@ -1618,5 +1618,3 @@ function LongTermTab({ memory, theme, glassSurface, alpha, setToast }: LongTermT
   );
 }
 
-// Needed for LongTermTab
-import React from "react";
