@@ -409,14 +409,50 @@ fn extract_title(content: &str) -> Option<String> {
 }
 
 fn extract_gist(content: &str, max_chars: usize) -> String {
-    // Skip blank lines and headings; take the first prose paragraph.
-    let text: String = content
-        .lines()
-        .map(str::trim)
+    // Priority: Abstract / Conclusion / Results / Summary sections come first.
+    // Falls back to first prose paragraphs if no key sections are found.
+    let priority_headings = ["abstract", "conclusion", "conclusions", "summary",
+                             "results", "discussion", "key findings", "overview"];
+    let lines: Vec<&str> = content.lines().collect();
+    let n = lines.len();
+
+    // Try to find a priority heading and extract the paragraph(s) beneath it.
+    for i in 0..n {
+        let trimmed = lines[i].trim();
+        let lower = trimmed.to_lowercase();
+        let heading_text = lower
+            .trim_start_matches('#')
+            .trim()
+            .trim_end_matches(':')
+            .trim();
+        if priority_headings.contains(&heading_text) {
+            // Collect prose lines until the next heading or code block.
+            let prose: String = lines[i + 1..]
+                .iter()
+                .take(8)
+                .map(|l| l.trim())
+                .take_while(|l| !l.starts_with('#') && !l.starts_with("```"))
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if prose.chars().count() > 40 {
+                return truncate_gist(prose, max_chars);
+            }
+        }
+    }
+
+    // Fallback: first non-heading, non-code prose lines.
+    let text: String = lines
+        .iter()
+        .map(|l| l.trim())
         .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("```"))
-        .take(5)
+        .take(6)
         .collect::<Vec<_>>()
         .join(" ");
+    truncate_gist(text, max_chars)
+}
+
+fn truncate_gist(text: String, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         text
     } else {
@@ -477,6 +513,48 @@ mod tests {
         let gist = extract_gist(&content, 300);
         assert!(gist.chars().count() <= 300);
         assert!(gist.ends_with('…'));
+    }
+
+    #[test]
+    fn extract_gist_prefers_abstract_section() {
+        let content = "Introduction\nThis is the preamble text.\n\
+                       \n## Abstract\n\
+                       NRF2 and glutathione interact with circadian clock genes.\n\
+                       This drives redox rhythm regulation.\n\
+                       \n## Methods\nExperiments were conducted in triplicate.";
+        let gist = extract_gist(content, 300);
+        assert!(
+            gist.contains("NRF2") || gist.contains("glutathione") || gist.contains("circadian"),
+            "gist should extract Abstract content, not intro; got: {gist}"
+        );
+        assert!(
+            !gist.contains("preamble") && !gist.contains("triplicate"),
+            "gist must not include intro or methods; got: {gist}"
+        );
+    }
+
+    #[test]
+    fn extract_gist_prefers_conclusion_over_intro() {
+        let content = "This paper is about memory systems.\n\
+                       Long intro paragraph here.\n\
+                       \n## Conclusion\n\
+                       Two-phase recall significantly improves retrieval accuracy.\n\
+                       The TF-IDF blend with context overlap is the key insight.";
+        let gist = extract_gist(content, 300);
+        assert!(
+            gist.contains("Two-phase") || gist.contains("retrieval") || gist.contains("TF-IDF"),
+            "gist should extract Conclusion, not intro; got: {gist}"
+        );
+    }
+
+    #[test]
+    fn extract_gist_falls_back_to_prose_when_no_priority_section() {
+        let content = "A paper without structured sections.\nThis is the main content paragraph.";
+        let gist = extract_gist(content, 300);
+        assert!(
+            gist.contains("main content") || gist.contains("structured sections"),
+            "fallback gist should contain first prose; got: {gist}"
+        );
     }
 
     #[test]

@@ -443,6 +443,10 @@ pub struct QueryRequest {
     pub session_id: Option<String>,
     pub query: String,
     pub limit: Option<usize>,
+    /// Optional recall scope: "all" | "wiki" | "long_term" | "implicit" |
+    /// "permanent" | "sources". Defaults to "all".
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -573,6 +577,30 @@ pub async fn memory_query(
     let root = project_root(&req.project_path);
     let config = load_resolved_config(&root).await.unwrap_or_default();
     let limit = req.limit.unwrap_or(5);
+    let scope = req.scope.as_deref().unwrap_or("all");
+
+    // ── scope=sources: route directly to Source Registry search ──────────────
+    if scope == "sources" {
+        use crate::domain::memory::source_registry::search_sources;
+        let lt = config.long_term_path(&root);
+        let matches = search_sources(&lt, &req.query, limit).await;
+        let results: Vec<QueryResultItem> = matches
+            .into_iter()
+            .map(|m| QueryResultItem {
+                title: m.title.unwrap_or_else(|| m.domain.clone()),
+                path: m.url.clone(),
+                breadcrumb: vec![m.domain],
+                excerpt: m.gist.unwrap_or_default(),
+                score: m.score,
+                match_type: "source".to_string(),
+                source_type: "SourceRegistry".to_string(),
+            })
+            .collect();
+        let total_matches = results.len();
+        return Ok(QueryResponse { total_matches, query: req.query, results });
+    }
+
+    // ── All other scopes: unified query with optional scope filtering ─────────
     let memory = MemorySystem::with_config(&root, config);
     let working_memory_excerpt = if let Some(session_id) = req.session_id.as_deref() {
         crate::domain::memory::working_memory::render_context(
@@ -594,6 +622,7 @@ pub async fn memory_query(
     let mut results: Vec<QueryResultItem> = unified
         .results
         .into_iter()
+        .filter(|r| scope_matches(scope, &r.source_type))
         .map(|r| QueryResultItem {
             title: r.title,
             path: r.path,
@@ -612,6 +641,20 @@ pub async fn memory_query(
         query: req.query,
         results,
     })
+}
+
+/// Returns true when a MemorySourceType matches the requested scope string.
+fn scope_matches(scope: &str, source_type: &crate::domain::memory::MemorySourceType) -> bool {
+    use crate::domain::memory::MemorySourceType::*;
+    match scope {
+        "all" => true,
+        "wiki" => matches!(source_type, KnowledgeBaseProject | KnowledgeBaseGlobal),
+        "long_term" => matches!(source_type, LongTermProject | LongTermGlobal),
+        "implicit" => matches!(source_type, Implicit),
+        "permanent" => matches!(source_type, LongTermGlobal | KnowledgeBaseGlobal),
+        "working_memory" => matches!(source_type, WorkingMemory),
+        _ => true,
+    }
 }
 
 #[tauri::command]
@@ -1316,5 +1359,62 @@ mod tests {
             Some("injected after first call"),
             "second call must hit the cache"
         );
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use crate::domain::memory::MemorySourceType;
+
+    #[test]
+    fn scope_all_matches_every_source_type() {
+        let types = [
+            MemorySourceType::WorkingMemory,
+            MemorySourceType::KnowledgeBaseProject,
+            MemorySourceType::KnowledgeBaseGlobal,
+            MemorySourceType::LongTermProject,
+            MemorySourceType::LongTermGlobal,
+            MemorySourceType::Implicit,
+        ];
+        for t in &types {
+            assert!(scope_matches("all", t), "scope=all must match {t:?}");
+        }
+    }
+
+    #[test]
+    fn scope_wiki_matches_knowledge_base_only() {
+        assert!(scope_matches("wiki", &MemorySourceType::KnowledgeBaseProject));
+        assert!(scope_matches("wiki", &MemorySourceType::KnowledgeBaseGlobal));
+        assert!(!scope_matches("wiki", &MemorySourceType::LongTermProject));
+        assert!(!scope_matches("wiki", &MemorySourceType::Implicit));
+    }
+
+    #[test]
+    fn scope_long_term_matches_long_term_only() {
+        assert!(scope_matches("long_term", &MemorySourceType::LongTermProject));
+        assert!(scope_matches("long_term", &MemorySourceType::LongTermGlobal));
+        assert!(!scope_matches("long_term", &MemorySourceType::KnowledgeBaseProject));
+        assert!(!scope_matches("long_term", &MemorySourceType::Implicit));
+    }
+
+    #[test]
+    fn scope_implicit_matches_implicit_only() {
+        assert!(scope_matches("implicit", &MemorySourceType::Implicit));
+        assert!(!scope_matches("implicit", &MemorySourceType::LongTermProject));
+        assert!(!scope_matches("implicit", &MemorySourceType::WorkingMemory));
+    }
+
+    #[test]
+    fn scope_permanent_matches_global_tiers() {
+        assert!(scope_matches("permanent", &MemorySourceType::LongTermGlobal));
+        assert!(scope_matches("permanent", &MemorySourceType::KnowledgeBaseGlobal));
+        assert!(!scope_matches("permanent", &MemorySourceType::LongTermProject));
+    }
+
+    #[test]
+    fn unknown_scope_defaults_to_all() {
+        assert!(scope_matches("nonexistent_scope", &MemorySourceType::Implicit));
+        assert!(scope_matches("nonexistent_scope", &MemorySourceType::LongTermProject));
     }
 }

@@ -161,35 +161,42 @@ pub async fn memory_get_dossier(project_path: String) -> Result<DossierDto, AppE
     }
 }
 
+/// Request body for memory_save_dossier — consolidates the many fields
+/// into a single struct to satisfy the Clippy too-many-arguments lint.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveDossierRequest {
+    pub project_path: String,
+    /// Slug returned by memory_get_dossier; empty → derived from project dir name.
+    pub slug: String,
+    pub title: String,
+    pub brief: String,
+    pub current_beliefs: Vec<String>,
+    pub decisions: Vec<String>,
+    pub open_questions: Vec<String>,
+    pub next_steps: Vec<String>,
+}
+
 #[tauri::command]
-pub async fn memory_save_dossier(
-    project_path: String,
-    slug: String,
-    title: String,
-    brief: String,
-    current_beliefs: Vec<String>,
-    decisions: Vec<String>,
-    open_questions: Vec<String>,
-    next_steps: Vec<String>,
-) -> Result<(), AppError> {
+pub async fn memory_save_dossier(req: SaveDossierRequest) -> Result<(), AppError> {
     use crate::domain::memory::dossier::{save_dossier, Dossier};
-    let root = super::project_root(&project_path);
+    let root = super::project_root(&req.project_path);
     let cfg = load_resolved_config(&root).await.unwrap_or_default();
     let lt = cfg.long_term_path(&root);
-    let slug = if slug.trim().is_empty() {
+    let slug = if req.slug.trim().is_empty() {
         crate::domain::memory::long_term::slugify_pub(
             root.file_name().and_then(|n| n.to_str()).unwrap_or("project"),
         )
     } else {
-        slug
+        req.slug
     };
     let dossier = Dossier {
-        title,
-        brief,
-        current_beliefs,
-        decisions,
-        open_questions,
-        next_steps,
+        title: req.title,
+        brief: req.brief,
+        current_beliefs: req.current_beliefs,
+        decisions: req.decisions,
+        open_questions: req.open_questions,
+        next_steps: req.next_steps,
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
     save_dossier(&lt, &slug, &dossier)

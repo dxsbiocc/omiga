@@ -16,6 +16,8 @@ const MAX_BELIEFS: usize = 8;
 const MAX_DECISIONS: usize = 10;
 const MAX_QUESTIONS: usize = 6;
 const MAX_NEXT_STEPS: usize = 5;
+/// Soft character cap for render_for_hot_memory (~375 tokens at 4 chars/token).
+const RENDER_CHAR_BUDGET: usize = 1500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Dossier {
@@ -51,39 +53,59 @@ impl Dossier {
         for item in next_steps.iter().take(MAX_NEXT_STEPS) {
             self.next_steps.push(item.clone());
         }
+        // Auto-resolve: remove open_questions whose keywords overlap with a new decision.
+        self.resolve_answered_questions();
         self.updated_at = chrono::Utc::now().to_rfc3339();
     }
 
+    /// Remove `open_questions` that are likely answered by an existing decision.
+    /// Uses simple keyword overlap: a question is resolved if ≥2 of its significant
+    /// words appear in any decision text (case-insensitive, ignoring stop words).
+    fn resolve_answered_questions(&mut self) {
+        let all_decision_text: String = self.decisions.join(" ").to_lowercase();
+        self.open_questions.retain(|q| {
+            let significant: Vec<&str> = q
+                .split_whitespace()
+                .filter(|w| w.len() > 3 && !is_stop_word(w))
+                .collect();
+            if significant.len() < 2 {
+                return true; // too short to confidently resolve
+            }
+            let overlap = significant
+                .iter()
+                .filter(|w| all_decision_text.contains(&w.to_lowercase()[..]))
+                .count();
+            overlap < 2 // keep if fewer than 2 keywords matched
+        });
+    }
+
     /// Render as a compact Hot-memory section injected into every turn's system prompt.
+    /// Total output is capped at RENDER_CHAR_BUDGET characters to protect token budget.
     pub fn render_for_hot_memory(&self) -> String {
         let mut out = String::from("## Project Brief\n\n");
         out.push_str(&format!("**{}**: {}\n\n", self.title, self.brief));
-        if !self.current_beliefs.is_empty() {
-            out.push_str("**Current beliefs:**\n");
-            for b in self.current_beliefs.iter().take(5) {
-                out.push_str(&format!("- {}\n", b));
+
+        // Emit each section while staying within the char budget.
+        let sections: &[(&str, &[String], usize)] = &[
+            ("**Current beliefs:**", &self.current_beliefs, 5),
+            ("**Decisions:**",       &self.decisions,        5),
+            ("**Open questions:**",  &self.open_questions,   3),
+            ("**Next steps:**",      &self.next_steps,       3),
+        ];
+        for (header, items, max_items) in sections {
+            if items.is_empty() { continue; }
+            if out.len() >= RENDER_CHAR_BUDGET { break; }
+            out.push_str(header);
+            out.push('\n');
+            for item in items.iter().take(*max_items) {
+                let line = format!("- {}\n", item);
+                if out.len() + line.len() > RENDER_CHAR_BUDGET {
+                    out.push_str("- …\n");
+                    break;
+                }
+                out.push_str(&line);
             }
             out.push('\n');
-        }
-        if !self.decisions.is_empty() {
-            out.push_str("**Decisions:**\n");
-            for d in self.decisions.iter().take(5) {
-                out.push_str(&format!("- {}\n", d));
-            }
-            out.push('\n');
-        }
-        if !self.open_questions.is_empty() {
-            out.push_str("**Open questions:**\n");
-            for q in self.open_questions.iter().take(3) {
-                out.push_str(&format!("- {}\n", q));
-            }
-            out.push('\n');
-        }
-        if !self.next_steps.is_empty() {
-            out.push_str("**Next steps:**\n");
-            for s in self.next_steps.iter().take(3) {
-                out.push_str(&format!("- {}\n", s));
-            }
         }
         out.trim().to_string()
     }
@@ -211,6 +233,16 @@ fn normalize(text: &str) -> String {
         .join(" ")
         .trim()
         .to_lowercase()
+}
+
+fn is_stop_word(w: &str) -> bool {
+    matches!(
+        w.to_lowercase().as_str(),
+        "what" | "which" | "when" | "where" | "should" | "would" | "could" | "will"
+        | "have" | "that" | "this" | "with" | "from" | "about" | "like" | "they"
+        | "them" | "than" | "then" | "been" | "were" | "does" | "make" | "made"
+        | "into" | "more" | "some" | "also" | "their" | "your" | "such" | "both"
+    )
 }
 
 fn truncate_chars(text: &str, max: usize) -> String {
@@ -390,4 +422,62 @@ mod tests {
         let result = load_latest_dossier(temp.path()).await;
         assert!(result.is_none());
     }
+
+    #[test]
+    fn render_respects_char_budget() {
+        let long_item = "x".repeat(200);
+        let d = Dossier {
+            title: "Budget test".to_string(),
+            brief: "brief".to_string(),
+            current_beliefs: (0..8).map(|_| long_item.clone()).collect(),
+            decisions: (0..10).map(|_| long_item.clone()).collect(),
+            open_questions: (0..6).map(|_| long_item.clone()).collect(),
+            next_steps: (0..5).map(|_| long_item.clone()).collect(),
+            ..Default::default()
+        };
+        let rendered = d.render_for_hot_memory();
+        assert!(
+            rendered.chars().count() <= RENDER_CHAR_BUDGET + 20, // small tolerance for "- …\n"
+            "render must not exceed budget: got {} chars",
+            rendered.chars().count()
+        );
+    }
+
+    #[test]
+    fn resolve_answered_questions_removes_matched_questions() {
+        let mut d = Dossier {
+            title: "resolution test".to_string(),
+            decisions: vec![
+                "We will use TF-IDF ranking for memory recall search".to_string(),
+                "Dossier updates happen after every session summary".to_string(),
+            ],
+            open_questions: vec![
+                "How should memory recall ranking work?".to_string(), // should be resolved
+                "What is the airspeed velocity of an unladen swallow?".to_string(), // unrelated
+            ],
+            ..Default::default()
+        };
+        d.resolve_answered_questions();
+        assert_eq!(d.open_questions.len(), 1, "one question should be resolved");
+        assert!(
+            d.open_questions[0].contains("airspeed"),
+            "unrelated question should remain"
+        );
+    }
+
+    #[test]
+    fn resolve_answered_questions_keeps_short_questions() {
+        let mut d = Dossier {
+            title: "short test".to_string(),
+            decisions: vec!["Use Rust".to_string()],
+            open_questions: vec![
+                "Why?".to_string(),   // too short — should be kept
+                "How?".to_string(),   // too short — should be kept
+            ],
+            ..Default::default()
+        };
+        d.resolve_answered_questions();
+        assert_eq!(d.open_questions.len(), 2, "short questions must not be auto-resolved");
+    }
+
 }
