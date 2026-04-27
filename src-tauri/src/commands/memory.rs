@@ -162,6 +162,7 @@ pub struct MemoryPaths {
 #[derive(Debug, Serialize)]
 pub struct SourceRegistryStatus {
     pub entry_count: usize,
+    pub stale_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -324,6 +325,7 @@ pub async fn memory_get_unified_status(
         },
         source_registry: SourceRegistryStatus {
             entry_count: stats.source_registry_count,
+            stale_count: stats.stale_source_count,
         },
         paths: MemoryPaths {
             root: memory.root_path().to_string_lossy().to_string(),
@@ -1256,16 +1258,92 @@ pub async fn memory_delete_long_term_entry(entry_path: String) -> Result<(), App
         .map_err(|e| AppError::Unknown(e.to_string()))
 }
 
-/// Manually trigger stale-entry pruning and return the number removed.
+/// Manually trigger stale-entry pruning (long-term + source registry) and return total removed.
 #[tauri::command]
 pub async fn memory_prune_stale(project_path: String) -> Result<usize, AppError> {
-    use crate::domain::memory::{config::permanent_long_term_path, long_term::prune_stale_entries};
+    use crate::domain::memory::{
+        config::permanent_long_term_path,
+        long_term::prune_stale_entries,
+        source_registry::prune_stale_sources,
+    };
     let root = project_root(&project_path);
     let cfg = load_resolved_config(&root).await.unwrap_or_default();
     let lt = cfg.long_term_path(&root);
     let perm_lt = permanent_long_term_path();
-    let removed = prune_stale_entries(&lt, false).await + prune_stale_entries(&perm_lt, false).await;
+    let removed = prune_stale_entries(&lt, false).await
+        + prune_stale_entries(&perm_lt, false).await
+        + prune_stale_sources(&lt, false).await;
     Ok(removed)
+}
+
+/// List source registry entries for the given project.
+/// Returns entries sorted by most-recently-used descending.
+#[tauri::command]
+pub async fn memory_list_sources(project_path: String) -> Result<Vec<SourceEntryDto>, AppError> {
+    use crate::domain::memory::source_registry::list_active_sources_with_paths;
+    let root = project_root(&project_path);
+    let cfg = load_resolved_config(&root).await.unwrap_or_default();
+    let lt = cfg.long_term_path(&root);
+    let mut entries = list_active_sources_with_paths(&lt).await;
+    entries.sort_by(|a, b| b.1.last_used_at.cmp(&a.1.last_used_at));
+    Ok(entries
+        .into_iter()
+        .map(|(path, entry)| {
+            let mut dto = SourceEntryDto::from(entry);
+            dto.path = path.to_string_lossy().into_owned();
+            dto
+        })
+        .collect())
+}
+
+/// Delete a single source entry by its canonical URL hash path.
+#[tauri::command]
+pub async fn memory_delete_source(entry_path: String) -> Result<(), AppError> {
+    let p = std::path::Path::new(&entry_path);
+    if p.exists() {
+        tokio::fs::remove_file(p)
+            .await
+            .map_err(|e| AppError::Unknown(format!("delete source: {e}")))?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceEntryDto {
+    pub path: String,
+    pub url: String,
+    pub canonical_url: String,
+    pub title: Option<String>,
+    pub domain: String,
+    pub gist: Option<String>,
+    pub accessed_at: String,
+    pub last_used_at: String,
+    pub use_count: u32,
+    pub sessions: Vec<String>,
+    pub query_context: Vec<String>,
+    pub expires_at: Option<String>,
+}
+
+impl From<crate::domain::memory::source_registry::SourceEntry> for SourceEntryDto {
+    fn from(e: crate::domain::memory::source_registry::SourceEntry) -> Self {
+        // Reconstruct the file path from canonical_url hash
+        // (path is not stored in SourceEntry; callers can use canonical_url as key)
+        Self {
+            path: String::new(), // filled by list command using the directory scan path
+            url: e.url,
+            canonical_url: e.canonical_url,
+            title: e.title,
+            domain: e.domain,
+            gist: e.gist,
+            accessed_at: e.accessed_at,
+            last_used_at: e.last_used_at,
+            use_count: e.use_count,
+            sessions: e.sessions,
+            query_context: e.query_context,
+            expires_at: e.expires_at,
+        }
+    }
 }
 
 #[cfg(test)]

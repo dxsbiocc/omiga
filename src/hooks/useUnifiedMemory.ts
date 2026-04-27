@@ -81,6 +81,22 @@ export interface MemoryPaths {
 
 export interface SourceRegistryStatus {
   entry_count: number;
+  stale_count: number;
+}
+
+export interface SourceEntryDto {
+  path: string;
+  url: string;
+  canonical_url: string;
+  title: string | null;
+  domain: string;
+  gist: string | null;
+  accessed_at: string;
+  last_used_at: string;
+  use_count: number;
+  sessions: string[];
+  query_context: string[];
+  expires_at: string | null;
 }
 
 export interface UnifiedMemoryStatus {
@@ -127,7 +143,7 @@ export interface QueryResponse {
   total_matches: number;
 }
 
-export type MemoryTab = "overview" | "knowledge" | "implicit" | "long_term" | "config";
+export type MemoryTab = "overview" | "knowledge" | "implicit" | "long_term" | "sources" | "config";
 
 export interface LongTermEntryDto {
   path: string;
@@ -385,6 +401,27 @@ export function useUnifiedMemory(projectPath: string) {
     loadSupportedExtensions();
   }, [loadSupportedExtensions]);
 
+  // ── Source registry CRUD ─────────────────────────────────────────────────
+  const [sourceEntries, setSourceEntries] = useState<SourceEntryDto[]>([]);
+  const [sourcesLoading, setSourcesLoading] = useState(false);
+
+  const loadSourceEntries = useCallback(async () => {
+    setSourcesLoading(true);
+    try {
+      const entries = await invoke<SourceEntryDto[]>("memory_list_sources", { projectPath });
+      setSourceEntries(entries);
+    } catch (e) {
+      console.error("[useUnifiedMemory] loadSourceEntries:", e);
+    } finally {
+      setSourcesLoading(false);
+    }
+  }, [projectPath]);
+
+  const deleteSourceEntry = useCallback(async (entryPath: string) => {
+    await invoke("memory_delete_source", { entryPath });
+    setSourceEntries(prev => prev.filter(e => e.path !== entryPath));
+  }, []);
+
   // ── Long-term memory CRUD ────────────────────────────────────────────────
   const [longTermEntries, setLongTermEntries] = useState<LongTermEntryDto[]>([]);
   const [longTermLoading, setLongTermLoading] = useState(false);
@@ -421,11 +458,12 @@ export function useUnifiedMemory(projectPath: string) {
     try {
       const removed = await invoke<number>("memory_prune_stale", { projectPath });
       await loadLongTermEntries();
+      await loadSourceEntries();
       return removed;
     } catch {
       return 0;
     }
-  }, [projectPath, loadLongTermEntries]);
+  }, [projectPath, loadLongTermEntries, loadSourceEntries]);
 
   return {
     // State
@@ -442,6 +480,8 @@ export function useUnifiedMemory(projectPath: string) {
     importing,
     importResult,
     supportedExtensions,
+    sourceEntries,
+    sourcesLoading,
     longTermEntries,
     longTermLoading,
     longTermScope,
@@ -458,6 +498,8 @@ export function useUnifiedMemory(projectPath: string) {
     isValidPath,
     importToWiki,
     loadSupportedExtensions,
+    loadSourceEntries,
+    deleteSourceEntry,
     loadLongTermEntries,
     archiveLongTermEntry,
     deleteLongTermEntry,

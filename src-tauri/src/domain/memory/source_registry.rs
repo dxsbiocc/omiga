@@ -170,6 +170,32 @@ pub async fn list_active_sources(lt_root: &Path) -> Vec<SourceEntry> {
     list_sources(lt_root).await.into_iter().filter(|e| !is_expired(e)).collect()
 }
 
+/// List active source entries together with their file paths (for delete-by-path UI).
+pub async fn list_active_sources_with_paths(lt_root: &Path) -> Vec<(PathBuf, SourceEntry)> {
+    let dir = sources_dir(lt_root);
+    if !dir.is_dir() {
+        return vec![];
+    }
+    let Ok(mut entries) = fs::read_dir(&dir).await else {
+        return vec![];
+    };
+    let mut out = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(raw) = fs::read_to_string(&p).await {
+            if let Ok(src) = serde_json::from_str::<SourceEntry>(&raw) {
+                if !is_expired(&src) {
+                    out.push((p, src));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Count non-expired source entries.
 pub async fn count_sources(lt_root: &Path) -> usize {
     list_active_sources(lt_root).await.len()

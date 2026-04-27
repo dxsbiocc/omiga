@@ -184,6 +184,7 @@ impl MemorySystem {
         let stale_project = long_term::count_stale_entries(&lt_project_path).await;
         let stale_global = long_term::count_stale_entries(&lt_global_path).await;
         let src_count = source_registry::count_sources(&lt_project_path).await;
+        let stale_src = source_registry::count_stale_sources(&lt_project_path).await;
         let mut stats = MemoryStats {
             project_knowledge_pages: count_markdown_pages(&self.wiki_path()).await,
             global_knowledge_pages: count_markdown_pages(&config::permanent_wiki_path()).await,
@@ -191,6 +192,7 @@ impl MemorySystem {
             long_term_global_entries: long_term::count_entries(&lt_global_path).await,
             stale_long_term_entries: stale_project + stale_global,
             source_registry_count: src_count,
+            stale_source_count: stale_src,
             ..Default::default()
         };
 
@@ -427,8 +429,10 @@ pub struct MemoryStats {
     pub long_term_global_entries: usize,
     /// Long-term entries not reused in >90 days with stability < 0.4.
     pub stale_long_term_entries: usize,
-    /// Number of web sources tracked in the source registry.
+    /// Number of active (non-expired) web sources tracked in the source registry.
     pub source_registry_count: usize,
+    /// Number of expired source entries not yet pruned.
+    pub stale_source_count: usize,
 }
 
 /// Unified query result

@@ -61,7 +61,7 @@ import {
   Delete as DeleteIcon,
   CleaningServices as PruneIcon,
 } from "@mui/icons-material";
-import type { LongTermEntryDto } from "../../hooks/useUnifiedMemory";
+import type { LongTermEntryDto, SourceEntryDto } from "../../hooks/useUnifiedMemory";
 import { useUnifiedMemory } from "../../hooks/useUnifiedMemory";
 
 interface UnifiedMemoryTabProps {
@@ -594,6 +594,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
         <Tab value="knowledge" label="知识库" icon={<WikiIcon />} iconPosition="start" />
         <Tab value="implicit" label="隐性记忆" icon={<ImplicitIcon />} iconPosition="start" />
         <Tab value="long_term" label="长期记忆" icon={<LongTermIcon />} iconPosition="start" />
+        <Tab value="sources" label="来源" icon={<SourceIcon />} iconPosition="start" />
         <Tab value="config" label="配置" icon={<ConfigIcon />} iconPosition="start" />
       </Tabs>
 
@@ -1049,6 +1050,11 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
         {/* Long-term Memory */}
         {memory.activeTab === "long_term" && (
           <LongTermTab memory={memory} theme={theme} glassSurface={glassSurface} alpha={alpha} setToast={setToast} />
+        )}
+
+        {/* Sources */}
+        {memory.activeTab === "sources" && (
+          <SourcesTab memory={memory} theme={theme} glassSurface={glassSurface} alpha={alpha} setToast={setToast} />
         )}
 
         {/* Config */}
@@ -1618,3 +1624,207 @@ function LongTermTab({ memory, theme, glassSurface, alpha, setToast }: LongTermT
   );
 }
 
+// ── Sources Tab ─────────────────────────────────────────────────────────────
+
+interface SourcesTabProps {
+  memory: ReturnType<typeof import("../../hooks/useUnifiedMemory").useUnifiedMemory>;
+  theme: import("@mui/material/styles").Theme;
+  glassSurface: object;
+  alpha: (color: string, opacity: number) => string;
+  setToast: (msg: string | null) => void;
+}
+
+function SourcesTab({ memory, theme, glassSurface, alpha, setToast }: SourcesTabProps) {
+  const [pruning, setPruning] = React.useState(false);
+  const [searchText, setSearchText] = React.useState("");
+
+  React.useEffect(() => {
+    memory.loadSourceEntries();
+  }, [memory.loadSourceEntries]);
+
+  const filtered = memory.sourceEntries.filter(e => {
+    if (!searchText.trim()) return true;
+    const q = searchText.toLowerCase();
+    return (
+      e.url.toLowerCase().includes(q) ||
+      (e.title ?? "").toLowerCase().includes(q) ||
+      (e.gist ?? "").toLowerCase().includes(q) ||
+      e.domain.toLowerCase().includes(q)
+    );
+  });
+
+  const handleDelete = async (path: string, url: string) => {
+    try {
+      await memory.deleteSourceEntry(path);
+      setToast(`已删除来源：${url}`);
+    } catch {
+      setToast("删除失败");
+    }
+  };
+
+  const handlePrune = async () => {
+    setPruning(true);
+    try {
+      const removed = await memory.pruneStale();
+      setToast(removed > 0 ? `已清理 ${removed} 条陈旧记录` : "无需清理");
+    } catch {
+      setToast("清理失败");
+    } finally {
+      setPruning(false);
+    }
+  };
+
+  const staleCount = memory.status?.source_registry?.stale_count ?? 0;
+
+  return (
+    <Stack spacing={2}>
+      {/* Toolbar */}
+      <Paper elevation={0} sx={{ p: 1.5, ...glassSurface }}>
+        <Stack direction="row" alignItems="center" spacing={1.5} flexWrap="wrap" gap={1}>
+          <TextField
+            size="small"
+            placeholder="搜索 URL / 标题 / 摘要…"
+            value={searchText}
+            onChange={e => setSearchText(e.target.value)}
+            sx={{ flex: 1, minWidth: 200 }}
+            InputProps={{ startAdornment: <SearchIcon fontSize="small" sx={{ mr: 0.5, color: "text.disabled" }} /> }}
+          />
+          <Tooltip title={`刷新来源列表（当前 ${memory.sourceEntries.length} 条）`}>
+            <span>
+              <Button
+                size="small"
+                startIcon={<RefreshIcon />}
+                onClick={() => memory.loadSourceEntries()}
+                disabled={memory.sourcesLoading}
+              >
+                刷新
+              </Button>
+            </span>
+          </Tooltip>
+          <Tooltip title={staleCount > 0 ? `清理 ${staleCount} 条已过期来源` : "无过期来源"}>
+            <span>
+              <Button
+                size="small"
+                color="warning"
+                startIcon={pruning ? <CircularProgress size={14} /> : <PruneIcon />}
+                onClick={handlePrune}
+                disabled={pruning || staleCount === 0}
+              >
+                清理陈旧 ({staleCount})
+              </Button>
+            </span>
+          </Tooltip>
+        </Stack>
+      </Paper>
+
+      {/* Summary */}
+      <Stack direction="row" spacing={1} alignItems="center">
+        <Chip
+          size="small"
+          icon={<SourceIcon />}
+          label={`${memory.sourceEntries.length} 条活跃来源`}
+          sx={{ fontSize: 11 }}
+        />
+        {staleCount > 0 && (
+          <Chip
+            size="small"
+            color="warning"
+            icon={<WarnIcon />}
+            label={`${staleCount} 条已过期`}
+            sx={{ fontSize: 11 }}
+          />
+        )}
+        {filtered.length !== memory.sourceEntries.length && (
+          <Chip
+            size="small"
+            label={`筛选后 ${filtered.length} 条`}
+            sx={{ fontSize: 11 }}
+          />
+        )}
+      </Stack>
+
+      {memory.sourcesLoading && <LinearProgress />}
+
+      {!memory.sourcesLoading && filtered.length === 0 && (
+        <Paper elevation={0} sx={{ p: 3, textAlign: "center", ...glassSurface }}>
+          <SourceIcon sx={{ fontSize: 36, color: "text.disabled", mb: 1 }} />
+          <Typography color="text.secondary" variant="body2">
+            {searchText ? "无匹配来源" : "暂无来源记录。发起 web_fetch / web_search 后自动登记。"}
+          </Typography>
+        </Paper>
+      )}
+
+      {/* Source list */}
+      {filtered.map(entry => (
+        <Paper
+          key={entry.canonical_url}
+          elevation={0}
+          sx={{ p: 1.75, ...glassSurface, "&:hover": { bgcolor: alpha(theme.palette.primary.main, 0.03) } }}
+        >
+          <Stack spacing={0.5}>
+            <Stack direction="row" alignItems="flex-start" justifyContent="space-between" spacing={1}>
+              <Stack spacing={0.25} flex={1} minWidth={0}>
+                <Typography variant="subtitle2" fontWeight={600} noWrap title={entry.url}>
+                  {entry.title ?? entry.domain}
+                </Typography>
+                <Typography
+                  variant="caption"
+                  color="primary.main"
+                  sx={{ wordBreak: "break-all", cursor: "pointer" }}
+                  onClick={() => { try { window.open(entry.url, "_blank"); } catch {} }}
+                  title={entry.url}
+                >
+                  {entry.url.length > 80 ? entry.url.slice(0, 80) + "…" : entry.url}
+                </Typography>
+              </Stack>
+              <Tooltip title="删除来源记录">
+                <span>
+                  <Button
+                    size="small"
+                    color="error"
+                    sx={{ minWidth: 0, px: 0.75 }}
+                    onClick={() => handleDelete(entry.path, entry.url)}
+                  >
+                    <DeleteIcon fontSize="small" />
+                  </Button>
+                </span>
+              </Tooltip>
+            </Stack>
+
+            {entry.gist && (
+              <Typography variant="caption" color="text.secondary" sx={{ fontStyle: "italic" }}>
+                {entry.gist}
+              </Typography>
+            )}
+
+            <Stack direction="row" spacing={1} flexWrap="wrap" gap={0.5} mt={0.25}>
+              <Chip size="small" label={entry.domain} sx={{ fontSize: 10, height: 18 }} />
+              <Chip size="small" label={`访问 ${entry.use_count} 次`} sx={{ fontSize: 10, height: 18 }} />
+              {entry.sessions.length > 0 && (
+                <Chip size="small" label={`${entry.sessions.length} 个会话`} sx={{ fontSize: 10, height: 18 }} />
+              )}
+              <Chip
+                size="small"
+                label={`最近使用 ${new Date(entry.last_used_at).toLocaleDateString("zh-CN")}`}
+                sx={{ fontSize: 10, height: 18 }}
+              />
+              {entry.expires_at && (
+                <Chip
+                  size="small"
+                  label={`过期 ${new Date(entry.expires_at).toLocaleDateString("zh-CN")}`}
+                  sx={{ fontSize: 10, height: 18, color: "text.disabled" }}
+                />
+              )}
+            </Stack>
+
+            {entry.query_context.length > 0 && (
+              <Typography variant="caption" color="text.disabled">
+                关联查询：{entry.query_context.slice(0, 3).join(" · ")}
+              </Typography>
+            )}
+          </Stack>
+        </Paper>
+      ))}
+    </Stack>
+  );
+}

@@ -260,6 +260,8 @@ pub fn run() {
             commands::memory::memory_archive_long_term_entry,
             commands::memory::memory_delete_long_term_entry,
             commands::memory::memory_prune_stale,
+            commands::memory::memory_list_sources,
+            commands::memory::memory_delete_source,
             commands::memory::write_user_omiga_file,
             commands::memory::init_user_context_files,
             commands::ralph::list_ralph_sessions,
