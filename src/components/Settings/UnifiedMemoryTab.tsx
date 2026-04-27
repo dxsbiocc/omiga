@@ -61,7 +61,7 @@ import {
   Delete as DeleteIcon,
   CleaningServices as PruneIcon,
 } from "@mui/icons-material";
-import type { LongTermEntryDto, SourceEntryDto } from "../../hooks/useUnifiedMemory";
+import type { LongTermEntryDto } from "../../hooks/useUnifiedMemory";
 import { useUnifiedMemory } from "../../hooks/useUnifiedMemory";
 
 interface UnifiedMemoryTabProps {

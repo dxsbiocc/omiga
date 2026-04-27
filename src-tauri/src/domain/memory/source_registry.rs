@@ -203,7 +203,7 @@ pub async fn count_sources(lt_root: &Path) -> usize {
 
 /// Count expired source entries.
 pub async fn count_stale_sources(lt_root: &Path) -> usize {
-    list_sources(lt_root).await.into_iter().filter(|e| is_expired(e)).count()
+    list_sources(lt_root).await.into_iter().filter(is_expired).count()
 }
 
 /// Delete expired source entries from disk.

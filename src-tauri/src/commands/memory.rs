@@ -658,13 +658,33 @@ pub async fn get_memory_context_cached(
         if let Ok(guard) = cache.lock() {
             if let Some(slot) = guard.get(&key) {
                 if slot.cached_at.elapsed() < ttl {
+                    tracing::debug!(
+                        target: "omiga::memory::preflight",
+                        session_id = sid,
+                        age_ms = slot.cached_at.elapsed().as_millis(),
+                        "preflight cache hit"
+                    );
                     return Some(slot.context.clone());
                 }
             }
         }
         // Cache miss — compute below, then store.
+        tracing::debug!(
+            target: "omiga::memory::preflight",
+            session_id = sid,
+            query_prefix = &query[..query.len().min(16)],
+            "preflight cache miss — computing"
+        );
+        let t0 = std::time::Instant::now();
         let result = compute_memory_context(repo, project_path, session_id, query, limit).await;
         if let Some(ref ctx) = result {
+            tracing::debug!(
+                target: "omiga::memory::preflight",
+                session_id = sid,
+                ctx_chars = ctx.len(),
+                elapsed_ms = t0.elapsed().as_millis(),
+                "preflight computed and cached"
+            );
             if let Ok(mut guard) = cache.lock() {
                 guard.insert(key, crate::app_state::MemoryPreflightSlot {
                     context: ctx.clone(),

@@ -29,6 +29,7 @@ function makeLongTermEntry(overrides: Partial<LongTermEntryDto> = {}): LongTermE
     expires_at: null,
     source_sessions: ["sess-1"],
     entities: ["memory", "recall"],
+    global: false,
     ...overrides,
   };
 }

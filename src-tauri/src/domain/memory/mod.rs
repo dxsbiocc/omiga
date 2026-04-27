@@ -313,9 +313,19 @@ impl MemorySystem {
 
         sort_memory_results(&mut results);
         dedupe_matches(&mut results);
+        let phase1_count = results.len();
         two_phase_rerank(&mut results, working_memory_excerpt);
         let total_matches = results.len();
         results.truncate(limit);
+
+        tracing::debug!(
+            target: "omiga::memory::recall",
+            query = %query,
+            phase1_candidates = phase1_count,
+            returned = results.len(),
+            rerank = working_memory_excerpt.is_some(),
+            "query_warm completed"
+        );
 
         UnifiedQueryResult {
             query: query.to_string(),
@@ -790,6 +800,9 @@ fn two_phase_rerank(results: &mut [MemoryQueryMatch], working_memory_excerpt: Op
     if ctx_terms.is_empty() {
         return;
     }
+    // Snapshot top-1 title before rerank to detect ranking changes.
+    let top_before = results.first().map(|r| r.title.clone());
+
     for result in results.iter_mut() {
         let ctx_score = crate::domain::pageindex::score_terms_against_text(
             &format!("{} {}", result.title, result.excerpt),
@@ -798,6 +811,18 @@ fn two_phase_rerank(results: &mut [MemoryQueryMatch], working_memory_excerpt: Op
         result.score = result.score * 0.70 + ctx_score * 0.30;
     }
     sort_memory_results(results);
+
+    let top_after = results.first().map(|r| r.title.as_str());
+    if top_before.as_deref() != top_after {
+        tracing::debug!(
+            target: "omiga::memory::recall",
+            before = top_before.as_deref().unwrap_or("(none)"),
+            after = top_after.unwrap_or("(none)"),
+            ctx_terms = ctx_terms.len(),
+            candidates = results.len(),
+            "two-phase rerank changed top result"
+        );
+    }
 }
 
 /// Returns true with probability 1/n using the current timestamp as a cheap entropy source.

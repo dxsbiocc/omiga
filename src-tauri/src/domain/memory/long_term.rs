@@ -429,9 +429,16 @@ async fn upsert_entry(root: &Path, entry: LongTermMemoryEntry) -> Result<(), std
                 .iter()
                 .filter(|(_, e)| e.status == EntryStatus::Active && e.retention_class != RetentionClass::Permanent)
                 .min_by(|(_, a), (_, b)| quality_score(a).partial_cmp(&quality_score(b)).unwrap_or(std::cmp::Ordering::Equal));
-            if let Some((evict_path, _)) = weakest {
+            if let Some((evict_path, evicted)) = weakest {
                 let _ = fs::remove_file(evict_path).await;
-                tracing::info!("write_gate: global cap {}, evicted {:?}", GLOBAL_SOFT_CAP, evict_path);
+                tracing::info!(
+                    target: "omiga::memory::write_gate",
+                    cap = GLOBAL_SOFT_CAP,
+                    total_active,
+                    evicted_topic = %evicted.topic,
+                    evicted_score = quality_score(evicted),
+                    "write_gate: global cap reached — evicted weakest entry"
+                );
             }
         }
     }
@@ -455,7 +462,14 @@ async fn upsert_entry(root: &Path, entry: LongTermMemoryEntry) -> Result<(), std
             if let Ok(json) = serde_json::to_string_pretty(&updated) {
                 let _ = fs::write(supersede_path, json).await;
             }
-            tracing::debug!("write_gate: superseded {:?} for topic '{}'", supersede_path, entry.topic);
+            tracing::debug!(
+                target: "omiga::memory::write_gate",
+                family = %family_prefix,
+                new_topic = %entry.topic,
+                superseded_topic = %old.topic,
+                superseded_score = quality_score(old),
+                "write_gate: per-topic cap reached — superseded weakest entry"
+            );
         }
     }
     // ── End Write Gate ───────────────────────────────────────────────────────
