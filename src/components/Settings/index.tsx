@@ -328,12 +328,14 @@ export function Settings({
         try {
           const config: LlmConfig = JSON.parse(stored);
           await invoke("set_llm_config", {
-            provider: config.provider,
-            apiKey: config.apiKey.trim(),
-            secretKey: config.secretKey,
-            appId: config.appId,
-            model: config.model,
-            baseUrl: config.baseUrl,
+            request: {
+              provider: config.provider,
+              apiKey: config.apiKey.trim(),
+              secretKey: config.secretKey,
+              appId: config.appId,
+              model: config.model,
+              baseUrl: config.baseUrl,
+            },
           });
         } catch {
           /* non-fatal */

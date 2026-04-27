@@ -27,29 +27,58 @@ pub struct Executor<R> {
     trace_store: Box<dyn TraceStore>,
 }
 
+pub struct ExecutorStores {
+    pub task_graph_store: Box<dyn TaskGraphStore>,
+    pub artifact_store: Box<dyn ArtifactStore>,
+    pub evidence_store: Box<dyn EvidenceStore>,
+    pub trace_store: Box<dyn TraceStore>,
+}
+
+pub struct ExecutorDependencies<R> {
+    pub registry: AgentRegistry,
+    pub runner: R,
+    pub reviewer: Reviewer,
+    pub permission_manager: PermissionManager,
+    pub context_assembler: ContextAssembler,
+    pub stores: ExecutorStores,
+}
+
+struct TraceDraft<'a> {
+    graph_id: &'a str,
+    task: Option<&'a TaskSpec>,
+    attempt: u32,
+    kind: TraceKind,
+    status: ResultStatus,
+    message: &'a str,
+    detail: serde_json::Value,
+}
+
+macro_rules! record_trace {
+    ($executor:expr, $graph_id:expr, $task:expr, $attempt:expr, $kind:expr, $status:expr, $message:expr, $detail:expr $(,)?) => {
+        $executor.record_trace(TraceDraft {
+            graph_id: $graph_id,
+            task: $task,
+            attempt: $attempt,
+            kind: $kind,
+            status: $status,
+            message: $message,
+            detail: $detail,
+        })
+    };
+}
+
 impl<R: AgentRunner + Sync> Executor<R> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        registry: AgentRegistry,
-        runner: R,
-        reviewer: Reviewer,
-        permission_manager: PermissionManager,
-        context_assembler: ContextAssembler,
-        task_graph_store: Box<dyn TaskGraphStore>,
-        artifact_store: Box<dyn ArtifactStore>,
-        evidence_store: Box<dyn EvidenceStore>,
-        trace_store: Box<dyn TraceStore>,
-    ) -> Self {
+    pub fn new(deps: ExecutorDependencies<R>) -> Self {
         Self {
-            registry,
-            runner,
-            reviewer,
-            permission_manager,
-            context_assembler,
-            task_graph_store,
-            artifact_store,
-            evidence_store,
-            trace_store,
+            registry: deps.registry,
+            runner: deps.runner,
+            reviewer: deps.reviewer,
+            permission_manager: deps.permission_manager,
+            context_assembler: deps.context_assembler,
+            task_graph_store: deps.stores.task_graph_store,
+            artifact_store: deps.stores.artifact_store,
+            evidence_store: deps.stores.evidence_store,
+            trace_store: deps.stores.trace_store,
         }
     }
 
@@ -76,7 +105,8 @@ impl<R: AgentRunner + Sync> Executor<R> {
         let mut iterations = 0_u32;
 
         for task in &graph.tasks {
-            self.record_trace(
+            record_trace!(
+                self,
                 &graph.graph_id,
                 Some(task),
                 0,
@@ -129,7 +159,8 @@ impl<R: AgentRunner + Sync> Executor<R> {
                 let attempt = attempt_counts.entry(task.task_id.clone()).or_insert(0);
                 *attempt += 1;
 
-                self.record_trace(
+                record_trace!(
+                    self,
                     &graph.graph_id,
                     Some(&task),
                     *attempt,
@@ -141,7 +172,8 @@ impl<R: AgentRunner + Sync> Executor<R> {
 
                 let Some(agent_card) = self.registry.get(&task.assigned_agent).cloned() else {
                     failed_tasks.insert(task.task_id.clone());
-                    self.record_trace(
+                    record_trace!(
+                        self,
                         &graph.graph_id,
                         Some(&task),
                         *attempt,
@@ -166,7 +198,8 @@ impl<R: AgentRunner + Sync> Executor<R> {
                         task_results.insert(task.task_id.clone(), result);
                         review_results.insert(task.task_id.clone(), review);
                         failed_tasks.insert(task.task_id.clone());
-                        self.record_trace(
+                        record_trace!(
+                            self,
                             &graph.graph_id,
                             Some(&task),
                             *attempt,
@@ -188,7 +221,8 @@ impl<R: AgentRunner + Sync> Executor<R> {
                         task_results.insert(task.task_id.clone(), result);
                         review_results.insert(task.task_id.clone(), review);
                         failed_tasks.insert(task.task_id.clone());
-                        self.record_trace(
+                        record_trace!(
+                            self,
                             &graph.graph_id,
                             Some(&task),
                             *attempt,
@@ -251,7 +285,8 @@ impl<R: AgentRunner + Sync> Executor<R> {
                 }
                 result.permission_status = Some(permission_decision.status);
 
-                self.record_trace(
+                record_trace!(
+                    self,
                     &graph.graph_id,
                     Some(&task),
                     attempt,
@@ -262,7 +297,8 @@ impl<R: AgentRunner + Sync> Executor<R> {
                 )?;
 
                 let review = self.reviewer.review(&task, &result, &permission_decision);
-                self.record_trace(
+                record_trace!(
+                    self,
                     &graph.graph_id,
                     Some(&task),
                     attempt,
@@ -288,7 +324,8 @@ impl<R: AgentRunner + Sync> Executor<R> {
                             }
                         }
                     }
-                    self.record_trace(
+                    record_trace!(
+                        self,
                         &graph.graph_id,
                         Some(&task),
                         attempt,
@@ -353,26 +390,17 @@ impl<R: AgentRunner + Sync> Executor<R> {
         })
     }
 
-    fn record_trace(
-        &mut self,
-        graph_id: &str,
-        task: Option<&TaskSpec>,
-        attempt: u32,
-        kind: TraceKind,
-        status: ResultStatus,
-        message: &str,
-        detail: serde_json::Value,
-    ) -> Result<(), String> {
+    fn record_trace(&mut self, draft: TraceDraft<'_>) -> Result<(), String> {
         let trace = TraceRecord {
             id: format!("trace-{}", Uuid::new_v4()),
-            graph_id: graph_id.to_string(),
-            task_id: task.map(|task| task.task_id.clone()),
-            agent_id: task.map(|task| task.assigned_agent.clone()),
-            attempt,
-            kind,
-            status,
-            message: message.to_string(),
-            detail,
+            graph_id: draft.graph_id.to_string(),
+            task_id: draft.task.map(|task| task.task_id.clone()),
+            agent_id: draft.task.map(|task| task.assigned_agent.clone()),
+            attempt: draft.attempt,
+            kind: draft.kind,
+            status: draft.status,
+            message: draft.message.to_string(),
+            detail: draft.detail,
             created_at: Utc::now().to_rfc3339(),
         };
         self.trace_store.append(trace)

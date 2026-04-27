@@ -4,7 +4,39 @@
 
 use super::{FollowUpSuggestion, Message, MessageTokenUsage, Session, ToolCall};
 use crate::api::{ContentBlock, Message as ApiMessage, Role};
-use crate::domain::persistence::{MessageRecord, SessionWithMessages};
+use crate::domain::persistence::{MessageRecord, NewMessageRecord, SessionWithMessages};
+
+/// Owned message fields ready for persistence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedMessageRecord {
+    pub id: String,
+    pub session_id: String,
+    pub role: String,
+    pub content: String,
+    pub tool_calls: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub token_usage_json: Option<String>,
+    pub reasoning_content: Option<String>,
+    pub follow_up_suggestions_json: Option<String>,
+    pub turn_summary: Option<String>,
+}
+
+impl EncodedMessageRecord {
+    pub fn as_insert(&self) -> NewMessageRecord<'_> {
+        NewMessageRecord {
+            id: &self.id,
+            session_id: &self.session_id,
+            role: &self.role,
+            content: &self.content,
+            tool_calls: self.tool_calls.as_deref(),
+            tool_call_id: self.tool_call_id.as_deref(),
+            token_usage_json: self.token_usage_json.as_deref(),
+            reasoning_content: self.reasoning_content.as_deref(),
+            follow_up_suggestions_json: self.follow_up_suggestions_json.as_deref(),
+            turn_summary: self.turn_summary.as_deref(),
+        }
+    }
+}
 
 /// Codec for session-related conversions
 pub struct SessionCodec;
@@ -65,42 +97,32 @@ impl SessionCodec {
         }
     }
 
-    /// Convert a domain Message to database-ready tuple
-    /// Returns: (id, session_id, role, content, tool_calls_json, tool_call_id, token_usage_json, reasoning_content, follow_up_suggestions_json)
+    /// Convert a domain Message to database-ready fields.
     pub fn message_to_record(
         message: &Message,
         id: &str,
         session_id: &str,
-    ) -> (
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) {
+    ) -> EncodedMessageRecord {
         match message {
-            Message::User { content } => (
-                id.to_string(),
-                session_id.to_string(),
-                "user".to_string(),
-                content.clone(),
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
+            Message::User { content } => EncodedMessageRecord {
+                id: id.to_string(),
+                session_id: session_id.to_string(),
+                role: "user".to_string(),
+                content: content.clone(),
+                tool_calls: None,
+                tool_call_id: None,
+                token_usage_json: None,
+                reasoning_content: None,
+                follow_up_suggestions_json: None,
+                turn_summary: None,
+            },
             Message::Assistant {
                 content,
                 tool_calls,
                 token_usage,
                 reasoning_content,
                 follow_up_suggestions,
-                turn_summary: _,
+                turn_summary,
             } => {
                 let tool_calls_json = tool_calls
                     .as_ref()
@@ -115,32 +137,38 @@ impl SessionCodec {
                 let follow_up_suggestions_json = follow_up_suggestions
                     .as_ref()
                     .and_then(|s| serde_json::to_string(s).ok());
-                (
-                    id.to_string(),
-                    session_id.to_string(),
-                    "assistant".to_string(),
-                    content.clone(),
-                    tool_calls_json,
-                    None,
+                EncodedMessageRecord {
+                    id: id.to_string(),
+                    session_id: session_id.to_string(),
+                    role: "assistant".to_string(),
+                    content: content.clone(),
+                    tool_calls: tool_calls_json,
+                    tool_call_id: None,
                     token_usage_json,
-                    reasoning,
+                    reasoning_content: reasoning,
                     follow_up_suggestions_json,
-                )
+                    turn_summary: turn_summary
+                        .as_ref()
+                        .map(|value| value.trim())
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                }
             }
             Message::Tool {
                 tool_call_id,
                 output,
-            } => (
-                id.to_string(),
-                session_id.to_string(),
-                "tool".to_string(),
-                output.clone(),
-                None,
-                Some(tool_call_id.clone()),
-                None,
-                None,
-                None,
-            ),
+            } => EncodedMessageRecord {
+                id: id.to_string(),
+                session_id: session_id.to_string(),
+                role: "tool".to_string(),
+                content: output.clone(),
+                tool_calls: None,
+                tool_call_id: Some(tool_call_id.clone()),
+                token_usage_json: None,
+                reasoning_content: None,
+                follow_up_suggestions_json: None,
+                turn_summary: None,
+            },
         }
     }
 
@@ -247,18 +275,17 @@ mod tests {
         let msg = Message::User {
             content: "Hello".to_string(),
         };
-        let (id, session_id, role, content, tool_calls, tool_call_id, tok, reasoning, follow_up) =
-            SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
+        let record = SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
 
-        assert_eq!(id, "msg-1");
-        assert_eq!(session_id, "sess-1");
-        assert_eq!(role, "user");
-        assert_eq!(content, "Hello");
-        assert!(tool_calls.is_none());
-        assert!(tool_call_id.is_none());
-        assert!(tok.is_none());
-        assert!(reasoning.is_none());
-        assert!(follow_up.is_none());
+        assert_eq!(record.id, "msg-1");
+        assert_eq!(record.session_id, "sess-1");
+        assert_eq!(record.role, "user");
+        assert_eq!(record.content, "Hello");
+        assert!(record.tool_calls.is_none());
+        assert!(record.tool_call_id.is_none());
+        assert!(record.token_usage_json.is_none());
+        assert!(record.reasoning_content.is_none());
+        assert!(record.follow_up_suggestions_json.is_none());
     }
 
     #[test]
@@ -277,18 +304,17 @@ mod tests {
             turn_summary: None,
         };
 
-        let (_, _, role, content, tool_calls_json, _, tok, reasoning, follow_up) =
-            SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
+        let record = SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
 
-        assert_eq!(role, "assistant");
-        assert_eq!(content, "Let me read that file");
-        assert!(tool_calls_json.is_some());
-        assert!(tok.is_none());
-        assert!(reasoning.is_none());
-        assert!(follow_up.is_none());
+        assert_eq!(record.role, "assistant");
+        assert_eq!(record.content, "Let me read that file");
+        assert!(record.tool_calls.is_some());
+        assert!(record.token_usage_json.is_none());
+        assert!(record.reasoning_content.is_none());
+        assert!(record.follow_up_suggestions_json.is_none());
 
         // Verify we can parse it back
-        let parsed = SessionCodec::parse_tool_calls(&tool_calls_json.unwrap());
+        let parsed = SessionCodec::parse_tool_calls(&record.tool_calls.unwrap());
         assert!(parsed.is_some());
         assert_eq!(parsed.unwrap().len(), 1);
     }

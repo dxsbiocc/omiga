@@ -1,7 +1,7 @@
 use super::context::ContextAssembler;
 use super::creator::Creator;
 use super::director::ResearchDirector;
-use super::executor::Executor;
+use super::executor::{Executor, ExecutorDependencies, ExecutorStores};
 use super::permissions::PermissionManager;
 use super::registry::{write_default_agent_cards, AgentRegistry};
 use super::reviewer::Reviewer;
@@ -78,17 +78,19 @@ fn run_flow(layout: &WorkspaceLayout, request: &str) -> Result<String, String> {
     let registry = load_registry(layout)?;
     let director = ResearchDirector::new(registry.clone(), MockAgentRunner::new());
     let (plan, control_plane_report) = director.prepare(request)?;
-    let mut executor = Executor::new(
+    let mut executor = Executor::new(ExecutorDependencies {
         registry,
-        MockAgentRunner::new(),
-        Reviewer::new(),
-        PermissionManager::new(),
-        ContextAssembler::new(),
-        Box::new(JsonFileTaskGraphStore::new(&layout.graphs_dir)),
-        Box::new(JsonFileArtifactStore::new(&layout.artifacts_dir)),
-        Box::new(JsonFileEvidenceStore::new(&layout.evidence_dir)),
-        Box::new(JsonFileTraceStore::new(&layout.traces_dir)),
-    );
+        runner: MockAgentRunner::new(),
+        reviewer: Reviewer::new(),
+        permission_manager: PermissionManager::new(),
+        context_assembler: ContextAssembler::new(),
+        stores: ExecutorStores {
+            task_graph_store: Box::new(JsonFileTaskGraphStore::new(&layout.graphs_dir)),
+            artifact_store: Box::new(JsonFileArtifactStore::new(&layout.artifacts_dir)),
+            evidence_store: Box::new(JsonFileEvidenceStore::new(&layout.evidence_dir)),
+            trace_store: Box::new(JsonFileTraceStore::new(&layout.traces_dir)),
+        },
+    });
     let mut result = executor.execute(plan)?;
     result.control_plane_report = Some(control_plane_report);
     serde_json::to_string_pretty(&result).map_err(|err| err.to_string())

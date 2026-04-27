@@ -29,7 +29,6 @@ import {
   MenuItem,
   ListItemIcon,
   ListItemText,
-  Snackbar,
   Alert,
   CircularProgress,
 } from "@mui/material";
@@ -63,6 +62,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useSessionStore } from "../../state/sessionStore";
 import { useChatComposerStore } from "../../state/chatComposerStore";
 import { usePencilPalette } from "../../theme";
+import { NotificationToast } from "../NotificationToast";
 import { FileTreeSkeleton } from "./FileTreeSkeleton";
 
 export interface FileNode {
@@ -1439,20 +1439,14 @@ export function FileTree() {
         </DialogActions>
       </Dialog>
 
-      <Snackbar
+      <NotificationToast
         open={Boolean(snack)}
         autoHideDuration={2400}
         onClose={() => setSnack(null)}
-      >
-        <Alert
-          onClose={() => setSnack(null)}
-          severity={snack?.severity ?? "success"}
-          variant="filled"
-          sx={{ width: "100%" }}
-        >
-          {snack?.msg ?? ""}
-        </Alert>
-      </Snackbar>
+        severity={snack?.severity ?? "success"}
+        title={snack?.severity === "error" ? "文件操作失败" : "文件操作成功"}
+        message={snack?.msg ?? ""}
+      />
     </>
   );
 }

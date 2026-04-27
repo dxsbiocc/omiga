@@ -776,7 +776,7 @@ fn dedupe_matches(results: &mut Vec<MemoryQueryMatch>) {
 
 /// Phase-2 rerank: boost results whose content overlaps with the current session context
 /// (working memory excerpt), blending 70% original score + 30% context overlap.
-fn two_phase_rerank(results: &mut Vec<MemoryQueryMatch>, working_memory_excerpt: Option<&str>) {
+fn two_phase_rerank(results: &mut [MemoryQueryMatch], working_memory_excerpt: Option<&str>) {
     let Some(excerpt) = working_memory_excerpt else { return };
     let ctx_terms = crate::domain::pageindex::derive_query_terms(excerpt);
     if ctx_terms.is_empty() {

@@ -17,7 +17,7 @@ pub use cli::run_research_cli;
 pub use context::ContextAssembler;
 pub use creator::Creator;
 pub use director::ResearchDirector;
-pub use executor::Executor;
+pub use executor::{Executor, ExecutorDependencies, ExecutorStores};
 pub use intake::IntakeAnalyzer;
 pub use models::*;
 pub use permissions::PermissionManager;

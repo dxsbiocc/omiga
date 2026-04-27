@@ -123,15 +123,17 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     setError(null);
     try {
       await invoke("save_provider_config", {
-        name: currentProvider?.label ?? provider,
-        providerType: provider,
-        apiKey: apiKey.trim(),
-        model: model.trim() || currentProvider?.defaultModel || "",
-        baseUrl: baseUrl.trim() || null,
-        secretKey: null,
-        appId: null,
-        thinking: null,
-        setAsDefault: true,
+        request: {
+          name: currentProvider?.label ?? provider,
+          providerType: provider,
+          apiKey: apiKey.trim(),
+          model: model.trim() || currentProvider?.defaultModel || "",
+          baseUrl: baseUrl.trim() || null,
+          secretKey: null,
+          appId: null,
+          thinking: null,
+          setAsDefault: true,
+        },
       });
       await invoke("switch_provider", {
         name: currentProvider?.label ?? provider,

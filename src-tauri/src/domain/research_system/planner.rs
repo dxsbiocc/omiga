@@ -80,12 +80,7 @@ impl Planner {
             &["清洗", "process", "格式", "预处理", "normalize"],
         );
 
-        if matches!(intake.execution_route, ExecutionRoute::Solo) {
-            return build_simple_graph(user_request, &lowered, &intake);
-        }
-
-        build_complex_graph(
-            user_request,
+        let intent = ResearchIntentFlags {
             retrieval,
             analysis,
             visualization,
@@ -95,9 +90,27 @@ impl Planner {
             biology,
             method,
             processing,
-            &intake,
-        )
+        };
+
+        if matches!(intake.execution_route, ExecutionRoute::Solo) {
+            return build_simple_graph(user_request, &lowered, &intake);
+        }
+
+        build_complex_graph(user_request, intent, &intake)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResearchIntentFlags {
+    retrieval: bool,
+    analysis: bool,
+    visualization: bool,
+    report: bool,
+    code: bool,
+    debug: bool,
+    biology: bool,
+    method: bool,
+    processing: bool,
 }
 
 fn build_simple_graph(user_request: &str, lowered: &str, intake: &IntakeAssessment) -> TaskGraph {
@@ -143,18 +156,9 @@ fn build_simple_graph(user_request: &str, lowered: &str, intake: &IntakeAssessme
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_complex_graph(
     user_request: &str,
-    retrieval: bool,
-    analysis: bool,
-    visualization: bool,
-    report: bool,
-    code: bool,
-    debug: bool,
-    biology: bool,
-    method: bool,
-    processing: bool,
+    intent: ResearchIntentFlags,
     intake: &IntakeAssessment,
 ) -> TaskGraph {
     let mut tasks = Vec::new();
@@ -167,7 +171,7 @@ fn build_complex_graph(
         max_tool_calls: Some(8),
     };
 
-    if retrieval {
+    if intent.retrieval {
         let task = base_task(
             "retrieve-1",
             format!("Collect external evidence for: {}", user_request),
@@ -201,7 +205,7 @@ fn build_complex_graph(
         tasks.push(task);
     }
 
-    if processing {
+    if intent.processing {
         let task = base_task(
             "process-1",
             "Normalize upstream evidence or data into a comparable structure",
@@ -232,7 +236,7 @@ fn build_complex_graph(
     let analysis_dependencies = latest_dependencies.clone();
     let mut analysis_outputs = Vec::new();
 
-    if analysis {
+    if intent.analysis {
         let task = base_task(
             "analyze-1",
             "Analyze retrieved material and summarize applicability or trade-offs",
@@ -242,13 +246,13 @@ fn build_complex_graph(
         .with_expected_output(OutputContract {
             format: "json".to_string(),
             required_fields: vec!["analysis".to_string(), "conclusions".to_string()],
-            requires_evidence: retrieval,
+            requires_evidence: intent.retrieval,
             minimum_artifacts: 0,
             schema_hint: serde_json::json!({"analysis": "string", "conclusions": ["string"]}),
         })
         .with_verification(VerificationSpec {
             required_checks: vec!["conclusion_alignment".to_string()],
-            required_evidence_count: if retrieval { 1 } else { 0 },
+            required_evidence_count: if intent.retrieval { 1 } else { 0 },
             require_test_results: false,
             require_consistency_statement: true,
         });
@@ -260,7 +264,7 @@ fn build_complex_graph(
         tasks.push(task);
     }
 
-    if method {
+    if intent.method {
         let task = base_task(
             "method-1",
             "Recommend methods and explain when they apply",
@@ -270,13 +274,13 @@ fn build_complex_graph(
         .with_expected_output(OutputContract {
             format: "json".to_string(),
             required_fields: vec!["recommendation".to_string(), "tradeoffs".to_string()],
-            requires_evidence: retrieval,
+            requires_evidence: intent.retrieval,
             minimum_artifacts: 0,
             schema_hint: serde_json::json!({"recommendation": "string", "tradeoffs": ["string"]}),
         })
         .with_verification(VerificationSpec {
             required_checks: vec!["tradeoff_coverage".to_string()],
-            required_evidence_count: if retrieval { 1 } else { 0 },
+            required_evidence_count: if intent.retrieval { 1 } else { 0 },
             require_test_results: false,
             require_consistency_statement: true,
         });
@@ -288,7 +292,7 @@ fn build_complex_graph(
         tasks.push(task);
     }
 
-    if biology {
+    if intent.biology {
         let task = base_task(
             "biology-1",
             "Interpret the evidence from a biology domain perspective",
@@ -301,13 +305,13 @@ fn build_complex_graph(
                 "biological_interpretation".to_string(),
                 "hypotheses".to_string(),
             ],
-            requires_evidence: retrieval,
+            requires_evidence: intent.retrieval,
             minimum_artifacts: 0,
             schema_hint: serde_json::json!({"biological_interpretation": "string", "hypotheses": ["string"]}),
         })
         .with_verification(VerificationSpec {
             required_checks: vec!["hypothesis_boundary".to_string()],
-            required_evidence_count: if retrieval { 1 } else { 0 },
+            required_evidence_count: if intent.retrieval { 1 } else { 0 },
             require_test_results: false,
             require_consistency_statement: true,
         });
@@ -319,7 +323,7 @@ fn build_complex_graph(
         tasks.push(task);
     }
 
-    if code {
+    if intent.code {
         let code_dependencies = if analysis_outputs.is_empty() {
             analysis_dependencies.clone()
         } else {
@@ -360,7 +364,7 @@ fn build_complex_graph(
         tasks.push(task);
     }
 
-    if debug {
+    if intent.debug {
         let debug_dependencies = if analysis_outputs.is_empty() {
             analysis_dependencies.clone()
         } else {
@@ -401,7 +405,7 @@ fn build_complex_graph(
         tasks.push(task);
     }
 
-    if visualization {
+    if intent.visualization {
         let viz_dependencies = if analysis_outputs.is_empty() {
             analysis_dependencies.clone()
         } else {
@@ -434,7 +438,7 @@ fn build_complex_graph(
         tasks.push(task);
     }
 
-    if report || analysis_outputs.len() > 1 || tasks.len() > 1 {
+    if intent.report || analysis_outputs.len() > 1 || tasks.len() > 1 {
         let dependencies = if analysis_outputs.is_empty() {
             latest_dependencies.clone()
         } else {
@@ -449,13 +453,13 @@ fn build_complex_graph(
         .with_expected_output(OutputContract {
             format: "json".to_string(),
             required_fields: vec!["final_report".to_string(), "citations".to_string()],
-            requires_evidence: retrieval,
+            requires_evidence: intent.retrieval,
             minimum_artifacts: 0,
             schema_hint: serde_json::json!({"final_report": "string", "citations": ["string"]}),
         })
         .with_verification(VerificationSpec {
             required_checks: vec!["report_consistency".to_string()],
-            required_evidence_count: if retrieval { 1 } else { 0 },
+            required_evidence_count: if intent.retrieval { 1 } else { 0 },
             require_test_results: false,
             require_consistency_statement: true,
         });
@@ -481,8 +485,8 @@ fn build_complex_graph(
         final_output_contract: OutputContract {
             format: "json".to_string(),
             required_fields: vec!["final_report".to_string()],
-            requires_evidence: retrieval,
-            minimum_artifacts: if visualization { 1 } else { 0 },
+            requires_evidence: intent.retrieval,
+            minimum_artifacts: if intent.visualization { 1 } else { 0 },
             schema_hint: serde_json::json!({"final_report": "string"}),
         },
         execution_budget,

@@ -320,13 +320,15 @@ export function ProviderManager({
       // Tauri maps camelCase keys to Rust snake_case. Pass explicit booleans for Moonshot/Custom so
       // `thinking` is never omitted when false (Some(false) in Rust).
       await invoke("save_provider_config", {
-        name: formName.trim(),
-        providerType: formProviderType,
-        apiKey: apiKeyToSave,
-        model: formModel.trim(),
-        baseUrl: formBaseUrl.trim() || undefined,
-        setAsDefault: formSetAsDefault,
-        thinking: providerSupportsThinking(formProviderType) ? formThinking : null,
+        request: {
+          name: formName.trim(),
+          providerType: formProviderType,
+          apiKey: apiKeyToSave,
+          model: formModel.trim(),
+          baseUrl: formBaseUrl.trim() || undefined,
+          setAsDefault: formSetAsDefault,
+          thinking: providerSupportsThinking(formProviderType) ? formThinking : null,
+        },
       });
 
       await loadProviders();

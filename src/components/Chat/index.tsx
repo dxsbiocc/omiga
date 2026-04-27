@@ -23,7 +23,6 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
-  Snackbar,
   CircularProgress,
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
@@ -58,6 +57,7 @@ import {
 } from "../../state";
 import { Terminal } from "../Terminal";
 import { OmigaLogo } from "../OmigaLogo";
+import { NotificationToast } from "../NotificationToast";
 import {
   AssistantTraceItem,
   LiveIntermediateTrace,
@@ -6451,44 +6451,28 @@ export function Chat({ sessionId }: ChatProps) {
         </DialogActions>
       </Dialog>
 
-      <Snackbar
+      <NotificationToast
         open={copySuccessToast}
         autoHideDuration={3000}
-        onClose={(_, reason) => {
-          if (reason === "clickaway") return;
+        onClose={() => {
           setCopySuccessToast(false);
         }}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-        sx={{ zIndex: (t) => t.zIndex.snackbar + 1 }}
-      >
-        <Alert
-          onClose={() => setCopySuccessToast(false)}
-          severity="success"
-          variant="filled"
-          sx={{ width: "100%", maxWidth: 560 }}
-        >
-          已复制到剪贴板
-        </Alert>
-      </Snackbar>
+        severity="success"
+        title="复制成功"
+        message="已复制到剪贴板"
+        zIndexOffset={1}
+      />
 
-      <Snackbar
+      <NotificationToast
         open={Boolean(bgToast)}
         autoHideDuration={7000}
-        onClose={(_, reason) => {
-          if (reason === "clickaway") return;
+        onClose={() => {
           setBgToast(null);
         }}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-      >
-        <Alert
-          onClose={() => setBgToast(null)}
-          severity="info"
-          variant="filled"
-          sx={{ width: "100%", maxWidth: 560 }}
-        >
-          {bgToast}
-        </Alert>
-      </Snackbar>
+        severity="info"
+        title="后台任务通知"
+        message={bgToast}
+      />
 
       <BackgroundAgentTranscriptDrawer
         open={bgTranscriptTaskId !== null}
@@ -6498,26 +6482,18 @@ export function Chat({ sessionId }: ChatProps) {
         taskLabel={bgTranscriptLabel}
       />
 
-      <Snackbar
+      <NotificationToast
         key={pathToastKey}
         open={Boolean(pathRequiredToast)}
         autoHideDuration={5000}
-        onClose={(_, reason) => {
-          if (reason === "clickaway") return;
+        onClose={() => {
           setPathRequiredToast(null);
         }}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-        sx={{ zIndex: (t) => t.zIndex.snackbar + 1 }}
-      >
-        <Alert
-          onClose={() => setPathRequiredToast(null)}
-          severity="warning"
-          variant="filled"
-          sx={{ width: "100%", maxWidth: 560 }}
-        >
-          {pathRequiredToast}
-        </Alert>
-      </Snackbar>
+        severity="warning"
+        title="需要选择工作目录"
+        message={pathRequiredToast}
+        zIndexOffset={1}
+      />
     </Box>
   );
 }

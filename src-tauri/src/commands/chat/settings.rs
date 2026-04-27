@@ -5,6 +5,7 @@ use super::subagent::persist_background_agent_task_snapshot;
 use super::{get_llm_config, CommandResult};
 use crate::app_state::OmigaAppState;
 use crate::domain::agents::background::{BackgroundAgentStatus, BackgroundAgentTask};
+use crate::domain::persistence::NewOrchestrationEventRecord;
 use crate::domain::session::Message;
 use crate::errors::{ApiError, ChatError, OmigaError};
 use crate::llm::{create_client, load_config_from_env, LlmConfig, LlmProvider};
@@ -15,9 +16,9 @@ use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
-#[tauri::command]
-pub async fn set_llm_config(
-    state: State<'_, OmigaAppState>,
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetLlmConfigRequest {
     provider: String,
     api_key: String,
     secret_key: Option<String>,
@@ -25,31 +26,51 @@ pub async fn set_llm_config(
     model: Option<String>,
     base_url: Option<String>,
     thinking: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLlmSettingsRequest {
+    provider: String,
+    api_key: String,
+    secret_key: Option<String>,
+    app_id: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+    thinking: Option<bool>,
+    timeout: Option<u64>,
+}
+
+#[tauri::command]
+pub async fn set_llm_config(
+    state: State<'_, OmigaAppState>,
+    request: SetLlmConfigRequest,
 ) -> CommandResult<()> {
-    let provider_enum = provider
+    let provider_enum = request
+        .provider
         .parse::<LlmProvider>()
         .map_err(|e| OmigaError::Config(format!("Invalid provider: {}", e)))?;
 
-    let mut config = LlmConfig::new(provider_enum, api_key);
+    let mut config = LlmConfig::new(provider_enum, request.api_key);
 
     // Apply optional settings
-    if let Some(secret) = secret_key {
+    if let Some(secret) = request.secret_key {
         config.secret_key = Some(secret);
     }
-    if let Some(id) = app_id {
+    if let Some(id) = request.app_id {
         config.app_id = Some(id);
     }
-    if let Some(m) = model {
+    if let Some(m) = request.model {
         config.model = m;
     }
-    if let Some(url) = base_url {
+    if let Some(url) = request.base_url {
         config.base_url = Some(url);
     }
     // Moonshot/Custom: always keep an explicit bool in memory (default false) so runtime matches API.
     // DeepSeek and others do not use `thinking`.
     match provider_enum {
         crate::llm::LlmProvider::Moonshot | crate::llm::LlmProvider::Custom => {
-            config.thinking = Some(thinking.unwrap_or(false));
+            config.thinking = Some(request.thinking.unwrap_or(false));
         }
         _ => {
             config.thinking = None;
@@ -69,26 +90,21 @@ pub async fn set_llm_config(
 #[tauri::command]
 pub async fn save_llm_settings_to_config(
     state: State<'_, OmigaAppState>,
-    provider: String,
-    api_key: String,
-    secret_key: Option<String>,
-    app_id: Option<String>,
-    model: Option<String>,
-    base_url: Option<String>,
-    thinking: Option<bool>,
-    timeout: Option<u64>,
+    request: SaveLlmSettingsRequest,
 ) -> CommandResult<()> {
-    let provider_enum = provider
+    let provider_enum = request
+        .provider
         .parse::<LlmProvider>()
         .map_err(|e| OmigaError::Config(format!("Invalid provider: {}", e)))?;
 
-    let model_str = model
+    let model_str = request
+        .model
         .as_ref()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| provider_enum.default_model().to_string());
 
-    let sk_opt = secret_key.and_then(|s| {
+    let sk_opt = request.secret_key.and_then(|s| {
         let t = s.trim();
         if t.is_empty() {
             None
@@ -96,7 +112,7 @@ pub async fn save_llm_settings_to_config(
             Some(t.to_string())
         }
     });
-    let aid_opt = app_id.and_then(|s| {
+    let aid_opt = request.app_id.and_then(|s| {
         let t = s.trim();
         if t.is_empty() {
             None
@@ -104,7 +120,7 @@ pub async fn save_llm_settings_to_config(
             Some(t.to_string())
         }
     });
-    let bu_opt = base_url.and_then(|s| {
+    let bu_opt = request.base_url.and_then(|s| {
         let t = s.trim();
         if t.is_empty() {
             None
@@ -127,14 +143,14 @@ pub async fn save_llm_settings_to_config(
     let prev_thinking = providers.get(&entry_key).and_then(|p| p.thinking);
     let thinking_resolved = match provider_enum {
         crate::llm::LlmProvider::Moonshot | crate::llm::LlmProvider::Custom => {
-            thinking.or(prev_thinking).or(Some(false))
+            request.thinking.or(prev_thinking).or(Some(false))
         }
         _ => None,
     };
 
     let provider_cfg = crate::llm::config::ProviderConfig {
-        provider_type: provider,
-        api_key: Some(api_key.clone()),
+        provider_type: request.provider,
+        api_key: Some(request.api_key.clone()),
         secret_key: sk_opt.clone(),
         app_id: aid_opt.clone(),
         base_url: bu_opt.clone(),
@@ -154,7 +170,7 @@ pub async fn save_llm_settings_to_config(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    if let Some(t) = timeout {
+    if let Some(t) = request.timeout {
         let mut global = config_file.settings.unwrap_or_default();
         global.timeout = Some(t);
         config_file.settings = Some(global);
@@ -164,13 +180,13 @@ pub async fn save_llm_settings_to_config(
         .map_err(|e| OmigaError::Config(format!("Failed to save config: {}", e)))?;
     invalidate_config_file_cache(&state).await;
 
-    let mut config = LlmConfig::new(provider_enum, api_key);
+    let mut config = LlmConfig::new(provider_enum, request.api_key);
     config.model = model_str;
     config.secret_key = sk_opt;
     config.app_id = aid_opt;
     config.base_url = bu_opt;
     config.thinking = thinking_resolved;
-    if let Some(t) = timeout {
+    if let Some(t) = request.timeout {
         config.timeout_secs = t;
     }
 
@@ -870,16 +886,17 @@ async fn append_mock_event(
     task_id: Option<&str>,
     payload: Value,
 ) -> Result<(), OmigaError> {
-    repo.append_orchestration_event(
+    let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+    repo.append_orchestration_event(NewOrchestrationEventRecord {
         session_id,
-        Some("mock-round"),
-        None,
+        round_id: Some("mock-round"),
+        message_id: None,
         mode,
         event_type,
         phase,
         task_id,
-        &serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
-    )
+        payload_json: &payload_json,
+    })
     .await
     .map_err(|e| OmigaError::Persistence(e.to_string()))
 }

@@ -330,10 +330,11 @@ fn extract_urls_from_text(text: &str) -> Vec<String> {
     let mut urls = Vec::new();
     for word in text.split_whitespace() {
         let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != ':' && c != '/' && c != '.' && c != '-' && c != '_' && c != '?'  && c != '=' && c != '&' && c != '#');
-        if clean.starts_with("https://") || clean.starts_with("http://") {
-            if clean.len() > 12 && !urls.contains(&clean.to_string()) {
-                urls.push(clean.to_string());
-            }
+        if (clean.starts_with("https://") || clean.starts_with("http://"))
+            && clean.len() > 12
+            && !urls.contains(&clean.to_string())
+        {
+            urls.push(clean.to_string());
         }
         if urls.len() >= 10 {
             break;

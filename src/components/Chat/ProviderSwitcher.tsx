@@ -18,8 +18,6 @@ import {
   ListItemIcon,
   ListItemText,
   CircularProgress,
-  Snackbar,
-  Alert,
   alpha,
   useTheme,
 } from "@mui/material";
@@ -28,6 +26,7 @@ import {
   RadioButtonUnchecked,
   Settings,
 } from "@mui/icons-material";
+import { NotificationToast } from "../NotificationToast";
 
 interface ProviderConfigEntry {
   name: string;
@@ -371,29 +370,23 @@ export function ProviderSwitcher({
         </Box>
       </Menu>
 
-      {/* Error Snackbar */}
-      <Snackbar
+      <NotificationToast
         open={!!error}
         autoHideDuration={6000}
         onClose={() => setError(null)}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-      >
-        <Alert severity="error" onClose={() => setError(null)}>
-          {error}
-        </Alert>
-      </Snackbar>
+        severity="error"
+        title="切换失败"
+        message={error}
+      />
 
-      {/* Success Snackbar */}
-      <Snackbar
+      <NotificationToast
         open={!!success}
         autoHideDuration={3000}
         onClose={() => setSuccess(null)}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-      >
-        <Alert severity="success" onClose={() => setSuccess(null)}>
-          {success}
-        </Alert>
-      </Snackbar>
+        severity="success"
+        title="模型配置已切换"
+        message={success}
+      />
     </Box>
   );
 }

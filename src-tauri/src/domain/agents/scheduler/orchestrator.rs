@@ -21,33 +21,38 @@ use tauri::{Emitter, Manager};
 
 use crate::app_state::OmigaAppState;
 use crate::domain::agents::reviewer_verdict::parse_reviewer_verdict;
+use crate::domain::persistence::NewOrchestrationEventRecord;
 use crate::domain::tools::WebSearchApiKeys;
+
+struct RuntimeOrchestrationEvent<'a> {
+    session_id: &'a str,
+    round_id: Option<&'a str>,
+    mode: Option<&'a str>,
+    event_type: &'a str,
+    phase: Option<&'a str>,
+    task_id: Option<&'a str>,
+    payload: serde_json::Value,
+}
 
 async fn append_orchestration_runtime_event(
     repo: &crate::domain::persistence::SessionRepository,
-    session_id: &str,
-    round_id: Option<&str>,
-    mode: Option<&str>,
-    event_type: &str,
-    phase: Option<&str>,
-    task_id: Option<&str>,
-    payload: serde_json::Value,
+    event: RuntimeOrchestrationEvent<'_>,
 ) {
-    let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+    let payload_json = serde_json::to_string(&event.payload).unwrap_or_else(|_| "{}".to_string());
     if let Err(e) = repo
-        .append_orchestration_event(
-            session_id,
-            round_id,
-            None,
-            mode,
-            event_type,
-            phase,
-            task_id,
-            &payload_json,
-        )
+        .append_orchestration_event(NewOrchestrationEventRecord {
+            session_id: event.session_id,
+            round_id: event.round_id,
+            message_id: None,
+            mode: event.mode,
+            event_type: event.event_type,
+            phase: event.phase,
+            task_id: event.task_id,
+            payload_json: &payload_json,
+        })
         .await
     {
-        tracing::warn!(target: "omiga::orchestration_events", session_id, event_type, error = %e, "append_orchestration_runtime_event failed");
+        tracing::warn!(target: "omiga::orchestration_events", session_id = event.session_id, event_type = event.event_type, error = %e, "append_orchestration_runtime_event failed");
     }
 }
 
@@ -361,29 +366,33 @@ impl AgentOrchestrator {
         let _ = team_state::write_state(project_root, &team_st).await;
         append_orchestration_runtime_event(
             repo,
-            session_id,
-            Some(runtime.round_id()),
-            Some(orchestration_mode),
-            "phase_changed",
-            Some("executing"),
-            None,
-            serde_json::json!({ "planId": plan_id }),
+            RuntimeOrchestrationEvent {
+                session_id,
+                round_id: Some(runtime.round_id()),
+                mode: Some(orchestration_mode),
+                event_type: "phase_changed",
+                phase: Some("executing"),
+                task_id: None,
+                payload: serde_json::json!({ "planId": plan_id }),
+            },
         )
         .await;
         append_orchestration_runtime_event(
             repo,
-            session_id,
-            Some(runtime.round_id()),
-            Some(orchestration_mode),
-            "executor_started",
-            Some("executing"),
-            None,
-            serde_json::json!({
-                "planId": plan_id,
-                "entryAgentType": plan.entry_agent_type.clone(),
-                "executionSupervisorAgentType": plan.execution_supervisor_agent_type.clone(),
-                "taskCount": plan.subtasks.len(),
-            }),
+            RuntimeOrchestrationEvent {
+                session_id,
+                round_id: Some(runtime.round_id()),
+                mode: Some(orchestration_mode),
+                event_type: "executor_started",
+                phase: Some("executing"),
+                task_id: None,
+                payload: serde_json::json!({
+                    "planId": plan_id,
+                    "entryAgentType": plan.entry_agent_type.clone(),
+                    "executionSupervisorAgentType": plan.execution_supervisor_agent_type.clone(),
+                    "taskCount": plan.subtasks.len(),
+                }),
+            },
         )
         .await;
 
@@ -479,24 +488,28 @@ impl AgentOrchestrator {
                     let _ = team_state::write_state(project_root, &team_st).await;
                     append_orchestration_runtime_event(
                         repo,
-                        session_id,
-                        Some(runtime.round_id()),
-                        Some(orchestration_mode),
-                        "phase_changed",
-                        Some("verifying"),
-                        None,
-                        serde_json::json!({ "group": group }),
+                        RuntimeOrchestrationEvent {
+                            session_id,
+                            round_id: Some(runtime.round_id()),
+                            mode: Some(orchestration_mode),
+                            event_type: "phase_changed",
+                            phase: Some("verifying"),
+                            task_id: None,
+                            payload: serde_json::json!({ "group": group }),
+                        },
                     )
                     .await;
                     append_orchestration_runtime_event(
                         repo,
-                        session_id,
-                        Some(runtime.round_id()),
-                        Some(orchestration_mode),
-                        "verification_started",
-                        Some("verifying"),
-                        None,
-                        serde_json::json!({ "group": group }),
+                        RuntimeOrchestrationEvent {
+                            session_id,
+                            round_id: Some(runtime.round_id()),
+                            mode: Some(orchestration_mode),
+                            event_type: "verification_started",
+                            phase: Some("verifying"),
+                            task_id: None,
+                            payload: serde_json::json!({ "group": group }),
+                        },
                     )
                     .await;
                     self.log(&mut result, None, "[Team] 进入验证阶段", LogLevel::Info);
@@ -561,20 +574,25 @@ impl AgentOrchestrator {
                     let message_id = uuid::Uuid::new_v4().to_string();
 
                     match crate::commands::chat::spawn_background_agent(
-                        app,
-                        &message_id,
-                        session_id,
-                        Some(plan_id.as_str()),
-                        &tool_results_dir,
-                        effective_root,
-                        None, // session_todos
-                        None, // session_agent_tasks
+                        crate::commands::chat::BackgroundAgentRequest {
+app,
+message_id: &message_id,
+session_id,
+plan_id: Some(plan_id.as_str()),
+tool_results_dir: &tool_results_dir,
+effective_root,
+session_todos: None,
+session_agent_tasks: // session_todos
+                        None,
+args: // session_agent_tasks
                         &agent_args,
-                        runtime,
-                        1, // subagent_execute_depth
+runtime,
+subagent_execute_depth: 1,
+web_search_api_keys: // subagent_execute_depth
                         web_search_keys.clone(),
-                        skill_cache.clone(),
-                        agent_def,
+skill_cache: skill_cache.clone(),
+agent_def,
+},
                     )
                     .await
                     {
@@ -605,38 +623,42 @@ impl AgentOrchestrator {
                             );
                             append_orchestration_runtime_event(
                                 repo,
-                                session_id,
-                                Some(runtime.round_id()),
-                                Some(orchestration_mode),
-                                "worker_started",
-                                Some("executing"),
-                                Some(task_id_str),
-                                serde_json::json!({
-                                    "planId": plan_id,
-                                    "agentType": subtask.agent_type,
-                                    "supervisorAgentType": subtask.supervisor_agent_type,
-                                    "stage": subtask_stage_label(subtask),
-                                    "description": subtask.description,
-                                    "backgroundTaskId": bg_task_id,
-                                }),
+                                RuntimeOrchestrationEvent {
+                                    session_id,
+                                    round_id: Some(runtime.round_id()),
+                                    mode: Some(orchestration_mode),
+                                    event_type: "worker_started",
+                                    phase: Some("executing"),
+                                    task_id: Some(task_id_str),
+                                    payload: serde_json::json!({
+                                        "planId": plan_id,
+                                        "agentType": subtask.agent_type,
+                                        "supervisorAgentType": subtask.supervisor_agent_type,
+                                        "stage": subtask_stage_label(subtask),
+                                        "description": subtask.description,
+                                        "backgroundTaskId": bg_task_id,
+                                    }),
+                                },
                             )
                             .await;
                             append_orchestration_runtime_event(
                                 repo,
-                                session_id,
-                                Some(runtime.round_id()),
-                                Some(orchestration_mode),
-                                "executor_child_started",
-                                Some("executing"),
-                                Some(task_id_str),
-                                serde_json::json!({
-                                    "planId": plan_id,
-                                    "agentType": subtask.agent_type,
-                                    "supervisorAgentType": subtask.supervisor_agent_type,
-                                    "stage": subtask_stage_label(subtask),
-                                    "description": subtask.description,
-                                    "backgroundTaskId": bg_task_id,
-                                }),
+                                RuntimeOrchestrationEvent {
+                                    session_id,
+                                    round_id: Some(runtime.round_id()),
+                                    mode: Some(orchestration_mode),
+                                    event_type: "executor_child_started",
+                                    phase: Some("executing"),
+                                    task_id: Some(task_id_str),
+                                    payload: serde_json::json!({
+                                        "planId": plan_id,
+                                        "agentType": subtask.agent_type,
+                                        "supervisorAgentType": subtask.supervisor_agent_type,
+                                        "stage": subtask_stage_label(subtask),
+                                        "description": subtask.description,
+                                        "backgroundTaskId": bg_task_id,
+                                    }),
+                                },
                             )
                             .await;
                             bg_task_ids.push((task_id_str.clone(), bg_task_id));
@@ -668,39 +690,43 @@ impl AgentOrchestrator {
                             );
                             append_orchestration_runtime_event(
                                 repo,
-                                session_id,
-                                Some(runtime.round_id()),
-                                Some(orchestration_mode),
-                                "worker_launch_failed",
-                                Some("executing"),
-                                Some(task_id_str),
-                                serde_json::json!({
-                                    "planId": plan_id,
-                                    "agentType": subtask.agent_type,
-                                    "supervisorAgentType": subtask.supervisor_agent_type,
-                                    "stage": subtask_stage_label(subtask),
-                                    "description": subtask.description,
-                                    "error": e,
-                                }),
+                                RuntimeOrchestrationEvent {
+                                    session_id,
+                                    round_id: Some(runtime.round_id()),
+                                    mode: Some(orchestration_mode),
+                                    event_type: "worker_launch_failed",
+                                    phase: Some("executing"),
+                                    task_id: Some(task_id_str),
+                                    payload: serde_json::json!({
+                                        "planId": plan_id,
+                                        "agentType": subtask.agent_type,
+                                        "supervisorAgentType": subtask.supervisor_agent_type,
+                                        "stage": subtask_stage_label(subtask),
+                                        "description": subtask.description,
+                                        "error": e,
+                                    }),
+                                },
                             )
                             .await;
                             append_orchestration_runtime_event(
                                 repo,
-                                session_id,
-                                Some(runtime.round_id()),
-                                Some(orchestration_mode),
-                                "executor_child_failed",
-                                Some("executing"),
-                                Some(task_id_str),
-                                serde_json::json!({
-                                    "planId": plan_id,
-                                    "agentType": subtask.agent_type,
-                                    "supervisorAgentType": subtask.supervisor_agent_type,
-                                    "stage": subtask_stage_label(subtask),
-                                    "description": subtask.description,
-                                    "error": e,
-                                    "reason": "launch_failed",
-                                }),
+                                RuntimeOrchestrationEvent {
+                                    session_id,
+                                    round_id: Some(runtime.round_id()),
+                                    mode: Some(orchestration_mode),
+                                    event_type: "executor_child_failed",
+                                    phase: Some("executing"),
+                                    task_id: Some(task_id_str),
+                                    payload: serde_json::json!({
+                                        "planId": plan_id,
+                                        "agentType": subtask.agent_type,
+                                        "supervisorAgentType": subtask.supervisor_agent_type,
+                                        "stage": subtask_stage_label(subtask),
+                                        "description": subtask.description,
+                                        "error": e,
+                                        "reason": "launch_failed",
+                                    }),
+                                },
                             )
                             .await;
                             result.subtask_results.insert(
@@ -789,19 +815,21 @@ impl AgentOrchestrator {
                         .and_then(|(_, _, t)| subtask_stage_label(t));
                     append_orchestration_runtime_event(
                         repo,
-                        session_id,
-                        Some(runtime.round_id()),
-                        Some(orchestration_mode),
-                        "worker_cancelled",
-                        Some("executing"),
-                        Some(&sid),
-                        serde_json::json!({
-                            "planId": plan_id,
-                            "agentType": subtask_result.agent_type.clone(),
-                            "supervisorAgentType": cancelled_supervisor,
-                            "stage": cancelled_stage,
-                            "error": subtask_result.error.clone(),
-                        }),
+                        RuntimeOrchestrationEvent {
+                            session_id,
+                            round_id: Some(runtime.round_id()),
+                            mode: Some(orchestration_mode),
+                            event_type: "worker_cancelled",
+                            phase: Some("executing"),
+                            task_id: Some(&sid),
+                            payload: serde_json::json!({
+                                "planId": plan_id,
+                                "agentType": subtask_result.agent_type.clone(),
+                                "supervisorAgentType": cancelled_supervisor,
+                                "stage": cancelled_stage,
+                                "error": subtask_result.error.clone(),
+                            }),
+                        },
                     )
                     .await;
                     result.subtask_results.insert(sid.clone(), subtask_result);
@@ -875,20 +903,22 @@ impl AgentOrchestrator {
                         let new_msg_id = uuid::Uuid::new_v4().to_string();
                         let next_attempt = attempt + 1;
                         match crate::commands::chat::spawn_background_agent(
-                            app,
-                            &new_msg_id,
-                            session_id,
-                            Some(plan_id.as_str()),
-                            &tool_results_dir,
-                            effective_root,
-                            None,
-                            None,
-                            &agent_args,
-                            runtime,
-                            1,
-                            web_search_keys.clone(),
-                            skill_cache.clone(),
-                            agent_def,
+                            crate::commands::chat::BackgroundAgentRequest {
+                                app,
+                                message_id: &new_msg_id,
+                                session_id,
+                                plan_id: Some(plan_id.as_str()),
+                                tool_results_dir: &tool_results_dir,
+                                effective_root,
+                                session_todos: None,
+                                session_agent_tasks: None,
+                                args: &agent_args,
+                                runtime,
+                                subagent_execute_depth: 1,
+                                web_search_api_keys: web_search_keys.clone(),
+                                skill_cache: skill_cache.clone(),
+                                agent_def,
+                            },
                         )
                         .await
                         {
@@ -936,41 +966,45 @@ impl AgentOrchestrator {
                                 );
                                 append_orchestration_runtime_event(
                                     repo,
-                                    session_id,
-                                    Some(runtime.round_id()),
-                                    Some(orchestration_mode),
-                                    "worker_launch_failed",
-                                    Some("executing"),
-                                    Some(&sid),
-                                    serde_json::json!({
-                                        "planId": plan_id,
-                                        "agentType": subtask.agent_type,
-                                        "supervisorAgentType": subtask.supervisor_agent_type,
-                                        "stage": subtask_stage_label(&subtask),
-                                        "description": subtask.description,
-                                        "error": e,
-                                        "attempt": next_attempt,
-                                    }),
+                                    RuntimeOrchestrationEvent {
+                                        session_id,
+                                        round_id: Some(runtime.round_id()),
+                                        mode: Some(orchestration_mode),
+                                        event_type: "worker_launch_failed",
+                                        phase: Some("executing"),
+                                        task_id: Some(&sid),
+                                        payload: serde_json::json!({
+                                            "planId": plan_id,
+                                            "agentType": subtask.agent_type,
+                                            "supervisorAgentType": subtask.supervisor_agent_type,
+                                            "stage": subtask_stage_label(&subtask),
+                                            "description": subtask.description,
+                                            "error": e,
+                                            "attempt": next_attempt,
+                                        }),
+                                    },
                                 )
                                 .await;
                                 append_orchestration_runtime_event(
                                     repo,
-                                    session_id,
-                                    Some(runtime.round_id()),
-                                    Some(orchestration_mode),
-                                    "executor_child_failed",
-                                    Some("executing"),
-                                    Some(&sid),
-                                    serde_json::json!({
-                                        "planId": plan_id,
-                                        "agentType": subtask.agent_type,
-                                        "supervisorAgentType": subtask.supervisor_agent_type,
-                                        "stage": subtask_stage_label(&subtask),
-                                        "description": subtask.description,
-                                        "error": e,
-                                        "attempt": next_attempt,
-                                        "reason": "retry_launch_failed",
-                                    }),
+                                    RuntimeOrchestrationEvent {
+                                        session_id,
+                                        round_id: Some(runtime.round_id()),
+                                        mode: Some(orchestration_mode),
+                                        event_type: "executor_child_failed",
+                                        phase: Some("executing"),
+                                        task_id: Some(&sid),
+                                        payload: serde_json::json!({
+                                            "planId": plan_id,
+                                            "agentType": subtask.agent_type,
+                                            "supervisorAgentType": subtask.supervisor_agent_type,
+                                            "stage": subtask_stage_label(&subtask),
+                                            "description": subtask.description,
+                                            "error": e,
+                                            "attempt": next_attempt,
+                                            "reason": "retry_launch_failed",
+                                        }),
+                                    },
                                 )
                                 .await;
                                 result.subtask_results.insert(sid, subtask_result);
@@ -1003,68 +1037,74 @@ impl AgentOrchestrator {
                     persist_subtask!(&sid, "failed", attempt, None::<String>, Some(fail_err));
                     append_orchestration_runtime_event(
                         repo,
-                        session_id,
-                        Some(runtime.round_id()),
-                        Some(orchestration_mode),
-                        "worker_failed",
-                        Some("executing"),
-                        Some(&sid),
-                        serde_json::json!({
-                            "planId": plan_id,
-                            "agentType": subtask_result.agent_type.clone(),
-                            "supervisorAgentType": failed_supervisor.clone(),
-                            "stage": failed_stage.clone(),
-                            "description": failed_description.clone(),
-                            "error": subtask_result.error.clone(),
-                            "attempt": attempt,
-                        }),
+                        RuntimeOrchestrationEvent {
+                            session_id,
+                            round_id: Some(runtime.round_id()),
+                            mode: Some(orchestration_mode),
+                            event_type: "worker_failed",
+                            phase: Some("executing"),
+                            task_id: Some(&sid),
+                            payload: serde_json::json!({
+                                "planId": plan_id,
+                                "agentType": subtask_result.agent_type.clone(),
+                                "supervisorAgentType": failed_supervisor.clone(),
+                                "stage": failed_stage.clone(),
+                                "description": failed_description.clone(),
+                                "error": subtask_result.error.clone(),
+                                "attempt": attempt,
+                            }),
+                        },
                     )
                     .await;
                     append_orchestration_runtime_event(
                         repo,
-                        session_id,
-                        Some(runtime.round_id()),
-                        Some(orchestration_mode),
-                        "executor_child_failed",
-                        Some("executing"),
-                        Some(&sid),
-                        serde_json::json!({
-                            "planId": plan_id,
-                            "agentType": subtask_result.agent_type.clone(),
-                            "supervisorAgentType": failed_supervisor.clone(),
-                            "stage": failed_stage.clone(),
-                            "description": failed_description.clone(),
-                            "error": subtask_result.error.clone(),
-                            "attempt": attempt,
-                            "reason": "retries_exhausted",
-                        }),
+                        RuntimeOrchestrationEvent {
+                            session_id,
+                            round_id: Some(runtime.round_id()),
+                            mode: Some(orchestration_mode),
+                            event_type: "executor_child_failed",
+                            phase: Some("executing"),
+                            task_id: Some(&sid),
+                            payload: serde_json::json!({
+                                "planId": plan_id,
+                                "agentType": subtask_result.agent_type.clone(),
+                                "supervisorAgentType": failed_supervisor.clone(),
+                                "stage": failed_stage.clone(),
+                                "description": failed_description.clone(),
+                                "error": subtask_result.error.clone(),
+                                "attempt": attempt,
+                                "reason": "retries_exhausted",
+                            }),
+                        },
                     )
                     .await;
                     if executor_debug_rounds < MAX_EXECUTOR_DEBUG_ROUNDS && !cancel.is_cancelled() {
                         executor_debug_rounds += 1;
-                        let debug_result = run_executor_debug_attempt(
-                            app,
-                            runtime,
-                            repo,
-                            session_id,
-                            &plan_id,
-                            orchestration_mode,
-                            request,
-                            &tool_results_dir,
-                            web_search_keys.clone(),
-                            skill_cache.clone(),
-                            cancel.clone(),
-                            &sid,
-                            subtask_result.agent_type.as_deref(),
-                            &failed_description,
-                            subtask_result
-                                .error
-                                .as_deref()
-                                .unwrap_or("subtask failed after retries"),
-                            &blackboard.snapshot_markdown(),
-                            executor_debug_rounds,
-                        )
-                        .await;
+                        let blackboard_snapshot = blackboard.snapshot_markdown();
+                        let debug_result =
+                            run_executor_debug_attempt(ExecutorDebugAttemptRequest {
+                                app,
+                                runtime,
+                                repo,
+                                session_id,
+                                plan_id: &plan_id,
+                                orchestration_mode,
+                                request,
+                                tool_results_dir: &tool_results_dir,
+                                web_search_keys: web_search_keys.clone(),
+                                skill_cache: skill_cache.clone(),
+                                cancel: cancel.clone(),
+                                failed_subtask_id: &sid,
+                                failed_agent_type: subtask_result.agent_type.as_deref(),
+                                failed_description: &failed_description,
+                                failed_error: subtask_result
+                                    .error
+                                    .as_deref()
+                                    .unwrap_or("subtask failed after retries"),
+                                blackboard_snapshot: &blackboard_snapshot,
+                                debug_round: executor_debug_rounds,
+                            })
+                            .await;
                         if let Some(debug_result) = debug_result {
                             let debug_output = debug_result
                                 .output
@@ -1088,22 +1128,24 @@ impl AgentOrchestrator {
                     } else {
                         append_orchestration_runtime_event(
                             repo,
-                            session_id,
-                            Some(runtime.round_id()),
-                            Some(orchestration_mode),
-                            "executor_escalated",
-                            Some("executing"),
-                            Some(&sid),
-                            serde_json::json!({
-                                "planId": plan_id,
-                                "agentType": subtask_result.agent_type.clone(),
-                                "supervisorAgentType": failed_supervisor.clone(),
-                                "stage": failed_stage.clone(),
-                                "description": failed_description.clone(),
-                                "error": subtask_result.error.clone(),
-                                "reason": "debug_budget_exhausted",
-                                "debugRounds": executor_debug_rounds,
-                            }),
+                            RuntimeOrchestrationEvent {
+                                session_id,
+                                round_id: Some(runtime.round_id()),
+                                mode: Some(orchestration_mode),
+                                event_type: "executor_escalated",
+                                phase: Some("executing"),
+                                task_id: Some(&sid),
+                                payload: serde_json::json!({
+                                    "planId": plan_id,
+                                    "agentType": subtask_result.agent_type.clone(),
+                                    "supervisorAgentType": failed_supervisor.clone(),
+                                    "stage": failed_stage.clone(),
+                                    "description": failed_description.clone(),
+                                    "error": subtask_result.error.clone(),
+                                    "reason": "debug_budget_exhausted",
+                                    "debugRounds": executor_debug_rounds,
+                                }),
+                            },
                         )
                         .await;
                     }
@@ -1135,22 +1177,24 @@ impl AgentOrchestrator {
                         result.final_summary = format!("关键任务 {} 失败，中止执行", sid);
                         append_orchestration_runtime_event(
                             repo,
-                            session_id,
-                            Some(runtime.round_id()),
-                            Some(orchestration_mode),
-                            "executor_escalated",
-                            Some("executing"),
-                            Some(&sid),
-                            serde_json::json!({
-                                "planId": plan_id,
-                                "agentType": critical_agent,
-                                "supervisorAgentType": failed_supervisor,
-                                "stage": failed_stage,
-                                "description": failed_description,
-                                "error": critical_err.clone(),
-                                "reason": "critical_failure",
-                                "debugRounds": executor_debug_rounds,
-                            }),
+                            RuntimeOrchestrationEvent {
+                                session_id,
+                                round_id: Some(runtime.round_id()),
+                                mode: Some(orchestration_mode),
+                                event_type: "executor_escalated",
+                                phase: Some("executing"),
+                                task_id: Some(&sid),
+                                payload: serde_json::json!({
+                                    "planId": plan_id,
+                                    "agentType": critical_agent,
+                                    "supervisorAgentType": failed_supervisor,
+                                    "stage": failed_stage,
+                                    "description": failed_description,
+                                    "error": critical_err.clone(),
+                                    "reason": "critical_failure",
+                                    "debugRounds": executor_debug_rounds,
+                                }),
+                            },
                         )
                         .await;
                         return Ok(result);
@@ -1168,38 +1212,42 @@ impl AgentOrchestrator {
                         .unwrap_or_default();
                     append_orchestration_runtime_event(
                         repo,
-                        session_id,
-                        Some(runtime.round_id()),
-                        Some(orchestration_mode),
-                        "worker_completed",
-                        Some("executing"),
-                        Some(&sid),
-                        serde_json::json!({
-                            "planId": plan_id,
-                            "agentType": subtask_result.agent_type.clone(),
-                            "supervisorAgentType": completed_supervisor.clone(),
-                            "stage": completed_stage.clone(),
-                            "description": completed_description.clone(),
-                            "attempt": attempt,
-                        }),
+                        RuntimeOrchestrationEvent {
+                            session_id,
+                            round_id: Some(runtime.round_id()),
+                            mode: Some(orchestration_mode),
+                            event_type: "worker_completed",
+                            phase: Some("executing"),
+                            task_id: Some(&sid),
+                            payload: serde_json::json!({
+                                "planId": plan_id,
+                                "agentType": subtask_result.agent_type.clone(),
+                                "supervisorAgentType": completed_supervisor.clone(),
+                                "stage": completed_stage.clone(),
+                                "description": completed_description.clone(),
+                                "attempt": attempt,
+                            }),
+                        },
                     )
                     .await;
                     append_orchestration_runtime_event(
                         repo,
-                        session_id,
-                        Some(runtime.round_id()),
-                        Some(orchestration_mode),
-                        "executor_child_completed",
-                        Some("executing"),
-                        Some(&sid),
-                        serde_json::json!({
-                            "planId": plan_id,
-                            "agentType": subtask_result.agent_type.clone(),
-                            "supervisorAgentType": completed_supervisor,
-                            "stage": completed_stage,
-                            "description": completed_description,
-                            "attempt": attempt,
-                        }),
+                        RuntimeOrchestrationEvent {
+                            session_id,
+                            round_id: Some(runtime.round_id()),
+                            mode: Some(orchestration_mode),
+                            event_type: "executor_child_completed",
+                            phase: Some("executing"),
+                            task_id: Some(&sid),
+                            payload: serde_json::json!({
+                                "planId": plan_id,
+                                "agentType": subtask_result.agent_type.clone(),
+                                "supervisorAgentType": completed_supervisor,
+                                "stage": completed_stage,
+                                "description": completed_description,
+                                "attempt": attempt,
+                            }),
+                        },
                     )
                     .await;
                     if let (Some(agent_type), Some(output)) = (
@@ -1221,19 +1269,21 @@ impl AgentOrchestrator {
                             let verdict = parse_reviewer_verdict(agent_type, output);
                             append_orchestration_runtime_event(
                                 repo,
-                                session_id,
-                                Some(runtime.round_id()),
-                                Some(orchestration_mode),
-                                "reviewer_verdict",
-                                Some("verifying"),
-                                Some(&sid),
-                                serde_json::json!({
-                                    "planId": plan_id,
-                                    "agentType": agent_type,
-                                    "severity": format!("{:?}", verdict.severity),
-                                    "verdict": format!("{:?}", verdict.verdict),
-                                    "summary": verdict.summary,
-                                }),
+                                RuntimeOrchestrationEvent {
+                                    session_id,
+                                    round_id: Some(runtime.round_id()),
+                                    mode: Some(orchestration_mode),
+                                    event_type: "reviewer_verdict",
+                                    phase: Some("verifying"),
+                                    task_id: Some(&sid),
+                                    payload: serde_json::json!({
+                                        "planId": plan_id,
+                                        "agentType": agent_type,
+                                        "severity": format!("{:?}", verdict.severity),
+                                        "verdict": format!("{:?}", verdict.verdict),
+                                        "summary": verdict.summary,
+                                    }),
+                                },
                             )
                             .await;
                         }
@@ -1309,24 +1359,28 @@ impl AgentOrchestrator {
                 let _ = team_state::write_state(project_root, &team_st).await;
                 append_orchestration_runtime_event(
                     repo,
-                    session_id,
-                    Some(runtime.round_id()),
-                    Some(orchestration_mode),
-                    "phase_changed",
-                    Some("fixing"),
-                    None,
-                    serde_json::json!({ "round": fix_round }),
+                    RuntimeOrchestrationEvent {
+                        session_id,
+                        round_id: Some(runtime.round_id()),
+                        mode: Some(orchestration_mode),
+                        event_type: "phase_changed",
+                        phase: Some("fixing"),
+                        task_id: None,
+                        payload: serde_json::json!({ "round": fix_round }),
+                    },
                 )
                 .await;
                 append_orchestration_runtime_event(
                     repo,
-                    session_id,
-                    Some(runtime.round_id()),
-                    Some(orchestration_mode),
-                    "fix_started",
-                    Some("fixing"),
-                    None,
-                    serde_json::json!({ "round": fix_round }),
+                    RuntimeOrchestrationEvent {
+                        session_id,
+                        round_id: Some(runtime.round_id()),
+                        mode: Some(orchestration_mode),
+                        event_type: "fix_started",
+                        phase: Some("fixing"),
+                        task_id: None,
+                        payload: serde_json::json!({ "round": fix_round }),
+                    },
                 )
                 .await;
                 self.log(
@@ -1386,20 +1440,22 @@ impl AgentOrchestrator {
                 let fix_msg_id = uuid::Uuid::new_v4().to_string();
 
                 match crate::commands::chat::spawn_background_agent(
-                    app,
-                    &fix_msg_id,
-                    session_id,
-                    Some(plan_id.as_str()),
-                    &tool_results_dir,
-                    effective_root,
-                    None,
-                    None,
-                    &fix_agent_args,
-                    runtime,
-                    1,
-                    web_search_keys.clone(),
-                    skill_cache.clone(),
-                    fix_agent_def,
+                    crate::commands::chat::BackgroundAgentRequest {
+                        app,
+                        message_id: &fix_msg_id,
+                        session_id,
+                        plan_id: Some(plan_id.as_str()),
+                        tool_results_dir: &tool_results_dir,
+                        effective_root,
+                        session_todos: None,
+                        session_agent_tasks: None,
+                        args: &fix_agent_args,
+                        runtime,
+                        subagent_execute_depth: 1,
+                        web_search_api_keys: web_search_keys.clone(),
+                        skill_cache: skill_cache.clone(),
+                        agent_def: fix_agent_def,
+                    },
                 )
                 .await
                 {
@@ -1438,24 +1494,28 @@ impl AgentOrchestrator {
                         let _ = team_state::write_state(project_root, &team_st).await;
                         append_orchestration_runtime_event(
                             repo,
-                            session_id,
-                            Some(runtime.round_id()),
-                            Some(orchestration_mode),
-                            "phase_changed",
-                            Some("verifying"),
-                            None,
-                            serde_json::json!({ "round": fix_round }),
+                            RuntimeOrchestrationEvent {
+                                session_id,
+                                round_id: Some(runtime.round_id()),
+                                mode: Some(orchestration_mode),
+                                event_type: "phase_changed",
+                                phase: Some("verifying"),
+                                task_id: None,
+                                payload: serde_json::json!({ "round": fix_round }),
+                            },
                         )
                         .await;
                         append_orchestration_runtime_event(
                             repo,
-                            session_id,
-                            Some(runtime.round_id()),
-                            Some(orchestration_mode),
-                            "verification_started",
-                            Some("verifying"),
-                            None,
-                            serde_json::json!({ "round": fix_round }),
+                            RuntimeOrchestrationEvent {
+                                session_id,
+                                round_id: Some(runtime.round_id()),
+                                mode: Some(orchestration_mode),
+                                event_type: "verification_started",
+                                phase: Some("verifying"),
+                                task_id: None,
+                                payload: serde_json::json!({ "round": fix_round }),
+                            },
                         )
                         .await;
                         self.log(
@@ -1492,20 +1552,22 @@ impl AgentOrchestrator {
                         let reverify_msg_id = uuid::Uuid::new_v4().to_string();
 
                         match crate::commands::chat::spawn_background_agent(
-                            app,
-                            &reverify_msg_id,
-                            session_id,
-                            Some(plan_id.as_str()),
-                            &tool_results_dir,
-                            effective_root,
-                            None,
-                            None,
-                            &reverify_args,
-                            runtime,
-                            1,
-                            web_search_keys.clone(),
-                            skill_cache.clone(),
-                            reverify_agent_def,
+                            crate::commands::chat::BackgroundAgentRequest {
+                                app,
+                                message_id: &reverify_msg_id,
+                                session_id,
+                                plan_id: Some(plan_id.as_str()),
+                                tool_results_dir: &tool_results_dir,
+                                effective_root,
+                                session_todos: None,
+                                session_agent_tasks: None,
+                                args: &reverify_args,
+                                runtime,
+                                subagent_execute_depth: 1,
+                                web_search_api_keys: web_search_keys.clone(),
+                                skill_cache: skill_cache.clone(),
+                                agent_def: reverify_agent_def,
+                            },
                         )
                         .await
                         {
@@ -1591,24 +1653,28 @@ impl AgentOrchestrator {
             let _ = team_state::write_state(project_root, &team_st).await;
             append_orchestration_runtime_event(
                 repo,
-                session_id,
-                Some(runtime.round_id()),
-                Some(orchestration_mode),
-                "phase_changed",
-                Some("synthesizing"),
-                None,
-                serde_json::json!({ "planId": plan_id }),
+                RuntimeOrchestrationEvent {
+                    session_id,
+                    round_id: Some(runtime.round_id()),
+                    mode: Some(orchestration_mode),
+                    event_type: "phase_changed",
+                    phase: Some("synthesizing"),
+                    task_id: None,
+                    payload: serde_json::json!({ "planId": plan_id }),
+                },
             )
             .await;
             append_orchestration_runtime_event(
                 repo,
-                session_id,
-                Some(runtime.round_id()),
-                Some(orchestration_mode),
-                "synthesizing_started",
-                Some("synthesizing"),
-                None,
-                serde_json::json!({ "planId": plan_id }),
+                RuntimeOrchestrationEvent {
+                    session_id,
+                    round_id: Some(runtime.round_id()),
+                    mode: Some(orchestration_mode),
+                    event_type: "synthesizing_started",
+                    phase: Some("synthesizing"),
+                    task_id: None,
+                    payload: serde_json::json!({ "planId": plan_id }),
+                },
             )
             .await;
             self.log(
@@ -1632,44 +1698,69 @@ impl AgentOrchestrator {
     }
 }
 
-async fn run_executor_debug_attempt(
-    app: &tauri::AppHandle,
-    runtime: &crate::commands::chat::AgentLlmRuntime,
-    repo: &crate::domain::persistence::SessionRepository,
-    session_id: &str,
-    plan_id: &str,
-    orchestration_mode: &str,
-    request: &SchedulingRequest,
-    tool_results_dir: &std::path::Path,
+struct ExecutorDebugAttemptRequest<'a> {
+    app: &'a tauri::AppHandle,
+    runtime: &'a crate::commands::chat::AgentLlmRuntime,
+    repo: &'a crate::domain::persistence::SessionRepository,
+    session_id: &'a str,
+    plan_id: &'a str,
+    orchestration_mode: &'a str,
+    request: &'a SchedulingRequest,
+    tool_results_dir: &'a std::path::Path,
     web_search_keys: WebSearchApiKeys,
     skill_cache: std::sync::Arc<std::sync::Mutex<crate::domain::skills::SkillCacheMap>>,
     cancel: tokio_util::sync::CancellationToken,
-    failed_subtask_id: &str,
-    failed_agent_type: Option<&str>,
-    failed_description: &str,
-    failed_error: &str,
-    blackboard_snapshot: &str,
+    failed_subtask_id: &'a str,
+    failed_agent_type: Option<&'a str>,
+    failed_description: &'a str,
+    failed_error: &'a str,
+    blackboard_snapshot: &'a str,
     debug_round: u32,
+}
+
+async fn run_executor_debug_attempt(
+    request: ExecutorDebugAttemptRequest<'_>,
 ) -> Option<SubTaskResult> {
+    let ExecutorDebugAttemptRequest {
+        app,
+        runtime,
+        repo,
+        session_id,
+        plan_id,
+        orchestration_mode,
+        request,
+        tool_results_dir,
+        web_search_keys,
+        skill_cache,
+        cancel,
+        failed_subtask_id,
+        failed_agent_type,
+        failed_description,
+        failed_error,
+        blackboard_snapshot,
+        debug_round,
+    } = request;
     let debug_id = format!("executor-debug-{}-{}", debug_round, failed_subtask_id);
     append_orchestration_runtime_event(
         repo,
-        session_id,
-        Some(runtime.round_id()),
-        Some(orchestration_mode),
-        "executor_debug_started",
-        Some("debug"),
-        Some(&debug_id),
-        serde_json::json!({
-            "planId": plan_id,
-            "failedSubtaskId": failed_subtask_id,
-            "failedAgentType": failed_agent_type,
-            "failedDescription": failed_description,
-            "failedError": failed_error,
-            "debugRound": debug_round,
-            "supervisorAgentType": "executor",
-            "stage": "debug",
-        }),
+        RuntimeOrchestrationEvent {
+            session_id,
+            round_id: Some(runtime.round_id()),
+            mode: Some(orchestration_mode),
+            event_type: "executor_debug_started",
+            phase: Some("debug"),
+            task_id: Some(&debug_id),
+            payload: serde_json::json!({
+                "planId": plan_id,
+                "failedSubtaskId": failed_subtask_id,
+                "failedAgentType": failed_agent_type,
+                "failedDescription": failed_description,
+                "failedError": failed_error,
+                "debugRound": debug_round,
+                "supervisorAgentType": "executor",
+                "stage": "debug",
+            }),
+        },
     )
     .await;
 
@@ -1705,20 +1796,22 @@ async fn run_executor_debug_attempt(
     let effective_root = std::path::Path::new(&request.project_root);
 
     match crate::commands::chat::spawn_background_agent(
-        app,
-        &message_id,
-        session_id,
-        Some(plan_id),
-        tool_results_dir,
-        effective_root,
-        None,
-        None,
-        &args,
-        runtime,
-        1,
-        web_search_keys,
-        skill_cache,
-        agent_def,
+        crate::commands::chat::BackgroundAgentRequest {
+            app,
+            message_id: &message_id,
+            session_id,
+            plan_id: Some(plan_id),
+            tool_results_dir,
+            effective_root,
+            session_todos: None,
+            session_agent_tasks: None,
+            args: &args,
+            runtime,
+            subagent_execute_depth: 1,
+            web_search_api_keys: web_search_keys,
+            skill_cache,
+            agent_def,
+        },
     )
     .await
     {
@@ -1739,21 +1832,23 @@ async fn run_executor_debug_attempt(
             };
             append_orchestration_runtime_event(
                 repo,
-                session_id,
-                Some(runtime.round_id()),
-                Some(orchestration_mode),
-                event_type,
-                Some("debug"),
-                Some(&debug_id),
-                serde_json::json!({
-                    "planId": plan_id,
-                    "agentType": "debugger",
-                    "supervisorAgentType": "executor",
-                    "stage": "debug",
-                    "failedSubtaskId": failed_subtask_id,
-                    "debugRound": debug_round,
-                    "error": debug_result.error.clone(),
-                }),
+                RuntimeOrchestrationEvent {
+                    session_id,
+                    round_id: Some(runtime.round_id()),
+                    mode: Some(orchestration_mode),
+                    event_type,
+                    phase: Some("debug"),
+                    task_id: Some(&debug_id),
+                    payload: serde_json::json!({
+                        "planId": plan_id,
+                        "agentType": "debugger",
+                        "supervisorAgentType": "executor",
+                        "stage": "debug",
+                        "failedSubtaskId": failed_subtask_id,
+                        "debugRound": debug_round,
+                        "error": debug_result.error.clone(),
+                    }),
+                },
             )
             .await;
             Some(debug_result)
@@ -1761,22 +1856,24 @@ async fn run_executor_debug_attempt(
         Err(e) => {
             append_orchestration_runtime_event(
                 repo,
-                session_id,
-                Some(runtime.round_id()),
-                Some(orchestration_mode),
-                "executor_child_failed",
-                Some("debug"),
-                Some(&debug_id),
-                serde_json::json!({
-                    "planId": plan_id,
-                    "agentType": "debugger",
-                    "supervisorAgentType": "executor",
-                    "stage": "debug",
-                    "failedSubtaskId": failed_subtask_id,
-                    "debugRound": debug_round,
-                    "error": e,
-                    "reason": "debugger_launch_failed",
-                }),
+                RuntimeOrchestrationEvent {
+                    session_id,
+                    round_id: Some(runtime.round_id()),
+                    mode: Some(orchestration_mode),
+                    event_type: "executor_child_failed",
+                    phase: Some("debug"),
+                    task_id: Some(&debug_id),
+                    payload: serde_json::json!({
+                        "planId": plan_id,
+                        "agentType": "debugger",
+                        "supervisorAgentType": "executor",
+                        "stage": "debug",
+                        "failedSubtaskId": failed_subtask_id,
+                        "debugRound": debug_round,
+                        "error": e,
+                        "reason": "debugger_launch_failed",
+                    }),
+                },
             )
             .await;
             None

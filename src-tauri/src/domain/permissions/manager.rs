@@ -88,12 +88,12 @@ impl PermissionManager {
 
         // 3. Critical 风险立即要求确认（未命中上述批准缓存时）
         if risk.level == RiskLevel::Critical {
-            return PermissionDecision::RequireApproval(PermissionRequest {
+            return PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 context: context.clone(),
                 risk,
                 suggested_mode: PermissionMode::AskEveryTime,
-            });
+            }));
         }
 
         // 4. 规则匹配（克隆匹配到的规则，释放读锁）
@@ -599,12 +599,12 @@ impl PermissionManager {
 
         match rule.mode {
             PermissionMode::AskEveryTime => {
-                PermissionDecision::RequireApproval(PermissionRequest {
+                PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                     request_id: uuid::Uuid::new_v4().to_string(),
                     context: context.clone(),
                     risk: risk.clone(),
                     suggested_mode: PermissionMode::Session,
-                })
+                }))
             }
             PermissionMode::Session | PermissionMode::Plan => {
                 if self
@@ -613,12 +613,12 @@ impl PermissionManager {
                 {
                     PermissionDecision::Allow
                 } else {
-                    PermissionDecision::RequireApproval(PermissionRequest {
+                    PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                         request_id: uuid::Uuid::new_v4().to_string(),
                         context: context.clone(),
                         risk: risk.clone(),
                         suggested_mode: rule.mode,
-                    })
+                    }))
                 }
             }
             PermissionMode::TimeWindow { .. } => {
@@ -628,22 +628,22 @@ impl PermissionManager {
                 {
                     PermissionDecision::Allow
                 } else {
-                    PermissionDecision::RequireApproval(PermissionRequest {
+                    PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                         request_id: uuid::Uuid::new_v4().to_string(),
                         context: context.clone(),
                         risk: risk.clone(),
                         suggested_mode: rule.mode,
-                    })
+                    }))
                 }
             }
             PermissionMode::Auto => {
                 if risk.level >= RiskLevel::High {
-                    PermissionDecision::RequireApproval(PermissionRequest {
+                    PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                         request_id: uuid::Uuid::new_v4().to_string(),
                         context: context.clone(),
                         risk: risk.clone(),
                         suggested_mode: PermissionMode::AskEveryTime,
-                    })
+                    }))
                 } else {
                     PermissionDecision::Allow
                 }
@@ -659,12 +659,12 @@ impl PermissionManager {
         risk: &RiskAssessment,
     ) -> PermissionDecision {
         if risk.level >= RiskLevel::High {
-            PermissionDecision::RequireApproval(PermissionRequest {
+            PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 context: context.clone(),
                 risk: risk.clone(),
                 suggested_mode: PermissionMode::AskEveryTime,
-            })
+            }))
         } else {
             PermissionDecision::Allow
         }
@@ -685,20 +685,20 @@ impl PermissionManager {
             // Safe 和 Low 风险自动允许（读取文件、网络搜索等）
             RiskLevel::Safe | RiskLevel::Low => PermissionDecision::Allow,
             // Medium 风险（文件写入、编辑）需要确认
-            RiskLevel::Medium => PermissionDecision::RequireApproval(PermissionRequest {
+            RiskLevel::Medium => PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 context: context.clone(),
                 risk: risk.clone(),
                 suggested_mode: PermissionMode::Session,
-            }),
+            })),
             // High 和 Critical 风险（删除、系统命令）需要确认，建议使用更严格的模式
             RiskLevel::High | RiskLevel::Critical => {
-                PermissionDecision::RequireApproval(PermissionRequest {
+                PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                     request_id: uuid::Uuid::new_v4().to_string(),
                     context: context.clone(),
                     risk: risk.clone(),
                     suggested_mode: PermissionMode::AskEveryTime,
-                })
+                }))
             }
         }
     }

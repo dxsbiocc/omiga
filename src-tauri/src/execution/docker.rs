@@ -66,24 +66,26 @@ pub struct DockerEnvironment {
     task_id: String,
 }
 
+pub struct DockerEnvironmentConfig {
+    pub image: String,
+    pub cwd: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub cpu: Option<f64>,
+    pub memory: Option<u64>,
+    pub disk: Option<u64>,
+    pub persistent: bool,
+    pub task_id: String,
+    pub volumes: Vec<String>,
+    pub forward_env: Vec<String>,
+    pub env_vars: HashMap<String, String>,
+    pub network: bool,
+}
+
 impl DockerEnvironment {
     /// 创建新的 Docker 执行环境
-    pub async fn new(
-        image: String,
-        cwd: Option<String>,
-        timeout_ms: Option<u64>,
-        cpu: Option<f64>,
-        memory: Option<u64>,
-        disk: Option<u64>,
-        persistent: bool,
-        task_id: String,
-        volumes: Vec<String>,
-        forward_env: Vec<String>,
-        env_vars: HashMap<String, String>,
-        network: bool,
-    ) -> Result<Self, ExecutionError> {
+    pub async fn new(config: DockerEnvironmentConfig) -> Result<Self, ExecutionError> {
         let docker_exe = Self::find_docker().await?;
-        let cwd = cwd.unwrap_or_else(|| "/root".to_string());
+        let cwd = config.cwd.unwrap_or_else(|| "/root".to_string());
 
         // 验证 Docker 可用
         Self::ensure_docker_available(&docker_exe).await?;
@@ -95,27 +97,34 @@ impl DockerEnvironment {
 
         let mut me = Self {
             cwd,
-            timeout_ms: timeout_ms.unwrap_or(60_000),
-            env: env_vars.clone(),
+            timeout_ms: config.timeout_ms.unwrap_or(60_000),
+            env: config.env_vars.clone(),
             session_id,
             snapshot_path,
             cwd_file,
             cwd_marker,
             snapshot_ready: false,
             last_sync_time: None,
-            image,
+            image: config.image,
             container_id: None,
             docker_exe,
             workspace_dir: None,
             home_dir: None,
             init_env_args: Vec::new(),
-            persistent,
-            task_id,
+            persistent: config.persistent,
+            task_id: config.task_id,
         };
 
         // 初始化容器
-        me.init_container(cpu, memory, disk, &volumes, &forward_env, network)
-            .await?;
+        me.init_container(
+            config.cpu,
+            config.memory,
+            config.disk,
+            &config.volumes,
+            &config.forward_env,
+            config.network,
+        )
+        .await?;
 
         // 初始化会话快照
         me.init_session().await?;

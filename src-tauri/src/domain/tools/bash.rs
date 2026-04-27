@@ -791,14 +791,16 @@ impl super::ToolImpl for BashTool {
                 .clone()
                 .unwrap_or_else(|| truncate_command_summary(&command));
             crate::domain::background_shell::spawn_background_bash_task(
-                bg,
-                cwd.clone(),
-                command.clone(),
-                timeout_ms,
-                output_path.clone(),
-                task_id.clone(),
-                desc_text,
-                ctx.cancel.clone(),
+                crate::domain::background_shell::BackgroundBashTask {
+                    handle: bg,
+                    cwd: cwd.clone(),
+                    command: command.clone(),
+                    timeout_ms,
+                    output_path: output_path.clone(),
+                    task_id: task_id.clone(),
+                    description: desc_text,
+                    cancel: ctx.cancel.clone(),
+                },
             );
             let msg = format!(
                 "Command running in background with task ID: {}\nOutput will be written to: {}\nYou will receive a notification when the command completes.",

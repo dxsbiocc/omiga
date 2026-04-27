@@ -299,12 +299,14 @@ export default function App() {
       }
       if (!parsed.provider || !parsed.apiKey?.trim()) return;
       void invoke("set_llm_config", {
-        provider: parsed.provider,
-        apiKey: parsed.apiKey.trim(),
-        secretKey: parsed.secretKey,
-        appId: parsed.appId,
-        model: parsed.model?.trim() || undefined,
-        baseUrl: parsed.baseUrl,
+        request: {
+          provider: parsed.provider,
+          apiKey: parsed.apiKey.trim(),
+          secretKey: parsed.secretKey,
+          appId: parsed.appId,
+          model: parsed.model?.trim() || undefined,
+          baseUrl: parsed.baseUrl,
+        },
       }).catch(() => {});
     })();
   }, []);

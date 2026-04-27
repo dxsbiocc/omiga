@@ -355,30 +355,8 @@ pub async fn replace_session_messages(
     let mut last_user_id: Option<String> = None;
     for msg in messages {
         let id = uuid::Uuid::new_v4().to_string();
-        let (
-            row_id,
-            sid,
-            role,
-            content,
-            tool_calls,
-            tool_call_id,
-            token_usage_json,
-            reasoning_content,
-            follow_up_suggestions_json,
-        ) = SessionCodec::message_to_record(msg, &id, session_id);
-        repo.save_message(
-            &row_id,
-            &sid,
-            &role,
-            &content,
-            tool_calls.as_deref(),
-            tool_call_id.as_deref(),
-            token_usage_json.as_deref(),
-            reasoning_content.as_deref(),
-            follow_up_suggestions_json.as_deref(),
-            SessionCodec::extract_turn_summary(msg).as_deref(),
-        )
-        .await?;
+        let record = SessionCodec::message_to_record(msg, &id, session_id);
+        repo.save_message(record.as_insert()).await?;
         if matches!(msg, Message::User { .. }) {
             last_user_id = Some(id);
         }

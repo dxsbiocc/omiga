@@ -10,17 +10,16 @@ fn test_user_message_roundtrip() {
     let msg = Message::User {
         content: "Hello".to_string(),
     };
-    let (id, session_id, role, content, tool_calls, tool_call_id, tok, reasoning, _follow_up) =
-        SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
+    let record = SessionCodec::message_to_record(&msg, "msg-1", "sess-1");
 
-    assert_eq!(id, "msg-1");
-    assert_eq!(session_id, "sess-1");
-    assert_eq!(role, "user");
-    assert_eq!(content, "Hello");
-    assert!(tool_calls.is_none());
-    assert!(tool_call_id.is_none());
-    assert!(tok.is_none());
-    assert!(reasoning.is_none());
+    assert_eq!(record.id, "msg-1");
+    assert_eq!(record.session_id, "sess-1");
+    assert_eq!(record.role, "user");
+    assert_eq!(record.content, "Hello");
+    assert!(record.tool_calls.is_none());
+    assert!(record.tool_call_id.is_none());
+    assert!(record.token_usage_json.is_none());
+    assert!(record.reasoning_content.is_none());
 }
 
 #[test]
@@ -34,15 +33,14 @@ fn test_assistant_message_roundtrip() {
         turn_summary: None,
     };
 
-    let (_, _, role, content, tool_calls, tool_call_id, tok, reasoning, _) =
-        SessionCodec::message_to_record(&msg, "msg-2", "sess-1");
+    let record = SessionCodec::message_to_record(&msg, "msg-2", "sess-1");
 
-    assert_eq!(role, "assistant");
-    assert_eq!(content, "Let me help");
-    assert!(tool_calls.is_none());
-    assert!(tool_call_id.is_none());
-    assert!(tok.is_none());
-    assert!(reasoning.is_none());
+    assert_eq!(record.role, "assistant");
+    assert_eq!(record.content, "Let me help");
+    assert!(record.tool_calls.is_none());
+    assert!(record.tool_call_id.is_none());
+    assert!(record.token_usage_json.is_none());
+    assert!(record.reasoning_content.is_none());
 }
 
 #[test]
@@ -62,17 +60,16 @@ fn test_assistant_message_with_tool_calls_roundtrip() {
         turn_summary: None,
     };
 
-    let (_, _, role, content, tool_calls_json, _, tok, reasoning, _) =
-        SessionCodec::message_to_record(&msg, "msg-3", "sess-1");
+    let record = SessionCodec::message_to_record(&msg, "msg-3", "sess-1");
 
-    assert_eq!(role, "assistant");
-    assert_eq!(content, "Let me read that file");
-    assert!(tool_calls_json.is_some());
-    assert!(tok.is_none());
-    assert!(reasoning.is_none());
+    assert_eq!(record.role, "assistant");
+    assert_eq!(record.content, "Let me read that file");
+    assert!(record.tool_calls.is_some());
+    assert!(record.token_usage_json.is_none());
+    assert!(record.reasoning_content.is_none());
 
     // Verify we can parse it back
-    let parsed = SessionCodec::parse_tool_calls(&tool_calls_json.unwrap());
+    let parsed = SessionCodec::parse_tool_calls(&record.tool_calls.unwrap());
     assert!(parsed.is_some());
     let parsed_calls = parsed.unwrap();
     assert_eq!(parsed_calls.len(), 1);
@@ -87,15 +84,14 @@ fn test_tool_message_roundtrip() {
         output: "File contents here".to_string(),
     };
 
-    let (_, _, role, content, tool_calls, tool_call_id, tok, reasoning, _) =
-        SessionCodec::message_to_record(&msg, "msg-4", "sess-1");
+    let record = SessionCodec::message_to_record(&msg, "msg-4", "sess-1");
 
-    assert_eq!(role, "tool");
-    assert_eq!(content, "File contents here");
-    assert!(tool_calls.is_none());
-    assert_eq!(tool_call_id, Some("call-1".to_string()));
-    assert!(tok.is_none());
-    assert!(reasoning.is_none());
+    assert_eq!(record.role, "tool");
+    assert_eq!(record.content, "File contents here");
+    assert!(record.tool_calls.is_none());
+    assert_eq!(record.tool_call_id, Some("call-1".to_string()));
+    assert!(record.token_usage_json.is_none());
+    assert!(record.reasoning_content.is_none());
 }
 
 #[test]

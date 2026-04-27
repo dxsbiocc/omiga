@@ -274,32 +274,11 @@ pub async fn save_session(state: State<'_, AppState>, session: SessionData) -> C
         };
 
         // Use SessionCodec for serialization (single source of truth)
-        let (
-            id,
-            session_id,
-            role,
-            content,
-            tool_calls,
-            tool_call_id,
-            token_usage_json,
-            reasoning_content,
-            follow_up_suggestions_json,
-        ) = SessionCodec::message_to_record(&domain_msg, &msg_id, &session.id);
+        let record = SessionCodec::message_to_record(&domain_msg, &msg_id, &session.id);
 
-        repo.save_message(
-            &id,
-            &session_id,
-            &role,
-            &content,
-            tool_calls.as_deref(),
-            tool_call_id.as_deref(),
-            token_usage_json.as_deref(),
-            reasoning_content.as_deref(),
-            follow_up_suggestions_json.as_deref(),
-            SessionCodec::extract_turn_summary(&domain_msg).as_deref(),
-        )
-        .await
-        .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
+        repo.save_message(record.as_insert())
+            .await
+            .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
     }
 
     Ok(())
@@ -446,32 +425,11 @@ pub async fn save_message(
     };
 
     // Use SessionCodec for serialization (single source of truth)
-    let (
-        id,
-        sid,
-        role,
-        content,
-        tool_calls,
-        tool_call_id,
-        token_usage_json,
-        reasoning_content,
-        follow_up_suggestions_json,
-    ) = SessionCodec::message_to_record(&domain_msg, &msg_id, &session_id);
+    let record = SessionCodec::message_to_record(&domain_msg, &msg_id, &session_id);
 
-    repo.save_message(
-        &id,
-        &sid,
-        &role,
-        &content,
-        tool_calls.as_deref(),
-        tool_call_id.as_deref(),
-        token_usage_json.as_deref(),
-        reasoning_content.as_deref(),
-        follow_up_suggestions_json.as_deref(),
-        SessionCodec::extract_turn_summary(&domain_msg).as_deref(),
-    )
-    .await
-    .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
+    repo.save_message(record.as_insert())
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
 
     // Update session timestamp
     repo.touch_session(&session_id)

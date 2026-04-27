@@ -252,18 +252,18 @@ async fn background_agent_messages_sanitize_opaque_object_text() {
 async fn save_message_persists_turn_summary() {
     let (repo, _dir, session_id) = setup_session_repo().await;
 
-    repo.save_message(
-        "assistant-turn-summary",
-        &session_id,
-        "assistant",
-        "done",
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some("short recap"),
-    )
+    repo.save_message(omiga_lib::domain::persistence::NewMessageRecord {
+        id: "assistant-turn-summary",
+        session_id: &session_id,
+        role: "assistant",
+        content: "done",
+        tool_calls: None,
+        tool_call_id: None,
+        token_usage_json: None,
+        reasoning_content: None,
+        follow_up_suggestions_json: None,
+        turn_summary: Some("short recap"),
+    })
     .await
     .expect("save assistant");
 

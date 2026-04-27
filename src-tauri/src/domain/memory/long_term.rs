@@ -570,6 +570,14 @@ pub fn slugify_pub(value: &str) -> String {
     slugify(value)
 }
 
+pub fn truncate_pub(text: &str, max_chars: usize) -> String {
+    truncate_chars(text, max_chars)
+}
+
+pub async fn upsert_entry_pub(root: &std::path::Path, entry: LongTermMemoryEntry) {
+    let _ = upsert_entry(root, entry).await;
+}
+
 fn slugify(value: &str) -> String {
     let mut out = String::new();
     let mut last_dash = false;

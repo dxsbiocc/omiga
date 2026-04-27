@@ -52,20 +52,20 @@ pub async fn create_environment(
                 ExecutionError::InvalidConfig("Docker image is required".to_string())
             })?;
 
-            let env = DockerEnvironment::new(
+            let env = DockerEnvironment::new(docker::DockerEnvironmentConfig {
                 image,
-                Some(config.cwd),
-                Some(config.timeout),
-                Some(config.cpu),
-                Some(config.memory),
-                Some(config.disk),
-                config.persistent_filesystem,
-                config.task_id,
-                config.volumes,
-                config.forward_env,
-                config.env,
-                config.network,
-            )
+                cwd: Some(config.cwd),
+                timeout_ms: Some(config.timeout),
+                cpu: Some(config.cpu),
+                memory: Some(config.memory),
+                disk: Some(config.disk),
+                persistent: config.persistent_filesystem,
+                task_id: config.task_id,
+                volumes: config.volumes,
+                forward_env: config.forward_env,
+                env_vars: config.env,
+                network: config.network,
+            })
             .await?;
             Ok(Arc::new(Mutex::new(env)))
         }

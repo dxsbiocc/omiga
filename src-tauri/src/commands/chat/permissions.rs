@@ -119,19 +119,36 @@ pub(super) fn build_permission_request_event_json(
 }
 
 /// Register a waiter, emit `permission-request`, then block until approve/deny/cancel.
+pub(super) struct PermissionToolResolutionRequest<'a> {
+    pub app: &'a AppHandle,
+    pub app_state: &'a OmigaAppState,
+    pub session_id: &'a str,
+    pub message_id: &'a str,
+    pub tool_use_id: &'a str,
+    pub stream_tool_name: &'a str,
+    pub tool_name_for_event: &'a str,
+    pub arguments_display: &'a str,
+    pub args_value: &'a serde_json::Value,
+    pub req: &'a PermissionRequest,
+    pub cancel_flag: Option<Arc<RwLock<bool>>>,
+}
+
 pub(super) async fn wait_for_permission_tool_resolution(
-    app: &AppHandle,
-    app_state: &OmigaAppState,
-    session_id: &str,
-    message_id: &str,
-    tool_use_id: &str,
-    stream_tool_name: &str,
-    tool_name_for_event: &str,
-    arguments_display: &str,
-    args_value: &serde_json::Value,
-    req: &PermissionRequest,
-    cancel_flag: Option<Arc<RwLock<bool>>>,
+    request: PermissionToolResolutionRequest<'_>,
 ) -> Result<(), String> {
+    let PermissionToolResolutionRequest {
+        app,
+        app_state,
+        session_id,
+        message_id,
+        tool_use_id,
+        stream_tool_name,
+        tool_name_for_event,
+        arguments_display,
+        args_value,
+        req,
+        cancel_flag,
+    } = request;
     let request_id = req.request_id.clone();
     let (tx, mut rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     {
@@ -223,17 +240,32 @@ pub(super) fn build_ask_user_success_output(
 }
 
 /// Chat path: block until the user submits answers in the Omiga UI (or cancel).
+pub(super) struct AskUserQuestionExecution<'a> {
+    pub tool_use_id: String,
+    pub tool_name: String,
+    pub arguments: String,
+    pub app: AppHandle,
+    pub message_id: String,
+    pub session_id: String,
+    pub tool_results_dir: &'a Path,
+    pub waiters: Arc<Mutex<HashMap<String, AskUserWaiter>>>,
+    pub cancel_flag: Option<Arc<RwLock<bool>>>,
+}
+
 pub(super) async fn execute_ask_user_question_interactive(
-    tool_use_id: String,
-    tool_name: String,
-    arguments: String,
-    app: AppHandle,
-    message_id: String,
-    session_id: String,
-    tool_results_dir: &Path,
-    waiters: Arc<Mutex<HashMap<String, AskUserWaiter>>>,
-    cancel_flag: Option<Arc<RwLock<bool>>>,
+    request: AskUserQuestionExecution<'_>,
 ) -> (String, String, bool) {
+    let AskUserQuestionExecution {
+        tool_use_id,
+        tool_name,
+        arguments,
+        app,
+        message_id,
+        session_id,
+        tool_results_dir,
+        waiters,
+        cancel_flag,
+    } = request;
     let args: ask_user_question::AskUserQuestionArgs = match serde_json::from_str(&arguments) {
         Err(e) => {
             let error_msg = format!("Failed to parse ask_user_question arguments: {}", e);

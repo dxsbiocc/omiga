@@ -11,6 +11,17 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::RwLock;
 
 use crate::domain::chat_state::SessionRuntimeState;
+use crate::domain::persistence::NewOrchestrationEventRecord;
+
+pub(super) struct ModeLifecycleContext<'a> {
+    pub is_active: bool,
+    pub sessions: &'a Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    pub repo: &'a crate::domain::persistence::SessionRepository,
+    pub project_root: &'a Path,
+    pub session_id: &'a str,
+    pub env_label: Option<String>,
+    pub round_id: Option<&'a str>,
+}
 
 async fn append_orchestration_mode_event(
     repo: &crate::domain::persistence::SessionRepository,
@@ -23,16 +34,16 @@ async fn append_orchestration_mode_event(
 ) {
     let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
     if let Err(e) = repo
-        .append_orchestration_event(
+        .append_orchestration_event(NewOrchestrationEventRecord {
             session_id,
             round_id,
-            None,
-            Some(mode),
+            message_id: None,
+            mode: Some(mode),
             event_type,
             phase,
-            None,
-            &payload_json,
-        )
+            task_id: None,
+            payload_json: &payload_json,
+        })
         .await
     {
         tracing::warn!(target: "omiga::orchestration_events", session_id, mode, event_type, error = %e, "append_orchestration_mode_event failed");
@@ -62,34 +73,25 @@ pub(super) fn ralph_runtime_env_label(
     }
 }
 
-pub(super) async fn begin_ralph_turn_if_needed(
-    is_ralph_turn: bool,
-    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
-    repo: &crate::domain::persistence::SessionRepository,
-    project_root: &Path,
-    session_id: &str,
-    goal: &str,
-    env_label: Option<String>,
-    round_id: Option<&str>,
-) {
-    if !is_ralph_turn {
+pub(super) async fn begin_ralph_turn_if_needed(ctx: ModeLifecycleContext<'_>, goal: &str) {
+    if !ctx.is_active {
         return;
     }
     if let Err(e) = crate::domain::orchestration::ralph::RalphOrchestrator::begin(
-        sessions,
-        project_root,
-        session_id,
+        ctx.sessions,
+        ctx.project_root,
+        ctx.session_id,
         goal,
-        env_label,
+        ctx.env_label,
     )
     .await
     {
-        tracing::warn!(target: "omiga::ralph", session_id, error = %e, "Failed to begin Ralph turn");
+        tracing::warn!(target: "omiga::ralph", session_id = ctx.session_id, error = %e, "Failed to begin Ralph turn");
     }
     append_orchestration_mode_event(
-        repo,
-        session_id,
-        round_id,
+        ctx.repo,
+        ctx.session_id,
+        ctx.round_id,
         "ralph",
         "phase_changed",
         Some("planning"),
@@ -99,34 +101,28 @@ pub(super) async fn begin_ralph_turn_if_needed(
 }
 
 pub(super) async fn update_ralph_phase_if_needed(
-    is_ralph_turn: bool,
-    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
-    repo: &crate::domain::persistence::SessionRepository,
-    project_root: &Path,
-    session_id: &str,
+    ctx: ModeLifecycleContext<'_>,
     phase: crate::domain::ralph_state::RalphPhase,
-    env_label: Option<String>,
-    round_id: Option<&str>,
 ) {
-    if !is_ralph_turn {
+    if !ctx.is_active {
         return;
     }
     if let Err(e) = crate::domain::orchestration::ralph::RalphOrchestrator::set_phase(
-        sessions,
-        project_root,
-        session_id,
+        ctx.sessions,
+        ctx.project_root,
+        ctx.session_id,
         phase,
-        env_label,
+        ctx.env_label,
     )
     .await
     {
-        tracing::warn!(target: "omiga::ralph", session_id, error = %e, "Failed to update Ralph phase");
+        tracing::warn!(target: "omiga::ralph", session_id = ctx.session_id, error = %e, "Failed to update Ralph phase");
     }
     let phase_s = phase.to_string();
     append_orchestration_mode_event(
-        repo,
-        session_id,
-        round_id,
+        ctx.repo,
+        ctx.session_id,
+        ctx.round_id,
         "ralph",
         "phase_changed",
         Some(&phase_s),
@@ -168,34 +164,29 @@ pub(super) async fn complete_ralph_turn_if_needed(
 }
 
 pub(super) async fn fail_ralph_turn_if_needed(
-    is_ralph_turn: bool,
-    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
-    repo: &crate::domain::persistence::SessionRepository,
-    project_root: &Path,
-    session_id: &str,
+    ctx: ModeLifecycleContext<'_>,
     phase: crate::domain::ralph_state::RalphPhase,
     error: &str,
-    round_id: Option<&str>,
 ) {
-    if !is_ralph_turn {
+    if !ctx.is_active {
         return;
     }
     if let Err(e) = crate::domain::orchestration::ralph::RalphOrchestrator::fail(
-        sessions,
-        project_root,
-        session_id,
+        ctx.sessions,
+        ctx.project_root,
+        ctx.session_id,
         phase,
         error,
     )
     .await
     {
-        tracing::warn!(target: "omiga::ralph", session_id, error = %e, "Failed to record Ralph failure");
+        tracing::warn!(target: "omiga::ralph", session_id = ctx.session_id, error = %e, "Failed to record Ralph failure");
     }
     let phase_s = phase.to_string();
     append_orchestration_mode_event(
-        repo,
-        session_id,
-        round_id,
+        ctx.repo,
+        ctx.session_id,
+        ctx.round_id,
         "ralph",
         "mode_failed",
         Some(&phase_s),
@@ -206,34 +197,25 @@ pub(super) async fn fail_ralph_turn_if_needed(
 
 // ── Autopilot ────────────────────────────────────────────────────────────────
 
-pub(super) async fn begin_autopilot_turn_if_needed(
-    is_autopilot_turn: bool,
-    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
-    repo: &crate::domain::persistence::SessionRepository,
-    project_root: &Path,
-    session_id: &str,
-    goal: &str,
-    env_label: Option<String>,
-    round_id: Option<&str>,
-) {
-    if !is_autopilot_turn {
+pub(super) async fn begin_autopilot_turn_if_needed(ctx: ModeLifecycleContext<'_>, goal: &str) {
+    if !ctx.is_active {
         return;
     }
     if let Err(e) = crate::domain::orchestration::autopilot::AutopilotOrchestrator::begin(
-        sessions,
-        project_root,
-        session_id,
+        ctx.sessions,
+        ctx.project_root,
+        ctx.session_id,
         goal,
-        env_label,
+        ctx.env_label,
     )
     .await
     {
-        tracing::warn!(target: "omiga::autopilot", session_id, error = %e, "Failed to begin Autopilot turn");
+        tracing::warn!(target: "omiga::autopilot", session_id = ctx.session_id, error = %e, "Failed to begin Autopilot turn");
     }
     append_orchestration_mode_event(
-        repo,
-        session_id,
-        round_id,
+        ctx.repo,
+        ctx.session_id,
+        ctx.round_id,
         "autopilot",
         "phase_changed",
         Some("intake"),
@@ -243,39 +225,33 @@ pub(super) async fn begin_autopilot_turn_if_needed(
 }
 
 pub(super) async fn update_autopilot_phase_if_needed(
-    is_autopilot_turn: bool,
-    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
-    repo: &crate::domain::persistence::SessionRepository,
-    project_root: &Path,
-    session_id: &str,
+    ctx: ModeLifecycleContext<'_>,
     phase: crate::domain::autopilot_state::AutopilotPhase,
-    env_label: Option<String>,
-    round_id: Option<&str>,
 ) -> Option<crate::domain::autopilot_state::AutopilotState> {
-    if !is_autopilot_turn {
+    if !ctx.is_active {
         return None;
     }
     let result = match crate::domain::orchestration::autopilot::AutopilotOrchestrator::set_phase(
-        sessions,
-        project_root,
-        session_id,
+        ctx.sessions,
+        ctx.project_root,
+        ctx.session_id,
         phase,
-        env_label,
+        ctx.env_label,
     )
     .await
     {
         Ok(state) => state,
         Err(e) => {
-            tracing::warn!(target: "omiga::autopilot", session_id, error = %e, "Failed to update Autopilot phase");
+            tracing::warn!(target: "omiga::autopilot", session_id = ctx.session_id, error = %e, "Failed to update Autopilot phase");
             None
         }
     };
     let phase_s = phase.to_string();
     if result.is_some() {
         append_orchestration_mode_event(
-            repo,
-            session_id,
-            round_id,
+            ctx.repo,
+            ctx.session_id,
+            ctx.round_id,
             "autopilot",
             "phase_changed",
             Some(&phase_s),
@@ -319,34 +295,29 @@ pub(super) async fn complete_autopilot_turn_if_needed(
 }
 
 pub(super) async fn fail_autopilot_turn_if_needed(
-    is_autopilot_turn: bool,
-    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
-    repo: &crate::domain::persistence::SessionRepository,
-    project_root: &Path,
-    session_id: &str,
+    ctx: ModeLifecycleContext<'_>,
     phase: crate::domain::autopilot_state::AutopilotPhase,
     error: &str,
-    round_id: Option<&str>,
 ) {
-    if !is_autopilot_turn {
+    if !ctx.is_active {
         return;
     }
     if let Err(e) = crate::domain::orchestration::autopilot::AutopilotOrchestrator::fail(
-        sessions,
-        project_root,
-        session_id,
+        ctx.sessions,
+        ctx.project_root,
+        ctx.session_id,
         phase,
         error,
     )
     .await
     {
-        tracing::warn!(target: "omiga::autopilot", session_id, error = %e, "Failed to record Autopilot failure");
+        tracing::warn!(target: "omiga::autopilot", session_id = ctx.session_id, error = %e, "Failed to record Autopilot failure");
     }
     let phase_s = phase.to_string();
     append_orchestration_mode_event(
-        repo,
-        session_id,
-        round_id,
+        ctx.repo,
+        ctx.session_id,
+        ctx.round_id,
         "autopilot",
         "mode_failed",
         Some(&phase_s),

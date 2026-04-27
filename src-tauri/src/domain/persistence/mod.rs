@@ -786,19 +786,7 @@ impl SessionRepository {
     }
 
     /// Save a message
-    pub async fn save_message(
-        &self,
-        id: &str,
-        session_id: &str,
-        role: &str,
-        content: &str,
-        tool_calls: Option<&str>,
-        tool_call_id: Option<&str>,
-        token_usage_json: Option<&str>,
-        reasoning_content: Option<&str>,
-        follow_up_suggestions_json: Option<&str>,
-        turn_summary: Option<&str>,
-    ) -> Result<(), sqlx::Error> {
+    pub async fn save_message(&self, message: NewMessageRecord<'_>) -> Result<(), sqlx::Error> {
         let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(
@@ -807,16 +795,16 @@ impl SessionRepository {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#
         )
-        .bind(id)
-        .bind(session_id)
-        .bind(role)
-        .bind(content)
-        .bind(tool_calls)
-        .bind(tool_call_id)
-        .bind(token_usage_json)
-        .bind(reasoning_content)
-        .bind(follow_up_suggestions_json)
-        .bind(turn_summary)
+        .bind(message.id)
+        .bind(message.session_id)
+        .bind(message.role)
+        .bind(message.content)
+        .bind(message.tool_calls)
+        .bind(message.tool_call_id)
+        .bind(message.token_usage_json)
+        .bind(message.reasoning_content)
+        .bind(message.follow_up_suggestions_json)
+        .bind(message.turn_summary)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -1080,14 +1068,7 @@ impl SessionRepository {
 
     pub async fn append_orchestration_event(
         &self,
-        session_id: &str,
-        round_id: Option<&str>,
-        message_id: Option<&str>,
-        mode: Option<&str>,
-        event_type: &str,
-        phase: Option<&str>,
-        task_id: Option<&str>,
-        payload_json: &str,
+        event: NewOrchestrationEventRecord<'_>,
     ) -> Result<(), sqlx::Error> {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
@@ -1098,14 +1079,14 @@ impl SessionRepository {
             "#,
         )
         .bind(uuid::Uuid::new_v4().to_string())
-        .bind(session_id)
-        .bind(round_id)
-        .bind(message_id)
-        .bind(mode)
-        .bind(event_type)
-        .bind(phase)
-        .bind(task_id)
-        .bind(payload_json)
+        .bind(event.session_id)
+        .bind(event.round_id)
+        .bind(event.message_id)
+        .bind(event.mode)
+        .bind(event.event_type)
+        .bind(event.phase)
+        .bind(event.task_id)
+        .bind(event.payload_json)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -1655,6 +1636,21 @@ pub struct MessageRecord {
     pub created_at: String,
 }
 
+/// Borrowed message insert payload.
+#[derive(Debug, Clone, Copy)]
+pub struct NewMessageRecord<'a> {
+    pub id: &'a str,
+    pub session_id: &'a str,
+    pub role: &'a str,
+    pub content: &'a str,
+    pub tool_calls: Option<&'a str>,
+    pub tool_call_id: Option<&'a str>,
+    pub token_usage_json: Option<&'a str>,
+    pub reasoning_content: Option<&'a str>,
+    pub follow_up_suggestions_json: Option<&'a str>,
+    pub turn_summary: Option<&'a str>,
+}
+
 /// Session with all messages
 #[derive(Debug, Clone)]
 pub struct SessionWithMessages {
@@ -1760,6 +1756,19 @@ pub struct OrchestrationEventRecord {
     pub created_at: String,
 }
 
+/// Borrowed orchestration-event insert payload.
+#[derive(Debug, Clone, Copy)]
+pub struct NewOrchestrationEventRecord<'a> {
+    pub session_id: &'a str,
+    pub round_id: Option<&'a str>,
+    pub message_id: Option<&'a str>,
+    pub mode: Option<&'a str>,
+    pub event_type: &'a str,
+    pub phase: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub payload_json: &'a str,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1775,29 +1784,29 @@ mod tests {
             .await
             .expect("create session");
 
-        repo.append_orchestration_event(
-            "session-1",
-            Some("round-1"),
-            Some("message-1"),
-            Some("schedule"),
-            "schedule_plan_created",
-            None,
-            None,
-            r#"{"planId":"plan-1","taskCount":3}"#,
-        )
+        repo.append_orchestration_event(NewOrchestrationEventRecord {
+            session_id: "session-1",
+            round_id: Some("round-1"),
+            message_id: Some("message-1"),
+            mode: Some("schedule"),
+            event_type: "schedule_plan_created",
+            phase: None,
+            task_id: None,
+            payload_json: r#"{"planId":"plan-1","taskCount":3}"#,
+        })
         .await
         .expect("append event");
 
-        repo.append_orchestration_event(
-            "session-1",
-            Some("round-1"),
-            Some("message-1"),
-            Some("team"),
-            "phase_changed",
-            Some("executing"),
-            None,
-            r#"{"goal":"fix export flow"}"#,
-        )
+        repo.append_orchestration_event(NewOrchestrationEventRecord {
+            session_id: "session-1",
+            round_id: Some("round-1"),
+            message_id: Some("message-1"),
+            mode: Some("team"),
+            event_type: "phase_changed",
+            phase: Some("executing"),
+            task_id: None,
+            payload_json: r#"{"goal":"fix export flow"}"#,
+        })
         .await
         .expect("append phase event");
 

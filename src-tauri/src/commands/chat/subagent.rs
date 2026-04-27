@@ -1,10 +1,10 @@
 //! Subagent session execution, skill forking, and background agent management.
 
-use super::tool_exec::execute_tool_calls;
+use super::tool_exec::{execute_tool_calls, ToolExecutionRequest};
 use super::{
     api_messages_to_llm, augment_llm_messages_with_runtime_constraints, completed_to_tool_calls,
     run_post_response_retry_text_only, stream_llm_response_with_cancel, AgentLlmRuntime,
-    MAX_SUBAGENT_TOOL_ROUNDS,
+    PostResponseRetryRequest, StreamLlmRequest, MAX_SUBAGENT_TOOL_ROUNDS,
 };
 use crate::constants::agent_prompt;
 use crate::domain::agents::scheduler::AgentSelector;
@@ -134,23 +134,42 @@ pub(super) async fn build_subagent_tool_schemas(
 ///
 /// Unlike inline execution which modifies current session state,
 /// forked execution creates an isolated context for the skill.
-pub(super) async fn run_skill_forked(
-    app: &AppHandle,
-    message_id: &str,
-    session_id: &str,
-    tool_results_dir: &Path,
-    project_root: &Path,
-    session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
-    session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
-    skill_name: &str,
-    skill_args: &str,
-    skill_content: &str,
-    allowed_tools: Option<Vec<String>>,
-    runtime: &AgentLlmRuntime,
-    subagent_execute_depth: u8,
-    web_search_api_keys: WebSearchApiKeys,
-    skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
-) -> Result<String, String> {
+pub(super) struct ForkedSkillRequest<'a> {
+    pub app: &'a AppHandle,
+    pub message_id: &'a str,
+    pub session_id: &'a str,
+    pub tool_results_dir: &'a Path,
+    pub project_root: &'a Path,
+    pub session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
+    pub session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
+    pub skill_name: &'a str,
+    pub skill_args: &'a str,
+    pub skill_content: &'a str,
+    pub allowed_tools: Option<Vec<String>>,
+    pub runtime: &'a AgentLlmRuntime,
+    pub subagent_execute_depth: u8,
+    pub web_search_api_keys: WebSearchApiKeys,
+    pub skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+}
+
+pub(super) async fn run_skill_forked(request: ForkedSkillRequest<'_>) -> Result<String, String> {
+    let ForkedSkillRequest {
+        app,
+        message_id,
+        session_id,
+        tool_results_dir,
+        project_root,
+        session_todos,
+        session_agent_tasks,
+        skill_name,
+        skill_args,
+        skill_content,
+        allowed_tools,
+        runtime,
+        subagent_execute_depth,
+        web_search_api_keys,
+        skill_cache,
+    } = request;
     // Build subagent configuration
     let mut sub_cfg = runtime.llm_config.clone();
 
@@ -248,18 +267,18 @@ pub(super) async fn run_skill_forked(
         );
 
         let (tool_calls, assistant_text, reasoning_text, cancelled, _) =
-            stream_llm_response_with_cancel(
-                client.as_ref(),
+            stream_llm_response_with_cancel(StreamLlmRequest {
+                client: client.as_ref(),
                 app,
                 message_id,
-                &runtime.round_id,
-                &constrained_messages,
-                &tools,
-                true,
-                &runtime.pending_tools,
-                &runtime.cancel_flag,
-                runtime.repo.clone(),
-            )
+                round_id: &runtime.round_id,
+                messages: &constrained_messages,
+                tools: &tools,
+                emit_text_chunks: true,
+                pending_tools: &runtime.pending_tools,
+                cancel_flag: &runtime.cancel_flag,
+                repo: runtime.repo.clone(),
+            })
             .await
             .map_err(|e| e.to_string())?;
 
@@ -337,19 +356,20 @@ pub(super) async fn run_skill_forked(
                         true,
                         true,
                     );
-                let (retry_text, retry_reasoning, _) = run_post_response_retry_text_only(
-                    client.as_ref(),
-                    app,
-                    message_id,
-                    &runtime.round_id,
-                    &retry_messages,
-                    &action.instruction,
-                    &runtime.pending_tools,
-                    &runtime.cancel_flag,
-                    runtime.repo.clone(),
-                )
-                .await
-                .map_err(|e| e.to_string())?;
+                let (retry_text, retry_reasoning, _) =
+                    run_post_response_retry_text_only(PostResponseRetryRequest {
+                        client: client.as_ref(),
+                        app,
+                        message_id,
+                        round_id: &runtime.round_id,
+                        base_messages: &retry_messages,
+                        instruction: &action.instruction,
+                        pending_tools: &runtime.pending_tools,
+                        cancel_flag: &runtime.cancel_flag,
+                        repo: runtime.repo.clone(),
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
                 if !retry_text.trim().is_empty() {
                     transcript.push(Message::Assistant {
                         content: retry_text.clone(),
@@ -368,27 +388,27 @@ pub(super) async fn run_skill_forked(
         constraint_state.record_tool_names(tool_calls.iter().map(|(_, name, _)| name.as_str()));
 
         // Execute tool calls
-        let results = execute_tool_calls(
-            &tool_calls,
+        let results = execute_tool_calls(ToolExecutionRequest {
+            tool_calls: &tool_calls,
             app,
             message_id,
             session_id,
             tool_results_dir,
             project_root,
-            session_todos.clone(),
-            session_agent_tasks.clone(),
-            Some(runtime),
-            subagent_execute_depth,
-            Some(subagent_skill_task_context.as_str()),
-            web_search_api_keys.clone(),
-            skill_cache.clone(),
-            runtime.execution_environment.clone(),
-            runtime.ssh_server.clone(),
-            runtime.sandbox_backend.clone(),
-            runtime.local_venv_type.clone(),
-            runtime.local_venv_name.clone(),
-            runtime.env_store.clone(),
-        )
+            session_todos: session_todos.clone(),
+            session_agent_tasks: session_agent_tasks.clone(),
+            agent_runtime: Some(runtime),
+            subagent_depth: subagent_execute_depth,
+            skill_task_context: Some(subagent_skill_task_context.as_str()),
+            web_search_api_keys: web_search_api_keys.clone(),
+            skill_cache: skill_cache.clone(),
+            execution_environment: runtime.execution_environment.clone(),
+            ssh_server: runtime.ssh_server.clone(),
+            sandbox_backend: runtime.sandbox_backend.clone(),
+            local_venv_type: runtime.local_venv_type.clone(),
+            local_venv_name: runtime.local_venv_name.clone(),
+            env_store: runtime.env_store.clone(),
+        })
         .await;
 
         for (tool_use_id, output, _) in &results {
@@ -405,23 +425,44 @@ pub(super) async fn run_skill_forked(
 }
 
 /// Shared foreground ReAct loop for `Agent` tool (main-thread and background worker).
+pub(super) struct ForegroundSubagentRequest<'a> {
+    pub app: &'a AppHandle,
+    pub message_id: &'a str,
+    pub session_id: &'a str,
+    pub tool_results_dir: &'a Path,
+    pub effective_root: &'a Path,
+    pub session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
+    pub session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
+    pub args: &'a crate::domain::tools::agent::AgentArgs,
+    pub runtime: &'a AgentLlmRuntime,
+    pub subagent_execute_depth: u8,
+    pub web_search_api_keys: WebSearchApiKeys,
+    pub skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+    pub agent_def: &'a dyn crate::domain::agents::AgentDefinition,
+    pub cancel_token: Option<&'a tokio_util::sync::CancellationToken>,
+    pub background_task_id: Option<&'a str>,
+}
+
 pub(super) async fn run_subagent_session_foreground_inner(
-    app: &AppHandle,
-    message_id: &str,
-    session_id: &str,
-    tool_results_dir: &Path,
-    effective_root: &Path,
-    session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
-    session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
-    args: &crate::domain::tools::agent::AgentArgs,
-    runtime: &AgentLlmRuntime,
-    subagent_execute_depth: u8,
-    web_search_api_keys: WebSearchApiKeys,
-    skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
-    agent_def: &dyn crate::domain::agents::AgentDefinition,
-    cancel_token: Option<&tokio_util::sync::CancellationToken>,
-    background_task_id: Option<&str>,
+    request: ForegroundSubagentRequest<'_>,
 ) -> Result<String, String> {
+    let ForegroundSubagentRequest {
+        app,
+        message_id,
+        session_id,
+        tool_results_dir,
+        effective_root,
+        session_todos,
+        session_agent_tasks,
+        args,
+        runtime,
+        subagent_execute_depth,
+        web_search_api_keys,
+        skill_cache,
+        agent_def,
+        cancel_token,
+        background_task_id,
+    } = request;
     let subagent_skill_task_context = format!("{} {}", args.description.trim(), args.prompt.trim());
 
     let parent_in_plan = if let Some(ref pm) = runtime.plan_mode_flag {
@@ -613,18 +654,18 @@ pub(super) async fn run_subagent_session_foreground_inner(
             true,
         );
         let (tool_calls, assistant_text, reasoning_text, cancelled, _) =
-            stream_llm_response_with_cancel(
-                client.as_ref(),
+            stream_llm_response_with_cancel(StreamLlmRequest {
+                client: client.as_ref(),
                 app,
                 message_id,
-                &runtime.round_id,
-                &constrained_messages,
-                &tools,
-                true,
-                &runtime.pending_tools,
-                &runtime.cancel_flag,
-                runtime.repo.clone(),
-            )
+                round_id: &runtime.round_id,
+                messages: &constrained_messages,
+                tools: &tools,
+                emit_text_chunks: true,
+                pending_tools: &runtime.pending_tools,
+                cancel_flag: &runtime.cancel_flag,
+                repo: runtime.repo.clone(),
+            })
             .await
             .map_err(|e| e.to_string())?;
         if cancelled {
@@ -736,19 +777,20 @@ pub(super) async fn run_subagent_session_foreground_inner(
                         true,
                         true,
                     );
-                let (retry_text, retry_reasoning, _) = run_post_response_retry_text_only(
-                    client.as_ref(),
-                    app,
-                    message_id,
-                    &runtime.round_id,
-                    &retry_messages,
-                    &action.instruction,
-                    &runtime.pending_tools,
-                    &runtime.cancel_flag,
-                    runtime.repo.clone(),
-                )
-                .await
-                .map_err(|e| e.to_string())?;
+                let (retry_text, retry_reasoning, _) =
+                    run_post_response_retry_text_only(PostResponseRetryRequest {
+                        client: client.as_ref(),
+                        app,
+                        message_id,
+                        round_id: &runtime.round_id,
+                        base_messages: &retry_messages,
+                        instruction: &action.instruction,
+                        pending_tools: &runtime.pending_tools,
+                        cancel_flag: &runtime.cancel_flag,
+                        repo: runtime.repo.clone(),
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
                 if !retry_text.trim().is_empty() {
                     let retry_asst = Message::Assistant {
                         content: retry_text.clone(),
@@ -774,27 +816,27 @@ pub(super) async fn run_subagent_session_foreground_inner(
             return Ok(assistant_text);
         }
         constraint_state.record_tool_names(tool_calls.iter().map(|(_, name, _)| name.as_str()));
-        let results = execute_tool_calls(
-            &tool_calls,
+        let results = execute_tool_calls(ToolExecutionRequest {
+            tool_calls: &tool_calls,
             app,
             message_id,
             session_id,
             tool_results_dir,
-            effective_root,
-            session_todos.clone(),
-            session_agent_tasks.clone(),
-            Some(runtime),
-            subagent_execute_depth,
-            Some(subagent_skill_task_context.as_str()),
-            web_search_api_keys.clone(),
-            skill_cache.clone(),
-            runtime.execution_environment.clone(),
-            runtime.ssh_server.clone(),
-            runtime.sandbox_backend.clone(),
-            runtime.local_venv_type.clone(),
-            runtime.local_venv_name.clone(),
-            runtime.env_store.clone(),
-        )
+            project_root: effective_root,
+            session_todos: session_todos.clone(),
+            session_agent_tasks: session_agent_tasks.clone(),
+            agent_runtime: Some(runtime),
+            subagent_depth: subagent_execute_depth,
+            skill_task_context: Some(subagent_skill_task_context.as_str()),
+            web_search_api_keys: web_search_api_keys.clone(),
+            skill_cache: skill_cache.clone(),
+            execution_environment: runtime.execution_environment.clone(),
+            ssh_server: runtime.ssh_server.clone(),
+            sandbox_backend: runtime.sandbox_backend.clone(),
+            local_venv_type: runtime.local_venv_type.clone(),
+            local_venv_name: runtime.local_venv_name.clone(),
+            env_store: runtime.env_store.clone(),
+        })
         .await;
         let tool_messages: Vec<Message> = results
             .iter()
@@ -815,21 +857,39 @@ pub(super) async fn run_subagent_session_foreground_inner(
 }
 
 /// Isolated sub-agent loop (same API key / stream channel as parent round).
+pub(super) struct SubagentSessionRequest<'a> {
+    pub app: &'a AppHandle,
+    pub message_id: &'a str,
+    pub session_id: &'a str,
+    pub tool_results_dir: &'a Path,
+    pub project_root: &'a Path,
+    pub session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
+    pub session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
+    pub args: &'a crate::domain::tools::agent::AgentArgs,
+    pub runtime: &'a AgentLlmRuntime,
+    /// Depth for [`execute_tool_calls`] inside this sub-session (main chat uses `0`; first sub-agent uses `1`).
+    pub subagent_execute_depth: u8,
+    pub web_search_api_keys: WebSearchApiKeys,
+    pub skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+}
+
 pub(super) async fn run_subagent_session(
-    app: &AppHandle,
-    message_id: &str,
-    session_id: &str,
-    tool_results_dir: &Path,
-    project_root: &Path,
-    session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
-    session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
-    args: &crate::domain::tools::agent::AgentArgs,
-    runtime: &AgentLlmRuntime,
-    // Depth for [`execute_tool_calls`] inside this sub-session (main chat uses `0`; first sub-agent uses `1`).
-    subagent_execute_depth: u8,
-    web_search_api_keys: WebSearchApiKeys,
-    skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+    request: SubagentSessionRequest<'_>,
 ) -> Result<String, String> {
+    let SubagentSessionRequest {
+        app,
+        message_id,
+        session_id,
+        tool_results_dir,
+        project_root,
+        session_todos,
+        session_agent_tasks,
+        args,
+        runtime,
+        subagent_execute_depth,
+        web_search_api_keys,
+        skill_cache,
+    } = request;
     // ===== Agent 路由系统集成（含自动调度）=====
     let router = crate::domain::agents::get_agent_router();
 
@@ -859,13 +919,13 @@ pub(super) async fn run_subagent_session(
 
     if should_run_in_background {
         // 启动后台 Agent 任务；返回 UUID 供调用方追踪，包装为 LLM 可读的字符串
-        let task_id = spawn_background_agent(
+        let task_id = spawn_background_agent(BackgroundAgentRequest {
             app,
             message_id,
             session_id,
-            None,
+            plan_id: None,
             tool_results_dir,
-            &effective_root,
+            effective_root: &effective_root,
             session_todos,
             session_agent_tasks,
             args,
@@ -874,7 +934,7 @@ pub(super) async fn run_subagent_session(
             web_search_api_keys,
             skill_cache,
             agent_def,
-        )
+        })
         .await?;
         let agent_type_name = crate::domain::agents::get_agent_router()
             .select_agent(args.subagent_type.as_deref())
@@ -888,12 +948,12 @@ pub(super) async fn run_subagent_session(
         ));
     }
 
-    run_subagent_session_foreground_inner(
+    run_subagent_session_foreground_inner(ForegroundSubagentRequest {
         app,
         message_id,
         session_id,
         tool_results_dir,
-        &effective_root,
+        effective_root: &effective_root,
         session_todos,
         session_agent_tasks,
         args,
@@ -902,9 +962,9 @@ pub(super) async fn run_subagent_session(
         web_search_api_keys,
         skill_cache,
         agent_def,
-        None,
-        None,
-    )
+        cancel_token: None,
+        background_task_id: None,
+    })
     .await
 }
 
@@ -969,22 +1029,42 @@ async fn persist_background_cancel_notice(
 }
 
 /// 启动后台 Agent 任务
+pub(crate) struct BackgroundAgentRequest<'a> {
+    pub app: &'a AppHandle,
+    pub message_id: &'a str,
+    pub session_id: &'a str,
+    pub plan_id: Option<&'a str>,
+    pub tool_results_dir: &'a std::path::Path,
+    pub effective_root: &'a std::path::Path,
+    pub session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
+    pub session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
+    pub args: &'a crate::domain::tools::agent::AgentArgs,
+    pub runtime: &'a AgentLlmRuntime,
+    pub subagent_execute_depth: u8,
+    pub web_search_api_keys: WebSearchApiKeys,
+    pub skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
+    pub agent_def: &'a dyn crate::domain::agents::AgentDefinition,
+}
+
 pub(crate) async fn spawn_background_agent(
-    app: &AppHandle,
-    message_id: &str,
-    session_id: &str,
-    plan_id: Option<&str>,
-    tool_results_dir: &std::path::Path,
-    effective_root: &std::path::Path,
-    session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
-    session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
-    args: &crate::domain::tools::agent::AgentArgs,
-    runtime: &AgentLlmRuntime,
-    subagent_execute_depth: u8,
-    web_search_api_keys: WebSearchApiKeys,
-    skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
-    agent_def: &dyn crate::domain::agents::AgentDefinition,
+    request: BackgroundAgentRequest<'_>,
 ) -> Result<String, String> {
+    let BackgroundAgentRequest {
+        app,
+        message_id,
+        session_id,
+        plan_id,
+        tool_results_dir,
+        effective_root,
+        session_todos,
+        session_agent_tasks,
+        args,
+        runtime,
+        subagent_execute_depth,
+        web_search_api_keys,
+        skill_cache,
+        agent_def,
+    } = request;
     use crate::domain::agents::background::*;
 
     // 注册后台任务
@@ -1065,22 +1145,22 @@ pub(crate) async fn spawn_background_agent(
         };
 
         // 运行子 Agent 会话（同步等待结果）
-        let result = run_subagent_session_internal(
-            &app_clone,
-            &message_id_clone,
-            &session_id_clone,
-            &tool_results_dir_clone,
-            &effective_root_clone,
+        let result = run_subagent_session_internal(SubagentInternalRequest {
+            app: &app_clone,
+            message_id: &message_id_clone,
+            session_id: &session_id_clone,
+            tool_results_dir: &tool_results_dir_clone,
+            effective_root: &effective_root_clone,
             session_todos,
             session_agent_tasks,
-            &args_clone,
-            &runtime_for_task,
+            args: &args_clone,
+            runtime: &runtime_for_task,
             subagent_execute_depth,
-            web_search_api_keys_clone,
-            skill_cache_clone,
+            web_search_api_keys: web_search_api_keys_clone,
+            skill_cache: skill_cache_clone,
             cancel_token,
-            &task_id_clone,
-        )
+            background_task_id: &task_id_clone,
+        })
         .await;
 
         let manager = crate::domain::agents::background::get_background_agent_manager();
@@ -1127,25 +1207,45 @@ pub(crate) async fn spawn_background_agent(
 }
 
 /// 后台 Worker：与前台共享同一套子 Agent ReAct 循环（含取消与跟进队列）。
-async fn run_subagent_session_internal(
-    app: &AppHandle,
-    message_id: &str,
-    session_id: &str,
-    tool_results_dir: &std::path::Path,
-    effective_root: &std::path::Path,
+struct SubagentInternalRequest<'a> {
+    app: &'a AppHandle,
+    message_id: &'a str,
+    session_id: &'a str,
+    tool_results_dir: &'a std::path::Path,
+    effective_root: &'a std::path::Path,
     session_todos: Option<Arc<Mutex<Vec<TodoItem>>>>,
     session_agent_tasks: Option<Arc<Mutex<Vec<AgentTask>>>>,
-    args: &crate::domain::tools::agent::AgentArgs,
-    runtime: &AgentLlmRuntime,
+    args: &'a crate::domain::tools::agent::AgentArgs,
+    runtime: &'a AgentLlmRuntime,
     subagent_execute_depth: u8,
     web_search_api_keys: WebSearchApiKeys,
     skill_cache: Arc<StdMutex<skills::SkillCacheMap>>,
     cancel_token: tokio_util::sync::CancellationToken,
-    background_task_id: &str,
+    background_task_id: &'a str,
+}
+
+async fn run_subagent_session_internal(
+    request: SubagentInternalRequest<'_>,
 ) -> Result<String, String> {
+    let SubagentInternalRequest {
+        app,
+        message_id,
+        session_id,
+        tool_results_dir,
+        effective_root,
+        session_todos,
+        session_agent_tasks,
+        args,
+        runtime,
+        subagent_execute_depth,
+        web_search_api_keys,
+        skill_cache,
+        cancel_token,
+        background_task_id,
+    } = request;
     let router = crate::domain::agents::get_agent_router();
     let agent_def = router.select_agent(args.subagent_type.as_deref());
-    run_subagent_session_foreground_inner(
+    run_subagent_session_foreground_inner(ForegroundSubagentRequest {
         app,
         message_id,
         session_id,
@@ -1159,9 +1259,9 @@ async fn run_subagent_session_internal(
         web_search_api_keys,
         skill_cache,
         agent_def,
-        Some(&cancel_token),
-        Some(background_task_id),
-    )
+        cancel_token: Some(&cancel_token),
+        background_task_id: Some(background_task_id),
+    })
     .await
 }
 

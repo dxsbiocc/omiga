@@ -1,9 +1,9 @@
 use omiga_lib::domain::research_system::{
     AgentCard, AgentRegistry, AgentResult, AgentRunner, AssembledContext, BudgetSpec,
-    ContextAssembler, ExecutionRoute, Executor, InMemoryArtifactStore, InMemoryEvidenceStore,
-    InMemoryTaskGraphStore, InMemoryTraceStore, MockAgentRunner, OutputContract, PermissionManager,
-    PermissionSpec, ResultStatus, ReviewStatus, Reviewer, TaskEdge, TaskGraph, TaskSpec, TraceKind,
-    VerificationSpec,
+    ContextAssembler, ExecutionRoute, Executor, ExecutorDependencies, ExecutorStores,
+    InMemoryArtifactStore, InMemoryEvidenceStore, InMemoryTaskGraphStore, InMemoryTraceStore,
+    MockAgentRunner, OutputContract, PermissionManager, PermissionSpec, ResultStatus, ReviewStatus,
+    Reviewer, TaskEdge, TaskGraph, TaskSpec, TraceKind, VerificationSpec,
 };
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -89,6 +89,22 @@ fn make_task(
     }
 }
 
+fn make_executor<R: AgentRunner + Sync>(registry: AgentRegistry, runner: R) -> Executor<R> {
+    Executor::new(ExecutorDependencies {
+        registry,
+        runner,
+        reviewer: Reviewer::new(),
+        permission_manager: PermissionManager::new(),
+        context_assembler: ContextAssembler::new(),
+        stores: ExecutorStores {
+            task_graph_store: Box::new(InMemoryTaskGraphStore::default()),
+            artifact_store: Box::new(InMemoryArtifactStore::default()),
+            evidence_store: Box::new(InMemoryEvidenceStore::default()),
+            trace_store: Box::new(InMemoryTraceStore::default()),
+        },
+    })
+}
+
 #[test]
 fn executor_can_run_simple_task_graph() {
     let registry = AgentRegistry::default_registry().expect("default registry");
@@ -122,17 +138,7 @@ fn executor_can_run_simple_task_graph() {
         },
     };
 
-    let mut executor = Executor::new(
-        registry,
-        MockAgentRunner::new(),
-        Reviewer::new(),
-        PermissionManager::new(),
-        ContextAssembler::new(),
-        Box::new(InMemoryTaskGraphStore::default()),
-        Box::new(InMemoryArtifactStore::default()),
-        Box::new(InMemoryEvidenceStore::default()),
-        Box::new(InMemoryTraceStore::default()),
-    );
+    let mut executor = make_executor(registry, MockAgentRunner::new());
 
     let result = executor.execute(graph).expect("execute");
     assert!(matches!(result.status, ResultStatus::Completed));
@@ -202,17 +208,7 @@ fn executor_respects_dependency_order_for_multiple_tasks() {
         },
     };
 
-    let mut executor = Executor::new(
-        registry,
-        MockAgentRunner::new(),
-        Reviewer::new(),
-        PermissionManager::new(),
-        ContextAssembler::new(),
-        Box::new(InMemoryTaskGraphStore::default()),
-        Box::new(InMemoryArtifactStore::default()),
-        Box::new(InMemoryEvidenceStore::default()),
-        Box::new(InMemoryTraceStore::default()),
-    );
+    let mut executor = make_executor(registry, MockAgentRunner::new());
 
     let result = executor.execute(graph).expect("execute");
     let started_order = result
@@ -299,17 +295,7 @@ fn executor_allows_multi_agent_batches_to_fit_iteration_budget() {
         },
     };
 
-    let mut executor = Executor::new(
-        registry,
-        MockAgentRunner::new(),
-        Reviewer::new(),
-        PermissionManager::new(),
-        ContextAssembler::new(),
-        Box::new(InMemoryTaskGraphStore::default()),
-        Box::new(InMemoryArtifactStore::default()),
-        Box::new(InMemoryEvidenceStore::default()),
-        Box::new(InMemoryTraceStore::default()),
-    );
+    let mut executor = make_executor(registry, MockAgentRunner::new());
 
     let result = executor.execute(graph).expect("execute");
 
@@ -433,17 +419,7 @@ fn executor_runs_multi_agent_ready_tasks_concurrently() {
         },
     };
 
-    let mut executor = Executor::new(
-        registry,
-        runner.clone(),
-        Reviewer::new(),
-        PermissionManager::new(),
-        ContextAssembler::new(),
-        Box::new(InMemoryTaskGraphStore::default()),
-        Box::new(InMemoryArtifactStore::default()),
-        Box::new(InMemoryEvidenceStore::default()),
-        Box::new(InMemoryTraceStore::default()),
-    );
+    let mut executor = make_executor(registry, runner.clone());
 
     let result = executor.execute(graph).expect("execute");
 

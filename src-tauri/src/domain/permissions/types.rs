@@ -303,7 +303,7 @@ pub enum ComposerPermissionStance {
 pub enum PermissionDecision {
     Allow,
     Deny(String),
-    RequireApproval(PermissionRequest),
+    RequireApproval(Box<PermissionRequest>),
 }
 
 /// 拒绝记录

@@ -1,8 +1,12 @@
 //! LLM provider configuration CRUD commands.
 
 use super::settings::{LlmConfigResponse, ProviderConfigEntry};
-use super::{get_llm_config, stream_llm_response_with_cancel, AgentLlmRuntime, CommandResult};
+use super::{
+    get_llm_config, stream_llm_response_with_cancel, AgentLlmRuntime, CommandResult,
+    StreamLlmRequest,
+};
 use crate::app_state::OmigaAppState;
+use crate::domain::persistence::{NewMessageRecord, NewOrchestrationEventRecord};
 use crate::domain::skills;
 use crate::errors::OmigaError;
 use crate::infrastructure::streaming::StreamOutputItem;
@@ -13,6 +17,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{Emitter, State};
 use tokio::sync::{Mutex, RwLock};
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveProviderConfigRequest {
+    name: String,
+    provider_type: String,
+    api_key: String,
+    model: String,
+    secret_key: Option<String>,
+    app_id: Option<String>,
+    base_url: Option<String>,
+    set_as_default: Option<bool>,
+    thinking: Option<bool>,
+}
 
 #[tauri::command]
 pub async fn list_provider_configs(
@@ -179,30 +197,23 @@ pub async fn switch_provider(
 #[tauri::command]
 pub async fn save_provider_config(
     state: State<'_, OmigaAppState>,
-    name: String,
-    provider_type: String,
-    api_key: String,
-    model: String,
-    secret_key: Option<String>,
-    app_id: Option<String>,
-    base_url: Option<String>,
-    set_as_default: Option<bool>,
-    thinking: Option<bool>,
+    request: SaveProviderConfigRequest,
 ) -> CommandResult<()> {
     // Validate required fields
-    if name.trim().is_empty() {
+    if request.name.trim().is_empty() {
         return Err(OmigaError::Config(
             "Configuration name is required".to_string(),
         ));
     }
-    if provider_type.trim().is_empty() {
+    if request.provider_type.trim().is_empty() {
         return Err(OmigaError::Config("Provider type is required".to_string()));
     }
-    if model.trim().is_empty() {
+    if request.model.trim().is_empty() {
         return Err(OmigaError::Config("Model name is required".to_string()));
     }
 
-    let provider_enum = provider_type
+    let provider_enum = request
+        .provider_type
         .parse::<LlmProvider>()
         .map_err(|e| OmigaError::Config(format!("Invalid provider type: {}", e)))?;
 
@@ -217,10 +228,10 @@ pub async fn save_provider_config(
     let providers = config_file.providers.as_mut().unwrap();
 
     // Check if we're updating an existing provider and need to preserve the existing API key
-    let final_api_key = if api_key == "${KEEP_EXISTING}" {
+    let final_api_key = if request.api_key == "${KEEP_EXISTING}" {
         // Preserve existing API key when editing
         let existing = providers
-            .get(&name)
+            .get(&request.name)
             .and_then(|p| p.api_key.clone())
             .filter(|k| !k.is_empty());
         if existing.is_none() {
@@ -230,44 +241,46 @@ pub async fn save_provider_config(
         }
         existing.unwrap()
     } else {
-        if api_key.trim().is_empty() {
+        if request.api_key.trim().is_empty() {
             return Err(OmigaError::Config("API key is required".to_string()));
         }
-        api_key
+        request.api_key.clone()
     };
 
-    let existing_thinking = providers.get(&name).and_then(|p| p.thinking);
+    let existing_thinking = providers.get(&request.name).and_then(|p| p.thinking);
     let thinking_for_entry = match provider_enum {
-        crate::llm::LlmProvider::Moonshot | crate::llm::LlmProvider::Custom => match thinking {
-            Some(t) => Some(t),
-            // New row: default false; existing row: keep file value when TS omits the field.
-            None => existing_thinking.or(Some(false)),
-        },
+        crate::llm::LlmProvider::Moonshot | crate::llm::LlmProvider::Custom => {
+            match request.thinking {
+                Some(t) => Some(t),
+                // New row: default false; existing row: keep file value when TS omits the field.
+                None => existing_thinking.or(Some(false)),
+            }
+        }
         // DeepSeek et al.: no thinking mode — never persist.
         _ => None,
     };
 
     // Create or update provider config
     let provider_config = crate::llm::config::ProviderConfig {
-        provider_type: provider_type.clone(),
+        provider_type: request.provider_type.clone(),
         api_key: Some(final_api_key),
-        secret_key,
-        app_id,
-        base_url,
-        model: Some(model),
+        secret_key: request.secret_key,
+        app_id: request.app_id,
+        base_url: request.base_url,
+        model: Some(request.model),
         enabled: true,
         thinking: thinking_for_entry,
         ..Default::default()
     };
 
-    providers.insert(name.clone(), provider_config);
+    providers.insert(request.name.clone(), provider_config);
 
     // Set as default if requested
-    if set_as_default.unwrap_or(false) {
-        config_file.default_provider = Some(name.clone());
+    if request.set_as_default.unwrap_or(false) {
+        config_file.default_provider = Some(request.name.clone());
 
         // Also update the active config in state
-        let saved = providers.get(&name).unwrap();
+        let saved = providers.get(&request.name).unwrap();
         let mut new_config =
             LlmConfig::new(provider_enum, saved.api_key.clone().unwrap_or_default())
                 .with_model(saved.model.clone().unwrap_or_default());
@@ -280,7 +293,7 @@ pub async fn save_provider_config(
         };
         let mut config_guard = state.chat.llm_config.lock().await;
         *config_guard = Some(new_config);
-        *state.chat.active_provider_entry_name.lock().await = Some(name.clone());
+        *state.chat.active_provider_entry_name.lock().await = Some(request.name.clone());
     }
 
     // Save to config file - use standard location if not found
@@ -787,21 +800,21 @@ pub async fn run_existing_agent_plan(
 
     let _ = app_state
         .repo
-        .append_orchestration_event(
-            &request.session_id,
-            None,
-            None,
-            request.mode_hint.as_deref().or(Some("schedule")),
-            "approved_plan_execution_started",
-            Some("executing"),
-            None,
-            &serde_json::json!({
+        .append_orchestration_event(NewOrchestrationEventRecord {
+            session_id: &request.session_id,
+            round_id: None,
+            message_id: None,
+            mode: request.mode_hint.as_deref().or(Some("schedule")),
+            event_type: "approved_plan_execution_started",
+            phase: Some("executing"),
+            task_id: None,
+            payload_json: &serde_json::json!({
                 "planId": plan.plan_id,
                 "taskCount": plan.subtasks.len(),
                 "strategy": format!("{:?}", strategy),
             })
             .to_string(),
-        )
+        })
         .await;
 
     let scheduler = AgentScheduler::new();
@@ -848,16 +861,16 @@ pub async fn cancel_agent_schedule(
 ) -> CommandResult<bool> {
     let _ = app_state
         .repo
-        .append_orchestration_event(
-            &session_id,
-            None,
-            None,
-            None,
-            "cancel_requested",
-            None,
-            None,
-            &serde_json::json!({}).to_string(),
-        )
+        .append_orchestration_event(NewOrchestrationEventRecord {
+            session_id: &session_id,
+            round_id: None,
+            message_id: None,
+            mode: None,
+            event_type: "cancel_requested",
+            phase: None,
+            task_id: None,
+            payload_json: &serde_json::json!({}).to_string(),
+        })
         .await;
     let tokens: Vec<tokio_util::sync::CancellationToken> = {
         let orch_map = app_state.chat.active_orchestrations.lock().await;
@@ -889,16 +902,16 @@ pub async fn cancel_agent_schedule(
     }
     let _ = app_state
         .repo
-        .append_orchestration_event(
-            &session_id,
-            None,
-            None,
-            None,
-            "cancel_completed",
-            None,
-            None,
-            &serde_json::json!({ "cancelled": true }).to_string(),
-        )
+        .append_orchestration_event(NewOrchestrationEventRecord {
+            session_id: &session_id,
+            round_id: None,
+            message_id: None,
+            mode: None,
+            event_type: "cancel_completed",
+            phase: None,
+            task_id: None,
+            payload_json: &serde_json::json!({ "cancelled": true }).to_string(),
+        })
         .await;
     Ok(true)
 }
@@ -930,21 +943,21 @@ pub(crate) async fn inject_schedule_summary_message(
 
     if let Err(e) = runtime
         .repo()
-        .append_orchestration_event(
+        .append_orchestration_event(NewOrchestrationEventRecord {
             session_id,
-            Some(runtime.round_id()),
-            None,
-            Some("schedule"),
-            "leader_summary_started",
-            Some("synthesizing"),
-            None,
-            &serde_json::json!({
+            round_id: Some(runtime.round_id()),
+            message_id: None,
+            mode: Some("schedule"),
+            event_type: "leader_summary_started",
+            phase: Some("synthesizing"),
+            task_id: None,
+            payload_json: &serde_json::json!({
                 "planId": result.plan_id,
                 "status": status_label,
                 "entryAgentType": "general-purpose",
             })
             .to_string(),
-        )
+        })
         .await
     {
         tracing::warn!(target: "omiga::scheduler", "Failed to append leader_summary_started event: {}", e);
@@ -1098,18 +1111,18 @@ pub(crate) async fn inject_schedule_summary_message(
                     }),
                 );
 
-                let stream_result = stream_llm_response_with_cancel(
-                    client.as_ref(),
+                let stream_result = stream_llm_response_with_cancel(StreamLlmRequest {
+                    client: client.as_ref(),
                     app,
-                    &stream_msg_id,
-                    &stream_round_id,
-                    &messages,
-                    &[],
-                    true, // stream chunks inline to the frontend
-                    &pending_tools,
-                    &cancel_flag,
-                    runtime.repo.clone(),
-                )
+                    message_id: &stream_msg_id,
+                    round_id: &stream_round_id,
+                    messages: &messages,
+                    tools: &[],
+                    emit_text_chunks: true,
+                    pending_tools: &pending_tools,
+                    cancel_flag: &cancel_flag,
+                    repo: runtime.repo.clone(),
+                })
                 .await;
 
                 // Always emit Complete for the synthesis stream so the frontend exits
@@ -1193,18 +1206,18 @@ pub(crate) async fn inject_schedule_summary_message(
 
     if let Err(e) = state
         .repo
-        .save_message(
-            &msg_id_to_use,
+        .save_message(NewMessageRecord {
+            id: &msg_id_to_use,
             session_id,
-            "assistant",
-            &summary,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+            role: "assistant",
+            content: &summary,
+            tool_calls: None,
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: None,
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
         .await
     {
         tracing::warn!(target: "omiga::scheduler", "Failed to save schedule summary message: {}", e);

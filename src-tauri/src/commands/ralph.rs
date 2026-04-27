@@ -2,6 +2,7 @@
 //! Used by the frontend to display active/stale ralph sessions and by the cancel skill.
 
 use crate::commands::CommandResult;
+use crate::domain::persistence::NewOrchestrationEventRecord;
 use crate::domain::{autopilot_state, ralph_state};
 use serde::Serialize;
 
@@ -356,16 +357,16 @@ pub async fn cancel_team_session(
     let mut cancelled = 0;
     let _ = app_state
         .repo
-        .append_orchestration_event(
-            &session_id,
-            None,
-            None,
-            Some("team"),
-            "cancel_requested",
-            Some("failed"),
-            None,
-            &serde_json::json!({}).to_string(),
-        )
+        .append_orchestration_event(NewOrchestrationEventRecord {
+            session_id: &session_id,
+            round_id: None,
+            message_id: None,
+            mode: Some("team"),
+            event_type: "cancel_requested",
+            phase: Some("failed"),
+            task_id: None,
+            payload_json: &serde_json::json!({}).to_string(),
+        })
         .await;
 
     // Read the team state to find bg_task_ids for each subtask
@@ -390,16 +391,16 @@ pub async fn cancel_team_session(
     blackboard::clear_board(root, &session_id).await;
     let _ = app_state
         .repo
-        .append_orchestration_event(
-            &session_id,
-            None,
-            None,
-            Some("team"),
-            "cancel_completed",
-            Some("failed"),
-            None,
-            &serde_json::json!({ "cancelled_subtasks": cancelled }).to_string(),
-        )
+        .append_orchestration_event(NewOrchestrationEventRecord {
+            session_id: &session_id,
+            round_id: None,
+            message_id: None,
+            mode: Some("team"),
+            event_type: "cancel_completed",
+            phase: Some("failed"),
+            task_id: None,
+            payload_json: &serde_json::json!({ "cancelled_subtasks": cancelled }).to_string(),
+        })
         .await;
 
     Ok(cancelled)
