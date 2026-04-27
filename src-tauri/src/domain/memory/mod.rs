@@ -110,7 +110,7 @@ impl MemorySystem {
         let _ = migration::backfill_wiki_metadata(&self.wiki_path()).await;
         let _ = migration::backfill_wiki_metadata(&config::permanent_wiki_path()).await;
 
-        // Probabilistic cleanup: prune stale long-term entries ~10% of the time on init.
+        // Probabilistic cleanup: prune stale long-term and source entries ~10% of the time on init.
         if rand_one_in_n(10) {
             let lt = self.long_term_path();
             let perm_lt = config::permanent_long_term_path();
@@ -123,6 +123,10 @@ impl MemorySystem {
                     removed_project,
                     removed_global
                 );
+            }
+            let removed_sources = source_registry::prune_stale_sources(&lt, false).await;
+            if removed_sources > 0 {
+                info!("Pruned {} expired source registry entries", removed_sources);
             }
         }
 

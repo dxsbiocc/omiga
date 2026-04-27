@@ -14,6 +14,11 @@
 //! - `gist` is a short (≤300 chars) summary of what was useful in the page.
 //! - `query_context` records the search queries that led to this URL being used,
 //!   enabling future recall to match it to similar queries.
+//! - `expires_at` is set to 90 days from last access; extended on re-access.
+//!   Expired entries are excluded from search and pruned probabilistically.
+
+/// Default TTL for source entries: 90 days from last access.
+const SOURCE_TTL_DAYS: i64 = 90;
 
 use crate::domain::pageindex::{derive_query_terms, score_terms_against_text};
 use serde::{Deserialize, Serialize};
@@ -48,6 +53,10 @@ pub struct SourceEntry {
     /// Search queries that led to this URL being fetched.
     #[serde(default)]
     pub query_context: Vec<String>,
+    /// ISO-8601 expiry timestamp. Entries past this date are excluded from search.
+    /// Extended by SOURCE_TTL_DAYS on every re-access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,12 +82,18 @@ fn entry_path(lt_root: &Path, canonical_url: &str) -> PathBuf {
 // ── Core operations ───────────────────────────────────────────────────────────
 
 /// Create or update a source entry (deduped by canonical URL).
+/// Re-access extends `expires_at` by SOURCE_TTL_DAYS from now.
 pub async fn upsert_source(lt_root: &Path, mut entry: SourceEntry) {
     let dir = sources_dir(lt_root);
     if let Err(e) = fs::create_dir_all(&dir).await {
         tracing::warn!("source_registry: mkdir failed: {}", e);
         return;
     }
+    // Always set expiry to TTL from now (extended on every re-access).
+    entry.expires_at = Some(
+        (chrono::Utc::now() + chrono::Duration::days(SOURCE_TTL_DAYS)).to_rfc3339(),
+    );
+
     let path = entry_path(lt_root, &entry.canonical_url);
     // Merge with existing if present.
     if let Ok(raw) = fs::read_to_string(&path).await {
@@ -117,7 +132,16 @@ pub async fn upsert_source(lt_root: &Path, mut entry: SourceEntry) {
     }
 }
 
-/// List all source entries (used for search and stats).
+/// Returns `true` if the entry has passed its `expires_at` timestamp.
+fn is_expired(entry: &SourceEntry) -> bool {
+    entry.expires_at.as_deref().map(|exp| {
+        chrono::DateTime::parse_from_rfc3339(exp)
+            .map(|dt| dt < chrono::Utc::now())
+            .unwrap_or(false)
+    }).unwrap_or(false)
+}
+
+/// List all source entries including expired ones (used for admin/stats).
 pub async fn list_sources(lt_root: &Path) -> Vec<SourceEntry> {
     let dir = sources_dir(lt_root);
     if !dir.is_dir() {
@@ -141,9 +165,56 @@ pub async fn list_sources(lt_root: &Path) -> Vec<SourceEntry> {
     out
 }
 
-/// Count total source entries.
+/// List active (non-expired) source entries.
+pub async fn list_active_sources(lt_root: &Path) -> Vec<SourceEntry> {
+    list_sources(lt_root).await.into_iter().filter(|e| !is_expired(e)).collect()
+}
+
+/// Count non-expired source entries.
 pub async fn count_sources(lt_root: &Path) -> usize {
-    list_sources(lt_root).await.len()
+    list_active_sources(lt_root).await.len()
+}
+
+/// Count expired source entries.
+pub async fn count_stale_sources(lt_root: &Path) -> usize {
+    list_sources(lt_root).await.into_iter().filter(|e| is_expired(e)).count()
+}
+
+/// Delete expired source entries from disk.
+/// Returns the number of entries removed.
+pub async fn prune_stale_sources(lt_root: &Path, dry_run: bool) -> usize {
+    let dir = sources_dir(lt_root);
+    if !dir.is_dir() {
+        return 0;
+    }
+    let Ok(mut entries) = fs::read_dir(&dir).await else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let expired = if let Ok(raw) = fs::read_to_string(&p).await {
+            serde_json::from_str::<SourceEntry>(&raw)
+                .map(|src| is_expired(&src))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if expired {
+            removed += 1;
+            if !dry_run {
+                let _ = fs::remove_file(&p).await;
+                tracing::debug!("source_registry: pruned expired entry {:?}", p);
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!("source_registry: pruned {} expired source entries (dry_run={})", removed, dry_run);
+    }
+    removed
 }
 
 /// Search sources by keyword (matches URL, title, gist, and query_context).
@@ -152,7 +223,7 @@ pub async fn search_sources(lt_root: &Path, query: &str, limit: usize) -> Vec<So
     if terms.is_empty() {
         return vec![];
     }
-    let mut matches: Vec<(SourceEntry, f64)> = list_sources(lt_root)
+    let mut matches: Vec<(SourceEntry, f64)> = list_active_sources(lt_root)
         .await
         .into_iter()
         .filter_map(|entry| {
@@ -206,6 +277,7 @@ pub fn entry_from_fetch(
     let gist = extract_gist(content, 300);
     let now = chrono::Utc::now().to_rfc3339();
 
+    let expires_at = (chrono::Utc::now() + chrono::Duration::days(SOURCE_TTL_DAYS)).to_rfc3339();
     SourceEntry {
         url: url.to_string(),
         canonical_url: canonical,
@@ -220,6 +292,7 @@ pub fn entry_from_fetch(
             .filter(|q| !q.trim().is_empty())
             .map(|q| vec![q.to_string()])
             .unwrap_or_default(),
+        expires_at: Some(expires_at),
     }
 }
 
@@ -235,6 +308,7 @@ pub fn entries_from_search_output(
             let canonical = canonicalize_url(&url);
             let domain = extract_domain(&url);
             let now = chrono::Utc::now().to_rfc3339();
+            let expires_at = (chrono::Utc::now() + chrono::Duration::days(SOURCE_TTL_DAYS)).to_rfc3339();
             SourceEntry {
                 url: url.clone(),
                 canonical_url: canonical,
@@ -250,6 +324,7 @@ pub fn entries_from_search_output(
                 } else {
                     vec![query.to_string()]
                 },
+                expires_at: Some(expires_at),
             }
         })
         .collect()
@@ -415,5 +490,160 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].use_count, 2);
         assert_eq!(all[0].sessions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn entry_from_fetch_sets_expires_at() {
+        let entry = entry_from_fetch("https://example.com/ttl-test", "content", Some("s1"), None);
+        let exp = entry.expires_at.as_deref().expect("expires_at must be set");
+        let exp_dt = chrono::DateTime::parse_from_rfc3339(exp).expect("valid RFC-3339");
+        let now = chrono::Utc::now();
+        // Should be ~90 days in the future (allow ±1 minute for test timing).
+        let diff_days = (exp_dt.timestamp() - now.timestamp()) / 86400;
+        assert!(
+            diff_days >= 89 && diff_days <= 91,
+            "expires_at should be ~90 days from now, got {} days",
+            diff_days
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_extends_ttl_on_reaccess() {
+        let temp = tempfile::tempdir().unwrap();
+        // First access.
+        let e1 = entry_from_fetch("https://example.com/reaccess", "first access", Some("s1"), None);
+        upsert_source(temp.path(), e1).await;
+        let before = list_sources(temp.path()).await;
+        let first_exp = before[0].expires_at.clone().unwrap();
+
+        // Re-access: should reset TTL to 90 days from now.
+        let e2 = entry_from_fetch("https://example.com/reaccess", "second access", Some("s2"), None);
+        upsert_source(temp.path(), e2).await;
+        let after = list_sources(temp.path()).await;
+        let second_exp = after[0].expires_at.clone().unwrap();
+
+        // Both are ~90 days out so they should be very close.
+        assert!(second_exp >= first_exp, "TTL must not shrink on re-access");
+    }
+
+    #[tokio::test]
+    async fn search_excludes_expired_entries() {
+        let temp = tempfile::tempdir().unwrap();
+
+        // Insert an expired entry directly.
+        let expired = SourceEntry {
+            url: "https://example.com/expired-source".to_string(),
+            canonical_url: "https://example.com/expired-source".to_string(),
+            title: Some("Expired Research Paper".to_string()),
+            domain: "example.com".to_string(),
+            gist: Some("circadian redox clock expired paper".to_string()),
+            accessed_at: "2024-01-01T00:00:00Z".to_string(),
+            last_used_at: "2024-01-01T00:00:00Z".to_string(),
+            use_count: 1,
+            sessions: vec![],
+            query_context: vec!["circadian".to_string()],
+            expires_at: Some("2024-01-02T00:00:00Z".to_string()), // past
+        };
+        let path = sources_dir(temp.path());
+        fs::create_dir_all(&path).await.unwrap();
+        fs::write(
+            path.join(format!("{}.json", "expired00deadbeef")),
+            serde_json::to_string_pretty(&expired).unwrap(),
+        ).await.unwrap();
+
+        // Insert a valid (non-expired) entry.
+        let valid = entry_from_fetch(
+            "https://pubmed.ncbi.nlm.nih.gov/valid-paper",
+            "# Valid Circadian Paper\n\ncircadian redox NRF2 glutathione",
+            Some("s1"),
+            Some("circadian"),
+        );
+        upsert_source(temp.path(), valid).await;
+
+        let results = search_sources(temp.path(), "circadian redox", 10).await;
+        // Expired entry must not appear in search results.
+        assert!(
+            results.iter().all(|r| !r.url.contains("expired")),
+            "expired source must not appear in search results: {:?}",
+            results.iter().map(|r| &r.url).collect::<Vec<_>>()
+        );
+        // Valid entry must appear.
+        assert!(
+            results.iter().any(|r| r.url.contains("valid-paper")),
+            "valid source must appear in search results"
+        );
+    }
+
+    #[tokio::test]
+    async fn count_sources_excludes_expired() {
+        let temp = tempfile::tempdir().unwrap();
+
+        // One expired, one active.
+        let expired = SourceEntry {
+            url: "https://example.com/old".to_string(),
+            canonical_url: "https://example.com/old".to_string(),
+            title: None,
+            domain: "example.com".to_string(),
+            gist: None,
+            accessed_at: "2024-01-01T00:00:00Z".to_string(),
+            last_used_at: "2024-01-01T00:00:00Z".to_string(),
+            use_count: 1,
+            sessions: vec![],
+            query_context: vec![],
+            expires_at: Some("2024-01-02T00:00:00Z".to_string()),
+        };
+        let src_dir = sources_dir(temp.path());
+        fs::create_dir_all(&src_dir).await.unwrap();
+        fs::write(
+            src_dir.join("expiredaaaa0000.json"),
+            serde_json::to_string_pretty(&expired).unwrap(),
+        ).await.unwrap();
+        let active = entry_from_fetch("https://example.com/active", "active content", None, None);
+        upsert_source(temp.path(), active).await;
+
+        assert_eq!(list_sources(temp.path()).await.len(), 2, "list_sources shows all");
+        assert_eq!(count_sources(temp.path()).await, 1, "count_sources excludes expired");
+        assert_eq!(count_stale_sources(temp.path()).await, 1, "one stale entry");
+    }
+
+    #[tokio::test]
+    async fn prune_stale_sources_dry_run_and_real() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = sources_dir(temp.path());
+        fs::create_dir_all(&src_dir).await.unwrap();
+
+        let expired = SourceEntry {
+            url: "https://example.com/prune-me".to_string(),
+            canonical_url: "https://example.com/prune-me".to_string(),
+            title: None,
+            domain: "example.com".to_string(),
+            gist: None,
+            accessed_at: "2024-01-01T00:00:00Z".to_string(),
+            last_used_at: "2024-01-01T00:00:00Z".to_string(),
+            use_count: 1,
+            sessions: vec![],
+            query_context: vec![],
+            expires_at: Some("2024-01-02T00:00:00Z".to_string()),
+        };
+        let keeper = entry_from_fetch("https://example.com/keeper", "kept content", None, None);
+        fs::write(
+            src_dir.join("pruneme0deadbeef.json"),
+            serde_json::to_string_pretty(&expired).unwrap(),
+        ).await.unwrap();
+        upsert_source(temp.path(), keeper).await;
+
+        assert_eq!(list_sources(temp.path()).await.len(), 2);
+
+        // Dry run: reports removal but does not delete.
+        let dry = prune_stale_sources(temp.path(), true).await;
+        assert_eq!(dry, 1, "dry run should report 1 stale source");
+        assert_eq!(list_sources(temp.path()).await.len(), 2, "dry run must not delete");
+
+        // Real run: deletes the expired entry.
+        let removed = prune_stale_sources(temp.path(), false).await;
+        assert_eq!(removed, 1);
+        let remaining = list_sources(temp.path()).await;
+        assert_eq!(remaining.len(), 1, "only keeper should remain");
+        assert!(remaining[0].url.contains("keeper"));
     }
 }
