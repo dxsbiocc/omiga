@@ -595,6 +595,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
         <Tab value="implicit" label="隐性记忆" icon={<ImplicitIcon />} iconPosition="start" />
         <Tab value="long_term" label="长期记忆" icon={<LongTermIcon />} iconPosition="start" />
         <Tab value="sources" label="来源" icon={<SourceIcon />} iconPosition="start" />
+        <Tab value="dossier" label="项目简报" icon={<HealthIcon />} iconPosition="start" />
         <Tab value="config" label="配置" icon={<ConfigIcon />} iconPosition="start" />
       </Tabs>
 
@@ -1055,6 +1056,11 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
         {/* Sources */}
         {memory.activeTab === "sources" && (
           <SourcesTab memory={memory} theme={theme} glassSurface={glassSurface} alpha={alpha} setToast={setToast} />
+        )}
+
+        {/* Dossier */}
+        {memory.activeTab === "dossier" && (
+          <DossierTab memory={memory} theme={theme} glassSurface={glassSurface} alpha={alpha} setToast={setToast} />
         )}
 
         {/* Config */}
@@ -1825,6 +1831,214 @@ function SourcesTab({ memory, theme, glassSurface, alpha, setToast }: SourcesTab
           </Stack>
         </Paper>
       ))}
+    </Stack>
+  );
+}
+
+// ── Dossier Tab ──────────────────────────────────────────────────────────────
+
+interface DossierTabProps {
+  memory: ReturnType<typeof import("../../hooks/useUnifiedMemory").useUnifiedMemory>;
+  theme: import("@mui/material/styles").Theme;
+  glassSurface: object;
+  alpha: (color: string, opacity: number) => string;
+  setToast: (msg: string | null) => void;
+}
+
+function DossierTab({ memory, theme, glassSurface, alpha, setToast }: DossierTabProps) {
+  const [editing, setEditing] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+
+  // Editable fields — plain textarea-friendly: one item per line
+  const [editTitle, setEditTitle] = React.useState("");
+  const [editBrief, setEditBrief] = React.useState("");
+  const [editBeliefs, setEditBeliefs] = React.useState("");
+  const [editDecisions, setEditDecisions] = React.useState("");
+  const [editQuestions, setEditQuestions] = React.useState("");
+  const [editNextSteps, setEditNextSteps] = React.useState("");
+
+  React.useEffect(() => {
+    memory.loadDossier();
+  }, [memory.loadDossier]);
+
+  const startEdit = () => {
+    const d = memory.dossier;
+    if (!d) return;
+    setEditTitle(d.title);
+    setEditBrief(d.brief);
+    setEditBeliefs(d.currentBeliefs.join("\n"));
+    setEditDecisions(d.decisions.join("\n"));
+    setEditQuestions(d.openQuestions.join("\n"));
+    setEditNextSteps(d.nextSteps.join("\n"));
+    setEditing(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await memory.saveDossier({
+        title: editTitle.trim(),
+        brief: editBrief.trim(),
+        currentBeliefs: editBeliefs.split("\n").map(s => s.trim()).filter(Boolean),
+        decisions: editDecisions.split("\n").map(s => s.trim()).filter(Boolean),
+        openQuestions: editQuestions.split("\n").map(s => s.trim()).filter(Boolean),
+        nextSteps: editNextSteps.split("\n").map(s => s.trim()).filter(Boolean),
+      });
+      setEditing(false);
+      setToast("项目简报已保存");
+    } catch {
+      setToast("保存失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const d = memory.dossier;
+  const isEmpty = !d || (!d.title && !d.brief && d.currentBeliefs.length === 0 && d.decisions.length === 0);
+
+  return (
+    <Stack spacing={2}>
+      {/* Header toolbar */}
+      <Paper elevation={0} sx={{ p: 1.5, ...glassSurface }}>
+        <Stack direction="row" alignItems="center" justifyContent="space-between">
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <HealthIcon color="primary" />
+            <Typography variant="subtitle2" fontWeight={700}>
+              项目简报（Dossier）
+            </Typography>
+            {d?.updatedAt && (
+              <Typography variant="caption" color="text.secondary">
+                更新于 {new Date(d.updatedAt).toLocaleString("zh-CN")}
+              </Typography>
+            )}
+          </Stack>
+          <Stack direction="row" spacing={1}>
+            {!editing && (
+              <Tooltip title="刷新简报">
+                <span>
+                  <Button size="small" startIcon={<RefreshIcon />} onClick={() => memory.loadDossier()} disabled={memory.dossierLoading}>
+                    刷新
+                  </Button>
+                </span>
+              </Tooltip>
+            )}
+            {!editing ? (
+              <Button size="small" variant="outlined" startIcon={<BuildIcon />} onClick={startEdit} disabled={memory.dossierLoading}>
+                编辑
+              </Button>
+            ) : (
+              <>
+                <Button size="small" onClick={() => setEditing(false)} disabled={saving}>取消</Button>
+                <Button size="small" variant="contained" onClick={handleSave} disabled={saving}>
+                  {saving ? <CircularProgress size={14} /> : "保存"}
+                </Button>
+              </>
+            )}
+          </Stack>
+        </Stack>
+      </Paper>
+
+      {memory.dossierLoading && <LinearProgress />}
+
+      {!editing && isEmpty && !memory.dossierLoading && (
+        <Paper elevation={0} sx={{ p: 3, textAlign: "center", ...glassSurface }}>
+          <HealthIcon sx={{ fontSize: 36, color: "text.disabled", mb: 1 }} />
+          <Typography color="text.secondary" variant="body2" sx={{ mb: 1 }}>
+            暂无项目简报。Agent 完成会话摘要后自动更新，或点击"编辑"手动填写。
+          </Typography>
+          <Button size="small" variant="outlined" startIcon={<BuildIcon />} onClick={startEdit}>
+            手动创建
+          </Button>
+        </Paper>
+      )}
+
+      {/* Read-only view */}
+      {!editing && !isEmpty && d && (
+        <Stack spacing={1.5}>
+          <Paper elevation={0} sx={{ p: 2, ...glassSurface }}>
+            <Typography variant="h6" fontWeight={700}>{d.title || "(无标题)"}</Typography>
+            {d.brief && <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{d.brief}</Typography>}
+          </Paper>
+
+          {d.currentBeliefs.length > 0 && (
+            <Paper elevation={0} sx={{ p: 1.75, ...glassSurface }}>
+              <Typography variant="overline" color="text.secondary" fontWeight={700} sx={{ letterSpacing: 0.1 }}>
+                当前信念
+              </Typography>
+              <Stack spacing={0.5} mt={0.5}>
+                {d.currentBeliefs.map((b, i) => (
+                  <Typography key={i} variant="body2">• {b}</Typography>
+                ))}
+              </Stack>
+            </Paper>
+          )}
+
+          {d.decisions.length > 0 && (
+            <Paper elevation={0} sx={{ p: 1.75, ...glassSurface }}>
+              <Typography variant="overline" color="text.secondary" fontWeight={700} sx={{ letterSpacing: 0.1 }}>
+                已做决策
+              </Typography>
+              <Stack spacing={0.5} mt={0.5}>
+                {d.decisions.map((dec, i) => (
+                  <Typography key={i} variant="body2">• {dec}</Typography>
+                ))}
+              </Stack>
+            </Paper>
+          )}
+
+          {d.openQuestions.length > 0 && (
+            <Paper elevation={0} sx={{ p: 1.75, ...glassSurface }}>
+              <Typography variant="overline" color="text.secondary" fontWeight={700} sx={{ letterSpacing: 0.1 }}>
+                待解问题
+              </Typography>
+              <Stack spacing={0.5} mt={0.5}>
+                {d.openQuestions.map((q, i) => (
+                  <Typography key={i} variant="body2" color="warning.main">? {q}</Typography>
+                ))}
+              </Stack>
+            </Paper>
+          )}
+
+          {d.nextSteps.length > 0 && (
+            <Paper elevation={0} sx={{ p: 1.75, ...glassSurface }}>
+              <Typography variant="overline" color="text.secondary" fontWeight={700} sx={{ letterSpacing: 0.1 }}>
+                后续行动
+              </Typography>
+              <Stack spacing={0.5} mt={0.5}>
+                {d.nextSteps.map((s, i) => (
+                  <Typography key={i} variant="body2" color="success.main">→ {s}</Typography>
+                ))}
+              </Stack>
+            </Paper>
+          )}
+
+          {/* Rendered preview — what Agent sees */}
+          <Paper elevation={0} sx={{ p: 1.75, bgcolor: alpha(theme.palette.info.main, 0.05), border: `1px solid ${alpha(theme.palette.info.main, 0.2)}`, borderRadius: 1 }}>
+            <Typography variant="caption" color="info.main" fontWeight={700} display="block" gutterBottom>
+              注入预览（Agent 实际看到的内容）
+            </Typography>
+            <Typography variant="caption" component="pre" sx={{ whiteSpace: "pre-wrap", fontFamily: "monospace", color: "text.secondary" }}>
+              {d.rendered || "(空)"}
+            </Typography>
+          </Paper>
+        </Stack>
+      )}
+
+      {/* Edit form */}
+      {editing && (
+        <Stack spacing={1.5}>
+          <Paper elevation={0} sx={{ p: 2, ...glassSurface }}>
+            <Stack spacing={1.5}>
+              <TextField size="small" label="项目标题" value={editTitle} onChange={e => setEditTitle(e.target.value)} fullWidth />
+              <TextField size="small" label="项目描述 (brief)" value={editBrief} onChange={e => setEditBrief(e.target.value)} fullWidth multiline rows={2} />
+              <TextField size="small" label="当前信念（每行一条）" value={editBeliefs} onChange={e => setEditBeliefs(e.target.value)} fullWidth multiline rows={4} placeholder="Rust 是正确的后端选择&#10;记忆系统需要分层设计" />
+              <TextField size="small" label="已做决策（每行一条）" value={editDecisions} onChange={e => setEditDecisions(e.target.value)} fullWidth multiline rows={4} placeholder="使用 Tauri 桌面框架&#10;采用 TF-IDF 召回" />
+              <TextField size="small" label="待解问题（每行一条）" value={editQuestions} onChange={e => setEditQuestions(e.target.value)} fullWidth multiline rows={3} placeholder="如何控制 Dossier token 预算?" />
+              <TextField size="small" label="后续行动（每行一条）" value={editNextSteps} onChange={e => setEditNextSteps(e.target.value)} fullWidth multiline rows={3} placeholder="补充前端测试&#10;合并到 main" />
+            </Stack>
+          </Paper>
+        </Stack>
+      )}
     </Stack>
   );
 }

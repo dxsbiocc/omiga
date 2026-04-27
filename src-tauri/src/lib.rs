@@ -262,6 +262,8 @@ pub fn run() {
             commands::memory::memory_prune_stale,
             commands::memory::memory_list_sources,
             commands::memory::memory_delete_source,
+            commands::memory::memory_get_dossier,
+            commands::memory::memory_save_dossier,
             commands::memory::write_user_omiga_file,
             commands::memory::init_user_context_files,
             commands::ralph::list_ralph_sessions,

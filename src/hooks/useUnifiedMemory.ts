@@ -143,7 +143,18 @@ export interface QueryResponse {
   total_matches: number;
 }
 
-export type MemoryTab = "overview" | "knowledge" | "implicit" | "long_term" | "sources" | "config";
+export type MemoryTab = "overview" | "knowledge" | "implicit" | "long_term" | "sources" | "dossier" | "config";
+
+export interface DossierDto {
+  title: string;
+  brief: string;
+  currentBeliefs: string[];
+  decisions: string[];
+  openQuestions: string[];
+  nextSteps: string[];
+  updatedAt: string;
+  rendered: string;
+}
 
 export interface LongTermEntryDto {
   path: string;
@@ -401,6 +412,35 @@ export function useUnifiedMemory(projectPath: string) {
     loadSupportedExtensions();
   }, [loadSupportedExtensions]);
 
+  // ── Dossier (project brief) ──────────────────────────────────────────────
+  const [dossier, setDossier] = useState<DossierDto | null>(null);
+  const [dossierLoading, setDossierLoading] = useState(false);
+
+  const loadDossier = useCallback(async () => {
+    setDossierLoading(true);
+    try {
+      const d = await invoke<DossierDto>("memory_get_dossier", { projectPath });
+      setDossier(d);
+    } catch (e) {
+      console.error("[useUnifiedMemory] loadDossier:", e);
+    } finally {
+      setDossierLoading(false);
+    }
+  }, [projectPath]);
+
+  const saveDossier = useCallback(async (updated: Omit<DossierDto, "updatedAt" | "rendered">): Promise<void> => {
+    await invoke("memory_save_dossier", {
+      projectPath,
+      title: updated.title,
+      brief: updated.brief,
+      currentBeliefs: updated.currentBeliefs,
+      decisions: updated.decisions,
+      openQuestions: updated.openQuestions,
+      nextSteps: updated.nextSteps,
+    });
+    await loadDossier();
+  }, [projectPath, loadDossier]);
+
   // ── Source registry CRUD ─────────────────────────────────────────────────
   const [sourceEntries, setSourceEntries] = useState<SourceEntryDto[]>([]);
   const [sourcesLoading, setSourcesLoading] = useState(false);
@@ -480,6 +520,8 @@ export function useUnifiedMemory(projectPath: string) {
     importing,
     importResult,
     supportedExtensions,
+    dossier,
+    dossierLoading,
     sourceEntries,
     sourcesLoading,
     longTermEntries,
@@ -498,6 +540,8 @@ export function useUnifiedMemory(projectPath: string) {
     isValidPath,
     importToWiki,
     loadSupportedExtensions,
+    loadDossier,
+    saveDossier,
     loadSourceEntries,
     deleteSourceEntry,
     loadLongTermEntries,

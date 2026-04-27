@@ -1278,6 +1278,78 @@ pub async fn memory_delete_long_term_entry(entry_path: String) -> Result<(), App
         .map_err(|e| AppError::Unknown(e.to_string()))
 }
 
+/// Return the current project dossier (or a default empty one if none exists yet).
+#[tauri::command]
+pub async fn memory_get_dossier(project_path: String) -> Result<DossierDto, AppError> {
+    use crate::domain::memory::dossier::load_dossier;
+    let root = project_root(&project_path);
+    let cfg = load_resolved_config(&root).await.unwrap_or_default();
+    let lt = cfg.long_term_path(&root);
+    // Derive the slug from the project root (same as update_project_dossier).
+    let slug = crate::domain::memory::long_term::slugify_pub(
+        root.file_name().and_then(|n| n.to_str()).unwrap_or("project"),
+    );
+    let dossier = load_dossier(&lt, &slug).await;
+    let rendered = dossier.render_for_hot_memory();
+    Ok(DossierDto {
+        title: dossier.title,
+        brief: dossier.brief,
+        current_beliefs: dossier.current_beliefs,
+        decisions: dossier.decisions,
+        open_questions: dossier.open_questions,
+        next_steps: dossier.next_steps,
+        updated_at: dossier.updated_at,
+        rendered,
+    })
+}
+
+/// Overwrite the project dossier with user-edited content.
+#[tauri::command]
+pub async fn memory_save_dossier(
+    project_path: String,
+    title: String,
+    brief: String,
+    current_beliefs: Vec<String>,
+    decisions: Vec<String>,
+    open_questions: Vec<String>,
+    next_steps: Vec<String>,
+) -> Result<(), AppError> {
+    use crate::domain::memory::dossier::{save_dossier, Dossier};
+    let root = project_root(&project_path);
+    let cfg = load_resolved_config(&root).await.unwrap_or_default();
+    let lt = cfg.long_term_path(&root);
+    let slug = crate::domain::memory::long_term::slugify_pub(
+        root.file_name().and_then(|n| n.to_str()).unwrap_or("project"),
+    );
+    let dossier = Dossier {
+        title,
+        brief,
+        current_beliefs,
+        decisions,
+        open_questions,
+        next_steps,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    };
+    save_dossier(&lt, &slug, &dossier)
+        .await
+        .map_err(|e| AppError::Unknown(format!("save dossier: {e}")))?;
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DossierDto {
+    pub title: String,
+    pub brief: String,
+    pub current_beliefs: Vec<String>,
+    pub decisions: Vec<String>,
+    pub open_questions: Vec<String>,
+    pub next_steps: Vec<String>,
+    pub updated_at: String,
+    /// Pre-rendered Markdown for the hot-memory injection preview.
+    pub rendered: String,
+}
+
 /// Manually trigger stale-entry pruning (long-term + source registry) and return total removed.
 #[tauri::command]
 pub async fn memory_prune_stale(project_path: String) -> Result<usize, AppError> {
