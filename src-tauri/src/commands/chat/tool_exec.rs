@@ -1561,12 +1561,13 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                 .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(str::to_owned))
                 .unwrap_or_default();
             if !query.trim().is_empty() {
-                crate::commands::memory::get_memory_context(
+                crate::commands::memory::get_memory_context_cached(
                     &app.state::<OmigaAppState>().repo,
                     project_root,
                     Some(session_id),
                     &query,
                     5,
+                    Some(&app.state::<OmigaAppState>().memory_preflight_cache),
                 )
                 .await
                 .map(|kb| {

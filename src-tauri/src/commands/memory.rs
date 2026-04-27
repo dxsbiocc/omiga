@@ -627,8 +627,57 @@ pub async fn memory_get_dir(project_path: String) -> String {
     memory.implicit_path().to_string_lossy().to_string()
 }
 
-/// Get relevant context for chat (internal use)
+/// Get relevant context for chat (internal use).
+///
+/// Results are cached per (session_id + query_prefix) with a 60 s TTL to avoid
+/// repeated disk scans on consecutive turns with similar queries.
 pub async fn get_memory_context(
+    repo: &crate::domain::persistence::SessionRepository,
+    project_path: &std::path::Path,
+    session_id: Option<&str>,
+    query: &str,
+    limit: usize,
+) -> Option<String> {
+    get_memory_context_cached(repo, project_path, session_id, query, limit, None).await
+}
+
+pub async fn get_memory_context_cached(
+    repo: &crate::domain::persistence::SessionRepository,
+    project_path: &std::path::Path,
+    session_id: Option<&str>,
+    query: &str,
+    limit: usize,
+    preflight_cache: Option<&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, crate::app_state::MemoryPreflightSlot>>>>,
+) -> Option<String> {
+    // Build cache key: session_id + first 16 chars of query.
+    if let (Some(sid), Some(cache)) = (session_id, preflight_cache) {
+        let key = format!("{}:{}", sid, &query[..query.len().min(16)]);
+        let ttl = crate::app_state::MEMORY_PREFLIGHT_CACHE_TTL;
+        if let Ok(guard) = cache.lock() {
+            if let Some(slot) = guard.get(&key) {
+                if slot.cached_at.elapsed() < ttl {
+                    return Some(slot.context.clone());
+                }
+            }
+        }
+        // Cache miss — compute below, then store.
+        let result = compute_memory_context(repo, project_path, session_id, query, limit).await;
+        if let Some(ref ctx) = result {
+            if let Ok(mut guard) = cache.lock() {
+                guard.insert(key, crate::app_state::MemoryPreflightSlot {
+                    context: ctx.clone(),
+                    cached_at: std::time::Instant::now(),
+                });
+                // Evict stale entries (keep map bounded).
+                guard.retain(|_, v| v.cached_at.elapsed() < ttl);
+            }
+        }
+        return result;
+    }
+    compute_memory_context(repo, project_path, session_id, query, limit).await
+}
+
+async fn compute_memory_context(
     repo: &crate::domain::persistence::SessionRepository,
     project_path: &std::path::Path,
     session_id: Option<&str>,

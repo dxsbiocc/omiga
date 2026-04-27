@@ -120,9 +120,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::chat::send_message,
-            commands::chat::list_available_agents,
-            commands::chat::list_agent_roles,
-            commands::chat::run_research_command,
+            commands::chat::research::list_available_agents,
+            commands::chat::research::list_agent_roles,
+            commands::chat::research::run_research_command,
             commands::chat::list_orchestration_events,
             commands::chat::run_mock_orchestration_scenario,
             commands::chat::list_session_background_tasks,

@@ -36,7 +36,7 @@ use crate::llm::{
     create_client, load_config_from_env, LlmClient, LlmConfig, LlmContent, LlmMessage, LlmRole,
 };
 use crate::utils::large_output_instructions::get_large_output_instructions;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -256,7 +256,7 @@ pub(crate) fn tool_results_dir_for_session(
 }
 
 /// Resolve session `project_path` to an absolute-ish root for tools (glob, bash, file_read).
-fn resolve_session_project_root(project_path: &str) -> std::path::PathBuf {
+pub(super) fn resolve_session_project_root(project_path: &str) -> std::path::PathBuf {
     let p = project_path.trim();
     if p.is_empty() || p == "." {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -972,249 +972,10 @@ mod subagent;
 pub(crate) use self::subagent::{spawn_background_agent, BackgroundAgentRequest};
 mod tool_exec;
 use self::tool_exec::{execute_tool_calls, ToolExecutionRequest};
-
-/// One built-in or custom agent entry for the composer picker.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AvailableAgentInfo {
-    pub agent_type: String,
-    pub description: String,
-    /// Whether this agent always runs in the background (no foreground stream).
-    pub background: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AgentRoleInfoDto {
-    pub agent_type: String,
-    pub when_to_use: String,
-    pub source: String,
-    pub model_tier: String,
-    pub explicit_model: Option<String>,
-    pub background: bool,
-    pub user_facing: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResearchCommandRequest {
-    pub session_id: String,
-    pub project_path: String,
-    pub content: String,
-    #[serde(default)]
-    pub body: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResearchCommandResponse {
-    pub session_id: String,
-    pub round_id: String,
-    pub user_message_id: String,
-    pub assistant_message_id: String,
-    pub assistant_content: String,
-}
-
-#[tauri::command]
-pub fn list_available_agents() -> Vec<AvailableAgentInfo> {
-    let router = crate::domain::agents::get_agent_router();
-    let mut out: Vec<AvailableAgentInfo> = router
-        .list_user_facing_agents()
-        .into_iter()
-        .map(|(t, d, bg)| AvailableAgentInfo {
-            agent_type: t.to_string(),
-            description: d.to_string(),
-            background: bg,
-        })
-        .collect();
-    out.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
-    out
-}
-
-#[tauri::command]
-pub fn list_agent_roles() -> Vec<AgentRoleInfoDto> {
-    crate::domain::agents::get_agent_registry()
-        .list_roles()
-        .into_iter()
-        .map(|role| AgentRoleInfoDto {
-            agent_type: role.agent_type,
-            when_to_use: role.when_to_use,
-            source: format!("{:?}", role.source),
-            model_tier: format!("{:?}", role.model_tier),
-            explicit_model: role.explicit_model,
-            background: role.background,
-            user_facing: role.user_facing,
-        })
-        .collect()
-}
-
-#[tauri::command]
-pub async fn run_research_command(
-    app_state: State<'_, OmigaAppState>,
-    request: ResearchCommandRequest,
-) -> CommandResult<ResearchCommandResponse> {
-    let repo = &*app_state.repo;
-    let db_session = repo
-        .get_session(&request.session_id)
-        .await
-        .map_err(|e| {
-            OmigaError::Chat(ChatError::StreamError(format!(
-                "Failed to load session: {}",
-                e
-            )))
-        })?
-        .ok_or_else(|| {
-            OmigaError::Chat(ChatError::StreamError(
-                "Session not found for /research".to_string(),
-            ))
-        })?;
-
-    let cwd = resolve_session_project_root(&request.project_path);
-    let args = parse_research_body(&request.body);
-    let output = crate::domain::research_system::run_research_cli(&args, &cwd)
-        .map_err(|e| OmigaError::Chat(ChatError::StreamError(e.to_string())))?;
-    let assistant_content = format_research_output(&args, &output);
-
-    let user_message_id = uuid::Uuid::new_v4().to_string();
-    repo.save_message(NewMessageRecord {
-        id: &user_message_id,
-        session_id: &request.session_id,
-        role: "user",
-        content: &request.content,
-        tool_calls: None,
-        tool_call_id: None,
-        token_usage_json: None,
-        reasoning_content: None,
-        follow_up_suggestions_json: None,
-        turn_summary: None,
-    })
-    .await
-    .map_err(|e| {
-        OmigaError::Chat(ChatError::StreamError(format!(
-            "Failed to save /research user message: {}",
-            e
-        )))
-    })?;
-
-    let round_id = uuid::Uuid::new_v4().to_string();
-    let assistant_message_id = uuid::Uuid::new_v4().to_string();
-    repo.create_round(
-        &round_id,
-        &request.session_id,
-        &assistant_message_id,
-        Some(&user_message_id),
-    )
-    .await
-    .map_err(|e| {
-        OmigaError::Chat(ChatError::StreamError(format!(
-            "Failed to create /research round: {}",
-            e
-        )))
-    })?;
-
-    repo.save_message(NewMessageRecord {
-        id: &assistant_message_id,
-        session_id: &request.session_id,
-        role: "assistant",
-        content: &assistant_content,
-        tool_calls: None,
-        tool_call_id: None,
-        token_usage_json: None,
-        reasoning_content: None,
-        follow_up_suggestions_json: None,
-        turn_summary: None,
-    })
-    .await
-    .map_err(|e| {
-        OmigaError::Chat(ChatError::StreamError(format!(
-            "Failed to save /research assistant message: {}",
-            e
-        )))
-    })?;
-
-    repo.complete_round(&round_id, Some(&assistant_message_id))
-        .await
-        .map_err(|e| {
-            OmigaError::Chat(ChatError::StreamError(format!(
-                "Failed to complete /research round: {}",
-                e
-            )))
-        })?;
-    repo.touch_session(&request.session_id).await.ok();
-
-    {
-        let mut sessions = app_state.chat.sessions.write().await;
-        if let Some(runtime) = sessions.get_mut(&request.session_id) {
-            let mut persisted_session = SessionCodec::db_to_domain(db_session);
-            persisted_session.add_user_message(&request.content);
-            persisted_session.add_assistant_message(&assistant_content);
-            runtime.session = persisted_session;
-        }
-    }
-
-    append_orchestration_event(
-        repo,
-        ChatOrchestrationEvent {
-            session_id: &request.session_id,
-            round_id: Some(&round_id),
-            message_id: Some(&assistant_message_id),
-            mode: Some("research"),
-            event_type: "research_command_completed",
-            phase: Some("complete"),
-            task_id: None,
-            payload: serde_json::json!({
-                "cwd": cwd,
-                "args": args,
-            }),
-        },
-    )
-    .await;
-
-    Ok(ResearchCommandResponse {
-        session_id: request.session_id,
-        round_id,
-        user_message_id,
-        assistant_message_id,
-        assistant_content,
-    })
-}
-
-fn parse_research_body(body: &str) -> Vec<String> {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return vec!["help".to_string()];
-    }
-
-    let mut parts = trimmed.splitn(2, char::is_whitespace);
-    let first = parts.next().unwrap_or_default();
-    let rest = parts.next().unwrap_or_default().trim();
-
-    match first {
-        "init" | "list-agents" | "list-proposals" | "review-traces" | "help" => {
-            vec![first.to_string()]
-        }
-        "plan" | "run" | "approve-proposal" => {
-            if rest.is_empty() {
-                vec![first.to_string()]
-            } else {
-                vec![first.to_string(), rest.to_string()]
-            }
-        }
-        _ => vec!["run".to_string(), trimmed.to_string()],
-    }
-}
-
-fn format_research_output(args: &[String], output: &str) -> String {
-    let label = args.join(" ");
-    let language = if serde_json::from_str::<serde_json::Value>(output).is_ok() {
-        "json"
-    } else {
-        "text"
-    };
-    format!(
-        "已执行 `/research {}`\n\n```{}\n{}\n```",
-        label, language, output
-    )
-}
+pub mod research;
+pub use self::research::{
+    AgentRoleInfoDto, AvailableAgentInfo, ResearchCommandRequest, ResearchCommandResponse,
+};
 
 /// Normalize composer `sandboxBackend` from the UI (`modal` | `daytona` | `docker` | `singularity`).
 /// Note: `ssh` is no longer a sandbox backend - it's now a separate execution environment.
@@ -1386,7 +1147,7 @@ fn looks_like_resume_request(text: &str) -> bool {
     .any(|token| lower.contains(token))
 }
 
-struct ChatOrchestrationEvent<'a> {
+pub(super) struct ChatOrchestrationEvent<'a> {
     session_id: &'a str,
     round_id: Option<&'a str>,
     message_id: Option<&'a str>,
@@ -1397,7 +1158,7 @@ struct ChatOrchestrationEvent<'a> {
     payload: serde_json::Value,
 }
 
-async fn append_orchestration_event(
+pub(super) async fn append_orchestration_event(
     repo: &crate::domain::persistence::SessionRepository,
     event: ChatOrchestrationEvent<'_>,
 ) {
@@ -2507,12 +2268,13 @@ pub async fn send_message(
         match tokio::time::timeout(std::time::Duration::from_secs(3), async {
             tokio::join!(
                 skills::skills_any_exist(&project_root, skill_cache_ref),
-                crate::commands::memory::get_memory_context(
+                crate::commands::memory::get_memory_context_cached(
                     repo,
                     &project_root,
                     Some(&session_id),
                     &request.content,
                     3,
+                    Some(&app_state.memory_preflight_cache),
                 ),
                 crate::commands::memory::memory_navigation_section(&project_root),
             )

@@ -22,6 +22,16 @@ use tauri::State;
 /// TTL for the integrations config cache. Short enough to pick up edits quickly.
 pub const INTEGRATIONS_CONFIG_CACHE_TTL: Duration = Duration::from_secs(30);
 
+/// TTL for the preflight memory context cache (dossier + warm results).
+/// 60 s keeps the cache fresh enough for a normal conversation pace.
+pub const MEMORY_PREFLIGHT_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Cached preflight memory context (rendered string ready to inject into system prompt).
+pub struct MemoryPreflightSlot {
+    pub context: String,
+    pub cached_at: Instant,
+}
+
 pub struct IntegrationsConfigCacheSlot {
     pub config: IntegrationsConfig,
     pub cached_at: Instant,
@@ -46,6 +56,10 @@ pub struct OmigaAppState {
     pub integrations_config_cache: Arc<StdMutex<HashMap<PathBuf, IntegrationsConfigCacheSlot>>>,
     /// Permission manager for tool execution security.
     pub permission_manager: Arc<PermissionManager>,
+    /// Session-level preflight memory context cache.
+    /// Key: "{session_id}:{query_prefix_16}" → rendered context string + timestamp.
+    /// Avoids repeated disk scans for dossier + warm results within the same 60 s window.
+    pub memory_preflight_cache: Arc<StdMutex<HashMap<String, MemoryPreflightSlot>>>,
 }
 
 impl OmigaAppState {
@@ -58,6 +72,7 @@ impl OmigaAppState {
             skill_cache: Arc::new(StdMutex::new(SkillCacheMap::default())),
             integrations_config_cache: Arc::new(StdMutex::new(HashMap::new())),
             permission_manager: Arc::new(PermissionManager::new()),
+            memory_preflight_cache: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 }
