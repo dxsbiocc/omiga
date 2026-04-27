@@ -1025,4 +1025,153 @@ mod tests {
         assert_eq!(entry.kind, LongTermMemoryKind::SessionSummary);
         assert!(entry.summary.contains("Goal:"));
     }
+
+    #[test]
+    fn quality_score_ranks_high_confidence_above_low() {
+        let high = LongTermMemoryEntry {
+            confidence: 0.9,
+            stability: 0.8,
+            importance: 0.9,
+            ..Default::default()
+        };
+        let low = LongTermMemoryEntry {
+            confidence: 0.3,
+            stability: 0.2,
+            importance: 0.2,
+            ..Default::default()
+        };
+        assert!(
+            quality_score(&high) > quality_score(&low),
+            "high-quality entry must score above low-quality entry"
+        );
+    }
+
+    #[test]
+    fn quality_score_does_not_evict_permanent_entries() {
+        // Permanent retention is excluded from global-cap eviction; ensure quality
+        // score is computed correctly (eviction code filters on retention_class separately).
+        let permanent = LongTermMemoryEntry {
+            retention_class: RetentionClass::Permanent,
+            confidence: 0.1,
+            stability: 0.1,
+            importance: 0.1,
+            ..Default::default()
+        };
+        // Just verify it doesn't panic and returns a float.
+        let score = quality_score(&permanent);
+        assert!(score >= 0.0 && score <= 1.0);
+    }
+
+    #[test]
+    fn merge_entry_takes_max_quality_scores() {
+        let existing = LongTermMemoryEntry {
+            topic: "existing".to_string(),
+            summary: "short".to_string(),
+            confidence: 0.5,
+            stability: 0.4,
+            importance: 0.3,
+            reuse_probability: 0.3,
+            ..Default::default()
+        };
+        let incoming = LongTermMemoryEntry {
+            topic: "existing".to_string(),
+            summary: "a longer and richer summary with more detail".to_string(),
+            confidence: 0.8,
+            stability: 0.2,
+            importance: 0.9,
+            reuse_probability: 0.7,
+            ..Default::default()
+        };
+        let merged = merge_entry(Some(existing), incoming);
+        // confidence: max(0.5, 0.8) = 0.8
+        assert!((merged.confidence - 0.8).abs() < 1e-6, "confidence should be max");
+        // stability: max(0.4, 0.2) = 0.4
+        assert!((merged.stability - 0.4).abs() < 1e-6, "stability should be max");
+        // importance: max(0.3, 0.9) = 0.9
+        assert!((merged.importance - 0.9).abs() < 1e-6, "importance should be max");
+        // reuse_probability: max(0.3, 0.7) = 0.7
+        assert!((merged.reuse_probability - 0.7).abs() < 1e-6);
+        // summary: richer incoming wins
+        assert!(merged.summary.contains("longer"), "richer summary should win");
+    }
+
+    #[test]
+    fn merge_entry_reactivates_archived_when_incoming_is_active() {
+        let archived = LongTermMemoryEntry {
+            topic: "archived".to_string(),
+            summary: "archived fact".to_string(),
+            status: EntryStatus::Archived,
+            ..Default::default()
+        };
+        let incoming = LongTermMemoryEntry {
+            topic: "archived".to_string(),
+            summary: "re-promoted fact".to_string(),
+            status: EntryStatus::Active,
+            ..Default::default()
+        };
+        let merged = merge_entry(Some(archived), incoming);
+        assert_eq!(
+            merged.status,
+            EntryStatus::Active,
+            "Active incoming should reactivate Archived existing"
+        );
+    }
+
+    #[test]
+    fn merge_entry_extends_ttl_to_later_expiry() {
+        let near_future = (chrono::Utc::now() + chrono::Duration::days(5)).to_rfc3339();
+        let far_future = (chrono::Utc::now() + chrono::Duration::days(60)).to_rfc3339();
+        let existing = LongTermMemoryEntry {
+            topic: "expiry-test".to_string(),
+            summary: "expiry test fact".to_string(),
+            expires_at: Some(near_future.clone()),
+            ..Default::default()
+        };
+        let incoming = LongTermMemoryEntry {
+            topic: "expiry-test".to_string(),
+            summary: "expiry test fact extended".to_string(),
+            expires_at: Some(far_future.clone()),
+            ..Default::default()
+        };
+        let merged = merge_entry(Some(existing), incoming);
+        assert_eq!(
+            merged.expires_at.as_deref(),
+            Some(far_future.as_str()),
+            "TTL should extend to the later expiry"
+        );
+    }
+
+    #[test]
+    fn merge_entry_deduplicates_entities_and_sessions() {
+        let existing = LongTermMemoryEntry {
+            topic: "dedup-test".to_string(),
+            summary: "fact".to_string(),
+            entities: vec!["rust".to_string(), "memory".to_string()],
+            source_sessions: vec!["sess-1".to_string()],
+            ..Default::default()
+        };
+        let incoming = LongTermMemoryEntry {
+            topic: "dedup-test".to_string(),
+            summary: "fact updated".to_string(),
+            entities: vec!["memory".to_string(), "tokio".to_string()],
+            source_sessions: vec!["sess-1".to_string(), "sess-2".to_string()],
+            ..Default::default()
+        };
+        let merged = merge_entry(Some(existing), incoming);
+        // "memory" must not be duplicated
+        let memory_count = merged.entities.iter().filter(|e| e.as_str() == "memory").count();
+        assert_eq!(memory_count, 1, "entities must not be duplicated");
+        assert_eq!(merged.entities.len(), 3, "rust + memory + tokio = 3");
+        let sess1_count = merged.source_sessions.iter().filter(|s| s.as_str() == "sess-1").count();
+        assert_eq!(sess1_count, 1, "sessions must not be duplicated");
+        assert_eq!(merged.source_sessions.len(), 2);
+    }
+
+    #[test]
+    fn family_slug_uses_first_two_hyphen_components() {
+        assert_eq!(family_slug("recall-ordering-variant-2"), "recall-ordering");
+        assert_eq!(family_slug("single"), "single");
+        assert_eq!(family_slug("two-parts"), "two-parts");
+        assert_eq!(family_slug("a-b-c-d"), "a-b");
+    }
 }

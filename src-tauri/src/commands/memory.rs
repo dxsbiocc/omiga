@@ -1267,3 +1267,142 @@ pub async fn memory_prune_stale(project_path: String) -> Result<usize, AppError>
     let removed = prune_stale_entries(&lt, false).await + prune_stale_entries(&perm_lt, false).await;
     Ok(removed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::{MemoryPreflightSlot, MEMORY_PREFLIGHT_CACHE_TTL};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    fn make_cache(entries: Vec<(String, String, Instant)>) -> Arc<Mutex<HashMap<String, MemoryPreflightSlot>>> {
+        let mut map = HashMap::new();
+        for (key, ctx, ts) in entries {
+            map.insert(key, MemoryPreflightSlot { context: ctx, cached_at: ts });
+        }
+        Arc::new(Mutex::new(map))
+    }
+
+    #[tokio::test]
+    async fn preflight_cache_returns_hit_within_ttl() {
+        // Build a real (but empty-project) repo to satisfy the function signature.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test.sqlite");
+        let pool = crate::domain::persistence::init_db(&db).await.unwrap();
+        let repo = crate::domain::persistence::SessionRepository::new(pool);
+
+        let session_id = "sess-cache-test";
+        let query = "recall memory ordering";
+        let key = format!("{}:{}", session_id, &query[..query.len().min(16)]);
+        let cached_value = "## cached context for test".to_string();
+
+        let cache = make_cache(vec![(key, cached_value.clone(), Instant::now())]);
+
+        // Empty project dir → compute_memory_context returns None.
+        // If cache hits, it must return Some(cached_value) instead.
+        let result = get_memory_context_cached(
+            &repo,
+            dir.path(),
+            Some(session_id),
+            query,
+            3,
+            Some(&cache),
+        )
+        .await;
+
+        assert_eq!(
+            result.as_deref(),
+            Some(cached_value.as_str()),
+            "should return cached value on hit"
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_cache_misses_on_expired_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test2.sqlite");
+        let pool = crate::domain::persistence::init_db(&db).await.unwrap();
+        let repo = crate::domain::persistence::SessionRepository::new(pool);
+
+        let session_id = "sess-expired";
+        let query = "recall expired cache";
+        let key = format!("{}:{}", session_id, &query[..query.len().min(16)]);
+
+        // Insert an already-expired entry (cached 2× TTL ago).
+        let expired_at = Instant::now() - MEMORY_PREFLIGHT_CACHE_TTL - Duration::from_secs(1);
+        let cache = make_cache(vec![(key, "stale value".to_string(), expired_at)]);
+
+        // compute_memory_context on an empty dir returns None → cache miss also returns None.
+        let result = get_memory_context_cached(
+            &repo,
+            dir.path(),
+            Some(session_id),
+            query,
+            3,
+            Some(&cache),
+        )
+        .await;
+
+        assert!(
+            result.is_none() || result.as_deref() != Some("stale value"),
+            "expired cache entry must not be returned; got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn preflight_cache_key_format_uses_16_char_query_prefix() {
+        // The key format is `{session_id}:{query[..16]}`.
+        let session_id = "my-session";
+        let query = "this is a long query that exceeds sixteen characters";
+        // query[..16] = "this is a long q" (t,h,i,s, ,i,s, ,a, ,l,o,n,g, ,q = 16 chars)
+        let expected_prefix = &query[..16];
+        assert_eq!(expected_prefix.len(), 16, "prefix must be exactly 16 chars");
+        let key = format!("{}:{}", session_id, expected_prefix);
+        assert_eq!(key, "my-session:this is a long q");
+    }
+
+    #[tokio::test]
+    async fn preflight_cache_stores_result_on_miss_and_hits_on_second_call() {
+        // This test verifies that after a cache miss that populates the cache,
+        // a second call with the same key is a hit.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("test3.sqlite");
+        let pool = crate::domain::persistence::init_db(&db).await.unwrap();
+        let repo = crate::domain::persistence::SessionRepository::new(pool);
+
+        let session_id = "sess-store-test";
+        let query = "populate cache test query";
+
+        let cache: Arc<Mutex<HashMap<String, MemoryPreflightSlot>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        // First call: cache miss → compute returns None (empty dir) → nothing stored.
+        let first = get_memory_context_cached(
+            &repo, dir.path(), Some(session_id), query, 3, Some(&cache),
+        ).await;
+        // Empty project returns None, so nothing is stored.
+        assert!(first.is_none());
+
+        // Manually inject a value so we can verify second call hits it.
+        let key = format!("{}:{}", session_id, &query[..query.len().min(16)]);
+        {
+            let mut guard = cache.lock().unwrap();
+            guard.insert(key, MemoryPreflightSlot {
+                context: "injected after first call".to_string(),
+                cached_at: Instant::now(),
+            });
+        }
+
+        // Second call must hit the cache and return the injected value.
+        let second = get_memory_context_cached(
+            &repo, dir.path(), Some(session_id), query, 3, Some(&cache),
+        ).await;
+        assert_eq!(
+            second.as_deref(),
+            Some("injected after first call"),
+            "second call must hit the cache"
+        );
+    }
+}

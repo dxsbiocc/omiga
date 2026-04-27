@@ -214,7 +214,7 @@ mod tests {
     #[tokio::test]
     async fn save_and_load_roundtrip() {
         let temp = tempfile::tempdir().unwrap();
-        let mut d = Dossier {
+        let d = Dossier {
             title: "My Project".to_string(),
             brief: "A test project".to_string(),
             current_beliefs: vec!["belief one".to_string()],
@@ -227,5 +227,83 @@ mod tests {
         let loaded = load_dossier(temp.path(), "my-project").await;
         assert_eq!(loaded.title, "My Project");
         assert_eq!(loaded.decisions, d.decisions);
+    }
+
+    #[test]
+    fn render_for_hot_memory_contains_required_sections() {
+        let d = Dossier {
+            title: "Omiga".to_string(),
+            brief: "AI coding workbench".to_string(),
+            current_beliefs: vec!["Rust backend is the right call".to_string()],
+            decisions: vec!["Use Tauri for desktop".to_string()],
+            open_questions: vec!["How to scale memory?".to_string()],
+            next_steps: vec!["Write tests".to_string()],
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let rendered = d.render_for_hot_memory();
+        assert!(rendered.contains("## Project Brief"), "must have ## Project Brief header");
+        assert!(rendered.contains("Omiga"), "must include project title");
+        assert!(rendered.contains("AI coding workbench"), "must include brief");
+        assert!(rendered.contains("**Current beliefs:**"), "must have beliefs section");
+        assert!(rendered.contains("Rust backend is the right call"));
+        assert!(rendered.contains("**Decisions:**"), "must have decisions section");
+        assert!(rendered.contains("Use Tauri for desktop"));
+        assert!(rendered.contains("**Open questions:**"), "must have questions section");
+        assert!(rendered.contains("**Next steps:**"), "must have next steps section");
+    }
+
+    #[test]
+    fn render_for_hot_memory_empty_dossier_is_minimal() {
+        let d = Dossier {
+            title: "Empty".to_string(),
+            brief: "minimal".to_string(),
+            ..Default::default()
+        };
+        let rendered = d.render_for_hot_memory();
+        assert!(rendered.contains("## Project Brief"));
+        // No sections for empty lists.
+        assert!(!rendered.contains("**Current beliefs:**"));
+        assert!(!rendered.contains("**Decisions:**"));
+        assert!(!rendered.contains("**Open questions:**"));
+        assert!(!rendered.contains("**Next steps:**"));
+    }
+
+    #[test]
+    fn render_for_hot_memory_caps_at_5_beliefs_and_decisions() {
+        let d = Dossier {
+            title: "Capped".to_string(),
+            brief: "brief".to_string(),
+            current_beliefs: (0..10).map(|i| format!("belief {}", i)).collect(),
+            decisions: (0..10).map(|i| format!("decision {}", i)).collect(),
+            ..Default::default()
+        };
+        let rendered = d.render_for_hot_memory();
+        // take(5) is applied — only first 5 should appear.
+        assert!(rendered.contains("belief 4"), "belief 4 should appear (5th item)");
+        assert!(!rendered.contains("belief 5"), "belief 5 should be truncated");
+        assert!(rendered.contains("decision 4"));
+        assert!(!rendered.contains("decision 5"));
+    }
+
+    #[test]
+    fn merge_deduplicates_beliefs_and_questions() {
+        let mut d = Dossier {
+            title: "dup-test".to_string(),
+            current_beliefs: vec!["belief A".to_string()],
+            open_questions: vec!["question A".to_string()],
+            ..Default::default()
+        };
+        // Merging same items should not duplicate.
+        d.merge(
+            &[],
+            &["belief A".to_string(), "belief B".to_string()],
+            &["question A".to_string(), "question B".to_string()],
+            &[],
+        );
+        let belief_a_count = d.current_beliefs.iter().filter(|b| b.as_str() == "belief A").count();
+        assert_eq!(belief_a_count, 1, "belief A must not be duplicated");
+        assert!(d.current_beliefs.contains(&"belief B".to_string()));
+        let q_a_count = d.open_questions.iter().filter(|q| q.as_str() == "question A").count();
+        assert_eq!(q_a_count, 1, "question A must not be duplicated");
     }
 }

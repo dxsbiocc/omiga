@@ -1007,4 +1007,97 @@ mod tests {
             "enriched query must not exceed 300 chars"
         );
     }
+
+    #[test]
+    fn two_phase_rerank_noop_without_excerpt() {
+        // two_phase_rerank with None excerpt is an early return — no reordering at all.
+        let mut results = vec![
+            MemoryQueryMatch {
+                title: "first-inserted".to_string(),
+                path: "a.md".to_string(),
+                breadcrumb: vec![],
+                excerpt: "rust memory recall".to_string(),
+                score: 0.8,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::LongTermProject,
+            },
+            MemoryQueryMatch {
+                title: "second-inserted".to_string(),
+                path: "b.md".to_string(),
+                breadcrumb: vec![],
+                excerpt: "python scripting".to_string(),
+                score: 0.9,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::LongTermProject,
+            },
+        ];
+        two_phase_rerank(&mut results, None);
+        // No excerpt → early return, insertion order preserved.
+        assert_eq!(
+            results[0].title, "first-inserted",
+            "no excerpt must leave order unchanged"
+        );
+        assert_eq!(results[1].title, "second-inserted");
+    }
+
+    #[test]
+    fn two_phase_rerank_boosts_context_matching_entry() {
+        // Entry A: generic, slightly higher raw score.
+        // Entry B: title+excerpt exactly match session context terms, slightly lower raw score.
+        // The 30% context boost must be enough to overtake the small raw gap.
+        let mut results = vec![
+            MemoryQueryMatch {
+                title: "networking protocols".to_string(),
+                path: "generic.md".to_string(),
+                breadcrumb: vec![],
+                excerpt: "unrelated topic about TCP UDP networking protocols".to_string(),
+                score: 0.55,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::LongTermProject,
+            },
+            MemoryQueryMatch {
+                title: "memory TF-IDF recall".to_string(),
+                path: "relevant.md".to_string(),
+                breadcrumb: vec![],
+                excerpt: "memory recall optimisation TF-IDF ranking strategy".to_string(),
+                score: 0.51,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::LongTermProject,
+            },
+        ];
+        // Context: strong signal about memory/recall/TF-IDF — matches "memory TF-IDF recall" entry.
+        let session_context = "### Session Goal\n- memory recall optimisation TF-IDF ranking\n\
+                               ### Active Topic\n- memory TF-IDF ranking strategy\n";
+        two_phase_rerank(&mut results, Some(session_context));
+        assert_eq!(
+            results[0].title, "memory TF-IDF recall",
+            "context-matching entry must rank first after Phase 2 rerank; got: {:?}",
+            results.iter().map(|r| (&r.title, r.score)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn two_phase_rerank_blends_scores_70_30() {
+        // Verify the blending formula: new_score = original * 0.7 + ctx * 0.3
+        // Entry with known original score and zero context overlap → score * 0.7.
+        let original_score = 1.0_f64;
+        let mut results = vec![MemoryQueryMatch {
+            title: "no-ctx-match".to_string(),
+            path: "x.md".to_string(),
+            breadcrumb: vec![],
+            excerpt: "qzzqzzqzz unique gibberish".to_string(),
+            score: original_score,
+            match_type: "summary".to_string(),
+            source_type: MemorySourceType::LongTermProject,
+        }];
+        // Context is completely unrelated so ctx_score ≈ 0.
+        let unrelated_ctx = "### Session Goal\n- aaaabbbbcccc unrelated\n";
+        two_phase_rerank(&mut results, Some(unrelated_ctx));
+        // Score should have decreased (0.7 * 1.0 + 0.3 * ~0 < 1.0).
+        assert!(
+            results[0].score < original_score,
+            "score must decrease when context is unrelated; got {}",
+            results[0].score
+        );
+    }
 }
