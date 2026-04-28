@@ -2,12 +2,16 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createTheme } from "@mui/material/styles";
 import { describe, expect, it } from "vitest";
 import { getChatTokens } from "./chatTokens";
-import { AssistantTraceItem, LiveIntermediateTrace } from "./AssistantTraceItem";
+import {
+  AssistantTraceItem,
+  CollapsibleThoughtTrace,
+  LiveIntermediateTrace,
+} from "./AssistantTraceItem";
 
 const chat = getChatTokens(createTheme());
 
 describe("AssistantTraceItem", () => {
-  it("renders intermediate assistant markdown with the thinking label", () => {
+  it("renders intermediate assistant text as a collapsed Thoughts row", () => {
     const html = renderToStaticMarkup(
       <AssistantTraceItem
         content="I will **inspect** files."
@@ -17,8 +21,8 @@ describe("AssistantTraceItem", () => {
       />,
     );
 
-    expect(html).toContain("思考");
-    expect(html).toContain("<strong>inspect</strong>");
+    expect(html).toContain("Thoughts");
+    expect(html).toContain("I will inspect files.");
   });
 
   it("omits empty trace content", () => {
@@ -30,8 +34,24 @@ describe("AssistantTraceItem", () => {
   });
 });
 
+describe("CollapsibleThoughtTrace", () => {
+  it("renders full markdown when expanded", () => {
+    const html = renderToStaticMarkup(
+      <CollapsibleThoughtTrace
+        content="I will **inspect** files."
+        defaultExpanded
+        chat={chat}
+        components={{}}
+      />,
+    );
+
+    expect(html).toContain("Thoughts");
+    expect(html).toContain("<strong>inspect</strong>");
+  });
+});
+
 describe("LiveIntermediateTrace", () => {
-  it("renders streaming trace copy and cursor", () => {
+  it("renders streaming trace as a collapsed Thoughts row", () => {
     const html = renderToStaticMarkup(
       <LiveIntermediateTrace
         foldId="rf-1"
@@ -41,8 +61,7 @@ describe("LiveIntermediateTrace", () => {
       />,
     );
 
-    expect(html).toContain("思考中");
-    expect(html).toContain("流式中；下一次行动会接在这里");
-    expect(html).toContain("<strong>thought</strong>");
+    expect(html).toContain("Thoughts");
+    expect(html).toContain("streaming thought");
   });
 });

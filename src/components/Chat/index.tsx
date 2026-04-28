@@ -92,6 +92,11 @@ import {
   shouldAnimateMessageItem,
 } from "./renderItemUtils";
 import {
+  applyToolResultMessage,
+  normalizeAssistantToolCallPrefaces,
+  upsertToolUseMessage,
+} from "./streamToolMessageUpdates";
+import {
   formatProgressiveRenderPerf,
   shouldLogProgressiveRenderPerf,
 } from "./renderPerfUtils";
@@ -1909,7 +1914,7 @@ function buildMarkdownComponents(
 
 /** Pure helper — converts store messages to local Message[] for rendering. */
 function convertStoreMessages(storeMessages: StoreMessage[], sessionId: string): Message[] {
-  return storeMessages.map((msg, index) => ({
+  const converted = storeMessages.map((msg, index) => ({
     id: msg.id || `${sessionId}-msg-${index}`,
     role: msg.role,
     content: msg.content ?? "",
@@ -1936,6 +1941,7 @@ function convertStoreMessages(storeMessages: StoreMessage[], sessionId: string):
         }
       : undefined,
   }));
+  return normalizeAssistantToolCallPrefaces(converted);
 }
 
 export function Chat({ sessionId }: ChatProps) {
@@ -1945,6 +1951,7 @@ export function Chat({ sessionId }: ChatProps) {
   const [panelTab, setPanelTab] = useState(0);
   const composerRef = useRef<ChatComposerRef>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const messagesRef = useRef<Message[]>([]);
   // Track which session we last initialized messages for, so we can reset
   // synchronously during render instead of waiting for a useEffect commit.
   // React allows calling setState during render when guarded by a different
@@ -2258,6 +2265,19 @@ export function Chat({ sessionId }: ChatProps) {
     activeProviderEntryName,
   } = useSessionStore();
 
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  const commitMessagesSnapshot = useCallback(
+    (next: Message[]) => {
+      messagesRef.current = next;
+      setMessages(next);
+      replaceStoreMessagesSnapshot(next.map(chatMessageToStore));
+    },
+    [replaceStoreMessagesSnapshot],
+  );
+
   const clearToolWatchdog = useCallback((toolUseId: string) => {
     const timer = toolWatchdogTimersRef.current.get(toolUseId);
     if (timer !== undefined) {
@@ -2355,6 +2375,7 @@ export function Chat({ sessionId }: ChatProps) {
       sessionId && storeMessages.length > 0
         ? convertStoreMessages(storeMessages, sessionId)
         : [];
+    messagesRef.current = converted;
     setMessages(converted);
     // Phase-1 of progressive rendering: immediately show only recent items.
     // Phase-2 (older items) is scheduled after the first paint via the effect below.
@@ -3157,18 +3178,20 @@ export function Chat({ sessionId }: ChatProps) {
     try {
       if (sessionId && storeMessages.length > 0) {
         const converted = convertStoreMessages(storeMessages, sessionId);
-        setMessages((prev) => {
-          // Skip if content is already the same (render-time reset already applied it)
-          if (
-            prev.length === converted.length &&
-            prev[prev.length - 1]?.id === converted[converted.length - 1]?.id
-          ) {
-            return prev;
-          }
-          return converted;
-        });
+        const current = messagesRef.current;
+        // Skip if content is already the same (render-time reset already applied it)
+        if (
+          current.length === converted.length &&
+          current[current.length - 1]?.id === converted[converted.length - 1]?.id
+        ) {
+          return;
+        }
+        messagesRef.current = converted;
+        setMessages(converted);
       } else if (!sessionId || storeMessages.length === 0) {
-        setMessages((prev) => (prev.length === 0 ? prev : []));
+        if (messagesRef.current.length === 0) return;
+        messagesRef.current = [];
+        setMessages([]);
       }
     } catch (e) {
       console.error(
@@ -3176,6 +3199,7 @@ export function Chat({ sessionId }: ChatProps) {
         e,
         { sessionId, storeMessagesLength: storeMessages.length },
       );
+      messagesRef.current = [];
       setMessages([]);
     }
   }, [sessionId, storeMessages]);
@@ -3514,71 +3538,48 @@ export function Chat({ sessionId }: ChatProps) {
           const newToolId = `tool-${Date.now()}`;
           activeReactFoldIdRef.current =
             activeReactFoldIdRef.current ?? `rf-${newToolId}`;
-          setMessages((prev) => {
-            if (tuId) {
-              const ex = prev.findIndex(
-                (m) => m.role === "tool" && m.toolCall?.id === tuId,
-              );
-              if (ex >= 0) {
-                const cur = prev[ex];
-                if (!cur.toolCall) return prev;
-                const next = [...prev];
-                next[ex] = {
-                  ...cur,
-                  content: `\`${toolData?.name || cur.toolCall.name}\``,
-                  toolCall: {
-                    ...cur.toolCall,
-                    id: tuId,
-                    name: toolData?.name || cur.toolCall.name,
-                    input:
-                      toolData?.arguments !== undefined
-                        ? toolData.arguments
-                        : cur.toolCall.input,
-                    status: cur.toolCall.status ?? "running",
-                  },
-                };
-                return next;
-              }
-            }
-            const visibleChunk = toolTracePrefaceFromText(
-              currentResponseRef.current,
+          const visibleChunk = toolTracePrefaceFromText(
+            currentResponseRef.current,
+          );
+          const foldIntermediateChunk = currentFoldIntermediateRef.current.trim();
+          const tracePreface = toolTracePrefaceFromText(
+            pendingToolTraceTextRef.current,
+          );
+          const intermediateChunk = [
+            foldIntermediateChunk,
+            visibleChunk || tracePreface,
+          ]
+            .filter(Boolean)
+            .join("\n\n");
+
+          const prevMessages = messagesRef.current;
+          const existingToolUse =
+            Boolean(tuId) &&
+            prevMessages.some(
+              (m) => m.role === "tool" && m.toolCall?.id === tuId,
             );
-            const foldIntermediateChunk = currentFoldIntermediateRef.current.trim();
-            const tracePreface = toolTracePrefaceFromText(
-              pendingToolTraceTextRef.current,
-            );
+
+          if (intermediateChunk || !existingToolUse) {
+            // Clear exactly once after the snapshot is computed. Keeping this
+            // outside a functional setState updater is intentional: React may
+            // replay updaters in StrictMode/concurrent rendering, and replaying
+            // this cleanup was dropping the pre-tool thought on the second pass.
             pendingToolTraceTextRef.current = "";
-            const intermediateChunk = [
-              foldIntermediateChunk,
-              visibleChunk || tracePreface,
-            ]
-              .filter(Boolean)
-              .join("\n\n");
-            // Clear immediately so pre-tool text is rendered exactly once in the
-            // ReAct fold instead of being replayed as the final assistant answer.
             currentResponseRef.current = "";
             currentFoldIntermediateRef.current = "";
             queueMicrotask(() => setCurrentResponse(""));
             queueMicrotask(() => setCurrentFoldIntermediate(""));
-            const toolMsg: Message = {
-              id: newToolId,
-              role: "tool",
-              content: `\`${toolData?.name || "tool"}\``,
-              ...(intermediateChunk
-                ? { prefaceBeforeTools: intermediateChunk }
-                : {}),
-              toolCall: {
-                id: tuId || undefined,
-                name: toolData?.name || "tool",
-                status: "running",
-                input: toolData?.arguments,
-              },
-              timestamp: Date.now(),
-            };
-            const next = [...prev];
-            next.push(toolMsg);
-            return next;
+          }
+
+          const nextMessages = upsertToolUseMessage(prevMessages, {
+            toolData,
+            newToolId,
+            prefaceBeforeTools: intermediateChunk,
+            timestamp: Date.now(),
           });
+          if (nextMessages !== prevMessages) {
+            commitMessagesSnapshot(nextMessages);
+          }
           if (isDev) {
             console.debug("[OmigaDev][AgentToolUse]", {
               streamId,
@@ -3625,6 +3626,21 @@ export function Chat({ sessionId }: ChatProps) {
           break;
         }
         case "tool_result": {
+          flushPendingText();
+          flushPendingFoldIntermediate();
+          const resultPreface = [
+            currentFoldIntermediateRef.current.trim(),
+            toolTracePrefaceFromText(currentResponseRef.current),
+          ]
+            .filter(Boolean)
+            .join("\n\n");
+          if (resultPreface) {
+            currentResponseRef.current = "";
+            currentFoldIntermediateRef.current = "";
+            pendingToolTraceTextRef.current = "";
+            queueMicrotask(() => setCurrentResponse(""));
+            queueMicrotask(() => setCurrentFoldIntermediate(""));
+          }
           const resultData = payload.data as
             | {
                 tool_use_id?: string;
@@ -3640,59 +3656,16 @@ export function Chat({ sessionId }: ChatProps) {
             resultData.tool_use_id.trim() !== ""
               ? resultData.tool_use_id.trim()
               : null;
-          setMessages((prev) => {
-            const matchId = toolResultMatchId;
-            let idx = -1;
-            if (matchId) {
-              for (let i = prev.length - 1; i >= 0; i--) {
-                const m = prev[i];
-                if (
-                  m.role === "tool" &&
-                  m.toolCall &&
-                  m.toolCall.id === matchId
-                ) {
-                  idx = i;
-                  break;
-                }
-              }
-            }
-            if (idx < 0) {
-              for (let i = prev.length - 1; i >= 0; i--) {
-                const m = prev[i];
-                if (
-                  m.role === "tool" &&
-                  m.toolCall &&
-                  m.toolCall.status === "running"
-                ) {
-                  idx = i;
-                  break;
-                }
-              }
-            }
-            if (idx < 0) return prev;
-            const lastMsg = prev[idx];
-            if (!lastMsg.toolCall) return prev;
-            const updated = [...prev];
-            const nextInput =
-              resultData != null &&
-              typeof resultData.input === "string" &&
-              resultData.input.trim() !== ""
-                ? resultData.input
-                : lastMsg.toolCall.input;
-            updated[idx] = {
-              ...lastMsg,
-              content: `\`${resultData?.name || lastMsg.toolCall.name}\` ${resultData?.is_error ? "failed" : "completed"}`,
-              toolCall: {
-                ...lastMsg.toolCall,
-                name: resultData?.name || lastMsg.toolCall.name,
-                status: resultData?.is_error ? "error" : "completed",
-                input: nextInput,
-                output: resultData?.output,
-                completedAt: Date.now(),
-              },
-            };
-            return updated;
+          const prevMessages = messagesRef.current;
+          const nextMessages = applyToolResultMessage(prevMessages, {
+            resultData,
+            matchId: toolResultMatchId,
+            completedAt: Date.now(),
+            prefaceBeforeTools: resultPreface,
           });
+          if (nextMessages !== prevMessages) {
+            commitMessagesSnapshot(nextMessages);
+          }
           if (toolResultMatchId) {
             markToolSettled(toolResultMatchId);
             clearToolWatchdog(toolResultMatchId);

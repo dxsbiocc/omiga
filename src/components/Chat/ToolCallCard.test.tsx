@@ -79,7 +79,7 @@ describe("ToolCallCard", () => {
       />,
     );
 
-    expect(html).toContain("思考");
+    expect(html).toContain("Thoughts");
     expect(html).toContain("先查看最新资料。");
     expect(html).not.toContain("思考摘要");
   });

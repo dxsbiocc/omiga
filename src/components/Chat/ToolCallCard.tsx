@@ -19,7 +19,7 @@ import {
   TravelExplore as TravelExploreIcon,
 } from "@mui/icons-material";
 import type { getChatTokens } from "./chatTokens";
-import { ChatMarkdownContent } from "./ChatMarkdownContent";
+import { CollapsibleThoughtTrace } from "./AssistantTraceItem";
 import {
   formatToolDuration,
   toolCallPanelTitle,
@@ -111,45 +111,12 @@ export const ToolCallCard = memo(function ToolCallCard({
   return (
     <Box>
       {prefaceThought && !previousAssistantHasText ? (
-        <Box
-          sx={{
-            px: 1,
-            py: 0.75,
-            borderRadius: "8px",
-            bgcolor: alpha(chat.agentBubbleBg, 0.52),
-            border: `1px dashed ${alpha(chat.agentBubbleBorder, 0.82)}`,
-            mb: 0.75,
-          }}
-        >
-          <Stack
-            direction="row"
-            alignItems="center"
-            spacing={0.75}
-            sx={{ mb: 0.35 }}
-          >
-            <Chip
-              size="small"
-              label="思考"
-              sx={{ height: 18, fontSize: 9, color: chat.textMuted }}
-            />
-          </Stack>
-          <Box
-            sx={{
-              fontSize: 12,
-              color: chat.textMuted,
-              lineHeight: 1.45,
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-            }}
-          >
-            <ChatMarkdownContent
-              content={prefaceThought}
-              tone="agent"
-              components={components}
-              chat={chat}
-            />
-          </Box>
-        </Box>
+        <CollapsibleThoughtTrace
+          content={prefaceThought}
+          chat={chat}
+          components={components}
+          sx={{ mb: 0.75 }}
+        />
       ) : null}
 
       <Box
