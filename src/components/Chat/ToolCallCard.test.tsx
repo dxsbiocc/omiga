@@ -81,6 +81,28 @@ describe("ToolCallCard", () => {
 
     expect(html).toContain("Thoughts");
     expect(html).toContain("先查看最新资料。");
+    expect(html).not.toContain("web_search");
     expect(html).not.toContain("思考摘要");
+  });
+
+  it("omits tool cards when both input and output are empty", () => {
+    const html = renderToStaticMarkup(
+      <ToolCallCard
+        foldId="rf-1"
+        messageId="tool-4"
+        content="`bash`"
+        timestamp={1000}
+        toolCall={{ name: "bash", status: "running", input: "   ", output: "" }}
+        previousAssistantHasText={false}
+        nestedOpen
+        showAskUserPanel={false}
+        chat={chat}
+        components={{}}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(html).toBe("");
+    expect(html).not.toContain("No command or output yet.");
   });
 });

@@ -107,17 +107,23 @@ export const ToolCallCard = memo(function ToolCallCard({
   const panelTitle = toolCallPanelTitle(toolCall.input, toolCall.name);
   const prefaceThought = prefaceBeforeTools?.trim() ?? "";
   const toolDurationLabel = formatToolDuration(timestamp, toolCall.completedAt);
+  const thoughtRow =
+    prefaceThought && !previousAssistantHasText ? (
+      <CollapsibleThoughtTrace
+        content={prefaceThought}
+        chat={chat}
+        components={components}
+        sx={{ mb: 0.75 }}
+      />
+    ) : null;
+
+  if (!hasInput && !hasOutput && !showAskUserPanel) {
+    return thoughtRow ? <Box>{thoughtRow}</Box> : null;
+  }
 
   return (
     <Box>
-      {prefaceThought && !previousAssistantHasText ? (
-        <CollapsibleThoughtTrace
-          content={prefaceThought}
-          chat={chat}
-          components={components}
-          sx={{ mb: 0.75 }}
-        />
-      ) : null}
+      {thoughtRow}
 
       <Box
         sx={{
@@ -337,13 +343,6 @@ export const ToolCallCard = memo(function ToolCallCard({
               </Stack>
             )}
 
-            {!hasInput && !hasOutput && !showAskUserPanel && (
-              <Typography
-                sx={{ fontSize: 12, color: chat.textMuted, fontStyle: "italic" }}
-              >
-                No command or output yet.
-              </Typography>
-            )}
           </Box>
         </Collapse>
       </Box>
