@@ -30,6 +30,8 @@ pub struct SaveProviderConfigRequest {
     base_url: Option<String>,
     set_as_default: Option<bool>,
     thinking: Option<bool>,
+    /// DeepSeek only: "high" or "max" (only meaningful when thinking = true).
+    reasoning_effort: Option<String>,
 }
 
 #[tauri::command]
@@ -89,6 +91,7 @@ pub async fn list_provider_configs(
                 api_key_preview,
                 base_url: config.base_url.clone(),
                 thinking: config.thinking,
+                reasoning_effort: config.reasoning_effort.clone(),
                 enabled: config.enabled,
                 is_session_active: matches_runtime,
                 is_default: name == &default_provider,
@@ -165,12 +168,15 @@ pub async fn switch_provider(
         config.timeout_secs = timeout;
     }
     match provider_enum {
-        LlmProvider::Moonshot | LlmProvider::Custom => {
+        LlmProvider::Moonshot | LlmProvider::Custom | LlmProvider::Deepseek => {
             config.thinking = Some(provider_config.thinking.unwrap_or(false));
         }
         _ => {
             config.thinking = None;
         }
+    }
+    if matches!(provider_enum, LlmProvider::Deepseek) {
+        config.reasoning_effort = provider_config.reasoning_effort.clone();
     }
 
     // Update active config in state (session only — does not change `default` in omiga.yaml)
@@ -248,15 +254,25 @@ pub async fn save_provider_config(
     };
 
     let existing_thinking = providers.get(&request.name).and_then(|p| p.thinking);
+    let existing_reasoning_effort = providers
+        .get(&request.name)
+        .and_then(|p| p.reasoning_effort.clone());
+
     let thinking_for_entry = match provider_enum {
-        crate::llm::LlmProvider::Moonshot | crate::llm::LlmProvider::Custom => {
-            match request.thinking {
-                Some(t) => Some(t),
-                // New row: default false; existing row: keep file value when TS omits the field.
-                None => existing_thinking.or(Some(false)),
-            }
-        }
-        // DeepSeek et al.: no thinking mode — never persist.
+        crate::llm::LlmProvider::Moonshot
+        | crate::llm::LlmProvider::Custom
+        | crate::llm::LlmProvider::Deepseek => match request.thinking {
+            Some(t) => Some(t),
+            None => existing_thinking.or(Some(false)),
+        },
+        _ => None,
+    };
+
+    let reasoning_effort_for_entry = match provider_enum {
+        crate::llm::LlmProvider::Deepseek => request
+            .reasoning_effort
+            .clone()
+            .or(existing_reasoning_effort),
         _ => None,
     };
 
@@ -270,6 +286,7 @@ pub async fn save_provider_config(
         model: Some(request.model),
         enabled: true,
         thinking: thinking_for_entry,
+        reasoning_effort: reasoning_effort_for_entry,
         ..Default::default()
     };
 
@@ -288,7 +305,13 @@ pub async fn save_provider_config(
             new_config.base_url = Some(expand_env_vars(url));
         }
         new_config.thinking = match provider_enum {
-            LlmProvider::Moonshot | LlmProvider::Custom => Some(saved.thinking.unwrap_or(false)),
+            LlmProvider::Moonshot | LlmProvider::Custom | LlmProvider::Deepseek => {
+                Some(saved.thinking.unwrap_or(false))
+            }
+            _ => None,
+        };
+        new_config.reasoning_effort = match provider_enum {
+            LlmProvider::Deepseek => saved.reasoning_effort.clone(),
             _ => None,
         };
         let mut config_guard = state.chat.llm_config.lock().await;
@@ -427,12 +450,15 @@ pub(crate) async fn apply_named_provider_runtime(
         config.base_url = Some(expand_env_vars(url));
     }
     match provider_enum {
-        LlmProvider::Moonshot | LlmProvider::Custom => {
+        LlmProvider::Moonshot | LlmProvider::Custom | LlmProvider::Deepseek => {
             config.thinking = Some(provider_config.thinking.unwrap_or(false));
         }
         _ => {
             config.thinking = None;
         }
+    }
+    if matches!(provider_enum, LlmProvider::Deepseek) {
+        config.reasoning_effort = provider_config.reasoning_effort.clone();
     }
 
     let mut config_guard = state.chat.llm_config.lock().await;

@@ -140,4 +140,96 @@ describe("orchestrationProjection", () => {
       },
     });
   });
+
+  it("projects background task tool invocations as clickable trace rows", () => {
+    const tasks: BackgroundAgentTaskRow[] = [
+      {
+        task_id: "bg-1",
+        agent_type: "debugger",
+        description: "Diagnose failing export",
+        status: "Running",
+      },
+    ];
+    const timeline = buildOrchestrationTimelineFromEvents(
+      [
+        event({
+          id: "bg-start",
+          event_type: "background_tool_call_started",
+          mode: "background",
+          task_id: "bg-1",
+          payload: {
+            agentType: "debugger",
+            description: "Diagnose failing export",
+            toolName: "rg",
+            inputPreview: "export failure",
+          },
+          created_at: at(1),
+        }),
+        event({
+          id: "bg-done",
+          event_type: "background_tool_call_completed",
+          mode: "background",
+          task_id: "bg-1",
+          payload: {
+            agentType: "debugger",
+            description: "Diagnose failing export",
+            toolName: "rg",
+            outputPreview: "src/export.ts:42",
+          },
+          created_at: at(2),
+        }),
+      ],
+      tasks,
+    );
+
+    expect(timeline.map((item) => item.id)).toEqual(["bg-done", "bg-start"]);
+    expect(timeline.find((item) => item.id === "bg-start")).toMatchObject({
+      label: "问题排查 调用 rg 开始",
+      detail: "Diagnose failing export",
+      tone: "info",
+      action: {
+        type: "task",
+        taskId: "bg-1",
+        label: "问题排查: Diagnose failing export",
+      },
+    });
+    expect(timeline.find((item) => item.id === "bg-done")).toMatchObject({
+      label: "问题排查 调用 rg 完成",
+      detail: "Diagnose failing export · src/export.ts:42",
+      tone: "success",
+      action: {
+        type: "task",
+        taskId: "bg-1",
+        label: "问题排查: Diagnose failing export",
+      },
+    });
+  });
+
+  it("keeps lightweight preflight events as trace-only actions", () => {
+    const timeline = buildOrchestrationTimelineFromEvents(
+      [
+        event({
+          id: "compact-done",
+          event_type: "preflight_stage_completed",
+          mode: "preflight",
+          phase: "preflight",
+          payload: {
+            stage: "auto_compact",
+            durationMs: 0,
+            payload: { compacted: true },
+          },
+          created_at: at(1),
+        }),
+      ],
+      [],
+    );
+
+    expect(timeline[0]).toMatchObject({
+      id: "compact-done",
+      label: "上下文压缩完成",
+      detail: "0 ms",
+      tone: "success",
+      action: { type: "trace", eventId: "compact-done" },
+    });
+  });
 });

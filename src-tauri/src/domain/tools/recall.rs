@@ -111,10 +111,9 @@ impl super::ToolImpl for RecallTool {
         // "sources" scope: query the source registry directly.
         if scope == "sources" {
             let lt_root = memory.long_term_path();
-            let matches = crate::domain::memory::source_registry::search_sources(
-                &lt_root, &query, limit,
-            )
-            .await;
+            let matches =
+                crate::domain::memory::source_registry::search_sources(&lt_root, &query, limit)
+                    .await;
             let content = format_source_results(&matches);
             let out = RecallOutput {
                 query,
@@ -162,7 +161,9 @@ impl super::ToolImpl for RecallTool {
     }
 }
 
-fn format_source_results(matches: &[crate::domain::memory::source_registry::SourceMatch]) -> String {
+fn format_source_results(
+    matches: &[crate::domain::memory::source_registry::SourceMatch],
+) -> String {
     if matches.is_empty() {
         return String::new();
     }

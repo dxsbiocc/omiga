@@ -416,6 +416,49 @@ pub(super) async fn fail_team_turn_if_needed(
 
 // ── Implicit memory indexing ──────────────────────────────────────────────────
 
+/// Start chat-to-memory indexing without delaying the foreground chat stream.
+///
+/// The chat reply is already persisted before this is called, so the UI can receive
+/// `complete` immediately while PageIndex work continues through `chat-index-*`
+/// events. Keeping this asynchronous prevents memory/indexing stalls from making
+/// the task panel look like the main ReAct turn is still running.
+pub(super) fn spawn_chat_indexing(
+    app: &AppHandle,
+    sessions: &Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    repo: &Arc<crate::domain::persistence::SessionRepository>,
+    session_id: &str,
+) {
+    let app = app.clone();
+    let sessions = Arc::clone(sessions);
+    let repo = Arc::clone(repo);
+    let session_id = session_id.to_string();
+
+    tokio::spawn(async move {
+        let (project_path, session_name) = {
+            let sessions_guard = sessions.read().await;
+            (
+                sessions_guard
+                    .get(&session_id)
+                    .map(|r| r.session.project_path.clone())
+                    .unwrap_or_else(|| ".".to_string()),
+                sessions_guard
+                    .get(&session_id)
+                    .map(|r| r.session.name.clone())
+                    .unwrap_or_else(|| "Unnamed".to_string()),
+            )
+        };
+
+        index_chat_to_implicit_memory(
+            &app,
+            &project_path,
+            &session_id,
+            &session_name,
+            repo.as_ref(),
+        )
+        .await;
+    });
+}
+
 /// Index a completed chat session into PageIndex implicit memory.
 /// Emits `chat-index-start`, `chat-index-complete`, or `chat-index-error` events.
 pub(super) async fn index_chat_to_implicit_memory(

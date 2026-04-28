@@ -5,10 +5,9 @@
 
 pub mod crud;
 pub use crud::{
-    DossierDto, LongTermEntryDto, SourceEntryDto,
-    memory_archive_long_term_entry, memory_delete_long_term_entry,
-    memory_delete_source, memory_get_dossier, memory_list_long_term,
-    memory_list_sources, memory_prune_stale, memory_save_dossier,
+    memory_archive_long_term_entry, memory_delete_long_term_entry, memory_delete_source,
+    memory_get_dossier, memory_list_long_term, memory_list_sources, memory_prune_stale,
+    memory_save_dossier, DossierDto, LongTermEntryDto, SourceEntryDto,
 };
 
 use crate::domain::memory::{
@@ -597,7 +596,11 @@ pub async fn memory_query(
             })
             .collect();
         let total_matches = results.len();
-        return Ok(QueryResponse { total_matches, query: req.query, results });
+        return Ok(QueryResponse {
+            total_matches,
+            query: req.query,
+            results,
+        });
     }
 
     // ── All other scopes: unified query with optional scope filtering ─────────
@@ -700,11 +703,18 @@ pub async fn get_memory_context_cached(
     session_id: Option<&str>,
     query: &str,
     limit: usize,
-    preflight_cache: Option<&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, crate::app_state::MemoryPreflightSlot>>>>,
+    preflight_cache: Option<
+        &std::sync::Arc<
+            std::sync::Mutex<
+                std::collections::HashMap<String, crate::app_state::MemoryPreflightSlot>,
+            >,
+        >,
+    >,
 ) -> Option<String> {
     // Build cache key: session_id + first 16 chars of query.
     if let (Some(sid), Some(cache)) = (session_id, preflight_cache) {
-        let key = format!("{}:{}", sid, &query[..query.len().min(16)]);
+        let query_prefix = memory_preflight_query_prefix(query);
+        let key = memory_preflight_cache_key(sid, query);
         let ttl = crate::app_state::MEMORY_PREFLIGHT_CACHE_TTL;
         if let Ok(guard) = cache.lock() {
             if let Some(slot) = guard.get(&key) {
@@ -723,7 +733,7 @@ pub async fn get_memory_context_cached(
         tracing::debug!(
             target: "omiga::memory::preflight",
             session_id = sid,
-            query_prefix = &query[..query.len().min(16)],
+            query_prefix = %query_prefix,
             "preflight cache miss — computing"
         );
         let t0 = std::time::Instant::now();
@@ -737,10 +747,13 @@ pub async fn get_memory_context_cached(
                 "preflight computed and cached"
             );
             if let Ok(mut guard) = cache.lock() {
-                guard.insert(key, crate::app_state::MemoryPreflightSlot {
-                    context: ctx.clone(),
-                    cached_at: std::time::Instant::now(),
-                });
+                guard.insert(
+                    key,
+                    crate::app_state::MemoryPreflightSlot {
+                        context: ctx.clone(),
+                        cached_at: std::time::Instant::now(),
+                    },
+                );
                 // Evict stale entries (keep map bounded).
                 guard.retain(|_, v| v.cached_at.elapsed() < ttl);
             }
@@ -748,6 +761,14 @@ pub async fn get_memory_context_cached(
         return result;
     }
     compute_memory_context(repo, project_path, session_id, query, limit).await
+}
+
+fn memory_preflight_query_prefix(query: &str) -> String {
+    query.chars().take(16).collect()
+}
+
+fn memory_preflight_cache_key(session_id: &str, query: &str) -> String {
+    format!("{}:{}", session_id, memory_preflight_query_prefix(query))
 }
 
 async fn compute_memory_context(
@@ -1222,7 +1243,6 @@ pub fn memory_get_import_extensions() -> Vec<String> {
     ]
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1231,10 +1251,18 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    fn make_cache(entries: Vec<(String, String, Instant)>) -> Arc<Mutex<HashMap<String, MemoryPreflightSlot>>> {
+    fn make_cache(
+        entries: Vec<(String, String, Instant)>,
+    ) -> Arc<Mutex<HashMap<String, MemoryPreflightSlot>>> {
         let mut map = HashMap::new();
         for (key, ctx, ts) in entries {
-            map.insert(key, MemoryPreflightSlot { context: ctx, cached_at: ts });
+            map.insert(
+                key,
+                MemoryPreflightSlot {
+                    context: ctx,
+                    cached_at: ts,
+                },
+            );
         }
         Arc::new(Mutex::new(map))
     }
@@ -1249,22 +1277,16 @@ mod tests {
 
         let session_id = "sess-cache-test";
         let query = "recall memory ordering";
-        let key = format!("{}:{}", session_id, &query[..query.len().min(16)]);
+        let key = memory_preflight_cache_key(session_id, query);
         let cached_value = "## cached context for test".to_string();
 
         let cache = make_cache(vec![(key, cached_value.clone(), Instant::now())]);
 
         // Empty project dir → compute_memory_context returns None.
         // If cache hits, it must return Some(cached_value) instead.
-        let result = get_memory_context_cached(
-            &repo,
-            dir.path(),
-            Some(session_id),
-            query,
-            3,
-            Some(&cache),
-        )
-        .await;
+        let result =
+            get_memory_context_cached(&repo, dir.path(), Some(session_id), query, 3, Some(&cache))
+                .await;
 
         assert_eq!(
             result.as_deref(),
@@ -1282,22 +1304,16 @@ mod tests {
 
         let session_id = "sess-expired";
         let query = "recall expired cache";
-        let key = format!("{}:{}", session_id, &query[..query.len().min(16)]);
+        let key = memory_preflight_cache_key(session_id, query);
 
         // Insert an already-expired entry (cached 2× TTL ago).
         let expired_at = Instant::now() - MEMORY_PREFLIGHT_CACHE_TTL - Duration::from_secs(1);
         let cache = make_cache(vec![(key, "stale value".to_string(), expired_at)]);
 
         // compute_memory_context on an empty dir returns None → cache miss also returns None.
-        let result = get_memory_context_cached(
-            &repo,
-            dir.path(),
-            Some(session_id),
-            query,
-            3,
-            Some(&cache),
-        )
-        .await;
+        let result =
+            get_memory_context_cached(&repo, dir.path(), Some(session_id), query, 3, Some(&cache))
+                .await;
 
         assert!(
             result.is_none() || result.as_deref() != Some("stale value"),
@@ -1308,14 +1324,31 @@ mod tests {
 
     #[test]
     fn preflight_cache_key_format_uses_16_char_query_prefix() {
-        // The key format is `{session_id}:{query[..16]}`.
+        // The key format is `{session_id}:{first 16 Unicode scalar values}`.
         let session_id = "my-session";
         let query = "this is a long query that exceeds sixteen characters";
-        // query[..16] = "this is a long q" (t,h,i,s, ,i,s, ,a, ,l,o,n,g, ,q = 16 chars)
-        let expected_prefix = &query[..16];
-        assert_eq!(expected_prefix.len(), 16, "prefix must be exactly 16 chars");
-        let key = format!("{}:{}", session_id, expected_prefix);
+        let expected_prefix = memory_preflight_query_prefix(query);
+        assert_eq!(
+            expected_prefix.chars().count(),
+            16,
+            "prefix must be exactly 16 chars"
+        );
+        let key = memory_preflight_cache_key(session_id, query);
         assert_eq!(key, "my-session:this is a long q");
+    }
+
+    #[test]
+    fn preflight_cache_key_handles_non_ascii_query_prefix() {
+        let session_id = "sess-cjk";
+        let query = "解读一下这篇文章 https://mp.weixin.qq.com/s/example";
+
+        let prefix = memory_preflight_query_prefix(query);
+        assert_eq!(prefix, "解读一下这篇文章 https:/");
+        assert_eq!(prefix.chars().count(), 16);
+        assert_eq!(
+            memory_preflight_cache_key(session_id, query),
+            "sess-cjk:解读一下这篇文章 https:/"
+        );
     }
 
     #[tokio::test]
@@ -1334,26 +1367,29 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new()));
 
         // First call: cache miss → compute returns None (empty dir) → nothing stored.
-        let first = get_memory_context_cached(
-            &repo, dir.path(), Some(session_id), query, 3, Some(&cache),
-        ).await;
+        let first =
+            get_memory_context_cached(&repo, dir.path(), Some(session_id), query, 3, Some(&cache))
+                .await;
         // Empty project returns None, so nothing is stored.
         assert!(first.is_none());
 
         // Manually inject a value so we can verify second call hits it.
-        let key = format!("{}:{}", session_id, &query[..query.len().min(16)]);
+        let key = memory_preflight_cache_key(session_id, query);
         {
             let mut guard = cache.lock().unwrap();
-            guard.insert(key, MemoryPreflightSlot {
-                context: "injected after first call".to_string(),
-                cached_at: Instant::now(),
-            });
+            guard.insert(
+                key,
+                MemoryPreflightSlot {
+                    context: "injected after first call".to_string(),
+                    cached_at: Instant::now(),
+                },
+            );
         }
 
         // Second call must hit the cache and return the injected value.
-        let second = get_memory_context_cached(
-            &repo, dir.path(), Some(session_id), query, 3, Some(&cache),
-        ).await;
+        let second =
+            get_memory_context_cached(&repo, dir.path(), Some(session_id), query, 3, Some(&cache))
+                .await;
         assert_eq!(
             second.as_deref(),
             Some("injected after first call"),
@@ -1384,37 +1420,70 @@ mod scope_tests {
 
     #[test]
     fn scope_wiki_matches_knowledge_base_only() {
-        assert!(scope_matches("wiki", &MemorySourceType::KnowledgeBaseProject));
-        assert!(scope_matches("wiki", &MemorySourceType::KnowledgeBaseGlobal));
+        assert!(scope_matches(
+            "wiki",
+            &MemorySourceType::KnowledgeBaseProject
+        ));
+        assert!(scope_matches(
+            "wiki",
+            &MemorySourceType::KnowledgeBaseGlobal
+        ));
         assert!(!scope_matches("wiki", &MemorySourceType::LongTermProject));
         assert!(!scope_matches("wiki", &MemorySourceType::Implicit));
     }
 
     #[test]
     fn scope_long_term_matches_long_term_only() {
-        assert!(scope_matches("long_term", &MemorySourceType::LongTermProject));
-        assert!(scope_matches("long_term", &MemorySourceType::LongTermGlobal));
-        assert!(!scope_matches("long_term", &MemorySourceType::KnowledgeBaseProject));
+        assert!(scope_matches(
+            "long_term",
+            &MemorySourceType::LongTermProject
+        ));
+        assert!(scope_matches(
+            "long_term",
+            &MemorySourceType::LongTermGlobal
+        ));
+        assert!(!scope_matches(
+            "long_term",
+            &MemorySourceType::KnowledgeBaseProject
+        ));
         assert!(!scope_matches("long_term", &MemorySourceType::Implicit));
     }
 
     #[test]
     fn scope_implicit_matches_implicit_only() {
         assert!(scope_matches("implicit", &MemorySourceType::Implicit));
-        assert!(!scope_matches("implicit", &MemorySourceType::LongTermProject));
+        assert!(!scope_matches(
+            "implicit",
+            &MemorySourceType::LongTermProject
+        ));
         assert!(!scope_matches("implicit", &MemorySourceType::WorkingMemory));
     }
 
     #[test]
     fn scope_permanent_matches_global_tiers() {
-        assert!(scope_matches("permanent", &MemorySourceType::LongTermGlobal));
-        assert!(scope_matches("permanent", &MemorySourceType::KnowledgeBaseGlobal));
-        assert!(!scope_matches("permanent", &MemorySourceType::LongTermProject));
+        assert!(scope_matches(
+            "permanent",
+            &MemorySourceType::LongTermGlobal
+        ));
+        assert!(scope_matches(
+            "permanent",
+            &MemorySourceType::KnowledgeBaseGlobal
+        ));
+        assert!(!scope_matches(
+            "permanent",
+            &MemorySourceType::LongTermProject
+        ));
     }
 
     #[test]
     fn unknown_scope_defaults_to_all() {
-        assert!(scope_matches("nonexistent_scope", &MemorySourceType::Implicit));
-        assert!(scope_matches("nonexistent_scope", &MemorySourceType::LongTermProject));
+        assert!(scope_matches(
+            "nonexistent_scope",
+            &MemorySourceType::Implicit
+        ));
+        assert!(scope_matches(
+            "nonexistent_scope",
+            &MemorySourceType::LongTermProject
+        ));
     }
 }

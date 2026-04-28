@@ -71,6 +71,8 @@ import { notifyTaskCompleted, notifyTaskFailed } from "../../utils/notifications
 import { OMIGA_COMPOSER_DISPATCH_EVENT } from "../../utils/chatComposerEvents";
 import { listenTauriEvent } from "../../utils/tauriEvents";
 
+const BACKGROUND_RUNNING_ACCENT = "#f97316";
+
 interface TodoLine {
   id: string;
   content: string;
@@ -124,6 +126,13 @@ type FailureDiagnosticItem = {
   summary: string;
   at?: number;
   source: "task" | "reviewer";
+};
+
+type TaskPanelRefreshEventPayload = {
+  session_id?: string;
+  sessionId?: string;
+  task_id?: string;
+  taskId?: string;
 };
 
 function orderedPhaseTrack(mode: string, phase: string): {
@@ -205,6 +214,26 @@ function payloadText(value: unknown): string | undefined {
 function taskRowText(value: unknown): string | undefined {
   const text = payloadText(value);
   return text && text !== "{...}" ? text : undefined;
+}
+
+function isActionableOrchestrationEvent(event: OrchestrationEventDto): boolean {
+  const type = event.event_type;
+  if (type.startsWith("background_") || type.startsWith("worker_")) return true;
+  if (type === "preflight_stage_failed") return true;
+  return [
+    "schedule_plan_created",
+    "mode_requested",
+    "phase_changed",
+    "mode_completed",
+    "mode_failed",
+    "verification_started",
+    "fix_started",
+    "synthesizing_started",
+    "reviewer_verdict",
+    "cancel_requested",
+    "cancel_completed",
+    "resume_requested",
+  ].includes(type);
 }
 
 function parseTodoWriteArgs(raw: string | undefined): TodoLine[] | null {
@@ -852,12 +881,17 @@ export function TaskStatus() {
       runningWorkerTasks.length,
     ],
   );
+  const hasActionableOrchestrationEvent = useMemo(
+    () => scopedOrchestrationEvents.some(isActionableOrchestrationEvent),
+    [scopedOrchestrationEvents],
+  );
   const hasOrchestrationStatus =
     !isPurePlanReviewState &&
     Boolean(
       currentOrchestration ||
         orchestrationLaneSummary ||
-        scopedOrchestrationEvents.length > 0 ||
+        hasActionableOrchestrationEvent ||
+        scopedSessionBackgroundTasks.length > 0 ||
         blockerVerdicts.length > 0 ||
         runningWorkerTasks.length > 0,
     );
@@ -1100,18 +1134,39 @@ export function TaskStatus() {
   }, [currentSession?.id, isStreaming, isConnecting, dashboardRefreshTick]);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    const unlisteners: Array<() => void> = [];
+    const refreshIfCurrentSession = (payload: TaskPanelRefreshEventPayload) => {
+      const sessionId = payload.session_id ?? payload.sessionId;
+      if (sessionId === currentSession?.id) {
+        setDashboardRefreshTick((n) => n + 1);
+      }
+    };
     void (async () => {
-      unlisten = await listenTauriEvent<{ sessionId: string }>(
-        "mock-orchestration-scenario-loaded",
-        (event) => {
-          if (event.payload.sessionId === currentSession?.id) {
-            setDashboardRefreshTick((n) => n + 1);
-          }
-        },
-      );
+      const listeners = await Promise.all([
+        listenTauriEvent<TaskPanelRefreshEventPayload>(
+          "mock-orchestration-scenario-loaded",
+          (event) => refreshIfCurrentSession(event.payload),
+        ),
+        listenTauriEvent<TaskPanelRefreshEventPayload>(
+          "background-agent-update",
+          (event) => refreshIfCurrentSession(event.payload),
+        ),
+        listenTauriEvent<TaskPanelRefreshEventPayload>(
+          "background-agent-complete",
+          (event) => refreshIfCurrentSession(event.payload),
+        ),
+      ]);
+      if (cancelled) {
+        listeners.forEach((unlisten) => unlisten());
+        return;
+      }
+      unlisteners.push(...listeners);
     })();
-    return () => unlisten?.();
+    return () => {
+      cancelled = true;
+      unlisteners.forEach((unlisten) => unlisten());
+    };
   }, [currentSession?.id]);
 
   const handleCancelCurrentOrchestration = async () => {
@@ -1231,12 +1286,25 @@ export function TaskStatus() {
         }
         break;
       case "mode":
-        if (hasPersistentStatus) {
-          setStatusPanelTab(1);
-        } else {
+        if (currentOrchestration) {
           setStatusPanelTab(0);
           setOrchestrationTab(0);
+        } else if (scopedOrchestrationEvents.length > 0) {
+          setStatusPanelTab(0);
+          setOrchestrationTab(2);
+          setTraceModeFilter("all");
+          setTraceEventTypeFilter("all");
+          setExpandedTraceEventId(event.id);
+        } else if (hasPersistentStatus) {
+          setStatusPanelTab(1);
         }
+        break;
+      case "trace":
+        setStatusPanelTab(0);
+        setOrchestrationTab(2);
+        setTraceModeFilter("all");
+        setTraceEventTypeFilter("all");
+        setExpandedTraceEventId(action.eventId);
         break;
       case "task":
       case "reviewer":
@@ -2375,10 +2443,16 @@ export function TaskStatus() {
               {backgroundJobs.map((job) => {
                 const shortJobLabel = compactLabel(job.label, 36);
                 const labelCompacted = isLabelCompacted(job.label, shortJobLabel);
+                const isRunningBackground = job.state === "running";
                 const labelNode = (
                   <Typography
                     variant="body2"
-                    sx={{ fontSize: 12, lineHeight: 1.35 }}
+                    sx={{
+                      fontSize: 12,
+                      lineHeight: 1.35,
+                      fontWeight: isRunningBackground ? 700 : 500,
+                      color: isRunningBackground ? BACKGROUND_RUNNING_ACCENT : "text.primary",
+                    }}
                     noWrap
                   >
                     {shortJobLabel}
@@ -2386,23 +2460,45 @@ export function TaskStatus() {
                 );
 
                 return (
-                <Fade key={job.id} in timeout={200}>
-                  <Box
-                    sx={{
-                      display: "flex",
-                      alignItems: "flex-start",
-                      gap: 1,
-                      p: 1,
-                      borderRadius: 1.5,
-                      bgcolor: alpha("#6366f1", 0.04),
-                      border: 1,
-                      borderColor: alpha("#6366f1", 0.12),
-                    }}
-                  >
-                    <Terminal
-                      fontSize="small"
-                      sx={{ color: "#6366f1", mt: 0.15, flexShrink: 0 }}
-                    />
+                  <Fade key={job.id} in timeout={200}>
+                    <Box
+                      sx={{
+                        display: "flex",
+                        alignItems: "flex-start",
+                        gap: 1,
+                        p: 1,
+                        borderRadius: 1.5,
+                        bgcolor: isRunningBackground
+                          ? alpha(BACKGROUND_RUNNING_ACCENT, 0.075)
+                          : alpha("#6366f1", 0.04),
+                        border: 1,
+                        borderColor: isRunningBackground
+                          ? alpha(BACKGROUND_RUNNING_ACCENT, 0.32)
+                          : alpha("#6366f1", 0.12),
+                        borderLeft: 3,
+                        borderLeftColor: isRunningBackground
+                          ? BACKGROUND_RUNNING_ACCENT
+                          : alpha("#6366f1", 0.32),
+                        boxShadow: isRunningBackground
+                          ? `0 0 0 1px ${alpha(BACKGROUND_RUNNING_ACCENT, 0.05)}, 0 8px 22px ${alpha(BACKGROUND_RUNNING_ACCENT, 0.12)}`
+                          : "none",
+                      }}
+                    >
+                      {isRunningBackground ? (
+                        <CloudQueue
+                          fontSize="small"
+                          sx={{
+                            color: BACKGROUND_RUNNING_ACCENT,
+                            mt: 0.15,
+                            flexShrink: 0,
+                          }}
+                        />
+                      ) : (
+                        <Terminal
+                          fontSize="small"
+                          sx={{ color: "#6366f1", mt: 0.15, flexShrink: 0 }}
+                        />
+                      )}
                     <Box sx={{ minWidth: 0, flex: 1 }}>
                       {labelCompacted ? (
                         <Tooltip title={job.label} placement="top">
@@ -2417,11 +2513,18 @@ export function TaskStatus() {
                         spacing={0.5}
                         sx={{ mt: 0.5 }}
                       >
-                        {job.state === "running" && (
+                        {isRunningBackground && (
                           <Chip
                             size="small"
-                            label="运行中"
-                            sx={{ height: 20, fontSize: 10 }}
+                            label="后台运行"
+                            sx={{
+                              height: 20,
+                              fontSize: 10,
+                              fontWeight: 700,
+                              bgcolor: alpha(BACKGROUND_RUNNING_ACCENT, 0.13),
+                              color: BACKGROUND_RUNNING_ACCENT,
+                              border: `1px solid ${alpha(BACKGROUND_RUNNING_ACCENT, 0.26)}`,
+                            }}
                           />
                         )}
                         {job.state === "done" && (

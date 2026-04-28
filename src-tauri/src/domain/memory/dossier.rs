@@ -88,13 +88,17 @@ impl Dossier {
         // Emit each section while staying within the char budget.
         let sections: &[(&str, &[String], usize)] = &[
             ("**Current beliefs:**", &self.current_beliefs, 5),
-            ("**Decisions:**",       &self.decisions,        5),
-            ("**Open questions:**",  &self.open_questions,   3),
-            ("**Next steps:**",      &self.next_steps,       3),
+            ("**Decisions:**", &self.decisions, 5),
+            ("**Open questions:**", &self.open_questions, 3),
+            ("**Next steps:**", &self.next_steps, 3),
         ];
         for (header, items, max_items) in sections {
-            if items.is_empty() { continue; }
-            if out.len() >= RENDER_CHAR_BUDGET { break; }
+            if items.is_empty() {
+                continue;
+            }
+            if out.len() >= RENDER_CHAR_BUDGET {
+                break;
+            }
             out.push_str(header);
             out.push('\n');
             for item in items.iter().take(*max_items) {
@@ -123,7 +127,10 @@ impl Dossier {
             topic: self.title.clone(),
             summary: truncate_chars(&summary, 500),
             kind: LongTermMemoryKind::ProjectExperience,
-            entities: derive_query_terms(&self.title).into_iter().take(5).collect(),
+            entities: derive_query_terms(&self.title)
+                .into_iter()
+                .take(5)
+                .collect(),
             source_sessions: vec![],
             confidence: 0.85,
             stability: 0.80,
@@ -181,7 +188,11 @@ pub async fn load_latest_dossier(root: &Path) -> Option<(String, Dossier)> {
 }
 
 /// Persist a dossier to disk.
-pub async fn save_dossier(root: &Path, slug: &str, dossier: &Dossier) -> Result<(), std::io::Error> {
+pub async fn save_dossier(
+    root: &Path,
+    slug: &str,
+    dossier: &Dossier,
+) -> Result<(), std::io::Error> {
     fs::create_dir_all(root).await?;
     let path = root.join(format!("dossier_{}.json", slug));
     let json = serde_json::to_string_pretty(dossier)
@@ -209,7 +220,11 @@ pub async fn update_project_dossier(
     }
     dossier.merge(&decisions, &beliefs, &open_questions, &next_steps);
     if let Err(e) = save_dossier(lt_root, &slug, &dossier).await {
-        tracing::warn!("update_project_dossier: failed to save dossier for '{}': {}", topic, e);
+        tracing::warn!(
+            "update_project_dossier: failed to save dossier for '{}': {}",
+            topic,
+            e
+        );
     }
 }
 
@@ -218,7 +233,10 @@ fn push_unique(list: &mut Vec<String>, item: &str, max: usize) {
     if normalized.is_empty() {
         return;
     }
-    if list.iter().any(|existing| normalize(existing) == normalized) {
+    if list
+        .iter()
+        .any(|existing| normalize(existing) == normalized)
+    {
         return;
     }
     if list.len() >= max {
@@ -238,10 +256,38 @@ fn normalize(text: &str) -> String {
 fn is_stop_word(w: &str) -> bool {
     matches!(
         w.to_lowercase().as_str(),
-        "what" | "which" | "when" | "where" | "should" | "would" | "could" | "will"
-        | "have" | "that" | "this" | "with" | "from" | "about" | "like" | "they"
-        | "them" | "than" | "then" | "been" | "were" | "does" | "make" | "made"
-        | "into" | "more" | "some" | "also" | "their" | "your" | "such" | "both"
+        "what"
+            | "which"
+            | "when"
+            | "where"
+            | "should"
+            | "would"
+            | "could"
+            | "will"
+            | "have"
+            | "that"
+            | "this"
+            | "with"
+            | "from"
+            | "about"
+            | "like"
+            | "they"
+            | "them"
+            | "than"
+            | "then"
+            | "been"
+            | "were"
+            | "does"
+            | "make"
+            | "made"
+            | "into"
+            | "more"
+            | "some"
+            | "also"
+            | "their"
+            | "your"
+            | "such"
+            | "both"
     )
 }
 
@@ -260,8 +306,10 @@ mod tests {
 
     #[test]
     fn merge_deduplicates_and_caps_decisions() {
-        let mut d = Dossier::default();
-        d.title = "test topic".to_string();
+        let mut d = Dossier {
+            title: "test topic".to_string(),
+            ..Default::default()
+        };
         let items: Vec<String> = (0..12).map(|i| format!("decision {}", i)).collect();
         d.merge(&items, &[], &[], &[]);
         assert!(d.decisions.len() <= MAX_DECISIONS);
@@ -269,9 +317,16 @@ mod tests {
 
     #[test]
     fn merge_replaces_next_steps() {
-        let mut d = Dossier::default();
-        d.next_steps = vec!["old step".to_string()];
-        d.merge(&[], &[], &[], &["new step A".to_string(), "new step B".to_string()]);
+        let mut d = Dossier {
+            next_steps: vec!["old step".to_string()],
+            ..Default::default()
+        };
+        d.merge(
+            &[],
+            &[],
+            &[],
+            &["new step A".to_string(), "new step B".to_string()],
+        );
         assert_eq!(d.next_steps, vec!["new step A", "new step B"]);
     }
 
@@ -305,15 +360,33 @@ mod tests {
             updated_at: chrono::Utc::now().to_rfc3339(),
         };
         let rendered = d.render_for_hot_memory();
-        assert!(rendered.contains("## Project Brief"), "must have ## Project Brief header");
+        assert!(
+            rendered.contains("## Project Brief"),
+            "must have ## Project Brief header"
+        );
         assert!(rendered.contains("Omiga"), "must include project title");
-        assert!(rendered.contains("AI coding workbench"), "must include brief");
-        assert!(rendered.contains("**Current beliefs:**"), "must have beliefs section");
+        assert!(
+            rendered.contains("AI coding workbench"),
+            "must include brief"
+        );
+        assert!(
+            rendered.contains("**Current beliefs:**"),
+            "must have beliefs section"
+        );
         assert!(rendered.contains("Rust backend is the right call"));
-        assert!(rendered.contains("**Decisions:**"), "must have decisions section");
+        assert!(
+            rendered.contains("**Decisions:**"),
+            "must have decisions section"
+        );
         assert!(rendered.contains("Use Tauri for desktop"));
-        assert!(rendered.contains("**Open questions:**"), "must have questions section");
-        assert!(rendered.contains("**Next steps:**"), "must have next steps section");
+        assert!(
+            rendered.contains("**Open questions:**"),
+            "must have questions section"
+        );
+        assert!(
+            rendered.contains("**Next steps:**"),
+            "must have next steps section"
+        );
     }
 
     #[test]
@@ -343,8 +416,14 @@ mod tests {
         };
         let rendered = d.render_for_hot_memory();
         // take(5) is applied — only first 5 should appear.
-        assert!(rendered.contains("belief 4"), "belief 4 should appear (5th item)");
-        assert!(!rendered.contains("belief 5"), "belief 5 should be truncated");
+        assert!(
+            rendered.contains("belief 4"),
+            "belief 4 should appear (5th item)"
+        );
+        assert!(
+            !rendered.contains("belief 5"),
+            "belief 5 should be truncated"
+        );
         assert!(rendered.contains("decision 4"));
         assert!(!rendered.contains("decision 5"));
     }
@@ -364,10 +443,18 @@ mod tests {
             &["question A".to_string(), "question B".to_string()],
             &[],
         );
-        let belief_a_count = d.current_beliefs.iter().filter(|b| b.as_str() == "belief A").count();
+        let belief_a_count = d
+            .current_beliefs
+            .iter()
+            .filter(|b| b.as_str() == "belief A")
+            .count();
         assert_eq!(belief_a_count, 1, "belief A must not be duplicated");
         assert!(d.current_beliefs.contains(&"belief B".to_string()));
-        let q_a_count = d.open_questions.iter().filter(|q| q.as_str() == "question A").count();
+        let q_a_count = d
+            .open_questions
+            .iter()
+            .filter(|q| q.as_str() == "question A")
+            .count();
         assert_eq!(q_a_count, 1, "question A must not be duplicated");
     }
 
@@ -398,16 +485,28 @@ mod tests {
     #[tokio::test]
     async fn load_latest_dossier_returns_most_recent() {
         let temp = tempfile::tempdir().unwrap();
-        save_dossier(temp.path(), "alpha", &Dossier {
-            title: "Alpha".to_string(),
-            updated_at: "2024-01-01T00:00:00Z".to_string(),
-            ..Default::default()
-        }).await.unwrap();
-        save_dossier(temp.path(), "beta", &Dossier {
-            title: "Beta".to_string(),
-            updated_at: "2025-03-15T00:00:00Z".to_string(),
-            ..Default::default()
-        }).await.unwrap();
+        save_dossier(
+            temp.path(),
+            "alpha",
+            &Dossier {
+                title: "Alpha".to_string(),
+                updated_at: "2024-01-01T00:00:00Z".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        save_dossier(
+            temp.path(),
+            "beta",
+            &Dossier {
+                title: "Beta".to_string(),
+                updated_at: "2025-03-15T00:00:00Z".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
         let latest = load_latest_dossier(temp.path()).await;
         assert!(latest.is_some());
@@ -471,13 +570,16 @@ mod tests {
             title: "short test".to_string(),
             decisions: vec!["Use Rust".to_string()],
             open_questions: vec![
-                "Why?".to_string(),   // too short — should be kept
-                "How?".to_string(),   // too short — should be kept
+                "Why?".to_string(), // too short — should be kept
+                "How?".to_string(), // too short — should be kept
             ],
             ..Default::default()
         };
         d.resolve_answered_questions();
-        assert_eq!(d.open_questions.len(), 2, "short questions must not be auto-resolved");
+        assert_eq!(
+            d.open_questions.len(),
+            2,
+            "short questions must not be auto-resolved"
+        );
     }
-
 }

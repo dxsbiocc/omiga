@@ -17,6 +17,14 @@ interface OrchestrationTimelineListProps {
   emptyText?: string;
 }
 
+function timelineActionLabel(action: TimelineEvent["action"]): string {
+  if (!action) return "";
+  if (action.type === "task" || action.type === "reviewer") return "打开任务记录";
+  if (action.type === "trace") return "查看原始事件";
+  if (action.type === "plan") return "查看计划";
+  return "查看阶段状态";
+}
+
 export function OrchestrationTimelineList({
   events,
   onEventClick,
@@ -136,7 +144,7 @@ export function OrchestrationTimelineList({
                           fontWeight: 600,
                         }}
                       >
-                        打开关联证据
+                        {timelineActionLabel(event.action)}
                       </Typography>
                     )}
                   </Box>

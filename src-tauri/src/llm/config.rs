@@ -314,9 +314,12 @@ pub struct ProviderConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query_params: Option<HashMap<String, String>>,
 
-    /// Moonshot/Custom only: persisted `thinking` flag (request always sends true/false; default false).
+    /// Moonshot/Custom/DeepSeek: persisted `thinking` flag; request sends thinking object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
+    /// DeepSeek only: `reasoning_effort` ("high" or "max"), used when thinking is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 
     /// Whether this provider is enabled
     #[serde(default = "default_true")]
@@ -422,10 +425,15 @@ impl LlmConfigFile {
         if let Some(thinking) = provider_config.thinking {
             config.thinking = Some(thinking);
         }
-        if matches!(provider, LlmProvider::Moonshot | LlmProvider::Custom)
-            && config.thinking.is_none()
+        if matches!(
+            provider,
+            LlmProvider::Moonshot | LlmProvider::Custom | LlmProvider::Deepseek
+        ) && config.thinking.is_none()
         {
             config.thinking = Some(false);
+        }
+        if let Some(re) = &provider_config.reasoning_effort {
+            config.reasoning_effort = Some(re.clone());
         }
 
         // Apply global settings (provider settings take precedence)
@@ -489,9 +497,10 @@ impl LlmConfigFile {
             LlmProvider::Deepseek => ProviderConfig {
                 provider_type: "deepseek".to_string(),
                 api_key: Some("${DEEPSEEK_API_KEY}".to_string()),
-                model: Some("deepseek-chat".to_string()),
+                model: Some("deepseek-v4-flash".to_string()),
                 max_tokens: Some(4096),
                 temperature: Some(0.7),
+                thinking: Some(false),
                 ..Default::default()
             },
             LlmProvider::Zhipu => ProviderConfig {
@@ -736,6 +745,9 @@ fn format_provider_yaml(name: &str, cfg: &ProviderConfig) -> String {
     }
     if let Some(t) = cfg.thinking {
         lines.push(format!("    thinking: {}", t));
+    }
+    if let Some(re) = &cfg.reasoning_effort {
+        lines.push(format!("    reasoning_effort: {}", re));
     }
 
     lines.join("\n")

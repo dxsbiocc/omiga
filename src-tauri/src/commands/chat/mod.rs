@@ -683,23 +683,6 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
 
     persist_session_tool_state(sessions, &repo, session_id).await;
 
-    {
-        let (project_path, session_name) = {
-            let sessions_guard = sessions.read().await;
-            (
-                sessions_guard
-                    .get(session_id)
-                    .map(|r| r.session.project_path.clone())
-                    .unwrap_or_else(|| ".".to_string()),
-                sessions_guard
-                    .get(session_id)
-                    .map(|r| r.session.name.clone())
-                    .unwrap_or_else(|| "Unnamed".to_string()),
-            )
-        };
-        index_chat_to_implicit_memory(app, &project_path, session_id, &session_name, &repo).await;
-    }
-
     if let Err(e) = repo
         .complete_round(round_id, Some(&last_assistant_id))
         .await
@@ -731,15 +714,17 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
     });
     emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
         app,
+        session_id,
         stream_message_id: message_id,
         assistant_message_id: &last_assistant_id,
         client,
         final_reply: &final_response,
         skip_summary: preflight_skip_turn_summary,
         suggestions_reply: &final_response,
-        repo,
+        repo: repo.clone(),
     })
     .await;
+    spawn_chat_indexing(app, sessions, &repo, session_id);
 }
 
 pub(super) struct PostResponseRetryRequest<'a> {
@@ -2589,7 +2574,9 @@ pub async fn send_message(
                 );
                 // Context compression is a semantic trigger: archive session summary now.
                 let project_root_for_compact = resolve_session_project_root(&project_path);
-                if let Ok(cfg) = crate::domain::memory::load_resolved_config(&project_root_for_compact).await {
+                if let Ok(cfg) =
+                    crate::domain::memory::load_resolved_config(&project_root_for_compact).await
+                {
                     let lt_path = cfg.long_term_path(&project_root_for_compact);
                     crate::commands::chat::turn::archive_on_compact(
                         &app,
@@ -3600,33 +3587,6 @@ pub async fn send_message(
             )
             .await;
 
-            // Index chat to implicit memory
-            {
-                let project_path = {
-                    let sessions = sessions_clone.read().await;
-                    sessions
-                        .get(&session_id_clone)
-                        .map(|r| r.session.project_path.clone())
-                        .unwrap_or_else(|| ".".to_string())
-                };
-                let repo = &*repo_clone;
-                let session_name = {
-                    let sessions = sessions_clone.read().await;
-                    sessions
-                        .get(&session_id_clone)
-                        .map(|r| r.session.name.clone())
-                        .unwrap_or_else(|| "Unnamed".to_string())
-                };
-                index_chat_to_implicit_memory(
-                    &app_clone,
-                    &project_path,
-                    &session_id_clone,
-                    &session_name,
-                    repo,
-                )
-                .await;
-            }
-
             {
                 let repo = &*repo_clone;
                 if let Err(e) = repo
@@ -3683,6 +3643,7 @@ pub async fn send_message(
             });
             emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
                 app: &app_clone,
+                session_id: &session_id_clone,
                 stream_message_id: &message_id_clone,
                 assistant_message_id: &last_assistant_id,
                 client: client.as_ref(),
@@ -3692,6 +3653,7 @@ pub async fn send_message(
                 repo: repo_clone.clone(),
             })
             .await;
+            spawn_chat_indexing(&app_clone, &sessions_clone, &repo_clone, &session_id_clone);
             return;
         }
 
@@ -3872,6 +3834,7 @@ pub async fn send_message(
                     });
                     emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
                         app: &app_clone,
+                        session_id: &session_id_clone,
                         stream_message_id: &message_id_clone,
                         assistant_message_id: &stop_msg_id,
                         client: client.as_ref(),
@@ -3945,7 +3908,9 @@ pub async fn send_message(
                                     let sessions_guard = sessions_clone.read().await;
                                     sessions_guard
                                         .get(&session_id_clone)
-                                        .map(|r| resolve_session_project_root(&r.session.project_path))
+                                        .map(|r| {
+                                            resolve_session_project_root(&r.session.project_path)
+                                        })
                                         .unwrap_or_else(|| std::path::PathBuf::from("."))
                                 };
                                 if let Ok(cfg) = crate::domain::memory::load_resolved_config(
@@ -3953,8 +3918,7 @@ pub async fn send_message(
                                 )
                                 .await
                                 {
-                                    let lt_path =
-                                        cfg.long_term_path(&project_root_for_compact);
+                                    let lt_path = cfg.long_term_path(&project_root_for_compact);
                                     crate::commands::chat::turn::archive_on_compact(
                                         &app_clone,
                                         &session_id_clone,
@@ -4383,32 +4347,6 @@ pub async fn send_message(
 
                 // Index chat to implicit memory
                 {
-                    let project_path = {
-                        let sessions = sessions_clone.read().await;
-                        sessions
-                            .get(&session_id_clone)
-                            .map(|r| r.session.project_path.clone())
-                            .unwrap_or_else(|| ".".to_string())
-                    };
-                    let repo = &*repo_clone;
-                    let session_name = {
-                        let sessions = sessions_clone.read().await;
-                        sessions
-                            .get(&session_id_clone)
-                            .map(|r| r.session.name.clone())
-                            .unwrap_or_else(|| "Unnamed".to_string())
-                    };
-                    index_chat_to_implicit_memory(
-                        &app_clone,
-                        &project_path,
-                        &session_id_clone,
-                        &session_name,
-                        repo,
-                    )
-                    .await;
-                }
-
-                {
                     let repo = &*repo_clone;
                     if let Err(e) = repo
                         .complete_round(&round_id_clone, Some(&last_assistant_id))
@@ -4464,6 +4402,7 @@ pub async fn send_message(
                 });
                 emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
                     app: &app_clone,
+                    session_id: &session_id_clone,
                     stream_message_id: &message_id_clone,
                     assistant_message_id: &last_assistant_id,
                     client: client.as_ref(),
@@ -4473,6 +4412,7 @@ pub async fn send_message(
                     repo: repo_clone.clone(),
                 })
                 .await;
+                spawn_chat_indexing(&app_clone, &sessions_clone, &repo_clone, &session_id_clone);
                 return;
             }
         }
@@ -4551,6 +4491,7 @@ pub async fn send_message(
         });
         emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
             app: &app_clone,
+            session_id: &session_id_clone,
             stream_message_id: &message_id_clone,
             assistant_message_id: &last_assistant_id,
             client: client.as_ref(),

@@ -1321,9 +1321,12 @@ pub struct ProviderConfigEntry {
     pub model: String,
     pub api_key_preview: String,
     pub base_url: Option<String>,
-    /// Moonshot / Custom only: request `thinking: true` and stream `reasoning_content`.
+    /// Moonshot / Custom / DeepSeek: request `thinking` object and stream `reasoning_content`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
+    /// DeepSeek only: "high" or "max", used when thinking is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     pub enabled: bool,
     /// Matches in-memory runtime config (current chat session / quick switch).
     pub is_session_active: bool,

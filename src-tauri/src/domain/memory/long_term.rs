@@ -89,8 +89,12 @@ pub struct LongTermMemoryEntry {
     pub last_reused_at: Option<String>,
 }
 
-fn default_importance() -> f32 { 0.5 }
-fn default_reuse_probability() -> f32 { 0.5 }
+fn default_importance() -> f32 {
+    0.5
+}
+fn default_reuse_probability() -> f32 {
+    0.5
+}
 
 impl Default for LongTermMemoryEntry {
     fn default() -> Self {
@@ -183,7 +187,12 @@ pub async fn promote_from_working_memory(
     let candidates = build_promotion_candidates(session_id, state);
     let count = candidates.len();
     for candidate in candidates {
-        let _ = upsert_entry(&root, candidate).await;
+        let target_root = if should_store_candidate_globally(&candidate, state) {
+            permanent_long_term_path()
+        } else {
+            root.clone()
+        };
+        let _ = upsert_entry(&target_root, candidate).await;
     }
     count
 }
@@ -256,11 +265,19 @@ pub async fn search_entries(
 /// +0.15 if reused within 7 days, +0.08 if within 30 days, 0 otherwise.
 fn recency_bonus(last_reused_at: Option<&str>) -> f64 {
     let Some(ts) = last_reused_at else { return 0.0 };
-    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) else { return 0.0 };
+    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) else {
+        return 0.0;
+    };
     let days = chrono::Utc::now()
         .signed_duration_since(dt.with_timezone(&chrono::Utc))
         .num_days();
-    if days < 7 { 0.15 } else if days < 30 { 0.08 } else { 0.0 }
+    if days < 7 {
+        0.15
+    } else if days < 30 {
+        0.08
+    } else {
+        0.0
+    }
 }
 
 /// Count entries that are stale: not reused in >90 days AND stability < 0.4.
@@ -366,6 +383,7 @@ pub async fn create_session_summary(
         .filter(|d| {
             d.status == crate::domain::memory::working_memory::WorkingMemoryItemStatus::Active
                 && d.confidence >= 0.70
+                && !is_unapproved_user_preference(d)
         })
         .take(3)
     {
@@ -377,6 +395,7 @@ pub async fn create_session_summary(
         .filter(|f| {
             f.status == crate::domain::memory::working_memory::WorkingMemoryItemStatus::Active
                 && f.confidence >= 0.75
+                && !is_unapproved_user_preference(f)
         })
         .take(2)
     {
@@ -399,9 +418,7 @@ pub async fn create_session_summary(
         reuse_probability: 0.55,
         retention_class: RetentionClass::Session,
         status: EntryStatus::Active,
-        expires_at: Some(
-            (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339()
-        ),
+        expires_at: Some((chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339()),
         ..Default::default()
     };
 
@@ -427,8 +444,15 @@ async fn upsert_entry(root: &Path, entry: LongTermMemoryEntry) -> Result<(), std
         if total_active >= GLOBAL_SOFT_CAP {
             let weakest = all_entries
                 .iter()
-                .filter(|(_, e)| e.status == EntryStatus::Active && e.retention_class != RetentionClass::Permanent)
-                .min_by(|(_, a), (_, b)| quality_score(a).partial_cmp(&quality_score(b)).unwrap_or(std::cmp::Ordering::Equal));
+                .filter(|(_, e)| {
+                    e.status == EntryStatus::Active
+                        && e.retention_class != RetentionClass::Permanent
+                })
+                .min_by(|(_, a), (_, b)| {
+                    quality_score(a)
+                        .partial_cmp(&quality_score(b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
             if let Some((evict_path, evicted)) = weakest {
                 let _ = fs::remove_file(evict_path).await;
                 tracing::info!(
@@ -453,9 +477,11 @@ async fn upsert_entry(root: &Path, entry: LongTermMemoryEntry) -> Result<(), std
         .collect();
 
     if active_topic.len() >= MAX_ENTRIES_PER_TOPIC {
-        let weakest = active_topic
-            .iter()
-            .min_by(|(_, a), (_, b)| quality_score(a).partial_cmp(&quality_score(b)).unwrap_or(std::cmp::Ordering::Equal));
+        let weakest = active_topic.iter().min_by(|(_, a), (_, b)| {
+            quality_score(a)
+                .partial_cmp(&quality_score(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         if let Some((supersede_path, old)) = weakest {
             let mut updated = (*old).clone();
             updated.status = EntryStatus::Superseded;
@@ -502,7 +528,9 @@ fn family_slug(slug: &str) -> String {
 
 /// Count JSON files without reading their content — O(n) metadata scan.
 async fn count_json_files(root: &Path) -> usize {
-    let Ok(mut dir) = fs::read_dir(root).await else { return 0 };
+    let Ok(mut dir) = fs::read_dir(root).await else {
+        return 0;
+    };
     let mut count = 0usize;
     while let Ok(Some(entry)) = dir.next_entry().await {
         if entry.path().extension().and_then(|e| e.to_str()) == Some("json") {
@@ -513,8 +541,13 @@ async fn count_json_files(root: &Path) -> usize {
 }
 
 /// Load only entries whose filename starts with `prefix` — avoids full-directory scan.
-async fn list_entries_with_prefix(root: &Path, prefix: &str) -> Vec<(PathBuf, LongTermMemoryEntry)> {
-    let Ok(mut dir) = fs::read_dir(root).await else { return vec![] };
+async fn list_entries_with_prefix(
+    root: &Path,
+    prefix: &str,
+) -> Vec<(PathBuf, LongTermMemoryEntry)> {
+    let Ok(mut dir) = fs::read_dir(root).await else {
+        return vec![];
+    };
     let mut out = Vec::new();
     while let Ok(Some(entry)) = dir.next_entry().await {
         let path = entry.path();
@@ -557,7 +590,11 @@ fn merge_entry(
     if let Some(new_exp) = incoming.expires_at {
         existing.expires_at = Some(match &existing.expires_at {
             Some(old_exp) => {
-                if new_exp > *old_exp { new_exp } else { old_exp.clone() }
+                if new_exp > *old_exp {
+                    new_exp
+                } else {
+                    old_exp.clone()
+                }
             }
             None => new_exp,
         });
@@ -629,7 +666,10 @@ fn build_promotion_candidates(
         let kind = infer_long_term_kind(item.kind.as_deref());
         if !should_promote_item(item, &kind) {
             // Reject log: surface borderline rejects for observability.
-            if item.confidence >= 0.70 && item.status == crate::domain::memory::working_memory::WorkingMemoryItemStatus::Active {
+            if item.confidence >= 0.70
+                && item.status
+                    == crate::domain::memory::working_memory::WorkingMemoryItemStatus::Active
+            {
                 tracing::debug!(
                     target: "omiga::memory::write_gate",
                     topic = %truncate_chars(&item.text, 60),
@@ -641,13 +681,14 @@ fn build_promotion_candidates(
             continue;
         }
         let (retention, ttl_days) = match kind {
-            LongTermMemoryKind::ResearchInsight | LongTermMemoryKind::MethodLesson |
-            LongTermMemoryKind::ProjectExperience | LongTermMemoryKind::TaskConclusion => (RetentionClass::LongTerm, None),
+            LongTermMemoryKind::ResearchInsight
+            | LongTermMemoryKind::MethodLesson
+            | LongTermMemoryKind::ProjectExperience
+            | LongTermMemoryKind::TaskConclusion => (RetentionClass::LongTerm, None),
             LongTermMemoryKind::SessionSummary => (RetentionClass::Session, Some(30u32)),
         };
-        let expires_at = ttl_days.map(|days| {
-            (chrono::Utc::now() + chrono::Duration::days(days as i64)).to_rfc3339()
-        });
+        let expires_at = ttl_days
+            .map(|days| (chrono::Utc::now() + chrono::Duration::days(days as i64)).to_rfc3339());
         let touch_ratio = (item.touch_count as f32 / 6.0).min(0.3);
         candidates.push(LongTermMemoryEntry {
             topic: truncate_chars(&item.text, 120),
@@ -678,11 +719,18 @@ fn should_promote_item(
     if item.status != crate::domain::memory::working_memory::WorkingMemoryItemStatus::Active {
         return false;
     }
-    if item.text.chars().count() < 24 {
+    let approved_user_preference = is_approved_user_preference(item);
+    if item.text.chars().count() < 24 && !approved_user_preference {
         return false;
     }
     if looks_transient_for_long_term(&item.text) {
         return false;
+    }
+    if is_unapproved_user_preference(item) {
+        return false;
+    }
+    if approved_user_preference {
+        return item.confidence >= 0.82 && !item.source_message_ids.is_empty();
     }
 
     // SessionSummary has a lighter threshold — no touch_count requirement.
@@ -712,9 +760,43 @@ fn infer_long_term_kind(kind: Option<&str>) -> LongTermMemoryKind {
         Some("research_insight") => LongTermMemoryKind::ResearchInsight,
         Some("method_lesson") => LongTermMemoryKind::MethodLesson,
         Some("project_experience") => LongTermMemoryKind::ProjectExperience,
+        Some("approved_user_preference") | Some("confirmed_user_preference") => {
+            LongTermMemoryKind::ProjectExperience
+        }
         Some("session_summary") => LongTermMemoryKind::SessionSummary,
         _ => LongTermMemoryKind::TaskConclusion,
     }
+}
+
+fn is_unapproved_user_preference(
+    item: &crate::domain::memory::working_memory::WorkingMemoryItem,
+) -> bool {
+    if is_approved_user_preference(item) {
+        return false;
+    }
+    crate::domain::memory::working_memory::is_user_preference_candidate_text(&item.text)
+}
+
+fn is_approved_user_preference(
+    item: &crate::domain::memory::working_memory::WorkingMemoryItem,
+) -> bool {
+    matches!(
+        item.kind.as_deref(),
+        Some("approved_user_preference") | Some("confirmed_user_preference")
+    )
+}
+
+fn should_store_candidate_globally(
+    entry: &LongTermMemoryEntry,
+    state: &WorkingMemoryState,
+) -> bool {
+    let entry_key = slugify(&entry.topic);
+    state.candidate_memories.iter().any(|candidate| {
+        candidate.status == crate::domain::memory::working_memory::CandidateMemoryStatus::Approved
+            && candidate.scope
+                == crate::domain::memory::working_memory::CandidateMemoryScope::Global
+            && slugify(&candidate.text) == entry_key
+    })
 }
 
 fn looks_transient_for_long_term(text: &str) -> bool {
@@ -791,6 +873,101 @@ mod tests {
             ..WorkingMemoryState::default()
         };
         assert_eq!(build_promotion_candidates("s1", &strong_state).len(), 1);
+    }
+
+    #[test]
+    fn promotion_candidates_hold_user_preferences_for_confirmation() {
+        let preference_state = WorkingMemoryState {
+            decisions: vec![crate::domain::memory::working_memory::WorkingMemoryItem {
+                text: "以后所有项目默认优先用 Rscript 脚本而不是 notebook".to_string(),
+                source_message_ids: vec!["m1".to_string(), "m2".to_string()],
+                confidence: 0.95,
+                last_touched_turn: 6,
+                expires_after_turns: 24,
+                status: crate::domain::memory::working_memory::WorkingMemoryItemStatus::Active,
+                kind: Some("project_experience".to_string()),
+                touch_count: 4,
+            }],
+            ..WorkingMemoryState::default()
+        };
+
+        assert!(
+            build_promotion_candidates("s1", &preference_state).is_empty(),
+            "unapproved user preferences should stay as candidates, not auto-promote"
+        );
+    }
+
+    #[test]
+    fn promotion_candidates_allow_approved_user_preferences() {
+        let approved_state = WorkingMemoryState {
+            working_facts: vec![crate::domain::memory::working_memory::WorkingMemoryItem {
+                text: "请记住：以后所有项目默认先分析再行动。".to_string(),
+                source_message_ids: vec!["m1".to_string(), "m2".to_string()],
+                confidence: 0.96,
+                last_touched_turn: 6,
+                expires_after_turns: 64,
+                status: crate::domain::memory::working_memory::WorkingMemoryItemStatus::Active,
+                kind: Some("approved_user_preference".to_string()),
+                touch_count: 3,
+            }],
+            ..WorkingMemoryState::default()
+        };
+
+        let candidates = build_promotion_candidates("s1", &approved_state);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].kind, LongTermMemoryKind::ProjectExperience);
+    }
+
+    #[test]
+    fn approved_global_candidate_targets_global_long_term_memory() {
+        let text = "请记住：以后所有项目默认先分析再行动。";
+        let state = WorkingMemoryState {
+            candidate_memories: vec![crate::domain::memory::working_memory::CandidateMemory {
+                text: text.to_string(),
+                source_message_ids: vec!["m1".to_string()],
+                confidence: 0.96,
+                reason: "explicit_remember_request".to_string(),
+                scope: crate::domain::memory::working_memory::CandidateMemoryScope::Global,
+                status: crate::domain::memory::working_memory::CandidateMemoryStatus::Approved,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                last_seen_at: chrono::Utc::now().to_rfc3339(),
+                touch_count: 1,
+            }],
+            ..WorkingMemoryState::default()
+        };
+        let entry = LongTermMemoryEntry {
+            topic: text.to_string(),
+            summary: text.to_string(),
+            kind: LongTermMemoryKind::ProjectExperience,
+            ..Default::default()
+        };
+
+        assert!(should_store_candidate_globally(&entry, &state));
+    }
+
+    #[tokio::test]
+    async fn session_summary_ignores_unapproved_user_preferences() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = WorkingMemoryState {
+            session_goal: Some("更新用户长期偏好".to_string()),
+            active_topic: Some("用户偏好".to_string()),
+            decisions: vec![crate::domain::memory::working_memory::WorkingMemoryItem {
+                text: "以后所有项目默认优先用 Rscript 脚本而不是 notebook".to_string(),
+                source_message_ids: vec!["m1".to_string(), "m2".to_string()],
+                confidence: 0.95,
+                last_touched_turn: 6,
+                expires_after_turns: 24,
+                status: crate::domain::memory::working_memory::WorkingMemoryItemStatus::Active,
+                kind: Some("project_experience".to_string()),
+                touch_count: 4,
+            }],
+            ..WorkingMemoryState::default()
+        };
+
+        assert!(
+            create_session_summary(temp.path(), "s1", &state).await.is_none(),
+            "preference-only turns should not archive unapproved preferences as long-term summaries"
+        );
     }
 
     #[tokio::test]
@@ -935,7 +1112,10 @@ mod tests {
         }
         let all = list_entries(temp.path()).await;
         // After the cap is reached, at least one entry must be Superseded.
-        let superseded = all.iter().filter(|(_, e)| e.status == EntryStatus::Superseded).count();
+        let superseded = all
+            .iter()
+            .filter(|(_, e)| e.status == EntryStatus::Superseded)
+            .count();
         assert!(
             superseded >= 1,
             "at least one entry should be superseded when per-topic cap is exceeded; all statuses: {:?}",
@@ -965,7 +1145,11 @@ mod tests {
         tokio::fs::write(path, json).await.unwrap();
 
         let matches = search_entries(temp.path(), "recall ordering", 10, false).await;
-        assert_eq!(matches.len(), 1, "superseded entry must not appear in search");
+        assert_eq!(
+            matches.len(),
+            1,
+            "superseded entry must not appear in search"
+        );
         assert_eq!(matches[0].title, "active-entry");
     }
 
@@ -985,15 +1169,17 @@ mod tests {
             topic: "ephemeral-valid".to_string(),
             summary: "ephemeral memory valid about recall ordering".to_string(),
             retention_class: RetentionClass::Ephemeral,
-            expires_at: Some(
-                (chrono::Utc::now() + chrono::Duration::days(10)).to_rfc3339()
-            ),
+            expires_at: Some((chrono::Utc::now() + chrono::Duration::days(10)).to_rfc3339()),
             ..Default::default()
         };
         let path_exp = temp.path().join("ephemeral-old.json");
         let path_val = temp.path().join("ephemeral-valid.json");
-        tokio::fs::write(path_exp, serde_json::to_string_pretty(&expired).unwrap()).await.unwrap();
-        tokio::fs::write(path_val, serde_json::to_string_pretty(&valid).unwrap()).await.unwrap();
+        tokio::fs::write(path_exp, serde_json::to_string_pretty(&expired).unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(path_val, serde_json::to_string_pretty(&valid).unwrap())
+            .await
+            .unwrap();
 
         let results = search_entries(temp.path(), "recall ordering", 10, false).await;
         assert_eq!(results.len(), 1, "expired Ephemeral must not appear");
@@ -1034,7 +1220,10 @@ mod tests {
             ..Default::default()
         };
         let result = create_session_summary(temp.path(), "sess-rich", &rich).await;
-        assert!(result.is_some(), "rich state should produce a session summary");
+        assert!(
+            result.is_some(),
+            "rich state should produce a session summary"
+        );
         let entry = result.unwrap();
         assert_eq!(entry.kind, LongTermMemoryKind::SessionSummary);
         assert!(entry.summary.contains("Goal:"));
@@ -1073,7 +1262,7 @@ mod tests {
         };
         // Just verify it doesn't panic and returns a float.
         let score = quality_score(&permanent);
-        assert!(score >= 0.0 && score <= 1.0);
+        assert!((0.0..=1.0).contains(&score));
     }
 
     #[test]
@@ -1098,15 +1287,27 @@ mod tests {
         };
         let merged = merge_entry(Some(existing), incoming);
         // confidence: max(0.5, 0.8) = 0.8
-        assert!((merged.confidence - 0.8).abs() < 1e-6, "confidence should be max");
+        assert!(
+            (merged.confidence - 0.8).abs() < 1e-6,
+            "confidence should be max"
+        );
         // stability: max(0.4, 0.2) = 0.4
-        assert!((merged.stability - 0.4).abs() < 1e-6, "stability should be max");
+        assert!(
+            (merged.stability - 0.4).abs() < 1e-6,
+            "stability should be max"
+        );
         // importance: max(0.3, 0.9) = 0.9
-        assert!((merged.importance - 0.9).abs() < 1e-6, "importance should be max");
+        assert!(
+            (merged.importance - 0.9).abs() < 1e-6,
+            "importance should be max"
+        );
         // reuse_probability: max(0.3, 0.7) = 0.7
         assert!((merged.reuse_probability - 0.7).abs() < 1e-6);
         // summary: richer incoming wins
-        assert!(merged.summary.contains("longer"), "richer summary should win");
+        assert!(
+            merged.summary.contains("longer"),
+            "richer summary should win"
+        );
     }
 
     #[test]
@@ -1173,10 +1374,18 @@ mod tests {
         };
         let merged = merge_entry(Some(existing), incoming);
         // "memory" must not be duplicated
-        let memory_count = merged.entities.iter().filter(|e| e.as_str() == "memory").count();
+        let memory_count = merged
+            .entities
+            .iter()
+            .filter(|e| e.as_str() == "memory")
+            .count();
         assert_eq!(memory_count, 1, "entities must not be duplicated");
         assert_eq!(merged.entities.len(), 3, "rust + memory + tokio = 3");
-        let sess1_count = merged.source_sessions.iter().filter(|s| s.as_str() == "sess-1").count();
+        let sess1_count = merged
+            .source_sessions
+            .iter()
+            .filter(|s| s.as_str() == "sess-1")
+            .count();
         assert_eq!(sess1_count, 1, "sessions must not be duplicated");
         assert_eq!(merged.source_sessions.len(), 2);
     }

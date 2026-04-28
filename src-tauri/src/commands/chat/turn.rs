@@ -449,8 +449,7 @@ pub(super) async fn sync_memory_layers_after_turn(request: MemorySyncRequest<'_>
             "sync_memory_layers_after_turn timed out (>30s); skipping memory sync this turn"
         );
         Err("timeout".to_string())
-    })
-    {
+    }) {
         Ok(state) => {
             if !state.dirty {
                 let op_id = format!("memory-sync-{}", uuid::Uuid::new_v4());
@@ -510,20 +509,16 @@ pub(super) async fn sync_memory_layers_after_turn(request: MemorySyncRequest<'_>
             }
 
             // Archive session summary on periodic interval OR on task completion signal.
-            let is_periodic = state.user_turn_count > 0
-                && state.user_turn_count % SESSION_SUMMARY_INTERVAL == 0;
-            let is_task_done = crate::domain::memory::working_memory::contains_task_completion_signal(
-                request.assistant_reply,
-            );
+            let is_periodic =
+                state.user_turn_count > 0 && state.user_turn_count % SESSION_SUMMARY_INTERVAL == 0;
+            let is_task_done =
+                crate::domain::memory::working_memory::contains_task_completion_signal(
+                    request.assistant_reply,
+                );
             if is_periodic || is_task_done {
                 let lt_path = config.long_term_path(&project_root);
-                maybe_archive_session_summary(
-                    request.app,
-                    request.session_id,
-                    &lt_path,
-                    &state,
-                )
-                .await;
+                maybe_archive_session_summary(request.app, request.session_id, &lt_path, &state)
+                    .await;
             }
         }
         Err(e) => {
@@ -568,8 +563,7 @@ async fn maybe_archive_session_summary(
         "running",
         Some("正在提炼本次会话精华…".to_string()),
     );
-    match crate::domain::memory::long_term::create_session_summary(lt_path, session_id, state)
-        .await
+    match crate::domain::memory::long_term::create_session_summary(lt_path, session_id, state).await
     {
         Some(entry) => {
             emit_activity_operation(
@@ -598,11 +592,7 @@ async fn maybe_archive_session_summary(
                 .iter()
                 .map(|q| q.text.clone())
                 .collect();
-            let next_steps: Vec<String> = state
-                .next_steps
-                .iter()
-                .map(|s| s.text.clone())
-                .collect();
+            let next_steps: Vec<String> = state.next_steps.iter().map(|s| s.text.clone()).collect();
             crate::domain::memory::dossier::update_project_dossier(
                 lt_path,
                 &entry.topic,
@@ -631,6 +621,7 @@ async fn maybe_archive_session_summary(
 ///   而非 LLM 的空壳收尾文本；其余情况与 `final_reply` 相同。
 pub(super) struct PostTurnCompletionRequest<'a> {
     pub app: &'a AppHandle,
+    pub session_id: &'a str,
     pub stream_message_id: &'a str,
     pub assistant_message_id: &'a str,
     pub client: &'a dyn LlmClient,
@@ -673,6 +664,7 @@ pub(super) async fn emit_post_turn_meta_then_complete(request: PostTurnCompletio
 
     // ── Clone everything needed for background tasks ───────────────────────────
     let app_bg = request.app.clone();
+    let session_id = request.session_id.to_string();
     let stream_id = request.stream_message_id.to_string();
     let assistant_id = request.assistant_message_id.to_string();
     let final_reply_bg = request.final_reply.to_string();
@@ -683,14 +675,59 @@ pub(super) async fn emit_post_turn_meta_then_complete(request: PostTurnCompletio
 
     // ── Single spawn: run summary and suggestions in parallel inside ──────────
     tokio::spawn(async move {
+        let summary_op_id = format!("post-turn-summary-{}", uuid::Uuid::new_v4());
+        let follow_op_id = format!("post-turn-suggestions-{}", uuid::Uuid::new_v4());
+
+        if !skip_summary && summary_enabled {
+            emit_activity_operation(
+                &app_bg,
+                &session_id,
+                &summary_op_id,
+                "生成本轮要点",
+                "running",
+                Some("后台独立 LLM 正在提炼本轮要点".to_string()),
+            );
+        }
+        if follow_enabled {
+            emit_activity_operation(
+                &app_bg,
+                &session_id,
+                &follow_op_id,
+                "生成下一步建议",
+                "running",
+                Some("后台独立 LLM 正在生成下一步建议".to_string()),
+            );
+        }
+
         let bg_client = match crate::llm::create_client(client_config) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(target: "omiga::post_turn", "bg client creation failed: {}", e);
+                if !skip_summary && summary_enabled {
+                    emit_activity_operation(
+                        &app_bg,
+                        &session_id,
+                        &summary_op_id,
+                        "生成本轮要点",
+                        "error",
+                        Some(format!("创建后台 LLM 客户端失败：{e}")),
+                    );
+                }
                 if follow_enabled {
+                    emit_activity_operation(
+                        &app_bg,
+                        &session_id,
+                        &follow_op_id,
+                        "生成下一步建议",
+                        "error",
+                        Some(format!("创建后台 LLM 客户端失败：{e}")),
+                    );
                     let _ = app_bg.emit(
                         &format!("chat-stream-{}", stream_id),
-                        &StreamOutputItem::SuggestionsComplete { generated: false, error: Some(e.to_string()) },
+                        &StreamOutputItem::SuggestionsComplete {
+                            generated: false,
+                            error: Some(e.to_string()),
+                        },
                     );
                 }
                 return;
@@ -701,7 +738,9 @@ pub(super) async fn emit_post_turn_meta_then_complete(request: PostTurnCompletio
         tokio::join!(
             // ── Turn summary ─────────────────────────────────────────────────
             async {
-                if skip_summary { return; }
+                if skip_summary || !summary_enabled {
+                    return;
+                }
                 let summary_text = match tokio::time::timeout(
                     std::time::Duration::from_secs(15),
                     crate::domain::agents::output_formatter::run_turn_summary_pass(
@@ -715,26 +754,75 @@ pub(super) async fn emit_post_turn_meta_then_complete(request: PostTurnCompletio
                     Ok(Ok(v)) => v,
                     Ok(Err(e)) => {
                         tracing::warn!(target: "omiga::post_turn", "turn summary error: {}", e);
-                        None
+                        let _ = app_bg.emit(
+                            &format!("chat-stream-{}", stream_id),
+                            &StreamOutputItem::TurnSummary { text: None },
+                        );
+                        emit_activity_operation(
+                            &app_bg,
+                            &session_id,
+                            &summary_op_id,
+                            "生成本轮要点",
+                            "error",
+                            Some(format!("本轮要点生成失败：{e}")),
+                        );
+                        return;
                     }
                     Err(_) => {
                         tracing::warn!(target: "omiga::post_turn", "turn summary timed out");
-                        None
+                        let _ = app_bg.emit(
+                            &format!("chat-stream-{}", stream_id),
+                            &StreamOutputItem::TurnSummary { text: None },
+                        );
+                        emit_activity_operation(
+                            &app_bg,
+                            &session_id,
+                            &summary_op_id,
+                            "生成本轮要点",
+                            "error",
+                            Some("本轮要点生成超时".to_string()),
+                        );
+                        return;
                     }
                 };
                 let _ = app_bg.emit(
                     &format!("chat-stream-{}", stream_id),
-                    &StreamOutputItem::TurnSummary { text: summary_text.clone() },
+                    &StreamOutputItem::TurnSummary {
+                        text: summary_text.clone(),
+                    },
                 );
                 if let Some(summary) = summary_text.as_deref() {
-                    if let Err(e) = repo.update_message_turn_summary(&assistant_id, Some(summary)).await {
+                    if let Err(e) = repo
+                        .update_message_turn_summary(&assistant_id, Some(summary))
+                        .await
+                    {
                         tracing::warn!("Failed to persist turn summary: {}", e);
                     }
                 }
+                emit_activity_operation(
+                    &app_bg,
+                    &session_id,
+                    &summary_op_id,
+                    "生成本轮要点",
+                    "done",
+                    Some(
+                        if summary_text
+                            .as_deref()
+                            .is_some_and(|s| !s.trim().is_empty())
+                        {
+                            "已生成本轮要点"
+                        } else {
+                            "后台模型未返回可用要点"
+                        }
+                        .to_string(),
+                    ),
+                );
             },
             // ── Follow-up suggestions ─────────────────────────────────────────
             async {
-                if !follow_enabled { return; }
+                if !follow_enabled {
+                    return;
+                }
                 let follow_res = crate::domain::suggestions::generate_follow_up_suggestions(
                     bg_client.as_ref(),
                     &suggestions_text,
@@ -758,20 +846,53 @@ pub(super) async fn emit_post_turn_meta_then_complete(request: PostTurnCompletio
                         }
                         let _ = app_bg.emit(
                             &format!("chat-stream-{}", stream_id),
-                            &StreamOutputItem::SuggestionsComplete { generated: true, error: None },
+                            &StreamOutputItem::SuggestionsComplete {
+                                generated: true,
+                                error: None,
+                            },
+                        );
+                        emit_activity_operation(
+                            &app_bg,
+                            &session_id,
+                            &follow_op_id,
+                            "生成下一步建议",
+                            "done",
+                            Some(format!("已生成 {} 条下一步建议", items.len())),
                         );
                     }
                     Ok(_) => {
                         let _ = app_bg.emit(
                             &format!("chat-stream-{}", stream_id),
-                            &StreamOutputItem::SuggestionsComplete { generated: false, error: None },
+                            &StreamOutputItem::SuggestionsComplete {
+                                generated: false,
+                                error: None,
+                            },
+                        );
+                        emit_activity_operation(
+                            &app_bg,
+                            &session_id,
+                            &follow_op_id,
+                            "生成下一步建议",
+                            "done",
+                            Some("后台模型未返回可用建议".to_string()),
                         );
                     }
                     Err(e) => {
                         tracing::warn!(target: "omiga::follow_up", "follow-up suggestions: {}", e);
                         let _ = app_bg.emit(
                             &format!("chat-stream-{}", stream_id),
-                            &StreamOutputItem::SuggestionsComplete { generated: false, error: Some(e.to_string()) },
+                            &StreamOutputItem::SuggestionsComplete {
+                                generated: false,
+                                error: Some(e.to_string()),
+                            },
+                        );
+                        emit_activity_operation(
+                            &app_bg,
+                            &session_id,
+                            &follow_op_id,
+                            "生成下一步建议",
+                            "error",
+                            Some(format!("下一步建议生成失败：{e}")),
                         );
                     }
                 }

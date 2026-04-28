@@ -396,7 +396,26 @@ fn looks_like_taboo(line: &str) -> bool {
 
 fn looks_like_style_preference(line: &str) -> bool {
     [
-        "风格", "语气", "语言", "回答", "输出", "长度", "tone", "style", "response",
+        "风格",
+        "语气",
+        "语言",
+        "回答",
+        "输出",
+        "长度",
+        "偏好",
+        "喜欢",
+        "习惯",
+        "倾向",
+        "默认",
+        "tone",
+        "style",
+        "response",
+        "prefer",
+        "preference",
+        "i like",
+        "i usually",
+        "i tend to",
+        "by default",
     ]
     .iter()
     .any(|needle| line.contains(needle))
@@ -409,10 +428,18 @@ fn looks_like_environment_constraint(line: &str) -> bool {
         "python",
         "node",
         "rust",
+        "rscript",
+        "notebook",
+        "jupyter",
+        "uv",
+        "pnpm",
+        "npm",
+        "yarn",
         "toolchain",
         "路径",
         "环境",
         "工具",
+        "脚本",
         "zsh",
         "bash",
     ]
@@ -425,6 +452,10 @@ fn looks_like_watchout(line: &str) -> bool {
         "踩坑",
         "容易",
         "注意",
+        "先分析",
+        "先计划",
+        "不要直接",
+        "别直接",
         "watch out",
         "pitfall",
         "warning",
@@ -435,9 +466,43 @@ fn looks_like_watchout(line: &str) -> bool {
 }
 
 fn looks_like_transient_user_focus(line: &str) -> bool {
-    ["当前", "这周", "最近", "ongoing", "right now", "currently"]
-        .iter()
-        .any(|needle| line.contains(needle))
+    [
+        "当前",
+        "这周",
+        "最近",
+        "这次",
+        "本次",
+        "今天",
+        "目前",
+        "暂时",
+        "临时",
+        "ongoing",
+        "right now",
+        "currently",
+        "this time",
+        "for this task",
+        "today",
+        "for now",
+        "temporary",
+    ]
+    .iter()
+    .any(|needle| line.contains(needle))
+}
+
+pub(crate) fn line_looks_like_style_preference(line: &str) -> bool {
+    looks_like_style_preference(&line.to_lowercase())
+}
+
+pub(crate) fn line_looks_like_environment_constraint(line: &str) -> bool {
+    looks_like_environment_constraint(&line.to_lowercase())
+}
+
+pub(crate) fn line_looks_like_workflow_watchout(line: &str) -> bool {
+    looks_like_watchout(&line.to_lowercase())
+}
+
+pub(crate) fn line_looks_like_transient_user_focus(line: &str) -> bool {
+    looks_like_transient_user_focus(&line.to_lowercase())
 }
 
 #[cfg(test)]

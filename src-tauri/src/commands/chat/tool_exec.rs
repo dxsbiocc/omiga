@@ -1520,10 +1520,9 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
             if let Some(url) = url {
                 if let Ok(cfg) = crate::domain::memory::load_resolved_config(project_root).await {
                     let lt_root = cfg.long_term_path(project_root);
-                    let hits = crate::domain::memory::source_registry::search_sources(
-                        &lt_root, &url, 1,
-                    )
-                    .await;
+                    let hits =
+                        crate::domain::memory::source_registry::search_sources(&lt_root, &url, 1)
+                            .await;
                     hits.into_iter().next().and_then(|m| {
                         m.gist.map(|gist| {
                             format!(

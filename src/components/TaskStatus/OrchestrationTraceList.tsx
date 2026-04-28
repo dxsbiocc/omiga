@@ -71,6 +71,14 @@ export function taskRecordLabel(failure: TraceFailureDiagnosticItem): string {
   return `${failure.agentLabel}: ${failure.detail ?? failure.summary}`;
 }
 
+function traceActionButtonLabel(action: TimelineEvent["action"]): string {
+  if (!action) return "定位";
+  if (action.type === "task" || action.type === "reviewer") return "任务";
+  if (action.type === "trace") return "展开";
+  if (action.type === "plan") return "计划";
+  return "状态";
+}
+
 export function OrchestrationTraceList({
   scopedEvents,
   filteredEvents,
@@ -267,7 +275,7 @@ export function OrchestrationTraceList({
                         onClick={() => onTimelineEvent(matchingTimeline)}
                         sx={{ fontSize: 10, py: 0.2, minWidth: 0 }}
                       >
-                        跳转
+                        {traceActionButtonLabel(matchingTimeline.action)}
                       </Button>
                     )}
                     {relatedFailure?.taskId && (

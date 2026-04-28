@@ -592,10 +592,9 @@ impl SessionRepository {
     /// Return at most `limit` messages for `session_id`, ordered newest-first.
     /// The caller takes `limit` rows and checks `len > limit - 1` to detect older pages.
     ///
-    /// `reasoning_content` (extended-thinking chain-of-thought) is excluded here — it can be
-    /// several KB per assistant message and the frontend `RawMessage` interface does not use it
-    /// on load.  Sending it over the Tauri WebView bridge was the primary cause of the
-    /// ~200 ms session-switch IPC latency.  Use `get_message_reasoning` if you need it later.
+    /// Include reasoning only for assistant rows that own tool calls: the frontend uses that
+    /// text to rebuild the ReAct fold "Thoughts" preface after refresh. Keep non-tool
+    /// reasoning out of the paged load path to avoid reintroducing large IPC payloads.
     pub async fn get_session_messages_paged(
         &self,
         session_id: &str,
@@ -605,7 +604,18 @@ impl SessionRepository {
         sqlx::query_as::<_, MessageRecord>(
             r#"
             SELECT id, session_id, role, content, tool_calls, tool_call_id,
-                   token_usage_json, NULL as reasoning_content, follow_up_suggestions_json, turn_summary, created_at
+                   token_usage_json,
+                   CASE
+                       WHEN role = 'assistant'
+                            AND reasoning_content IS NOT NULL
+                            AND trim(reasoning_content) <> ''
+                            AND tool_calls IS NOT NULL
+                            AND trim(tool_calls) <> ''
+                            AND trim(tool_calls) <> '[]'
+                       THEN reasoning_content
+                       ELSE NULL
+                   END as reasoning_content,
+                   follow_up_suggestions_json, turn_summary, created_at
             FROM messages
             WHERE session_id = ?
             ORDER BY created_at DESC, id DESC
@@ -620,7 +630,8 @@ impl SessionRepository {
 
     /// Return at most `limit` messages older than `before_id`, newest-first.
     /// The caller reverses the result to get chronological order.
-    /// `reasoning_content` excluded for the same reason as `get_session_messages_paged`.
+    /// `reasoning_content` is included only for tool-call assistant rows, matching
+    /// `get_session_messages_paged`.
     pub async fn get_messages_before(
         &self,
         session_id: &str,
@@ -630,7 +641,18 @@ impl SessionRepository {
         sqlx::query_as::<_, MessageRecord>(
             r#"
             SELECT id, session_id, role, content, tool_calls, tool_call_id,
-                   token_usage_json, NULL as reasoning_content, follow_up_suggestions_json, turn_summary, created_at
+                   token_usage_json,
+                   CASE
+                       WHEN role = 'assistant'
+                            AND reasoning_content IS NOT NULL
+                            AND trim(reasoning_content) <> ''
+                            AND tool_calls IS NOT NULL
+                            AND trim(tool_calls) <> ''
+                            AND trim(tool_calls) <> '[]'
+                       THEN reasoning_content
+                       ELSE NULL
+                   END as reasoning_content,
+                   follow_up_suggestions_json, turn_summary, created_at
             FROM messages
             WHERE session_id = ?
               AND (created_at, id) < (
@@ -1822,5 +1844,67 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e.event_type == "phase_changed" && e.phase.as_deref() == Some("executing")));
+    }
+
+    #[tokio::test]
+    async fn paged_messages_restore_tool_call_reasoning_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        repo.create_session("session-1", "Reasoning", "/tmp/project")
+            .await
+            .expect("create session");
+
+        repo.save_message(NewMessageRecord {
+            id: "assistant-tool",
+            session_id: "session-1",
+            role: "assistant",
+            content: "",
+            tool_calls: Some(r#"[{"id":"call-1","name":"bash","arguments":"{}"}]"#),
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: Some("I should inspect the CAS1-specific file first."),
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
+        .await
+        .expect("save tool assistant");
+
+        repo.save_message(NewMessageRecord {
+            id: "assistant-plain",
+            session_id: "session-1",
+            role: "assistant",
+            content: "final answer",
+            tool_calls: None,
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: Some("This non-tool reasoning should stay out of paged loads."),
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
+        .await
+        .expect("save plain assistant");
+
+        let messages = repo
+            .get_session_messages_paged("session-1", 10, 0)
+            .await
+            .expect("load paged messages");
+
+        let tool_owner = messages
+            .iter()
+            .find(|msg| msg.id == "assistant-tool")
+            .expect("tool assistant row");
+        assert_eq!(
+            tool_owner.reasoning_content.as_deref(),
+            Some("I should inspect the CAS1-specific file first.")
+        );
+
+        let plain = messages
+            .iter()
+            .find(|msg| msg.id == "assistant-plain")
+            .expect("plain assistant row");
+        assert!(plain.reasoning_content.is_none());
     }
 }

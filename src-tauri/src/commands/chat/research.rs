@@ -236,13 +236,18 @@ pub(super) fn persist_research_to_memory(
         .ok()
         .and_then(|v| {
             v.get("final_output")
-                .and_then(|fo| fo.get("summary").and_then(|s| s.as_str()).map(str::to_owned))
+                .and_then(|fo| {
+                    fo.get("summary")
+                        .and_then(|s| s.as_str())
+                        .map(str::to_owned)
+                })
                 .or_else(|| {
                     v.get("task_results")
                         .and_then(|tr| tr.as_object())
                         .and_then(|map| {
-                            map.values()
-                                .find_map(|r| r.get("summary").and_then(|s| s.as_str()).map(str::to_owned))
+                            map.values().find_map(|r| {
+                                r.get("summary").and_then(|s| s.as_str()).map(str::to_owned)
+                            })
                         })
                 })
         })

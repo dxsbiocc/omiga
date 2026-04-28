@@ -49,7 +49,8 @@ describe("OrchestrationTimelineList", () => {
     expect(html).toContain("调度计划已生成");
     expect(html).toContain("分析执行 已完成");
     expect(html).toContain("Implement token refresh");
-    expect(html).toContain("打开关联证据");
+    expect(html).toContain("查看计划");
+    expect(html).toContain("打开任务记录");
   });
 
   it("server-renders team phase timeline labels", () => {
@@ -67,7 +68,7 @@ describe("OrchestrationTimelineList", () => {
     expect(html).toContain("验证阶段开始");
     expect(html).toContain("修复阶段开始");
     expect(html).toContain("综合阶段开始");
-    expect(html).not.toContain("打开关联证据");
+    expect(html).not.toContain("打开任务记录");
   });
 
   it("server-renders empty timeline fallback", () => {

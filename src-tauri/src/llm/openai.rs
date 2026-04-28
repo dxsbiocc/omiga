@@ -170,6 +170,34 @@ fn maybe_attach_kimi_thinking_body(body: &mut serde_json::Value, config: &LlmCon
     }
 }
 
+/// Build the DeepSeek `thinking` object.
+/// When enabled, `reasoning_effort` ("high" or "max") is included; default is "high".
+fn deepseek_thinking_request_value(
+    enabled: bool,
+    reasoning_effort: Option<&str>,
+) -> serde_json::Value {
+    if enabled {
+        serde_json::json!({
+            "type": "enabled",
+            "reasoning_effort": reasoning_effort.unwrap_or("high")
+        })
+    } else {
+        serde_json::json!({ "type": "disabled" })
+    }
+}
+
+/// Attach DeepSeek `thinking` body only when thinking is explicitly enabled.
+///
+/// Omitting the field (thinking disabled / not configured) is equivalent to
+/// `{"type": "disabled"}` per the API default, and avoids breaking old configs
+/// or sessions that never used thinking mode.
+fn maybe_attach_deepseek_thinking_body(body: &mut serde_json::Value, config: &LlmConfig) {
+    if config.provider != LlmProvider::Deepseek || config.thinking != Some(true) {
+        return;
+    }
+    body["thinking"] = deepseek_thinking_request_value(true, config.reasoning_effort.as_deref());
+}
+
 impl OpenAiCompatibleClient {
     pub fn new(config: LlmConfig) -> Self {
         let client = Client::builder()
@@ -181,14 +209,34 @@ impl OpenAiCompatibleClient {
         Self { client, config }
     }
 
-    /// Moonshot/Kimi: when `thinking` is enabled, replay must include `reasoning_content` for
-    /// assistant turns that contain tool calls (empty string if missing).
+    /// Determine the `reasoning_content` to include in a replayed assistant message.
+    ///
+    /// DeepSeek (docs): "When tool calls occur, reasoning_content MUST be returned to the API
+    /// in all subsequent rounds — omitting it causes a 400 error."
+    /// Moonshot/Kimi: same requirement when thinking is enabled.
     fn assistant_reasoning_for_api(
         config: &LlmConfig,
         has_tool_calls: bool,
         stored: Option<String>,
     ) -> Option<String> {
-        if config.thinking != Some(true) {
+        let thinking_on = config.thinking == Some(true);
+
+        if matches!(config.provider, LlmProvider::Deepseek) {
+            if has_tool_calls {
+                if thinking_on {
+                    // Thinking enabled + tool calls: MUST include even when empty.
+                    return Some(stored.unwrap_or_default());
+                }
+                // Thinking disabled but stored value is non-empty (e.g. deepseek-reasoner
+                // produced reasoning before thinking was explicitly configured): pass it back.
+                return stored.filter(|s| !s.is_empty());
+            }
+            // No tool calls: API ignores reasoning_content; only include if non-empty.
+            return stored.filter(|s| !s.is_empty());
+        }
+
+        // Moonshot / Custom
+        if !thinking_on {
             return stored.filter(|s| !s.is_empty());
         }
         if has_tool_calls {
@@ -556,6 +604,7 @@ impl LlmClient for OpenAiCompatibleClient {
         }
 
         maybe_attach_kimi_thinking_body(&mut body, &self.config);
+        maybe_attach_deepseek_thinking_body(&mut body, &self.config);
         let diagnostics = request_diagnostics(&body);
         if diagnostics.body_bytes >= LARGE_REQUEST_WARN_BYTES {
             tracing::warn!(

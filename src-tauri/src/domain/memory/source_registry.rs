@@ -90,9 +90,8 @@ pub async fn upsert_source(lt_root: &Path, mut entry: SourceEntry) {
         return;
     }
     // Always set expiry to TTL from now (extended on every re-access).
-    entry.expires_at = Some(
-        (chrono::Utc::now() + chrono::Duration::days(SOURCE_TTL_DAYS)).to_rfc3339(),
-    );
+    entry.expires_at =
+        Some((chrono::Utc::now() + chrono::Duration::days(SOURCE_TTL_DAYS)).to_rfc3339());
 
     let path = entry_path(lt_root, &entry.canonical_url);
     // Merge with existing if present.
@@ -134,11 +133,15 @@ pub async fn upsert_source(lt_root: &Path, mut entry: SourceEntry) {
 
 /// Returns `true` if the entry has passed its `expires_at` timestamp.
 fn is_expired(entry: &SourceEntry) -> bool {
-    entry.expires_at.as_deref().map(|exp| {
-        chrono::DateTime::parse_from_rfc3339(exp)
-            .map(|dt| dt < chrono::Utc::now())
-            .unwrap_or(false)
-    }).unwrap_or(false)
+    entry
+        .expires_at
+        .as_deref()
+        .map(|exp| {
+            chrono::DateTime::parse_from_rfc3339(exp)
+                .map(|dt| dt < chrono::Utc::now())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
 }
 
 /// List all source entries including expired ones (used for admin/stats).
@@ -167,7 +170,11 @@ pub async fn list_sources(lt_root: &Path) -> Vec<SourceEntry> {
 
 /// List active (non-expired) source entries.
 pub async fn list_active_sources(lt_root: &Path) -> Vec<SourceEntry> {
-    list_sources(lt_root).await.into_iter().filter(|e| !is_expired(e)).collect()
+    list_sources(lt_root)
+        .await
+        .into_iter()
+        .filter(|e| !is_expired(e))
+        .collect()
 }
 
 /// List active source entries together with their file paths (for delete-by-path UI).
@@ -203,7 +210,11 @@ pub async fn count_sources(lt_root: &Path) -> usize {
 
 /// Count expired source entries.
 pub async fn count_stale_sources(lt_root: &Path) -> usize {
-    list_sources(lt_root).await.into_iter().filter(is_expired).count()
+    list_sources(lt_root)
+        .await
+        .into_iter()
+        .filter(is_expired)
+        .count()
 }
 
 /// Delete expired source entries from disk.
@@ -238,7 +249,11 @@ pub async fn prune_stale_sources(lt_root: &Path, dry_run: bool) -> usize {
         }
     }
     if removed > 0 {
-        tracing::info!("source_registry: pruned {} expired source entries (dry_run={})", removed, dry_run);
+        tracing::info!(
+            "source_registry: pruned {} expired source entries (dry_run={})",
+            removed,
+            dry_run
+        );
     }
     removed
 }
@@ -334,7 +349,8 @@ pub fn entries_from_search_output(
             let canonical = canonicalize_url(&url);
             let domain = extract_domain(&url);
             let now = chrono::Utc::now().to_rfc3339();
-            let expires_at = (chrono::Utc::now() + chrono::Duration::days(SOURCE_TTL_DAYS)).to_rfc3339();
+            let expires_at =
+                (chrono::Utc::now() + chrono::Duration::days(SOURCE_TTL_DAYS)).to_rfc3339();
             SourceEntry {
                 url: url.clone(),
                 canonical_url: canonical,
@@ -411,8 +427,16 @@ fn extract_title(content: &str) -> Option<String> {
 fn extract_gist(content: &str, max_chars: usize) -> String {
     // Priority: Abstract / Conclusion / Results / Summary sections come first.
     // Falls back to first prose paragraphs if no key sections are found.
-    let priority_headings = ["abstract", "conclusion", "conclusions", "summary",
-                             "results", "discussion", "key findings", "overview"];
+    let priority_headings = [
+        "abstract",
+        "conclusion",
+        "conclusions",
+        "summary",
+        "results",
+        "discussion",
+        "key findings",
+        "overview",
+    ];
     let lines: Vec<&str> = content.lines().collect();
     let n = lines.len();
 
@@ -466,7 +490,18 @@ fn extract_urls_from_text(text: &str) -> Vec<String> {
     // Simple regex-free extraction: find tokens that look like https?:// URLs.
     let mut urls = Vec::new();
     for word in text.split_whitespace() {
-        let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != ':' && c != '/' && c != '.' && c != '-' && c != '_' && c != '?'  && c != '=' && c != '&' && c != '#');
+        let clean = word.trim_matches(|c: char| {
+            !c.is_alphanumeric()
+                && c != ':'
+                && c != '/'
+                && c != '.'
+                && c != '-'
+                && c != '_'
+                && c != '?'
+                && c != '='
+                && c != '&'
+                && c != '#'
+        });
         if (clean.starts_with("https://") || clean.starts_with("http://"))
             && clean.len() > 12
             && !urls.contains(&clean.to_string())
@@ -498,13 +533,19 @@ mod tests {
 
     #[test]
     fn extract_domain_works() {
-        assert_eq!(extract_domain("https://pubmed.ncbi.nlm.nih.gov/12345"), "pubmed.ncbi.nlm.nih.gov");
+        assert_eq!(
+            extract_domain("https://pubmed.ncbi.nlm.nih.gov/12345"),
+            "pubmed.ncbi.nlm.nih.gov"
+        );
     }
 
     #[test]
     fn extract_title_prefers_markdown_heading() {
         let content = "# My Research Paper\n\nSome abstract text here.";
-        assert_eq!(extract_title(content), Some("My Research Paper".to_string()));
+        assert_eq!(
+            extract_title(content),
+            Some("My Research Paper".to_string())
+        );
     }
 
     #[test]
@@ -585,7 +626,12 @@ mod tests {
     async fn upsert_merges_use_count_and_sessions() {
         let temp = tempfile::tempdir().unwrap();
         let e1 = entry_from_fetch("https://example.com/page", "content one", Some("s1"), None);
-        let e2 = entry_from_fetch("https://example.com/page?foo=bar", "content two", Some("s2"), None);
+        let e2 = entry_from_fetch(
+            "https://example.com/page?foo=bar",
+            "content two",
+            Some("s2"),
+            None,
+        );
         upsert_source(temp.path(), e1).await;
         upsert_source(temp.path(), e2).await;
 
@@ -605,7 +651,7 @@ mod tests {
         // Should be ~90 days in the future (allow ±1 minute for test timing).
         let diff_days = (exp_dt.timestamp() - now.timestamp()) / 86400;
         assert!(
-            diff_days >= 89 && diff_days <= 91,
+            (89..=91).contains(&diff_days),
             "expires_at should be ~90 days from now, got {} days",
             diff_days
         );
@@ -615,13 +661,23 @@ mod tests {
     async fn upsert_extends_ttl_on_reaccess() {
         let temp = tempfile::tempdir().unwrap();
         // First access.
-        let e1 = entry_from_fetch("https://example.com/reaccess", "first access", Some("s1"), None);
+        let e1 = entry_from_fetch(
+            "https://example.com/reaccess",
+            "first access",
+            Some("s1"),
+            None,
+        );
         upsert_source(temp.path(), e1).await;
         let before = list_sources(temp.path()).await;
         let first_exp = before[0].expires_at.clone().unwrap();
 
         // Re-access: should reset TTL to 90 days from now.
-        let e2 = entry_from_fetch("https://example.com/reaccess", "second access", Some("s2"), None);
+        let e2 = entry_from_fetch(
+            "https://example.com/reaccess",
+            "second access",
+            Some("s2"),
+            None,
+        );
         upsert_source(temp.path(), e2).await;
         let after = list_sources(temp.path()).await;
         let second_exp = after[0].expires_at.clone().unwrap();
@@ -653,7 +709,9 @@ mod tests {
         fs::write(
             path.join(format!("{}.json", "expired00deadbeef")),
             serde_json::to_string_pretty(&expired).unwrap(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Insert a valid (non-expired) entry.
         let valid = entry_from_fetch(
@@ -701,12 +759,22 @@ mod tests {
         fs::write(
             src_dir.join("expiredaaaa0000.json"),
             serde_json::to_string_pretty(&expired).unwrap(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let active = entry_from_fetch("https://example.com/active", "active content", None, None);
         upsert_source(temp.path(), active).await;
 
-        assert_eq!(list_sources(temp.path()).await.len(), 2, "list_sources shows all");
-        assert_eq!(count_sources(temp.path()).await, 1, "count_sources excludes expired");
+        assert_eq!(
+            list_sources(temp.path()).await.len(),
+            2,
+            "list_sources shows all"
+        );
+        assert_eq!(
+            count_sources(temp.path()).await,
+            1,
+            "count_sources excludes expired"
+        );
         assert_eq!(count_stale_sources(temp.path()).await, 1, "one stale entry");
     }
 
@@ -733,7 +801,9 @@ mod tests {
         fs::write(
             src_dir.join("pruneme0deadbeef.json"),
             serde_json::to_string_pretty(&expired).unwrap(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         upsert_source(temp.path(), keeper).await;
 
         assert_eq!(list_sources(temp.path()).await.len(), 2);
@@ -741,7 +811,11 @@ mod tests {
         // Dry run: reports removal but does not delete.
         let dry = prune_stale_sources(temp.path(), true).await;
         assert_eq!(dry, 1, "dry run should report 1 stale source");
-        assert_eq!(list_sources(temp.path()).await.len(), 2, "dry run must not delete");
+        assert_eq!(
+            list_sources(temp.path()).await.len(),
+            2,
+            "dry run must not delete"
+        );
 
         // Real run: deletes the expired entry.
         let removed = prune_stale_sources(temp.path(), false).await;

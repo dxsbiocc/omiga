@@ -61,9 +61,7 @@ pub async fn memory_list_long_term(
     project_path: String,
     scope: Option<String>,
 ) -> Result<Vec<LongTermEntryDto>, AppError> {
-    use crate::domain::memory::{
-        config::permanent_long_term_path, long_term::list_entries,
-    };
+    use crate::domain::memory::{config::permanent_long_term_path, long_term::list_entries};
     let root = super::project_root(&project_path);
     let cfg = load_resolved_config(&root).await.unwrap_or_default();
     let lt = cfg.long_term_path(&root);
@@ -73,11 +71,19 @@ pub async fn memory_list_long_term(
     let mut entries: Vec<LongTermEntryDto> = Vec::new();
     if scope == "project" || scope == "all" {
         let project = list_entries(&lt).await;
-        entries.extend(project.into_iter().map(|(p, e)| LongTermEntryDto::from_entry(p, e, false)));
+        entries.extend(
+            project
+                .into_iter()
+                .map(|(p, e)| LongTermEntryDto::from_entry(p, e, false)),
+        );
     }
     if scope == "global" || scope == "all" {
         let global = list_entries(&perm_lt).await;
-        entries.extend(global.into_iter().map(|(p, e)| LongTermEntryDto::from_entry(p, e, true)));
+        entries.extend(
+            global
+                .into_iter()
+                .map(|(p, e)| LongTermEntryDto::from_entry(p, e, true)),
+        );
     }
     entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(entries)
@@ -185,7 +191,9 @@ pub async fn memory_save_dossier(req: SaveDossierRequest) -> Result<(), AppError
     let lt = cfg.long_term_path(&root);
     let slug = if req.slug.trim().is_empty() {
         crate::domain::memory::long_term::slugify_pub(
-            root.file_name().and_then(|n| n.to_str()).unwrap_or("project"),
+            root.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project"),
         )
     } else {
         req.slug
@@ -210,8 +218,7 @@ pub async fn memory_save_dossier(req: SaveDossierRequest) -> Result<(), AppError
 #[tauri::command]
 pub async fn memory_prune_stale(project_path: String) -> Result<usize, AppError> {
     use crate::domain::memory::{
-        config::permanent_long_term_path,
-        long_term::prune_stale_entries,
+        config::permanent_long_term_path, long_term::prune_stale_entries,
         source_registry::prune_stale_sources,
     };
     let root = super::project_root(&project_path);

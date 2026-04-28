@@ -139,7 +139,7 @@ impl LlmProvider {
             LlmProvider::Google => "gemini-1.5-pro".to_string(),
             LlmProvider::Minimax => "abab6.5-chat".to_string(),
             LlmProvider::Alibaba => "qwen-max".to_string(),
-            LlmProvider::Deepseek => "deepseek-chat".to_string(),
+            LlmProvider::Deepseek => "deepseek-v4-flash".to_string(),
             LlmProvider::Zhipu => "glm-4".to_string(),
             // Kimi K2 — current OpenAI-compatible id (older moonshot-v1-* may 404 on newer keys)
             LlmProvider::Moonshot => "kimi-k2-0905-preview".to_string(),
@@ -259,10 +259,14 @@ pub struct LlmConfig {
     /// Extra query parameters (for some providers)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_query: Option<HashMap<String, String>>,
-    /// Moonshot/Custom only: request body always includes `thinking: true|false` (default false).
-    /// DeepSeek and other providers leave this unset. When true, tool-call replays need `reasoning_content`.
+    /// Moonshot/Custom/DeepSeek: request body includes `thinking` object (enabled/disabled).
+    /// When true, tool-call replays need `reasoning_content`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
+    /// DeepSeek only: `reasoning_effort` inside the thinking object ("high" or "max").
+    /// Only meaningful when `thinking` is Some(true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 fn default_timeout() -> u64 {
@@ -288,6 +292,7 @@ impl LlmConfig {
             extra_headers: None,
             extra_query: None,
             thinking: None,
+            reasoning_effort: None,
         }
     }
 
@@ -402,6 +407,7 @@ impl Default for LlmConfig {
             extra_headers: None,
             extra_query: None,
             thinking: None,
+            reasoning_effort: None,
         }
     }
 }
@@ -581,6 +587,7 @@ pub fn load_config_from_env() -> Result<LlmConfig, ApiError> {
         extra_headers: None,
         extra_query: None,
         thinking: None,
+        reasoning_effort: None,
     })
 }
 

@@ -117,7 +117,7 @@ describe("OrchestrationTraceList", () => {
     expect(html).toContain("关联失败");
     expect(html).toContain("论证审查 给出 reject");
     expect(html).toContain("Missing regression evidence");
-    expect(html).toContain("跳转");
+    expect(html).toContain("任务");
     expect(html).toContain("记录");
     expect(html).toContain("复制 payload");
     expect(html).toContain("打开队友记录");
@@ -140,7 +140,7 @@ describe("OrchestrationTraceList", () => {
 
     findOnClickByText(element, "autopilot")?.();
     findOnClickByText(element, "reviewer_verdict")?.();
-    findOnClickByText(element, "跳转")?.();
+    findOnClickByText(element, "任务")?.();
     findOnClickByText(element, "记录")?.();
     findOnClickByText(element, "复制 payload")?.();
     findOnClickByText(element, "展开 trace payload")?.();

@@ -172,4 +172,36 @@ describe("stream tool message updates", () => {
     );
     expect(normalized[2].prefaceBeforeTools).toBeUndefined();
   });
+
+  it("normalizes persisted reasoning_content preface into the first matching tool row", () => {
+    const dbShape: StreamToolMessageLike[] = [
+      {
+        id: "assistant-2",
+        role: "assistant",
+        content: "",
+        prefaceBeforeTools:
+          "I need to verify the CAS1-specific RSL3 response before answering.",
+        toolCallsList: [{ id: "call-3", name: "bash", arguments: "{}" }],
+      },
+      {
+        id: "tool-3",
+        role: "tool",
+        content: "ok",
+        toolCall: {
+          id: "call-3",
+          name: "bash",
+          status: "completed",
+          output: "ok",
+        },
+      },
+    ];
+
+    const normalized = normalizeAssistantToolCallPrefaces(dbShape);
+
+    expect(normalized[0].content).toBe("");
+    expect(normalized[0].prefaceBeforeTools).toBeUndefined();
+    expect(normalized[1].prefaceBeforeTools).toBe(
+      "I need to verify the CAS1-specific RSL3 response before answering.",
+    );
+  });
 });

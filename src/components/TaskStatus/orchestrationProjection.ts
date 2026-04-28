@@ -11,6 +11,7 @@ export type TimelineEvent = {
   action?:
     | { type: "plan" }
     | { type: "mode" }
+    | { type: "trace"; eventId: string }
     | { type: "task"; taskId: string; label?: string }
     | { type: "reviewer"; taskId: string; label?: string };
 };
@@ -57,6 +58,7 @@ function preflightStageLabel(stage: string): string {
     mcp_tools: "MCP 工具准备",
     tool_schemas: "工具清单准备",
     send_message_ready: "进入流式阶段前准备",
+    auto_compact: "上下文压缩",
   };
   return labels[stage] ?? stage;
 }
@@ -126,6 +128,14 @@ export function buildOrchestrationTimelineFromEvents(
           ? `${payload.taskCount} 个子任务`
           : payloadText(payload.taskCount);
       const stage = payloadText(payload.stage);
+      const toolName =
+        payloadText(payload.toolName) ??
+        payloadText(payload.tool_name) ??
+        payloadText(payload.name);
+      const toolOutputPreview =
+        payloadText(payload.outputPreview) ??
+        payloadText(payload.output_preview) ??
+        payloadText(payload.error);
       const durationMs =
         typeof payload.durationMs === "number"
           ? `${payload.durationMs} ms`
@@ -142,77 +152,117 @@ export function buildOrchestrationTimelineFromEvents(
       const stageError = payloadText(payload.error);
       const taskLabel = description ? `${agentLabel}: ${description}` : undefined;
       const reviewerLabel = summary ? `${reviewerAgentLabel}: ${summary}` : taskLabel;
+      const backgroundTaskAction =
+        event.event_type.startsWith("background_") && event.task_id
+          ? ({
+              type: "task" as const,
+              taskId: event.task_id,
+              label: taskLabel,
+            })
+          : undefined;
       const action =
         event.event_type === "schedule_plan_created"
           ? ({ type: "plan" } as const)
           : event.event_type === "mode_requested"
             ? ({ type: "mode" } as const)
-            : event.event_type.startsWith("worker_") && event.task_id
-              ? ({
-                  type: "task" as const,
-                  taskId: event.task_id,
-                  label: taskLabel,
-                })
-              : event.event_type === "reviewer_verdict" && event.task_id
+            : backgroundTaskAction
+              ? backgroundTaskAction
+              : event.event_type.startsWith("worker_") && event.task_id
                 ? ({
-                    type: "reviewer" as const,
+                    type: "task" as const,
                     taskId: event.task_id,
-                    label: reviewerLabel,
+                    label: taskLabel,
                   })
-                : event.phase
-                  ? ({ type: "mode" as const })
-                  : undefined;
+                : event.event_type === "reviewer_verdict" && event.task_id
+                  ? ({
+                      type: "reviewer" as const,
+                      taskId: event.task_id,
+                      label: reviewerLabel,
+                    })
+                  : event.event_type === "preflight_stage_completed" ||
+                      event.event_type === "preflight_stage_failed"
+                    ? ({ type: "trace" as const, eventId: event.id })
+                    : event.event_type === "phase_changed"
+                      ? ({ type: "mode" as const })
+                    : undefined;
 
+      const toolDisplayName = toolName ?? "工具";
       const label =
         event.event_type === "schedule_plan_created"
           ? "调度计划已生成"
-          : event.event_type === "resume_requested"
-            ? `${event.mode ?? "编排"} 恢复请求`
-            : event.event_type === "cancel_requested"
-              ? `${event.mode ?? "编排"} 取消请求`
-              : event.event_type === "cancel_completed"
-                ? `${event.mode ?? "编排"} 已取消`
-                : event.event_type === "verification_started"
-                  ? "验证阶段开始"
-                  : event.event_type === "fix_started"
-                    ? "修复阶段开始"
-                    : event.event_type === "synthesizing_started"
-                      ? "综合阶段开始"
-                      : event.event_type === "mode_requested"
-                        ? `${event.mode ?? "编排"} 模式已触发`
-                        : event.event_type === "phase_changed"
-                          ? `${event.mode ?? "编排"} 切换到 ${orchestrationPhaseLabel(
-                              event.phase ?? "",
-                            )}`
-                          : event.event_type === "worker_started"
-                            ? `${agentLabel} 已启动`
-                            : event.event_type === "worker_completed"
-                              ? `${agentLabel} 已完成`
-                              : event.event_type === "worker_failed"
-                                ? `${agentLabel} 失败`
-                                : event.event_type === "worker_cancelled"
-                                  ? `${agentLabel} 已取消`
-                                  : event.event_type === "worker_launch_failed"
-                                    ? `${agentLabel} 启动失败`
-                                    : event.event_type === "reviewer_verdict"
-                                      ? `${reviewerAgentLabel} 给出 ${verdict}`
-                                      : event.event_type === "preflight_stage_completed" && stage
-                                        ? `${preflightStageLabel(stage)}完成`
-                                        : event.event_type === "preflight_stage_failed" && stage
-                                          ? `${preflightStageLabel(stage)}失败`
-                                          : event.event_type;
+          : event.event_type === "background_agent_started"
+            ? `${agentLabel} 后台任务已启动`
+            : event.event_type === "background_agent_completed"
+              ? `${agentLabel} 后台任务已完成`
+              : event.event_type === "background_agent_failed"
+                ? `${agentLabel} 后台任务失败`
+                : event.event_type === "background_agent_cancelled"
+                  ? `${agentLabel} 后台任务已取消`
+                  : event.event_type === "background_tool_call_started"
+                    ? `${agentLabel} 调用 ${toolDisplayName} 开始`
+                    : event.event_type === "background_tool_call_completed"
+                      ? `${agentLabel} 调用 ${toolDisplayName} 完成`
+                      : event.event_type === "background_tool_call_failed"
+                        ? `${agentLabel} 调用 ${toolDisplayName} 失败`
+                        : event.event_type === "background_tool_call_blocked"
+                          ? `${agentLabel} 调用 ${toolDisplayName} 被拦截`
+                          : event.event_type === "resume_requested"
+                            ? `${event.mode ?? "编排"} 恢复请求`
+                            : event.event_type === "cancel_requested"
+                              ? `${event.mode ?? "编排"} 取消请求`
+                              : event.event_type === "cancel_completed"
+                                ? `${event.mode ?? "编排"} 已取消`
+                                : event.event_type === "verification_started"
+                                  ? "验证阶段开始"
+                                  : event.event_type === "fix_started"
+                                    ? "修复阶段开始"
+                                    : event.event_type === "synthesizing_started"
+                                      ? "综合阶段开始"
+                                      : event.event_type === "mode_requested"
+                                        ? `${event.mode ?? "编排"} 模式已触发`
+                                        : event.event_type === "phase_changed"
+                                          ? `${event.mode ?? "编排"} 切换到 ${orchestrationPhaseLabel(
+                                              event.phase ?? "",
+                                            )}`
+                                          : event.event_type === "worker_started"
+                                            ? `${agentLabel} 已启动`
+                                            : event.event_type === "worker_completed"
+                                              ? `${agentLabel} 已完成`
+                                              : event.event_type === "worker_failed"
+                                                ? `${agentLabel} 失败`
+                                                : event.event_type === "worker_cancelled"
+                                                  ? `${agentLabel} 已取消`
+                                                  : event.event_type === "worker_launch_failed"
+                                                    ? `${agentLabel} 启动失败`
+                                                    : event.event_type === "reviewer_verdict"
+                                                      ? `${reviewerAgentLabel} 给出 ${verdict}`
+                                                      : event.event_type ===
+                                                            "preflight_stage_completed" && stage
+                                                        ? `${preflightStageLabel(stage)}完成`
+                                                        : event.event_type ===
+                                                              "preflight_stage_failed" && stage
+                                                          ? `${preflightStageLabel(stage)}失败`
+                                                          : event.event_type;
 
+      const backgroundToolDetail = [
+        description,
+        toolOutputPreview,
+      ]
+        .filter((part): part is string => Boolean(part))
+        .join(" · ");
       const detail =
         event.event_type === "preflight_stage_completed" ||
         event.event_type === "preflight_stage_failed"
           ? [durationMs, cacheStatus, toolCount, stageError]
               .filter((part): part is string => Boolean(part))
               .join(" · ")
-          : description ||
-            summary ||
-            goal ||
-            taskCount ||
-            (event.phase ? orchestrationPhaseLabel(event.phase) : undefined);
+          : event.event_type.startsWith("background_tool_call_")
+            ? backgroundToolDetail || toolName || undefined
+            : description ||
+              summary ||
+              goal ||
+              taskCount ||
+              (event.phase ? orchestrationPhaseLabel(event.phase) : undefined);
 
       const verdictLower = verdict.toLowerCase();
       const tone =
@@ -222,24 +272,26 @@ export function buildOrchestrationTimelineFromEvents(
               typeof payload.durationMs === "number" &&
               payload.durationMs >= 1500
             ? "warning"
-            : event.event_type.includes("failed")
-              ? "error"
-              : event.event_type.includes("cancelled") || event.event_type === "cancel_requested"
-                ? "warning"
-                : event.event_type === "resume_requested"
-                  ? "info"
-                  : event.event_type === "reviewer_verdict" &&
-                      ["reject", "fail"].includes(verdictLower)
-                    ? "error"
-                    : event.event_type === "reviewer_verdict" && verdictLower === "partial"
-                      ? "warning"
-                      : ["verification_started", "fix_started", "synthesizing_started"].includes(
-                            event.event_type,
-                          )
-                        ? "info"
-                        : event.event_type.includes("completed")
-                          ? "success"
-                          : "info";
+            : event.event_type === "background_tool_call_blocked"
+              ? "warning"
+              : event.event_type.includes("failed")
+                ? "error"
+                : event.event_type.includes("cancelled") || event.event_type === "cancel_requested"
+                  ? "warning"
+                  : event.event_type === "resume_requested"
+                    ? "info"
+                    : event.event_type === "reviewer_verdict" &&
+                        ["reject", "fail"].includes(verdictLower)
+                      ? "error"
+                      : event.event_type === "reviewer_verdict" && verdictLower === "partial"
+                        ? "warning"
+                        : ["verification_started", "fix_started", "synthesizing_started"].includes(
+                              event.event_type,
+                            )
+                          ? "info"
+                          : event.event_type.includes("completed")
+                            ? "success"
+                            : "info";
       return {
         id: event.id,
         label,

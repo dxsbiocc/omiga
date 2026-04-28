@@ -272,6 +272,8 @@ interface RawMessage {
   output?: string;
   tool_calls?: Array<{ id: string; name: string; arguments: string }>;
   tool_call_id?: string;
+  /** Persisted assistant reasoning text used to rebuild ReAct fold Thoughts after reload. */
+  reasoning_content?: string;
   token_usage?: {
     input: number;
     output: number;
@@ -456,6 +458,16 @@ function convertRawMessages(
       m.role === "assistant" && typeof m.turn_summary === "string" && m.turn_summary.trim()
         ? m.turn_summary.trim()
         : undefined;
+    const reasoningContent =
+      m.role === "assistant" &&
+      typeof m.reasoning_content === "string" &&
+      m.reasoning_content.trim()
+        ? m.reasoning_content.trim()
+        : undefined;
+    const prefaceBeforeTools =
+      m.role === "assistant" && toolCallsList?.length && reasoningContent
+        ? reasoningContent
+        : undefined;
     // For tool rows, use the assistant message's created_at as the start timestamp
     // so elapsed time = completedAt - timestamp reflects actual execution duration.
     const timestamp: number | undefined =
@@ -473,6 +485,7 @@ function convertRawMessages(
       ...(tokenUsage ? { tokenUsage } : {}),
       ...(followUpSuggestions ? { followUpSuggestions } : {}),
       ...(turnSummary ? { turnSummary } : {}),
+      ...(prefaceBeforeTools ? { prefaceBeforeTools } : {}),
     });
   });
 }

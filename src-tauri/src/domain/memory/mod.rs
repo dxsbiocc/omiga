@@ -267,18 +267,23 @@ impl MemorySystem {
                 }),
         );
         results.extend(
-            long_term::search_entries(&config::permanent_long_term_path(), &lt_query, phase1_limit, true)
-                .await
-                .into_iter()
-                .map(|result| MemoryQueryMatch {
-                    title: result.title,
-                    path: result.path,
-                    breadcrumb: vec![],
-                    excerpt: result.excerpt,
-                    score: result.score,
-                    match_type: "summary".to_string(),
-                    source_type: MemorySourceType::LongTermGlobal,
-                }),
+            long_term::search_entries(
+                &config::permanent_long_term_path(),
+                &lt_query,
+                phase1_limit,
+                true,
+            )
+            .await
+            .into_iter()
+            .map(|result| MemoryQueryMatch {
+                title: result.title,
+                path: result.path,
+                breadcrumb: vec![],
+                excerpt: result.excerpt,
+                score: result.score,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::LongTermGlobal,
+            }),
         );
         results.extend(
             search_markdown_wiki(&self.wiki_path(), query, phase1_limit)
@@ -367,18 +372,23 @@ impl MemorySystem {
                 }),
         );
         results.extend(
-            long_term::search_entries(&config::permanent_long_term_path(), &lt_query, phase1_limit, true)
-                .await
-                .into_iter()
-                .map(|result| MemoryQueryMatch {
-                    title: result.title,
-                    path: result.path,
-                    breadcrumb: vec![],
-                    excerpt: result.excerpt,
-                    score: result.score,
-                    match_type: "summary".to_string(),
-                    source_type: MemorySourceType::LongTermGlobal,
-                }),
+            long_term::search_entries(
+                &config::permanent_long_term_path(),
+                &lt_query,
+                phase1_limit,
+                true,
+            )
+            .await
+            .into_iter()
+            .map(|result| MemoryQueryMatch {
+                title: result.title,
+                path: result.path,
+                breadcrumb: vec![],
+                excerpt: result.excerpt,
+                score: result.score,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::LongTermGlobal,
+            }),
         );
 
         results.extend(
@@ -591,6 +601,10 @@ pub async fn init_memory_system(
 
 /// 在文本中找到最密集的关键词窗口，返回摘要（带省略号）。
 fn extract_excerpt(content: &str, query: &str, max_len: usize) -> String {
+    if content.is_empty() || max_len == 0 {
+        return String::new();
+    }
+
     let query_lower = query.to_lowercase();
     let content_lower = content.to_lowercase();
     let query_terms = crate::domain::pageindex::derive_query_terms(query);
@@ -606,12 +620,12 @@ fn extract_excerpt(content: &str, query: &str, max_len: usize) -> String {
         })
         .unwrap_or(0);
 
-    // 窗口从锚点前 60 字符开始
-    let start = anchor.saturating_sub(60);
+    // 窗口从锚点前 60 字节附近开始；所有切片前都必须回退到 UTF-8 字符边界。
+    let start = floor_char_boundary(content, anchor.saturating_sub(60));
     // 对齐到行首（避免从行中间截断）
     let start = content[..start].rfind('\n').map(|p| p + 1).unwrap_or(start);
 
-    let end = (start + max_len).min(content.len());
+    let end = floor_char_boundary(content, (start + max_len).min(content.len()));
     // 对齐到行尾
     let end = content[end..].find('\n').map(|p| end + p).unwrap_or(end);
 
@@ -623,6 +637,14 @@ fn extract_excerpt(content: &str, query: &str, max_len: usize) -> String {
         (false, true) => format!("{}…", slice),
         _ => slice,
     }
+}
+
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut i = index.min(text.len());
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 async fn count_markdown_pages(root: &Path) -> usize {
@@ -795,7 +817,9 @@ fn dedupe_matches(results: &mut Vec<MemoryQueryMatch>) {
 /// Phase-2 rerank: boost results whose content overlaps with the current session context
 /// (working memory excerpt), blending 70% original score + 30% context overlap.
 fn two_phase_rerank(results: &mut [MemoryQueryMatch], working_memory_excerpt: Option<&str>) {
-    let Some(excerpt) = working_memory_excerpt else { return };
+    let Some(excerpt) = working_memory_excerpt else {
+        return;
+    };
     let ctx_terms = crate::domain::pageindex::derive_query_terms(excerpt);
     if ctx_terms.is_empty() {
         return;
@@ -951,6 +975,19 @@ mod tests {
         assert_eq!(results[0].title, "氧化还原节律");
     }
 
+    #[test]
+    fn extract_excerpt_respects_utf8_boundaries_for_cjk() {
+        let content = format!(
+            "{}直链淀粉相关内容用于验证摘要窗口不会切开中文字符。\n下一行继续。",
+            "前置中文内容".repeat(150)
+        );
+
+        let excerpt = extract_excerpt(&content, "直链淀粉", 301);
+
+        assert!(excerpt.contains("直链淀粉"));
+        assert!(excerpt.is_char_boundary(excerpt.len()));
+    }
+
     #[tokio::test]
     async fn search_markdown_wiki_reads_nested_pages() {
         let temp = tempfile::tempdir().unwrap();
@@ -1103,9 +1140,13 @@ mod tests {
                                ### Active Topic\n- memory TF-IDF ranking strategy\n";
         two_phase_rerank(&mut results, Some(session_context));
         assert_eq!(
-            results[0].title, "memory TF-IDF recall",
+            results[0].title,
+            "memory TF-IDF recall",
             "context-matching entry must rank first after Phase 2 rerank; got: {:?}",
-            results.iter().map(|r| (&r.title, r.score)).collect::<Vec<_>>()
+            results
+                .iter()
+                .map(|r| (&r.title, r.score))
+                .collect::<Vec<_>>()
         );
     }
 

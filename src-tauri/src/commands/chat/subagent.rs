@@ -2,9 +2,10 @@
 
 use super::tool_exec::{execute_tool_calls, ToolExecutionRequest};
 use super::{
-    api_messages_to_llm, augment_llm_messages_with_runtime_constraints, completed_to_tool_calls,
-    run_post_response_retry_text_only, stream_llm_response_with_cancel, AgentLlmRuntime,
-    PostResponseRetryRequest, StreamLlmRequest, MAX_SUBAGENT_TOOL_ROUNDS,
+    api_messages_to_llm, append_orchestration_event, augment_llm_messages_with_runtime_constraints,
+    completed_to_tool_calls, run_post_response_retry_text_only, stream_llm_response_with_cancel,
+    AgentLlmRuntime, ChatOrchestrationEvent, PostResponseRetryRequest, StreamLlmRequest,
+    MAX_SUBAGENT_TOOL_ROUNDS,
 };
 use crate::constants::agent_prompt;
 use crate::domain::agents::scheduler::AgentSelector;
@@ -29,6 +30,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::AppHandle;
 use tokio::sync::{Mutex, RwLock};
+
+const BACKGROUND_TRACE_INPUT_PREVIEW_CHARS: usize = 480;
+const BACKGROUND_TRACE_OUTPUT_PREVIEW_CHARS: usize = 800;
+
 pub(super) fn is_agent_tool_name(name: &str) -> bool {
     matches!(name, "Agent" | "Task" | "agent" | "task")
 }
@@ -720,6 +725,24 @@ pub(super) async fn run_subagent_session_foreground_inner(
                     &tool_messages,
                 )
                 .await;
+                for (tool_use_id, tool_name, arguments) in &tool_calls {
+                    append_background_tool_trace_event(BackgroundToolTraceEvent {
+                        app,
+                        runtime,
+                        session_id,
+                        message_id,
+                        task_id: tid,
+                        event_type: "background_tool_call_blocked",
+                        agent_type: agent_def.agent_type(),
+                        description: &args.description,
+                        tool_use_id,
+                        tool_name,
+                        arguments,
+                        output: Some(&block.tool_result_message),
+                        is_error: Some(true),
+                    })
+                    .await;
+                }
             }
             transcript.extend(tool_messages);
             let clarification = Message::Assistant {
@@ -816,6 +839,26 @@ pub(super) async fn run_subagent_session_foreground_inner(
             return Ok(assistant_text);
         }
         constraint_state.record_tool_names(tool_calls.iter().map(|(_, name, _)| name.as_str()));
+        if let Some(tid) = background_task_id {
+            for (tool_use_id, tool_name, arguments) in &tool_calls {
+                append_background_tool_trace_event(BackgroundToolTraceEvent {
+                    app,
+                    runtime,
+                    session_id,
+                    message_id,
+                    task_id: tid,
+                    event_type: "background_tool_call_started",
+                    agent_type: agent_def.agent_type(),
+                    description: &args.description,
+                    tool_use_id,
+                    tool_name,
+                    arguments,
+                    output: None,
+                    is_error: None,
+                })
+                .await;
+            }
+        }
         let results = execute_tool_calls(ToolExecutionRequest {
             tool_calls: &tool_calls,
             app,
@@ -848,6 +891,33 @@ pub(super) async fn run_subagent_session_foreground_inner(
         if let Some(tid) = background_task_id {
             persist_background_transcript_messages(&runtime.repo, tid, session_id, &tool_messages)
                 .await;
+            for (tool_use_id, output, is_error) in &results {
+                let matching_call = tool_calls
+                    .iter()
+                    .find(|(id, _, _)| id == tool_use_id)
+                    .map(|(_, tool_name, arguments)| (tool_name.as_str(), arguments.as_str()));
+                let (tool_name, arguments) = matching_call.unwrap_or(("unknown", ""));
+                append_background_tool_trace_event(BackgroundToolTraceEvent {
+                    app,
+                    runtime,
+                    session_id,
+                    message_id,
+                    task_id: tid,
+                    event_type: if *is_error {
+                        "background_tool_call_failed"
+                    } else {
+                        "background_tool_call_completed"
+                    },
+                    agent_type: agent_def.agent_type(),
+                    description: &args.description,
+                    tool_use_id,
+                    tool_name,
+                    arguments,
+                    output: Some(output),
+                    is_error: Some(*is_error),
+                })
+                .await;
+            }
         }
         transcript.extend(tool_messages);
     }
@@ -1028,6 +1098,110 @@ async fn persist_background_cancel_notice(
     persist_background_transcript_message(repo, task_id, session_id, &m).await;
 }
 
+fn truncate_background_trace_text(raw: &str, max_chars: usize) -> String {
+    let trimmed = raw.trim();
+    let total = trimmed.chars().count();
+    if total <= max_chars {
+        return trimmed.to_string();
+    }
+    let prefix: String = trimmed.chars().take(max_chars).collect();
+    format!("{prefix}\n… [{total} chars total]")
+}
+
+async fn refresh_background_task_panel(app: &AppHandle, task_id: &str) {
+    let manager = crate::domain::agents::background::get_background_agent_manager();
+    if let Some(task) = manager.get_task(task_id).await {
+        if let Err(e) = crate::domain::agents::background::emit_background_agent_update(app, &task)
+        {
+            tracing::warn!(target: "omiga::bg_agent", "emit background-agent-update failed: {}", e);
+        }
+    }
+}
+
+struct BackgroundToolTraceEvent<'a> {
+    app: &'a AppHandle,
+    runtime: &'a AgentLlmRuntime,
+    session_id: &'a str,
+    message_id: &'a str,
+    task_id: &'a str,
+    event_type: &'a str,
+    agent_type: &'a str,
+    description: &'a str,
+    tool_use_id: &'a str,
+    tool_name: &'a str,
+    arguments: &'a str,
+    output: Option<&'a str>,
+    is_error: Option<bool>,
+}
+
+async fn append_background_tool_trace_event(event: BackgroundToolTraceEvent<'_>) {
+    let input_preview =
+        truncate_background_trace_text(event.arguments, BACKGROUND_TRACE_INPUT_PREVIEW_CHARS);
+    let output_preview = event.output.map(|output| {
+        truncate_background_trace_text(output, BACKGROUND_TRACE_OUTPUT_PREVIEW_CHARS)
+    });
+    append_orchestration_event(
+        &event.runtime.repo,
+        ChatOrchestrationEvent {
+            session_id: event.session_id,
+            round_id: Some(&event.runtime.round_id),
+            message_id: Some(event.message_id),
+            mode: Some("background"),
+            event_type: event.event_type,
+            phase: Some("executing"),
+            task_id: Some(event.task_id),
+            payload: serde_json::json!({
+                "agentType": event.agent_type,
+                "description": event.description,
+                "toolUseId": event.tool_use_id,
+                "toolName": event.tool_name,
+                "inputPreview": input_preview,
+                "outputPreview": output_preview,
+                "isError": event.is_error,
+            }),
+        },
+    )
+    .await;
+    refresh_background_task_panel(event.app, event.task_id).await;
+}
+
+struct BackgroundLifecycleTraceEvent<'a> {
+    app: &'a AppHandle,
+    runtime: &'a AgentLlmRuntime,
+    session_id: &'a str,
+    message_id: &'a str,
+    task_id: &'a str,
+    event_type: &'a str,
+    phase: &'a str,
+    agent_type: &'a str,
+    description: &'a str,
+    summary: Option<&'a str>,
+    error: Option<&'a str>,
+}
+
+async fn append_background_lifecycle_event(event: BackgroundLifecycleTraceEvent<'_>) {
+    append_orchestration_event(
+        &event.runtime.repo,
+        ChatOrchestrationEvent {
+            session_id: event.session_id,
+            round_id: Some(&event.runtime.round_id),
+            message_id: Some(event.message_id),
+            mode: Some("background"),
+            event_type: event.event_type,
+            phase: Some(event.phase),
+            task_id: Some(event.task_id),
+            payload: serde_json::json!({
+                "agentType": event.agent_type,
+                "description": event.description,
+                "summary": event.summary,
+                "error": event.error,
+            }),
+        },
+    )
+    .await;
+    refresh_background_task_panel(event.app, event.task_id).await;
+}
+
 /// 启动后台 Agent 任务
 pub(crate) struct BackgroundAgentRequest<'a> {
     pub app: &'a AppHandle,
@@ -1066,6 +1240,7 @@ pub(crate) async fn spawn_background_agent(
         agent_def,
     } = request;
     use crate::domain::agents::background::*;
+    let record_background_lifecycle = plan_id.is_none();
 
     // 注册后台任务
     let manager = crate::domain::agents::background::get_background_agent_manager();
@@ -1102,6 +1277,22 @@ pub(crate) async fn spawn_background_agent(
     if let Some(task) = manager.get_task(&task_id).await {
         let _ = emit_background_agent_update(app, &task);
     }
+    if record_background_lifecycle {
+        append_background_lifecycle_event(BackgroundLifecycleTraceEvent {
+            app,
+            runtime,
+            session_id,
+            message_id,
+            task_id: &task_id,
+            event_type: "background_agent_started",
+            phase: "executing",
+            agent_type: agent_def.agent_type(),
+            description: &args.description,
+            summary: None,
+            error: None,
+        })
+        .await;
+    }
 
     // 克隆需要的变量用于异步任务
     let app_clone = app.clone();
@@ -1116,6 +1307,7 @@ pub(crate) async fn spawn_background_agent(
     let skill_cache_clone = skill_cache.clone();
     let task_id_clone = task_id.clone();
     let output_path_clone = output_path.clone();
+    let record_background_lifecycle_clone = record_background_lifecycle;
 
     // 克隆 agent_def 的数据
     let agent_type_clone = agent_def.agent_type().to_string();
@@ -1194,6 +1386,32 @@ pub(crate) async fn spawn_background_agent(
 
         if let Some(task) = manager.get_task(&task_id_clone).await {
             persist_background_agent_task_snapshot(&bg_repo_spawn, &task).await;
+        }
+        if record_background_lifecycle_clone {
+            if let Some(task) = manager.get_task(&task_id_clone).await {
+                let (event_type, phase) = match &task.status {
+                    BackgroundAgentStatus::Completed => ("background_agent_completed", "complete"),
+                    BackgroundAgentStatus::Cancelled => ("background_agent_cancelled", "failed"),
+                    BackgroundAgentStatus::Failed => ("background_agent_failed", "failed"),
+                    BackgroundAgentStatus::Pending | BackgroundAgentStatus::Running => {
+                        ("background_agent_updated", "executing")
+                    }
+                };
+                append_background_lifecycle_event(BackgroundLifecycleTraceEvent {
+                    app: &app_clone,
+                    runtime: &runtime_for_task,
+                    session_id: &session_id_clone,
+                    message_id: &message_id_clone,
+                    task_id: &task_id_clone,
+                    event_type,
+                    phase,
+                    agent_type: &task.agent_type,
+                    description: &task.description,
+                    summary: task.result_summary.as_deref(),
+                    error: task.error_message.as_deref(),
+                })
+                .await;
+            }
         }
 
         // 发送完成事件

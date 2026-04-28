@@ -173,13 +173,15 @@ export function normalizeAssistantToolCallPrefaces<T extends StreamToolMessageLi
 
   for (let i = 0; i < messages.length; i++) {
     const source = (next ?? messages)[i];
-    if (
-      source.role !== "assistant" ||
-      !source.content.trim() ||
-      !source.toolCallsList?.length
-    ) {
+    if (source.role !== "assistant" || !source.toolCallsList?.length) {
       continue;
     }
+
+    const sourcePreface = [source.prefaceBeforeTools, source.content]
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value))
+      .join("\n\n");
+    if (!sourcePreface) continue;
 
     const toolIds = new Set(source.toolCallsList.map((tc) => tc.id));
     for (let j = i + 1; j < messages.length; j++) {
@@ -194,12 +196,13 @@ export function normalizeAssistantToolCallPrefaces<T extends StreamToolMessageLi
         if (!candidate.prefaceBeforeTools?.trim()) {
           out[j] = {
             ...candidate,
-            prefaceBeforeTools: source.content.trim(),
+            prefaceBeforeTools: sourcePreface,
           } as T;
         }
         out[i] = {
           ...source,
           content: "",
+          prefaceBeforeTools: undefined,
         } as T;
         break;
       }

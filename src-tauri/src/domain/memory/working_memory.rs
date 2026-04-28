@@ -12,6 +12,7 @@ const APPROX_CHARS_PER_TOKEN: usize = 4;
 const HOUSEKEEP_TURN_INTERVAL: u32 = 8;
 const HOUSEKEEP_MINUTES: i64 = 25;
 const LONG_REPLY_REFRESH_CHARS: usize = 600;
+const MAX_CANDIDATE_MEMORIES: usize = 12;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -40,6 +41,42 @@ pub struct WorkingMemoryItem {
     pub touch_count: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum CandidateMemoryStatus {
+    #[default]
+    Pending,
+    Approved,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum CandidateMemoryScope {
+    #[default]
+    Project,
+    Global,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CandidateMemory {
+    pub text: String,
+    #[serde(default)]
+    pub source_message_ids: Vec<String>,
+    pub confidence: f32,
+    pub reason: String,
+    #[serde(default)]
+    pub scope: CandidateMemoryScope,
+    #[serde(default)]
+    pub status: CandidateMemoryStatus,
+    pub created_at: String,
+    pub last_seen_at: String,
+    #[serde(default)]
+    pub touch_count: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct WorkingMemoryState {
     pub session_goal: Option<String>,
@@ -56,6 +93,8 @@ pub struct WorkingMemoryState {
     pub artifacts: Vec<WorkingMemoryItem>,
     #[serde(default)]
     pub next_steps: Vec<WorkingMemoryItem>,
+    #[serde(default)]
+    pub candidate_memories: Vec<CandidateMemory>,
     #[serde(default)]
     pub dirty: bool,
     #[serde(default)]
@@ -193,6 +232,7 @@ pub async fn sync_after_turn(
         merged.updated_at = Some(now_rfc3339());
     }
     cleanup_state(&mut merged);
+    record_candidate_memories(&mut merged, user_message, &source_message_ids);
     repo.upsert_session_working_memory(session_id, &merged)
         .await
         .map_err(|e| format!("save working memory: {e}"))?;
@@ -548,6 +588,7 @@ fn cleanup_state(state: &mut WorkingMemoryState) {
     prune_items(&mut state.open_questions, state.user_turn_count);
     prune_items(&mut state.artifacts, state.user_turn_count);
     prune_items(&mut state.next_steps, state.user_turn_count);
+    prune_candidate_memories(&mut state.candidate_memories);
 }
 
 fn prune_items(items: &mut Vec<WorkingMemoryItem>, current_turn: u32) {
@@ -617,6 +658,280 @@ fn contains_user_direction_change(user_message: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+fn record_candidate_memories(
+    state: &mut WorkingMemoryState,
+    user_message: &str,
+    source_message_ids: &[String],
+) {
+    for candidate in detect_candidate_memories(user_message, source_message_ids) {
+        if candidate.status == CandidateMemoryStatus::Approved {
+            upsert_approved_candidate_fact(state, &candidate);
+        }
+        upsert_candidate_memory(&mut state.candidate_memories, candidate);
+    }
+    prune_candidate_memories(&mut state.candidate_memories);
+}
+
+fn detect_candidate_memories(
+    user_message: &str,
+    source_message_ids: &[String],
+) -> Vec<CandidateMemory> {
+    let text = user_message.trim();
+    if !is_user_preference_candidate_text(text) {
+        return vec![];
+    }
+
+    let Some(signal) = candidate_memory_signal(text) else {
+        return vec![];
+    };
+    let now = now_rfc3339();
+    vec![CandidateMemory {
+        text: truncate_chars(text, 280),
+        source_message_ids: source_message_ids.to_vec(),
+        confidence: signal.confidence,
+        reason: signal.reason.to_string(),
+        scope: infer_candidate_memory_scope(text),
+        status: if signal.approved {
+            CandidateMemoryStatus::Approved
+        } else {
+            CandidateMemoryStatus::Pending
+        },
+        created_at: now.clone(),
+        last_seen_at: now,
+        touch_count: 1,
+    }]
+}
+
+pub(crate) fn is_user_preference_candidate_text(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text.chars().count() >= 12
+        && !looks_sensitive_for_candidate_memory(text)
+        && !looks_transient_for_candidate_memory(text)
+        && candidate_memory_signal(text).is_some()
+}
+
+struct CandidateMemorySignal {
+    reason: &'static str,
+    confidence: f32,
+    approved: bool,
+}
+
+fn candidate_memory_signal(text: &str) -> Option<CandidateMemorySignal> {
+    let lower = text.to_lowercase();
+    if contains_any(
+        &lower,
+        &[
+            "不要记住",
+            "别记住",
+            "不要保存",
+            "别保存",
+            "do not remember",
+            "don't remember",
+            "do not save",
+            "don't save",
+        ],
+    ) {
+        return None;
+    }
+
+    if contains_any(&lower, &["记住", "记得", "remember", "please remember"]) {
+        return Some(CandidateMemorySignal {
+            reason: "explicit_remember_request",
+            confidence: 0.96,
+            approved: true,
+        });
+    }
+
+    if contains_any(
+        &lower,
+        &["以后都", "以后不要", "以后别", "from now on", "always"],
+    ) {
+        return Some(CandidateMemorySignal {
+            reason: "explicit_cross_session_instruction",
+            confidence: 0.95,
+            approved: false,
+        });
+    }
+
+    if contains_any(
+        &lower,
+        &[
+            "我主要研究",
+            "我的研究领域",
+            "我的研究方向",
+            "主要研究方向",
+            "my research area",
+            "i mainly study",
+            "i work on",
+        ],
+    ) {
+        return Some(CandidateMemorySignal {
+            reason: "stable_user_domain",
+            confidence: 0.88,
+            approved: false,
+        });
+    }
+
+    let has_preference_subject = super::permanent_profile::line_looks_like_style_preference(&lower);
+    let has_long_lived_marker = contains_any(
+        &lower,
+        &[
+            "以后",
+            "长期",
+            "一直",
+            "每次",
+            "默认",
+            "所有项目",
+            "所有对话",
+            "跨项目",
+            "always",
+            "from now on",
+            "going forward",
+            "by default",
+            "in every",
+            "for all projects",
+        ],
+    );
+    let has_tool_or_workflow_marker =
+        super::permanent_profile::line_looks_like_environment_constraint(&lower)
+            || super::permanent_profile::line_looks_like_workflow_watchout(&lower)
+            || super::permanent_profile::line_looks_like_style_preference(&lower);
+    if (has_preference_subject && (has_tool_or_workflow_marker || has_long_lived_marker))
+        || (has_long_lived_marker && has_tool_or_workflow_marker)
+    {
+        return Some(CandidateMemorySignal {
+            reason: "stable_preference_or_workflow",
+            confidence: 0.84,
+            approved: false,
+        });
+    }
+
+    None
+}
+
+fn infer_candidate_memory_scope(text: &str) -> CandidateMemoryScope {
+    let lower = text.to_lowercase();
+    if contains_any(
+        &lower,
+        &[
+            "全局",
+            "所有项目",
+            "所有对话",
+            "跨项目",
+            "以后都",
+            "always",
+            "from now on",
+            "for all projects",
+            "in every project",
+        ],
+    ) {
+        CandidateMemoryScope::Global
+    } else {
+        CandidateMemoryScope::Project
+    }
+}
+
+fn looks_sensitive_for_candidate_memory(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "密码",
+            "密钥",
+            "令牌",
+            "身份证",
+            "手机号",
+            "住址",
+            "家庭住址",
+            "病历",
+            "诊断",
+            "secret",
+            "token",
+            "api key",
+            "private key",
+            "password",
+            "credential",
+            "address",
+            "phone number",
+            "medical",
+        ],
+    )
+}
+
+fn looks_transient_for_candidate_memory(text: &str) -> bool {
+    super::permanent_profile::line_looks_like_transient_user_focus(text)
+}
+
+fn upsert_candidate_memory(candidates: &mut Vec<CandidateMemory>, incoming: CandidateMemory) {
+    let key = normalize_text(&incoming.text);
+    if key.is_empty() {
+        return;
+    }
+    if let Some(existing) = candidates
+        .iter_mut()
+        .find(|candidate| normalize_text(&candidate.text) == key)
+    {
+        for source_id in incoming.source_message_ids {
+            if !existing.source_message_ids.contains(&source_id) {
+                existing.source_message_ids.push(source_id);
+            }
+        }
+        existing.confidence = existing.confidence.max(incoming.confidence);
+        existing.last_seen_at = incoming.last_seen_at;
+        existing.touch_count = existing.touch_count.saturating_add(1).max(1);
+        if existing.status != CandidateMemoryStatus::Approved {
+            existing.status = incoming.status;
+        }
+        return;
+    }
+    candidates.push(incoming);
+}
+
+fn upsert_approved_candidate_fact(state: &mut WorkingMemoryState, candidate: &CandidateMemory) {
+    upsert_text_item(
+        &mut state.working_facts,
+        WorkingMemoryItem {
+            text: candidate.text.clone(),
+            source_message_ids: candidate.source_message_ids.clone(),
+            confidence: candidate.confidence,
+            last_touched_turn: state.user_turn_count.max(1),
+            expires_after_turns: 64,
+            status: WorkingMemoryItemStatus::Active,
+            kind: Some("approved_user_preference".to_string()),
+            // Approved preferences should be eligible for the long-term promotion gate
+            // immediately; inferred preferences remain Pending candidates only.
+            touch_count: 3,
+        },
+    );
+}
+
+fn prune_candidate_memories(candidates: &mut Vec<CandidateMemory>) {
+    candidates.sort_by(|a, b| {
+        candidate_status_rank(&a.status)
+            .cmp(&candidate_status_rank(&b.status))
+            .then_with(|| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| b.touch_count.cmp(&a.touch_count))
+    });
+    candidates.truncate(MAX_CANDIDATE_MEMORIES);
+}
+
+fn candidate_status_rank(status: &CandidateMemoryStatus) -> u8 {
+    match status {
+        CandidateMemoryStatus::Approved => 0,
+        CandidateMemoryStatus::Pending => 1,
+        CandidateMemoryStatus::Rejected => 2,
+    }
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
 }
 
 fn contains_user_correction(user_message: &str) -> bool {
@@ -944,6 +1259,71 @@ mod tests {
         assert_eq!(state.working_facts.len(), 1);
         assert!(state.working_facts[0].text.contains("Pre-compact recap"));
         assert!(state.working_facts[0].text.contains("recall"));
+    }
+
+    #[test]
+    fn detects_stable_preference_as_pending_candidate_memory() {
+        let candidates = detect_candidate_memories(
+            "以后都优先用 Rscript 脚本，不要用 notebook。",
+            &["user-1".to_string(), "assistant-1".to_string()],
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].status, CandidateMemoryStatus::Pending);
+        assert_eq!(candidates[0].scope, CandidateMemoryScope::Global);
+        assert!(candidates[0].confidence >= 0.9);
+        assert!(candidates[0].text.contains("Rscript"));
+    }
+
+    #[test]
+    fn candidate_memory_detector_rejects_transient_or_sensitive_text() {
+        assert!(detect_candidate_memories("这次先用 Python 跑一下。", &[]).is_empty());
+        assert!(detect_candidate_memories("记住我的 API key 是 sk-test-123。", &[]).is_empty());
+        assert!(detect_candidate_memories("不要记住我这次用 Rscript。", &[]).is_empty());
+    }
+
+    #[test]
+    fn record_candidate_memories_deduplicates_repeated_preferences() {
+        let mut state = WorkingMemoryState::default();
+        record_candidate_memories(
+            &mut state,
+            "以后所有项目默认先分析再行动。",
+            &["m1".to_string()],
+        );
+        record_candidate_memories(
+            &mut state,
+            "以后所有项目默认先分析再行动。",
+            &["m2".to_string()],
+        );
+
+        assert_eq!(state.candidate_memories.len(), 1);
+        assert_eq!(state.candidate_memories[0].touch_count, 2);
+        assert_eq!(state.candidate_memories[0].source_message_ids.len(), 2);
+    }
+
+    #[test]
+    fn explicit_remember_request_creates_approved_preference_fact() {
+        let mut state = WorkingMemoryState {
+            user_turn_count: 3,
+            ..WorkingMemoryState::default()
+        };
+        record_candidate_memories(
+            &mut state,
+            "请记住：以后所有项目默认先分析再行动。",
+            &["m1".to_string(), "m2".to_string()],
+        );
+
+        assert_eq!(state.candidate_memories.len(), 1);
+        assert_eq!(
+            state.candidate_memories[0].status,
+            CandidateMemoryStatus::Approved
+        );
+        assert_eq!(state.working_facts.len(), 1);
+        assert_eq!(
+            state.working_facts[0].kind.as_deref(),
+            Some("approved_user_preference")
+        );
+        assert_eq!(state.working_facts[0].touch_count, 3);
     }
 
     #[test]

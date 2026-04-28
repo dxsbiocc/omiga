@@ -3831,7 +3831,22 @@ export function Chat({ sessionId }: ChatProps) {
               text = v.trim();
             }
           }
-          pendingTurnSummaryRef.current = text;
+          if (!isStreamingRef.current) {
+            if (text) {
+              setMessages((prev) => {
+                const lastIdx = prev.length - 1;
+                if (lastIdx < 0 || prev[lastIdx].role !== "assistant") return prev;
+                const next = [
+                  ...prev.slice(0, lastIdx),
+                  { ...prev[lastIdx], turnSummary: text },
+                ];
+                messagesRef.current = next;
+                return next;
+              });
+            }
+          } else {
+            pendingTurnSummaryRef.current = text;
+          }
           break;
         }
         case "follow_up_suggestions": {
@@ -3862,7 +3877,9 @@ export function Chat({ sessionId }: ChatProps) {
                   ...prev[lastIdx],
                   followUpSuggestions: parsed,
                 };
-                return [...prev.slice(0, lastIdx), updated];
+                const next = [...prev.slice(0, lastIdx), updated];
+                messagesRef.current = next;
+                return next;
               });
             }
           } else {
