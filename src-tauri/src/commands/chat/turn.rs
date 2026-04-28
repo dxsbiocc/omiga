@@ -368,6 +368,54 @@ pub(super) struct MemorySyncRequest<'a> {
     pub allow_long_term_promotion: bool,
 }
 
+/// Owned version of MemorySyncRequest — required to move the sync work into a background task.
+struct MemorySyncOwned {
+    app: AppHandle,
+    sessions: Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
+    repo: Arc<crate::domain::persistence::SessionRepository>,
+    session_id: String,
+    client_config: crate::llm::LlmConfig,
+    user_message: String,
+    assistant_reply: String,
+    allow_long_term_promotion: bool,
+}
+
+/// Spawn memory sync as a fire-and-forget background task so it never blocks turn completion.
+/// Activity-operation events are emitted on `omiga-activity-step` so the UI shows progress.
+pub(super) fn spawn_memory_sync(request: MemorySyncRequest<'_>) {
+    let owned = MemorySyncOwned {
+        app: request.app.clone(),
+        sessions: request.sessions.clone(),
+        repo: request.repo.clone(),
+        session_id: request.session_id.to_string(),
+        client_config: request.client.config().clone(),
+        user_message: request.user_message.to_string(),
+        assistant_reply: request.assistant_reply.to_string(),
+        allow_long_term_promotion: request.allow_long_term_promotion,
+    };
+    tokio::spawn(async move {
+        let client = match crate::llm::create_client(owned.client_config) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(target: "omiga::working_memory", "bg memory sync: client error: {}", e);
+                return;
+            }
+        };
+        // Reuse the existing sync logic with the spawned client.
+        sync_memory_layers_after_turn(MemorySyncRequest {
+            app: &owned.app,
+            sessions: &owned.sessions,
+            repo: &owned.repo,
+            session_id: &owned.session_id,
+            client: client.as_ref(),
+            user_message: &owned.user_message,
+            assistant_reply: &owned.assistant_reply,
+            allow_long_term_promotion: owned.allow_long_term_promotion,
+        })
+        .await;
+    });
+}
+
 /// Periodic session-summary interval (aligns with the link's recommended 6-10 turn cadence).
 const SESSION_SUMMARY_INTERVAL: u32 = 8;
 
@@ -592,161 +640,142 @@ pub(super) struct PostTurnCompletionRequest<'a> {
     pub repo: Arc<crate::domain::persistence::SessionRepository>,
 }
 
+/// Emit Complete immediately, then run all post-turn LLM work in parallel background tasks.
+///
+/// Previous architecture (sequential, blocking):
+///   main reply → sync_memory → turn_summary → follow_up → Complete
+///   (could block 60+ seconds on slow LLM or large context)
+///
+/// New architecture (parallel, non-blocking):
+///   main reply → Complete (UI unlocked immediately)
+///            ↘ [parallel background]
+///              ├─ turn_summary      → emits TurnSummary event + persists
+///              └─ follow_up chips   → emits FollowUpSuggestions + SuggestionsComplete
 pub(super) async fn emit_post_turn_meta_then_complete(request: PostTurnCompletionRequest<'_>) {
     let flags = crate::domain::post_turn_settings::load_post_turn_meta_flags(&request.repo)
         .await
         .unwrap_or((true, true));
     let (summary_enabled, follow_enabled) = flags;
 
-    // Run summary synchronously (needed before Complete so the frontend can render it).
-    // 15-second cap: if the summary LLM call hangs, skip it rather than blocking the turn.
-    let summary_res = if request.skip_summary {
-        Ok(None)
-    } else {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            crate::domain::agents::output_formatter::run_turn_summary_pass(
-                request.client,
-                request.final_reply,
-                summary_enabled,
-            ),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(_) => {
-                tracing::warn!(target: "omiga::post_turn", "turn summary timed out (>15s); skipping");
-                Ok(None)
-            }
-        }
-    };
-
-    let summary_text = match summary_res {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(target: "omiga::post_turn", "post-turn summary: {}", e);
-            None
-        }
-    };
+    // ── Emit Complete immediately — UI input is unlocked right here ───────────
     let _ = request.app.emit(
         &format!("chat-stream-{}", request.stream_message_id),
-        &StreamOutputItem::TurnSummary {
-            text: summary_text.clone(),
-        },
+        &StreamOutputItem::Complete,
     );
 
-    if let Some(summary) = summary_text.as_deref() {
-        if let Err(e) = request
-            .repo
-            .update_message_turn_summary(request.assistant_message_id, Some(summary))
-            .await
-        {
-            tracing::warn!("Failed to persist turn summary: {}", e);
-        }
-    }
-
-    if !follow_enabled {
+    // Emit SuggestionsGenerating indicator so UI shows the spinner promptly.
+    if follow_enabled {
         let _ = request.app.emit(
             &format!("chat-stream-{}", request.stream_message_id),
-            &StreamOutputItem::Complete,
+            &StreamOutputItem::SuggestionsGenerating,
         );
-        return;
     }
 
-    // Emit indicator that suggestions are being generated in background
-    let _ = request.app.emit(
-        &format!("chat-stream-{}", request.stream_message_id),
-        &StreamOutputItem::SuggestionsGenerating,
-    );
-
-    // Spawn background task for follow-up suggestions so they don't block the frontend
+    // ── Clone everything needed for background tasks ───────────────────────────
     let app_bg = request.app.clone();
     let stream_id = request.stream_message_id.to_string();
     let assistant_id = request.assistant_message_id.to_string();
+    let final_reply_bg = request.final_reply.to_string();
     let suggestions_text = request.suggestions_reply.to_string();
     let repo = request.repo.clone();
-    // Clone client config for background use
     let client_config = request.client.config().clone();
+    let skip_summary = request.skip_summary;
+
+    // ── Single spawn: run summary and suggestions in parallel inside ──────────
     tokio::spawn(async move {
         let bg_client = match crate::llm::create_client(client_config) {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(target: "omiga::follow_up", "failed to create bg client: {}", e);
-                let _ = app_bg.emit(
-                    &format!("chat-stream-{}", stream_id),
-                    &StreamOutputItem::SuggestionsComplete {
-                        generated: false,
-                        error: Some(e.to_string()),
-                    },
-                );
-                let _ = app_bg.emit(
-                    &format!("chat-stream-{}", stream_id),
-                    &StreamOutputItem::Complete,
-                );
+                tracing::warn!(target: "omiga::post_turn", "bg client creation failed: {}", e);
+                if follow_enabled {
+                    let _ = app_bg.emit(
+                        &format!("chat-stream-{}", stream_id),
+                        &StreamOutputItem::SuggestionsComplete { generated: false, error: Some(e.to_string()) },
+                    );
+                }
                 return;
             }
         };
-        let follow_res = crate::domain::suggestions::generate_follow_up_suggestions(
-            bg_client.as_ref(),
-            &suggestions_text,
-            follow_enabled,
-        )
-        .await;
 
-        match follow_res {
-            Ok(items) if !items.is_empty() => {
+        // Run turn summary and follow-up suggestions in parallel.
+        tokio::join!(
+            // ── Turn summary ─────────────────────────────────────────────────
+            async {
+                if skip_summary { return; }
+                let summary_text = match tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    crate::domain::agents::output_formatter::run_turn_summary_pass(
+                        bg_client.as_ref(),
+                        &final_reply_bg,
+                        summary_enabled,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(v)) => v,
+                    Ok(Err(e)) => {
+                        tracing::warn!(target: "omiga::post_turn", "turn summary error: {}", e);
+                        None
+                    }
+                    Err(_) => {
+                        tracing::warn!(target: "omiga::post_turn", "turn summary timed out");
+                        None
+                    }
+                };
                 let _ = app_bg.emit(
                     &format!("chat-stream-{}", stream_id),
-                    &StreamOutputItem::FollowUpSuggestions(items.clone()),
+                    &StreamOutputItem::TurnSummary { text: summary_text.clone() },
                 );
-                // Persist to database
-                if let Ok(json) = serde_json::to_string(&items) {
-                    if let Err(e) = repo
-                        .update_message_follow_up_suggestions(&assistant_id, Some(&json))
-                        .await
-                    {
-                        tracing::warn!("Failed to persist follow-up suggestions: {}", e);
+                if let Some(summary) = summary_text.as_deref() {
+                    if let Err(e) = repo.update_message_turn_summary(&assistant_id, Some(summary)).await {
+                        tracing::warn!("Failed to persist turn summary: {}", e);
                     }
                 }
-                let _ = app_bg.emit(
-                    &format!("chat-stream-{}", stream_id),
-                    &StreamOutputItem::SuggestionsComplete {
-                        generated: true,
-                        error: None,
-                    },
-                );
-                let _ = app_bg.emit(
-                    &format!("chat-stream-{}", stream_id),
-                    &StreamOutputItem::Complete,
-                );
+            },
+            // ── Follow-up suggestions ─────────────────────────────────────────
+            async {
+                if !follow_enabled { return; }
+                let follow_res = crate::domain::suggestions::generate_follow_up_suggestions(
+                    bg_client.as_ref(),
+                    &suggestions_text,
+                    follow_enabled,
+                )
+                .await;
+
+                match follow_res {
+                    Ok(items) if !items.is_empty() => {
+                        let _ = app_bg.emit(
+                            &format!("chat-stream-{}", stream_id),
+                            &StreamOutputItem::FollowUpSuggestions(items.clone()),
+                        );
+                        if let Ok(json) = serde_json::to_string(&items) {
+                            if let Err(e) = repo
+                                .update_message_follow_up_suggestions(&assistant_id, Some(&json))
+                                .await
+                            {
+                                tracing::warn!("Failed to persist follow-up suggestions: {}", e);
+                            }
+                        }
+                        let _ = app_bg.emit(
+                            &format!("chat-stream-{}", stream_id),
+                            &StreamOutputItem::SuggestionsComplete { generated: true, error: None },
+                        );
+                    }
+                    Ok(_) => {
+                        let _ = app_bg.emit(
+                            &format!("chat-stream-{}", stream_id),
+                            &StreamOutputItem::SuggestionsComplete { generated: false, error: None },
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: "omiga::follow_up", "follow-up suggestions: {}", e);
+                        let _ = app_bg.emit(
+                            &format!("chat-stream-{}", stream_id),
+                            &StreamOutputItem::SuggestionsComplete { generated: false, error: Some(e.to_string()) },
+                        );
+                    }
+                }
             }
-            Ok(_) => {
-                let _ = app_bg.emit(
-                    &format!("chat-stream-{}", stream_id),
-                    &StreamOutputItem::SuggestionsComplete {
-                        generated: false,
-                        error: None,
-                    },
-                );
-                let _ = app_bg.emit(
-                    &format!("chat-stream-{}", stream_id),
-                    &StreamOutputItem::Complete,
-                );
-            }
-            Err(e) => {
-                tracing::warn!(target: "omiga::follow_up", "follow-up suggestions: {}", e);
-                let _ = app_bg.emit(
-                    &format!("chat-stream-{}", stream_id),
-                    &StreamOutputItem::SuggestionsComplete {
-                        generated: false,
-                        error: Some(e.to_string()),
-                    },
-                );
-                let _ = app_bg.emit(
-                    &format!("chat-stream-{}", stream_id),
-                    &StreamOutputItem::Complete,
-                );
-            }
-        }
+        );
     });
 }

@@ -719,7 +719,7 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
         provider_name,
     )
     .await;
-    sync_memory_layers_after_turn(MemorySyncRequest {
+    spawn_memory_sync(MemorySyncRequest {
         app,
         sessions,
         repo: &repo,
@@ -728,8 +728,7 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
         user_message,
         assistant_reply: &final_response,
         allow_long_term_promotion: false,
-    })
-    .await;
+    });
     emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
         app,
         stream_message_id: message_id,
@@ -3672,7 +3671,7 @@ pub async fn send_message(
                 Some(&round_id_clone),
             )
             .await;
-            sync_memory_layers_after_turn(MemorySyncRequest {
+            spawn_memory_sync(MemorySyncRequest {
                 app: &app_clone,
                 sessions: &sessions_clone,
                 repo: &repo_clone,
@@ -3681,8 +3680,7 @@ pub async fn send_message(
                 user_message: &request_text_for_constraints,
                 assistant_reply: &final_reply_for_follow_up,
                 allow_long_term_promotion: true,
-            })
-            .await;
+            });
             emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
                 app: &app_clone,
                 stream_message_id: &message_id_clone,
@@ -3862,7 +3860,7 @@ pub async fn send_message(
                         &llm_config_for_spawn.provider.to_string(),
                     )
                     .await;
-                    sync_memory_layers_after_turn(MemorySyncRequest {
+                    spawn_memory_sync(MemorySyncRequest {
                         app: &app_clone,
                         sessions: &sessions_clone,
                         repo: &repo_clone,
@@ -3871,8 +3869,7 @@ pub async fn send_message(
                         user_message: &request_text_for_constraints,
                         assistant_reply: &stop_text,
                         allow_long_term_promotion: true,
-                    })
-                    .await;
+                    });
                     emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
                         app: &app_clone,
                         stream_message_id: &message_id_clone,
@@ -4455,7 +4452,7 @@ pub async fn send_message(
                     Some(&round_id_clone),
                 )
                 .await;
-                sync_memory_layers_after_turn(MemorySyncRequest {
+                spawn_memory_sync(MemorySyncRequest {
                     app: &app_clone,
                     sessions: &sessions_clone,
                     repo: &repo_clone,
@@ -4464,8 +4461,7 @@ pub async fn send_message(
                     user_message: &request_text_for_constraints,
                     assistant_reply: &final_reply_for_follow_up,
                     allow_long_term_promotion: true,
-                })
-                .await;
+                });
                 emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
                     app: &app_clone,
                     stream_message_id: &message_id_clone,
@@ -4543,7 +4539,7 @@ pub async fn send_message(
             &llm_config_for_spawn.provider.to_string(),
         )
         .await;
-        sync_memory_layers_after_turn(MemorySyncRequest {
+        spawn_memory_sync(MemorySyncRequest {
             app: &app_clone,
             sessions: &sessions_clone,
             repo: &repo_clone,
@@ -4552,8 +4548,7 @@ pub async fn send_message(
             user_message: &request_text_for_constraints,
             assistant_reply: &final_reply_for_follow_up,
             allow_long_term_promotion: true,
-        })
-        .await;
+        });
         emit_post_turn_meta_then_complete(PostTurnCompletionRequest {
             app: &app_clone,
             stream_message_id: &message_id_clone,
