@@ -380,14 +380,28 @@ pub(super) async fn sync_memory_layers_after_turn(request: MemorySyncRequest<'_>
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     };
 
-    match crate::domain::memory::working_memory::sync_after_turn(
-        request.repo,
-        request.session_id,
-        request.client,
-        request.user_message,
-        request.assistant_reply,
+    // 30-second wall-clock cap: post-turn memory sync must never block turn completion
+    // indefinitely. If the LLM is slow/hung, the heuristic inside extract_draft fires
+    // first (20s), but this outer timeout is the final safety net.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        crate::domain::memory::working_memory::sync_after_turn(
+            request.repo,
+            request.session_id,
+            request.client,
+            request.user_message,
+            request.assistant_reply,
+        ),
     )
     .await
+    .unwrap_or_else(|_| {
+        tracing::warn!(
+            target: "omiga::working_memory",
+            session_id = %request.session_id,
+            "sync_memory_layers_after_turn timed out (>30s); skipping memory sync this turn"
+        );
+        Err("timeout".to_string())
+    })
     {
         Ok(state) => {
             if !state.dirty {
@@ -584,16 +598,27 @@ pub(super) async fn emit_post_turn_meta_then_complete(request: PostTurnCompletio
         .unwrap_or((true, true));
     let (summary_enabled, follow_enabled) = flags;
 
-    // Run summary synchronously (needed before Complete so the frontend can render it)
+    // Run summary synchronously (needed before Complete so the frontend can render it).
+    // 15-second cap: if the summary LLM call hangs, skip it rather than blocking the turn.
     let summary_res = if request.skip_summary {
         Ok(None)
     } else {
-        crate::domain::agents::output_formatter::run_turn_summary_pass(
-            request.client,
-            request.final_reply,
-            summary_enabled,
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            crate::domain::agents::output_formatter::run_turn_summary_pass(
+                request.client,
+                request.final_reply,
+                summary_enabled,
+            ),
         )
         .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                tracing::warn!(target: "omiga::post_turn", "turn summary timed out (>15s); skipping");
+                Ok(None)
+            }
+        }
     };
 
     let summary_text = match summary_res {

@@ -690,14 +690,29 @@ async fn extract_draft(
         truncate_chars(user_message.trim(), 3_000),
         truncate_chars(assistant_reply.trim(), 5_000)
     );
-    let raw = collect_llm_text_only(
-        client,
-        vec![
-            LlmMessage::system(system_prompt_working_memory()),
-            LlmMessage::user(user),
-        ],
+    // 20-second cap so a slow/hung LLM call never blocks turn completion.
+    let raw = match tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        collect_llm_text_only(
+            client,
+            vec![
+                LlmMessage::system(system_prompt_working_memory()),
+                LlmMessage::user(user),
+            ],
+        ),
     )
-    .await?;
+    .await
+    {
+        Ok(Ok(text)) => text,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            tracing::warn!(
+                target: "omiga::working_memory",
+                "extract_draft timed out (>20s); falling back to heuristic"
+            );
+            return Ok(heuristic_draft(user_message, assistant_reply));
+        }
+    };
     let Some(slice) = extract_json_object_slice(&raw) else {
         return Ok(heuristic_draft(user_message, assistant_reply));
     };
