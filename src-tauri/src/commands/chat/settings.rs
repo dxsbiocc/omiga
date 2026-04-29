@@ -209,11 +209,13 @@ pub async fn save_llm_settings_to_config(
 }
 
 /// Persist global settings from the Advanced Settings panel.
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn save_global_settings_to_config(
     state: State<'_, OmigaAppState>,
     timeout: Option<u64>,
     web_use_proxy: Option<bool>,
+    web_search_engine: Option<String>,
+    web_search_methods: Option<Vec<String>>,
 ) -> CommandResult<()> {
     let mut config_file = get_config_file(&state)
         .await
@@ -226,6 +228,13 @@ pub async fn save_global_settings_to_config(
     }
     if let Some(v) = web_use_proxy {
         global.web_use_proxy = Some(v);
+    }
+    if let Some(engine) = web_search_engine {
+        global.web_search_engine = Some(normalize_web_search_engine_field(&engine)?);
+    }
+    if let Some(methods) = web_search_methods {
+        global.web_search_methods =
+            Some(crate::llm::config::normalize_web_search_methods(&methods));
     }
     config_file.settings = Some(global);
 
@@ -248,6 +257,18 @@ pub async fn save_global_settings_to_config(
     Ok(())
 }
 
+fn normalize_web_search_engine_field(engine: &str) -> CommandResult<String> {
+    match engine.trim().to_ascii_lowercase().as_str() {
+        "google" => Ok("google".to_string()),
+        "bing" => Ok("bing".to_string()),
+        "duckduckgo" | "duck-duck-go" | "ddg" => Ok("ddg".to_string()),
+        "" => Ok("ddg".to_string()),
+        other => Err(OmigaError::Config(format!(
+            "Unsupported web search engine `{other}`; expected google, bing, or ddg"
+        ))),
+    }
+}
+
 /// Get global settings from config file (for Settings UI)
 #[tauri::command]
 pub async fn get_global_settings(
@@ -261,6 +282,8 @@ pub async fn get_global_settings(
         temperature: settings.temperature,
         enable_tools: settings.enable_tools,
         web_use_proxy: settings.web_use_proxy,
+        web_search_engine: settings.web_search_engine,
+        web_search_methods: settings.web_search_methods,
     })
 }
 
@@ -273,6 +296,8 @@ pub struct GlobalSettingsResponse {
     pub temperature: Option<f32>,
     pub enable_tools: Option<bool>,
     pub web_use_proxy: Option<bool>,
+    pub web_search_engine: Option<String>,
+    pub web_search_methods: Option<Vec<String>>,
 }
 
 /// Get current LLM configuration
@@ -312,17 +337,6 @@ pub struct TavilySearchKeyState {
     pub preview: String,
 }
 
-/// Set all web search API keys from Settings (empty string clears that field; env still applies when unset).
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetWebSearchApiKeysArgs {
-    pub tavily: String,
-    pub exa: String,
-    pub parallel: String,
-    pub firecrawl: String,
-    pub firecrawl_url: String,
-}
-
 fn normalize_web_search_key_field(s: &str) -> Option<String> {
     let t = s.trim();
     if t.is_empty() {
@@ -332,17 +346,21 @@ fn normalize_web_search_key_field(s: &str) -> Option<String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn set_web_search_api_keys(
     state: State<'_, OmigaAppState>,
-    args: SetWebSearchApiKeysArgs,
+    tavily: String,
+    exa: String,
+    parallel: String,
+    firecrawl: String,
+    firecrawl_url: String,
 ) -> CommandResult<()> {
     let mut g = state.chat.web_search_api_keys.lock().await;
-    g.tavily = normalize_web_search_key_field(&args.tavily);
-    g.exa = normalize_web_search_key_field(&args.exa);
-    g.parallel = normalize_web_search_key_field(&args.parallel);
-    g.firecrawl = normalize_web_search_key_field(&args.firecrawl);
-    g.firecrawl_url = normalize_web_search_key_field(&args.firecrawl_url);
+    g.tavily = normalize_web_search_key_field(&tavily);
+    g.exa = normalize_web_search_key_field(&exa);
+    g.parallel = normalize_web_search_key_field(&parallel);
+    g.firecrawl = normalize_web_search_key_field(&firecrawl);
+    g.firecrawl_url = normalize_web_search_key_field(&firecrawl_url);
     Ok(())
 }
 

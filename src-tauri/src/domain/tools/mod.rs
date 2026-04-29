@@ -604,7 +604,7 @@ impl Tool {
     }
 }
 
-/// API keys for built-in `web_search` (Settings override env). See `web_search` module for provider order.
+/// API keys for built-in `web_search` (Settings override env). Search priority is configured separately.
 #[derive(Debug, Clone, Default)]
 pub struct WebSearchApiKeys {
     pub tavily: Option<String>,
@@ -659,6 +659,10 @@ pub struct ToolContext {
     pub web_search_api_keys: WebSearchApiKeys,
     /// Whether web tools should honor system/env proxy settings.
     pub web_use_proxy: bool,
+    /// Preferred public search engine for `web_search`: ddg, bing, or google.
+    pub web_search_engine: String,
+    /// Ordered `web_search` methods selected in Settings, e.g. tavily → google → ddg.
+    pub web_search_methods: Vec<String>,
     /// Skill metadata cache shared across tool calls in a session.
     #[allow(dead_code)]
     pub skill_cache: Option<Arc<std::sync::Mutex<crate::domain::skills::SkillCacheMap>>>,
@@ -686,6 +690,8 @@ impl fmt::Debug for ToolContext {
             .field("local_venv_name", &self.local_venv_name)
             .field("timeout_secs", &self.timeout_secs)
             .field("web_use_proxy", &self.web_use_proxy)
+            .field("web_search_engine", &self.web_search_engine)
+            .field("web_search_methods", &self.web_search_methods)
             .field("skill_cache", &self.skill_cache.as_ref().map(|_| "<cache>"))
             .field("skill_task_context", &self.skill_task_context)
             .finish_non_exhaustive()
@@ -715,7 +721,17 @@ impl ToolContext {
             tool_results_dir: None,
             plan_mode: None,
             web_search_api_keys: WebSearchApiKeys::default(),
-            web_use_proxy: false,
+            web_use_proxy: true,
+            web_search_engine: "ddg".to_string(),
+            web_search_methods: vec![
+                "tavily".to_string(),
+                "exa".to_string(),
+                "firecrawl".to_string(),
+                "parallel".to_string(),
+                "google".to_string(),
+                "bing".to_string(),
+                "ddg".to_string(),
+            ],
             env_store: None,
             skill_cache: None,
             skill_task_context: None,
@@ -809,6 +825,16 @@ impl ToolContext {
 
     pub fn with_web_use_proxy(mut self, enabled: bool) -> Self {
         self.web_use_proxy = enabled;
+        self
+    }
+
+    pub fn with_web_search_engine(mut self, engine: impl Into<String>) -> Self {
+        self.web_search_engine = engine.into();
+        self
+    }
+
+    pub fn with_web_search_methods(mut self, methods: Vec<String>) -> Self {
+        self.web_search_methods = methods;
         self
     }
 

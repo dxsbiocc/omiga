@@ -2,10 +2,14 @@
 //!
 //! Upstream `WebSearchTool` uses Anthropic server-side `web_search`; Omiga runs a real HTTP search.
 //!
-//! DuckDuckGo: the public `api.duckduckgo.com` endpoint is an **instant-answer** API, not full web
-//! search — many queries return empty `AbstractURL` / `RelatedTopics`. HTML results at
-//! `html.duckduckgo.com` are used when the JSON API yields nothing. Result links are often
-//! `duckduckgo.com/l/?uddg=…` redirects; we unwrap `uddg` to the real destination URL.
+//! Public fallback engines:
+//! - DuckDuckGo: the public `api.duckduckgo.com` endpoint is an **instant-answer** API, not full
+//!   web search — many queries return empty `AbstractURL` / `RelatedTopics`. HTML results at
+//!   `html.duckduckgo.com` are used when the JSON API yields nothing.
+//! - Bing / Google: lightweight HTML fallbacks used after configured APIs / MCP browser routes.
+//!
+//! Result links are often search-engine redirects (`duckduckgo.com/l/?uddg=…`,
+//! `bing.com/ck/a?u=…`, `google.com/url?q=…`); we unwrap them to the real destination URL.
 
 use super::{ToolContext, ToolError, ToolSchema};
 use crate::domain::mcp::client::{
@@ -14,6 +18,10 @@ use crate::domain::mcp::client::{
 use crate::domain::mcp::config::merged_mcp_servers;
 use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
 use async_trait::async_trait;
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use lazy_static::lazy_static;
 use regex::Regex;
 use rmcp::model::CallToolResult;
@@ -30,8 +38,8 @@ const MAX_OUTPUT_CHARS: usize = 100_000;
 /// Per-result snippet cap (Hermes-style: keep tool output lean).
 const MAX_SNIPPET_CHARS: usize = 512;
 const MAX_TITLE_CHARS: usize = 220;
-const DDG_HTML_RETRY_DELAY_MS: u64 = 450;
-const TAVILY_RETRY_DELAY_MS: u64 = 400;
+const SEARCH_METHOD_RETRY_DELAY_MS: u64 = 400;
+const SEARCH_METHOD_MAX_ATTEMPTS: usize = 3;
 /// `web_search` is an interactive chat tool: a search that cannot return within
 /// this budget is not useful enough to keep the turn blocked.
 const WEB_SEARCH_MAX_TIMEOUT_SECS: u64 = 30;
@@ -39,8 +47,8 @@ const WEB_SEARCH_MCP_MAX_TIMEOUT_SECS: u64 = 10;
 
 pub const DESCRIPTION: &str = r#"Search the public web for up-to-date information.
 
-- Provider order when keys are set (Omiga Settings → Advanced, or env): Tavily → Exa → Firecrawl → Parallel → DuckDuckGo. Env vars: `OMIGA_TAVILY_API_KEY` / `TAVILY_API_KEY`, `OMIGA_EXA_API_KEY` / `EXA_API_KEY`, `OMIGA_FIRECRAWL_API_KEY` / `FIRECRAWL_API_KEY`, optional `OMIGA_FIRECRAWL_API_URL` / `FIRECRAWL_API_URL` for self-hosted Firecrawl base, `OMIGA_PARALLEL_API_KEY` / `PARALLEL_API_KEY`. Settings overrides env when non-empty.
-- If every configured provider fails or returns no results, falls back to DuckDuckGo (instant-answer JSON when available, then HTML; no API key). HTML fetch retries once on transient errors.
+- Search methods run in the user-configured order from Settings → Search (for example Tavily → Google → DuckDuckGo). Each method is tried up to 3 times before the next method is attempted.
+- Supported methods: Tavily, Exa, Firecrawl, Parallel, Google, Bing, DuckDuckGo. Env vars: `OMIGA_TAVILY_API_KEY` / `TAVILY_API_KEY`, `OMIGA_EXA_API_KEY` / `EXA_API_KEY`, `OMIGA_FIRECRAWL_API_KEY` / `FIRECRAWL_API_KEY`, optional `OMIGA_FIRECRAWL_API_URL` / `FIRECRAWL_API_URL` for self-hosted Firecrawl base, `OMIGA_PARALLEL_API_KEY` / `PARALLEL_API_KEY`. Settings overrides env when non-empty.
 - Optional `allowed_domains` or `blocked_domains` filter result URLs (not both).
 - `max_results` (default 5, max 10) limits how many hits are returned.
 - Optional `search_url` overrides the DuckDuckGo HTML endpoint (for private search proxies or tests).
@@ -89,11 +97,32 @@ enum SearchApiProvider {
     Parallel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchMethod {
+    Tavily,
+    Exa,
+    Firecrawl,
+    Parallel,
+    PubMedMcp,
+    BrowserMcp,
+    Ddg,
+    Bing,
+    Google,
+}
+
 #[derive(Debug, Clone)]
 struct SearchExecution {
     hits: Vec<SearchHit>,
     source_labels: Vec<String>,
     notes: Vec<String>,
+}
+
+struct SearchMethodRequest<'a> {
+    query: &'a str,
+    allowed: &'a Option<Vec<String>>,
+    blocked: &'a Option<Vec<String>>,
+    max_results: usize,
+    search_url: Option<&'a str>,
 }
 
 impl SearchExecution {
@@ -152,6 +181,8 @@ const PUBMED_SERVER: &str = "pubmed";
 const PUBMED_HOST: &str = "pubmed.ncbi.nlm.nih.gov";
 const BIORXIV_HOST: &str = "biorxiv.org";
 const DDG_HTML_SEARCH_BASE: &str = "https://html.duckduckgo.com/html/";
+const BING_SEARCH_BASE: &str = "https://www.bing.com/search";
+const GOOGLE_SEARCH_BASE: &str = "https://www.google.com/search";
 const MCP_BROWSER_MIN_SCORE: i32 = 55;
 const MCP_PUBMED_MIN_SCORE: i32 = 60;
 const PLAYWRIGHT_BROWSER_MIN_SCORE: i32 = 45;
@@ -282,6 +313,117 @@ fn api_provider_label(provider: SearchApiProvider) -> &'static str {
         SearchApiProvider::Exa => "Exa Search API",
         SearchApiProvider::Firecrawl => "Firecrawl Search API",
         SearchApiProvider::Parallel => "Parallel Search API",
+    }
+}
+
+fn search_method_from_setting(value: &str) -> Option<SearchMethod> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "tavily" => Some(SearchMethod::Tavily),
+        "exa" => Some(SearchMethod::Exa),
+        "firecrawl" => Some(SearchMethod::Firecrawl),
+        "parallel" => Some(SearchMethod::Parallel),
+        "pubmed" | "pubmed-mcp" | "pubmed_mcp" => Some(SearchMethod::PubMedMcp),
+        "browser" | "browser-mcp" | "browser_mcp" | "mcp-browser" | "mcp_browser" => {
+            Some(SearchMethod::BrowserMcp)
+        }
+        "google" => Some(SearchMethod::Google),
+        "bing" => Some(SearchMethod::Bing),
+        "duckduckgo" | "duck-duck-go" | "ddg" => Some(SearchMethod::Ddg),
+        _ => None,
+    }
+}
+
+fn search_method_label(method: SearchMethod) -> &'static str {
+    match method {
+        SearchMethod::Tavily => "Tavily",
+        SearchMethod::Exa => "Exa",
+        SearchMethod::Firecrawl => "Firecrawl",
+        SearchMethod::Parallel => "Parallel",
+        SearchMethod::PubMedMcp => "PubMed MCP",
+        SearchMethod::BrowserMcp => "Browser MCP",
+        SearchMethod::Ddg => "DuckDuckGo",
+        SearchMethod::Bing => "Bing",
+        SearchMethod::Google => "Google",
+    }
+}
+
+fn default_search_methods() -> Vec<SearchMethod> {
+    vec![
+        SearchMethod::Tavily,
+        SearchMethod::Exa,
+        SearchMethod::Firecrawl,
+        SearchMethod::Parallel,
+        SearchMethod::Google,
+        SearchMethod::Bing,
+        SearchMethod::Ddg,
+    ]
+}
+
+fn ordered_search_methods(settings: &[String], legacy_preferred_engine: &str) -> Vec<SearchMethod> {
+    let mut out = Vec::new();
+    for value in settings {
+        let Some(method) = search_method_from_setting(value) else {
+            continue;
+        };
+        if !out.contains(&method) {
+            out.push(method);
+        }
+    }
+    if out.is_empty() {
+        if let Some(method) = search_method_from_setting(legacy_preferred_engine) {
+            out.push(method);
+        }
+        for method in default_search_methods() {
+            if !out.contains(&method) {
+                out.push(method);
+            }
+        }
+    }
+    out
+}
+
+fn search_method_missing_config(ctx: &ToolContext, method: SearchMethod) -> Option<&'static str> {
+    match method {
+        SearchMethod::Tavily if resolve_tavily_api_key(ctx).is_none() => {
+            Some("Tavily API key is not configured")
+        }
+        SearchMethod::Exa if resolve_exa_api_key(ctx).is_none() => {
+            Some("Exa API key is not configured")
+        }
+        SearchMethod::Firecrawl if resolve_firecrawl_api_key(ctx).is_none() => {
+            Some("Firecrawl API key is not configured")
+        }
+        SearchMethod::Parallel if resolve_parallel_api_key(ctx).is_none() => {
+            Some("Parallel API key is not configured")
+        }
+        _ => None,
+    }
+}
+
+fn search_api_provider_for_method(method: SearchMethod) -> Option<SearchApiProvider> {
+    match method {
+        SearchMethod::Tavily => Some(SearchApiProvider::Tavily),
+        SearchMethod::Exa => Some(SearchApiProvider::Exa),
+        SearchMethod::Firecrawl => Some(SearchApiProvider::Firecrawl),
+        SearchMethod::Parallel => Some(SearchApiProvider::Parallel),
+        SearchMethod::PubMedMcp
+        | SearchMethod::BrowserMcp
+        | SearchMethod::Ddg
+        | SearchMethod::Bing
+        | SearchMethod::Google => None,
+    }
+}
+
+fn search_method_source_label(method: SearchMethod) -> String {
+    if let Some(provider) = search_api_provider_for_method(method) {
+        api_provider_label(provider).to_string()
+    } else {
+        match method {
+            SearchMethod::PubMedMcp | SearchMethod::BrowserMcp => {
+                format!("{} search", search_method_label(method))
+            }
+            _ => format!("{} public search", search_method_label(method)),
+        }
     }
 }
 
@@ -906,60 +1048,151 @@ fn resolve_firecrawl_base_url(ctx: &ToolContext) -> String {
         .unwrap_or_else(|| "https://api.firecrawl.dev".to_string())
 }
 
-fn has_any_search_key(ctx: &ToolContext) -> bool {
-    resolve_tavily_api_key(ctx).is_some()
-        || resolve_exa_api_key(ctx).is_some()
-        || resolve_firecrawl_api_key(ctx).is_some()
-        || resolve_parallel_api_key(ctx).is_some()
+async fn search_once_with_method(
+    client: &reqwest::Client,
+    ctx: &ToolContext,
+    method: SearchMethod,
+    request: &SearchMethodRequest<'_>,
+) -> Result<Vec<SearchHit>, ToolError> {
+    let max_u32 = request.max_results.min(20) as u32;
+    match method {
+        SearchMethod::Tavily => {
+            let key = resolve_tavily_api_key(ctx).ok_or_else(|| ToolError::ExecutionFailed {
+                message: "Tavily API key is not configured".to_string(),
+            })?;
+            search_tavily_once(
+                client,
+                &key,
+                request.query,
+                request.allowed,
+                request.blocked,
+                max_u32,
+            )
+            .await
+        }
+        SearchMethod::Exa => {
+            let key = resolve_exa_api_key(ctx).ok_or_else(|| ToolError::ExecutionFailed {
+                message: "Exa API key is not configured".to_string(),
+            })?;
+            search_exa_once(client, &key, request.query, max_u32).await
+        }
+        SearchMethod::Firecrawl => {
+            let key = resolve_firecrawl_api_key(ctx).ok_or_else(|| ToolError::ExecutionFailed {
+                message: "Firecrawl API key is not configured".to_string(),
+            })?;
+            let base = resolve_firecrawl_base_url(ctx);
+            search_firecrawl_once(client, &key, &base, request.query, max_u32).await
+        }
+        SearchMethod::Parallel => {
+            let key = resolve_parallel_api_key(ctx).ok_or_else(|| ToolError::ExecutionFailed {
+                message: "Parallel API key is not configured".to_string(),
+            })?;
+            search_parallel_once(client, &key, request.query, max_u32).await
+        }
+        SearchMethod::PubMedMcp => Ok(search_pubmed_mcp(ctx, request.query, request.max_results)
+            .await?
+            .map(|exec| exec.hits)
+            .unwrap_or_default()),
+        SearchMethod::BrowserMcp => {
+            Ok(
+                search_via_browser_mcp(ctx, request.query, request.max_results)
+                    .await?
+                    .map(|exec| exec.hits)
+                    .unwrap_or_default(),
+            )
+        }
+        SearchMethod::Ddg => {
+            search_ddg(
+                client,
+                request.query,
+                request.max_results,
+                request.search_url,
+            )
+            .await
+        }
+        SearchMethod::Bing => search_bing(client, request.query, request.max_results).await,
+        SearchMethod::Google => search_google(client, request.query, request.max_results).await,
+    }
 }
 
-async fn search_via_configured_apis(
+async fn search_ordered_methods(
     client: &reqwest::Client,
     ctx: &ToolContext,
     query: &str,
     allowed: &Option<Vec<String>>,
     blocked: &Option<Vec<String>>,
     max_results: usize,
-) -> Result<Option<(Vec<SearchHit>, SearchApiProvider)>, ToolError> {
-    let max_u32 = max_results.min(20) as u32;
+    search_url: Option<&str>,
+) -> SearchExecution {
+    let methods = ordered_search_methods(&ctx.web_search_methods, &ctx.web_search_engine);
+    let mut exec = SearchExecution::new();
+    exec.push_note(format!(
+        "Search order: {}",
+        methods
+            .iter()
+            .map(|m| search_method_label(*m))
+            .collect::<Vec<_>>()
+            .join(" → ")
+    ));
 
-    if let Some(key) = resolve_tavily_api_key(ctx) {
-        if let Ok(hits) = search_tavily(client, &key, query, allowed, blocked, max_u32).await {
-            if !hits.is_empty() {
-                return Ok(Some((hits, SearchApiProvider::Tavily)));
+    let request = SearchMethodRequest {
+        query,
+        allowed,
+        blocked,
+        max_results,
+        search_url,
+    };
+
+    for method in methods {
+        let label = search_method_source_label(method);
+        if let Some(reason) = search_method_missing_config(ctx, method) {
+            exec.push_note(format!("{label} skipped: {reason}."));
+            continue;
+        }
+
+        let mut last_error: Option<String> = None;
+        let mut empty_attempts = 0usize;
+
+        for attempt in 1..=SEARCH_METHOD_MAX_ATTEMPTS {
+            let result = search_once_with_method(client, ctx, method, &request).await;
+            match result {
+                Ok(hits) => {
+                    let filtered =
+                        filter_hits(&ctx.project_root, hits, allowed, blocked, max_results);
+                    if !filtered.is_empty() {
+                        exec.hits = filtered;
+                        exec.push_source(if attempt == 1 {
+                            label
+                        } else {
+                            format!("{label} (attempt {attempt})")
+                        });
+                        return exec;
+                    }
+                    empty_attempts += 1;
+                }
+                Err(err) => {
+                    last_error = Some(err.to_string());
+                }
             }
+
+            if attempt < SEARCH_METHOD_MAX_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(SEARCH_METHOD_RETRY_DELAY_MS)).await;
+            }
+        }
+
+        if let Some(err) = last_error {
+            exec.push_note(format!(
+                "{label} failed after {SEARCH_METHOD_MAX_ATTEMPTS} attempts: {err}"
+            ));
+        } else if empty_attempts > 0 {
+            exec.push_note(format!(
+                "{label} returned no usable hits after {empty_attempts} attempts."
+            ));
         }
     }
 
-    if let Some(key) = resolve_exa_api_key(ctx) {
-        if let Ok(hits) = search_exa_once(client, &key, query, max_u32).await {
-            let filtered = filter_hits(&ctx.project_root, hits, allowed, blocked, max_results);
-            if !filtered.is_empty() {
-                return Ok(Some((filtered, SearchApiProvider::Exa)));
-            }
-        }
-    }
-
-    if let Some(key) = resolve_firecrawl_api_key(ctx) {
-        let base = resolve_firecrawl_base_url(ctx);
-        if let Ok(hits) = search_firecrawl_once(client, &key, &base, query, max_u32).await {
-            let filtered = filter_hits(&ctx.project_root, hits, allowed, blocked, max_results);
-            if !filtered.is_empty() {
-                return Ok(Some((filtered, SearchApiProvider::Firecrawl)));
-            }
-        }
-    }
-
-    if let Some(key) = resolve_parallel_api_key(ctx) {
-        if let Ok(hits) = search_parallel_once(client, &key, query, max_u32).await {
-            let filtered = filter_hits(&ctx.project_root, hits, allowed, blocked, max_results);
-            if !filtered.is_empty() {
-                return Ok(Some((filtered, SearchApiProvider::Parallel)));
-            }
-        }
-    }
-
-    Ok(None)
+    exec.push_source("No configured search method returned usable hits");
+    exec
 }
 
 async fn search_pubmed_mcp(
@@ -1258,96 +1491,27 @@ async fn run_research_search(
     max_results: usize,
     search_url: Option<&str>,
 ) -> Result<SearchExecution, ToolError> {
-    let mut execution = SearchExecution::new();
-
-    if let Some(pubmed_exec) = search_pubmed_mcp(ctx, args.query.trim(), max_results).await? {
-        for label in pubmed_exec.source_labels {
-            execution.push_source(label);
-        }
-        for note in pubmed_exec.notes {
-            execution.push_note(note);
-        }
-        execution.hits.extend(pubmed_exec.hits);
-    }
-
-    if execution.hits.is_empty() {
-        let pubmed_query = scoped_site_query(args.query.trim(), PUBMED_HOST);
-        if let Some((hits, provider)) = search_via_configured_apis(
-            client,
-            ctx,
-            &pubmed_query,
-            &Some(vec![PUBMED_HOST.to_string()]),
-            &None,
-            max_results,
+    let query = args.query.trim();
+    let scoped_research_query = if query.to_ascii_lowercase().contains("site:") {
+        query.to_string()
+    } else {
+        format!(
+            "({}) OR ({})",
+            scoped_site_query(query, PUBMED_HOST),
+            scoped_site_query(query, BIORXIV_HOST)
         )
-        .await?
-        {
-            execution.push_source(format!("PubMed via {}", api_provider_label(provider)));
-            execution.hits.extend(hits);
-        }
-    }
-
-    let biorxiv_query = scoped_site_query(args.query.trim(), BIORXIV_HOST);
-    if let Some((hits, provider)) = search_via_configured_apis(
+    };
+    let mut execution = search_ordered_methods(
         client,
         ctx,
-        &biorxiv_query,
-        &Some(vec![BIORXIV_HOST.to_string()]),
-        &None,
-        max_results,
-    )
-    .await?
-    {
-        execution.push_source(format!("bioRxiv via {}", api_provider_label(provider)));
-        execution.hits.extend(hits);
-    }
-
-    let processed = dedupe_hits_preserve_order(
-        execution
-            .hits
-            .into_iter()
-            .map(sanitize_hit)
-            .collect::<Vec<_>>(),
-    );
-    execution.hits = filter_hits(
-        &ctx.project_root,
-        processed,
+        &scoped_research_query,
         &args.allowed_domains,
         &args.blocked_domains,
         max_results,
-    );
-    if !execution.hits.is_empty() {
-        return Ok(execution);
-    }
-
-    let scoped_browser_query = format!(
-        "{} (site:{} OR site:{})",
-        args.query.trim(),
-        PUBMED_HOST,
-        BIORXIV_HOST
-    );
-    if let Some(browser_exec) =
-        search_via_browser_mcp(ctx, &scoped_browser_query, max_results).await?
-    {
-        return Ok(browser_exec);
-    }
-
-    let ddg_query = scoped_browser_query;
-    let hits = search_ddg(
-        client,
-        &ddg_query,
-        max_results,
-        search_url.or(Some(DDG_HTML_SEARCH_BASE)),
+        search_url,
     )
-    .await?;
-    execution.hits = filter_hits(
-        &ctx.project_root,
-        dedupe_hits_preserve_order(hits),
-        &args.allowed_domains,
-        &args.blocked_domains,
-        max_results,
-    );
-    execution.push_source("DuckDuckGo scoped fallback (PubMed/bioRxiv)");
+    .await;
+    execution.push_note("Research query scoped to PubMed/bioRxiv.");
     Ok(execution)
 }
 
@@ -1581,24 +1745,6 @@ async fn search_tavily_once(
         }
     }
     Ok(out)
-}
-
-/// One automatic retry on failure (transient network / rate limits).
-async fn search_tavily(
-    client: &reqwest::Client,
-    key: &str,
-    query: &str,
-    allowed: &Option<Vec<String>>,
-    blocked: &Option<Vec<String>>,
-    max_results: u32,
-) -> Result<Vec<SearchHit>, ToolError> {
-    match search_tavily_once(client, key, query, allowed, blocked, max_results).await {
-        Ok(v) => Ok(v),
-        Err(_) => {
-            tokio::time::sleep(Duration::from_millis(TAVILY_RETRY_DELAY_MS)).await;
-            search_tavily_once(client, key, query, allowed, blocked, max_results).await
-        }
-    }
 }
 
 async fn search_exa_once(
@@ -1852,8 +1998,55 @@ fn ddg_html_headers() -> reqwest::header::HeaderMap {
     h
 }
 
+fn bing_html_headers() -> reqwest::header::HeaderMap {
+    let mut h = ddg_html_headers();
+    h.insert(
+        reqwest::header::REFERER,
+        reqwest::header::HeaderValue::from_static("https://www.bing.com/"),
+    );
+    h
+}
+
+fn google_html_headers() -> reqwest::header::HeaderMap {
+    let mut h = ddg_html_headers();
+    h.insert(
+        reqwest::header::REFERER,
+        reqwest::header::HeaderValue::from_static("https://www.google.com/"),
+    );
+    h
+}
+
 fn ddg_href_for_parse(raw: &str) -> String {
     raw.replace("&amp;", "&")
+}
+
+fn decode_bing_redirect_candidate(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let candidates = if let Some(stripped) = trimmed.strip_prefix("a1") {
+        vec![trimmed, stripped]
+    } else {
+        vec![trimmed]
+    };
+
+    for candidate in candidates {
+        for decoded in [
+            URL_SAFE_NO_PAD.decode(candidate.as_bytes()),
+            URL_SAFE.decode(candidate.as_bytes()),
+            BASE64_STANDARD.decode(candidate.as_bytes()),
+        ] {
+            let Ok(bytes) = decoded else {
+                continue;
+            };
+            let Ok(text) = String::from_utf8(bytes) else {
+                continue;
+            };
+            if text.starts_with("http://") || text.starts_with("https://") {
+                return Some(text);
+            }
+        }
+    }
+
+    None
 }
 
 /// Match OpenHarness: unwrap `uddg` on DDG `/l/` redirects; otherwise return the URL unchanged.
@@ -1861,6 +2054,8 @@ fn normalize_result_url(raw_url: &str) -> String {
     let raw = ddg_href_for_parse(raw_url.trim());
     let fixed = if raw.starts_with("//") {
         format!("https:{}", raw)
+    } else if raw.starts_with('/') {
+        format!("https://www.google.com{}", raw)
     } else {
         raw
     };
@@ -1871,6 +2066,22 @@ fn normalize_result_url(raw_url: &str) -> String {
     if host.ends_with("duckduckgo.com") && u.path().starts_with("/l") {
         for (k, v) in u.query_pairs() {
             if k == "uddg" && !v.is_empty() {
+                return v.into_owned();
+            }
+        }
+    }
+    if host.ends_with("bing.com") && u.path().starts_with("/ck/") {
+        for (k, v) in u.query_pairs() {
+            if k == "u" && !v.is_empty() {
+                if let Some(decoded) = decode_bing_redirect_candidate(&v) {
+                    return decoded;
+                }
+            }
+        }
+    }
+    if host.ends_with("google.com") && u.path().starts_with("/url") {
+        for (k, v) in u.query_pairs() {
+            if k == "q" && !v.is_empty() {
                 return v.into_owned();
             }
         }
@@ -1980,6 +2191,11 @@ lazy_static! {
         Regex::new(r#"(?is)<a(?P<attrs>[^>]+)>(?P<title>.*?)</a>"#).expect("regex");
     static ref RE_CLASS_ATTR: Regex = Regex::new(r#"(?i)class="(?P<class>[^"]+)""#).expect("regex");
     static ref RE_HREF_ATTR: Regex = Regex::new(r#"(?i)href="(?P<href>[^"]+)""#).expect("regex");
+    static ref RE_BING_BLOCK: Regex =
+        Regex::new(r#"(?is)<li[^>]+class="[^"]*\bb_algo\b[^"]*"[^>]*>(?P<body>.*?)</li>"#)
+            .expect("regex");
+    static ref RE_BING_SNIPPET: Regex =
+        Regex::new(r#"(?is)<p[^>]*>(?P<snippet>.*?)</p>"#).expect("regex");
 }
 
 fn extract_ddg_snippets(body: &str) -> Vec<String> {
@@ -2037,6 +2253,87 @@ fn parse_ddg_html_results_openharness(body: &str, limit: usize) -> Vec<SearchHit
     }
 
     results
+}
+
+fn parse_bing_html_results(body: &str, limit: usize) -> Vec<SearchHit> {
+    let mut results = Vec::new();
+
+    for block in RE_BING_BLOCK.captures_iter(body) {
+        if results.len() >= limit {
+            break;
+        }
+        let block = block.name("body").map(|m| m.as_str()).unwrap_or("");
+        let Some(anchor) = RE_DDG_ANCHOR.captures(block) else {
+            continue;
+        };
+        let attrs = anchor.name("attrs").map(|m| m.as_str()).unwrap_or("");
+        let Some(href_m) = RE_HREF_ATTR.captures(attrs) else {
+            continue;
+        };
+        let raw_href = href_m.name("href").map(|m| m.as_str()).unwrap_or("");
+        let title_raw = anchor.name("title").map(|m| m.as_str()).unwrap_or("");
+        let title = clean_html_fragment(title_raw);
+        let url = normalize_result_url(raw_href);
+        let snippet = RE_BING_SNIPPET
+            .captures(block)
+            .and_then(|c| c.name("snippet").map(|m| clean_html_fragment(m.as_str())))
+            .unwrap_or_default();
+
+        if title.is_empty() || url.is_empty() {
+            continue;
+        }
+        let title = if title.len() > 160 {
+            format!("{}…", &title[..160])
+        } else {
+            title
+        };
+        results.push(SearchHit {
+            title,
+            url,
+            snippet,
+        });
+    }
+
+    dedupe_hits_preserve_order(results.into_iter().map(sanitize_hit).collect())
+}
+
+fn parse_google_html_results(body: &str, limit: usize) -> Vec<SearchHit> {
+    let mut results = Vec::new();
+
+    for anchor in RE_DDG_ANCHOR.captures_iter(body) {
+        if results.len() >= limit {
+            break;
+        }
+        let attrs = anchor.name("attrs").map(|m| m.as_str()).unwrap_or("");
+        let Some(href_m) = RE_HREF_ATTR.captures(attrs) else {
+            continue;
+        };
+        let raw_href = href_m.name("href").map(|m| m.as_str()).unwrap_or("");
+        let title_raw = anchor.name("title").map(|m| m.as_str()).unwrap_or("");
+        let title = clean_html_fragment(title_raw);
+        let url = normalize_result_url(raw_href);
+        let host = host_of_url(&url).unwrap_or_default();
+
+        if title.is_empty()
+            || url.is_empty()
+            || !url.starts_with("http")
+            || host.ends_with("google.com")
+        {
+            continue;
+        }
+        let title = if title.len() > 160 {
+            format!("{}…", &title[..160])
+        } else {
+            title
+        };
+        results.push(SearchHit {
+            title,
+            url,
+            snippet: String::new(),
+        });
+    }
+
+    dedupe_hits_preserve_order(results.into_iter().map(sanitize_hit).collect())
 }
 
 async fn fetch_ddg_instant_answer_body(
@@ -2098,6 +2395,53 @@ async fn fetch_ddg_html_body(
     })
 }
 
+async fn fetch_bing_html_body(client: &reqwest::Client, query: &str) -> Result<String, ToolError> {
+    let resp = client
+        .get(BING_SEARCH_BASE)
+        .query(&[("q", query), ("count", "10")])
+        .headers(bing_html_headers())
+        .send()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Bing HTML request failed: {}", e),
+        })?;
+
+    if !resp.status().is_success() {
+        return Err(ToolError::ExecutionFailed {
+            message: format!("Bing HTML HTTP {}", resp.status()),
+        });
+    }
+
+    resp.text().await.map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Bing HTML read body: {}", e),
+    })
+}
+
+async fn fetch_google_html_body(
+    client: &reqwest::Client,
+    query: &str,
+) -> Result<String, ToolError> {
+    let resp = client
+        .get(GOOGLE_SEARCH_BASE)
+        .query(&[("q", query), ("num", "10")])
+        .headers(google_html_headers())
+        .send()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Google HTML request failed: {}", e),
+        })?;
+
+    if !resp.status().is_success() {
+        return Err(ToolError::ExecutionFailed {
+            message: format!("Google HTML HTTP {}", resp.status()),
+        });
+    }
+
+    resp.text().await.map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Google HTML read body: {}", e),
+    })
+}
+
 /// Instant answer JSON; if empty or unusable, HTML result page (`search_url` or default DDG HTML).
 async fn search_ddg(
     client: &reqwest::Client,
@@ -2108,7 +2452,7 @@ async fn search_ddg(
     let html_base = search_url
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("https://html.duckduckgo.com/html/");
+        .unwrap_or(DDG_HTML_SEARCH_BASE);
 
     let mut hits = match fetch_ddg_instant_answer_body(client, query).await {
         Ok(body) => parse_ddg_instant_answer_json(&body, max_results).unwrap_or_default(),
@@ -2116,17 +2460,29 @@ async fn search_ddg(
     };
 
     if hits.is_empty() {
-        let html = match fetch_ddg_html_body(client, query, html_base).await {
-            Ok(s) => s,
-            Err(_) => {
-                tokio::time::sleep(Duration::from_millis(DDG_HTML_RETRY_DELAY_MS)).await;
-                fetch_ddg_html_body(client, query, html_base).await?
-            }
-        };
+        let html = fetch_ddg_html_body(client, query, html_base).await?;
         hits = parse_ddg_html_results_openharness(&html, max_results);
     }
 
     Ok(hits)
+}
+
+async fn search_bing(
+    client: &reqwest::Client,
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<SearchHit>, ToolError> {
+    let html = fetch_bing_html_body(client, query).await?;
+    Ok(parse_bing_html_results(&html, max_results))
+}
+
+async fn search_google(
+    client: &reqwest::Client,
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<SearchHit>, ToolError> {
+    let html = fetch_google_html_body(client, query).await?;
+    Ok(parse_google_html_results(&html, max_results))
 }
 
 #[cfg(test)]
@@ -2139,6 +2495,20 @@ mod ddg_tests {
             "https://duckduckgo.com/l/?uddg=https%3A%2F%2Frust-lang.org%2F&rut=abc",
         );
         assert_eq!(u, "https://rust-lang.org/");
+    }
+
+    #[test]
+    fn normalize_result_url_extracts_bing_redirect() {
+        let u = normalize_result_url(
+            "https://www.bing.com/ck/a?u=a1aHR0cHM6Ly9leGFtcGxlLm9yZy9wYXRo&ntb=1",
+        );
+        assert_eq!(u, "https://example.org/path");
+    }
+
+    #[test]
+    fn normalize_result_url_extracts_google_redirect() {
+        let u = normalize_result_url("/url?q=https%3A%2F%2Fexample.net%2Fpaper&sa=U");
+        assert_eq!(u, "https://example.net/paper");
     }
 
     #[test]
@@ -2234,6 +2604,52 @@ mod ddg_tests {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].url, "https://bar.com/");
         assert!(v[0].snippet.contains("snippet"));
+    }
+
+    #[test]
+    fn parse_bing_html_extracts_result_block() {
+        let html = r#"
+<ol id="b_results">
+  <li class="b_algo">
+    <h2><a href="https://example.org/paper">Example Paper</a></h2>
+    <div class="b_caption"><p>Readable summary &amp; details.</p></div>
+  </li>
+</ol>
+"#;
+        let v = parse_bing_html_results(html, 10);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].url, "https://example.org/paper");
+        assert_eq!(v[0].title, "Example Paper");
+        assert!(v[0].snippet.contains("summary & details"));
+    }
+
+    #[test]
+    fn parse_google_html_extracts_url_redirect() {
+        let html = r#"
+<a href="/url?q=https%3A%2F%2Fexample.net%2Fpaper&amp;sa=U"><h3>Google Result</h3></a>
+"#;
+        let v = parse_google_html_results(html, 10);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].url, "https://example.net/paper");
+        assert_eq!(v[0].title, "Google Result");
+    }
+
+    #[test]
+    fn search_method_order_uses_user_selection() {
+        assert_eq!(
+            ordered_search_methods(&["tavily".into(), "google".into(), "ddg".into()], "bing"),
+            vec![
+                SearchMethod::Tavily,
+                SearchMethod::Google,
+                SearchMethod::Ddg
+            ]
+        );
+        assert_eq!(
+            ordered_search_methods(&["google".into(), "google".into(), "unknown".into()], "ddg"),
+            vec![SearchMethod::Google]
+        );
+        assert_eq!(ordered_search_methods(&[], "bing")[0], SearchMethod::Bing);
+        assert_eq!(ordered_search_methods(&[], "unknown").len(), 7);
     }
 
     /// Live network (optional): `cargo test -p omiga ddg_live_smoke -- --ignored --nocapture`
@@ -2445,7 +2861,6 @@ impl super::ToolImpl for WebSearchTool {
             super::web_safety::validate_public_http_url(&ctx.project_root, search_url, false)
                 .map_err(|message| ToolError::InvalidArguments { message })?;
         }
-        let had_any_search_key = has_any_search_key(ctx);
         let intent = if has_explicit_domain_override(&args) {
             SearchIntent::General
         } else {
@@ -2464,66 +2879,19 @@ impl super::ToolImpl for WebSearchTool {
                         }
                     }
                     SearchIntent::General => {
-                        let mut exec = SearchExecution::new();
-
-                        let api_fut = search_via_configured_apis(
+                        let strategy_fut = search_ordered_methods(
                             &client,
                             ctx,
                             args.query.trim(),
                             allowed,
                             blocked,
                             max_n,
+                            search_url,
                         );
-                        if let Some((hits, provider)) = tokio::select! {
+                        let exec = tokio::select! {
                             _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                            r = api_fut => r?,
-                        } {
-                            exec.hits = hits;
-                            exec.push_source(api_provider_label(provider));
-                        }
-
-                        if exec.hits.is_empty() {
-                            let browser_fut = search_via_browser_mcp(ctx, args.query.trim(), max_n);
-                            if let Some(browser_exec) = tokio::select! {
-                                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                                r = browser_fut => r?,
-                            } {
-                                exec = browser_exec;
-                                if had_any_search_key {
-                                    exec.push_note(
-                                        "Configured search APIs returned no usable hits; used Agent-browser fallback.",
-                                    );
-                                } else {
-                                    exec.push_note(
-                                        "No search API keys configured; used Agent-browser fallback.",
-                                    );
-                                }
-                            }
-                        }
-
-                        if exec.hits.is_empty() {
-                            let ddg_fut = search_ddg(
-                                &client,
-                                args.query.trim(),
-                                max_n,
-                                search_url.or(Some(DDG_HTML_SEARCH_BASE)),
-                            );
-                            let hits = tokio::select! {
-                                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                                r = ddg_fut => r?,
-                            };
-                            exec.hits = filter_hits(&ctx.project_root, hits, allowed, blocked, max_n);
-                            if had_any_search_key {
-                                exec.push_source(
-                                    "DuckDuckGo fallback after configured search APIs and Agent-browser returned no usable hits",
-                                );
-                            } else {
-                                exec.push_source(
-                                    "DuckDuckGo fallback (no search API keys configured and no Agent-browser route matched)",
-                                );
-                            }
-                        }
-
+                            r = strategy_fut => r,
+                        };
                         Ok(exec)
                     }
                 }

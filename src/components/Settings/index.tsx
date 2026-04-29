@@ -1,8 +1,10 @@
-import { Fragment, useState, useEffect } from "react";
+import { Fragment, useRef, useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useDrag, useDragLayer, useDrop } from "react-dnd";
 import {
   TextField,
   Button,
+  Checkbox,
   Box,
   Typography,
   Alert,
@@ -23,6 +25,7 @@ import {
   VisibilityOff,
   OpenInNew,
   ArrowBack,
+  DragIndicator,
 } from "@mui/icons-material";
 import { useSessionStore } from "../../state/sessionStore";
 import { useColorModeStore } from "../../state/themeStore";
@@ -36,14 +39,14 @@ import { ThemeAppearancePanel } from "./ThemeAppearancePanel";
 import { ProviderManager } from "./ProviderManager";
 import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 import { RuntimeConstraintsPanel } from "./RuntimeConstraintsPanel";
+import { moveItemToIndex } from "./searchMethodOrder";
 import { AgentScheduleLauncher } from "../AgentSchedule/AgentScheduleLauncher";
-import { MockScenarioLauncher } from "../AgentSchedule/MockScenarioLauncher";
 import { AgentRolesPanel } from "../AgentRoles/AgentRolesPanel";
 
 interface SettingsProps {
   open: boolean;
   onClose: () => void;
-  /** See `openSettingsTabMap.ts`: 0–12 */
+  /** See `openSettingsTabMap.ts`: 0–13 */
   initialTab?: number;
   /** When `initialTab` is Execution (9): inner tab 0 Modal / 1 Daytona / 2 SSH */
   initialExecutionSubTab?: number;
@@ -62,6 +65,7 @@ const SETTINGS_SECTIONS: {
     items: [
       { index: 0, label: "Model" },
       { index: 1, label: "Advanced" },
+      { index: 13, label: "Search" },
       { index: 2, label: "Permissions" },
       { index: 3, label: "Theme" },
       { index: 10, label: "Harness" },
@@ -91,7 +95,7 @@ const SETTINGS_SECTIONS: {
 ];
 
 const SETTINGS_NAV_FLAT = SETTINGS_SECTIONS.flatMap((s) => s.items);
-const SETTINGS_TAB_MAX = 12;
+const SETTINGS_TAB_MAX = 13;
 
 function clampSettingsTab(i: number): number {
   return Math.min(
@@ -106,6 +110,406 @@ function parseSettingBool(raw: unknown, defaultVal: boolean): boolean {
   if (t === "false" || t === "0" || t === "no" || t === "off") return false;
   if (t === "true" || t === "1" || t === "yes" || t === "on") return true;
   return defaultVal;
+}
+
+type WebSearchEngine = "ddg" | "bing" | "google";
+type WebSearchMethod =
+  | "tavily"
+  | "exa"
+  | "firecrawl"
+  | "parallel"
+  | "google"
+  | "bing"
+  | "ddg";
+
+type SearchMethodOption = {
+  id: WebSearchMethod;
+  label: string;
+  description: string;
+};
+
+const SEARCH_METHOD_DND_TYPE = "settings/search-method";
+
+type SearchMethodDragItem = {
+  id: WebSearchMethod;
+  index: number;
+  fromIndex: number;
+  option: SearchMethodOption;
+  width: number;
+  height: number;
+};
+
+type SearchMethodDragState = {
+  id: WebSearchMethod;
+  fromIndex: number;
+  overIndex: number;
+};
+
+const SEARCH_METHOD_OPTIONS: SearchMethodOption[] = [
+  {
+    id: "tavily",
+    label: "Tavily",
+    description: "需要 Tavily API key；适合通用网页搜索。",
+  },
+  {
+    id: "exa",
+    label: "Exa",
+    description: "需要 Exa API key；偏语义检索和内容提取。",
+  },
+  {
+    id: "firecrawl",
+    label: "Firecrawl",
+    description: "需要 Firecrawl API key；可使用自定义 API base URL。",
+  },
+  {
+    id: "parallel",
+    label: "Parallel",
+    description: "需要 Parallel API key。",
+  },
+  {
+    id: "google",
+    label: "Google",
+    description: "公共 HTML 搜索回退；不需要 API key。",
+  },
+  {
+    id: "bing",
+    label: "Bing",
+    description: "公共 HTML 搜索回退；不需要 API key。",
+  },
+  {
+    id: "ddg",
+    label: "DuckDuckGo",
+    description: "公共 Instant Answer + HTML 搜索回退；不需要 API key。",
+  },
+];
+
+const DEFAULT_WEB_SEARCH_METHODS: WebSearchMethod[] = SEARCH_METHOD_OPTIONS.map(
+  (option) => option.id,
+);
+
+function normalizeWebSearchMethod(raw: unknown): WebSearchMethod | null {
+  const value = String(raw ?? "").trim().toLowerCase();
+  if (value === "tavily") return "tavily";
+  if (value === "exa") return "exa";
+  if (value === "firecrawl") return "firecrawl";
+  if (value === "parallel") return "parallel";
+  if (value === "google") return "google";
+  if (value === "bing") return "bing";
+  if (value === "duckduckgo" || value === "duck-duck-go" || value === "ddg") {
+    return "ddg";
+  }
+  return null;
+}
+
+function normalizeWebSearchMethods(raw: unknown): WebSearchMethod[] {
+  if (!Array.isArray(raw)) return DEFAULT_WEB_SEARCH_METHODS;
+  const out: WebSearchMethod[] = [];
+  for (const item of raw) {
+    const method = normalizeWebSearchMethod(item);
+    if (method && !out.includes(method)) out.push(method);
+  }
+  return out.length > 0 ? out : DEFAULT_WEB_SEARCH_METHODS;
+}
+
+function primaryPublicSearchEngine(
+  methods: WebSearchMethod[],
+  fallback: WebSearchEngine = "ddg",
+): WebSearchEngine {
+  return (
+    methods.find(
+      (method): method is WebSearchEngine =>
+        method === "google" || method === "bing" || method === "ddg",
+    ) ?? fallback
+  );
+}
+
+function normalizeWebSearchEngine(raw: unknown): WebSearchEngine {
+  const value = String(raw ?? "").trim().toLowerCase();
+  if (value === "google") return "google";
+  if (value === "bing") return "bing";
+  if (value === "duckduckgo" || value === "duck-duck-go" || value === "ddg") {
+    return "ddg";
+  }
+  return "ddg";
+}
+
+function searchMethodDragTransform(
+  rowIndex: number,
+  dragState: SearchMethodDragState | null,
+): string | undefined {
+  if (!dragState || dragState.fromIndex === dragState.overIndex) return undefined;
+  if (rowIndex === dragState.fromIndex) return undefined;
+
+  if (
+    dragState.overIndex > dragState.fromIndex &&
+    rowIndex > dragState.fromIndex &&
+    rowIndex <= dragState.overIndex
+  ) {
+    return "translateY(-100%)";
+  }
+
+  if (
+    dragState.overIndex < dragState.fromIndex &&
+    rowIndex >= dragState.overIndex &&
+    rowIndex < dragState.fromIndex
+  ) {
+    return "translateY(100%)";
+  }
+
+  return undefined;
+}
+
+function SearchMethodPriorityRow({
+  option,
+  index,
+  total,
+  isLoading,
+  dragState,
+  onToggle,
+  onDragStart,
+  onDragHover,
+  onDragEnd,
+  onStep,
+}: {
+  option: SearchMethodOption;
+  index: number;
+  total: number;
+  isLoading: boolean;
+  dragState: SearchMethodDragState | null;
+  onToggle: (method: WebSearchMethod, checked: boolean) => void;
+  onDragStart: (method: WebSearchMethod, fromIndex: number) => void;
+  onDragHover: (method: WebSearchMethod, overIndex: number) => void;
+  onDragEnd: (method: WebSearchMethod) => void;
+  onStep: (method: WebSearchMethod, direction: -1 | 1) => void;
+}) {
+  const rowRef = useRef<HTMLDivElement>(null);
+  const isLast = index === total - 1;
+  const isSourceRow = dragState?.id === option.id;
+  const rowTransform = searchMethodDragTransform(index, dragState);
+
+  const [{ isOver }, drop] = useDrop<
+    SearchMethodDragItem,
+    void,
+    { isOver: boolean }
+  >(
+    () => ({
+      accept: SEARCH_METHOD_DND_TYPE,
+      hover(item, monitor) {
+        const node = rowRef.current;
+        if (!node || item.id === option.id) return;
+
+        const dragIndex = item.index;
+        const hoverIndex = index;
+        if (dragIndex === hoverIndex) return;
+
+        const hoverRect = node.getBoundingClientRect();
+        const hoverMiddleY = (hoverRect.bottom - hoverRect.top) / 2;
+        const clientOffset = monitor.getClientOffset();
+        if (!clientOffset) return;
+        const hoverClientY = clientOffset.y - hoverRect.top;
+
+        if (dragIndex < hoverIndex && hoverClientY < hoverMiddleY) return;
+        if (dragIndex > hoverIndex && hoverClientY > hoverMiddleY) return;
+
+        onDragHover(item.id, hoverIndex);
+        item.index = hoverIndex;
+      },
+      drop(item) {
+        if (item.id !== option.id) {
+          onDragHover(item.id, index);
+          item.index = index;
+        }
+      },
+      collect: (monitor) => ({
+        isOver: monitor.isOver({ shallow: true }),
+      }),
+    }),
+    [index, onDragHover, option.id],
+  );
+
+  const [{ isDragging }, drag] = useDrag<
+    SearchMethodDragItem,
+    void,
+    { isDragging: boolean }
+  >(
+    () => ({
+      type: SEARCH_METHOD_DND_TYPE,
+      item: () => {
+        const rect = rowRef.current?.getBoundingClientRect();
+        onDragStart(option.id, index);
+        return {
+          id: option.id,
+          index,
+          fromIndex: index,
+          option,
+          width: rect?.width ?? 360,
+          height: rect?.height ?? 64,
+        };
+      },
+      canDrag: !isLoading,
+      end: (item) => {
+        if (item) onDragEnd(item.id);
+      },
+      collect: (monitor) => ({
+        isDragging: monitor.isDragging(),
+      }),
+    }),
+    [index, isLoading, onDragEnd, onDragStart, option],
+  );
+
+  drag(drop(rowRef));
+
+  return (
+    <Box
+      ref={rowRef}
+      role="listitem"
+      sx={(theme) => ({
+        display: "flex",
+        alignItems: "center",
+        gap: 1,
+        p: 1.25,
+        cursor: isLoading ? "default" : "grab",
+        opacity: isDragging || isSourceRow ? 0 : 1,
+        bgcolor: isOver
+          ? alpha(theme.palette.primary.main, 0.14)
+          : alpha(theme.palette.primary.main, 0.06),
+        boxShadow: isOver
+          ? `inset 0 0 0 2px ${theme.palette.primary.main}`
+          : "none",
+        transition:
+          "transform 180ms ease, background-color 140ms ease, box-shadow 140ms ease, opacity 120ms ease",
+        transform: rowTransform,
+        borderBottom: isLast ? "none" : `1px solid ${theme.palette.divider}`,
+        touchAction: "none",
+        userSelect: "none",
+        WebkitUserSelect: "none",
+        "&:active": {
+          cursor: isLoading ? "default" : "grabbing",
+        },
+      })}
+    >
+      <Box
+        role="button"
+        tabIndex={isLoading ? -1 : 0}
+        aria-label={`拖动 ${option.label} 调整搜索优先级`}
+        sx={{
+          width: 34,
+          height: 34,
+          display: "grid",
+          placeItems: "center",
+          borderRadius: 1,
+          color: "text.secondary",
+          cursor: isLoading ? "default" : "grab",
+          flexShrink: 0,
+          "&:hover": {
+            bgcolor: "action.hover",
+            color: "text.primary",
+          },
+          "&:active": {
+            cursor: isLoading ? "default" : "grabbing",
+          },
+          "&:focus-visible": {
+            outline: "2px solid",
+            outlineColor: "primary.main",
+            outlineOffset: 2,
+          },
+        }}
+      >
+        <DragIndicator fontSize="small" aria-hidden />
+      </Box>
+      <Checkbox
+        checked
+        onChange={(e) => onToggle(option.id, e.target.checked)}
+        disabled={isLoading || total <= 1}
+        size="small"
+        inputProps={{
+          "aria-label": `启用 ${option.label}`,
+        }}
+      />
+      <Box sx={{ flex: 1, minWidth: 0 }}>
+        <Typography variant="body2" fontWeight={600}>
+          {index + 1}. {option.label}
+        </Typography>
+        <Typography variant="caption" color="text.secondary">
+          {option.description}
+        </Typography>
+      </Box>
+      <Box sx={{ display: "flex", gap: 0.5 }}>
+        <Button
+          size="small"
+          variant="outlined"
+          disabled={isLoading || index <= 0}
+          onClick={() => onStep(option.id, -1)}
+        >
+          上移
+        </Button>
+        <Button
+          size="small"
+          variant="outlined"
+          disabled={isLoading || index >= total - 1}
+          onClick={() => onStep(option.id, 1)}
+        >
+          下移
+        </Button>
+      </Box>
+    </Box>
+  );
+}
+
+function SearchMethodDragLayer() {
+  const { item, isDragging, sourceOffset } = useDragLayer((monitor) => ({
+    item: monitor.getItem<SearchMethodDragItem | null>(),
+    isDragging:
+      monitor.isDragging() &&
+      monitor.getItemType() === SEARCH_METHOD_DND_TYPE,
+    sourceOffset: monitor.getSourceClientOffset(),
+  }));
+
+  if (!isDragging || !item || !sourceOffset) return null;
+
+  return (
+    <Box
+      sx={{
+        position: "fixed",
+        pointerEvents: "none",
+        zIndex: 20000,
+        left: 0,
+        top: 0,
+        width: item.width,
+        minHeight: item.height,
+        transform: `translate3d(${sourceOffset.x}px, ${sourceOffset.y}px, 0)`,
+      }}
+    >
+      <Box
+        sx={(theme) => ({
+          display: "flex",
+          alignItems: "center",
+          gap: 1,
+          p: 1.25,
+          minHeight: item.height,
+          borderRadius: 2,
+          border: `1px solid ${theme.palette.primary.main}`,
+          bgcolor: theme.palette.background.paper,
+          boxShadow: theme.shadows[8],
+        })}
+      >
+        <DragIndicator
+          fontSize="small"
+          aria-hidden
+          sx={{ color: "text.secondary", flexShrink: 0, width: 34 }}
+        />
+        <Checkbox checked disabled size="small" />
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography variant="body2" fontWeight={600}>
+            {item.option.label}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            {item.option.description}
+          </Typography>
+        </Box>
+      </Box>
+    </Box>
+  );
 }
 
 // Supported LLM providers with their display names and required fields
@@ -257,8 +661,18 @@ export function Settings({
     useState(true);
   /** LLM 请求超时（秒）——长对话 / 复杂任务需要更大值 */
   const [requestTimeoutSecs, setRequestTimeoutSecs] = useState(600);
-  /** 网页访问是否使用系统/环境代理；默认关闭 */
-  const [webUseProxy, setWebUseProxy] = useState(false);
+  /** 网页访问是否使用系统/环境代理；默认开启 */
+  const [webUseProxy, setWebUseProxy] = useState(true);
+  /** 内置 web_search 的默认公共搜索引擎（兼容旧配置字段） */
+  const [webSearchEngine, setWebSearchEngine] =
+    useState<WebSearchEngine>("ddg");
+  /** 内置 web_search 的启用方式和优先级。 */
+  const [webSearchMethods, setWebSearchMethods] = useState<
+    WebSearchMethod[]
+  >(DEFAULT_WEB_SEARCH_METHODS);
+  const [searchMethodDrag, setSearchMethodDrag] =
+    useState<SearchMethodDragState | null>(null);
+  const searchMethodDragRef = useRef<SearchMethodDragState | null>(null);
 
   // UI state
   const [isLoading, setIsLoading] = useState(false);
@@ -279,6 +693,10 @@ export function Settings({
       setActiveTab(clampSettingsTab(initialTab));
     }
   }, [open, initialTab]);
+
+  useEffect(() => {
+    searchMethodDragRef.current = searchMethodDrag;
+  }, [searchMethodDrag]);
 
   // Do NOT auto-fill model in a useEffect([provider]) when model is empty.
   // On restart, loadSavedConfig applies localStorage synchronously before the first await,
@@ -430,17 +848,87 @@ export function Settings({
         const gs = await invoke<{
           timeout?: number;
           webUseProxy?: boolean;
+          webSearchEngine?: string;
+          webSearchMethods?: string[];
         }>("get_global_settings", {});
         if (gs.timeout != null && gs.timeout > 0) {
           setRequestTimeoutSecs(gs.timeout);
         }
-        setWebUseProxy(gs.webUseProxy === true);
+        setWebUseProxy(gs.webUseProxy !== false);
+        setWebSearchEngine(normalizeWebSearchEngine(gs.webSearchEngine));
+        setWebSearchMethods(normalizeWebSearchMethods(gs.webSearchMethods));
       } catch {
         /* ignore */
       }
     } catch (error) {
       console.log("No saved config found");
     }
+  };
+
+  const selectedSearchMethodOptions = webSearchMethods
+    .map((method) => SEARCH_METHOD_OPTIONS.find((option) => option.id === method))
+    .filter(
+      (option): option is (typeof SEARCH_METHOD_OPTIONS)[number] =>
+        Boolean(option),
+    );
+  const inactiveSearchMethodOptions = SEARCH_METHOD_OPTIONS.filter(
+    (option) => !webSearchMethods.includes(option.id),
+  );
+
+  const toggleWebSearchMethod = (method: WebSearchMethod, checked: boolean) => {
+    setWebSearchMethods((current) => {
+      if (checked) {
+        return current.includes(method) ? current : [...current, method];
+      }
+      if (current.length <= 1) return current;
+      return current.filter((item) => item !== method);
+    });
+  };
+
+  const moveWebSearchMethod = (method: WebSearchMethod, direction: -1 | 1) => {
+    setWebSearchMethods((current) => {
+      const index = current.indexOf(method);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= current.length) {
+        return current;
+      }
+      const next = [...current];
+      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+      return next;
+    });
+  };
+
+  const startWebSearchMethodDrag = (
+    method: WebSearchMethod,
+    fromIndex: number,
+  ) => {
+    const next = { id: method, fromIndex, overIndex: fromIndex };
+    searchMethodDragRef.current = next;
+    setSearchMethodDrag(next);
+  };
+
+  const previewWebSearchMethodDrag = (
+    method: WebSearchMethod,
+    overIndex: number,
+  ) => {
+    setSearchMethodDrag((current) => {
+      if (!current || current.id !== method) return current;
+      if (current.overIndex === overIndex) return current;
+      const next = { ...current, overIndex };
+      searchMethodDragRef.current = next;
+      return next;
+    });
+  };
+
+  const finishWebSearchMethodDrag = (method: WebSearchMethod) => {
+    const latest = searchMethodDragRef.current;
+    if (latest?.id === method && latest.overIndex !== latest.fromIndex) {
+      setWebSearchMethods((current) =>
+        moveItemToIndex(current, method, latest.overIndex),
+      );
+    }
+    searchMethodDragRef.current = null;
+    setSearchMethodDrag(null);
   };
 
   const handleSaveAdvanced = async () => {
@@ -473,6 +961,8 @@ export function Settings({
       await invoke("save_global_settings_to_config", {
         timeout: Math.max(30, requestTimeoutSecs),
         webUseProxy,
+        webSearchEngine: primaryPublicSearchEngine(webSearchMethods, webSearchEngine),
+        webSearchMethods,
       });
       localStorage.setItem(WEB_SEARCH_KEYS_STORAGE, JSON.stringify(ws));
       localStorage.removeItem("omiga_tavily_search_api_key");
@@ -480,13 +970,54 @@ export function Settings({
 
       setMessage({
         type: "success",
-        text: "Advanced settings saved (request timeout, web search keys, web proxy, post-turn summary & follow-up suggestions)",
+        text: "Advanced settings saved (request timeout, search priority, web proxy, post-turn summary & follow-up suggestions)",
       });
     } catch (error) {
       console.error("Failed to save advanced settings:", error);
       setMessage({
         type: "error",
         text: `Failed to save: ${error}`,
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSaveSearchSettings = async () => {
+    setIsLoading(true);
+    setMessage(null);
+    try {
+      const ws = {
+        tavily: tavilyApiKey.trim(),
+        exa: exaApiKey.trim(),
+        parallel: parallelApiKey.trim(),
+        firecrawl: firecrawlApiKey.trim(),
+        firecrawlUrl: firecrawlUrl.trim(),
+      };
+      await invoke("set_web_search_api_keys", {
+        tavily: ws.tavily,
+        exa: ws.exa,
+        parallel: ws.parallel,
+        firecrawl: ws.firecrawl,
+        firecrawlUrl: ws.firecrawlUrl,
+      });
+      await invoke("save_global_settings_to_config", {
+        webUseProxy,
+        webSearchEngine: primaryPublicSearchEngine(webSearchMethods, webSearchEngine),
+        webSearchMethods,
+      });
+      localStorage.setItem(WEB_SEARCH_KEYS_STORAGE, JSON.stringify(ws));
+      localStorage.removeItem("omiga_tavily_search_api_key");
+      localStorage.removeItem("omiga_brave_search_api_key");
+      setMessage({
+        type: "success",
+        text: "Search settings saved (method priority, proxy, and provider keys)",
+      });
+    } catch (error) {
+      console.error("Failed to save search settings:", error);
+      setMessage({
+        type: "error",
+        text: `Failed to save search settings: ${error}`,
       });
     } finally {
       setIsLoading(false);
@@ -766,7 +1297,7 @@ export function Settings({
                         网页访问使用代理
                       </Typography>
                       <Typography variant="caption" color="text.secondary">
-                        仅影响内置 web_search / web_fetch。关闭时强制直连；开启后才会读取系统或环境代理设置。
+                        仅影响内置 web_search / web_fetch。默认读取系统或环境代理；关闭时强制直连。
                       </Typography>
                     </Box>
                   }
@@ -788,7 +1319,7 @@ export function Settings({
                   value={tavilyApiKey}
                   onChange={(e) => setTavilyApiKey(e.target.value)}
                   disabled={isLoading}
-                  helperText="Used by built-in web_search (provider order: Tavily → Exa → Firecrawl → Parallel → DuckDuckGo). Overrides OMIGA_TAVILY_API_KEY / TAVILY_API_KEY when set."
+                  helperText="Used by built-in web_search when Tavily is enabled in Search priority. Overrides OMIGA_TAVILY_API_KEY / TAVILY_API_KEY when set."
                   InputProps={{
                     endAdornment: (
                       <InputAdornment position="end">
@@ -945,6 +1476,289 @@ export function Settings({
               </Box>
             )}
 
+            {activeTab === 13 && (
+              <Box>
+                <Typography variant="h6" sx={{ mb: 1 }}>
+                  搜索设置
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                  配置内置 <code>web_search</code> 的搜索方式、优先级、代理行为和可选 API key。
+                  运行时会严格按下方顺序依次尝试；某种方式失败或无可用结果时再尝试下一种，
+                  每种方式最多尝试 3 次。
+                </Typography>
+
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "block", mb: 1, fontWeight: 600 }}
+                >
+                  搜索方式与优先级
+                </Typography>
+                <Box
+                  role="list"
+                  aria-label="已启用搜索方式排序"
+                  sx={(theme) => ({
+                    border: `1px solid ${theme.palette.divider}`,
+                    borderRadius: 2,
+                    overflow: "hidden",
+                    mb: 1,
+                  })}
+                >
+                  {selectedSearchMethodOptions.map((option, index) => (
+                    <SearchMethodPriorityRow
+                      key={option.id}
+                      option={option}
+                      index={index}
+                      total={selectedSearchMethodOptions.length}
+                      isLoading={isLoading}
+                      dragState={searchMethodDrag}
+                      onToggle={toggleWebSearchMethod}
+                      onDragStart={startWebSearchMethodDrag}
+                      onDragHover={previewWebSearchMethodDrag}
+                      onDragEnd={finishWebSearchMethodDrag}
+                      onStep={moveWebSearchMethod}
+                    />
+                  ))}
+                </Box>
+                <SearchMethodDragLayer />
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "block", mb: 2 }}
+                >
+                  拖动整行或左侧手柄时，条目会跟随鼠标并预览上下滑动；释放鼠标后才提交新顺序。
+                  上移 / 下移按钮保留为键盘和无鼠标环境的备用操作。
+                </Typography>
+
+                {inactiveSearchMethodOptions.length > 0 && (
+                  <Box
+                    sx={(theme) => ({
+                      border: `1px dashed ${theme.palette.divider}`,
+                      borderRadius: 2,
+                      overflow: "hidden",
+                      mb: 2,
+                    })}
+                  >
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ display: "block", px: 1.25, pt: 1.25, pb: 0.5 }}
+                    >
+                      未启用
+                    </Typography>
+                    {inactiveSearchMethodOptions.map((option, index) => {
+                      const isLast = index === inactiveSearchMethodOptions.length - 1;
+                      return (
+                        <Box
+                          key={option.id}
+                          sx={(theme) => ({
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 1,
+                            p: 1.25,
+                            bgcolor: "transparent",
+                            borderBottom: isLast
+                              ? "none"
+                              : `1px solid ${theme.palette.divider}`,
+                          })}
+                        >
+                          <Checkbox
+                            checked={false}
+                            onChange={(e) =>
+                              toggleWebSearchMethod(option.id, e.target.checked)
+                            }
+                            disabled={isLoading}
+                            size="small"
+                            inputProps={{
+                              "aria-label": `启用 ${option.label}`,
+                            }}
+                          />
+                          <Box sx={{ flex: 1, minWidth: 0 }}>
+                            <Typography variant="body2" fontWeight={600}>
+                              {option.label}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary">
+                              {option.description}
+                            </Typography>
+                          </Box>
+                        </Box>
+                      );
+                    })}
+                  </Box>
+                )}
+
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "block", mb: 3 }}
+                >
+                  当前顺序：{" "}
+                  {webSearchMethods
+                    .map(
+                      (method) =>
+                        SEARCH_METHOD_OPTIONS.find((option) => option.id === method)
+                          ?.label ?? method,
+                    )
+                    .join(" → ")}
+                </Typography>
+
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={webUseProxy}
+                      onChange={(_, v) => setWebUseProxy(v)}
+                      disabled={isLoading}
+                      color="primary"
+                    />
+                  }
+                  label={
+                    <Box>
+                      <Typography variant="body2" fontWeight={600}>
+                        网页访问使用代理
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        开启时读取系统或环境代理；关闭时内置 web_search / web_fetch 强制直连。
+                      </Typography>
+                    </Box>
+                  }
+                  sx={{
+                    alignItems: "flex-start",
+                    mb: 3,
+                    ml: 0,
+                    "& .MuiFormControlLabel-label": { mt: 0.25 },
+                  }}
+                />
+
+                <Divider sx={{ mb: 3 }} />
+
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "block", mb: 1, fontWeight: 600 }}
+                >
+                  可选搜索 API Provider
+                </Typography>
+
+                <TextField
+                  fullWidth
+                  type={showTavilyKey ? "text" : "password"}
+                  label="Tavily API key (optional)"
+                  placeholder="tvly-..."
+                  value={tavilyApiKey}
+                  onChange={(e) => setTavilyApiKey(e.target.value)}
+                  disabled={isLoading}
+                  helperText="Overrides OMIGA_TAVILY_API_KEY / TAVILY_API_KEY when set."
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton
+                          onClick={() => setShowTavilyKey(!showTavilyKey)}
+                          edge="end"
+                          size="small"
+                        >
+                          {showTavilyKey ? <VisibilityOff /> : <Visibility />}
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  }}
+                  sx={{ mb: 2 }}
+                />
+
+                <TextField
+                  fullWidth
+                  type={showExaKey ? "text" : "password"}
+                  label="Exa API key (optional)"
+                  placeholder="exa-..."
+                  value={exaApiKey}
+                  onChange={(e) => setExaApiKey(e.target.value)}
+                  disabled={isLoading}
+                  helperText="Overrides OMIGA_EXA_API_KEY / EXA_API_KEY."
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton
+                          onClick={() => setShowExaKey(!showExaKey)}
+                          edge="end"
+                          size="small"
+                        >
+                          {showExaKey ? <VisibilityOff /> : <Visibility />}
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  }}
+                  sx={{ mb: 2 }}
+                />
+
+                <TextField
+                  fullWidth
+                  type={showParallelKey ? "text" : "password"}
+                  label="Parallel API key (optional)"
+                  value={parallelApiKey}
+                  onChange={(e) => setParallelApiKey(e.target.value)}
+                  disabled={isLoading}
+                  helperText="Overrides OMIGA_PARALLEL_API_KEY / PARALLEL_API_KEY."
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton
+                          onClick={() => setShowParallelKey(!showParallelKey)}
+                          edge="end"
+                          size="small"
+                        >
+                          {showParallelKey ? <VisibilityOff /> : <Visibility />}
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  }}
+                  sx={{ mb: 2 }}
+                />
+
+                <TextField
+                  fullWidth
+                  type={showFirecrawlKey ? "text" : "password"}
+                  label="Firecrawl API key (optional)"
+                  value={firecrawlApiKey}
+                  onChange={(e) => setFirecrawlApiKey(e.target.value)}
+                  disabled={isLoading}
+                  helperText="Overrides OMIGA_FIRECRAWL_API_KEY / FIRECRAWL_API_KEY."
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton
+                          onClick={() => setShowFirecrawlKey(!showFirecrawlKey)}
+                          edge="end"
+                          size="small"
+                        >
+                          {showFirecrawlKey ? <VisibilityOff /> : <Visibility />}
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  }}
+                  sx={{ mb: 2 }}
+                />
+
+                <TextField
+                  fullWidth
+                  label="Firecrawl API base URL (optional)"
+                  placeholder="https://api.firecrawl.dev"
+                  value={firecrawlUrl}
+                  onChange={(e) => setFirecrawlUrl(e.target.value)}
+                  disabled={isLoading}
+                  helperText="Self-hosted or alternate endpoint. Overrides OMIGA_FIRECRAWL_API_URL."
+                  sx={{ mb: 3 }}
+                />
+
+                <Button
+                  variant="contained"
+                  onClick={() => void handleSaveSearchSettings()}
+                  disabled={isLoading}
+                  sx={{ mb: 2 }}
+                >
+                  Save search settings
+                </Button>
+              </Box>
+            )}
+
             {activeTab === 2 && (
               <Box>
                 <PermissionSettingsTab projectPath={projectPath} />
@@ -1074,10 +1888,6 @@ export function Settings({
                 {currentSessionId && projectPath ? (
                   <Box display="flex" flexDirection="column" gap={2}>
                     <AgentScheduleLauncher
-                      sessionId={currentSessionId}
-                      projectRoot={projectPath}
-                    />
-                    <MockScenarioLauncher
                       sessionId={currentSessionId}
                       projectRoot={projectPath}
                     />

@@ -1476,6 +1476,8 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
         };
         let ctx = {
             let web_use_proxy = crate::llm::config::load_web_use_proxy_setting();
+            let web_search_engine = crate::llm::config::load_web_search_engine_setting();
+            let web_search_methods = crate::llm::config::load_web_search_methods_setting();
             let base = ToolContext::new(project_root.to_path_buf())
                 .with_session_id(Some(session_id.to_string()))
                 .with_working_memory_context(working_memory_context)
@@ -1484,6 +1486,8 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                 .with_plan_mode(agent_runtime.and_then(|r| r.plan_mode_flag.clone()))
                 .with_web_search_api_keys(web_search_api_keys.clone())
                 .with_web_use_proxy(web_use_proxy)
+                .with_web_search_engine(web_search_engine)
+                .with_web_search_methods(web_search_methods)
                 .with_tool_results_dir(tool_results_dir.to_path_buf())
                 .with_execution_environment(execution_environment.clone())
                 .with_ssh_server(ssh_server.clone())

@@ -352,6 +352,14 @@ pub struct GlobalSettings {
     /// Whether web-access tools should honor system/env proxy settings.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_use_proxy: Option<bool>,
+
+    /// Preferred public search engine for built-in `web_search`: ddg, bing, or google.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_search_engine: Option<String>,
+
+    /// Ordered enabled methods for built-in `web_search`, e.g. ["tavily", "google", "ddg"].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_search_methods: Option<Vec<String>>,
 }
 
 impl LlmConfigFile {
@@ -529,7 +537,9 @@ impl LlmConfigFile {
                 temperature: Some(0.7),
                 timeout: Some(600),
                 enable_tools: Some(true),
-                web_use_proxy: Some(false),
+                web_use_proxy: Some(true),
+                web_search_engine: Some("ddg".to_string()),
+                web_search_methods: Some(default_web_search_methods()),
             }),
             execution_envs: None,
             terminal: None,
@@ -593,7 +603,9 @@ impl LlmConfigFile {
                 temperature: Some(0.7),
                 timeout: Some(600),
                 enable_tools: Some(true),
-                web_use_proxy: Some(false),
+                web_use_proxy: Some(true),
+                web_search_engine: Some("ddg".to_string()),
+                web_search_methods: Some(default_web_search_methods()),
             }),
             execution_envs: None,
             terminal: None,
@@ -673,6 +685,8 @@ settings:
   timeout: {}
   enable_tools: {}
   web_use_proxy: {}
+  web_search_engine: {}
+  web_search_methods: [{}]
 "#,
             self.version,
             self.default_provider.as_deref().unwrap_or("anthropic"),
@@ -703,8 +717,76 @@ settings:
             self.settings
                 .as_ref()
                 .and_then(|s| s.web_use_proxy)
-                .unwrap_or(false)
+                .unwrap_or(true),
+            self.settings
+                .as_ref()
+                .and_then(|s| s.web_search_engine.as_deref())
+                .map(normalize_web_search_engine_name)
+                .unwrap_or_else(|| "ddg".to_string()),
+            self.settings
+                .as_ref()
+                .and_then(|s| s.web_search_methods.as_ref())
+                .map(|methods| normalize_web_search_methods(methods).join(", "))
+                .unwrap_or_else(|| default_web_search_methods().join(", "))
         )
+    }
+}
+
+pub fn default_web_search_methods() -> Vec<String> {
+    [
+        "tavily",
+        "exa",
+        "firecrawl",
+        "parallel",
+        "google",
+        "bing",
+        "ddg",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+fn normalize_web_search_engine_name(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "google" => "google".to_string(),
+        "bing" => "bing".to_string(),
+        "duckduckgo" | "duck-duck-go" | "ddg" => "ddg".to_string(),
+        _ => "ddg".to_string(),
+    }
+}
+
+fn normalize_web_search_method_name(value: &str) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "tavily" => Some("tavily".to_string()),
+        "exa" => Some("exa".to_string()),
+        "firecrawl" => Some("firecrawl".to_string()),
+        "parallel" => Some("parallel".to_string()),
+        "pubmed" | "pubmed-mcp" | "pubmed_mcp" => Some("pubmed_mcp".to_string()),
+        "browser" | "browser-mcp" | "browser_mcp" | "mcp-browser" | "mcp_browser" => {
+            Some("browser_mcp".to_string())
+        }
+        "google" => Some("google".to_string()),
+        "bing" => Some("bing".to_string()),
+        "duckduckgo" | "duck-duck-go" | "ddg" => Some("ddg".to_string()),
+        _ => None,
+    }
+}
+
+pub fn normalize_web_search_methods(values: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in values {
+        let Some(method) = normalize_web_search_method_name(value) else {
+            continue;
+        };
+        if !out.contains(&method) {
+            out.push(method);
+        }
+    }
+    if out.is_empty() {
+        default_web_search_methods()
+    } else {
+        out
     }
 }
 
@@ -712,7 +794,23 @@ pub fn load_web_use_proxy_setting() -> bool {
     load_config_file()
         .ok()
         .and_then(|cfg| cfg.settings.and_then(|s| s.web_use_proxy))
-        .unwrap_or(false)
+        .unwrap_or(true)
+}
+
+pub fn load_web_search_engine_setting() -> String {
+    load_config_file()
+        .ok()
+        .and_then(|cfg| cfg.settings.and_then(|s| s.web_search_engine))
+        .map(|s| normalize_web_search_engine_name(&s))
+        .unwrap_or_else(|| "ddg".to_string())
+}
+
+pub fn load_web_search_methods_setting() -> Vec<String> {
+    load_config_file()
+        .ok()
+        .and_then(|cfg| cfg.settings.and_then(|s| s.web_search_methods))
+        .map(|methods| normalize_web_search_methods(&methods))
+        .unwrap_or_else(default_web_search_methods)
 }
 
 fn format_provider_yaml(name: &str, cfg: &ProviderConfig) -> String {

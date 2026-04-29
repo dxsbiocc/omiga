@@ -37,3 +37,6 @@ settings:
   temperature: 0.7
   timeout: 600
   enable_tools: true
+  web_use_proxy: true
+  web_search_engine: ddg
+  web_search_methods: [tavily, exa, firecrawl, parallel, google, bing, ddg]
