@@ -1924,7 +1924,8 @@ function buildMarkdownComponents(
         component="blockquote"
         sx={{
           my: 1.5,
-          pl: 2,
+          mx: 0,
+          pl: 1.5,
           borderLeft: 3,
           borderColor: isAgent
             ? CHAT.agentBubbleBorder
