@@ -337,7 +337,7 @@ pub fn entry_from_fetch(
     }
 }
 
-/// Build lightweight entries from web_search result text (extracts URLs from output).
+/// Build lightweight entries from search result text (extracts URLs from output).
 pub fn entries_from_search_output(
     output: &str,
     session_id: Option<&str>,

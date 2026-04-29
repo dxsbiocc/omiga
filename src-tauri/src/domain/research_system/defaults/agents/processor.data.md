@@ -16,7 +16,7 @@ tools:
   allowed:
     - file_search
   forbidden:
-    - web_search
+    - search
 permissions:
   read:
     - artifact_store

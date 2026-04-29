@@ -203,6 +203,36 @@ impl AgentLlmRuntime {
     }
 }
 
+struct ActiveRoundCleanup {
+    active_rounds: Arc<Mutex<HashMap<String, RoundCancellationState>>>,
+    message_id: String,
+}
+
+impl ActiveRoundCleanup {
+    fn new(
+        active_rounds: Arc<Mutex<HashMap<String, RoundCancellationState>>>,
+        message_id: String,
+    ) -> Self {
+        Self {
+            active_rounds,
+            message_id,
+        }
+    }
+}
+
+impl Drop for ActiveRoundCleanup {
+    fn drop(&mut self) {
+        let active_rounds = self.active_rounds.clone();
+        let message_id = self.message_id.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let mut active_rounds = active_rounds.lock().await;
+                active_rounds.remove(&message_id);
+            });
+        }
+    }
+}
+
 pub use crate::domain::chat_state::{
     ChatState, PendingToolCall, RoundCancellationState, SessionRuntimeState,
 };
@@ -419,6 +449,7 @@ struct RuntimeConstraintBlockRequest<'a> {
     preflight_skip_turn_summary: bool,
     turn_token_usage: &'a Option<crate::llm::TokenUsage>,
     provider_name: &'a str,
+    persist_original_assistant: bool,
 }
 
 async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockRequest<'_>) {
@@ -441,73 +472,79 @@ async fn handle_runtime_constraint_block_main(request: RuntimeConstraintBlockReq
         preflight_skip_turn_summary,
         turn_token_usage,
         provider_name,
+        persist_original_assistant,
     } = request;
     let assistant_msg_id = uuid::Uuid::new_v4().to_string();
     let tool_calls_json = tool_calls_json_opt(tool_calls);
     let reasoning_save = (!assistant_reasoning.is_empty()).then_some(assistant_reasoning);
-    if let Err(e) = repo
-        .save_message(NewMessageRecord {
-            id: &assistant_msg_id,
-            session_id,
-            role: "assistant",
-            content: assistant_text,
-            tool_calls: tool_calls_json.as_deref(),
-            tool_call_id: None,
-            token_usage_json: None,
-            reasoning_content: reasoning_save,
-            follow_up_suggestions_json: None,
-            turn_summary: None,
-        })
-        .await
-    {
-        tracing::warn!(
-            "Failed to save assistant message before runtime constraint block: {}",
-            e
-        );
-    }
-
-    {
-        let mut sessions_guard = sessions.write().await;
-        if let Some(runtime) = sessions_guard.get_mut(session_id) {
-            let tc = completed_to_tool_calls(tool_calls);
-            let rc = (!assistant_reasoning.is_empty()).then(|| assistant_reasoning.to_string());
-            runtime
-                .session
-                .add_assistant_message_with_tools(assistant_text, tc, rc);
+    if persist_original_assistant {
+        if let Err(e) = repo
+            .save_message(NewMessageRecord {
+                id: &assistant_msg_id,
+                session_id,
+                role: "assistant",
+                content: assistant_text,
+                tool_calls: tool_calls_json.as_deref(),
+                tool_call_id: None,
+                token_usage_json: None,
+                reasoning_content: reasoning_save,
+                follow_up_suggestions_json: None,
+                turn_summary: None,
+            })
+            .await
+        {
+            tracing::warn!(
+                "Failed to save assistant message before runtime constraint block: {}",
+                e
+            );
         }
-    }
 
-    let blocked_batch: Vec<(String, String, Option<String>)> = tool_calls
-        .iter()
-        .map(|(id, _name, _arguments)| (id.clone(), block.tool_result_message.to_string(), None))
-        .collect();
-    if let Err(e) = repo
-        .save_tool_results_batch(session_id, &blocked_batch)
-        .await
-    {
-        tracing::warn!(
-            "Failed to save runtime-constraint blocked tool results batch: {}",
-            e
-        );
-    }
-
-    {
-        let mut sessions_guard = sessions.write().await;
-        if let Some(runtime) = sessions_guard.get_mut(session_id) {
-            for (tool_use_id, tool_name, arguments) in tool_calls {
+        {
+            let mut sessions_guard = sessions.write().await;
+            if let Some(runtime) = sessions_guard.get_mut(session_id) {
+                let tc = completed_to_tool_calls(tool_calls);
+                let rc = (!assistant_reasoning.is_empty()).then(|| assistant_reasoning.to_string());
                 runtime
                     .session
-                    .add_tool_result(tool_use_id.clone(), block.tool_result_message.to_string());
-                let _ = app.emit(
-                    &format!("chat-stream-{}", message_id),
-                    &StreamOutputItem::ToolResult {
-                        tool_use_id: tool_use_id.clone(),
-                        name: tool_name.clone(),
-                        input: arguments.clone(),
-                        output: block.tool_result_message.to_string(),
-                        is_error: true,
-                    },
-                );
+                    .add_assistant_message_with_tools(assistant_text, tc, rc);
+            }
+        }
+
+        let blocked_batch: Vec<(String, String, Option<String>)> = tool_calls
+            .iter()
+            .map(|(id, _name, _arguments)| {
+                (id.clone(), block.tool_result_message.to_string(), None)
+            })
+            .collect();
+        if let Err(e) = repo
+            .save_tool_results_batch(session_id, &blocked_batch)
+            .await
+        {
+            tracing::warn!(
+                "Failed to save runtime-constraint blocked tool results batch: {}",
+                e
+            );
+        }
+
+        {
+            let mut sessions_guard = sessions.write().await;
+            if let Some(runtime) = sessions_guard.get_mut(session_id) {
+                for (tool_use_id, tool_name, arguments) in tool_calls {
+                    runtime.session.add_tool_result(
+                        tool_use_id.clone(),
+                        block.tool_result_message.to_string(),
+                    );
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: arguments.clone(),
+                            output: block.tool_result_message.to_string(),
+                            is_error: true,
+                        },
+                    );
+                }
             }
         }
     }
@@ -3030,6 +3067,13 @@ pub async fn send_message(
 
     let round_cancel_spawn = round_cancel.clone();
     tokio::spawn(async move {
+        // Keep this round cancellable for the entire assistant/tool loop. Previously the
+        // active-round entry was removed after the first model response, so cancelling during
+        // tool execution only updated SQLite; the background task kept writing follow-up
+        // assistant messages and could interleave another round's tool result sequence.
+        let _active_round_cleanup =
+            ActiveRoundCleanup::new(active_rounds_clone.clone(), message_id_clone.clone());
+
         // Give the frontend a short window to receive `message_id` from `send_message`
         // and subscribe to `chat-stream-{message_id}` before the first stream event.
         // Without this, very fast failures/responses can be emitted before the listener
@@ -3259,11 +3303,6 @@ pub async fn send_message(
         };
         merge_turn_token_usage(&mut turn_token_usage, usage_first);
 
-        {
-            let mut active_rounds = active_rounds_clone.lock().await;
-            active_rounds.remove(&message_id_clone);
-        }
-
         if was_cancelled {
             persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
             update_ralph_phase_if_needed(
@@ -3351,9 +3390,61 @@ pub async fn send_message(
                 preflight_skip_turn_summary,
                 turn_token_usage: &turn_token_usage,
                 provider_name: &llm_config_for_spawn.provider.to_string(),
+                persist_original_assistant: true,
             })
             .await;
             return;
+        }
+
+        if pending_tool_calls.is_empty() {
+            let no_pending_tool_names: Vec<String> = Vec::new();
+            if let Some(block) = constraint_harness.post_response_block(
+                &crate::domain::runtime_constraints::PostResponseConstraintContext {
+                    request_text: &request_text_for_constraints,
+                    assistant_text: &assistant_text,
+                    pending_tool_names: &no_pending_tool_names,
+                    is_subagent: false,
+                },
+                &constraint_state,
+            ) {
+                constraint_state.mark_clarification_requested();
+                emit_runtime_constraint_metadata(
+                    &app_clone,
+                    &repo_clone,
+                    &session_id_clone,
+                    &round_id_clone,
+                    &message_id_clone,
+                    "runtime_constraints.post_response_block",
+                    serde_json::json!({
+                        "id": block.id,
+                        "assistant_response": block.assistant_response,
+                    }),
+                )
+                .await;
+                handle_runtime_constraint_block_main(RuntimeConstraintBlockRequest {
+                    app: &app_clone,
+                    client: client.as_ref(),
+                    repo: repo_clone.clone(),
+                    sessions: &sessions_clone,
+                    session_id: &session_id_clone,
+                    round_id: &round_id_clone,
+                    message_id: &message_id_clone,
+                    user_message: &request_text_for_constraints,
+                    assistant_text: &assistant_text,
+                    assistant_reasoning: &assistant_reasoning,
+                    tool_calls: &pending_tool_calls,
+                    block: &block,
+                    tool_results_dir: &tool_results_dir,
+                    ask_user_waiters: ask_user_waiters_clone.clone(),
+                    cancel_flag: cancel_flag.clone(),
+                    preflight_skip_turn_summary,
+                    turn_token_usage: &turn_token_usage,
+                    provider_name: &llm_config_for_spawn.provider.to_string(),
+                    persist_original_assistant: false,
+                })
+                .await;
+                return;
+            }
         }
 
         if agent_runtime.runtime_constraints_config.buffer_responses
@@ -3679,7 +3770,7 @@ pub async fn send_message(
                     .map(|(_, tool_name, _)| tool_name.as_str()),
             );
 
-            let tool_results = execute_tool_calls(ToolExecutionRequest {
+            let mut tool_results = execute_tool_calls(ToolExecutionRequest {
                 tool_calls: &pending_tool_calls,
                 app: &app_clone,
                 message_id: &message_id_clone,
@@ -3701,6 +3792,22 @@ pub async fn send_message(
                 env_store: agent_runtime.env_store.clone(),
             })
             .await;
+
+            // Preserve the provider-required assistant(tool_calls) -> tool(...) sequence even
+            // when a cancellation-aware tool exits without returning a row for every call.
+            let returned_tool_ids: HashSet<String> = tool_results
+                .iter()
+                .map(|(tool_use_id, _, _)| tool_use_id.clone())
+                .collect();
+            for (tool_use_id, tool_name, _) in &pending_tool_calls {
+                if !returned_tool_ids.contains(tool_use_id) {
+                    tool_results.push((
+                        tool_use_id.clone(),
+                        format!("Tool `{tool_name}` was cancelled before it returned a result."),
+                        true,
+                    ));
+                }
+            }
 
             {
                 let repo = &*repo_clone;
@@ -3727,6 +3834,20 @@ pub async fn send_message(
             }
 
             persist_session_tool_state(&sessions_clone, &repo_clone, &session_id_clone).await;
+            if *cancel_flag.read().await || round_cancel_spawn.is_cancelled() {
+                let _ = repo_clone
+                    .cancel_round(&round_id_clone, Some("User cancelled"))
+                    .await;
+                let _ = app_clone.emit(
+                    &format!("chat-stream-{}", message_id_clone),
+                    &StreamOutputItem::Text("\n\n[Cancelled]".to_string()),
+                );
+                let _ = app_clone.emit(
+                    &format!("chat-stream-{}", message_id_clone),
+                    &StreamOutputItem::Cancelled,
+                );
+                return;
+            }
             update_ralph_phase_if_needed(
                 mode_lifecycle_context!(
                     is_ralph_mode_for_spawn,
@@ -4104,9 +4225,61 @@ pub async fn send_message(
                     preflight_skip_turn_summary,
                     turn_token_usage: &turn_token_usage,
                     provider_name: &llm_config_for_spawn.provider.to_string(),
+                    persist_original_assistant: true,
                 })
                 .await;
                 return;
+            }
+
+            if next_tools.is_empty() {
+                let no_pending_tool_names: Vec<String> = Vec::new();
+                if let Some(block) = constraint_harness.post_response_block(
+                    &crate::domain::runtime_constraints::PostResponseConstraintContext {
+                        request_text: &request_text_for_constraints,
+                        assistant_text: &next_text,
+                        pending_tool_names: &no_pending_tool_names,
+                        is_subagent: false,
+                    },
+                    &constraint_state,
+                ) {
+                    constraint_state.mark_clarification_requested();
+                    emit_runtime_constraint_metadata(
+                        &app_clone,
+                        &repo_clone,
+                        &session_id_clone,
+                        &round_id_clone,
+                        &message_id_clone,
+                        "runtime_constraints.post_response_block",
+                        serde_json::json!({
+                            "id": block.id,
+                            "assistant_response": block.assistant_response,
+                        }),
+                    )
+                    .await;
+                    handle_runtime_constraint_block_main(RuntimeConstraintBlockRequest {
+                        app: &app_clone,
+                        client: client.as_ref(),
+                        repo: repo_clone.clone(),
+                        sessions: &sessions_clone,
+                        session_id: &session_id_clone,
+                        round_id: &round_id_clone,
+                        message_id: &message_id_clone,
+                        user_message: &request_text_for_constraints,
+                        assistant_text: &next_text,
+                        assistant_reasoning: &next_reasoning,
+                        tool_calls: &next_tools,
+                        block: &block,
+                        tool_results_dir: &tool_results_dir,
+                        ask_user_waiters: ask_user_waiters_clone.clone(),
+                        cancel_flag: cancel_flag.clone(),
+                        preflight_skip_turn_summary,
+                        turn_token_usage: &turn_token_usage,
+                        provider_name: &llm_config_for_spawn.provider.to_string(),
+                        persist_original_assistant: false,
+                    })
+                    .await;
+                    return;
+                }
             }
 
             if agent_runtime.runtime_constraints_config.buffer_responses && !next_tools.is_empty() {

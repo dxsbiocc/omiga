@@ -45,8 +45,8 @@ impl AgentDefinition for DeepResearchAgent {
         // SendUserMessage excluded: output must land in the blackboard so the Leader
         // synthesis step can consolidate citations and present a single coherent reply.
         Some(vec![
-            "web_search".to_string(),
-            "web_fetch".to_string(),
+            "search".to_string(),
+            "fetch".to_string(),
             "recall".to_string(),
             "file_read".to_string(),
             "todo_write".to_string(),

@@ -87,10 +87,10 @@ function inferIntent(toolNameRaw: string, args: AnyArgs): { title: string; detai
   if (toolName === "grep" || toolName === "Grep" || toolName === "ripgrep" || toolName === "Ripgrep") {
     return { title: "搜索内容" };
   }
-  if (toolName === "web_fetch" || toolName === "WebFetch") {
+  if (toolName === "fetch" || toolName === "Fetch") {
     return { title: "访问网页" };
   }
-  if (toolName === "web_search" || toolName === "WebSearch") {
+  if (toolName === "search" || toolName === "Search") {
     return { title: "联网搜索" };
   }
   if (toolName === "bash" || toolName === "Bash") {

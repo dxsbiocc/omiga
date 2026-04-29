@@ -1502,10 +1502,10 @@ pub(super) fn is_parallelizable_tool(tool_name: &str) -> bool {
     is_safe_mcp
         || matches!(
             tool_name,
-            "web_search"
-                | "WebSearch"
-                | "web_fetch"
-                | "WebFetch"
+            "search"
+                | "Search"
+                | "fetch"
+                | "Fetch"
                 | "file_read"
                 | "Read"
                 | "glob"

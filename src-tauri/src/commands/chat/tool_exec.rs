@@ -48,8 +48,8 @@ fn working_memory_query_text(
     let canonical = canonical_permission_tool_name(tool_name).to_ascii_lowercase();
 
     let preferred_keys: &[&str] = match canonical.as_str() {
-        "recall" | "web_search" => &["query"],
-        "web_fetch" | "read_mcp_resource" => &["url", "uri"],
+        "recall" | "search" => &["query"],
+        "fetch" | "read_mcp_resource" => &["url", "uri"],
         _ => &[
             "query", "prompt", "message", "url", "uri", "path", "title", "text",
         ],
@@ -288,7 +288,7 @@ pub(super) async fn execute_tool_calls(
             })
             .collect();
 
-        // Wrap each future with a bounded timeout so one slow web_fetch can't stall
+        // Wrap each future with a bounded timeout so one slow fetch can't stall
         // the whole batch.  On timeout we return an error result for that tool slot
         // instead of blocking every other tool indefinitely.
         let timed_futures: Vec<_> = parallel_futures
@@ -1515,9 +1515,9 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
             }
         };
         // ── Source Registry pre-check harness ──────────────────────────────────
-        // Before web_fetch, check if this URL has been previously accessed and
+        // Before fetch, check if this URL has been previously accessed and
         // has a cached gist.  If so, prepend it so the model can avoid redundant fetches.
-        let src_prefix: Option<String> = if matches!(tool_name.as_str(), "web_fetch" | "WebFetch") {
+        let src_prefix: Option<String> = if matches!(tool_name.as_str(), "fetch" | "Fetch") {
             let url = serde_json::from_str::<serde_json::Value>(arguments)
                 .ok()
                 .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(str::to_owned));
@@ -1552,13 +1552,12 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
         // ── End Source Registry pre-check harness ───────────────────────────────
 
         // ── Knowledge-base search harness ───────────────────────────────────────
-        // Every web_search call first queries the local knowledge base (wiki +
+        // Every search call first queries the local knowledge base (wiki +
         // implicit memory).  Results, if any, are prepended to the tool output so
         // the model is forced to see KB content before the web results.
         // This is a hard harness — it runs unconditionally regardless of what the
         // system prompt says.
-        let kb_prefix: Option<String> = if matches!(tool_name.as_str(), "web_search" | "WebSearch")
-        {
+        let kb_prefix: Option<String> = if matches!(tool_name.as_str(), "search" | "Search") {
             let query = serde_json::from_str::<serde_json::Value>(arguments)
                 .ok()
                 .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(str::to_owned))
@@ -1619,11 +1618,11 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                             stream_error || exit_code.map(|c| c != 0).unwrap_or(false),
                         );
 
-                        // Prepend source registry prefix (web_fetch only).
+                        // Prepend source registry prefix (fetch only).
                         if let Some(prefix) = src_prefix {
                             output_text = format!("{prefix}{output_text}");
                         }
-                        // Prepend KB harness prefix (web_search only).
+                        // Prepend KB harness prefix (search only).
                         if let Some(prefix) = kb_prefix {
                             output_text = format!("{prefix}{output_text}");
                         }
@@ -1746,7 +1745,7 @@ fn register_web_source_async(
         let lt_root = cfg.long_term_path(&project_root);
 
         match tool_name.as_str() {
-            "web_fetch" | "WebFetch" => {
+            "fetch" | "Fetch" => {
                 // Extract URL from args: {"url":"...", "prompt":"..."}
                 let url = serde_json::from_str::<serde_json::Value>(&arguments)
                     .ok()
@@ -1761,7 +1760,7 @@ fn register_web_source_async(
                     crate::domain::memory::source_registry::upsert_source(&lt_root, entry).await;
                 }
             }
-            "web_search" | "WebSearch" => {
+            "search" | "Search" => {
                 // Extract query from args: {"query":"..."}
                 let query = serde_json::from_str::<serde_json::Value>(&arguments)
                     .ok()
@@ -1807,8 +1806,8 @@ mod tests {
     #[test]
     fn parallel_tool_timeout_message_names_tool_and_budget() {
         assert_eq!(
-            parallel_tool_timeout_message("web_search"),
-            "Tool `web_search` timed out after 45s"
+            parallel_tool_timeout_message("search"),
+            "Tool `search` timed out after 45s"
         );
     }
 }

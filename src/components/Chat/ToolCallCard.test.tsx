@@ -69,7 +69,7 @@ describe("ToolCallCard", () => {
         content=""
         timestamp={1000}
         prefaceBeforeTools="先查看最新资料。"
-        toolCall={{ name: "web_search", status: "running" }}
+        toolCall={{ name: "search", status: "running" }}
         previousAssistantHasText={false}
         nestedOpen={false}
         showAskUserPanel={false}
@@ -81,7 +81,7 @@ describe("ToolCallCard", () => {
 
     expect(html).toContain("Thoughts");
     expect(html).toContain("先查看最新资料。");
-    expect(html).not.toContain("web_search");
+    expect(html).not.toContain("search");
     expect(html).not.toContain("思考摘要");
   });
 

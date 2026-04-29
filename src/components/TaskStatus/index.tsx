@@ -23,6 +23,7 @@ import {
   Hub,
   WarningAmber,
   Groups,
+  Search,
 } from "@mui/icons-material";
 import {
   useSessionStore,
@@ -55,8 +56,12 @@ import {
 } from "../../utils/reviewerVerdict";
 import { compactLabel, isLabelCompacted } from "../../utils/compactLabel";
 import { stringifyUnknown } from "../../utils/stringifyUnknown";
-import { parseWorkflowCommand } from "../../utils/workflowCommands";
+import {
+  parseResearchCommand,
+  parseWorkflowCommand,
+} from "../../utils/workflowCommands";
 import { schedulerStageLabel } from "../../utils/schedulerPlanHierarchy";
+import { filterTaskOrchestrationEvents } from "./taskPanelDisplay";
 
 import {
   buildOrchestrationTimelineFromEvents,
@@ -336,6 +341,120 @@ function getTaskStatus(items: PlanTodoItem[]) {
   return { running, completed, pending, error };
 }
 
+function researchArgsFromEvent(event: OrchestrationEventDto | undefined): string[] {
+  const args = event?.payload?.args;
+  if (!Array.isArray(args)) return [];
+  return args
+    .map((arg) => (typeof arg === "string" ? arg.trim() : String(arg)))
+    .filter(Boolean);
+}
+
+function ResearchTaskPanel({
+  commandBody,
+  events,
+  active,
+}: {
+  commandBody?: string;
+  events: OrchestrationEventDto[];
+  active: boolean;
+}) {
+  const latestEvent = events[0];
+  const latestAt = parseEventTime(latestEvent?.created_at);
+  const args = researchArgsFromEvent(latestEvent);
+  const cwd = payloadText(latestEvent?.payload?.cwd);
+  const query = commandBody?.trim() || args.join(" ");
+  const completed = latestEvent?.event_type === "research_command_completed";
+
+  return (
+    <Box sx={{ p: 1.5 }}>
+      <Box
+        sx={{
+          p: 1.25,
+          borderRadius: 1.75,
+          border: 1,
+          borderColor: alpha("#0ea5e9", 0.18),
+          bgcolor: alpha("#0ea5e9", 0.045),
+        }}
+      >
+        <Stack spacing={0.85}>
+          <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
+            <Search sx={{ fontSize: 16, color: "#0ea5e9" }} />
+            <Typography variant="body2" sx={{ fontSize: 12, fontWeight: 700 }}>
+              Research 任务
+            </Typography>
+            <Chip
+              size="small"
+              label={completed ? "已完成" : active ? "执行中" : "待执行"}
+              sx={{
+                height: 20,
+                fontSize: 10,
+                fontWeight: 700,
+                bgcolor: alpha(completed ? "#22c55e" : "#0ea5e9", 0.12),
+                color: completed ? "#16a34a" : "#0284c7",
+              }}
+            />
+            {latestAt ? (
+              <Typography variant="caption" color="text.secondary" sx={{ fontSize: 10 }}>
+                {relativeEventTime(latestAt)}
+              </Typography>
+            ) : null}
+          </Stack>
+
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ display: "block", fontSize: 10.5, lineHeight: 1.55 }}
+          >
+            Research System 独立于 Team / Autopilot / Schedule。结果显示在对话区，关键结论会写入长期记忆 ResearchInsight；这里不再混用通用 Trace/时间线。
+          </Typography>
+
+          {query ? (
+            <Box
+              sx={{
+                p: 0.9,
+                borderRadius: 1.25,
+                bgcolor: alpha("#fff", 0.62),
+                border: `1px solid ${alpha("#0ea5e9", 0.12)}`,
+              }}
+            >
+              <Typography variant="caption" sx={{ display: "block", fontSize: 9.5, color: "text.secondary", mb: 0.25 }}>
+                命令 / 主题
+              </Typography>
+              <Typography variant="body2" sx={{ fontSize: 12, fontWeight: 600, lineHeight: 1.45 }}>
+                {query}
+              </Typography>
+            </Box>
+          ) : null}
+
+          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+            {args.length > 0 ? (
+              <Chip size="small" label={`${args.length} 个参数`} sx={{ height: 20, fontSize: 10 }} />
+            ) : null}
+            {cwd ? (
+              <Tooltip title={cwd} placement="top">
+                <Chip
+                  size="small"
+                  label={`cwd: ${compactLabel(cwd, 28)}`}
+                  variant="outlined"
+                  sx={{ height: 20, fontSize: 10, maxWidth: "100%" }}
+                />
+              </Tooltip>
+            ) : null}
+            {events.length > 0 ? (
+              <Chip
+                size="small"
+                label={`${events.length} 个 Research 事件`}
+                variant="outlined"
+                sx={{ height: 20, fontSize: 10 }}
+              />
+            ) : null}
+          </Stack>
+        </Stack>
+      </Box>
+    </Box>
+  );
+}
+
 export function TaskStatus() {
   const composerAgentType = useChatComposerStore((s) => s.composerAgentType);
   /** 与输入框底部「本地 / 沙箱」同一 store，发消息时随 `executionEnvironment` 同步到后端 */
@@ -411,6 +530,20 @@ export function TaskStatus() {
     () => getLatestUserMessage(storeMessages),
     [storeMessages],
   );
+  const latestWorkflowCommand = useMemo(
+    () =>
+      latestUserMessage?.role === "user"
+        ? parseWorkflowCommand(latestUserMessage.content)?.command ?? null
+        : null,
+    [latestUserMessage],
+  );
+  const latestResearchCommand = useMemo(
+    () =>
+      latestUserMessage?.role === "user"
+        ? parseResearchCommand(latestUserMessage.content)
+        : null,
+    [latestUserMessage],
+  );
 
   const todoItems = useMemo(() => {
     // Prefer live activeTodos (updated in real-time during streaming via tool_result events).
@@ -456,6 +589,11 @@ export function TaskStatus() {
   const isPlanMode = composerAgentType === "Plan";
   const isAutoMode = composerAgentType === "auto";
   const isExploreMode = composerAgentType === "Explore";
+  const isScheduleRequest = latestWorkflowCommand === "schedule" || Boolean(hasSchedulerPlan);
+  const isTeamRequest = latestWorkflowCommand === "team";
+  const isAutopilotRequest = latestWorkflowCommand === "autopilot";
+  const isResearchRequest = Boolean(latestResearchCommand);
+  const hasPlanSurface = isPlanMode || latestWorkflowCommand === "plan" || hasTodos;
 
   const surfaceContext = useMemo(
     () => ({
@@ -469,6 +607,30 @@ export function TaskStatus() {
 
   // 获取模式标签和图标
   const getModeInfo = () => {
+    if (isResearchRequest)
+      return {
+        label: "Research",
+        icon: <Search fontSize="small" />,
+        color: "info" as const,
+      };
+    if (isScheduleRequest)
+      return {
+        label: "Schedule",
+        icon: <Route fontSize="small" />,
+        color: "primary" as const,
+      };
+    if (isTeamRequest)
+      return {
+        label: "Team",
+        icon: <Groups fontSize="small" />,
+        color: "primary" as const,
+      };
+    if (isAutopilotRequest)
+      return {
+        label: "Autopilot",
+        icon: <SmartToy fontSize="small" />,
+        color: "primary" as const,
+      };
     if (isPlanMode)
       return {
         label: "Plan",
@@ -510,8 +672,6 @@ export function TaskStatus() {
       color: "default" as const,
     };
   };
-
-  const modeInfo = getModeInfo();
   const currentTurnStartedAt = latestUserMessage?.timestamp ?? 0;
   const scopedSessionBackgroundTasks = useMemo(
     () =>
@@ -527,6 +687,27 @@ export function TaskStatus() {
       ),
     [currentTurnStartedAt, orchestrationEvents],
   );
+  const scopedTaskOrchestrationEvents = useMemo(
+    () => filterTaskOrchestrationEvents(scopedOrchestrationEvents),
+    [scopedOrchestrationEvents],
+  );
+  const researchEvents = useMemo(
+    () =>
+      scopedOrchestrationEvents
+        .filter(
+          (event) =>
+            (event.mode ?? "").trim().toLowerCase() === "research" ||
+            event.event_type.startsWith("research_"),
+        )
+        .sort(
+          (a, b) =>
+            (parseEventTime(b.created_at) ?? 0) -
+            (parseEventTime(a.created_at) ?? 0),
+        ),
+    [scopedOrchestrationEvents],
+  );
+  const hasResearchSurface =
+    Boolean(latestResearchCommand) || researchEvents.length > 0;
   const activeLanes = useMemo(() => {
     if (!currentSession?.id) return [];
     return modeLanes.filter((lane) => lane.session_id === currentSession.id);
@@ -573,16 +754,8 @@ export function TaskStatus() {
         updatedAt: parseEventTime(currentTeamSession.updated_at) ?? Date.now(),
       };
     }
-    if (currentRalphSession) {
-      return {
-        mode: "ralph",
-        phase: currentRalphSession.phase,
-        detail: `第 ${currentRalphSession.iteration} 轮`,
-        updatedAt: parseEventTime(currentRalphSession.updated_at) ?? Date.now(),
-      };
-    }
     return null;
-  }, [currentAutopilotSession, currentRalphSession, currentTeamSession]);
+  }, [currentAutopilotSession, currentTeamSession]);
   const visibleActiveLanes = useMemo(
     () => (currentOrchestration ? activeLanes : []),
     [activeLanes, currentOrchestration],
@@ -604,7 +777,7 @@ export function TaskStatus() {
   );
   const recordedPhaseEvents = useMemo(() => {
     if (!currentOrchestration) return [];
-    const phaseEvents = scopedOrchestrationEvents
+    const phaseEvents = scopedTaskOrchestrationEvents
       .filter((event) => event.mode === currentOrchestration.mode)
       .filter((event) =>
         ["mode_requested", "phase_changed", "mode_completed", "mode_failed"].includes(
@@ -631,7 +804,7 @@ export function TaskStatus() {
       deduped.push(event);
     }
     return deduped;
-  }, [currentOrchestration, scopedOrchestrationEvents]);
+  }, [currentOrchestration, scopedTaskOrchestrationEvents]);
   const phaseTrackRows = useMemo(() => {
     if (!currentPhaseTrack) return [];
     const visitedAt = new Map<string, number>();
@@ -768,13 +941,13 @@ export function TaskStatus() {
     const coveredTaskIds = new Set<string>();
     const findTraceForTask = (taskId?: string) =>
       taskId
-        ? scopedOrchestrationEvents.find(
+        ? scopedTaskOrchestrationEvents.find(
             (event) =>
               event.task_id === taskId &&
               (event.event_type.includes("failed") ||
                 event.event_type.includes("cancelled") ||
                 event.event_type === "worker_launch_failed"),
-          ) ?? scopedOrchestrationEvents.find((event) => event.task_id === taskId)
+          ) ?? scopedTaskOrchestrationEvents.find((event) => event.task_id === taskId)
         : undefined;
 
     for (const task of scopedSessionBackgroundTasks) {
@@ -821,7 +994,7 @@ export function TaskStatus() {
     }
 
     return items.sort((a, b) => (b.at ?? 0) - (a.at ?? 0)).slice(0, 4);
-  }, [blockerVerdicts, scopedOrchestrationEvents, scopedSessionBackgroundTasks]);
+  }, [blockerVerdicts, scopedTaskOrchestrationEvents, scopedSessionBackgroundTasks]);
   const latestScheduledMessage =
     latestUserMessage?.schedulerPlan && latestUserMessage.role === "user"
       ? latestUserMessage
@@ -881,17 +1054,34 @@ export function TaskStatus() {
       runningWorkerTasks.length,
     ],
   );
+  const hasScheduleSurface = Boolean(
+    hasSchedulerPlan ||
+      latestWorkflowCommand === "schedule" ||
+      scopedTaskOrchestrationEvents.some(
+        (event) =>
+          event.event_type === "schedule_plan_created" ||
+          (event.mode ?? "").trim().toLowerCase() === "schedule",
+      ),
+  );
+  const hasManagedTaskOrchestrationSurface = Boolean(
+    currentAutopilotSession ||
+      currentTeamSession ||
+      hasScheduleSurface ||
+      scopedTaskOrchestrationEvents.length > 0,
+  );
   const hasActionableOrchestrationEvent = useMemo(
-    () => scopedOrchestrationEvents.some(isActionableOrchestrationEvent),
-    [scopedOrchestrationEvents],
+    () => scopedTaskOrchestrationEvents.some(isActionableOrchestrationEvent),
+    [scopedTaskOrchestrationEvents],
   );
   const hasOrchestrationStatus =
     !isPurePlanReviewState &&
+    hasManagedTaskOrchestrationSurface &&
     Boolean(
       currentOrchestration ||
         orchestrationLaneSummary ||
         hasActionableOrchestrationEvent ||
-        scopedSessionBackgroundTasks.length > 0 ||
+        hasScheduleSurface ||
+        currentPlanTaskRows.length > 0 ||
         blockerVerdicts.length > 0 ||
         runningWorkerTasks.length > 0,
     );
@@ -903,9 +1093,9 @@ export function TaskStatus() {
       : 1
     : 0;
   const orchestrationTimeline = useMemo<TimelineEvent[]>(() => {
-    if (scopedOrchestrationEvents.length > 0) {
+    if (scopedTaskOrchestrationEvents.length > 0) {
       return buildOrchestrationTimelineFromEvents(
-        scopedOrchestrationEvents,
+        scopedTaskOrchestrationEvents,
         scopedSessionBackgroundTasks,
       );
     }
@@ -941,15 +1131,6 @@ export function TaskStatus() {
         detail: `${orchestrationPhaseLabel(currentTeamSession.phase)} · ${currentTeamSession.completed_count}/${currentTeamSession.subtask_count} 完成`,
         tone: currentTeamSession.failed_count > 0 ? "warning" : "info",
         at: parseEventTime(currentTeamSession.updated_at) ?? Date.now(),
-        action: { type: "mode" },
-      });
-    } else if (currentRalphSession) {
-      events.push({
-        id: `ralph-${currentRalphSession.session_id}`,
-        label: "Ralph 模式活跃",
-        detail: `${orchestrationPhaseLabel(currentRalphSession.phase)} · 第 ${currentRalphSession.iteration} 轮`,
-        tone: "info",
-        at: parseEventTime(currentRalphSession.updated_at) ?? Date.now(),
         action: { type: "mode" },
       });
     }
@@ -1031,10 +1212,9 @@ export function TaskStatus() {
       .slice(0, 8);
   }, [
     currentAutopilotSession,
-    currentRalphSession,
     currentTeamSession,
     latestScheduledMessage,
-    scopedOrchestrationEvents,
+    scopedTaskOrchestrationEvents,
     reviewerVerdicts,
     scopedSessionBackgroundTasks,
   ]);
@@ -1042,24 +1222,25 @@ export function TaskStatus() {
     () =>
       Array.from(
         new Set(
-          scopedOrchestrationEvents
+          scopedTaskOrchestrationEvents
             .map((event) => event.mode?.trim())
             .filter((mode): mode is string => Boolean(mode)),
         ),
       ),
-    [scopedOrchestrationEvents],
+    [scopedTaskOrchestrationEvents],
   );
   const traceEventTypes = useMemo(
-    () => Array.from(new Set(scopedOrchestrationEvents.map((event) => event.event_type))),
-    [scopedOrchestrationEvents],
+    () => Array.from(new Set(scopedTaskOrchestrationEvents.map((event) => event.event_type))),
+    [scopedTaskOrchestrationEvents],
   );
   const filteredTraceEvents = useMemo(() => {
     return filterOrchestrationTraceEvents(
-      scopedOrchestrationEvents,
+      scopedTaskOrchestrationEvents,
       traceModeFilter,
       traceEventTypeFilter,
     );
-  }, [scopedOrchestrationEvents, traceEventTypeFilter, traceModeFilter]);
+  }, [scopedTaskOrchestrationEvents, traceEventTypeFilter, traceModeFilter]);
+  const modeInfo = getModeInfo();
 
   useEffect(() => {
     if (!projectRoot) {
@@ -1289,7 +1470,7 @@ export function TaskStatus() {
         if (currentOrchestration) {
           setStatusPanelTab(0);
           setOrchestrationTab(0);
-        } else if (scopedOrchestrationEvents.length > 0) {
+        } else if (scopedTaskOrchestrationEvents.length > 0) {
           setStatusPanelTab(0);
           setOrchestrationTab(2);
           setTraceModeFilter("all");
@@ -1317,6 +1498,38 @@ export function TaskStatus() {
         break;
     }
   };
+
+  const openPlanItemExecution = (item: PlanTodoItem) => {
+    const normalizedName = item.name.trim().toLowerCase();
+    const taskRow =
+      currentPlanTaskRows.find((row) => row.task_id === item.id) ??
+      currentPlanTaskRows.find((row) => {
+        if (!normalizedName) return false;
+        const rowText = row.description.trim().toLowerCase();
+        return (
+          rowText === normalizedName ||
+          rowText.includes(normalizedName) ||
+          normalizedName.includes(rowText)
+        );
+      });
+
+    if (taskRow) {
+      setReviewerTranscriptTask({
+        taskId: taskRow.task_id,
+        label: `${normalizeAgentDisplayName(taskRow.agent_type)}: ${taskRow.description}`,
+      });
+      return;
+    }
+
+    if (hasSchedulerPlan) {
+      setActiveTab(schedulerTabIndex);
+    }
+  };
+  const canOpenPlanItemExecution =
+    Boolean(hasSchedulerPlan) || currentPlanTaskRows.length > 0;
+  const handlePlanItemClick = canOpenPlanItemExecution
+    ? openPlanItemExecution
+    : undefined;
 
   return (
     <>
@@ -1671,7 +1884,7 @@ export function TaskStatus() {
                 color="text.secondary"
                 sx={{ display: "block", fontSize: 9.5, lineHeight: 1.4 }}
               >
-                当前显示：仅当前会话的状态、时间线与原始事件。
+                当前显示：Team / Autopilot / Schedule 的任务编排状态；Plan 与 Research 使用各自任务面板。
               </Typography>
 
               {orchestrationTab === 0 && currentOrchestration && currentPhaseTrack && (
@@ -1947,7 +2160,7 @@ export function TaskStatus() {
                                 size="small"
                                 variant="outlined"
                                 onClick={() => handleOpenFailureTrace(item)}
-                                disabled={!item.traceEventId && scopedOrchestrationEvents.length === 0}
+                                disabled={!item.traceEventId && scopedTaskOrchestrationEvents.length === 0}
                                 sx={{ minWidth: 0, fontSize: 10, py: 0.15 }}
                               >
                                 原始 Trace
@@ -1991,7 +2204,7 @@ export function TaskStatus() {
                     const toolCalls = executionSteps.filter((step) =>
                       step.id.startsWith("tool-"),
                     ).length;
-                    const failedEvents = scopedOrchestrationEvents.filter(
+                    const failedEvents = scopedTaskOrchestrationEvents.filter(
                       (event) =>
                         event.event_type.includes("failed") ||
                         event.event_type.includes("cancelled") ||
@@ -2001,7 +2214,7 @@ export function TaskStatus() {
                     const hasFallbackOverview =
                       hasExecution ||
                       Boolean(schedulerPlan) ||
-                      scopedOrchestrationEvents.length > 0 ||
+                      scopedTaskOrchestrationEvents.length > 0 ||
                       orchestrationTimeline.length > 0;
 
                     if (!hasFallbackOverview) {
@@ -2071,10 +2284,10 @@ export function TaskStatus() {
                               sx={{ height: 20, fontSize: 9.5 }}
                             />
                           )}
-                          {scopedOrchestrationEvents.length > 0 && (
+                          {scopedTaskOrchestrationEvents.length > 0 && (
                             <Chip
                               size="small"
-                              label={`Trace ${scopedOrchestrationEvents.length} 事件`}
+                              label={`Trace ${scopedTaskOrchestrationEvents.length} 事件`}
                               sx={{ height: 20, fontSize: 9.5 }}
                             />
                           )}
@@ -2118,9 +2331,9 @@ export function TaskStatus() {
                 />
               )}
 
-              {orchestrationTab === 2 && scopedOrchestrationEvents.length > 0 && (
+              {orchestrationTab === 2 && scopedTaskOrchestrationEvents.length > 0 && (
                 <OrchestrationTraceList
-                  scopedEvents={scopedOrchestrationEvents}
+                  scopedEvents={scopedTaskOrchestrationEvents}
                   filteredEvents={filteredTraceEvents}
                   timelineEvents={orchestrationTimeline}
                   failureDiagnostics={failureDiagnostics}
@@ -2145,7 +2358,7 @@ export function TaskStatus() {
                   onBackToFailures={() => setOrchestrationTab(0)}
                 />
               )}
-              {orchestrationTab === 2 && scopedOrchestrationEvents.length === 0 && (
+              {orchestrationTab === 2 && scopedTaskOrchestrationEvents.length === 0 && (
                 <Box
                   sx={{
                     mt: 0.25,
@@ -2224,6 +2437,40 @@ export function TaskStatus() {
 
       {/* 内容区 */}
       <Box sx={{ flex: 1, overflow: "auto", minHeight: 0 }}>
+        {/* Research 模式：独立于通用编排 Trace/Timeline 的研究任务摘要 */}
+        {hasResearchSurface && !hasTodos && !hasExecution && !hasSchedulerPlan && (
+          <ResearchTaskPanel
+            commandBody={latestResearchCommand?.body}
+            events={researchEvents}
+            active={isConnecting || isStreaming || waitingFirstChunk}
+          />
+        )}
+
+        {/* Plan 模式空状态：仍保持 ToDo 语义，避免掉回通用编排/空状态 */}
+        {hasPlanSurface &&
+          !hasTodos &&
+          !hasExecution &&
+          !hasSchedulerPlan &&
+          !hasResearchSurface && (
+            <Box sx={{ p: 1.5 }}>
+              <Typography
+                variant="caption"
+                sx={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: "warning.main",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.6,
+                  mb: 0.75,
+                  display: "block",
+                }}
+              >
+                Plan ToDo
+              </Typography>
+              <PlanTodoList items={[]} />
+            </Box>
+          )}
+
         {/* Plan 模式：待办列表 */}
         {hasTodos && activeTab === 0 && (
           <Box sx={{ p: 1.5 }}>
@@ -2278,7 +2525,15 @@ export function TaskStatus() {
                 </Typography>
                 <Stack spacing={0.75}>
                   {taskStatus.running.map((item) => (
-                    <RunningTaskCard key={item.id} item={item} />
+                    <RunningTaskCard
+                      key={item.id}
+                      item={item}
+                      onClick={
+                        handlePlanItemClick
+                          ? () => handlePlanItemClick(item)
+                          : undefined
+                      }
+                    />
                   ))}
                 </Stack>
               </Box>
@@ -2303,7 +2558,15 @@ export function TaskStatus() {
                 </Typography>
                 <Stack spacing={0.5}>
                   {taskStatus.pending.map((item) => (
-                    <PendingTaskCard key={item.id} item={item} />
+                    <PendingTaskCard
+                      key={item.id}
+                      item={item}
+                      onClick={
+                        handlePlanItemClick
+                          ? () => handlePlanItemClick(item)
+                          : undefined
+                      }
+                    />
                   ))}
                 </Stack>
               </Box>
@@ -2326,7 +2589,10 @@ export function TaskStatus() {
                 >
                   已完成
                 </Typography>
-                <PlanTodoList items={taskStatus.completed} />
+                <PlanTodoList
+                  items={taskStatus.completed}
+                  onItemClick={handlePlanItemClick}
+                />
               </Box>
             )}
 
@@ -2347,7 +2613,10 @@ export function TaskStatus() {
                 >
                   出错
                 </Typography>
-                <PlanTodoList items={taskStatus.error} />
+                <PlanTodoList
+                  items={taskStatus.error}
+                  onItemClick={handlePlanItemClick}
+                />
               </Box>
             )}
           </Box>
@@ -2384,7 +2653,7 @@ export function TaskStatus() {
           )}
 
         {/* 空状态 — show skeleton while switching, idle message otherwise */}
-        {!hasTodos && !hasExecution && !hasSchedulerPlan && (
+        {!hasTodos && !hasExecution && !hasSchedulerPlan && !hasResearchSurface && !hasPlanSurface && (
           isSwitchingSession ? (
             <TaskStatusSkeleton />
           ) : (

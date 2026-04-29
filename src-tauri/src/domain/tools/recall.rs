@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 pub const DESCRIPTION: &str = r#"Search the local knowledge base (wiki + session memory) for relevant information.
 
-Use this tool BEFORE web_search whenever you need to find information about:
+Use this tool BEFORE search whenever you need to find information about:
 - Past conversations, decisions, or results
 - Project-specific knowledge or notes
 - Prior analyses, findings, or summaries
@@ -67,7 +67,7 @@ impl StreamOutput for RecallOutput {
             format!(
                 "No knowledge base results found for query: \"{}\"\n\n\
                  The knowledge base is empty or does not contain relevant content.\n\
-                 Proceed with web_search or other sources.",
+                 Proceed with search or other sources.",
                 self.query
             )
         } else {

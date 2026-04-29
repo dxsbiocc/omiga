@@ -1086,11 +1086,13 @@ pub(crate) async fn inject_schedule_summary_message(
 
         let citation_instruction =
             "\n\n**引用格式规则（严格执行）：**\n\
-             - 所有文献引用必须格式化为 Markdown 超链接，禁止裸文本形式（如 `[PMID: 12345678]` 或 `[1]`）\n\
+             - 所有文献引用必须格式化为可点击/可 hover 的链接；优先 Markdown 超链接，也可使用安全 HTML 锚点 `<a href=\"https://...\">标签</a>`\n\
+             - 禁止裸文本形式（如 `[PMID: 12345678]` 或 `[1]`）；禁止把 URL 只裸露为纯文本\n\
              - PubMed：`[PMID: 12345678](https://pubmed.ncbi.nlm.nih.gov/12345678/)`\n\
              - DOI：`[Smith et al., 2023](https://doi.org/10.XXXX/YYYY)`\n\
              - arXiv：`[Smith et al., 2023](https://arxiv.org/abs/XXXX.XXXXX)`\n\
-             - 引用紧跟对应陈述就近嵌入，不要集中移到文末\n\
+             - 链接文本应使用期刊/来源、作者年份、PMID/DOI 或论文标题，不要只用裸 URL\n\
+             - 引用紧跟对应陈述就近嵌入；如需文末参考文献列表，仍要保留正文内联链接引用\n\
              - 禁止丢弃已有链接，禁止编造引用";
 
         let synthesis_prompt = format!(
@@ -1109,7 +1111,7 @@ pub(crate) async fn inject_schedule_summary_message(
                - 每个单元格内容必须写在同一行，禁止在单元格内换行\n\
                - 需要列出多个条目时，用「①②③」或「；」分隔，写在一行内\n\
                - 如果单元格内容确实过长无法单行表达，放弃使用表格，改用「**标题**」+缩进列表的形式\n\
-            4. 在回复末尾用 `### 下一步建议` 作为标题，加编号列表列出 2-3 条具体建议（格式：`1. 建议内容`）{}\n",
+            4. 加入 `### 下一步建议`，用编号列表列出 2-3 条具体建议（格式：`1. 建议内容`）。如果回复包含 `## References` / `## 参考文献`，下一步建议必须放在参考文献之前，让参考文献保持为最后一个章节，便于 UI 折叠展示{}\n",
             user_request,
             status_label,
             worker_outputs_block,

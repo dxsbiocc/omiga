@@ -22,6 +22,7 @@ pub mod ralph_state;
 pub mod research_system;
 pub mod routing;
 pub mod runtime_constraints;
+pub mod search;
 pub mod session;
 pub mod skills;
 pub mod suggestions;

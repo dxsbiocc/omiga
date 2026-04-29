@@ -20,7 +20,7 @@ This replaces everything — prompt, tools, model, color — and is hot-reloaded
 ---
 description: Human-readable description (optional)
 model: standard | frontier | fast   # optional — overrides model tier
-tools: [web_search, web_fetch, ...]  # optional — overrides allowed tools
+tools: [search, fetch, ...]  # optional — overrides allowed tools
 color: "#hex"                         # optional — overrides UI color
 ---
 
@@ -41,7 +41,7 @@ The frontmatter block is optional. If omitted, the entire file is used as the sy
 | `plan.md` | `Plan` | Read-only planning and design |
 | `verification.md` | `verification` | Adversarial testing |
 | `general-purpose.md` | `general-purpose` | Main assistant / commander |
-| `literature-search.md` | `literature-search` | Academic database search (PubMed, arXiv, bioRxiv) |
+| `literature-search.md` | `literature-search` | Academic database search (PubMed, arXiv, Crossref, OpenAlex, bioRxiv/medRxiv, optional enabled sources) |
 | `deep-research.md` | `deep-research` | Comprehensive domain survey with citations |
 | `data-analysis.md` | `data-analysis` | Scientific data analysis (Python/R) |
 | `data-viz.md` | `data-viz` | Publication-ready figure generation |

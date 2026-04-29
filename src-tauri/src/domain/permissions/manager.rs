@@ -460,7 +460,7 @@ impl PermissionManager {
     // 内部辅助方法
     // =========================================================================
 
-    /// 用户「记住」批准 / 本会话拒绝 使用的键：与 `tool_rules` 一致，Read/WebSearch 等与内置名合并
+    /// 用户「记住」批准 / 本会话拒绝 使用的键：与 `tool_rules` 一致，Read/Search 等与内置名合并
     fn approval_cache_key(tool_name: &str) -> String {
         let c = canonical_permission_tool_name(tool_name.trim());
         if c.starts_with("mcp__") {
@@ -1071,7 +1071,7 @@ impl PermissionManager {
                 recommendations: vec![],
                 detected_risks: vec![],
             },
-            "web_fetch" | "web_search" => RiskAssessment {
+            "fetch" | "search" => RiskAssessment {
                 level: RiskLevel::Low,
                 categories: vec![RiskCategory::Network],
                 description: "网络请求".to_string(),
@@ -1084,8 +1084,8 @@ impl PermissionManager {
                 }],
             },
             // 其他常见安全工具
-            "list_skills" | "skills_list" | "skill_view" | "search" | "tool_search"
-            | "get_current_time" | "get_system_info" => RiskAssessment {
+            "list_skills" | "skills_list" | "skill_view" | "tool_search" | "get_current_time"
+            | "get_system_info" => RiskAssessment {
                 level: RiskLevel::Safe,
                 categories: vec![],
                 description: format!("使用工具: {}", tool_name),

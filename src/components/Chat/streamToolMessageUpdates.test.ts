@@ -44,15 +44,15 @@ describe("stream tool message updates", () => {
       {
         id: "tool-1",
         role: "tool",
-        content: "`web_search`",
-        toolCall: { id: "call-1", name: "web_search", status: "running" },
+        content: "`search`",
+        toolCall: { id: "call-1", name: "search", status: "running" },
       },
     ];
 
     const updated = applyToolResultMessage(running, {
       resultData: {
         tool_use_id: "call-1",
-        name: "web_search",
+        name: "search",
         input: JSON.stringify({ query: "tet(M)" }),
         output: "timeout",
         is_error: true,
@@ -71,7 +71,7 @@ describe("stream tool message updates", () => {
   it("preserves preface text when a second tool_use frame fills arguments", () => {
     const initial: StreamToolMessageLike[] = [];
     const withPlaceholder = upsertToolUseMessage(initial, {
-      toolData: { id: "call-2", name: "web_search", arguments: "" },
+      toolData: { id: "call-2", name: "search", arguments: "" },
       newToolId: "tool-2",
       prefaceBeforeTools: "Search current docs before answering.",
       timestamp: 2000,
@@ -80,7 +80,7 @@ describe("stream tool message updates", () => {
     const withArguments = upsertToolUseMessage(withPlaceholder, {
       toolData: {
         id: "call-2",
-        name: "web_search",
+        name: "search",
         arguments: JSON.stringify({ query: "latest docs" }),
       },
       newToolId: "tool-unused",
@@ -136,8 +136,8 @@ describe("stream tool message updates", () => {
         role: "assistant",
         content: "先搜索两篇论文，再综合回答。",
         toolCallsList: [
-          { id: "call-1", name: "web_search", arguments: "{}" },
-          { id: "call-2", name: "web_search", arguments: "{}" },
+          { id: "call-1", name: "search", arguments: "{}" },
+          { id: "call-2", name: "search", arguments: "{}" },
         ],
       },
       {
@@ -146,7 +146,7 @@ describe("stream tool message updates", () => {
         content: "timeout",
         toolCall: {
           id: "call-1",
-          name: "web_search",
+          name: "search",
           status: "error",
           output: "timeout",
         },
@@ -157,7 +157,7 @@ describe("stream tool message updates", () => {
         content: "ok",
         toolCall: {
           id: "call-2",
-          name: "web_search",
+          name: "search",
           status: "completed",
           output: "ok",
         },

@@ -9,12 +9,12 @@ use_when:
 avoid_when:
   - 已有完整上下文且不需要新增证据
 capabilities:
-  - web_search
+  - search
   - source_triage
   - evidence_extraction
 tools:
   allowed:
-    - web_search
+    - search
     - file_search
   forbidden:
     - shell

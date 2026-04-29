@@ -18,7 +18,7 @@ tools:
     - file_search
   forbidden:
     - shell
-    - web_search
+    - search
 permissions:
   read:
     - project_memory

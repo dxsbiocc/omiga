@@ -9,7 +9,7 @@
 //! ```markdown
 //! ---
 //! description: Optional one-line description (ignored at load time, for human reference)
-//! tools: [web_search, web_fetch]   # optional — overrides allowed_tools
+//! tools: [search, fetch]   # optional — overrides allowed_tools
 //! model: standard                  # optional — overrides model tier alias
 //! color: "#8b5cf6"                 # optional — overrides UI colour
 //! ---
@@ -204,10 +204,10 @@ mod tests {
 
     #[test]
     fn parse_with_frontmatter() {
-        let src = "---\ntools: [web_search]\nmodel: standard\n---\n\nHello prompt.";
+        let src = "---\ntools: [search]\nmodel: standard\n---\n\nHello prompt.";
         let pf = parse_prompt_file(src);
         assert_eq!(pf.prompt, "Hello prompt.");
-        assert_eq!(pf.meta.tools, Some(vec!["web_search".to_string()]));
+        assert_eq!(pf.meta.tools, Some(vec!["search".to_string()]));
         assert_eq!(pf.meta.model, Some("standard".to_string()));
     }
 

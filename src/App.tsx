@@ -232,20 +232,35 @@ export default function App() {
     const raw = localStorage.getItem(WEB_SEARCH_KEYS_STORAGE);
     if (raw) {
       try {
-        const j = JSON.parse(raw) as Record<string, string>;
+        const j = JSON.parse(raw) as Record<string, unknown>;
         const payload = {
-          tavily: (j.tavily ?? "").trim(),
-          exa: (j.exa ?? "").trim(),
-          parallel: (j.parallel ?? "").trim(),
-          firecrawl: (j.firecrawl ?? "").trim(),
-          firecrawlUrl: (j.firecrawlUrl ?? "").trim(),
+          tavily: String(j.tavily ?? "").trim(),
+          exa: String(j.exa ?? "").trim(),
+          parallel: String(j.parallel ?? "").trim(),
+          firecrawl: String(j.firecrawl ?? "").trim(),
+          firecrawlUrl: String(j.firecrawlUrl ?? "").trim(),
+          semanticScholarEnabled:
+            j.semanticScholarEnabled === "true" ||
+            j.semanticScholarEnabled === true,
+          semanticScholarApiKey: String(j.semanticScholarApiKey ?? "").trim(),
+          wechatSearchEnabled:
+            j.wechatSearchEnabled === "true" || j.wechatSearchEnabled === true,
+          pubmedApiKey: String(j.pubmedApiKey ?? "").trim(),
+          pubmedEmail: String(j.pubmedEmail ?? "omiga@example.invalid").trim(),
+          pubmedToolName: String(j.pubmedToolName ?? "omiga").trim(),
         };
         if (
           payload.tavily ||
           payload.exa ||
           payload.parallel ||
           payload.firecrawl ||
-          payload.firecrawlUrl
+          payload.firecrawlUrl ||
+          payload.semanticScholarEnabled ||
+          payload.semanticScholarApiKey ||
+          payload.wechatSearchEnabled ||
+          payload.pubmedApiKey ||
+          payload.pubmedEmail ||
+          payload.pubmedToolName
         ) {
           void invoke("set_web_search_api_keys", payload).catch(() => {});
         }
@@ -264,6 +279,12 @@ export default function App() {
         parallel: "",
         firecrawl: "",
         firecrawlUrl: "",
+        semanticScholarEnabled: false,
+        semanticScholarApiKey: "",
+        wechatSearchEnabled: false,
+        pubmedApiKey: "",
+        pubmedEmail: "omiga@example.invalid",
+        pubmedToolName: "omiga",
       }).catch(() => {});
     }
   }, []);

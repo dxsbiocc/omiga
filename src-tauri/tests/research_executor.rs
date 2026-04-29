@@ -71,7 +71,7 @@ fn make_task(
             max_tool_calls: Some(4),
         },
         requested_tools: if agent == "seeker.web_research" {
-            vec!["web_search".to_string()]
+            vec!["search".to_string()]
         } else {
             Vec::new()
         },

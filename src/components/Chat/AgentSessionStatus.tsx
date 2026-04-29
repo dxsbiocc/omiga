@@ -50,8 +50,8 @@ export interface AgentSessionStatusProps {
 function pickToolIcon(toolName: string | null | undefined): SvgIconComponent {
   const n = (toolName ?? "").toLowerCase();
   if (!n) return Construction;
-  if (n.includes("web_search")) return SearchIcon;
-  if (n.includes("web_fetch") || (n.includes("fetch") && n.includes("web")))
+  if (n.includes("search")) return SearchIcon;
+  if (n.includes("fetch") || (n.includes("fetch") && n.includes("web")))
     return TravelExplore;
   if (n.includes("bash") || n.includes("shell")) return Terminal;
   if (n.includes("ripgrep") || n.includes("grep")) return Construction;

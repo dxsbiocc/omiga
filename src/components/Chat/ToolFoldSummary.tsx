@@ -42,8 +42,8 @@ export function summarizeToolGroup(
       n.includes("read_file") ||
       n.includes("file_write") ||
       n.includes("file_edit") ||
-      n.includes("web_fetch") ||
-      n.includes("web_search") ||
+      n === "fetch" ||
+      n === "search" ||
       n.includes("todo_write") ||
       n.includes("notebook_edit") ||
       n === "file_read",

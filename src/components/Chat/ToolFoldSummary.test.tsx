@@ -20,8 +20,8 @@ describe("ToolFoldSummary helpers", () => {
   it("summarizes mixed tool groups without scanning UI state", () => {
     expect(summarizeToolGroup([])).toBe("");
     expect(
-      summarizeToolGroup([{ role: "tool", toolCall: { name: "web_search" } }]),
-    ).toBe("web_search");
+      summarizeToolGroup([{ role: "tool", toolCall: { name: "search" } }]),
+    ).toBe("search");
     expect(
       summarizeToolGroup([
         { role: "tool", toolCall: { name: "bash" } },
@@ -35,7 +35,7 @@ describe("ToolFoldSummary helpers", () => {
   it("keeps ReAct fold reasoning and latest running tool labels stable", () => {
     const fold = [
       { role: "assistant", content: "thinking" },
-      { role: "tool", toolCall: { name: "web_search", status: "running" as const } },
+      { role: "tool", toolCall: { name: "search", status: "running" as const } },
       { role: "tool", toolCall: { name: "bash", status: "running" as const } },
     ];
 
@@ -56,8 +56,8 @@ describe("ToolFoldSummary helpers", () => {
     ).toBe("");
     expect(
       toolDisplayOutputText(
-        { role: "tool", content: "`web_search`" },
-        { name: "web_search", status: "running" },
+        { role: "tool", content: "`search`" },
+        { name: "search", status: "running" },
       ),
     ).toBe("");
     expect(

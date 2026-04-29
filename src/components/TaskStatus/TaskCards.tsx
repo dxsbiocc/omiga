@@ -22,11 +22,13 @@ export interface RuntimeAgentTaskItem {
 /** 运行中任务卡片 - 高亮显示、带动画 */
 interface RunningTaskCardProps {
   item: PlanTodoItem;
+  onClick?: () => void;
 }
 
-export function RunningTaskCard({ item }: RunningTaskCardProps) {
+export function RunningTaskCard({ item, onClick }: RunningTaskCardProps) {
   return (
     <Box
+      onClick={onClick}
       sx={{
         p: 1.25,
         borderRadius: 1.5,
@@ -34,6 +36,15 @@ export function RunningTaskCard({ item }: RunningTaskCardProps) {
         border: `1px solid ${alpha("#6366f1", 0.25)}`,
         position: "relative",
         overflow: "hidden",
+        cursor: onClick ? "pointer" : "default",
+        transition: "transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease",
+        "&:hover": onClick
+          ? {
+              transform: "translateY(-1px)",
+              boxShadow: `0 10px 24px ${alpha("#6366f1", 0.12)}`,
+              borderColor: alpha("#6366f1", 0.34),
+            }
+          : undefined,
         "&::before": {
           content: '""',
           position: "absolute",
@@ -272,11 +283,13 @@ export function PendingTaskCard({ item, onClick }: PendingTaskCardProps) {
 /** 已完成任务卡片 - 简洁、带删除线 */
 interface CompletedTaskCardProps {
   item: PlanTodoItem;
+  onClick?: () => void;
 }
 
-export function CompletedTaskCard({ item }: CompletedTaskCardProps) {
+export function CompletedTaskCard({ item, onClick }: CompletedTaskCardProps) {
   return (
     <Box
+      onClick={onClick}
       sx={{
         p: 1,
         borderRadius: 1,
@@ -285,6 +298,14 @@ export function CompletedTaskCard({ item }: CompletedTaskCardProps) {
         display: "flex",
         alignItems: "center",
         gap: 1,
+        cursor: onClick ? "pointer" : "default",
+        transition: "background-color 0.18s ease, border-color 0.18s ease",
+        "&:hover": onClick
+          ? {
+              bgcolor: alpha("#22c55e", 0.07),
+              borderColor: alpha("#22c55e", 0.24),
+            }
+          : undefined,
       }}
     >
       <CheckCircle
@@ -313,11 +334,13 @@ export function CompletedTaskCard({ item }: CompletedTaskCardProps) {
 /** 错误任务卡片 */
 interface ErrorTaskCardProps {
   item: PlanTodoItem;
+  onClick?: () => void;
 }
 
-export function ErrorTaskCard({ item }: ErrorTaskCardProps) {
+export function ErrorTaskCard({ item, onClick }: ErrorTaskCardProps) {
   return (
     <Box
+      onClick={onClick}
       sx={{
         p: 1.25,
         borderRadius: 1,
@@ -326,6 +349,14 @@ export function ErrorTaskCard({ item }: ErrorTaskCardProps) {
         display: "flex",
         alignItems: "flex-start",
         gap: 1,
+        cursor: onClick ? "pointer" : "default",
+        transition: "background-color 0.18s ease, border-color 0.18s ease",
+        "&:hover": onClick
+          ? {
+              bgcolor: alpha("#ef4444", 0.07),
+              borderColor: alpha("#ef4444", 0.28),
+            }
+          : undefined,
       }}
     >
       <ErrorOutline
@@ -373,11 +404,11 @@ interface TaskCardProps {
 export function TaskCard({ item, onClick }: TaskCardProps) {
   switch (item.status) {
     case "running":
-      return <RunningTaskCard item={item} />;
+      return <RunningTaskCard item={item} onClick={onClick} />;
     case "completed":
-      return <CompletedTaskCard item={item} />;
+      return <CompletedTaskCard item={item} onClick={onClick} />;
     case "error":
-      return <ErrorTaskCard item={item} />;
+      return <ErrorTaskCard item={item} onClick={onClick} />;
     case "pending":
     default:
       return <PendingTaskCard item={item} onClick={onClick} />;

@@ -193,7 +193,7 @@ fn build_complex_graph(
             require_test_results: false,
             require_consistency_statement: true,
         })
-        .with_requested_tools(vec!["web_search".to_string()])
+        .with_requested_tools(vec!["search".to_string()])
         .with_requested_permissions(PermissionSpec {
             read: vec!["web".to_string()],
             write: vec!["evidence_store".to_string()],

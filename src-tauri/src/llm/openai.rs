@@ -431,111 +431,71 @@ impl OpenAiCompatibleClient {
     }
 
     /// Validate message history to ensure OpenAI compatibility:
-    /// - Assistant messages with tool_calls must be followed by corresponding tool messages
+    /// - Assistant messages with tool_calls must be immediately followed by corresponding tool messages
     /// - Remove orphaned tool messages that don't have a matching assistant tool_call
+    ///
+    /// This intentionally enforces the stricter OpenAI Chat Completions invariant rather than
+    /// just "the matching tool result appears later". Cancelled/retried Omiga rounds can leave
+    /// persisted transcripts like `assistant(tool_calls) -> assistant(text) -> tool(result)`;
+    /// OpenAI rejects that with HTTP 400, so we strip the stale tool-use blocks and drop the
+    /// delayed orphan tool results before constructing the request body.
     fn validate_message_history(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
         use std::collections::HashSet;
 
-        // Collect all expected tool_call_ids from assistant messages
-        let mut expected_tool_ids: HashSet<String> = HashSet::new();
-        for msg in &messages {
-            if let LlmRole::Assistant = msg.role {
-                for content in &msg.content {
-                    if let LlmContent::ToolUse { id, .. } = content {
-                        expected_tool_ids.insert(id.clone());
-                    }
-                }
-            }
-        }
-
-        // Filter messages: remove orphaned tool results and extra tool results
         let mut result = Vec::new();
-        let mut pending_tool_ids: HashSet<String> = HashSet::new();
+        let mut i = 0usize;
 
-        for msg in messages {
-            match msg.role {
-                LlmRole::Assistant => {
-                    // Check if this assistant has tool_calls
-                    let has_tool_calls = msg
-                        .content
-                        .iter()
-                        .any(|c| matches!(c, LlmContent::ToolUse { .. }));
-                    if has_tool_calls {
-                        // Add tool_call_ids to pending set
-                        for content in &msg.content {
-                            if let LlmContent::ToolUse { id, .. } = content {
-                                pending_tool_ids.insert(id.clone());
-                            }
-                        }
+        while i < messages.len() {
+            let msg = &messages[i];
+            let tool_use_ids = assistant_tool_use_ids(msg);
+
+            if !tool_use_ids.is_empty() {
+                let mut needed: HashSet<String> = tool_use_ids.iter().cloned().collect();
+                let mut tool_messages = Vec::new();
+                let mut j = i + 1;
+
+                while j < messages.len() && is_tool_result_message(&messages[j]) {
+                    if let Some(filtered) =
+                        filter_tool_result_message_for_ids(&messages[j], &mut needed)
+                    {
+                        tool_messages.push(filtered);
                     }
-                    result.push(msg);
-                }
-                LlmRole::Tool => {
-                    // Only keep tool results that match a pending tool_call_id
-                    if let Some(LlmContent::ToolResult { tool_use_id, .. }) = msg.content.first() {
-                        if pending_tool_ids.contains(tool_use_id) {
-                            pending_tool_ids.remove(tool_use_id);
-                            result.push(msg);
+                    j += 1;
+                    if needed.is_empty() {
+                        while j < messages.len() && is_tool_result_message(&messages[j]) {
+                            j += 1;
                         }
-                        // Else: orphaned tool message, skip it
+                        break;
                     }
                 }
-                LlmRole::User => {
-                    // Check if this user message contains tool results (LlmContent::ToolResult)
-                    let is_tool_result_msg = msg
-                        .content
-                        .iter()
-                        .all(|c| matches!(c, LlmContent::ToolResult { .. }));
-                    if is_tool_result_msg {
-                        // This is a tool result message in User role - convert to Tool role logic
-                        let mut keep = false;
-                        for content in &msg.content {
-                            if let LlmContent::ToolResult { tool_use_id, .. } = content {
-                                if pending_tool_ids.contains(tool_use_id) {
-                                    pending_tool_ids.remove(tool_use_id);
-                                    keep = true;
-                                }
-                            }
-                        }
-                        if keep {
-                            result.push(msg);
-                        }
-                        // Else: all tool results orphaned, skip
-                    } else {
-                        result.push(msg);
-                    }
+
+                if needed.is_empty() {
+                    result.push(msg.clone());
+                    result.extend(tool_messages);
+                } else {
+                    tracing::warn!(
+                        target: "omiga::openai",
+                        missing_tool_call_ids = ?needed,
+                        "Assistant tool_calls were not followed immediately by matching tool results; stripping stale tool calls"
+                    );
+                    result.push(strip_tool_uses(msg));
                 }
-                _ => {
-                    result.push(msg);
-                }
+
+                i = j.max(i + 1);
+                continue;
             }
-        }
 
-        // If there are still pending tool_ids, we have assistant messages without tool results
-        // This is also an error condition - remove those assistant tool_calls
-        if !pending_tool_ids.is_empty() {
-            tracing::warn!(
-                target: "omiga::openai",
-                pending_tool_ids = ?pending_tool_ids,
-                "Assistant tool_calls without matching tool results, removing tool_calls"
-            );
+            if is_tool_result_message(msg) {
+                tracing::warn!(
+                    target: "omiga::openai",
+                    "Dropping orphaned tool result message before OpenAI request"
+                );
+                i += 1;
+                continue;
+            }
 
-            // Remove tool_calls from assistant messages that don't have matching tool results
-            result = result
-                .into_iter()
-                .map(|mut msg| {
-                    if let LlmRole::Assistant = msg.role {
-                        msg.content.retain(|c| {
-                            if let LlmContent::ToolUse { id, .. } = c {
-                                !pending_tool_ids.contains(id)
-                            } else {
-                                true
-                            }
-                        });
-                    }
-                    msg
-                })
-                .collect();
+            result.push(msg.clone());
+            i += 1;
         }
 
         result
@@ -555,6 +515,60 @@ impl OpenAiCompatibleClient {
             })
             .collect()
     }
+}
+
+fn assistant_tool_use_ids(msg: &LlmMessage) -> Vec<String> {
+    if msg.role != LlmRole::Assistant {
+        return Vec::new();
+    }
+    msg.content
+        .iter()
+        .filter_map(|content| match content {
+            LlmContent::ToolUse { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_tool_result_message(msg: &LlmMessage) -> bool {
+    matches!(msg.role, LlmRole::Tool | LlmRole::User)
+        && !msg.content.is_empty()
+        && msg
+            .content
+            .iter()
+            .all(|content| matches!(content, LlmContent::ToolResult { .. }))
+}
+
+fn filter_tool_result_message_for_ids(
+    msg: &LlmMessage,
+    needed: &mut std::collections::HashSet<String>,
+) -> Option<LlmMessage> {
+    let mut filtered = msg.clone();
+    filtered.content = msg
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            LlmContent::ToolResult { tool_use_id, .. } if needed.remove(tool_use_id) => {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    if filtered.content.is_empty() {
+        None
+    } else {
+        Some(filtered)
+    }
+}
+
+fn strip_tool_uses(msg: &LlmMessage) -> LlmMessage {
+    let mut stripped = msg.clone();
+    stripped
+        .content
+        .retain(|content| !matches!(content, LlmContent::ToolUse { .. }));
+    stripped.tool_calls = None;
+    stripped
 }
 
 #[async_trait]
@@ -845,4 +859,95 @@ struct OpenAiToolFunction {
 struct OpenAiToolFunctionDelta {
     name: Option<String>,
     arguments: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn assistant_with_tool(text: &str, id: &str) -> LlmMessage {
+        LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![
+                LlmContent::text(text),
+                LlmContent::tool_use(id, "search", json!({"query": "q"})),
+            ],
+            name: None,
+            tool_calls: None,
+            reasoning_content: None,
+        }
+    }
+
+    fn tool_ids(messages: &[LlmMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .flat_map(|msg| msg.content.iter())
+            .filter_map(|content| match content {
+                LlmContent::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn has_tool_use(message: &LlmMessage) -> bool {
+        message
+            .content
+            .iter()
+            .any(|content| matches!(content, LlmContent::ToolUse { .. }))
+    }
+
+    #[test]
+    fn validate_message_history_preserves_immediate_tool_result() {
+        let messages = vec![
+            LlmMessage::user("question"),
+            assistant_with_tool("checking", "call_1"),
+            LlmMessage::tool("call_1", "result"),
+            LlmMessage::assistant("done"),
+        ];
+
+        let sanitized = OpenAiCompatibleClient::validate_message_history(messages);
+
+        assert_eq!(sanitized.len(), 4);
+        assert!(has_tool_use(&sanitized[1]));
+        assert_eq!(tool_ids(&sanitized), vec!["call_1"]);
+    }
+
+    #[test]
+    fn validate_message_history_strips_interleaved_tool_call_and_drops_delayed_result() {
+        let messages = vec![
+            LlmMessage::user("question"),
+            assistant_with_tool("checking", "call_1"),
+            LlmMessage::assistant("final answer from cancelled overlapping round"),
+            LlmMessage::tool("call_1", "late result"),
+        ];
+
+        let sanitized = OpenAiCompatibleClient::validate_message_history(messages);
+
+        assert_eq!(sanitized.len(), 3);
+        assert!(!has_tool_use(&sanitized[1]));
+        assert_eq!(sanitized[1].text_content(), "checking");
+        assert_eq!(
+            sanitized[2].text_content(),
+            "final answer from cancelled overlapping round"
+        );
+        assert!(tool_ids(&sanitized).is_empty());
+    }
+
+    #[test]
+    fn validate_message_history_drops_unknown_tool_results_inside_contiguous_block() {
+        let messages = vec![
+            assistant_with_tool("checking", "call_1"),
+            LlmMessage::tool("orphan", "orphan result"),
+            LlmMessage::tool("call_1", "real result"),
+            LlmMessage::assistant("done"),
+        ];
+
+        let sanitized = OpenAiCompatibleClient::validate_message_history(messages);
+
+        assert_eq!(sanitized.len(), 3);
+        assert!(has_tool_use(&sanitized[0]));
+        assert_eq!(tool_ids(&sanitized), vec!["call_1"]);
+        assert_eq!(sanitized[2].text_content(), "done");
+    }
 }

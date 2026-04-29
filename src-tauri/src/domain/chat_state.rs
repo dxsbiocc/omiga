@@ -54,7 +54,7 @@ pub struct ChatState {
     /// `omiga.yaml` `providers` map key for the entry currently driving [`Self::llm_config`].
     /// Used so Settings only marks one row as "In use" when multiple entries share the same provider+model.
     pub active_provider_entry_name: Mutex<Option<String>>,
-    /// User-configured API keys for built-in `web_search` (Settings override env when set).
+    /// User-configured API keys for built-in `search` (Settings override env when set).
     pub web_search_api_keys: Mutex<WebSearchApiKeys>,
     /// In-memory session cache for O(1) lookup by session_id
     pub sessions: Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
@@ -127,7 +127,7 @@ pub struct RoundCancellationState {
     pub message_id: String,
     pub session_id: String,
     pub cancelled: Arc<RwLock<bool>>,
-    /// Cancels in-flight tools (foreground/background bash, web_fetch, …) when the user stops the round.
+    /// Cancels in-flight tools (foreground/background bash, fetch, …) when the user stops the round.
     pub round_cancel: CancellationToken,
 }
 

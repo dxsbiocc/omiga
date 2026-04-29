@@ -1,21 +1,15 @@
-//! Web search — Tavily Search API (preferred) or DuckDuckGo fallback
-//!
-//! Upstream `WebSearchTool` uses Anthropic server-side `web_search`; Omiga runs a real HTTP search.
+//! Unified search tool — web, literature, and extension-ready source routing
 //!
 //! Public fallback engines:
 //! - DuckDuckGo: the public `api.duckduckgo.com` endpoint is an **instant-answer** API, not full
 //!   web search — many queries return empty `AbstractURL` / `RelatedTopics`. HTML results at
 //!   `html.duckduckgo.com` are used when the JSON API yields nothing.
-//! - Bing / Google: lightweight HTML fallbacks used after configured APIs / MCP browser routes.
+//! - Bing / Google: lightweight HTML fallbacks used after configured APIs.
 //!
 //! Result links are often search-engine redirects (`duckduckgo.com/l/?uddg=…`,
 //! `bing.com/ck/a?u=…`, `google.com/url?q=…`); we unwrap them to the real destination URL.
 
 use super::{ToolContext, ToolError, ToolSchema};
-use crate::domain::mcp::client::{
-    call_tool_on_server, call_tool_via_peer, connect_mcp_server_legacy, list_tools_for_server,
-};
-use crate::domain::mcp::config::merged_mcp_servers;
 use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
 use async_trait::async_trait;
 use base64::{
@@ -24,9 +18,8 @@ use base64::{
 };
 use lazy_static::lazy_static;
 use regex::Regex;
-use rmcp::model::CallToolResult;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map as JsonMap, Value as JsonValue};
+use serde_json::{json, Value as JsonValue};
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
@@ -40,20 +33,20 @@ const MAX_SNIPPET_CHARS: usize = 512;
 const MAX_TITLE_CHARS: usize = 220;
 const SEARCH_METHOD_RETRY_DELAY_MS: u64 = 400;
 const SEARCH_METHOD_MAX_ATTEMPTS: usize = 3;
-/// `web_search` is an interactive chat tool: a search that cannot return within
+/// `search` is an interactive chat tool: a search that cannot return within
 /// this budget is not useful enough to keep the turn blocked.
-const WEB_SEARCH_MAX_TIMEOUT_SECS: u64 = 30;
-const WEB_SEARCH_MCP_MAX_TIMEOUT_SECS: u64 = 10;
+const SEARCH_MAX_TIMEOUT_SECS: u64 = 30;
 
-pub const DESCRIPTION: &str = r#"Search the public web for up-to-date information.
+pub const DESCRIPTION: &str = r#"Search across typed data-source categories and return SerpAPI-style JSON.
 
-- Search methods run in the user-configured order from Settings → Search (for example Tavily → Google → DuckDuckGo). Each method is tried up to 3 times before the next method is attempted.
-- Supported methods: Tavily, Exa, Firecrawl, Parallel, Google, Bing, DuckDuckGo. Env vars: `OMIGA_TAVILY_API_KEY` / `TAVILY_API_KEY`, `OMIGA_EXA_API_KEY` / `EXA_API_KEY`, `OMIGA_FIRECRAWL_API_KEY` / `FIRECRAWL_API_KEY`, optional `OMIGA_FIRECRAWL_API_URL` / `FIRECRAWL_API_URL` for self-hosted Firecrawl base, `OMIGA_PARALLEL_API_KEY` / `PARALLEL_API_KEY`. Settings overrides env when non-empty.
-- Optional `allowed_domains` or `blocked_domains` filter result URLs (not both).
+- `category` is required. First-version categories: `web`, `literature`, `social`.
+- `source` is optional and defaults to `auto`. Web sources: `auto`, `tavily`, `exa`, `firecrawl`, `parallel`, `google`, `bing`, `ddg`. Literature sources: `auto`, `pubmed`, `arxiv`, `crossref`, `openalex`, `biorxiv`, `medrxiv`, `semantic_scholar` (opt-in, API key required). Social sources: `wechat` (opt-in).
+- `source=auto` uses Settings → Search priority for web, and PubMed for literature.
+- Results are returned as formatted JSON with a top-level `results` array and SerpAPI-style fields (`position`, `title`, `name`, `link`, `url`, `displayed_link`, `favicon`, `snippet`, `metadata`).
+- Optional `allowed_domains` or `blocked_domains` filter web result URLs (not both).
 - `max_results` (default 5, max 10) limits how many hits are returned.
 - Optional `search_url` overrides the DuckDuckGo HTML endpoint (for private search proxies or tests).
 - Unsafe/private result URLs are filtered out; `search_url` must also be a public-safe HTTP(S) URL.
-- The full search attempt respects a short interactive timeout (default/global setting, hard-capped at 30s) so fallback chains cannot hang indefinitely.
 - After answering, cite sources with markdown links when you use this tool."#;
 
 fn default_max_results() -> Option<u32> {
@@ -61,7 +54,10 @@ fn default_max_results() -> Option<u32> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebSearchArgs {
+pub struct SearchArgs {
+    pub category: String,
+    #[serde(default)]
+    pub source: Option<String>,
     pub query: String,
     #[serde(default)]
     pub allowed_domains: Option<Vec<String>>,
@@ -84,12 +80,6 @@ struct SearchHit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SearchIntent {
-    General,
-    Research,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchApiProvider {
     Tavily,
     Exa,
@@ -103,8 +93,6 @@ enum SearchMethod {
     Exa,
     Firecrawl,
     Parallel,
-    PubMedMcp,
-    BrowserMcp,
     Ddg,
     Bing,
     Google,
@@ -114,6 +102,7 @@ enum SearchMethod {
 struct SearchExecution {
     hits: Vec<SearchHit>,
     source_labels: Vec<String>,
+    effective_source: Option<String>,
     notes: Vec<String>,
 }
 
@@ -130,13 +119,9 @@ impl SearchExecution {
         Self {
             hits: Vec::new(),
             source_labels: Vec::new(),
+            effective_source: None,
             notes: Vec::new(),
         }
-    }
-
-    fn with_hits(mut self, hits: Vec<SearchHit>) -> Self {
-        self.hits = hits;
-        self
     }
 
     fn push_source(&mut self, label: impl Into<String>) {
@@ -154,150 +139,9 @@ impl SearchExecution {
     }
 }
 
-#[derive(Debug, Clone)]
-struct McpToolCandidate {
-    tool_name: String,
-    args: JsonMap<String, JsonValue>,
-    score: i32,
-}
-
-#[derive(Debug, Clone)]
-struct BrowserMcpAction {
-    tool_name: String,
-    schema: JsonValue,
-    score: i32,
-}
-
-#[derive(Debug, Clone)]
-struct BrowserMcpBundle {
-    server_name: String,
-    navigate: BrowserMcpAction,
-    evaluate: BrowserMcpAction,
-    wait: Option<BrowserMcpAction>,
-    score: i32,
-}
-
-const PUBMED_SERVER: &str = "pubmed";
-const PUBMED_HOST: &str = "pubmed.ncbi.nlm.nih.gov";
-const BIORXIV_HOST: &str = "biorxiv.org";
 const DDG_HTML_SEARCH_BASE: &str = "https://html.duckduckgo.com/html/";
 const BING_SEARCH_BASE: &str = "https://www.bing.com/search";
 const GOOGLE_SEARCH_BASE: &str = "https://www.google.com/search";
-const MCP_BROWSER_MIN_SCORE: i32 = 55;
-const MCP_PUBMED_MIN_SCORE: i32 = 60;
-const PLAYWRIGHT_BROWSER_MIN_SCORE: i32 = 45;
-const BROWSER_SEARCH_EXTRACTION_SCRIPT: &str = r#"(() => {
-  const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
-  const hits = [];
-  const seen = new Set();
-  const pushHit = (title, url, snippet) => {
-    const cleanTitle = normalize(title).slice(0, 220);
-    const cleanUrl = normalize(url);
-    const cleanSnippet = normalize(snippet).slice(0, 320);
-    if (!cleanTitle || !/^https?:/i.test(cleanUrl) || seen.has(cleanUrl)) return;
-    seen.add(cleanUrl);
-    hits.push({ title: cleanTitle, url: cleanUrl, snippet: cleanSnippet });
-  };
-
-  const resultNodes = Array.from(
-    new Set(
-      [
-        ...document.querySelectorAll('[data-testid="result"], .result, article, main li'),
-      ]
-    )
-  );
-
-  for (const node of resultNodes) {
-    const anchor = node.querySelector('a[href]');
-    if (!anchor) continue;
-    const title = anchor.textContent || anchor.getAttribute('aria-label') || '';
-    const url = anchor.href || '';
-    const snippet = (node.innerText || '').replace(anchor.textContent || '', '');
-    pushHit(title, url, snippet);
-    if (hits.length >= 12) return hits;
-  }
-
-  for (const anchor of document.querySelectorAll('a[href]')) {
-    const href = anchor.href || '';
-    if (!/^https?:/i.test(href)) continue;
-    if (/duckduckgo\.com\/(y\.js|settings|\/html\/?$)/i.test(href)) continue;
-    const title = anchor.textContent || anchor.getAttribute('aria-label') || '';
-    if (!normalize(title)) continue;
-    const container = anchor.closest('article, li, div') || anchor.parentElement || anchor;
-    const snippet = container ? container.innerText || '' : '';
-    pushHit(title, href, snippet);
-    if (hits.length >= 12) break;
-  }
-
-  return hits;
-})()"#;
-
-fn has_explicit_domain_override(args: &WebSearchArgs) -> bool {
-    args.allowed_domains
-        .as_ref()
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-        || args
-            .blocked_domains
-            .as_ref()
-            .map(|v| !v.is_empty())
-            .unwrap_or(false)
-}
-
-fn detect_search_intent(query: &str) -> SearchIntent {
-    let q = query.to_ascii_lowercase();
-    let is_research = [
-        "pubmed",
-        "pmid",
-        "doi",
-        "biorxiv",
-        "bioarxiv",
-        "arxiv",
-        "medline",
-        "scholar",
-        "paper",
-        "papers",
-        "study",
-        "studies",
-        "literature",
-        "journal",
-        "preprint",
-        "abstract",
-        "meta-analysis",
-        "meta analysis",
-        "systematic review",
-        "clinical trial",
-        "citation",
-        "reference",
-        "文献",
-        "论文",
-        "综述",
-        "预印本",
-        "期刊",
-        "学术",
-        "doi",
-        "单细胞",
-        "转录组",
-        "基因组",
-        "蛋白组",
-    ]
-    .iter()
-    .any(|needle| q.contains(needle));
-    if is_research {
-        SearchIntent::Research
-    } else {
-        SearchIntent::General
-    }
-}
-
-fn scoped_site_query(query: &str, domain: &str) -> String {
-    let q = query.trim();
-    if q.to_ascii_lowercase().contains(domain) || q.to_ascii_lowercase().contains("site:") {
-        q.to_string()
-    } else {
-        format!("{q} site:{domain}")
-    }
-}
 
 fn join_labels(labels: &[String]) -> String {
     if labels.is_empty() {
@@ -322,10 +166,6 @@ fn search_method_from_setting(value: &str) -> Option<SearchMethod> {
         "exa" => Some(SearchMethod::Exa),
         "firecrawl" => Some(SearchMethod::Firecrawl),
         "parallel" => Some(SearchMethod::Parallel),
-        "pubmed" | "pubmed-mcp" | "pubmed_mcp" => Some(SearchMethod::PubMedMcp),
-        "browser" | "browser-mcp" | "browser_mcp" | "mcp-browser" | "mcp_browser" => {
-            Some(SearchMethod::BrowserMcp)
-        }
         "google" => Some(SearchMethod::Google),
         "bing" => Some(SearchMethod::Bing),
         "duckduckgo" | "duck-duck-go" | "ddg" => Some(SearchMethod::Ddg),
@@ -339,8 +179,6 @@ fn search_method_label(method: SearchMethod) -> &'static str {
         SearchMethod::Exa => "Exa",
         SearchMethod::Firecrawl => "Firecrawl",
         SearchMethod::Parallel => "Parallel",
-        SearchMethod::PubMedMcp => "PubMed MCP",
-        SearchMethod::BrowserMcp => "Browser MCP",
         SearchMethod::Ddg => "DuckDuckGo",
         SearchMethod::Bing => "Bing",
         SearchMethod::Google => "Google",
@@ -348,15 +186,7 @@ fn search_method_label(method: SearchMethod) -> &'static str {
 }
 
 fn default_search_methods() -> Vec<SearchMethod> {
-    vec![
-        SearchMethod::Tavily,
-        SearchMethod::Exa,
-        SearchMethod::Firecrawl,
-        SearchMethod::Parallel,
-        SearchMethod::Google,
-        SearchMethod::Bing,
-        SearchMethod::Ddg,
-    ]
+    vec![SearchMethod::Ddg, SearchMethod::Google, SearchMethod::Bing]
 }
 
 fn ordered_search_methods(settings: &[String], legacy_preferred_engine: &str) -> Vec<SearchMethod> {
@@ -406,11 +236,7 @@ fn search_api_provider_for_method(method: SearchMethod) -> Option<SearchApiProvi
         SearchMethod::Exa => Some(SearchApiProvider::Exa),
         SearchMethod::Firecrawl => Some(SearchApiProvider::Firecrawl),
         SearchMethod::Parallel => Some(SearchApiProvider::Parallel),
-        SearchMethod::PubMedMcp
-        | SearchMethod::BrowserMcp
-        | SearchMethod::Ddg
-        | SearchMethod::Bing
-        | SearchMethod::Google => None,
+        SearchMethod::Ddg | SearchMethod::Bing | SearchMethod::Google => None,
     }
 }
 
@@ -418,563 +244,40 @@ fn search_method_source_label(method: SearchMethod) -> String {
     if let Some(provider) = search_api_provider_for_method(method) {
         api_provider_label(provider).to_string()
     } else {
-        match method {
-            SearchMethod::PubMedMcp | SearchMethod::BrowserMcp => {
-                format!("{} search", search_method_label(method))
-            }
-            _ => format!("{} public search", search_method_label(method)),
-        }
+        format!("{} public search", search_method_label(method))
     }
 }
 
-fn value_object(value: &JsonValue) -> Option<&serde_json::Map<String, JsonValue>> {
-    value.as_object()
-}
-
-fn schema_properties(schema: &JsonValue) -> Option<&serde_json::Map<String, JsonValue>> {
-    schema
-        .get("properties")
-        .and_then(JsonValue::as_object)
-        .or_else(|| value_object(schema))
-}
-
-fn first_matching_key<'a>(
-    props: &'a serde_json::Map<String, JsonValue>,
-    candidates: &[&str],
-) -> Option<&'a str> {
-    props.keys().find_map(|key| {
-        let lower: String = key
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect::<String>()
-            .to_ascii_lowercase();
-        candidates
-            .iter()
-            .find(|candidate| {
-                let normalized = candidate
-                    .chars()
-                    .filter(|c| c.is_ascii_alphanumeric())
-                    .collect::<String>()
-                    .to_ascii_lowercase();
-                lower == normalized || lower.contains(&normalized)
-            })
-            .map(|_| key.as_str())
-    })
-}
-
-fn first_string_field(map: &serde_json::Map<String, JsonValue>, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        map.iter().find_map(|(actual, value)| {
-            if actual.eq_ignore_ascii_case(key) {
-                value
-                    .as_str()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            } else {
-                None
-            }
-        })
-    })
-}
-
-fn build_query_args_from_schema(
-    schema: &JsonValue,
-    query: &str,
-    max_results: u32,
-) -> Option<JsonMap<String, JsonValue>> {
-    let props = schema_properties(schema)?;
-    let mut args = JsonMap::new();
-
-    if let Some(key) = first_matching_key(
-        props,
-        &[
-            "query",
-            "q",
-            "term",
-            "search",
-            "search_query",
-            "search_term",
-            "keywords",
-            "text",
-            "objective",
-            "prompt",
-            "question",
-        ],
-    ) {
-        args.insert(key.to_string(), JsonValue::String(query.to_string()));
-    }
-
-    if let Some(key) = first_matching_key(
-        props,
-        &[
-            "max_results",
-            "limit",
-            "count",
-            "size",
-            "top_k",
-            "retmax",
-            "n",
-        ],
-    ) {
-        args.insert(
-            key.to_string(),
-            JsonValue::Number(serde_json::Number::from(max_results.max(1))),
-        );
-    }
-
-    if let Some(key) = first_matching_key(props, &["offset", "start", "page", "from"]) {
-        args.insert(
-            key.to_string(),
-            JsonValue::Number(serde_json::Number::from(0)),
-        );
-    }
-
-    if args.is_empty() {
-        None
-    } else {
-        Some(args)
-    }
-}
-
-fn browser_context_score(server_name: &str, tool_name: &str, description: &str) -> i32 {
-    let mut score = 0;
-    let haystack = format!(
-        "{} {} {}",
-        server_name.to_ascii_lowercase(),
-        tool_name.to_ascii_lowercase(),
-        description.to_ascii_lowercase()
-    );
-    for needle in [
-        "browser",
-        "browse",
-        "playwright",
-        "chrome",
-        "chromium",
-        "puppeteer",
-        "web page",
-        "webpage",
-        "navigation",
-        "navigate",
-    ] {
-        if haystack.contains(needle) {
-            score += 20;
-        }
-    }
-    score
-}
-
-fn browser_search_candidate_from_schema(
-    server_name: &str,
-    tool_name: &str,
-    description: &str,
-    schema: &JsonValue,
-    query: &str,
-    max_results: u32,
-) -> Option<McpToolCandidate> {
-    let context_score = browser_context_score(server_name, tool_name, description);
-    if context_score == 0 {
-        return None;
-    }
-
-    let props = schema_properties(schema)?;
-    let args = build_query_args_from_schema(schema, query, max_results)?;
-    let name = tool_name.to_ascii_lowercase();
-    let desc = description.to_ascii_lowercase();
-    let mut score = context_score;
-    if name.contains("search") || name.contains("query") || name.contains("find") {
-        score += 25;
-    }
-    if desc.contains("search") || desc.contains("results") || desc.contains("web") {
-        score += 15;
-    }
-    if first_matching_key(
-        props,
-        &[
-            "query",
-            "q",
-            "term",
-            "search",
-            "search_query",
-            "search_term",
-            "keywords",
-            "objective",
-        ],
-    )
-    .is_some()
-    {
-        score += 20;
-    }
-    if first_matching_key(props, &["max_results", "limit", "count", "size", "top_k"]).is_some() {
-        score += 10;
-    }
-    (score >= MCP_BROWSER_MIN_SCORE).then(|| McpToolCandidate {
-        tool_name: tool_name.to_string(),
-        args,
-        score,
-    })
-}
-
-fn browser_action_candidate(
-    server_name: &str,
-    tool_name: &str,
-    description: &str,
-    schema: &JsonValue,
-    action_keywords: &[&str],
-) -> Option<BrowserMcpAction> {
-    let context_score = browser_context_score(server_name, tool_name, description);
-    if context_score == 0 {
-        return None;
-    }
-    let name = tool_name.to_ascii_lowercase();
-    let desc = description.to_ascii_lowercase();
-    let mut score = context_score;
-    for needle in action_keywords {
-        if name.contains(needle) {
-            score += 25;
-        }
-        if desc.contains(needle) {
-            score += 10;
-        }
-    }
-    (score >= PLAYWRIGHT_BROWSER_MIN_SCORE).then(|| BrowserMcpAction {
-        tool_name: tool_name.to_string(),
-        schema: schema.clone(),
-        score,
-    })
-}
-
-fn build_url_args_from_schema(schema: &JsonValue, url: &str) -> Option<JsonMap<String, JsonValue>> {
-    let props = schema_properties(schema)?;
-    let mut args = JsonMap::new();
-    if let Some(key) = first_matching_key(
-        props,
-        &[
-            "url",
-            "uri",
-            "href",
-            "target_url",
-            "targeturl",
-            "page_url",
-            "pageurl",
-        ],
-    ) {
-        args.insert(key.to_string(), JsonValue::String(url.to_string()));
-    }
-    (!args.is_empty()).then_some(args)
-}
-
-fn build_browser_evaluate_args(
-    schema: &JsonValue,
-    script: &str,
-) -> Option<JsonMap<String, JsonValue>> {
-    let props = schema_properties(schema)?;
-    let mut args = JsonMap::new();
-    if let Some(key) = first_matching_key(
-        props,
-        &[
-            "function",
-            "expression",
-            "script",
-            "javascript",
-            "code",
-            "js",
-        ],
-    ) {
-        args.insert(key.to_string(), JsonValue::String(script.to_string()));
-    }
-    if let Some(key) = first_matching_key(props, &["selector", "element", "locator"]) {
-        args.insert(key.to_string(), JsonValue::String("body".to_string()));
-    }
-    (!args.is_empty()).then_some(args)
-}
-
-fn build_browser_wait_args(schema: &JsonValue) -> Option<JsonMap<String, JsonValue>> {
-    let props = schema_properties(schema)?;
-    let mut args = JsonMap::new();
-    if let Some(key) = first_matching_key(
-        props,
-        &[
-            "state",
-            "wait_until",
-            "waituntil",
-            "load",
-            "load_state",
-            "loadstate",
-        ],
-    ) {
-        args.insert(
-            key.to_string(),
-            JsonValue::String("networkidle".to_string()),
-        );
-    }
-    if let Some(key) = first_matching_key(
-        props,
-        &[
-            "timeout",
-            "timeout_ms",
-            "timeoutms",
-            "milliseconds",
-            "ms",
-            "duration",
-        ],
-    ) {
-        args.insert(
-            key.to_string(),
-            JsonValue::Number(serde_json::Number::from(5000)),
-        );
-    }
-    Some(args)
-}
-
-fn extract_text_blobs(value: &JsonValue, out: &mut Vec<String>, depth: usize) {
-    if depth > 8 {
-        return;
-    }
-    match value {
-        JsonValue::String(s) => {
-            if !s.trim().is_empty() {
-                out.push(s.trim().to_string());
-            }
-        }
-        JsonValue::Array(items) => {
-            for item in items {
-                extract_text_blobs(item, out, depth + 1);
-            }
-        }
-        JsonValue::Object(map) => {
-            if let Some(text) = map.get("text").and_then(JsonValue::as_str) {
-                if !text.trim().is_empty() {
-                    out.push(text.trim().to_string());
-                }
-            }
-            for child in map.values() {
-                extract_text_blobs(child, out, depth + 1);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn search_hits_from_browser_result(value: &JsonValue, limit: usize) -> Vec<SearchHit> {
-    if let Some(structured) = value.get("structuredContent") {
-        let hits = search_hits_from_any_json(structured, limit);
-        if !hits.is_empty() {
-            return hits;
-        }
-    }
-
-    let mut blobs = Vec::new();
-    extract_text_blobs(value, &mut blobs, 0);
-    for blob in blobs {
-        if let Ok(parsed) = serde_json::from_str::<JsonValue>(&blob) {
-            let hits = search_hits_from_any_json(&parsed, limit);
-            if !hits.is_empty() {
-                return hits;
-            }
-        }
-    }
-
-    search_hits_from_any_json(value, limit)
-}
-
-fn browser_search_url(query: &str) -> String {
-    let mut url =
-        reqwest::Url::parse(DDG_HTML_SEARCH_BASE).expect("duckduckgo html search base is valid");
-    url.query_pairs_mut().append_pair("q", query.trim());
-    url.to_string()
-}
-
-fn pubmed_candidate_from_schema(
-    tool_name: &str,
-    description: &str,
-    schema: &JsonValue,
-    query: &str,
-    max_results: u32,
-) -> Option<McpToolCandidate> {
-    let args = build_query_args_from_schema(schema, query, max_results)?;
-    let name = tool_name.to_ascii_lowercase();
-    let desc = description.to_ascii_lowercase();
-    let mut score = 0;
-    if name.contains("pubmed") {
-        score += 20;
-    }
-    if name.contains("search") {
-        score += 30;
-    }
-    if name.contains("article") {
-        score += 15;
-    }
-    if desc.contains("search") || desc.contains("article") || desc.contains("pubmed") {
-        score += 20;
-    }
-    (score >= MCP_PUBMED_MIN_SCORE).then(|| McpToolCandidate {
-        tool_name: tool_name.to_string(),
-        args,
-        score,
-    })
-}
-
-fn object_to_generic_hit(map: &serde_json::Map<String, JsonValue>) -> Option<SearchHit> {
-    let url = first_string_field(
-        map,
-        &["url", "link", "href", "sourceUrl", "pubmedUrl", "uri"],
-    )?;
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return None;
-    }
-    let title = first_string_field(
-        map,
-        &["title", "name", "heading", "paperTitle", "label", "source"],
-    )
-    .unwrap_or_else(|| url.clone());
-    let snippet = first_string_field(
-        map,
-        &[
-            "snippet",
-            "summary",
-            "description",
-            "text",
-            "content",
-            "abstract",
-            "markdown",
-        ],
-    )
-    .unwrap_or_default();
-    Some(SearchHit {
-        title,
-        url,
-        snippet,
-    })
-}
-
-fn collect_generic_search_hits(
-    value: &JsonValue,
-    out: &mut Vec<SearchHit>,
-    limit: usize,
-    depth: usize,
-) {
-    if out.len() >= limit || depth > 8 {
-        return;
-    }
-    match value {
-        JsonValue::Array(items) => {
-            for item in items {
-                collect_generic_search_hits(item, out, limit, depth + 1);
-                if out.len() >= limit {
-                    break;
-                }
-            }
-        }
-        JsonValue::Object(map) => {
-            if let Some(hit) = object_to_generic_hit(map) {
-                out.push(hit);
-                if out.len() >= limit {
-                    return;
-                }
-            }
-            for child in map.values() {
-                collect_generic_search_hits(child, out, limit, depth + 1);
-                if out.len() >= limit {
-                    break;
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn search_hits_from_any_json(value: &JsonValue, limit: usize) -> Vec<SearchHit> {
-    let mut hits = Vec::new();
-    collect_generic_search_hits(value, &mut hits, limit, 0);
-    dedupe_hits_preserve_order(hits.into_iter().map(sanitize_hit).collect())
-}
-
-fn search_hits_from_pubmed_result(value: &JsonValue, limit: usize) -> Vec<SearchHit> {
-    let mut out = Vec::new();
-    if let Some(items) = value
-        .pointer("/structuredContent/summaries")
-        .and_then(JsonValue::as_array)
-    {
-        for item in items {
-            let Some(map) = item.as_object() else {
-                continue;
-            };
-            let Some(url) = first_string_field(map, &["pubmedUrl", "url", "link"]) else {
-                continue;
-            };
-            let title = first_string_field(map, &["title"]).unwrap_or_else(|| url.clone());
-            let authors = first_string_field(map, &["authors"]).unwrap_or_default();
-            let source = first_string_field(map, &["source"]).unwrap_or_default();
-            let pub_date =
-                first_string_field(map, &["pubDate", "published", "date"]).unwrap_or_default();
-            let mut snippet_bits = Vec::new();
-            if !authors.is_empty() {
-                snippet_bits.push(authors);
-            }
-            if !source.is_empty() {
-                snippet_bits.push(source);
-            }
-            if !pub_date.is_empty() {
-                snippet_bits.push(pub_date);
-            }
-            out.push(SearchHit {
-                title,
-                url,
-                snippet: snippet_bits.join(" | "),
-            });
-            if out.len() >= limit {
-                break;
-            }
-        }
-    }
-    if out.is_empty() {
-        search_hits_from_any_json(value, limit)
-    } else {
-        dedupe_hits_preserve_order(out.into_iter().map(sanitize_hit).collect())
-    }
-}
-
-fn call_tool_result_to_json(result: &CallToolResult) -> Option<JsonValue> {
-    serde_json::to_value(result).ok()
-}
-
-fn effective_max_results(args: &WebSearchArgs) -> usize {
+fn effective_max_results(args: &SearchArgs) -> usize {
     let m = args.max_results.unwrap_or(5).clamp(1, 10) as usize;
     m.min(MAX_RESULTS_CAP)
 }
 
-fn effective_web_search_timeout(timeout_secs: u64) -> Duration {
-    Duration::from_secs(timeout_secs.clamp(5, WEB_SEARCH_MAX_TIMEOUT_SECS))
+fn effective_search_timeout(timeout_secs: u64) -> Duration {
+    Duration::from_secs(timeout_secs.clamp(5, SEARCH_MAX_TIMEOUT_SECS))
 }
 
-fn effective_web_search_mcp_timeout(timeout_secs: u64) -> Duration {
-    Duration::from_secs(timeout_secs.clamp(5, WEB_SEARCH_MCP_MAX_TIMEOUT_SECS))
-}
-
-fn web_search_timeout_error(timeout: Duration) -> ToolError {
+fn search_timeout_error(timeout: Duration) -> ToolError {
     let timeout_secs = timeout.as_secs().max(1);
     ToolError::ExecutionFailed {
         message: format!(
-            "web_search timed out after {}s. Try a narrower query or configure a faster search API provider.",
+            "search timed out after {}s. Try a narrower query or configure a faster search API provider.",
             timeout_secs
         ),
     }
 }
 
-async fn enforce_web_search_timeout<F>(
-    timeout: Duration,
-    fut: F,
-) -> Result<SearchExecution, ToolError>
+async fn enforce_search_timeout<F>(timeout: Duration, fut: F) -> Result<SearchExecution, ToolError>
 where
     F: Future<Output = Result<SearchExecution, ToolError>>,
 {
     match tokio::time::timeout(timeout, fut).await {
         Ok(result) => result,
-        Err(_) => Err(web_search_timeout_error(timeout)),
+        Err(_) => Err(search_timeout_error(timeout)),
     }
 }
 
-pub struct WebSearchTool;
+pub struct SearchTool;
 
 /// Settings key wins, then env vars.
 fn resolve_tavily_api_key(ctx: &ToolContext) -> Option<String> {
@@ -1089,18 +392,6 @@ async fn search_once_with_method(
             })?;
             search_parallel_once(client, &key, request.query, max_u32).await
         }
-        SearchMethod::PubMedMcp => Ok(search_pubmed_mcp(ctx, request.query, request.max_results)
-            .await?
-            .map(|exec| exec.hits)
-            .unwrap_or_default()),
-        SearchMethod::BrowserMcp => {
-            Ok(
-                search_via_browser_mcp(ctx, request.query, request.max_results)
-                    .await?
-                    .map(|exec| exec.hits)
-                    .unwrap_or_default(),
-            )
-        }
         SearchMethod::Ddg => {
             search_ddg(
                 client,
@@ -1115,6 +406,7 @@ async fn search_once_with_method(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn search_ordered_methods(
     client: &reqwest::Client,
     ctx: &ToolContext,
@@ -1123,8 +415,9 @@ async fn search_ordered_methods(
     blocked: &Option<Vec<String>>,
     max_results: usize,
     search_url: Option<&str>,
-) -> SearchExecution {
-    let methods = ordered_search_methods(&ctx.web_search_methods, &ctx.web_search_engine);
+    source: &str,
+) -> Result<SearchExecution, ToolError> {
+    let methods = web_methods_for_source(ctx, source)?;
     let mut exec = SearchExecution::new();
     exec.push_note(format!(
         "Search order: {}",
@@ -1161,12 +454,13 @@ async fn search_ordered_methods(
                         filter_hits(&ctx.project_root, hits, allowed, blocked, max_results);
                     if !filtered.is_empty() {
                         exec.hits = filtered;
+                        exec.effective_source = Some(search_method_source_key(method).to_string());
                         exec.push_source(if attempt == 1 {
                             label
                         } else {
                             format!("{label} (attempt {attempt})")
                         });
-                        return exec;
+                        return Ok(exec);
                     }
                     empty_attempts += 1;
                 }
@@ -1192,333 +486,10 @@ async fn search_ordered_methods(
     }
 
     exec.push_source("No configured search method returned usable hits");
-    exec
+    Ok(exec)
 }
 
-async fn search_pubmed_mcp(
-    ctx: &ToolContext,
-    query: &str,
-    max_results: usize,
-) -> Result<Option<SearchExecution>, ToolError> {
-    if !merged_mcp_servers(&ctx.project_root).contains_key(PUBMED_SERVER) {
-        return Ok(None);
-    }
-
-    let timeout = effective_web_search_mcp_timeout(ctx.timeout_secs);
-    let tools = match list_tools_for_server(&ctx.project_root, PUBMED_SERVER, timeout).await {
-        Ok(tools) => tools,
-        Err(err) => {
-            let mut exec = SearchExecution::new();
-            exec.push_note(format!("PubMed MCP unavailable: {err}"));
-            return Ok(Some(exec));
-        }
-    };
-
-    let mut best: Option<McpToolCandidate> = None;
-    for tool in tools {
-        let schema =
-            serde_json::to_value(&*tool.input_schema).unwrap_or_else(|_| serde_json::json!({}));
-        let Some(candidate) = pubmed_candidate_from_schema(
-            tool.name.as_ref(),
-            tool.description.as_deref().unwrap_or(""),
-            &schema,
-            query,
-            max_results as u32,
-        ) else {
-            continue;
-        };
-        if best
-            .as_ref()
-            .map(|current| candidate.score > current.score)
-            .unwrap_or(true)
-        {
-            best = Some(candidate);
-        }
-    }
-
-    let Some(candidate) = best else {
-        return Ok(None);
-    };
-
-    let result = match call_tool_on_server(
-        &ctx.project_root,
-        PUBMED_SERVER,
-        &candidate.tool_name,
-        Some(candidate.args),
-        timeout,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(err) => {
-            let mut exec = SearchExecution::new();
-            exec.push_note(format!("PubMed MCP call failed: {err}"));
-            return Ok(Some(exec));
-        }
-    };
-
-    let Some(value) = call_tool_result_to_json(&result) else {
-        return Ok(None);
-    };
-    let hits = search_hits_from_pubmed_result(&value, max_results);
-    if hits.is_empty() {
-        return Ok(None);
-    }
-
-    let mut exec = SearchExecution::new().with_hits(hits);
-    exec.push_source(format!(
-        "PubMed MCP (`{}` on `{}`)",
-        candidate.tool_name, PUBMED_SERVER
-    ));
-    Ok(Some(exec))
-}
-
-async fn search_via_browser_mcp(
-    ctx: &ToolContext,
-    query: &str,
-    max_results: usize,
-) -> Result<Option<SearchExecution>, ToolError> {
-    let timeout = effective_web_search_mcp_timeout(ctx.timeout_secs);
-    let merged = merged_mcp_servers(&ctx.project_root);
-    if merged.is_empty() {
-        return Ok(None);
-    }
-
-    let mut best_server = String::new();
-    let mut best_candidate: Option<McpToolCandidate> = None;
-    let mut best_bundle: Option<BrowserMcpBundle> = None;
-
-    let mut server_names: Vec<String> = merged.keys().cloned().collect();
-    server_names.sort();
-    for server_name in server_names {
-        let Ok(tools) = list_tools_for_server(&ctx.project_root, &server_name, timeout).await
-        else {
-            continue;
-        };
-        let mut navigate_candidate: Option<BrowserMcpAction> = None;
-        let mut evaluate_candidate: Option<BrowserMcpAction> = None;
-        let mut wait_candidate: Option<BrowserMcpAction> = None;
-        for tool in tools {
-            let schema =
-                serde_json::to_value(&*tool.input_schema).unwrap_or_else(|_| serde_json::json!({}));
-            if let Some(candidate) = browser_search_candidate_from_schema(
-                &server_name,
-                tool.name.as_ref(),
-                tool.description.as_deref().unwrap_or(""),
-                &schema,
-                query,
-                max_results as u32,
-            ) {
-                let should_replace = best_candidate
-                    .as_ref()
-                    .map(|current| candidate.score > current.score)
-                    .unwrap_or(true);
-                if should_replace {
-                    best_server = server_name.clone();
-                    best_candidate = Some(candidate);
-                }
-            }
-
-            if let Some(candidate) = browser_action_candidate(
-                &server_name,
-                tool.name.as_ref(),
-                tool.description.as_deref().unwrap_or(""),
-                &schema,
-                &["navigate", "goto", "open"],
-            ) {
-                if navigate_candidate
-                    .as_ref()
-                    .map(|current| candidate.score > current.score)
-                    .unwrap_or(true)
-                {
-                    navigate_candidate = Some(candidate);
-                }
-            }
-
-            if let Some(candidate) = browser_action_candidate(
-                &server_name,
-                tool.name.as_ref(),
-                tool.description.as_deref().unwrap_or(""),
-                &schema,
-                &["evaluate", "eval", "javascript", "script", "code"],
-            ) {
-                if evaluate_candidate
-                    .as_ref()
-                    .map(|current| candidate.score > current.score)
-                    .unwrap_or(true)
-                {
-                    evaluate_candidate = Some(candidate);
-                }
-            }
-
-            if let Some(candidate) = browser_action_candidate(
-                &server_name,
-                tool.name.as_ref(),
-                tool.description.as_deref().unwrap_or(""),
-                &schema,
-                &["wait", "load"],
-            ) {
-                if wait_candidate
-                    .as_ref()
-                    .map(|current| candidate.score > current.score)
-                    .unwrap_or(true)
-                {
-                    wait_candidate = Some(candidate);
-                }
-            }
-        }
-
-        if let (Some(navigate), Some(evaluate)) = (navigate_candidate, evaluate_candidate) {
-            let score = navigate.score
-                + evaluate.score
-                + wait_candidate.as_ref().map(|c| c.score).unwrap_or(0);
-            let bundle = BrowserMcpBundle {
-                server_name: server_name.clone(),
-                navigate,
-                evaluate,
-                wait: wait_candidate,
-                score,
-            };
-            if best_bundle
-                .as_ref()
-                .map(|current| bundle.score > current.score)
-                .unwrap_or(true)
-            {
-                best_bundle = Some(bundle);
-            }
-        }
-    }
-
-    if let Some(candidate) = best_candidate {
-        let result = call_tool_on_server(
-            &ctx.project_root,
-            &best_server,
-            &candidate.tool_name,
-            Some(candidate.args),
-            timeout,
-        )
-        .await
-        .ok();
-        if let Some(result) = result {
-            if let Some(value) = call_tool_result_to_json(&result) {
-                let hits = search_hits_from_browser_result(&value, max_results);
-                if !hits.is_empty() {
-                    let mut exec = SearchExecution::new().with_hits(hits);
-                    exec.push_source(format!(
-                        "Agent-browser MCP (`{}` on `{}`)",
-                        candidate.tool_name, best_server
-                    ));
-                    return Ok(Some(exec));
-                }
-            }
-        }
-    }
-
-    let Some(bundle) = best_bundle else {
-        return Ok(None);
-    };
-    let navigate_args =
-        match build_url_args_from_schema(&bundle.navigate.schema, &browser_search_url(query)) {
-            Some(args) => args,
-            None => return Ok(None),
-        };
-    let connection =
-        match connect_mcp_server_legacy(&ctx.project_root, &bundle.server_name, timeout).await {
-            Ok(conn) => conn,
-            Err(_) => return Ok(None),
-        };
-    if call_tool_via_peer(
-        &connection.peer,
-        &bundle.navigate.tool_name,
-        Some(navigate_args),
-        timeout,
-    )
-    .await
-    .is_err()
-    {
-        return Ok(None);
-    }
-
-    if let Some(wait_tool) = &bundle.wait {
-        let wait_args = build_browser_wait_args(&wait_tool.schema).unwrap_or_default();
-        let _ = call_tool_via_peer(
-            &connection.peer,
-            &wait_tool.tool_name,
-            Some(wait_args),
-            timeout,
-        )
-        .await;
-    }
-
-    let eval_args = match build_browser_evaluate_args(
-        &bundle.evaluate.schema,
-        BROWSER_SEARCH_EXTRACTION_SCRIPT,
-    ) {
-        Some(args) => args,
-        None => return Ok(None),
-    };
-    let result = match call_tool_via_peer(
-        &connection.peer,
-        &bundle.evaluate.tool_name,
-        Some(eval_args),
-        timeout,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => return Ok(None),
-    };
-    let Some(value) = call_tool_result_to_json(&result) else {
-        return Ok(None);
-    };
-    let hits = search_hits_from_browser_result(&value, max_results);
-    if hits.is_empty() {
-        return Ok(None);
-    }
-
-    let mut exec = SearchExecution::new().with_hits(hits);
-    exec.push_source(format!(
-        "Agent-browser MCP bundle (`{}` + `{}` on `{}`)",
-        bundle.navigate.tool_name, bundle.evaluate.tool_name, bundle.server_name
-    ));
-    Ok(Some(exec))
-}
-
-async fn run_research_search(
-    client: &reqwest::Client,
-    ctx: &ToolContext,
-    args: &WebSearchArgs,
-    max_results: usize,
-    search_url: Option<&str>,
-) -> Result<SearchExecution, ToolError> {
-    let query = args.query.trim();
-    let scoped_research_query = if query.to_ascii_lowercase().contains("site:") {
-        query.to_string()
-    } else {
-        format!(
-            "({}) OR ({})",
-            scoped_site_query(query, PUBMED_HOST),
-            scoped_site_query(query, BIORXIV_HOST)
-        )
-    };
-    let mut execution = search_ordered_methods(
-        client,
-        ctx,
-        &scoped_research_query,
-        &args.allowed_domains,
-        &args.blocked_domains,
-        max_results,
-        search_url,
-    )
-    .await;
-    execution.push_note("Research query scoped to PubMed/bioRxiv.");
-    Ok(execution)
-}
-
-/// Returns true if the URL's host resolves to a loopback, link-local, or RFC-1918 private
-/// address — prevents SSRF via LLM-controlled `search_url` pointing at internal services
-/// (AWS metadata 169.254.169.254, localhost, 10/8, 172.16/12, 192.168/16, etc.).
-fn validate(args: &WebSearchArgs) -> Result<(), ToolError> {
+fn validate(args: &SearchArgs) -> Result<(), ToolError> {
     if args.query.trim().len() < 2 {
         return Err(ToolError::InvalidArguments {
             message: "query must be at least 2 characters".to_string(),
@@ -2648,8 +1619,14 @@ mod ddg_tests {
             ordered_search_methods(&["google".into(), "google".into(), "unknown".into()], "ddg"),
             vec![SearchMethod::Google]
         );
-        assert_eq!(ordered_search_methods(&[], "bing")[0], SearchMethod::Bing);
-        assert_eq!(ordered_search_methods(&[], "unknown").len(), 7);
+        assert_eq!(
+            ordered_search_methods(&[], "bing"),
+            vec![SearchMethod::Bing, SearchMethod::Ddg, SearchMethod::Google]
+        );
+        assert_eq!(
+            ordered_search_methods(&[], "unknown"),
+            vec![SearchMethod::Ddg, SearchMethod::Google, SearchMethod::Bing]
+        );
     }
 
     /// Live network (optional): `cargo test -p omiga ddg_live_smoke -- --ignored --nocapture`
@@ -2660,7 +1637,7 @@ mod ddg_tests {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(45))
             .no_proxy()
-            .user_agent(concat!("Omiga/", env!("CARGO_PKG_VERSION"), " WebSearch"))
+            .user_agent(concat!("Omiga/", env!("CARGO_PKG_VERSION"), " Search"))
             .build()
             .expect("client");
         let hits = match search_ddg(&client, "rust programming language", 10, None).await {
@@ -2674,110 +1651,6 @@ mod ddg_tests {
             !hits.is_empty(),
             "DDG instant answer or HTML fallback should return at least one link"
         );
-    }
-
-    #[test]
-    fn detect_research_intent_from_academic_keywords() {
-        assert_eq!(
-            detect_search_intent("检索肝癌单细胞文献"),
-            SearchIntent::Research
-        );
-        assert_eq!(
-            detect_search_intent("latest pubmed papers about fibrosis"),
-            SearchIntent::Research
-        );
-        assert_eq!(
-            detect_search_intent("weather in shanghai tomorrow"),
-            SearchIntent::General
-        );
-    }
-
-    #[test]
-    fn scoped_site_query_adds_domain_once() {
-        assert_eq!(
-            scoped_site_query("cholangiocarcinoma review", PUBMED_HOST),
-            "cholangiocarcinoma review site:pubmed.ncbi.nlm.nih.gov"
-        );
-        assert_eq!(
-            scoped_site_query(
-                "cholangiocarcinoma site:pubmed.ncbi.nlm.nih.gov",
-                PUBMED_HOST
-            ),
-            "cholangiocarcinoma site:pubmed.ncbi.nlm.nih.gov"
-        );
-    }
-
-    #[test]
-    fn generic_json_hit_parser_finds_nested_hits() {
-        let value = serde_json::json!({
-            "results": [
-                {
-                    "title": "Example paper",
-                    "url": "https://example.org/paper",
-                    "snippet": "summary"
-                }
-            ]
-        });
-        let hits = search_hits_from_any_json(&value, 5);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].url, "https://example.org/paper");
-        assert_eq!(hits[0].title, "Example paper");
-    }
-
-    #[test]
-    fn browser_candidate_prefers_browser_context_and_query_args() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string" },
-                "max_results": { "type": "integer" }
-            }
-        });
-        let candidate = browser_search_candidate_from_schema(
-            "browser-use",
-            "search_web",
-            "Search the web in a browser session",
-            &schema,
-            "gene therapy",
-            5,
-        )
-        .expect("candidate");
-        assert_eq!(
-            candidate.args.get("query").and_then(JsonValue::as_str),
-            Some("gene therapy")
-        );
-        assert_eq!(
-            candidate
-                .args
-                .get("max_results")
-                .and_then(JsonValue::as_u64),
-            Some(5)
-        );
-    }
-
-    #[test]
-    fn browser_search_url_builds_duckduckgo_query() {
-        let url = browser_search_url("liver fibrosis review");
-        assert!(url.starts_with(DDG_HTML_SEARCH_BASE));
-        assert!(
-            url.contains("q=liver+fibrosis+review") || url.contains("q=liver%20fibrosis%20review")
-        );
-    }
-
-    #[test]
-    fn browser_result_parser_reads_json_text_payload() {
-        let payload = serde_json::json!({
-            "content": [
-                {
-                    "type": "text",
-                    "text": "[{\"title\":\"Paper A\",\"url\":\"https://example.org/a\",\"snippet\":\"summary\"}]"
-                }
-            ]
-        });
-        let hits = search_hits_from_browser_result(&payload, 5);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].title, "Paper A");
-        assert_eq!(hits[0].url, "https://example.org/a");
     }
 
     #[test]
@@ -2801,18 +1674,14 @@ mod ddg_tests {
     }
 
     #[test]
-    fn web_search_timeout_is_hard_capped_for_interactive_use() {
-        assert_eq!(effective_web_search_timeout(600), Duration::from_secs(30));
-        assert_eq!(effective_web_search_timeout(1), Duration::from_secs(5));
-        assert_eq!(
-            effective_web_search_mcp_timeout(600),
-            Duration::from_secs(10)
-        );
+    fn search_timeout_is_hard_capped_for_interactive_use() {
+        assert_eq!(effective_search_timeout(600), Duration::from_secs(30));
+        assert_eq!(effective_search_timeout(1), Duration::from_secs(5));
     }
 
     #[tokio::test]
-    async fn web_search_global_timeout_returns_error() {
-        let result = enforce_web_search_timeout(Duration::from_millis(1), async {
+    async fn search_global_timeout_returns_error() {
+        let result = enforce_search_timeout(Duration::from_millis(1), async {
             tokio::time::sleep(Duration::from_millis(50)).await;
             Ok(SearchExecution::new())
         })
@@ -2820,16 +1689,156 @@ mod ddg_tests {
 
         match result {
             Err(ToolError::ExecutionFailed { message }) => {
-                assert!(message.contains("web_search timed out after 1s"));
+                assert!(message.contains("search timed out after 1s"));
             }
             other => panic!("expected timeout execution failure, got {other:?}"),
         }
     }
 }
 
+fn normalized_category(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+fn normalized_source(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("auto")
+        .to_ascii_lowercase()
+        .replace('-', "_")
+}
+
+fn search_method_source_key(method: SearchMethod) -> &'static str {
+    match method {
+        SearchMethod::Tavily => "tavily",
+        SearchMethod::Exa => "exa",
+        SearchMethod::Firecrawl => "firecrawl",
+        SearchMethod::Parallel => "parallel",
+        SearchMethod::Ddg => "ddg",
+        SearchMethod::Bing => "bing",
+        SearchMethod::Google => "google",
+    }
+}
+
+fn web_methods_for_source(ctx: &ToolContext, source: &str) -> Result<Vec<SearchMethod>, ToolError> {
+    match source {
+        "auto" => Ok(ordered_search_methods(
+            &ctx.web_search_methods,
+            &ctx.web_search_engine,
+        )),
+        "tavily" => Ok(vec![SearchMethod::Tavily]),
+        "exa" => Ok(vec![SearchMethod::Exa]),
+        "firecrawl" => Ok(vec![SearchMethod::Firecrawl]),
+        "parallel" => Ok(vec![SearchMethod::Parallel]),
+        "google" => Ok(vec![SearchMethod::Google]),
+        "bing" => Ok(vec![SearchMethod::Bing]),
+        "ddg" | "duckduckgo" | "duck_duck_go" => Ok(vec![SearchMethod::Ddg]),
+        other => Err(ToolError::InvalidArguments {
+            message: format!("Unsupported web search source: {other}"),
+        }),
+    }
+}
+
+fn displayed_link_for_url(url: &str) -> String {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return url.to_string();
+    };
+    let host = parsed
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches("www.");
+    let mut out = host.to_string();
+    let path = parsed.path().trim_end_matches('/');
+    if !path.is_empty() && path != "/" {
+        out.push_str(path);
+    }
+    out
+}
+
+fn favicon_for_url(url: &str) -> Option<String> {
+    let host = host_of_url(url)?;
+    Some(format!(
+        "https://www.google.com/s2/favicons?domain={}&sz=64",
+        host.trim_start_matches("www.")
+    ))
+}
+
+fn web_results_json(
+    args: &SearchArgs,
+    requested_source: &str,
+    execution: SearchExecution,
+    hits: Vec<SearchHit>,
+    duration: f32,
+) -> JsonValue {
+    let effective_source = execution
+        .effective_source
+        .clone()
+        .unwrap_or_else(|| requested_source.to_string());
+    let results: Vec<JsonValue> = hits
+        .iter()
+        .enumerate()
+        .map(|(idx, h)| {
+            let title = if h.title.trim().is_empty() {
+                &h.url
+            } else {
+                &h.title
+            };
+            json!({
+                "position": idx + 1,
+                "category": "web",
+                "source": effective_source,
+                "title": title,
+                "name": title,
+                "link": h.url,
+                "url": h.url,
+                "displayed_link": displayed_link_for_url(&h.url),
+                "favicon": favicon_for_url(&h.url),
+                "snippet": h.snippet,
+                "id": JsonValue::Null,
+                "metadata": {},
+            })
+        })
+        .collect();
+    json!({
+        "query": args.query.trim(),
+        "category": "web",
+        "source": requested_source,
+        "effective_source": effective_source,
+        "source_label": join_labels(&execution.source_labels),
+        "duration_seconds": duration,
+        "route_notes": execution.notes,
+        "results": results,
+    })
+}
+
+fn structured_error_json(
+    code: &str,
+    category: &str,
+    source: &str,
+    message: impl Into<String>,
+) -> JsonValue {
+    json!({
+        "error": code,
+        "category": category,
+        "source": source,
+        "message": message.into(),
+        "results": [],
+    })
+}
+
+fn json_stream(value: JsonValue) -> crate::infrastructure::streaming::StreamOutputBox {
+    let mut text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+    if text.len() > MAX_OUTPUT_CHARS {
+        text.truncate(MAX_OUTPUT_CHARS);
+        text.push_str("\n/* Output truncated */");
+    }
+    SearchOutput { text }.into_stream()
+}
+
 #[async_trait]
-impl super::ToolImpl for WebSearchTool {
-    type Args = WebSearchArgs;
+impl super::ToolImpl for SearchTool {
+    type Args = SearchArgs;
 
     const DESCRIPTION: &'static str = DESCRIPTION;
 
@@ -2839,46 +1848,40 @@ impl super::ToolImpl for WebSearchTool {
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
         validate(&args)?;
         let start = Instant::now();
-
-        let timeout = effective_web_search_timeout(ctx.timeout_secs);
-        let mut client_builder = reqwest::Client::builder()
-            .timeout(timeout)
-            .user_agent(concat!("Omiga/", env!("CARGO_PKG_VERSION"), " WebSearch"));
-        if !ctx.web_use_proxy {
-            client_builder = client_builder.no_proxy();
-        }
-        let client = client_builder
-            .build()
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("HTTP client: {}", e),
-            })?;
-
-        let allowed = &args.allowed_domains;
-        let blocked = &args.blocked_domains;
+        let category = normalized_category(&args.category);
+        let source = normalized_source(args.source.as_deref());
         let max_n = effective_max_results(&args);
-        let search_url = args.search_url.as_deref().filter(|s| !s.trim().is_empty());
-        if let Some(search_url) = search_url {
-            super::web_safety::validate_public_http_url(&ctx.project_root, search_url, false)
-                .map_err(|message| ToolError::InvalidArguments { message })?;
-        }
-        let intent = if has_explicit_domain_override(&args) {
-            SearchIntent::General
-        } else {
-            detect_search_intent(args.query.trim())
-        };
 
-        let execution = tokio::select! {
-            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-            r = enforce_web_search_timeout(timeout, async {
-                match intent {
-                    SearchIntent::Research => {
-                        let research_fut = run_research_search(&client, ctx, &args, max_n, search_url);
-                        tokio::select! {
-                            _ = ctx.cancel.cancelled() => Err(ToolError::Cancelled),
-                            r = research_fut => r,
-                        }
-                    }
-                    SearchIntent::General => {
+        match category.as_str() {
+            "web" => {
+                let timeout = effective_search_timeout(ctx.timeout_secs);
+                let mut client_builder = reqwest::Client::builder()
+                    .timeout(timeout)
+                    .user_agent(concat!("Omiga/", env!("CARGO_PKG_VERSION"), " Search"));
+                if !ctx.web_use_proxy {
+                    client_builder = client_builder.no_proxy();
+                }
+                let client = client_builder
+                    .build()
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        message: format!("HTTP client: {}", e),
+                    })?;
+
+                let allowed = &args.allowed_domains;
+                let blocked = &args.blocked_domains;
+                let search_url = args.search_url.as_deref().filter(|s| !s.trim().is_empty());
+                if let Some(search_url) = search_url {
+                    super::web_safety::validate_public_http_url(
+                        &ctx.project_root,
+                        search_url,
+                        false,
+                    )
+                    .map_err(|message| ToolError::InvalidArguments { message })?;
+                }
+
+                let execution = tokio::select! {
+                    _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                    r = enforce_search_timeout(timeout, async {
                         let strategy_fut = search_ordered_methods(
                             &client,
                             ctx,
@@ -2887,85 +1890,141 @@ impl super::ToolImpl for WebSearchTool {
                             blocked,
                             max_n,
                             search_url,
+                            &source,
                         );
-                        let exec = tokio::select! {
-                            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                        tokio::select! {
+                            _ = ctx.cancel.cancelled() => Err(ToolError::Cancelled),
                             r = strategy_fut => r,
-                        };
-                        Ok(exec)
-                    }
-                }
-            }) => r?,
-        };
-
-        let processed = dedupe_hits_preserve_order(
-            execution
-                .hits
-                .into_iter()
-                .map(sanitize_hit)
-                .collect::<Vec<_>>(),
-        );
-        let hits = filter_hits(&ctx.project_root, processed, allowed, blocked, max_n);
-        let duration = start.elapsed().as_secs_f32();
-
-        let mut text = String::new();
-        text.push_str(&format!(
-            "Web search results for query: \"{}\"\n\n",
-            args.query.trim()
-        ));
-        text.push_str(&format!(
-            "Intent: {}\n",
-            match intent {
-                SearchIntent::Research => "research",
-                SearchIntent::General => "general",
-            }
-        ));
-        text.push_str(&format!(
-            "Source: {}\n",
-            join_labels(&execution.source_labels)
-        ));
-        if !execution.notes.is_empty() {
-            text.push_str(&format!("Route notes: {}\n", execution.notes.join(" | ")));
-        }
-        text.push_str(&format!("Duration: {:.2}s\n\n", duration));
-
-        if hits.is_empty() {
-            text.push_str("No links matched the filters or the search returned no results.\n");
-        } else {
-            text.push_str("Results:\n");
-            for (i, h) in hits.iter().enumerate() {
-                let t = if h.title.is_empty() {
-                    h.url.as_str()
-                } else {
-                    h.title.as_str()
+                        }
+                    }) => r?,
                 };
-                text.push_str(&format!("{}. {}\n", i + 1, t));
-                text.push_str(&format!("   URL: {}\n", h.url));
-                if !h.snippet.trim().is_empty() {
-                    text.push_str(&format!("   {}\n", h.snippet.trim()));
-                }
+
+                let processed = dedupe_hits_preserve_order(
+                    execution
+                        .hits
+                        .iter()
+                        .cloned()
+                        .map(sanitize_hit)
+                        .collect::<Vec<_>>(),
+                );
+                let hits = filter_hits(&ctx.project_root, processed, allowed, blocked, max_n);
+                let duration = start.elapsed().as_secs_f32();
+                Ok(json_stream(web_results_json(
+                    &args, &source, execution, hits, duration,
+                )))
             }
+            "literature" => match source.as_str() {
+                "auto" | "pubmed" => {
+                    let client =
+                        crate::domain::search::pubmed::EntrezClient::from_tool_context(ctx)
+                            .map_err(|message| ToolError::ExecutionFailed { message })?;
+                    let response = tokio::select! {
+                        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                        r = client.search(crate::domain::search::pubmed::PubmedSearchArgs {
+                            query: args.query.trim().to_string(),
+                            max_results: args.max_results,
+                            ret_start: None,
+                            sort: None,
+                            date_type: None,
+                            mindate: None,
+                            maxdate: None,
+                        }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+                    };
+                    Ok(json_stream(
+                        crate::domain::search::pubmed::search_response_to_json(&response),
+                    ))
+                }
+                "semantic_scholar" | "semanticscholar" | "s2" => {
+                    if !ctx.web_search_api_keys.semantic_scholar_enabled {
+                        return Ok(json_stream(structured_error_json(
+                            "source_disabled",
+                            "literature",
+                            &source,
+                            "literature.semantic_scholar is disabled. Enable it and configure an API key in Settings → Search.",
+                        )));
+                    }
+                    let client =
+                        crate::domain::search::semantic_scholar::SemanticScholarClient::from_tool_context(ctx)
+                            .map_err(|message| ToolError::ExecutionFailed { message })?;
+                    let response = tokio::select! {
+                        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                        r = client.search(crate::domain::search::semantic_scholar::SemanticScholarSearchArgs {
+                            query: args.query.trim().to_string(),
+                            max_results: args.max_results,
+                            token: None,
+                        }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+                    };
+                    Ok(json_stream(
+                        crate::domain::search::semantic_scholar::search_response_to_json(&response),
+                    ))
+                }
+                "arxiv" | "crossref" | "openalex" | "biorxiv" | "bio_rxiv" | "medrxiv"
+                | "med_rxiv" => {
+                    let source_kind =
+                        crate::domain::search::literature::PublicLiteratureSource::parse(&source)
+                            .ok_or_else(|| ToolError::InvalidArguments {
+                            message: format!("Unsupported literature search source: {source}"),
+                        })?;
+                    let client =
+                        crate::domain::search::literature::PublicLiteratureClient::from_tool_context(ctx)
+                            .map_err(|message| ToolError::ExecutionFailed { message })?;
+                    let response = tokio::select! {
+                        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                        r = client.search(source_kind, crate::domain::search::literature::LiteratureSearchArgs {
+                            query: args.query.trim().to_string(),
+                            max_results: args.max_results,
+                        }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+                    };
+                    Ok(json_stream(
+                        crate::domain::search::literature::search_response_to_json(&response),
+                    ))
+                }
+                other => Err(ToolError::InvalidArguments {
+                    message: format!("Unsupported literature search source: {other}"),
+                }),
+            },
+            "social" => match source.as_str() {
+                "auto" | "wechat" => {
+                    if !ctx.web_search_api_keys.wechat_search_enabled {
+                        return Ok(json_stream(structured_error_json(
+                            "source_disabled",
+                            "social",
+                            &source,
+                            "social.wechat is disabled. Enable WeChat public-account search in Settings → Search.",
+                        )));
+                    }
+                    let client =
+                        crate::domain::search::wechat::WechatClient::from_tool_context(ctx)
+                            .map_err(|message| ToolError::ExecutionFailed { message })?;
+                    let response = tokio::select! {
+                        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                        r = client.search(crate::domain::search::wechat::WechatSearchArgs {
+                            query: args.query.trim().to_string(),
+                            max_results: args.max_results,
+                            page: None,
+                        }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+                    };
+                    Ok(json_stream(
+                        crate::domain::search::wechat::search_response_to_json(&response),
+                    ))
+                }
+                other => Err(ToolError::InvalidArguments {
+                    message: format!("Unsupported social search source: {other}"),
+                }),
+            },
+            other => Err(ToolError::InvalidArguments {
+                message: format!("Unsupported search category: {other}"),
+            }),
         }
-
-        text.push_str(
-            "\nREMINDER: Include a Sources section with markdown links when you use these URLs in your answer.",
-        );
-
-        if text.len() > MAX_OUTPUT_CHARS {
-            text.truncate(MAX_OUTPUT_CHARS);
-            text.push_str("\n\n[Output truncated]");
-        }
-
-        Ok(WebSearchOutput { text }.into_stream())
     }
 }
 
 #[derive(Debug, Clone)]
-struct WebSearchOutput {
+struct SearchOutput {
     text: String,
 }
 
-impl StreamOutput for WebSearchOutput {
+impl StreamOutput for SearchOutput {
     fn into_stream(self) -> Pin<Box<dyn futures::Stream<Item = StreamOutputItem> + Send>> {
         use futures::stream;
         Box::pin(stream::iter(vec![
@@ -2978,11 +2037,19 @@ impl StreamOutput for WebSearchOutput {
 
 pub fn schema() -> ToolSchema {
     ToolSchema::new(
-        "web_search",
+        "search",
         DESCRIPTION,
         serde_json::json!({
             "type": "object",
             "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "Data-source category. First version supports web, literature, social."
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Source within the category. Defaults to auto. Examples: google, ddg, bing, tavily, pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar (opt-in), wechat (opt-in)."
+                },
                 "query": {
                     "type": "string",
                     "description": "Search query (at least 2 characters)"
@@ -3008,7 +2075,7 @@ pub fn schema() -> ToolSchema {
                     "description": "Optional override for the DuckDuckGo HTML search endpoint (http(s) URL)"
                 }
             },
-            "required": ["query"]
+            "required": ["category", "query"]
         }),
     )
 }

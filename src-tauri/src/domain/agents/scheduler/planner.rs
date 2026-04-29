@@ -862,7 +862,7 @@ impl TaskPlanner {
                 .with_stage(SubTaskStage::Retrieve)
                 .with_context(format!(
                     "基于项目计划的范围，为科研分析收集证据。\
-                    优先 PubMed / Google Scholar / arXiv / bioRxiv / GEO / TCGA / 官方数据库；\
+                    优先 PubMed / Google Scholar / arXiv / bioRxiv / GEO / TCGA / 官方数据库；可选数据源（如 Semantic Scholar、微信公众号）只有在用户显式启用后才使用；\
                     每条证据或数据线索必须保留标题/数据集编号、年份、来源、DOI/URL、关键结论和适用边界。\
                     如果项目计划判定某类来源不必要，请说明跳过理由。原始目标: {}",
                     request.user_request
@@ -1266,12 +1266,17 @@ impl TaskPlanner {
                     .with_agent("literature-search")
                     .with_context(format!(
                         "研究任务: {}\n\n请并行搜索以下学术数据库：\
-                        1) PubMed: web_search with query \"<topic> site:pubmed.ncbi.nlm.nih.gov\"\
-                        2) arXiv: web_search with query \"<topic> site:arxiv.org/abs\"\
-                        3) bioRxiv: web_search with query \"<topic> site:biorxiv.org\"\
-                        4) Google Scholar: web_search with query \"<topic> review 2022 2023 2024 2025\"\
+                        1) PubMed: search(category=\"literature\", source=\"pubmed\", query=\"<topic>\")\
+                        2) arXiv: search(category=\"literature\", source=\"arxiv\", query=\"<topic>\")\
+                        3) Crossref: search(category=\"literature\", source=\"crossref\", query=\"<topic>\")\
+                        4) OpenAlex: search(category=\"literature\", source=\"openalex\", query=\"<topic>\")\
+                        5) bioRxiv/medRxiv: search(category=\"literature\", source=\"biorxiv\", query=\"<topic>\") and search(category=\"literature\", source=\"medrxiv\", query=\"<topic>\")\
+                        6) Recent reviews: search(category=\"web\", source=\"auto\", query=\"<topic> recent review OR latest review\")\
+                        7) Foundational papers: search(category=\"web\", source=\"auto\", query=\"<topic> seminal OR foundational OR landmark OR classic\")\
+                        可选数据源（如 Semantic Scholar、微信公众号）只有在用户显式启用后才使用。\
                         每条结果必须包含：标题、作者、发表年份、期刊/来源、DOI 或完整 URL。\
-                        最少检索 10 篇论文，优先近 3 年的高被引论文和综述。",
+                        最少检索 10 篇论文；默认以最近几年为主（按当前日期动态判断，不得写死年份），同时补充早期奠基/方法学/高影响力文献。\
+                        最后必须给出参考文献列表，并在综合结论中使用可点击/可 hover 的链接引用；如用编号，编号本身必须带 DOI/URL 链接。",
                         request
                     ))
                     .with_timeout(TIMEOUT_STANDARD_SECS)
@@ -1466,14 +1471,14 @@ These override all other rules:
   → strategy:"single"
 
 ━━━ AVAILABLE AGENTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- "general-purpose"    — default; web_search, file tools, code execution
+- "general-purpose"    — default; search, file tools, code execution
 - "Explore"            — codebase search and exploration
 - "Plan"               — architecture and design planning
 - "executor"           — code writing and implementation
 - "verification"       — testing and quality checks
 - "architect"          — high-level design evaluation
 - "debugger"           — root-cause analysis and bug fixing
-- "literature-search"  — academic: PubMed, arXiv, bioRxiv, Google Scholar in parallel; DOI/URL per result; min 10 papers
+- "literature-search"  — academic: PubMed, arXiv, bioRxiv, Google Scholar in parallel; optional user-enabled sources; DOI/URL per result; min 10 papers
 - "deep-research"      — domain synthesis: parallel web searches, ≥800-word report, inline citations [Author, Year](URL)
 - "data-analysis"      — scientific data preprocessing/statistics using Python/R
 - "data-visual"        — publication-quality scientific figures

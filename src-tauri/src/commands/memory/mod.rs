@@ -915,7 +915,7 @@ pub async fn memory_navigation_section(project_root: &std::path::Path) -> String
     );
     lines.push(
         "4. For previously fetched URLs: use `recall(query=\"…\", scope=\"sources\")` \
-         to check if the page is cached before calling `web_fetch` again."
+         to check if the page is cached before calling `fetch` again."
             .to_string(),
     );
     lines.push(format!(

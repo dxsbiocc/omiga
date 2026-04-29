@@ -15,7 +15,7 @@ capabilities:
 tools:
   allowed:
     - file_search
-    - web_search
+    - search
   forbidden:
     - shell
 permissions:

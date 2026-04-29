@@ -5,7 +5,11 @@ import {
   TextField,
   Button,
   Checkbox,
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Box,
+  Chip,
   Typography,
   Alert,
   InputAdornment,
@@ -16,6 +20,8 @@ import {
   ListItemButton,
   ListItemText,
   ListSubheader,
+  Stack,
+  Tooltip,
   FormControlLabel,
   Switch,
   alpha,
@@ -26,6 +32,11 @@ import {
   OpenInNew,
   ArrowBack,
   DragIndicator,
+  ExpandMore,
+  InfoOutlined,
+  Language,
+  MenuBook,
+  Forum,
 } from "@mui/icons-material";
 import { useSessionStore } from "../../state/sessionStore";
 import { useColorModeStore } from "../../state/themeStore";
@@ -39,7 +50,15 @@ import { ThemeAppearancePanel } from "./ThemeAppearancePanel";
 import { ProviderManager } from "./ProviderManager";
 import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 import { RuntimeConstraintsPanel } from "./RuntimeConstraintsPanel";
-import { moveItemToIndex } from "./searchMethodOrder";
+import {
+  DEFAULT_WEB_SEARCH_METHODS,
+  moveItemToIndex,
+  normalizeWebSearchEngine,
+  normalizeWebSearchMethods,
+  primaryPublicSearchEngine,
+  type WebSearchEngine,
+  type WebSearchMethod,
+} from "./searchMethodOrder";
 import { AgentScheduleLauncher } from "../AgentSchedule/AgentScheduleLauncher";
 import { AgentRolesPanel } from "../AgentRoles/AgentRolesPanel";
 
@@ -52,8 +71,10 @@ interface SettingsProps {
   initialExecutionSubTab?: number;
 }
 
-/** Persisted JSON for built-in `web_search` provider keys (Settings → Advanced). */
+/** Persisted JSON for built-in search/fetch provider keys (Settings → Search). */
 const WEB_SEARCH_KEYS_STORAGE = "omiga_web_search_api_keys";
+const DEFAULT_PUBMED_EMAIL = "omiga@example.invalid";
+const DEFAULT_PUBMED_TOOL_NAME = "omiga";
 
 /** Grouped sidebar — indices must match `openSettingsTabMap` */
 const SETTINGS_SECTIONS: {
@@ -112,21 +133,13 @@ function parseSettingBool(raw: unknown, defaultVal: boolean): boolean {
   return defaultVal;
 }
 
-type WebSearchEngine = "ddg" | "bing" | "google";
-type WebSearchMethod =
-  | "tavily"
-  | "exa"
-  | "firecrawl"
-  | "parallel"
-  | "google"
-  | "bing"
-  | "ddg";
-
 type SearchMethodOption = {
   id: WebSearchMethod;
   label: string;
   description: string;
 };
+
+type SearchSourceTab = "web" | "literature" | "social";
 
 const SEARCH_METHOD_DND_TYPE = "settings/search-method";
 
@@ -183,55 +196,31 @@ const SEARCH_METHOD_OPTIONS: SearchMethodOption[] = [
   },
 ];
 
-const DEFAULT_WEB_SEARCH_METHODS: WebSearchMethod[] = SEARCH_METHOD_OPTIONS.map(
-  (option) => option.id,
-);
-
-function normalizeWebSearchMethod(raw: unknown): WebSearchMethod | null {
-  const value = String(raw ?? "").trim().toLowerCase();
-  if (value === "tavily") return "tavily";
-  if (value === "exa") return "exa";
-  if (value === "firecrawl") return "firecrawl";
-  if (value === "parallel") return "parallel";
-  if (value === "google") return "google";
-  if (value === "bing") return "bing";
-  if (value === "duckduckgo" || value === "duck-duck-go" || value === "ddg") {
-    return "ddg";
-  }
-  return null;
-}
-
-function normalizeWebSearchMethods(raw: unknown): WebSearchMethod[] {
-  if (!Array.isArray(raw)) return DEFAULT_WEB_SEARCH_METHODS;
-  const out: WebSearchMethod[] = [];
-  for (const item of raw) {
-    const method = normalizeWebSearchMethod(item);
-    if (method && !out.includes(method)) out.push(method);
-  }
-  return out.length > 0 ? out : DEFAULT_WEB_SEARCH_METHODS;
-}
-
-function primaryPublicSearchEngine(
-  methods: WebSearchMethod[],
-  fallback: WebSearchEngine = "ddg",
-): WebSearchEngine {
-  return (
-    methods.find(
-      (method): method is WebSearchEngine =>
-        method === "google" || method === "bing" || method === "ddg",
-    ) ?? fallback
-  );
-}
-
-function normalizeWebSearchEngine(raw: unknown): WebSearchEngine {
-  const value = String(raw ?? "").trim().toLowerCase();
-  if (value === "google") return "google";
-  if (value === "bing") return "bing";
-  if (value === "duckduckgo" || value === "duck-duck-go" || value === "ddg") {
-    return "ddg";
-  }
-  return "ddg";
-}
+const SEARCH_SOURCE_TABS: {
+  id: SearchSourceTab;
+  label: string;
+  description: string;
+  icon: typeof Language;
+}[] = [
+  {
+    id: "web",
+    label: "网页搜索",
+    description: "来源顺序、代理与 API",
+    icon: Language,
+  },
+  {
+    id: "literature",
+    label: "文献检索",
+    description: "PubMed 与论文数据源",
+    icon: MenuBook,
+  },
+  {
+    id: "social",
+    label: "社交平台",
+    description: "公众号等社交来源",
+    icon: Forum,
+  },
+];
 
 function searchMethodDragTransform(
   rowIndex: number,
@@ -391,7 +380,17 @@ function SearchMethodPriorityRow({
       <Box
         role="button"
         tabIndex={isLoading ? -1 : 0}
-        aria-label={`拖动 ${option.label} 调整搜索优先级`}
+        aria-label={`拖动 ${option.label} 调整搜索优先级；也可用方向键排序`}
+        onKeyDown={(event) => {
+          if (isLoading) return;
+          if (event.key === "ArrowUp") {
+            event.preventDefault();
+            onStep(option.id, -1);
+          } else if (event.key === "ArrowDown") {
+            event.preventDefault();
+            onStep(option.id, 1);
+          }
+        }}
         sx={{
           width: 34,
           height: 34,
@@ -433,24 +432,6 @@ function SearchMethodPriorityRow({
         <Typography variant="caption" color="text.secondary">
           {option.description}
         </Typography>
-      </Box>
-      <Box sx={{ display: "flex", gap: 0.5 }}>
-        <Button
-          size="small"
-          variant="outlined"
-          disabled={isLoading || index <= 0}
-          onClick={() => onStep(option.id, -1)}
-        >
-          上移
-        </Button>
-        <Button
-          size="small"
-          variant="outlined"
-          disabled={isLoading || index >= total - 1}
-          onClick={() => onStep(option.id, 1)}
-        >
-          下移
-        </Button>
       </Box>
     </Box>
   );
@@ -654,6 +635,14 @@ export function Settings({
   const [firecrawlApiKey, setFirecrawlApiKey] = useState("");
   const [showFirecrawlKey, setShowFirecrawlKey] = useState(false);
   const [firecrawlUrl, setFirecrawlUrl] = useState("");
+  const [semanticScholarEnabled, setSemanticScholarEnabled] = useState(false);
+  const [semanticScholarApiKey, setSemanticScholarApiKey] = useState("");
+  const [showSemanticScholarKey, setShowSemanticScholarKey] = useState(false);
+  const [wechatSearchEnabled, setWechatSearchEnabled] = useState(false);
+  const [pubmedApiKey, setPubmedApiKey] = useState("");
+  const [showPubmedKey, setShowPubmedKey] = useState(false);
+  const [pubmedEmail, setPubmedEmail] = useState(DEFAULT_PUBMED_EMAIL);
+  const [pubmedToolName, setPubmedToolName] = useState(DEFAULT_PUBMED_TOOL_NAME);
   /** 回合结束后第二次模型调用：要点摘要 */
   const [postTurnSummaryEnabled, setPostTurnSummaryEnabled] = useState(true);
   /** 回合结束后第二次模型调用：输入框上方「下一步」建议 */
@@ -663,13 +652,15 @@ export function Settings({
   const [requestTimeoutSecs, setRequestTimeoutSecs] = useState(600);
   /** 网页访问是否使用系统/环境代理；默认开启 */
   const [webUseProxy, setWebUseProxy] = useState(true);
-  /** 内置 web_search 的默认公共搜索引擎（兼容旧配置字段） */
+  /** 内置 search(category="web") 的默认公共搜索引擎（兼容旧配置字段） */
   const [webSearchEngine, setWebSearchEngine] =
     useState<WebSearchEngine>("ddg");
-  /** 内置 web_search 的启用方式和优先级。 */
+  /** 内置 search(category="web") 的启用方式和优先级。 */
   const [webSearchMethods, setWebSearchMethods] = useState<
     WebSearchMethod[]
   >(DEFAULT_WEB_SEARCH_METHODS);
+  const [activeSearchSourceTab, setActiveSearchSourceTab] =
+    useState<SearchSourceTab>("web");
   const [searchMethodDrag, setSearchMethodDrag] =
     useState<SearchMethodDragState | null>(null);
   const searchMethodDragRef = useRef<SearchMethodDragState | null>(null);
@@ -723,12 +714,21 @@ export function Settings({
       const rawWebKeys = localStorage.getItem(WEB_SEARCH_KEYS_STORAGE);
       if (rawWebKeys) {
         try {
-          const j = JSON.parse(rawWebKeys) as Record<string, string>;
-          setTavilyApiKey(j.tavily ?? "");
-          setExaApiKey(j.exa ?? "");
-          setParallelApiKey(j.parallel ?? "");
-          setFirecrawlApiKey(j.firecrawl ?? "");
-          setFirecrawlUrl(j.firecrawlUrl ?? "");
+          const j = JSON.parse(rawWebKeys) as Record<string, unknown>;
+          setTavilyApiKey(String(j.tavily ?? ""));
+          setExaApiKey(String(j.exa ?? ""));
+          setParallelApiKey(String(j.parallel ?? ""));
+          setFirecrawlApiKey(String(j.firecrawl ?? ""));
+          setFirecrawlUrl(String(j.firecrawlUrl ?? ""));
+          setSemanticScholarEnabled(parseSettingBool(j.semanticScholarEnabled, false));
+          setSemanticScholarApiKey(String(j.semanticScholarApiKey ?? ""));
+          setWechatSearchEnabled(parseSettingBool(j.wechatSearchEnabled, false));
+          setPubmedApiKey(String(j.pubmedApiKey ?? ""));
+          setPubmedEmail(String(j.pubmedEmail ?? DEFAULT_PUBMED_EMAIL));
+          setPubmedToolName(String(j.pubmedToolName ?? DEFAULT_PUBMED_TOOL_NAME));
+          setWebUseProxy(parseSettingBool(j.webUseProxy, true));
+          setWebSearchEngine(normalizeWebSearchEngine(j.webSearchEngine));
+          setWebSearchMethods(normalizeWebSearchMethods(j.webSearchMethods));
         } catch {
           /* ignore */
         }
@@ -783,16 +783,28 @@ export function Settings({
         parallel: string;
         firecrawl: string;
         firecrawlUrl: string;
+        semanticScholarEnabled: boolean;
+        semanticScholarApiKey: string;
+        wechatSearchEnabled: boolean;
+        pubmedApiKey: string;
+        pubmedEmail: string;
+        pubmedToolName: string;
       };
       if (rawWebKeys) {
         try {
-          const j = JSON.parse(rawWebKeys) as Record<string, string>;
+          const j = JSON.parse(rawWebKeys) as Record<string, unknown>;
           wsPayload = {
-            tavily: (j.tavily ?? "").trim(),
-            exa: (j.exa ?? "").trim(),
-            parallel: (j.parallel ?? "").trim(),
-            firecrawl: (j.firecrawl ?? "").trim(),
-            firecrawlUrl: (j.firecrawlUrl ?? "").trim(),
+            tavily: String(j.tavily ?? "").trim(),
+            exa: String(j.exa ?? "").trim(),
+            parallel: String(j.parallel ?? "").trim(),
+            firecrawl: String(j.firecrawl ?? "").trim(),
+            firecrawlUrl: String(j.firecrawlUrl ?? "").trim(),
+            semanticScholarEnabled: parseSettingBool(j.semanticScholarEnabled, false),
+            semanticScholarApiKey: String(j.semanticScholarApiKey ?? "").trim(),
+            wechatSearchEnabled: parseSettingBool(j.wechatSearchEnabled, false),
+            pubmedApiKey: String(j.pubmedApiKey ?? "").trim(),
+            pubmedEmail: String(j.pubmedEmail ?? DEFAULT_PUBMED_EMAIL).trim(),
+            pubmedToolName: String(j.pubmedToolName ?? DEFAULT_PUBMED_TOOL_NAME).trim(),
           };
         } catch {
           wsPayload = {
@@ -801,6 +813,12 @@ export function Settings({
             parallel: "",
             firecrawl: "",
             firecrawlUrl: "",
+            semanticScholarEnabled: false,
+            semanticScholarApiKey: "",
+            wechatSearchEnabled: false,
+            pubmedApiKey: "",
+            pubmedEmail: DEFAULT_PUBMED_EMAIL,
+            pubmedToolName: DEFAULT_PUBMED_TOOL_NAME,
           };
         }
       } else {
@@ -815,6 +833,12 @@ export function Settings({
           parallel: "",
           firecrawl: "",
           firecrawlUrl: "",
+          semanticScholarEnabled: false,
+          semanticScholarApiKey: "",
+          wechatSearchEnabled: false,
+          pubmedApiKey: "",
+          pubmedEmail: DEFAULT_PUBMED_EMAIL,
+          pubmedToolName: DEFAULT_PUBMED_TOOL_NAME,
         };
       }
       if (
@@ -822,7 +846,13 @@ export function Settings({
         wsPayload.exa ||
         wsPayload.parallel ||
         wsPayload.firecrawl ||
-        wsPayload.firecrawlUrl
+        wsPayload.firecrawlUrl ||
+        wsPayload.semanticScholarEnabled ||
+        wsPayload.semanticScholarApiKey ||
+        wsPayload.wechatSearchEnabled ||
+        wsPayload.pubmedApiKey ||
+        wsPayload.pubmedEmail ||
+        wsPayload.pubmedToolName
       ) {
         try {
           await invoke("set_web_search_api_keys", wsPayload);
@@ -854,9 +884,15 @@ export function Settings({
         if (gs.timeout != null && gs.timeout > 0) {
           setRequestTimeoutSecs(gs.timeout);
         }
-        setWebUseProxy(gs.webUseProxy !== false);
-        setWebSearchEngine(normalizeWebSearchEngine(gs.webSearchEngine));
-        setWebSearchMethods(normalizeWebSearchMethods(gs.webSearchMethods));
+        if (typeof gs.webUseProxy === "boolean") {
+          setWebUseProxy(gs.webUseProxy);
+        }
+        if (gs.webSearchEngine != null) {
+          setWebSearchEngine(normalizeWebSearchEngine(gs.webSearchEngine));
+        }
+        if (Array.isArray(gs.webSearchMethods)) {
+          setWebSearchMethods(normalizeWebSearchMethods(gs.webSearchMethods));
+        }
       } catch {
         /* ignore */
       }
@@ -874,7 +910,6 @@ export function Settings({
   const inactiveSearchMethodOptions = SEARCH_METHOD_OPTIONS.filter(
     (option) => !webSearchMethods.includes(option.id),
   );
-
   const toggleWebSearchMethod = (method: WebSearchMethod, checked: boolean) => {
     setWebSearchMethods((current) => {
       if (checked) {
@@ -973,6 +1008,12 @@ export function Settings({
         parallel: parallelApiKey.trim(),
         firecrawl: firecrawlApiKey.trim(),
         firecrawlUrl: firecrawlUrl.trim(),
+        semanticScholarEnabled,
+        semanticScholarApiKey: semanticScholarApiKey.trim(),
+        wechatSearchEnabled,
+        pubmedApiKey: pubmedApiKey.trim(),
+        pubmedEmail: pubmedEmail.trim() || DEFAULT_PUBMED_EMAIL,
+        pubmedToolName: pubmedToolName.trim() || DEFAULT_PUBMED_TOOL_NAME,
       };
       await invoke("set_web_search_api_keys", {
         tavily: ws.tavily,
@@ -980,13 +1021,30 @@ export function Settings({
         parallel: ws.parallel,
         firecrawl: ws.firecrawl,
         firecrawlUrl: ws.firecrawlUrl,
+        semanticScholarEnabled: ws.semanticScholarEnabled,
+        semanticScholarApiKey: ws.semanticScholarApiKey,
+        wechatSearchEnabled: ws.wechatSearchEnabled,
+        pubmedApiKey: ws.pubmedApiKey,
+        pubmedEmail: ws.pubmedEmail,
+        pubmedToolName: ws.pubmedToolName,
       });
       await invoke("save_global_settings_to_config", {
         webUseProxy,
         webSearchEngine: primaryPublicSearchEngine(webSearchMethods, webSearchEngine),
         webSearchMethods,
       });
-      localStorage.setItem(WEB_SEARCH_KEYS_STORAGE, JSON.stringify(ws));
+      localStorage.setItem(
+        WEB_SEARCH_KEYS_STORAGE,
+        JSON.stringify({
+          ...ws,
+          webUseProxy,
+          webSearchEngine: primaryPublicSearchEngine(
+            webSearchMethods,
+            webSearchEngine,
+          ),
+          webSearchMethods,
+        }),
+      );
       localStorage.removeItem("omiga_tavily_search_api_key");
       localStorage.removeItem("omiga_brave_search_api_key");
       setMessage({
@@ -1286,280 +1344,815 @@ export function Settings({
                   搜索设置
                 </Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-                  配置内置 <code>web_search</code> 的搜索方式、优先级、代理行为和可选 API key。
+                  配置内置 <code>search</code> / <code>fetch</code> 的搜索方式、优先级、代理行为和可选 API key。
                   运行时会严格按下方顺序依次尝试；某种方式失败或无可用结果时再尝试下一种，
                   每种方式最多尝试 3 次。
                 </Typography>
 
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ display: "block", mb: 1, fontWeight: 600 }}
-                >
-                  搜索方式与优先级
-                </Typography>
                 <Box
-                  role="list"
-                  aria-label="已启用搜索方式排序"
                   sx={(theme) => ({
                     border: `1px solid ${theme.palette.divider}`,
                     borderRadius: 2,
                     overflow: "hidden",
-                    mb: 1,
+                    mb: 2,
+                    bgcolor: alpha(theme.palette.background.paper, 0.78),
+                    boxShadow: `0 1px 0 ${alpha(theme.palette.common.black, 0.04)}`,
                   })}
                 >
-                  {selectedSearchMethodOptions.map((option, index) => (
-                    <SearchMethodPriorityRow
-                      key={option.id}
-                      option={option}
-                      index={index}
-                      total={selectedSearchMethodOptions.length}
-                      isLoading={isLoading}
-                      dragState={searchMethodDrag}
-                      onToggle={toggleWebSearchMethod}
-                      onDragStart={startWebSearchMethodDrag}
-                      onDragHover={previewWebSearchMethodDrag}
-                      onDragEnd={finishWebSearchMethodDrag}
-                      onStep={moveWebSearchMethod}
-                    />
-                  ))}
-                </Box>
-                <SearchMethodDragLayer />
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ display: "block", mb: 2 }}
-                >
-                  拖动整行或左侧手柄时，条目会跟随鼠标并预览上下滑动；释放鼠标后才提交新顺序。
-                  上移 / 下移按钮保留为键盘和无鼠标环境的备用操作。
-                </Typography>
-
-                {inactiveSearchMethodOptions.length > 0 && (
                   <Box
-                    sx={(theme) => ({
-                      border: `1px dashed ${theme.palette.divider}`,
-                      borderRadius: 2,
-                      overflow: "hidden",
-                      mb: 2,
-                    })}
+                    role="tablist"
+                    aria-label="搜索源分类"
+                    sx={{
+                      display: "grid",
+                      gridTemplateColumns: {
+                        xs: "1fr",
+                        sm: "repeat(3, minmax(0, 1fr))",
+                      },
+                      gap: 1,
+                      p: 1,
+                    }}
                   >
-                    <Typography
-                      variant="caption"
-                      color="text.secondary"
-                      sx={{ display: "block", px: 1.25, pt: 1.25, pb: 0.5 }}
-                    >
-                      未启用
-                    </Typography>
-                    {inactiveSearchMethodOptions.map((option, index) => {
-                      const isLast = index === inactiveSearchMethodOptions.length - 1;
+                    {SEARCH_SOURCE_TABS.map((tab) => {
+                      const selected = activeSearchSourceTab === tab.id;
+                      const Icon = tab.icon;
                       return (
                         <Box
-                          key={option.id}
+                          key={tab.id}
+                          role="tab"
+                          aria-selected={selected}
+                          tabIndex={selected ? 0 : -1}
+                          onClick={() => setActiveSearchSourceTab(tab.id)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              setActiveSearchSourceTab(tab.id);
+                            }
+                          }}
                           sx={(theme) => ({
                             display: "flex",
-                            alignItems: "center",
-                            gap: 1,
-                            p: 1.25,
-                            bgcolor: "transparent",
-                            borderBottom: isLast
-                              ? "none"
-                              : `1px solid ${theme.palette.divider}`,
+                            alignItems: "flex-start",
+                            gap: 1.25,
+                            minHeight: 86,
+                            p: 1.75,
+                            borderRadius: 2,
+                            cursor: "pointer",
+                            color: selected ? "text.primary" : "text.secondary",
+                            bgcolor: selected
+                              ? alpha(
+                                  theme.palette.primary.dark,
+                                  theme.palette.mode === "dark" ? 0.34 : 0.14,
+                                )
+                              : "transparent",
+                            border: `1px solid ${
+                              selected
+                                ? alpha(theme.palette.primary.main, 0.34)
+                                : "transparent"
+                            }`,
+                            boxShadow: selected
+                              ? `0 0 0 1px ${alpha(theme.palette.primary.main, 0.08)} inset`
+                              : "none",
+                            transition:
+                              "background-color 160ms ease, border-color 160ms ease, color 160ms ease, box-shadow 160ms ease",
+                            "&:hover": {
+                              bgcolor: selected
+                                ? alpha(
+                                    theme.palette.primary.dark,
+                                    theme.palette.mode === "dark" ? 0.38 : 0.18,
+                                  )
+                                : alpha(theme.palette.text.primary, 0.045),
+                              color: "text.primary",
+                            },
+                            "&:focus-visible": {
+                              outline: "2px solid",
+                              outlineColor: "primary.main",
+                              outlineOffset: 2,
+                            },
                           })}
                         >
-                          <Checkbox
-                            checked={false}
-                            onChange={(e) =>
-                              toggleWebSearchMethod(option.id, e.target.checked)
-                            }
-                            disabled={isLoading}
-                            size="small"
-                            inputProps={{
-                              "aria-label": `启用 ${option.label}`,
+                          <Icon
+                            fontSize="small"
+                            sx={{
+                              mt: 0.25,
+                              flexShrink: 0,
+                              opacity: selected ? 1 : 0.72,
                             }}
                           />
-                          <Box sx={{ flex: 1, minWidth: 0 }}>
-                            <Typography variant="body2" fontWeight={600}>
-                              {option.label}
+                          <Box sx={{ minWidth: 0 }}>
+                            <Typography variant="body1" fontWeight={800} noWrap>
+                              {tab.label}
                             </Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              {option.description}
+                            <Typography
+                              variant="body2"
+                              color="text.secondary"
+                              sx={{
+                                mt: 0.75,
+                                lineHeight: 1.45,
+                                display: "-webkit-box",
+                                overflow: "hidden",
+                                WebkitBoxOrient: "vertical",
+                                WebkitLineClamp: 1,
+                              }}
+                            >
+                              {tab.description}
                             </Typography>
                           </Box>
                         </Box>
                       );
                     })}
                   </Box>
-                )}
 
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ display: "block", mb: 3 }}
-                >
-                  当前顺序：{" "}
-                  {webSearchMethods
-                    .map(
-                      (method) =>
-                        SEARCH_METHOD_OPTIONS.find((option) => option.id === method)
-                          ?.label ?? method,
-                    )
-                    .join(" → ")}
-                </Typography>
+                  <Divider />
 
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={webUseProxy}
-                      onChange={(_, v) => setWebUseProxy(v)}
+                  <Box
+                    sx={(theme) => ({
+                      p: 2,
+                      bgcolor: alpha(theme.palette.background.default, 0.22),
+                      "& .MuiAccordion-root": {
+                        border: `1px solid ${theme.palette.divider}`,
+                        borderRadius: 2,
+                        overflow: "hidden",
+                        bgcolor: alpha(theme.palette.background.paper, 0.72),
+                        boxShadow: "none",
+                        "&:before": { display: "none" },
+                        "& + .MuiAccordion-root": { mt: 1.5 },
+                      },
+                      "& .MuiAccordionSummary-root": {
+                        minHeight: 64,
+                        px: 2,
+                        "& .MuiAccordionSummary-content": { my: 1.25 },
+                      },
+                      "& .MuiAccordionDetails-root": {
+                        px: 2,
+                        pt: 0,
+                        pb: 2,
+                      },
+                    })}
+                  >
+                    {activeSearchSourceTab === "web" && (
+                      <Box>
+                        <Accordion defaultExpanded disableGutters>
+                          <AccordionSummary expandIcon={<ExpandMore />}>
+                            <Box>
+                              <Typography variant="body2" fontWeight={700}>
+                                搜索方式与优先级
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                启用/禁用网页来源，并调整 fallback 顺序。
+                              </Typography>
+                            </Box>
+                          </AccordionSummary>
+                          <AccordionDetails>
+                            <Box
+                              role="list"
+                              aria-label="已启用搜索方式排序"
+                              sx={(theme) => ({
+                                border: `1px solid ${theme.palette.divider}`,
+                                borderRadius: 2,
+                                overflow: "hidden",
+                                mb: 1,
+                              })}
+                            >
+                              {selectedSearchMethodOptions.map((option, index) => (
+                                <SearchMethodPriorityRow
+                                  key={option.id}
+                                  option={option}
+                                  index={index}
+                                  total={selectedSearchMethodOptions.length}
+                                  isLoading={isLoading}
+                                  dragState={searchMethodDrag}
+                                  onToggle={toggleWebSearchMethod}
+                                  onDragStart={startWebSearchMethodDrag}
+                                  onDragHover={previewWebSearchMethodDrag}
+                                  onDragEnd={finishWebSearchMethodDrag}
+                                  onStep={moveWebSearchMethod}
+                                />
+                              ))}
+                            </Box>
+                            <SearchMethodDragLayer />
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              sx={{ display: "block", mb: 2 }}
+                            >
+                              拖动整行或左侧手柄时，条目会跟随鼠标并预览上下滑动；释放鼠标后才提交新顺序。
+                              键盘环境可聚焦左侧手柄后用方向键排序。
+                            </Typography>
+
+                            {inactiveSearchMethodOptions.length > 0 && (
+                              <Box
+                                sx={(theme) => ({
+                                  border: `1px dashed ${theme.palette.divider}`,
+                                  borderRadius: 2,
+                                  overflow: "hidden",
+                                  mb: 2,
+                                })}
+                              >
+                                <Typography
+                                  variant="caption"
+                                  color="text.secondary"
+                                  sx={{
+                                    display: "block",
+                                    px: 1.25,
+                                    pt: 1.25,
+                                    pb: 0.5,
+                                  }}
+                                >
+                                  未启用
+                                </Typography>
+                                {inactiveSearchMethodOptions.map((option, index) => {
+                                  const isLast =
+                                    index === inactiveSearchMethodOptions.length - 1;
+                                  return (
+                                    <Box
+                                      key={option.id}
+                                      sx={(theme) => ({
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 1,
+                                        p: 1.25,
+                                        bgcolor: "transparent",
+                                        borderBottom: isLast
+                                          ? "none"
+                                          : `1px solid ${theme.palette.divider}`,
+                                      })}
+                                    >
+                                      <Checkbox
+                                        checked={false}
+                                        onChange={(e) =>
+                                          toggleWebSearchMethod(
+                                            option.id,
+                                            e.target.checked,
+                                          )
+                                        }
+                                        disabled={isLoading}
+                                        size="small"
+                                        inputProps={{
+                                          "aria-label": `启用 ${option.label}`,
+                                        }}
+                                      />
+                                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                                        <Typography variant="body2" fontWeight={600}>
+                                          {option.label}
+                                        </Typography>
+                                        <Typography
+                                          variant="caption"
+                                          color="text.secondary"
+                                        >
+                                          {option.description}
+                                        </Typography>
+                                      </Box>
+                                    </Box>
+                                  );
+                                })}
+                              </Box>
+                            )}
+
+                            <Typography variant="caption" color="text.secondary">
+                              当前顺序：{" "}
+                              {webSearchMethods
+                                .map(
+                                  (method) =>
+                                    SEARCH_METHOD_OPTIONS.find(
+                                      (option) => option.id === method,
+                                    )?.label ?? method,
+                                )
+                                .join(" → ")}
+                            </Typography>
+                          </AccordionDetails>
+                        </Accordion>
+
+                        <Accordion disableGutters>
+                          <AccordionSummary expandIcon={<ExpandMore />}>
+                            <Box>
+                              <Typography variant="body2" fontWeight={700}>
+                                访问方式
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                控制网页 search/fetch 是否使用系统或环境代理。
+                              </Typography>
+                            </Box>
+                          </AccordionSummary>
+                          <AccordionDetails>
+                            <FormControlLabel
+                              control={
+                                <Switch
+                                  checked={webUseProxy}
+                                  onChange={(_, v) => setWebUseProxy(v)}
+                                  disabled={isLoading}
+                                  color="primary"
+                                />
+                              }
+                              label={
+                                <Box>
+                                  <Typography variant="body2" fontWeight={600}>
+                                    网页访问使用代理
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary">
+                                    开启时读取系统或环境代理；关闭时内置 search / fetch 强制直连。
+                                  </Typography>
+                                </Box>
+                              }
+                              sx={{
+                                alignItems: "flex-start",
+                                ml: 0,
+                                "& .MuiFormControlLabel-label": { mt: 0.25 },
+                              }}
+                            />
+                          </AccordionDetails>
+                        </Accordion>
+
+                        <Accordion disableGutters>
+                          <AccordionSummary expandIcon={<ExpandMore />}>
+                            <Box>
+                              <Typography variant="body2" fontWeight={700}>
+                                可选 API Provider
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                Tavily / Exa / Parallel / Firecrawl。默认关闭，填写 key 并在优先级中启用后使用。
+                              </Typography>
+                            </Box>
+                          </AccordionSummary>
+                          <AccordionDetails>
+                            <TextField
+                              fullWidth
+                              type={showTavilyKey ? "text" : "password"}
+                              label="Tavily API key (optional)"
+                              placeholder="tvly-..."
+                              value={tavilyApiKey}
+                              onChange={(e) => setTavilyApiKey(e.target.value)}
+                              disabled={isLoading}
+                              helperText="Overrides OMIGA_TAVILY_API_KEY / TAVILY_API_KEY when set."
+                              InputProps={{
+                                endAdornment: (
+                                  <InputAdornment position="end">
+                                    <IconButton
+                                      onClick={() => setShowTavilyKey(!showTavilyKey)}
+                                      edge="end"
+                                      size="small"
+                                    >
+                                      {showTavilyKey ? (
+                                        <VisibilityOff />
+                                      ) : (
+                                        <Visibility />
+                                      )}
+                                    </IconButton>
+                                  </InputAdornment>
+                                ),
+                              }}
+                              sx={{ mb: 2 }}
+                            />
+
+                            <TextField
+                              fullWidth
+                              type={showExaKey ? "text" : "password"}
+                              label="Exa API key (optional)"
+                              placeholder="exa-..."
+                              value={exaApiKey}
+                              onChange={(e) => setExaApiKey(e.target.value)}
+                              disabled={isLoading}
+                              helperText="Overrides OMIGA_EXA_API_KEY / EXA_API_KEY."
+                              InputProps={{
+                                endAdornment: (
+                                  <InputAdornment position="end">
+                                    <IconButton
+                                      onClick={() => setShowExaKey(!showExaKey)}
+                                      edge="end"
+                                      size="small"
+                                    >
+                                      {showExaKey ? <VisibilityOff /> : <Visibility />}
+                                    </IconButton>
+                                  </InputAdornment>
+                                ),
+                              }}
+                              sx={{ mb: 2 }}
+                            />
+
+                            <TextField
+                              fullWidth
+                              type={showParallelKey ? "text" : "password"}
+                              label="Parallel API key (optional)"
+                              value={parallelApiKey}
+                              onChange={(e) => setParallelApiKey(e.target.value)}
+                              disabled={isLoading}
+                              helperText="Overrides OMIGA_PARALLEL_API_KEY / PARALLEL_API_KEY."
+                              InputProps={{
+                                endAdornment: (
+                                  <InputAdornment position="end">
+                                    <IconButton
+                                      onClick={() =>
+                                        setShowParallelKey(!showParallelKey)
+                                      }
+                                      edge="end"
+                                      size="small"
+                                    >
+                                      {showParallelKey ? (
+                                        <VisibilityOff />
+                                      ) : (
+                                        <Visibility />
+                                      )}
+                                    </IconButton>
+                                  </InputAdornment>
+                                ),
+                              }}
+                              sx={{ mb: 2 }}
+                            />
+
+                            <TextField
+                              fullWidth
+                              type={showFirecrawlKey ? "text" : "password"}
+                              label="Firecrawl API key (optional)"
+                              value={firecrawlApiKey}
+                              onChange={(e) => setFirecrawlApiKey(e.target.value)}
+                              disabled={isLoading}
+                              helperText="Overrides OMIGA_FIRECRAWL_API_KEY / FIRECRAWL_API_KEY."
+                              InputProps={{
+                                endAdornment: (
+                                  <InputAdornment position="end">
+                                    <IconButton
+                                      onClick={() =>
+                                        setShowFirecrawlKey(!showFirecrawlKey)
+                                      }
+                                      edge="end"
+                                      size="small"
+                                    >
+                                      {showFirecrawlKey ? (
+                                        <VisibilityOff />
+                                      ) : (
+                                        <Visibility />
+                                      )}
+                                    </IconButton>
+                                  </InputAdornment>
+                                ),
+                              }}
+                              sx={{ mb: 2 }}
+                            />
+
+                            <TextField
+                              fullWidth
+                              label="Firecrawl API base URL (optional)"
+                              placeholder="https://api.firecrawl.dev"
+                              value={firecrawlUrl}
+                              onChange={(e) => setFirecrawlUrl(e.target.value)}
+                              disabled={isLoading}
+                              helperText="Self-hosted or alternate endpoint. Overrides OMIGA_FIRECRAWL_API_URL."
+                            />
+                          </AccordionDetails>
+                        </Accordion>
+                      </Box>
+                    )}
+
+                    {activeSearchSourceTab === "literature" && (
+                      <Box>
+                        <Box
+                          sx={(theme) => ({
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 1.5,
+                            mb: 2,
+                            p: 1.5,
+                            border: `1px solid ${alpha(theme.palette.primary.main, 0.18)}`,
+                            borderRadius: 2,
+                            bgcolor: alpha(theme.palette.primary.main, 0.05),
+                          })}
+                        >
+                          <Box sx={{ minWidth: 0 }}>
+                            <Typography variant="body2" fontWeight={700}>
+                              内置文献源
+                            </Typography>
+                            <Stack
+                              spacing={1}
+                              sx={{ mt: 1.25 }}
+                            >
+                              <Stack
+                                direction="row"
+                                spacing={0.75}
+                                useFlexGap
+                                flexWrap="wrap"
+                                alignItems="center"
+                              >
+                                <Typography
+                                  variant="caption"
+                                  fontWeight={800}
+                                  color="success.main"
+                                  sx={{ width: 58, flexShrink: 0 }}
+                                >
+                                  无需 API
+                                </Typography>
+                                {[
+                                  "PubMed",
+                                  "arXiv",
+                                  "Crossref",
+                                  "OpenAlex",
+                                  "bioRxiv",
+                                  "medRxiv",
+                                ].map((sourceName) => (
+                                  <Chip
+                                    key={sourceName}
+                                    label={sourceName}
+                                    size="small"
+                                    color="success"
+                                    variant="outlined"
+                                    sx={(theme) => ({
+                                      height: 24,
+                                      fontWeight: 700,
+                                      borderRadius: 999,
+                                      color: "success.light",
+                                      borderColor: alpha(
+                                        theme.palette.success.main,
+                                        0.52,
+                                      ),
+                                      bgcolor: alpha(
+                                        theme.palette.success.main,
+                                        0.08,
+                                      ),
+                                    })}
+                                  />
+                                ))}
+                              </Stack>
+                              <Stack
+                                direction="row"
+                                spacing={0.75}
+                                useFlexGap
+                                flexWrap="wrap"
+                                alignItems="center"
+                              >
+                                <Typography
+                                  variant="caption"
+                                  fontWeight={800}
+                                  color="warning.main"
+                                  sx={{ width: 58, flexShrink: 0 }}
+                                >
+                                  需要 API
+                                </Typography>
+                                <Chip
+                                  label="Semantic Scholar"
+                                  size="small"
+                                  color="warning"
+                                  variant="outlined"
+                                  sx={(theme) => ({
+                                    height: 24,
+                                    fontWeight: 700,
+                                    borderRadius: 999,
+                                    color: "warning.light",
+                                    borderColor: alpha(
+                                      theme.palette.warning.main,
+                                      0.64,
+                                    ),
+                                    bgcolor: alpha(
+                                      theme.palette.warning.main,
+                                      0.1,
+                                    ),
+                                  })}
+                                />
+                              </Stack>
+                            </Stack>
+                          </Box>
+                          <Tooltip
+                            arrow
+                            placement="left"
+                            title={
+                              <Box sx={{ maxWidth: 360 }}>
+                                <Typography variant="caption" component="div">
+                                  arXiv / Crossref / OpenAlex / bioRxiv / medRxiv
+                                  为免 key 文献源，可直接通过 literature source
+                                  调用。
+                                </Typography>
+                                <Typography
+                                  variant="caption"
+                                  component="div"
+                                  sx={{ mt: 0.75 }}
+                                >
+                                  PubMed 使用官方 NCBI E-utilities；Semantic
+                                  Scholar 需要在此处手动开启并填写 API key。
+                                </Typography>
+                              </Box>
+                            }
+                          >
+                            <IconButton
+                              size="small"
+                              aria-label="查看文献源说明"
+                              sx={(theme) => ({
+                                flexShrink: 0,
+                                color: "text.secondary",
+                                bgcolor: alpha(theme.palette.background.paper, 0.7),
+                                "&:hover": {
+                                  color: "primary.main",
+                                  bgcolor: alpha(theme.palette.primary.main, 0.1),
+                                },
+                              })}
+                            >
+                              <InfoOutlined fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        </Box>
+
+                        <Accordion defaultExpanded disableGutters>
+                          <AccordionSummary expandIcon={<ExpandMore />}>
+                            <Box>
+                              <Typography variant="body2" fontWeight={700}>
+                                PubMed / NCBI
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                官方 E-utilities；API key 可选，email/tool 有默认值。
+                              </Typography>
+                            </Box>
+                          </AccordionSummary>
+                          <AccordionDetails>
+                            <TextField
+                              fullWidth
+                              type={showPubmedKey ? "text" : "password"}
+                              label="PubMed / NCBI API key (optional)"
+                              value={pubmedApiKey}
+                              onChange={(e) => setPubmedApiKey(e.target.value)}
+                              disabled={isLoading}
+                              helperText="可选；不填写也可使用官方 E-utilities。超过默认速率时建议配置 NCBI API key。"
+                              InputProps={{
+                                endAdornment: (
+                                  <InputAdornment position="end">
+                                    <IconButton
+                                      onClick={() => setShowPubmedKey(!showPubmedKey)}
+                                      edge="end"
+                                      size="small"
+                                    >
+                                      {showPubmedKey ? <VisibilityOff /> : <Visibility />}
+                                    </IconButton>
+                                  </InputAdornment>
+                                ),
+                              }}
+                              sx={{ mb: 2 }}
+                            />
+
+                            <TextField
+                              fullWidth
+                              label="PubMed email"
+                              placeholder={DEFAULT_PUBMED_EMAIL}
+                              value={pubmedEmail}
+                              onChange={(e) => setPubmedEmail(e.target.value)}
+                              disabled={isLoading}
+                              helperText="NCBI 建议随请求提供 email/tool；默认使用虚拟邮箱，不影响本地使用。"
+                              sx={{ mb: 2 }}
+                            />
+
+                            <TextField
+                              fullWidth
+                              label="PubMed tool name"
+                              placeholder={DEFAULT_PUBMED_TOOL_NAME}
+                              value={pubmedToolName}
+                              onChange={(e) => setPubmedToolName(e.target.value)}
+                              disabled={isLoading}
+                              helperText="发送给 NCBI E-utilities 的 tool 参数。"
+                            />
+                          </AccordionDetails>
+                        </Accordion>
+
+                        <Accordion disableGutters>
+                          <AccordionSummary expandIcon={<ExpandMore />}>
+                            <Box>
+                              <Typography variant="body2" fontWeight={700}>
+                                Semantic Scholar
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                需要用户 API key；默认关闭。
+                              </Typography>
+                            </Box>
+                          </AccordionSummary>
+                          <AccordionDetails>
+                            <FormControlLabel
+                              control={
+                                <Switch
+                                  checked={semanticScholarEnabled}
+                                  onChange={(_, v) => setSemanticScholarEnabled(v)}
+                                  disabled={isLoading}
+                                  color="primary"
+                                />
+                              }
+                              label={
+                                <Box>
+                                  <Typography variant="body2" fontWeight={600}>
+                                    启用 Semantic Scholar（需要 API key）
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary">
+                                    默认关闭；开启并填写 key 后，才允许使用
+                                    <code> search(category="literature", source="semantic_scholar")</code>。
+                                  </Typography>
+                                </Box>
+                              }
+                              sx={{
+                                alignItems: "flex-start",
+                                mb: 2,
+                                ml: 0,
+                                "& .MuiFormControlLabel-label": { mt: 0.25 },
+                              }}
+                            />
+
+                            <TextField
+                              fullWidth
+                              type={showSemanticScholarKey ? "text" : "password"}
+                              label="Semantic Scholar API key (optional)"
+                              value={semanticScholarApiKey}
+                              onChange={(e) => setSemanticScholarApiKey(e.target.value)}
+                              disabled={isLoading || !semanticScholarEnabled}
+                              helperText="必需；设置后覆盖 OMIGA_SEMANTIC_SCHOLAR_API_KEY / SEMANTIC_SCHOLAR_API_KEY / S2_API_KEY。"
+                              InputProps={{
+                                endAdornment: (
+                                  <InputAdornment position="end">
+                                    <IconButton
+                                      onClick={() =>
+                                        setShowSemanticScholarKey(
+                                          !showSemanticScholarKey,
+                                        )
+                                      }
+                                      edge="end"
+                                      size="small"
+                                    >
+                                      {showSemanticScholarKey ? (
+                                        <VisibilityOff />
+                                      ) : (
+                                        <Visibility />
+                                      )}
+                                    </IconButton>
+                                  </InputAdornment>
+                                ),
+                              }}
+                              sx={{ mb: 2 }}
+                            />
+                            <Typography variant="caption" color="text.secondary">
+                              <Link
+                                href="https://www.semanticscholar.org/product/api"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                sx={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: 0.5,
+                                }}
+                              >
+                                Semantic Scholar API
+                                <OpenInNew fontSize="inherit" />
+                              </Link>
+                            </Typography>
+                          </AccordionDetails>
+                        </Accordion>
+                      </Box>
+                    )}
+
+                    {activeSearchSourceTab === "social" && (
+                      <Box>
+                        <Accordion defaultExpanded disableGutters>
+                          <AccordionSummary expandIcon={<ExpandMore />}>
+                            <Box>
+                              <Typography variant="body2" fontWeight={700}>
+                                微信公众号搜索
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                Sogou 微信公开 HTML 搜索；默认关闭。
+                              </Typography>
+                            </Box>
+                          </AccordionSummary>
+                          <AccordionDetails>
+                            <FormControlLabel
+                              control={
+                                <Switch
+                                  checked={wechatSearchEnabled}
+                                  onChange={(_, v) => setWechatSearchEnabled(v)}
+                                  disabled={isLoading}
+                                  color="primary"
+                                />
+                              }
+                              label={
+                                <Box>
+                                  <Typography variant="body2" fontWeight={600}>
+                                    启用微信公众号搜索（Sogou 微信）
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary">
+                                    默认关闭；开启后允许
+                                    <code> search(category="social", source="wechat")</code>。
+                                    该来源依赖公开 HTML 页面，可能被验证码/限流影响。
+                                  </Typography>
+                                </Box>
+                              }
+                              sx={{
+                                alignItems: "flex-start",
+                                ml: 0,
+                                "& .MuiFormControlLabel-label": { mt: 0.25 },
+                              }}
+                            />
+                          </AccordionDetails>
+                        </Accordion>
+                      </Box>
+                    )}
+
+                    <Button
+                      variant="contained"
+                      onClick={() => void handleSaveSearchSettings()}
                       disabled={isLoading}
-                      color="primary"
-                    />
-                  }
-                  label={
-                    <Box>
-                      <Typography variant="body2" fontWeight={600}>
-                        网页访问使用代理
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        开启时读取系统或环境代理；关闭时内置 web_search / web_fetch 强制直连。
-                      </Typography>
-                    </Box>
-                  }
-                  sx={{
-                    alignItems: "flex-start",
-                    mb: 3,
-                    ml: 0,
-                    "& .MuiFormControlLabel-label": { mt: 0.25 },
-                  }}
-                />
-
-                <Divider sx={{ mb: 3 }} />
-
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ display: "block", mb: 1, fontWeight: 600 }}
-                >
-                  可选搜索 API Provider
-                </Typography>
-
-                <TextField
-                  fullWidth
-                  type={showTavilyKey ? "text" : "password"}
-                  label="Tavily API key (optional)"
-                  placeholder="tvly-..."
-                  value={tavilyApiKey}
-                  onChange={(e) => setTavilyApiKey(e.target.value)}
-                  disabled={isLoading}
-                  helperText="Overrides OMIGA_TAVILY_API_KEY / TAVILY_API_KEY when set."
-                  InputProps={{
-                    endAdornment: (
-                      <InputAdornment position="end">
-                        <IconButton
-                          onClick={() => setShowTavilyKey(!showTavilyKey)}
-                          edge="end"
-                          size="small"
-                        >
-                          {showTavilyKey ? <VisibilityOff /> : <Visibility />}
-                        </IconButton>
-                      </InputAdornment>
-                    ),
-                  }}
-                  sx={{ mb: 2 }}
-                />
-
-                <TextField
-                  fullWidth
-                  type={showExaKey ? "text" : "password"}
-                  label="Exa API key (optional)"
-                  placeholder="exa-..."
-                  value={exaApiKey}
-                  onChange={(e) => setExaApiKey(e.target.value)}
-                  disabled={isLoading}
-                  helperText="Overrides OMIGA_EXA_API_KEY / EXA_API_KEY."
-                  InputProps={{
-                    endAdornment: (
-                      <InputAdornment position="end">
-                        <IconButton
-                          onClick={() => setShowExaKey(!showExaKey)}
-                          edge="end"
-                          size="small"
-                        >
-                          {showExaKey ? <VisibilityOff /> : <Visibility />}
-                        </IconButton>
-                      </InputAdornment>
-                    ),
-                  }}
-                  sx={{ mb: 2 }}
-                />
-
-                <TextField
-                  fullWidth
-                  type={showParallelKey ? "text" : "password"}
-                  label="Parallel API key (optional)"
-                  value={parallelApiKey}
-                  onChange={(e) => setParallelApiKey(e.target.value)}
-                  disabled={isLoading}
-                  helperText="Overrides OMIGA_PARALLEL_API_KEY / PARALLEL_API_KEY."
-                  InputProps={{
-                    endAdornment: (
-                      <InputAdornment position="end">
-                        <IconButton
-                          onClick={() => setShowParallelKey(!showParallelKey)}
-                          edge="end"
-                          size="small"
-                        >
-                          {showParallelKey ? <VisibilityOff /> : <Visibility />}
-                        </IconButton>
-                      </InputAdornment>
-                    ),
-                  }}
-                  sx={{ mb: 2 }}
-                />
-
-                <TextField
-                  fullWidth
-                  type={showFirecrawlKey ? "text" : "password"}
-                  label="Firecrawl API key (optional)"
-                  value={firecrawlApiKey}
-                  onChange={(e) => setFirecrawlApiKey(e.target.value)}
-                  disabled={isLoading}
-                  helperText="Overrides OMIGA_FIRECRAWL_API_KEY / FIRECRAWL_API_KEY."
-                  InputProps={{
-                    endAdornment: (
-                      <InputAdornment position="end">
-                        <IconButton
-                          onClick={() => setShowFirecrawlKey(!showFirecrawlKey)}
-                          edge="end"
-                          size="small"
-                        >
-                          {showFirecrawlKey ? <VisibilityOff /> : <Visibility />}
-                        </IconButton>
-                      </InputAdornment>
-                    ),
-                  }}
-                  sx={{ mb: 2 }}
-                />
-
-                <TextField
-                  fullWidth
-                  label="Firecrawl API base URL (optional)"
-                  placeholder="https://api.firecrawl.dev"
-                  value={firecrawlUrl}
-                  onChange={(e) => setFirecrawlUrl(e.target.value)}
-                  disabled={isLoading}
-                  helperText="Self-hosted or alternate endpoint. Overrides OMIGA_FIRECRAWL_API_URL."
-                  sx={{ mb: 3 }}
-                />
-
-                <Button
-                  variant="contained"
-                  onClick={() => void handleSaveSearchSettings()}
-                  disabled={isLoading}
-                  sx={{ mb: 2 }}
-                >
-                  Save search settings
-                </Button>
+                      sx={{ mt: 2 }}
+                    >
+                      Save search settings
+                    </Button>
+                  </Box>
+                </Box>
               </Box>
             )}
 

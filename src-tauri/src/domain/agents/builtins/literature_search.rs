@@ -1,7 +1,7 @@
 //! Literature Search Agent
 //!
 //! Specialist for finding, screening, and summarizing academic papers.
-//! Searches PubMed, arXiv, bioRxiv, and Google Scholar in parallel; returns
+//! Searches PubMed, arXiv, Crossref, OpenAlex, bioRxiv/medRxiv, and optional user-enabled sources in parallel; returns
 //! structured summaries with DOIs/URLs suitable for citation.
 
 use crate::domain::agents::definition::{AgentDefinition, AgentSource, ModelTier};
@@ -17,8 +17,8 @@ impl AgentDefinition for LiteratureSearchAgent {
     fn when_to_use(&self) -> &str {
         "Academic literature search and summarization specialist. Use for: finding papers on a topic, \
          screening abstracts, summarizing methods and findings, building reference lists, and \
-         identifying key authors and research groups. Searches PubMed, arXiv, bioRxiv, and \
-         Google Scholar in parallel."
+         identifying key authors and research groups. Searches PubMed, arXiv, Crossref, OpenAlex, \
+         bioRxiv/medRxiv, and optional user-enabled sources in parallel."
     }
 
     fn system_prompt(&self, ctx: &ToolContext) -> String {
@@ -43,8 +43,8 @@ impl AgentDefinition for LiteratureSearchAgent {
         // and consolidate citations.  Streaming directly to the user bypasses the pipeline
         // and leaves the synthesis with no data.
         Some(vec![
-            "web_search".to_string(),
-            "web_fetch".to_string(),
+            "search".to_string(),
+            "fetch".to_string(),
             "recall".to_string(),
             "todo_write".to_string(),
         ])

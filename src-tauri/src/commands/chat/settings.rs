@@ -337,6 +337,9 @@ pub struct TavilySearchKeyState {
     pub preview: String,
 }
 
+const DEFAULT_PUBMED_EMAIL: &str = "omiga@example.invalid";
+const DEFAULT_PUBMED_TOOL_NAME: &str = "omiga";
+
 fn normalize_web_search_key_field(s: &str) -> Option<String> {
     let t = s.trim();
     if t.is_empty() {
@@ -346,7 +349,12 @@ fn normalize_web_search_key_field(s: &str) -> Option<String> {
     }
 }
 
+fn normalize_optional_search_key_field(s: Option<String>) -> Option<String> {
+    s.and_then(|value| normalize_web_search_key_field(&value))
+}
+
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 pub async fn set_web_search_api_keys(
     state: State<'_, OmigaAppState>,
     tavily: String,
@@ -354,6 +362,12 @@ pub async fn set_web_search_api_keys(
     parallel: String,
     firecrawl: String,
     firecrawl_url: String,
+    semantic_scholar_enabled: Option<bool>,
+    semantic_scholar_api_key: Option<String>,
+    wechat_search_enabled: Option<bool>,
+    pubmed_api_key: Option<String>,
+    pubmed_email: Option<String>,
+    pubmed_tool_name: Option<String>,
 ) -> CommandResult<()> {
     let mut g = state.chat.web_search_api_keys.lock().await;
     g.tavily = normalize_web_search_key_field(&tavily);
@@ -361,6 +375,14 @@ pub async fn set_web_search_api_keys(
     g.parallel = normalize_web_search_key_field(&parallel);
     g.firecrawl = normalize_web_search_key_field(&firecrawl);
     g.firecrawl_url = normalize_web_search_key_field(&firecrawl_url);
+    g.semantic_scholar_enabled = semantic_scholar_enabled.unwrap_or(false);
+    g.semantic_scholar_api_key = normalize_optional_search_key_field(semantic_scholar_api_key);
+    g.wechat_search_enabled = wechat_search_enabled.unwrap_or(false);
+    g.pubmed_api_key = normalize_optional_search_key_field(pubmed_api_key);
+    g.pubmed_email = normalize_optional_search_key_field(pubmed_email)
+        .or_else(|| Some(DEFAULT_PUBMED_EMAIL.to_string()));
+    g.pubmed_tool_name = normalize_optional_search_key_field(pubmed_tool_name)
+        .or_else(|| Some(DEFAULT_PUBMED_TOOL_NAME.to_string()));
     Ok(())
 }
 
@@ -379,6 +401,12 @@ pub struct WebSearchApiKeysState {
     pub parallel: WebSearchKeyFieldState,
     pub firecrawl: WebSearchKeyFieldState,
     pub firecrawl_url: WebSearchKeyFieldState,
+    pub semantic_scholar_enabled: bool,
+    pub semantic_scholar_api_key: WebSearchKeyFieldState,
+    pub wechat_search_enabled: bool,
+    pub pubmed_api_key: WebSearchKeyFieldState,
+    pub pubmed_email: WebSearchKeyFieldState,
+    pub pubmed_tool_name: WebSearchKeyFieldState,
 }
 
 fn web_search_key_field_state(key: &Option<String>) -> WebSearchKeyFieldState {
@@ -413,10 +441,24 @@ pub async fn get_web_search_api_keys_state(
         parallel: web_search_key_field_state(&g.parallel),
         firecrawl: web_search_key_field_state(&g.firecrawl),
         firecrawl_url: web_search_key_field_state(&g.firecrawl_url),
+        semantic_scholar_enabled: g.semantic_scholar_enabled,
+        semantic_scholar_api_key: web_search_key_field_state(&g.semantic_scholar_api_key),
+        wechat_search_enabled: g.wechat_search_enabled,
+        pubmed_api_key: web_search_key_field_state(&g.pubmed_api_key),
+        pubmed_email: web_search_key_field_state(
+            &g.pubmed_email
+                .clone()
+                .or_else(|| Some(DEFAULT_PUBMED_EMAIL.to_string())),
+        ),
+        pubmed_tool_name: web_search_key_field_state(
+            &g.pubmed_tool_name
+                .clone()
+                .or_else(|| Some(DEFAULT_PUBMED_TOOL_NAME.to_string())),
+        ),
     })
 }
 
-/// Store Tavily API key for built-in `web_search` (empty clears user override; env still works).
+/// Store Tavily API key for built-in search (empty clears user override; env still works).
 #[tauri::command]
 pub async fn set_tavily_search_api_key(
     state: State<'_, OmigaAppState>,

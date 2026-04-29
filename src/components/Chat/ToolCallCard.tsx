@@ -45,9 +45,8 @@ function toolRowIcon(toolName: string) {
     return MenuBookIcon;
   if (n === "skill" || n === "skilltool") return MenuBookIcon;
   if (n === "recall") return SearchIcon;
-  if (n.includes("web_search") || n.includes("websearch"))
-    return TravelExploreIcon;
-  if (n.includes("web_fetch") || n.includes("fetch")) return LinkIcon;
+  if (n === "search" || n === "websearch") return TravelExploreIcon;
+  if (n === "fetch") return LinkIcon;
   if (n.includes("bash") || n.includes("shell")) return TerminalIcon;
   if (n.includes("glob") || n.includes("file")) return FolderOpen;
   if (n.includes("ripgrep") || n.includes("grep")) return SearchIcon;

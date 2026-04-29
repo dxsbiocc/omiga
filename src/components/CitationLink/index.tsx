@@ -5,7 +5,7 @@
  * On hover, fetches and displays full metadata (title, authors, journal, year).
  */
 
-import { useState, useCallback, useRef } from "react";
+import { Children, isValidElement, useState, useCallback, useRef } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Box,
@@ -78,6 +78,28 @@ function sourceLabel(url: string): string {
   } catch {
     return "Link";
   }
+}
+
+function textFromChildren(children: React.ReactNode): string {
+  const parts: string[] = [];
+  Children.forEach(children, (child) => {
+    if (typeof child === "string" || typeof child === "number") {
+      parts.push(String(child));
+      return;
+    }
+    if (isValidElement<{ children?: React.ReactNode }>(child)) {
+      parts.push(textFromChildren(child.props.children));
+    }
+  });
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+
+function citationLabelFromChildren(children: React.ReactNode, url: string): string | null {
+  const text = textFromChildren(children);
+  if (!text) return null;
+  if (/^https?:\/\//i.test(text)) return null;
+  if (text === url) return null;
+  return text;
 }
 
 function isCitationUrl(url: string): boolean {
@@ -247,8 +269,9 @@ export function CitationLink({ href, children, accentColor }: CitationLinkProps)
   const [fetchState, setFetchState] = useState<FetchState>("idle");
   const [meta, setMeta] = useState<CitationMeta | null>(null);
 
-  const label = sourceLabel(url);
+  const label = citationLabelFromChildren(children, url) ?? sourceLabel(url);
   const isCitation = isCitationUrl(url);
+  const source = sourceLabel(url);
 
   const fetchMeta = useCallback(async () => {
     if (!url.startsWith("http")) return;
@@ -338,6 +361,8 @@ export function CitationLink({ href, children, accentColor }: CitationLinkProps)
           href={url}
           target="_blank"
           rel="noopener noreferrer"
+          title={`打开引用：${label}`}
+          aria-label={`打开引用：${label}`}
           onClick={handleClick}
           onMouseEnter={handleMouseEnter}
           onMouseLeave={handleMouseLeave}
@@ -408,14 +433,14 @@ export function CitationLink({ href, children, accentColor }: CitationLinkProps)
                 </Paper>
               )}
               {fetchState === "done" && meta && (
-                <CitationTooltipCard meta={meta} label={label} />
+                <CitationTooltipCard meta={meta} label={source} />
               )}
               {fetchState === "error" && (
                 <Paper elevation={3} sx={{ p: 1.25, maxWidth: 280, borderRadius: 2 }}>
                   <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 0.5 }}>
-                    <SourceBadge label={label} />
+                    <SourceBadge label={source} />
                     <Typography variant="caption" sx={{ fontWeight: 500 }}>
-                      {label}
+                      {source}
                     </Typography>
                   </Box>
                   <Typography

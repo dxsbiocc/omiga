@@ -23,12 +23,12 @@ pub const ENTER_PLAN_MODE_TOOL_RESULT_FOLLOWUP: &str = r#"In plan mode, you shou
 1. Thoroughly explore the codebase to understand existing patterns
 2. Identify similar features and architectural approaches
 3. Consider multiple approaches and their trade-offs
-4. Use AskUserQuestion if you need to clarify the approach
+4. Use AskUserQuestion as the first-choice UI if you need to clarify the approach; do not ask bounded clarification choices only in plain text when the tool is available
 5. Design a concrete implementation strategy
 6. Write and refine your plan in a single markdown plan file in the project (use `file_write` / `file_edit` on that path only). Do not edit implementation files or run non-readonly actions until the user approves after you exit plan mode.
 7. When the plan is ready, use ExitPlanMode to request user approval.
 
-**Important:** Use AskUserQuestion only to clarify requirements or choose between approaches. Use ExitPlanMode to request plan approval. Do NOT ask "Is this plan okay?" via AskUserQuestion — that is what ExitPlanMode is for.
+**Important:** Use AskUserQuestion only to clarify requirements or choose between approaches, and prefer it over plain-text questions for bounded choices. Use ExitPlanMode to request plan approval. Do NOT ask "Is this plan okay?" via AskUserQuestion — that is what ExitPlanMode is for.
 
 **Omiga:** There is no separate plan file path in a system attachment — pick a clear path under the project root (e.g. `docs/plan-<topic>.md`) and use it consistently until you call ExitPlanMode."#;
 

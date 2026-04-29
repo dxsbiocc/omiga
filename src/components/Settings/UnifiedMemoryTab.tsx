@@ -647,7 +647,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
               <li>优先级：工作记忆 &gt; 长期项目 &gt; 长期全局 &gt; 知识库 &gt; 隐性记忆</li>
               <li>陈旧的长期条目（90 天未访问 + 稳定性低）在下次启动时概率性自动清理</li>
               <li>
-                <strong>来源登记（Source Registry）</strong>：每次 <code>web_fetch</code> / <code>web_search</code> 成功后自动记录 URL、标题、摘要，可通过 <code>recall scope=sources</code> 检索历史来源，避免重复抓取
+                <strong>来源登记（Source Registry）</strong>：每次 <code>fetch</code> / <code>search</code> 成功后自动记录 URL、标题、摘要，可通过 <code>recall scope=sources</code> 检索历史来源，避免重复抓取
               </li>
             </Box>
 
@@ -1755,7 +1755,7 @@ function SourcesTab({ memory, theme, glassSurface, alpha, setToast }: SourcesTab
         <Paper elevation={0} sx={{ p: 3, textAlign: "center", ...glassSurface }}>
           <SourceIcon sx={{ fontSize: 36, color: "text.disabled", mb: 1 }} />
           <Typography color="text.secondary" variant="body2">
-            {searchText ? "无匹配来源" : "暂无来源记录。发起 web_fetch / web_search 后自动登记。"}
+            {searchText ? "无匹配来源" : "暂无来源记录。发起 fetch / search 后自动登记。"}
           </Typography>
         </Paper>
       )}

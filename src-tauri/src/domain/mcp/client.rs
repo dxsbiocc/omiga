@@ -13,6 +13,7 @@ use rmcp::transport::{
 use rmcp::ServiceExt;
 use serde_json::json;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -346,15 +347,17 @@ async fn create_running_service(
 ) -> Result<RunningService<RoleClient, ()>, String> {
     match config {
         McpServerConfig::Stdio { command, args, env } => {
-            let transport = TokioChildProcess::new(Command::new(&command).configure(|cmd| {
-                cmd.args(&args);
-                cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-                cmd.current_dir(project_root);
-                cmd.stdin(std::process::Stdio::piped());
-                cmd.stdout(std::process::Stdio::piped());
-                cmd.stderr(std::process::Stdio::piped());
-            }))
-            .map_err(|e| format!("MCP stdio spawn: {e}"))?;
+            let resolved_command = resolve_stdio_command(&command)?;
+            let transport =
+                TokioChildProcess::new(Command::new(&resolved_command).configure(|cmd| {
+                    cmd.args(&args);
+                    cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+                    cmd.current_dir(project_root);
+                    cmd.stdin(std::process::Stdio::piped());
+                    cmd.stdout(std::process::Stdio::piped());
+                    cmd.stderr(std::process::Stdio::piped());
+                }))
+                .map_err(|e| format!("MCP stdio spawn: {e}"))?;
 
             tokio::time::timeout(timeout, ().serve(transport))
                 .await
@@ -451,6 +454,15 @@ async fn create_running_service(
                 last_error.unwrap_or_else(|| "Unknown error".to_string())
             ))
         }
+    }
+}
+
+fn resolve_stdio_command(command: &str) -> Result<PathBuf, String> {
+    if command == "__omiga_self__" {
+        std::env::current_exe()
+            .map_err(|e| format!("resolve __omiga_self__ to current executable: {e}"))
+    } else {
+        Ok(PathBuf::from(command))
     }
 }
 

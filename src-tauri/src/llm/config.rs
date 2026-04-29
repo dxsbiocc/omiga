@@ -353,11 +353,11 @@ pub struct GlobalSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_use_proxy: Option<bool>,
 
-    /// Preferred public search engine for built-in `web_search`: ddg, bing, or google.
+    /// Preferred public search engine for `search(category="web")`: ddg, bing, or google.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search_engine: Option<String>,
 
-    /// Ordered enabled methods for built-in `web_search`, e.g. ["tavily", "google", "ddg"].
+    /// Ordered enabled methods for `search(category="web")`, e.g. ["tavily", "google", "ddg"].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search_methods: Option<Vec<String>>,
 }
@@ -733,6 +733,13 @@ settings:
 }
 
 pub fn default_web_search_methods() -> Vec<String> {
+    ["ddg", "google", "bing"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn legacy_all_provider_web_search_methods() -> Vec<String> {
     [
         "tavily",
         "exa",
@@ -762,10 +769,6 @@ fn normalize_web_search_method_name(value: &str) -> Option<String> {
         "exa" => Some("exa".to_string()),
         "firecrawl" => Some("firecrawl".to_string()),
         "parallel" => Some("parallel".to_string()),
-        "pubmed" | "pubmed-mcp" | "pubmed_mcp" => Some("pubmed_mcp".to_string()),
-        "browser" | "browser-mcp" | "browser_mcp" | "mcp-browser" | "mcp_browser" => {
-            Some("browser_mcp".to_string())
-        }
         "google" => Some("google".to_string()),
         "bing" => Some("bing".to_string()),
         "duckduckgo" | "duck-duck-go" | "ddg" => Some("ddg".to_string()),
@@ -783,7 +786,7 @@ pub fn normalize_web_search_methods(values: &[String]) -> Vec<String> {
             out.push(method);
         }
     }
-    if out.is_empty() {
+    if out.is_empty() || out == legacy_all_provider_web_search_methods() {
         default_web_search_methods()
     } else {
         out
@@ -1161,5 +1164,30 @@ mod tests {
         assert_eq!(config.provider, LlmProvider::Deepseek);
         assert_eq!(config.api_key, "sk-test");
         assert_eq!(config.model, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn web_search_defaults_skip_api_key_providers() {
+        assert_eq!(
+            default_web_search_methods(),
+            vec!["ddg".to_string(), "google".to_string(), "bing".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_web_search_methods_migrates_legacy_all_provider_default() {
+        let legacy = vec![
+            "tavily".to_string(),
+            "exa".to_string(),
+            "firecrawl".to_string(),
+            "parallel".to_string(),
+            "google".to_string(),
+            "bing".to_string(),
+            "ddg".to_string(),
+        ];
+        assert_eq!(
+            normalize_web_search_methods(&legacy),
+            default_web_search_methods()
+        );
     }
 }

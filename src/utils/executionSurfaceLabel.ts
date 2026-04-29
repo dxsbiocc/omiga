@@ -6,9 +6,8 @@ import type { ExecutionStep } from "../state/activityStore";
 export function toolCategoryLabel(toolName: string): string {
   const n = (toolName || "").toLowerCase();
   if (!n) return "调用工具";
-  if (n.includes("web_search")) return "搜索内容";
-  if (n.includes("web_fetch") || (n.includes("fetch") && n.includes("web")))
-    return "获取网页";
+  if (n === "search") return "搜索内容";
+  if (n === "fetch") return "获取网页";
   if (n === "taskcreate" || n.includes("task_create")) return "创建任务";
   if (n.includes("taskstop") || n.includes("taskoutput")) return "任务输出";
   if (

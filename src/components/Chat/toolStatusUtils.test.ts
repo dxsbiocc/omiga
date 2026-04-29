@@ -8,14 +8,14 @@ describe("settleRunningToolCalls", () => {
       [
         {
           role: "tool",
-          content: "`web_search`",
-          toolCall: { name: "web_search", status: "running" as const },
+          content: "`search`",
+          toolCall: { name: "search", status: "running" as const },
         },
         {
           role: "tool",
-          content: "`web_fetch` completed",
+          content: "`fetch` completed",
           toolCall: {
-            name: "web_fetch",
+            name: "fetch",
             status: "completed" as const,
             completedAt: 12,
           },
@@ -30,17 +30,17 @@ describe("settleRunningToolCalls", () => {
     );
 
     expect(settled[0]).toMatchObject({
-      content: "`web_search` completed",
+      content: "`search` completed",
       toolCall: {
-        name: "web_search",
+        name: "search",
         status: "completed",
         completedAt: 99,
       },
     });
     expect(settled[1]).toMatchObject({
-      content: "`web_fetch` completed",
+      content: "`fetch` completed",
       toolCall: {
-        name: "web_fetch",
+        name: "fetch",
         status: "completed",
         completedAt: 12,
       },

@@ -11,6 +11,7 @@ pub mod bash;
 pub mod enter_plan_mode;
 pub mod env_store;
 pub mod exit_plan_mode;
+pub mod fetch;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -21,6 +22,7 @@ pub mod list_skills;
 pub mod notebook_edit;
 pub mod read_mcp_resource;
 pub mod recall;
+pub mod search;
 pub mod send_user_message;
 pub mod shell_file_ops;
 pub mod skill_config;
@@ -38,9 +40,7 @@ pub mod task_update;
 pub mod todo_write;
 pub mod tool_search;
 pub mod visualization;
-pub mod web_fetch;
 pub mod web_safety;
-pub mod web_search;
 pub mod workflow;
 
 use crate::domain::agents::subagent_tool_filter::env_workflow_scripts_enabled;
@@ -63,8 +63,8 @@ pub enum ToolKind {
     #[serde(rename = "ripgrep", alias = "grep")]
     Grep,
     Glob,
-    WebFetch,
-    WebSearch,
+    Fetch,
+    Search,
     TodoWrite,
     NotebookEdit,
     Visualization,
@@ -111,8 +111,8 @@ impl fmt::Display for ToolKind {
             ToolKind::FileWrite => write!(f, "file_write"),
             ToolKind::Grep => write!(f, "ripgrep"),
             ToolKind::Glob => write!(f, "glob"),
-            ToolKind::WebFetch => write!(f, "web_fetch"),
-            ToolKind::WebSearch => write!(f, "web_search"),
+            ToolKind::Fetch => write!(f, "fetch"),
+            ToolKind::Search => write!(f, "search"),
             ToolKind::TodoWrite => write!(f, "todo_write"),
             ToolKind::NotebookEdit => write!(f, "notebook_edit"),
             ToolKind::Visualization => write!(f, "visualization"),
@@ -149,8 +149,8 @@ pub enum Tool {
     FileWrite(file_write::FileWriteArgs),
     Grep(grep::GrepArgs),
     Glob(glob::GlobArgs),
-    WebFetch(web_fetch::WebFetchArgs),
-    WebSearch(web_search::WebSearchArgs),
+    Fetch(fetch::FetchArgs),
+    Search(search::SearchArgs),
     TodoWrite(todo_write::TodoWriteArgs),
     NotebookEdit(notebook_edit::NotebookEditArgs),
     Visualization(visualization::VisualizationArgs),
@@ -188,8 +188,8 @@ impl Tool {
             Tool::FileWrite(_) => ToolKind::FileWrite,
             Tool::Grep(_) => ToolKind::Grep,
             Tool::Glob(_) => ToolKind::Glob,
-            Tool::WebFetch(_) => ToolKind::WebFetch,
-            Tool::WebSearch(_) => ToolKind::WebSearch,
+            Tool::Fetch(_) => ToolKind::Fetch,
+            Tool::Search(_) => ToolKind::Search,
             Tool::TodoWrite(_) => ToolKind::TodoWrite,
             Tool::NotebookEdit(_) => ToolKind::NotebookEdit,
             Tool::Visualization(_) => ToolKind::Visualization,
@@ -224,8 +224,8 @@ impl Tool {
             Tool::FileWrite(_) => "FileWrite",
             Tool::Grep(_) => "Ripgrep",
             Tool::Glob(_) => "Glob",
-            Tool::WebFetch(_) => "WebFetch",
-            Tool::WebSearch(_) => "WebSearch",
+            Tool::Fetch(_) => "fetch",
+            Tool::Search(_) => "search",
             Tool::TodoWrite(_) => "TodoWrite",
             Tool::NotebookEdit(_) => "NotebookEdit",
             Tool::Visualization(_) => "Visualization",
@@ -260,8 +260,8 @@ impl Tool {
             Tool::FileWrite(_) => file_write::DESCRIPTION,
             Tool::Grep(_) => grep::DESCRIPTION,
             Tool::Glob(_) => glob::DESCRIPTION,
-            Tool::WebFetch(_) => web_fetch::DESCRIPTION,
-            Tool::WebSearch(_) => web_search::DESCRIPTION,
+            Tool::Fetch(_) => fetch::DESCRIPTION,
+            Tool::Search(_) => search::DESCRIPTION,
             Tool::TodoWrite(_) => todo_write::DESCRIPTION,
             Tool::NotebookEdit(_) => notebook_edit::DESCRIPTION,
             Tool::Visualization(_) => visualization::DESCRIPTION,
@@ -299,8 +299,8 @@ impl Tool {
             Tool::FileWrite(args) => file_write::FileWriteTool::execute(ctx, args).await?,
             Tool::Grep(args) => grep::GrepTool::execute(ctx, args).await?,
             Tool::Glob(args) => glob::GlobTool::execute(ctx, args).await?,
-            Tool::WebFetch(args) => web_fetch::WebFetchTool::execute(ctx, args).await?,
-            Tool::WebSearch(args) => web_search::WebSearchTool::execute(ctx, args).await?,
+            Tool::Fetch(args) => fetch::FetchTool::execute(ctx, args).await?,
+            Tool::Search(args) => search::SearchTool::execute(ctx, args).await?,
             Tool::TodoWrite(args) => todo_write::TodoWriteTool::execute(ctx, args).await?,
             Tool::NotebookEdit(args) => notebook_edit::NotebookEditTool::execute(ctx, args).await?,
             Tool::Visualization(args) => {
@@ -414,17 +414,17 @@ impl Tool {
                 })?;
                 Ok(Tool::Glob(args))
             }
-            ToolKind::WebFetch => {
+            ToolKind::Fetch => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
-                    message: format!("Invalid web_fetch arguments: {}", e),
+                    message: format!("Invalid fetch arguments: {}", e),
                 })?;
-                Ok(Tool::WebFetch(args))
+                Ok(Tool::Fetch(args))
             }
-            ToolKind::WebSearch => {
+            ToolKind::Search => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
-                    message: format!("Invalid web_search arguments: {}", e),
+                    message: format!("Invalid search arguments: {}", e),
                 })?;
-                Ok(Tool::WebSearch(args))
+                Ok(Tool::Search(args))
             }
             ToolKind::TodoWrite => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
@@ -570,8 +570,8 @@ impl Tool {
             "file_write" => ToolKind::FileWrite,
             "ripgrep" | "Ripgrep" | "grep" | "Grep" => ToolKind::Grep,
             "glob" => ToolKind::Glob,
-            "web_fetch" => ToolKind::WebFetch,
-            "web_search" => ToolKind::WebSearch,
+            "fetch" => ToolKind::Fetch,
+            "search" => ToolKind::Search,
             "todo_write" => ToolKind::TodoWrite,
             "notebook_edit" => ToolKind::NotebookEdit,
             "visualization" => ToolKind::Visualization,
@@ -604,7 +604,9 @@ impl Tool {
     }
 }
 
-/// API keys for built-in `web_search` (Settings override env). Search priority is configured separately.
+/// API keys/settings for built-in search/fetch adapters (Settings override env where supported).
+///
+/// The struct name is kept for config/state compatibility with existing Settings commands.
 #[derive(Debug, Clone, Default)]
 pub struct WebSearchApiKeys {
     pub tavily: Option<String>,
@@ -613,6 +615,18 @@ pub struct WebSearchApiKeys {
     pub firecrawl: Option<String>,
     /// Self-hosted Firecrawl base URL, e.g. `https://api.firecrawl.dev` (no trailing path).
     pub firecrawl_url: Option<String>,
+    /// Semantic Scholar is opt-in because the Academic Graph API requires a user key.
+    pub semantic_scholar_enabled: bool,
+    /// Optional Semantic Scholar Academic Graph API key.
+    pub semantic_scholar_api_key: Option<String>,
+    /// WeChat public-account search via Sogou is opt-in because it depends on a fragile public endpoint.
+    pub wechat_search_enabled: bool,
+    /// Optional NCBI E-utilities API key for PubMed.
+    pub pubmed_api_key: Option<String>,
+    /// NCBI contact email. Defaults to a local virtual mailbox when unset.
+    pub pubmed_email: Option<String>,
+    /// NCBI tool identifier. Defaults to `omiga` when unset.
+    pub pubmed_tool_name: Option<String>,
 }
 
 /// Execution context passed to all tools
@@ -655,13 +669,13 @@ pub struct ToolContext {
     pub tool_results_dir: Option<std::path::PathBuf>,
     /// When set, `EnterPlanMode` / `ExitPlanMode` toggle this (TS `permissionMode === 'plan'`).
     pub plan_mode: Option<Arc<tokio::sync::Mutex<bool>>>,
-    /// Search API keys from Omiga Settings (`web_search` tool).
+    /// Search/fetch adapter API keys from Omiga Settings.
     pub web_search_api_keys: WebSearchApiKeys,
     /// Whether web tools should honor system/env proxy settings.
     pub web_use_proxy: bool,
-    /// Preferred public search engine for `web_search`: ddg, bing, or google.
+    /// Preferred public search engine for `search(category="web")`: ddg, bing, or google.
     pub web_search_engine: String,
-    /// Ordered `web_search` methods selected in Settings, e.g. tavily → google → ddg.
+    /// Ordered web search methods selected in Settings, e.g. tavily → google → ddg.
     pub web_search_methods: Vec<String>,
     /// Skill metadata cache shared across tool calls in a session.
     #[allow(dead_code)]
@@ -723,15 +737,7 @@ impl ToolContext {
             web_search_api_keys: WebSearchApiKeys::default(),
             web_use_proxy: true,
             web_search_engine: "ddg".to_string(),
-            web_search_methods: vec![
-                "tavily".to_string(),
-                "exa".to_string(),
-                "firecrawl".to_string(),
-                "parallel".to_string(),
-                "google".to_string(),
-                "bing".to_string(),
-                "ddg".to_string(),
-            ],
+            web_search_methods: vec!["ddg".to_string(), "google".to_string(), "bing".to_string()],
             env_store: None,
             skill_cache: None,
             skill_task_context: None,
@@ -817,7 +823,7 @@ impl ToolContext {
         self
     }
 
-    /// All web search API keys from settings (used by `web_search`).
+    /// Search/fetch adapter API keys from settings.
     pub fn with_web_search_api_keys(mut self, keys: WebSearchApiKeys) -> Self {
         self.web_search_api_keys = keys;
         self
@@ -925,8 +931,8 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         notebook_edit::schema(),
         grep::schema(),
         glob::schema(),
-        web_fetch::schema(),
-        web_search::schema(),
+        fetch::schema(),
+        search::schema(),
         todo_write::schema(),
         visualization::schema(),
         sleep::schema(),
@@ -995,8 +1001,8 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
             | "ripgrep"
             | "grep"
             | "glob"
-            | "web_fetch"
-            | "web_search"
+            | "fetch"
+            | "search"
             | "ToolSearch"
             | "tool_search"
             | "visualization"

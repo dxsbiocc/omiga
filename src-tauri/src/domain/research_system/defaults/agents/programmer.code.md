@@ -17,7 +17,7 @@ tools:
     - file_search
     - shell
   forbidden:
-    - web_search
+    - search
 permissions:
   read:
     - artifact_store

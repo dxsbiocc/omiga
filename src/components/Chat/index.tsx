@@ -194,11 +194,11 @@ interface ChatProps {
   sessionId: string;
 }
 
-const WEB_SEARCH_CLIENT_WATCHDOG_MS = 45_000;
+const SEARCH_CLIENT_WATCHDOG_MS = 45_000;
 
-function isWebSearchToolName(name?: string): boolean {
+function isSearchToolName(name?: string): boolean {
   const n = (name ?? "").toLowerCase();
-  return n.includes("web_search") || n.includes("websearch");
+  return n === "search" || n === "websearch";
 }
 
 interface SchedulerPlan {
@@ -505,8 +505,8 @@ function humanizeToolStepTitle(name: string, args?: string): string {
   if (n.includes("todo_write") || n.includes("todowrite"))
     return "更新任务清单";
   if (n === "recall") return "检索知识库";
-  if (isWebSearchToolName(name)) return "网络搜索";
-  if (n.includes("web_fetch") || n.includes("fetch")) return "获取网页";
+  if (isSearchToolName(name)) return "网络搜索";
+  if (n === "fetch") return "获取网页";
   if (n.includes("glob")) return "搜索文件";
   if (n.includes("ripgrep") || n.includes("grep")) return "代码搜索";
   if (n.includes("notebook")) return "编辑 Notebook";
@@ -558,7 +558,7 @@ function executionStepSummary(name: string, args?: string): string {
       const pat = String(j.glob_pattern ?? j.pattern ?? "");
       if (pat) return `Find files: ${pat}`;
     }
-    if (isWebSearchToolName(name)) {
+    if (isSearchToolName(name)) {
       const q = String(j.query ?? "");
       if (q) return `Search web: ${q.slice(0, 80)}`;
     }
@@ -2326,14 +2326,14 @@ export function Chat({ sessionId }: ChatProps) {
 
   const startToolWatchdog = useCallback(
     (toolUseId: string, toolName: string) => {
-      if (!toolUseId || !isWebSearchToolName(toolName)) return;
+      if (!toolUseId || !isSearchToolName(toolName)) return;
       clearToolWatchdog(toolUseId);
       const timer = window.setTimeout(() => {
         toolWatchdogTimersRef.current.delete(toolUseId);
         markToolSettled(toolUseId);
-        const timeoutSeconds = Math.round(WEB_SEARCH_CLIENT_WATCHDOG_MS / 1000);
+        const timeoutSeconds = Math.round(SEARCH_CLIENT_WATCHDOG_MS / 1000);
         const watchdogOutput =
-          `web_search has been running for ${timeoutSeconds}s without a result. ` +
+          `search has been running for ${timeoutSeconds}s without a result. ` +
           "Stopped showing it as running to avoid a stuck UI; cancel and retry with a narrower query if the backend does not continue.";
         setMessages((prev) => {
           let didMark = false;
@@ -2346,7 +2346,7 @@ export function Chat({ sessionId }: ChatProps) {
               return m;
             }
             didMark = true;
-            const name = m.toolCall.name || toolName || "web_search";
+            const name = m.toolCall.name || toolName || "search";
             return {
               ...m,
               content: `\`${name}\` timed out`,
@@ -2370,7 +2370,7 @@ export function Chat({ sessionId }: ChatProps) {
           }
           return didMark ? next : prev;
         });
-      }, WEB_SEARCH_CLIENT_WATCHDOG_MS);
+      }, SEARCH_CLIENT_WATCHDOG_MS);
       toolWatchdogTimersRef.current.set(toolUseId, timer);
     },
     [clearToolWatchdog, markToolSettled, replaceStoreMessagesSnapshot],
