@@ -109,6 +109,11 @@ import {
   sortComposerMentionRows,
   type ComposerMentionRow,
 } from "./composerPathMentions";
+import {
+  EDITABLE_EMPTY_SENTINEL,
+  getEditableInputUpdate,
+  normalizeEditableText,
+} from "./editableText";
 
 const SANDBOX_BACKENDS: { id: SandboxBackend; label: string }[] = [
   { id: "docker", label: "Docker" },
@@ -346,12 +351,6 @@ function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
   else (ref as MutableRefObject<T | null>).current = value;
 }
 
-const EDITABLE_EMPTY_SENTINEL = "\u200B";
-
-function normalizeEditableText(text: string): string {
-  return text.split(EDITABLE_EMPTY_SENTINEL).join("");
-}
-
 function ensureEditableTextNode(el: HTMLElement): Text {
   const doc = el.ownerDocument;
   const first = el.firstChild;
@@ -518,6 +517,7 @@ export const ChatComposer = memo(function ChatComposer({
   const inputValueRef = useRef(input);
   inputValueRef.current = input;
   const editableRef = useRef<HTMLSpanElement | null>(null);
+  const editableCompositionRef = useRef(false);
   const normalizeSlashValue = useCallback(
     (
       rawValue: string,
@@ -1252,6 +1252,9 @@ export const ChatComposer = memo(function ChatComposer({
   useLayoutEffect(() => {
     const el = editableRef.current;
     if (!el) {
+      return;
+    }
+    if (editableCompositionRef.current) {
       return;
     }
     const isFocused = el.ownerDocument.activeElement === el;
@@ -2156,12 +2159,32 @@ export const ChatComposer = memo(function ChatComposer({
             }}
             onInput={(e) => {
               const rawValue = e.currentTarget.textContent ?? "";
-              const nextValue = normalizeEditableText(rawValue);
-              if (nextValue !== rawValue || nextValue === "") {
-                setEditableDomText(e.currentTarget, nextValue, true);
-                setEditableTextSelection(e.currentTarget, nextValue.length);
+              const nativeEvent = e.nativeEvent as InputEvent;
+              const update = getEditableInputUpdate(
+                rawValue,
+                editableCompositionRef.current ||
+                  nativeEvent.isComposing === true,
+              );
+              if (update.shouldNormalizeDom) {
+                setEditableDomText(e.currentTarget, update.nextValue, true);
+                setEditableTextSelection(e.currentTarget, update.nextValue.length);
               }
-              commitEditableInput(nextValue);
+              if (update.shouldCommit) {
+                commitEditableInput(update.nextValue);
+              }
+            }}
+            onCompositionStart={() => {
+              editableCompositionRef.current = true;
+            }}
+            onCompositionEnd={(e) => {
+              editableCompositionRef.current = false;
+              const rawValue = e.currentTarget.textContent ?? "";
+              const update = getEditableInputUpdate(rawValue, false);
+              if (update.shouldNormalizeDom) {
+                setEditableDomText(e.currentTarget, update.nextValue, true);
+                setEditableTextSelection(e.currentTarget, update.nextValue.length);
+              }
+              commitEditableInput(update.nextValue);
             }}
             onPaste={(e) => {
               e.preventDefault();
