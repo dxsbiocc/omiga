@@ -202,18 +202,21 @@ describe("Invoke argument contracts", () => {
     expect(args.projectPath).toBeTruthy();
   });
 
-  it("memory_archive_long_term_entry requires entryPath", () => {
-    const args = { entryPath: "/long_term/entry.json" };
+  it("memory_archive_long_term_entry requires projectPath and entryPath", () => {
+    const args = { projectPath: "/my/project", entryPath: "/long_term/entry.json" };
+    expect(args.projectPath).toBeTruthy();
     expect(args.entryPath).toBeTruthy();
   });
 
-  it("memory_delete_long_term_entry requires entryPath", () => {
-    const args = { entryPath: "/long_term/entry.json" };
+  it("memory_delete_long_term_entry requires projectPath and entryPath", () => {
+    const args = { projectPath: "/my/project", entryPath: "/long_term/entry.json" };
+    expect(args.projectPath).toBeTruthy();
     expect(args.entryPath).toBeTruthy();
   });
 
-  it("memory_delete_source requires entryPath", () => {
-    const args = { entryPath: "/long_term/sources/entry.json" };
+  it("memory_delete_source requires projectPath and entryPath", () => {
+    const args = { projectPath: "/my/project", entryPath: "/long_term/sources/entry.json" };
+    expect(args.projectPath).toBeTruthy();
     expect(args.entryPath).toBeTruthy();
   });
 

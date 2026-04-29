@@ -68,4 +68,7 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
 
       - name: Run tests (includes deterministic mock LLM orchestration harness)
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        # GitHub-hosted runners expose Docker, which would make the Docker
+        # integration test pull/start a container. Keep CI deterministic by
+        # leaving that environment-dependent test to local opt-in runs.
+        run: cargo test --manifest-path src-tauri/Cargo.toml -- --skip execution::docker::tests::test_docker_env_basic

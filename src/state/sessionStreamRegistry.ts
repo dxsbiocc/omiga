@@ -4,10 +4,10 @@
  * Lives outside React so stream listeners and their accumulated state survive
  * session switches.  When the user switches away from Session A (which is still
  * streaming), the listener is NOT unregistered — it keeps receiving events from
- * the backend.  The ownerSessionId guard inside the handler silently discards
- * events for non-current sessions.  When the user switches BACK to Session A,
- * sessionIdRef.current becomes ownerSessionId again and the handler resumes
- * updating React state transparently.
+ * the backend.  The ownerSessionId guard inside the handler stores non-current
+ * session events in this registry instead of mutating the visible React state.
+ * When the user switches BACK to Session A, the saved snapshot restores the
+ * latest accumulated stream state immediately.
  *
  * The snapshot map (save/load) handles the React state values that were cleared
  * on the previous switch-away, so the restored session shows its accumulated
@@ -25,6 +25,12 @@ import type {
   ActiveTodoItem,
   BackgroundJob,
 } from "./activityStore";
+import {
+  activitySnapshotHasRecords,
+  buildSessionActivitySnapshot,
+  finalizeActivitySnapshot,
+  saveLatestActivitySnapshot,
+} from "./sessionActivitySnapshots";
 
 export interface SessionStreamSnapshot {
   streamId: string | null;
@@ -73,6 +79,10 @@ export function saveStreamSnapshot(
   snap: SessionStreamSnapshot,
 ): void {
   _snapshots.set(sessionId, snap);
+  const activitySnapshot = buildSessionActivitySnapshot(sessionId, snap);
+  if (activitySnapshotHasRecords(activitySnapshot)) {
+    saveLatestActivitySnapshot(sessionId, activitySnapshot);
+  }
   bumpVersion();
 }
 
@@ -97,6 +107,16 @@ export function isBackgroundSessionRunning(sessionId: string): boolean {
 
 /** Clear the snapshot for a session once the stream ends or the session is deleted. */
 export function clearStreamSnapshot(sessionId: string): void {
+  const snap = _snapshots.get(sessionId);
+  if (snap) {
+    const activitySnapshot = buildSessionActivitySnapshot(sessionId, snap);
+    if (activitySnapshotHasRecords(activitySnapshot)) {
+      saveLatestActivitySnapshot(
+        sessionId,
+        finalizeActivitySnapshot(activitySnapshot),
+      );
+    }
+  }
   _snapshots.delete(sessionId);
   bumpVersion();
 }

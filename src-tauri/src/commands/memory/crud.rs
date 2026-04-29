@@ -3,6 +3,7 @@
 use crate::domain::memory::load_resolved_config;
 use crate::errors::AppError;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 // ── Long-term entry DTO ───────────────────────────────────────────────────────
 
@@ -54,6 +55,94 @@ impl LongTermEntryDto {
     }
 }
 
+// ── Scoped path helpers ──────────────────────────────────────────────────────
+
+async fn canonical_memory_root(root: &Path) -> Result<PathBuf, AppError> {
+    tokio::fs::create_dir_all(root)
+        .await
+        .map_err(|e| AppError::Unknown(format!("prepare memory root: {e}")))?;
+    tokio::fs::canonicalize(root)
+        .await
+        .map_err(|e| AppError::Unknown(format!("resolve memory root: {e}")))
+}
+
+async fn canonical_existing_file(path: &Path) -> Result<Option<PathBuf>, AppError> {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) => {
+            if !meta.is_file() {
+                return Err(AppError::Unknown(
+                    "memory entry path must point to a file".to_string(),
+                ));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(AppError::Unknown(format!(
+                "read memory entry metadata: {e}"
+            )))
+        }
+    }
+
+    tokio::fs::canonicalize(path)
+        .await
+        .map(Some)
+        .map_err(|e| AppError::Unknown(format!("resolve memory entry path: {e}")))
+}
+
+async fn scoped_existing_file_path(
+    entry_path: &str,
+    allowed_roots: &[PathBuf],
+    label: &str,
+) -> Result<Option<PathBuf>, AppError> {
+    let trimmed = entry_path.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::Unknown(format!("{label} path is empty")));
+    }
+
+    let Some(target) = canonical_existing_file(Path::new(trimmed)).await? else {
+        return Ok(None);
+    };
+
+    for root in allowed_roots {
+        let root = canonical_memory_root(root).await?;
+        if target.starts_with(&root) {
+            return Ok(Some(target));
+        }
+    }
+
+    Err(AppError::Unknown(format!(
+        "{label} path outside resolved memory root"
+    )))
+}
+
+async fn scoped_long_term_entry_path(
+    project_path: &str,
+    entry_path: &str,
+) -> Result<Option<PathBuf>, AppError> {
+    use crate::domain::memory::config::permanent_long_term_path;
+
+    let root = super::project_root(project_path);
+    let cfg = load_resolved_config(&root).await.unwrap_or_default();
+    scoped_existing_file_path(
+        entry_path,
+        &[cfg.long_term_path(&root), permanent_long_term_path()],
+        "long-term memory entry",
+    )
+    .await
+}
+
+async fn scoped_source_entry_path(
+    project_path: &str,
+    entry_path: &str,
+) -> Result<Option<PathBuf>, AppError> {
+    use crate::domain::memory::source_registry::sources_dir;
+
+    let root = super::project_root(project_path);
+    let cfg = load_resolved_config(&root).await.unwrap_or_default();
+    let lt = cfg.long_term_path(&root);
+    scoped_existing_file_path(entry_path, &[sources_dir(&lt)], "source memory entry").await
+}
+
 // ── Long-term memory commands ─────────────────────────────────────────────────
 
 #[tauri::command]
@@ -90,14 +179,19 @@ pub async fn memory_list_long_term(
 }
 
 #[tauri::command]
-pub async fn memory_archive_long_term_entry(entry_path: String) -> Result<(), AppError> {
+pub async fn memory_archive_long_term_entry(
+    project_path: String,
+    entry_path: String,
+) -> Result<(), AppError> {
     use crate::domain::memory::long_term::{EntryStatus, LongTermMemoryEntry};
-    let path = std::path::Path::new(&entry_path);
-    if let Ok(raw) = tokio::fs::read_to_string(path).await {
+    if let Some(path) = scoped_long_term_entry_path(&project_path, &entry_path).await? {
+        let raw = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| AppError::Unknown(format!("read entry: {e}")))?;
         if let Ok(mut entry) = serde_json::from_str::<LongTermMemoryEntry>(&raw) {
             entry.status = EntryStatus::Archived;
             if let Ok(json) = serde_json::to_string_pretty(&entry) {
-                tokio::fs::write(path, json)
+                tokio::fs::write(&path, json)
                     .await
                     .map_err(|e| AppError::Unknown(format!("archive entry: {e}")))?;
             }
@@ -107,10 +201,12 @@ pub async fn memory_archive_long_term_entry(entry_path: String) -> Result<(), Ap
 }
 
 #[tauri::command]
-pub async fn memory_delete_long_term_entry(entry_path: String) -> Result<(), AppError> {
-    let path = std::path::Path::new(&entry_path);
-    if path.exists() {
-        tokio::fs::remove_file(path)
+pub async fn memory_delete_long_term_entry(
+    project_path: String,
+    entry_path: String,
+) -> Result<(), AppError> {
+    if let Some(path) = scoped_long_term_entry_path(&project_path, &entry_path).await? {
+        tokio::fs::remove_file(&path)
             .await
             .map_err(|e| AppError::Unknown(format!("delete entry: {e}")))?;
     }
@@ -250,10 +346,12 @@ pub async fn memory_list_sources(project_path: String) -> Result<Vec<SourceEntry
 }
 
 #[tauri::command]
-pub async fn memory_delete_source(entry_path: String) -> Result<(), AppError> {
-    let p = std::path::Path::new(&entry_path);
-    if p.exists() {
-        tokio::fs::remove_file(p)
+pub async fn memory_delete_source(
+    project_path: String,
+    entry_path: String,
+) -> Result<(), AppError> {
+    if let Some(path) = scoped_source_entry_path(&project_path, &entry_path).await? {
+        tokio::fs::remove_file(&path)
             .await
             .map_err(|e| AppError::Unknown(format!("delete source: {e}")))?;
     }
@@ -293,5 +391,59 @@ impl From<crate::domain::memory::source_registry::SourceEntry> for SourceEntryDt
             query_context: e.query_context,
             expires_at: e.expires_at,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn scoped_existing_file_path_allows_files_under_memory_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("memory");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let entry = root.join("entry.json");
+        tokio::fs::write(&entry, "{}").await.unwrap();
+
+        let resolved = scoped_existing_file_path(entry.to_str().unwrap(), &[root], "test entry")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resolved, tokio::fs::canonicalize(entry).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn scoped_existing_file_path_rejects_files_outside_memory_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("memory");
+        let outside = temp.path().join("outside.json");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::write(&outside, "{}").await.unwrap();
+
+        let err = scoped_existing_file_path(outside.to_str().unwrap(), &[root], "test entry")
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:?}").contains("outside resolved memory root"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scoped_existing_file_path_rejects_symlink_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("memory");
+        let outside = temp.path().join("outside.json");
+        let symlink = root.join("link.json");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::write(&outside, "{}").await.unwrap();
+        std::os::unix::fs::symlink(&outside, &symlink).unwrap();
+
+        let err = scoped_existing_file_path(symlink.to_str().unwrap(), &[root], "test entry")
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err:?}").contains("outside resolved memory root"));
     }
 }

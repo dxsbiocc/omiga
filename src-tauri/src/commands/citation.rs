@@ -7,6 +7,7 @@
 //!   - Generic URLs    → OG title + description via lightweight HTML regex
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use lazy_static::lazy_static;
@@ -345,26 +346,32 @@ fn extract_xml_tag(xml: &str, tag: &str) -> Vec<String> {
 // ── Generic OG meta tags ──────────────────────────────────────────────────────
 
 async fn fetch_og_tags(url: &str) -> Result<CitationMeta, String> {
-    // SSRF guard: reject non-http(s) and private/loopback addresses
-    let parsed = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        _ => return Err("unsupported scheme".to_string()),
-    }
-    if let Some(host) = parsed.host_str() {
-        if is_private_host(host) {
-            return Err("private address".to_string());
-        }
-    }
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    crate::domain::tools::web_safety::validate_public_http_url(&project_root, url, true)?;
 
+    let redirect_policy_root = project_root.clone();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(6))
         .user_agent("Mozilla/5.0 (compatible; Omiga/1.0)")
-        .redirect(reqwest::redirect::Policy::limited(3))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 3 {
+                return attempt.error("too many redirects");
+            }
+            match crate::domain::tools::web_safety::validate_public_http_url(
+                &redirect_policy_root,
+                attempt.url().as_str(),
+                true,
+            ) {
+                Ok(()) => attempt.follow(),
+                Err(message) => attempt.error(message),
+            }
+        }))
         .build()
         .map_err(|e| e.to_string())?;
 
     let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
+    let final_url = resp.url().to_string();
+    crate::domain::tools::web_safety::validate_public_http_url(&project_root, &final_url, true)?;
 
     // Only process HTML; avoid downloading binary files
     let ct = resp
@@ -391,7 +398,7 @@ async fn fetch_og_tags(url: &str) -> Result<CitationMeta, String> {
         .map(|s| truncate_str(s, 300));
 
     Ok(CitationMeta {
-        url: url.to_string(),
+        url: final_url,
         title,
         description,
         authors: vec![],
@@ -400,35 +407,6 @@ async fn fetch_og_tags(url: &str) -> Result<CitationMeta, String> {
         doi: None,
         kind: CitationKind::Web,
     })
-}
-
-fn is_private_host(host: &str) -> bool {
-    use std::net::IpAddr;
-    if host == "localhost" || host.ends_with(".local") {
-        return true;
-    }
-    if let Ok(addr) = host.parse::<IpAddr>() {
-        return addr.is_loopback()
-            || addr.is_unspecified()
-            || matches!(addr, IpAddr::V4(v4) if
-                v4.is_private() || v4.is_link_local() || v4.is_broadcast()
-            )
-            || matches!(addr, IpAddr::V6(v6) if is_private_ipv6(&v6));
-    }
-    false
-}
-
-fn is_private_ipv6(addr: &std::net::Ipv6Addr) -> bool {
-    let segments = addr.segments();
-    // Unique-local: fc00::/7
-    if (segments[0] & 0xfe00) == 0xfc00 {
-        return true;
-    }
-    // Link-local: fe80::/10
-    if (segments[0] & 0xffc0) == 0xfe80 {
-        return true;
-    }
-    false
 }
 
 fn og_meta(html: &str, property: &str) -> Option<String> {

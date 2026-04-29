@@ -600,7 +600,8 @@ mod tests {
 
         let config = EnvironmentConfig {
             r#type: super::super::EnvironmentType::Docker,
-            image: Some("alpine:latest".to_string()),
+            // DockerEnvironment executes commands through `bash -c`.
+            image: Some("bash:5.2-alpine".to_string()),
             cwd: "/root".to_string(),
             timeout: 60_000,
             ..Default::default()

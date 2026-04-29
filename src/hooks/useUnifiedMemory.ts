@@ -431,14 +431,16 @@ export function useUnifiedMemory(projectPath: string) {
 
   const saveDossier = useCallback(async (updated: Omit<DossierDto, "updatedAt" | "rendered">): Promise<void> => {
     await invoke("memory_save_dossier", {
-      projectPath,
-      slug: updated.slug,
-      title: updated.title,
-      brief: updated.brief,
-      currentBeliefs: updated.currentBeliefs,
-      decisions: updated.decisions,
-      openQuestions: updated.openQuestions,
-      nextSteps: updated.nextSteps,
+      req: {
+        projectPath,
+        slug: updated.slug,
+        title: updated.title,
+        brief: updated.brief,
+        currentBeliefs: updated.currentBeliefs,
+        decisions: updated.decisions,
+        openQuestions: updated.openQuestions,
+        nextSteps: updated.nextSteps,
+      },
     });
     await loadDossier();
   }, [projectPath, loadDossier]);
@@ -460,9 +462,9 @@ export function useUnifiedMemory(projectPath: string) {
   }, [projectPath]);
 
   const deleteSourceEntry = useCallback(async (entryPath: string) => {
-    await invoke("memory_delete_source", { entryPath });
+    await invoke("memory_delete_source", { projectPath, entryPath });
     setSourceEntries(prev => prev.filter(e => e.path !== entryPath));
-  }, []);
+  }, [projectPath]);
 
   // ── Long-term memory CRUD ────────────────────────────────────────────────
   const [longTermEntries, setLongTermEntries] = useState<LongTermEntryDto[]>([]);
@@ -485,16 +487,16 @@ export function useUnifiedMemory(projectPath: string) {
   }, [projectPath, longTermScope]);
 
   const archiveLongTermEntry = useCallback(async (entryPath: string) => {
-    await invoke("memory_archive_long_term_entry", { entryPath });
+    await invoke("memory_archive_long_term_entry", { projectPath, entryPath });
     setLongTermEntries(prev =>
       prev.map(e => e.path === entryPath ? { ...e, status: "Archived" } : e)
     );
-  }, []);
+  }, [projectPath]);
 
   const deleteLongTermEntry = useCallback(async (entryPath: string) => {
-    await invoke("memory_delete_long_term_entry", { entryPath });
+    await invoke("memory_delete_long_term_entry", { projectPath, entryPath });
     setLongTermEntries(prev => prev.filter(e => e.path !== entryPath));
-  }, []);
+  }, [projectPath]);
 
   const pruneStale = useCallback(async (): Promise<number> => {
     try {

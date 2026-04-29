@@ -144,7 +144,15 @@ import {
   registerStreamListener,
   cancelStreamListener,
   cancelAllStreamListeners,
+  type SessionStreamSnapshot,
 } from "../../state/sessionStreamRegistry";
+import {
+  activitySnapshotHasRecords,
+  buildSessionActivitySnapshot,
+  historicalActivityStateFromSnapshot,
+  loadLatestActivitySnapshot,
+  saveLatestActivitySnapshot,
+} from "../../state/sessionActivitySnapshots";
 
 const FencedCodeBlock = lazy(() => import("./FencedCodeBlock"));
 const VisualizationRenderer = lazy(() =>
@@ -253,6 +261,22 @@ interface Message {
   };
   /** Plan mode 初始 todos（与后端 round 对齐，仅存本地） */
   initialTodos?: InitialTodoItem[];
+}
+
+function assistantMessageHasVisibleText(message: Message): boolean {
+  return message.role !== "assistant" || message.content.trim().length > 0;
+}
+
+function renderItemHasVisibleContent(item: RenderMsgItem): boolean {
+  if (item.kind === "row") {
+    return assistantMessageHasVisibleText(item.message);
+  }
+  return item.fold.some((message) => {
+    if (message.role === "assistant") {
+      return assistantMessageHasVisibleText(message);
+    }
+    return message.role === "tool" && Boolean(message.toolCall);
+  });
 }
 
 /** Build payload text: `@a @b` + optional body (matches composer chips + input). */
@@ -627,7 +651,9 @@ function groupMessagesForRender(messages: Message[]): RenderMsgItem[] {
         for (let si = 0; si < segment.length; si++) {
           const m = segment[si];
           if (m.role === "assistant") {
-            fold.push(m);
+            if (assistantMessageHasVisibleText(m)) {
+              fold.push(m);
+            }
             const list = m.toolCallsList;
             if (list?.length) {
               for (const tc of list) {
@@ -665,14 +691,20 @@ function groupMessagesForRender(messages: Message[]): RenderMsgItem[] {
         }
       }
       for (const msg of segment) {
-        out.push({ kind: "row", message: msg, dividerBefore: false });
+        if (assistantMessageHasVisibleText(msg)) {
+          out.push({ kind: "row", message: msg, dividerBefore: false });
+        }
       }
       continue;
     }
 
     let lastAssistantAfterTools = -1;
     for (let k = segment.length - 1; k > lastToolIdx; k--) {
-      if (segment[k].role === "assistant" && !segment[k].intermediate) {
+      if (
+        segment[k].role === "assistant" &&
+        !segment[k].intermediate &&
+        assistantMessageHasVisibleText(segment[k])
+      ) {
         lastAssistantAfterTools = k;
         break;
       }
@@ -1258,6 +1290,7 @@ const ReactFoldRenderItem = memo(function ReactFoldRenderItem({
           >
             {fold.map((message, foldIndex) => {
               if (message.role === "assistant") {
+                if (!assistantMessageHasVisibleText(message)) return null;
                 return (
                   <AssistantTraceItem
                     key={message.id}
@@ -2404,11 +2437,10 @@ export function Chat({ sessionId }: ChatProps) {
     // ── Session switch: save → restore (or clear) ─────────────────────────
     //
     // Design: stream listeners are NEVER unregistered on session switch.
-    // Each listener captures ownerSessionId at setup and guards:
-    //   if (sessionIdRef.current !== ownerSessionId) return;
-    // While the user is on another session, events are silently discarded.
-    // When the user switches BACK, sessionIdRef.current becomes ownerSessionId
-    // again and the listener transparently resumes updating React state.
+    // Each listener captures ownerSessionId at setup. While the user is on
+    // another session, events update that session's snapshot instead of the
+    // visible React state. When the user switches BACK, the snapshot restores
+    // the latest accumulated stream state immediately.
     //
     // The snapshot map persists the accumulated response text and activity
     // state so the restored session's UI is correct immediately on return.
@@ -2442,6 +2474,9 @@ export function Chat({ sessionId }: ChatProps) {
     // Try to restore the state of the session we're switching TO.
     const snap = sessionBeingEntered
       ? loadStreamSnapshot(sessionBeingEntered)
+      : null;
+    const latestActivity = sessionBeingEntered
+      ? loadLatestActivitySnapshot(sessionBeingEntered)
       : null;
     const restoring = snapshotIsActive(snap);
 
@@ -2479,8 +2514,8 @@ export function Chat({ sessionId }: ChatProps) {
       pendingToolTraceTextRef.current = "";
       setCurrentStreamId(null);
       currentStreamIdRef.current = null;
-      setCurrentRoundId(null);
-      currentRoundIdRef.current = null;
+      setCurrentRoundId(latestActivity?.roundId ?? null);
+      currentRoundIdRef.current = latestActivity?.roundId ?? null;
       setCurrentResponse("");
       currentResponseRef.current = "";
       setCurrentFoldIntermediate("");
@@ -2489,7 +2524,13 @@ export function Chat({ sessionId }: ChatProps) {
       setIsStreaming(false);
       isStreamingRef.current = false;
       setAwaitingResumeAfterCancel(false);
-      useActivityStore.getState().clearAllActivity();
+      if (latestActivity && activitySnapshotHasRecords(latestActivity)) {
+        useActivityStore.setState(
+          historicalActivityStateFromSnapshot(latestActivity),
+        );
+      } else {
+        useActivityStore.getState().clearAllActivity();
+      }
     }
 
     // ── Save state when we LEAVE this session (return = cleanup) ─────────────
@@ -2518,6 +2559,26 @@ export function Chat({ sessionId }: ChatProps) {
       });
     };
   }, [sessionId, bumpQueueUi, clearCancelFallbackTimer, clearRunningToolTracking]);
+
+  useEffect(() => {
+    if (!sessionId) return;
+    const persist = (act: ReturnType<typeof useActivityStore.getState>) => {
+      const snapshot = buildSessionActivitySnapshot(sessionId, {
+        roundId: currentRoundIdRef.current,
+        executionSteps: act.executionSteps,
+        executionStartedAt: act.executionStartedAt,
+        executionEndedAt: act.executionEndedAt,
+        activeTodos: act.activeTodos,
+        backgroundJobs: act.backgroundJobs,
+      });
+      if (activitySnapshotHasRecords(snapshot)) {
+        saveLatestActivitySnapshot(sessionId, snapshot);
+      }
+    };
+
+    persist(useActivityStore.getState());
+    return useActivityStore.subscribe(persist);
+  }, [sessionId]);
 
   // ── Progressive rendering: phase-2 scheduler ─────────────────────────────
   // When allItemsVisible is false (long session, phase 1 rendered), schedule
@@ -2944,6 +3005,7 @@ export function Chat({ sessionId }: ChatProps) {
   useEffect(() => {
     activeReactFoldIdRef.current = activeReactFoldId;
   }, [activeReactFoldId]);
+  const currentResponseHasVisibleText = currentResponse.trim().length > 0;
   const shouldRenderCurrentResponseInFold = Boolean(
     isStreaming &&
       activeReactFoldId &&
@@ -2966,6 +3028,10 @@ export function Chat({ sessionId }: ChatProps) {
   const displayedItems = allItemsVisible
     ? messageRenderItems
     : messageRenderItems.slice(-INSTANT_RENDER_COUNT);
+  const visibleDisplayedItems = useMemo(
+    () => displayedItems.filter(renderItemHasVisibleContent),
+    [displayedItems],
+  );
 
   useLayoutEffect(() => {
     const totalItems = messageRenderItems.length;
@@ -3327,37 +3393,378 @@ export function Chat({ sessionId }: ChatProps) {
       window.removeEventListener(OMIGA_COMPOSER_DISPATCH_EVENT, handler);
   }, []);
 
+  type SnapshotExecutionStep = SessionStreamSnapshot["executionSteps"][number];
+
+  const markSnapshotStepDone = (
+    steps: SnapshotExecutionStep[],
+    id: string,
+  ): SnapshotExecutionStep[] =>
+    steps.map((step) =>
+      step.id === id && step.status === "running"
+        ? { ...step, status: "done" as const }
+        : step,
+    );
+
+  const ensureSnapshotStreamStarted = (
+    snap: SessionStreamSnapshot,
+  ): SessionStreamSnapshot => {
+    const nextSteps = markSnapshotStepDone(snap.executionSteps, "connect");
+    return {
+      ...snap,
+      isConnecting: false,
+      isStreaming: true,
+      waitingFirstChunk: true,
+      executionSteps: nextSteps.some((step) => step.id === "think")
+        ? nextSteps
+        : [
+            ...nextSteps,
+            { id: "think", title: "推理中", status: "running" as const },
+          ],
+    };
+  };
+
+  const markSnapshotFirstOutput = (
+    snap: SessionStreamSnapshot,
+  ): SessionStreamSnapshot => {
+    const running = snap.executionSteps.find((step) => step.status === "running");
+    if (running?.id === "think") {
+      return {
+        ...snap,
+        executionSteps: [
+          ...markSnapshotStepDone(snap.executionSteps, "think"),
+          { id: "reply", title: "解析输出", status: "running" as const },
+        ],
+      };
+    }
+    if (!running) {
+      return {
+        ...snap,
+        executionSteps: [
+          ...snap.executionSteps,
+          {
+            id: `reply-${Date.now()}`,
+            title: "解析输出",
+            status: "running" as const,
+          },
+        ],
+      };
+    }
+    return snap;
+  };
+
+  const upsertSnapshotToolStep = (
+    snap: SessionStreamSnapshot,
+    toolUseId: string,
+    title: string,
+    detail: { summary?: string; input?: string; toolName?: string },
+  ): SessionStreamSnapshot => {
+    const stepId = `tool-${toolUseId}`;
+    const baseSteps = snap.executionSteps.map((step) => {
+      if (
+        step.status === "running" &&
+        (step.id === "think" || step.id === "reply" || step.id.startsWith("reply-"))
+      ) {
+        return { ...step, status: "done" as const };
+      }
+      return step;
+    });
+    const nextStep: SnapshotExecutionStep = {
+      id: stepId,
+      title,
+      status: "running",
+      summary: detail.summary ?? title,
+      ...(detail.input !== undefined ? { input: detail.input } : {}),
+      ...(detail.toolName !== undefined ? { toolName: detail.toolName } : {}),
+    };
+    return {
+      ...snap,
+      executionSteps: baseSteps.some((step) => step.id === stepId)
+        ? baseSteps.map((step) =>
+            step.id === stepId ? { ...step, ...nextStep } : step,
+          )
+        : [...baseSteps, nextStep],
+    };
+  };
+
+  const settleSnapshotToolStep = (
+    snap: SessionStreamSnapshot,
+    toolUseId: string,
+    detail: { output?: string; failed?: boolean },
+  ): SessionStreamSnapshot => ({
+    ...snap,
+    executionSteps: markSnapshotStepDone(
+      snap.executionSteps,
+      `tool-${toolUseId}`,
+    ).map((step) =>
+      step.id === `tool-${toolUseId}`
+        ? {
+            ...step,
+            ...(detail.output !== undefined ? { toolOutput: detail.output } : {}),
+            ...(detail.failed !== undefined ? { failed: detail.failed } : {}),
+          }
+        : step,
+    ),
+  });
+
+  const getBackgroundStreamSnapshot = (
+    ownerSessionId: string,
+    streamId: string,
+    roundId?: string | null,
+  ): SessionStreamSnapshot => {
+    const existing = loadStreamSnapshot(ownerSessionId);
+    const reusable =
+      existing && (existing.streamId === streamId || existing.streamId === null)
+        ? existing
+        : null;
+    return {
+      streamId,
+      roundId: roundId ?? reusable?.roundId ?? null,
+      response: reusable?.response ?? "",
+      foldIntermediate: reusable?.foldIntermediate ?? "",
+      pendingText: reusable?.pendingText ?? "",
+      pendingFoldText: reusable?.pendingFoldText ?? "",
+      isStreaming: reusable?.isStreaming ?? false,
+      isConnecting: reusable?.isConnecting ?? true,
+      waitingFirstChunk: reusable?.waitingFirstChunk ?? false,
+      currentToolHint: reusable?.currentToolHint ?? null,
+      executionSteps:
+        reusable?.executionSteps.length
+          ? [...reusable.executionSteps]
+          : [{ id: "connect", title: "等待响应", status: "running" as const }],
+      executionStartedAt: reusable?.executionStartedAt ?? Date.now(),
+      executionEndedAt: reusable?.executionEndedAt ?? null,
+      activeTodos: reusable?.activeTodos ?? null,
+      backgroundJobs: reusable?.backgroundJobs ? [...reusable.backgroundJobs] : [],
+    };
+  };
+
+  const updateBackgroundStreamSnapshot = (
+    ownerSessionId: string,
+    streamId: string,
+    payload: StreamOutputItem,
+    roundId?: string | null,
+  ) => {
+    if (
+      payload.type === "complete" ||
+      payload.type === "error" ||
+      payload.type === "cancelled"
+    ) {
+      clearStreamSnapshot(ownerSessionId);
+      return;
+    }
+
+    let snap = getBackgroundStreamSnapshot(ownerSessionId, streamId, roundId);
+
+    switch (payload.type) {
+      case "Start": {
+        snap = ensureSnapshotStreamStarted({
+          ...snap,
+          response: "",
+          foldIntermediate: "",
+          pendingText: "",
+          pendingFoldText: "",
+        });
+        break;
+      }
+      case "text": {
+        const text = typeof payload.data === "string" ? payload.data : "";
+        if (text) {
+          snap = ensureSnapshotStreamStarted(snap);
+          snap = markSnapshotFirstOutput({
+            ...snap,
+            response: snap.response + snap.pendingText + text,
+            pendingText: "",
+            isConnecting: false,
+            isStreaming: true,
+            waitingFirstChunk: false,
+          });
+        }
+        break;
+      }
+      case "thinking": {
+        const text = typeof payload.data === "string" ? payload.data : "";
+        if (text) {
+          snap = ensureSnapshotStreamStarted(snap);
+          snap = {
+            ...snap,
+            foldIntermediate: snap.foldIntermediate + snap.pendingFoldText + text,
+            pendingFoldText: "",
+            isConnecting: false,
+            isStreaming: true,
+            waitingFirstChunk: false,
+          };
+        }
+        break;
+      }
+      case "tool_use": {
+        const toolData = payload.data as
+          | { id?: string; name?: string; arguments?: string }
+          | undefined;
+        if (!isEmptyToolUsePayload(toolData)) {
+          snap = ensureSnapshotStreamStarted(snap);
+          const toolName = toolData?.name ?? "tool";
+          const toolUseId = (toolData?.id ?? "").trim();
+          snap = {
+            ...snap,
+            response: snap.response + snap.pendingText,
+            foldIntermediate: snap.foldIntermediate + snap.pendingFoldText,
+            pendingText: "",
+            pendingFoldText: "",
+            isConnecting: false,
+            isStreaming: true,
+            waitingFirstChunk: false,
+            currentToolHint: toolName.slice(0, 96),
+          };
+          if (toolUseId) {
+            snap = upsertSnapshotToolStep(
+              snap,
+              toolUseId,
+              humanizeToolStepTitle(toolName, toolData?.arguments),
+              {
+                summary: executionStepSummary(toolName, toolData?.arguments),
+                input: toolData?.arguments,
+                toolName,
+              },
+            );
+          }
+        }
+        break;
+      }
+      case "tool_result": {
+        const resultData = payload.data as
+          | {
+              tool_use_id?: string;
+              name: string;
+              input: string;
+              output: string;
+              is_error: boolean;
+            }
+          | undefined;
+        const toolUseId = resultData?.tool_use_id?.trim();
+        snap = ensureSnapshotStreamStarted(snap);
+        snap = {
+          ...snap,
+          response: snap.response + snap.pendingText,
+          foldIntermediate: snap.foldIntermediate + snap.pendingFoldText,
+          pendingText: "",
+          pendingFoldText: "",
+          isConnecting: false,
+          isStreaming: true,
+          waitingFirstChunk: false,
+        };
+        if (toolUseId) {
+          snap = settleSnapshotToolStep(snap, toolUseId, {
+            output: resultData?.output,
+            failed: Boolean(resultData?.is_error),
+          });
+        }
+        if (resultData?.name === "todo_write" && resultData.input) {
+          try {
+            const parsed = JSON.parse(resultData.input) as {
+              todos?: Array<{
+                id?: string;
+                content: string;
+                activeForm?: string;
+                active_form?: string;
+                status: string;
+              }>;
+            };
+            if (Array.isArray(parsed.todos)) {
+              snap = {
+                ...snap,
+                activeTodos: parsed.todos.map((todo, index) => ({
+                  id: todo.id ?? `todo-${index}`,
+                  content: todo.content,
+                  activeForm: todo.activeForm ?? todo.active_form ?? todo.content,
+                  status: String(todo.status),
+                })),
+              };
+            }
+          } catch {
+            // Ignore malformed todo payloads in background snapshots.
+          }
+        }
+        if (resultData?.name === "bash" && resultData.tool_use_id) {
+          const bg = tryParseBashBackground(resultData.input);
+          if (bg) {
+            const job = {
+              id: resultData.tool_use_id,
+              toolUseId: resultData.tool_use_id,
+              label: bg.label,
+              state: "running" as const,
+            };
+            const idx = snap.backgroundJobs.findIndex((j) => j.id === job.id);
+            snap = {
+              ...snap,
+              backgroundJobs:
+                idx >= 0
+                  ? snap.backgroundJobs.map((j, i) =>
+                      i === idx ? { ...j, ...job } : j,
+                    )
+                  : [...snap.backgroundJobs, job],
+            };
+          }
+        }
+        break;
+      }
+      case "ask_user_pending": {
+        snap = {
+          ...snap,
+          isConnecting: false,
+          isStreaming: true,
+          waitingFirstChunk: false,
+          currentToolHint: "ask_user_question",
+        };
+        break;
+      }
+    }
+
+    saveStreamSnapshot(ownerSessionId, snap);
+  };
+
   // Set up stream listener for a specific stream ID
-  const setupStreamListener = async (streamId: string) => {
-    const ownerSessionId = sessionIdRef.current;
+  const setupStreamListener = async (
+    streamId: string,
+    ownerSessionIdOverride?: string | null,
+    ownerRoundId?: string | null,
+  ) => {
+    const ownerSessionId = ownerSessionIdOverride ?? sessionIdRef.current;
     // Cancel only the PREVIOUS listener for THIS session (e.g., user sent a
     // second message before the first finished).  Other sessions' listeners
     // are intentionally left alive so parallel tasks are not interrupted.
     if (ownerSessionId) {
       cancelStreamListener(ownerSessionId);
     }
-    // Flush any buffered text before swapping listeners
-    if (textFlushRafRef.current !== null) {
-      cancelAnimationFrame(textFlushRafRef.current);
-      textFlushRafRef.current = null;
-    }
-    if (foldIntermediateFlushRafRef.current !== null) {
-      cancelAnimationFrame(foldIntermediateFlushRafRef.current);
-      foldIntermediateFlushRafRef.current = null;
-    }
-    const buffered = pendingTextBufferRef.current;
-    if (buffered) {
-      pendingTextBufferRef.current = "";
-      const next = currentResponseRef.current + buffered;
-      currentResponseRef.current = next;
-      setCurrentResponse(next);
-    }
-    const bufferedFoldIntermediate = pendingFoldIntermediateBufferRef.current;
-    if (bufferedFoldIntermediate) {
-      pendingFoldIntermediateBufferRef.current = "";
-      const next = currentFoldIntermediateRef.current + bufferedFoldIntermediate;
-      currentFoldIntermediateRef.current = next;
-      setCurrentFoldIntermediate(next);
+
+    if (ownerSessionId && sessionIdRef.current !== ownerSessionId) {
+      saveStreamSnapshot(
+        ownerSessionId,
+        getBackgroundStreamSnapshot(ownerSessionId, streamId, ownerRoundId),
+      );
+    } else {
+      // Flush any buffered text before swapping listeners for the visible session.
+      if (textFlushRafRef.current !== null) {
+        cancelAnimationFrame(textFlushRafRef.current);
+        textFlushRafRef.current = null;
+      }
+      if (foldIntermediateFlushRafRef.current !== null) {
+        cancelAnimationFrame(foldIntermediateFlushRafRef.current);
+        foldIntermediateFlushRafRef.current = null;
+      }
+      const buffered = pendingTextBufferRef.current;
+      if (buffered) {
+        pendingTextBufferRef.current = "";
+        const next = currentResponseRef.current + buffered;
+        currentResponseRef.current = next;
+        setCurrentResponse(next);
+      }
+      const bufferedFoldIntermediate = pendingFoldIntermediateBufferRef.current;
+      if (bufferedFoldIntermediate) {
+        pendingFoldIntermediateBufferRef.current = "";
+        const next = currentFoldIntermediateRef.current + bufferedFoldIntermediate;
+        currentFoldIntermediateRef.current = next;
+        setCurrentFoldIntermediate(next);
+      }
     }
 
     const eventName = `chat-stream-${streamId}`;
@@ -3404,15 +3811,15 @@ export function Chat({ sessionId }: ChatProps) {
 
     const unlisten = await listenTauriEvent<StreamOutputItem>(eventName, (event) => {
       if (sessionIdRef.current !== ownerSessionId) {
-        // Background session: the ownerSessionId guard prevents UI updates, but
-        // terminal events (complete / error / cancelled) must still clear the
-        // snapshot so the sidebar stops showing the session as "running".
-        const t = event.payload.type;
-        if (
-          ownerSessionId &&
-          (t === "complete" || t === "error" || t === "cancelled")
-        ) {
-          clearStreamSnapshot(ownerSessionId);
+        // Background session: update its per-session snapshot instead of
+        // touching the visible React state for the currently selected session.
+        if (ownerSessionId) {
+          updateBackgroundStreamSnapshot(
+            ownerSessionId,
+            streamId,
+            event.payload,
+            ownerRoundId,
+          );
         }
         return;
       }
@@ -4022,7 +4429,9 @@ export function Chat({ sessionId }: ChatProps) {
     if (ownerSessionId) {
       registerStreamListener(ownerSessionId, unlisten);
     }
-    unlistenRef.current = unlisten;
+    if (sessionIdRef.current === ownerSessionId) {
+      unlistenRef.current = unlisten;
+    }
   };
 
   const handleSend = async () => {
@@ -4489,9 +4898,18 @@ export function Chat({ sessionId }: ChatProps) {
         },
       });
 
-      if (sessionIdRef.current !== requestSessionId) {
-        return;
+      if (sessionIdRef.current === requestSessionId) {
+        setCurrentRoundId(response.round_id);
+        currentRoundIdRef.current = response.round_id;
+        setCurrentStreamId(response.message_id);
+        currentStreamIdRef.current = response.message_id;
       }
+
+      await setupStreamListener(
+        response.message_id,
+        requestSessionId,
+        response.round_id,
+      );
 
       if (sendCancelledDuringRequestRef.current) {
         sendCancelledDuringRequestRef.current = false;
@@ -4503,17 +4921,22 @@ export function Chat({ sessionId }: ChatProps) {
             e,
           );
         }
-        useActivityStore.getState().clearTransient();
-        useActivityStore.getState().resetExecutionState();
-        setCurrentStreamId(null);
-        setCurrentRoundId(null);
+        if (sessionIdRef.current === requestSessionId) {
+          useActivityStore.getState().clearTransient();
+          useActivityStore.getState().resetExecutionState();
+          setCurrentStreamId(null);
+          setCurrentRoundId(null);
+        } else {
+          clearStreamSnapshot(requestSessionId);
+        }
+        return;
+      }
+
+      if (sessionIdRef.current !== requestSessionId) {
         return;
       }
 
       useChatComposerStore.getState().setComposerAgentType("general-purpose");
-
-      // Track round_id for status updates
-      setCurrentRoundId(response.round_id);
 
       // 如果有调度计划，更新用户消息
       if (
@@ -4558,9 +4981,6 @@ export function Chat({ sessionId }: ChatProps) {
         );
       }
 
-      // Set up listener for this specific stream
-      setCurrentStreamId(response.message_id);
-      await setupStreamListener(response.message_id);
     } catch (error: unknown) {
       if (sessionIdRef.current !== requestSessionId) {
         return;
@@ -4785,13 +5205,24 @@ export function Chat({ sessionId }: ChatProps) {
           },
         });
 
+        if (sessionIdRef.current === requestSessionId) {
+          setCurrentRoundId(response.round_id);
+          currentRoundIdRef.current = response.round_id;
+          setCurrentStreamId(response.message_id);
+          currentStreamIdRef.current = response.message_id;
+        }
+
+        await setupStreamListener(
+          response.message_id,
+          requestSessionId,
+          response.round_id,
+        );
+
         if (sessionIdRef.current !== requestSessionId) {
           return;
         }
 
         useChatComposerStore.getState().setComposerAgentType("general-purpose");
-
-        setCurrentRoundId(response.round_id);
 
         if (
           response.scheduler_plan &&
@@ -4833,9 +5264,6 @@ export function Chat({ sessionId }: ChatProps) {
             ),
           );
         }
-
-        setCurrentStreamId(response.message_id);
-        await setupStreamListener(response.message_id);
       } catch (error: unknown) {
         if (sessionIdRef.current !== requestSessionId) {
           return;
@@ -5309,6 +5737,19 @@ export function Chat({ sessionId }: ChatProps) {
         },
       });
 
+      if (sessionIdRef.current === requestSessionId) {
+        setCurrentRoundId(response.round_id);
+        currentRoundIdRef.current = response.round_id;
+        setCurrentStreamId(response.message_id);
+        currentStreamIdRef.current = response.message_id;
+      }
+
+      await setupStreamListener(
+        response.message_id,
+        requestSessionId,
+        response.round_id,
+      );
+
       if (sessionIdRef.current !== requestSessionId) {
         return;
       }
@@ -5332,10 +5773,6 @@ export function Chat({ sessionId }: ChatProps) {
           ),
         );
       }
-
-      setCurrentRoundId(response.round_id);
-      setCurrentStreamId(response.message_id);
-      await setupStreamListener(response.message_id);
     } catch (error: unknown) {
       if (sessionIdRef.current !== requestSessionId) {
         return;
@@ -5630,7 +6067,7 @@ export function Chat({ sessionId }: ChatProps) {
             )}
 
             {/* Empty state — only when genuinely empty (not while skeleton is showing) */}
-            {!isSwitchingSession && messages.length === 0 && !currentResponse && (
+            {!isSwitchingSession && messages.length === 0 && !currentResponseHasVisibleText && (
               <Box
                 sx={{
                   display: "flex",
@@ -5682,7 +6119,7 @@ export function Chat({ sessionId }: ChatProps) {
                 },
               }}
             >
-            {displayedItems.map((item, itemIndex) => {
+            {visibleDisplayedItems.map((item, itemIndex) => {
               const itemKey = messageRenderItemKey(item);
               const animateMessageItem = shouldAnimateMessageItem({
                 restoringOlderItems,
@@ -5690,7 +6127,7 @@ export function Chat({ sessionId }: ChatProps) {
               const msgStagger = animateMessageItem
                 ? messageEntranceDelayMs(itemIndex)
                 : 0;
-              const nextItem = displayedItems[itemIndex + 1];
+              const nextItem = visibleDisplayedItems[itemIndex + 1];
               const nextRowIsUser =
                 nextItem?.kind === "row" && nextItem.message.role === "user";
 
@@ -5791,7 +6228,7 @@ export function Chat({ sessionId }: ChatProps) {
             )}
 
             {/* Streaming: before any tool, show normal assistant text; after tools, attach live text to the active ReAct fold. */}
-            {isStreaming && currentResponse && !shouldRenderCurrentResponseInFold && (
+            {isStreaming && currentResponseHasVisibleText && !shouldRenderCurrentResponseInFold && (
               <Box
                 sx={{
                   width: "100%",
