@@ -1,6 +1,6 @@
 /**
  * Maps `window` event `openSettings` → `detail.tab` string to Settings sidebar index.
- * Keep in sync with `SETTINGS_SECTIONS` in `Settings/index.tsx` (0–10). Language is not a tab — use profile menu + locale store.
+ * Keep in sync with `SETTINGS_SECTIONS` in `Settings/index.tsx` (0–12). Language is not a tab — use profile menu + locale store.
  * Optional `detail.executionSubTab`: 0 Modal, 1 Daytona, 2 SSH (see `ExecutionEnvsSettingsTab`).
  */
 export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
@@ -23,6 +23,13 @@ export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
   notebook: 7,
   jupyter: 7,
   ipynb: 7,
+  /** Profile files: ~/.omiga/SOUL.md, USER.md, MEMORY.md */
+  profile: 12,
+  soul: 12,
+  user: 12,
+  preferences: 12,
+  "user-profile": 12,
+  "agent-profile": 12,
   /** Unified Memory system (Wiki + PageIndex) */
   memory: 8,
   wiki: 8,

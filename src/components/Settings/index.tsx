@@ -31,6 +31,7 @@ import { NotebookSettingsTab } from "./NotebookSettingsTab";
 import { ClaudeCodeImportPanel } from "./ClaudeCodeImportPanel";
 import { IntegrationsCatalogPanel } from "./IntegrationsCatalogPanel";
 import { UnifiedMemoryTab } from "./UnifiedMemoryTab";
+import { ProfileSettingsTab } from "./ProfileSettingsTab";
 import { ThemeAppearancePanel } from "./ThemeAppearancePanel";
 import { ProviderManager } from "./ProviderManager";
 import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
@@ -42,7 +43,7 @@ import { AgentRolesPanel } from "../AgentRoles/AgentRolesPanel";
 interface SettingsProps {
   open: boolean;
   onClose: () => void;
-  /** See `openSettingsTabMap.ts`: 0–10 */
+  /** See `openSettingsTabMap.ts`: 0–12 */
   initialTab?: number;
   /** When `initialTab` is Execution (9): inner tab 0 Modal / 1 Daytona / 2 SSH */
   initialExecutionSubTab?: number;
@@ -78,7 +79,10 @@ const SETTINGS_SECTIONS: {
   },
   {
     header: "Knowledge",
-    items: [{ index: 8, label: "Memory" }],
+    items: [
+      { index: 12, label: "Profile" },
+      { index: 8, label: "Memory" },
+    ],
   },
   {
     header: "Agents",
@@ -87,7 +91,7 @@ const SETTINGS_SECTIONS: {
 ];
 
 const SETTINGS_NAV_FLAT = SETTINGS_SECTIONS.flatMap((s) => s.items);
-const SETTINGS_TAB_MAX = 11;
+const SETTINGS_TAB_MAX = 12;
 
 function clampSettingsTab(i: number): number {
   return Math.min(
@@ -1039,6 +1043,12 @@ export function Settings({
             {activeTab === 8 && (
               <Box>
                 <UnifiedMemoryTab projectPath={projectPath} />
+              </Box>
+            )}
+
+            {activeTab === 12 && (
+              <Box>
+                <ProfileSettingsTab />
               </Box>
             )}
 

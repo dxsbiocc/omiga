@@ -333,7 +333,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         </Typography>
         <Typography variant="caption" color="text.disabled"
           sx={{ display: "block", mb: 4 }}>
-          配置保存在 <code>~/.omiga/</code>，随时可在 Settings → Memory 编辑。
+          配置保存在 <code>~/.omiga/</code>，随时可在 Settings → Profile 编辑。
         </Typography>
         <Button variant="contained" size="large"
           onClick={onComplete}

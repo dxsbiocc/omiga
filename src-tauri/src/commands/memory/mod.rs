@@ -1141,13 +1141,17 @@ pub async fn memory_import_to_wiki(
     Ok(result.into())
 }
 
-/// Write a file to the user's ~/.omiga/ directory (e.g. USER.md, SOUL.md).
-///
-/// Only allows writing markdown/text files with simple filenames (no path traversal).
-/// Used by the onboarding wizard to persist user profile and agent identity.
-#[tauri::command]
-pub fn write_user_omiga_file(filename: String, content: String) -> Result<(), String> {
-    // Validate: only simple filename, no path separators
+#[derive(Debug, Serialize)]
+pub struct UserOmigaFileResponse {
+    pub filename: String,
+    pub path: String,
+    pub content: String,
+    pub exists: bool,
+}
+
+const USER_PROFILE_TEMPLATE_FILES: &[&str] = &["SOUL.md", "USER.md", "MEMORY.md"];
+
+fn validate_user_omiga_filename(filename: &str) -> Result<String, String> {
     let name = filename.trim();
     if name.is_empty()
         || name.contains('/')
@@ -1162,12 +1166,87 @@ pub fn write_user_omiga_file(filename: String, content: String) -> Result<(), St
     if !lower.ends_with(".md") && !lower.ends_with(".txt") {
         return Err("Only .md and .txt files are allowed".to_string());
     }
+    Ok(name.to_string())
+}
+
+fn user_omiga_file_path(filename: &str) -> Result<(String, PathBuf), String> {
+    let name = validate_user_omiga_filename(filename)?;
+    let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
+    Ok((name.clone(), home.join(".omiga").join(name)))
+}
+
+fn write_user_profile_template_if_missing(
+    omiga_dir: &std::path::Path,
+    filename: &str,
+) -> Result<(), String> {
+    use crate::domain::agents::markdown::{TEMPLATE_MEMORY_MD, TEMPLATE_SOUL_MD, TEMPLATE_USER_MD};
+
+    let template = match filename {
+        "SOUL.md" => TEMPLATE_SOUL_MD,
+        "USER.md" => TEMPLATE_USER_MD,
+        "MEMORY.md" => TEMPLATE_MEMORY_MD,
+        _ => return Ok(()),
+    };
+    let path = omiga_dir.join(filename);
+    if !path.exists() {
+        std::fs::write(&path, template.as_bytes())
+            .map_err(|e| format!("Failed to write {filename}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Read a markdown/text file from the user's ~/.omiga/ directory for Settings → Profile.
+///
+/// Only allows simple filenames (no path traversal). Missing files return an empty body with
+/// `exists=false` so the UI can offer to create default templates.
+#[tauri::command]
+pub fn read_user_omiga_file(filename: String) -> Result<UserOmigaFileResponse, String> {
+    let (name, target) = user_omiga_file_path(&filename)?;
+    let exists = target.is_file();
+    let content = if exists {
+        std::fs::read_to_string(&target).map_err(|e| format!("Read failed: {e}"))?
+    } else {
+        String::new()
+    };
+    Ok(UserOmigaFileResponse {
+        filename: name,
+        path: target.to_string_lossy().to_string(),
+        content,
+        exists,
+    })
+}
+
+/// Write a file to the user's ~/.omiga/ directory (e.g. USER.md, SOUL.md).
+///
+/// Only allows writing markdown/text files with simple filenames (no path traversal).
+/// Used by the onboarding wizard and Settings → Profile to persist user profile and agent identity.
+#[tauri::command]
+pub fn write_user_omiga_file(filename: String, content: String) -> Result<(), String> {
+    let (name, target) = user_omiga_file_path(&filename)?;
+    let omiga_dir = target
+        .parent()
+        .ok_or_else(|| "Cannot determine ~/.omiga directory".to_string())?;
+    std::fs::create_dir_all(omiga_dir).map_err(|e| format!("Cannot create ~/.omiga: {e}"))?;
+    std::fs::write(&target, content.as_bytes()).map_err(|e| format!("Write failed: {e}"))?;
+    tracing::debug!(filename = %name, path = %target.display(), "Updated user Omiga profile file");
+    Ok(())
+}
+
+/// Ensure editable profile templates exist without re-triggering BOOTSTRAP.md onboarding.
+#[tauri::command]
+pub fn ensure_user_profile_files() -> Result<Vec<UserOmigaFileResponse>, String> {
     let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
     let omiga_dir = home.join(".omiga");
     std::fs::create_dir_all(&omiga_dir).map_err(|e| format!("Cannot create ~/.omiga: {e}"))?;
-    let target = omiga_dir.join(name);
-    std::fs::write(&target, content.as_bytes()).map_err(|e| format!("Write failed: {e}"))?;
-    Ok(())
+
+    for filename in USER_PROFILE_TEMPLATE_FILES {
+        write_user_profile_template_if_missing(&omiga_dir, filename)?;
+    }
+
+    USER_PROFILE_TEMPLATE_FILES
+        .iter()
+        .map(|filename| read_user_omiga_file((*filename).to_string()))
+        .collect()
 }
 
 /// Onboarding: 在 ~/.omiga/ 写入三个模板文件 + BOOTSTRAP.md。
@@ -1181,34 +1260,20 @@ pub fn write_user_omiga_file(filename: String, content: String) -> Result<(), St
 /// - BOOTSTRAP.md — 写入引导指令，Agent 完成引导后自行删除
 #[tauri::command]
 pub fn init_user_context_files() -> Result<(), String> {
-    use crate::domain::agents::markdown::{
-        TEMPLATE_BOOTSTRAP_MD, TEMPLATE_MEMORY_MD, TEMPLATE_SOUL_MD, TEMPLATE_USER_MD,
-    };
+    use crate::domain::agents::markdown::TEMPLATE_BOOTSTRAP_MD;
 
     let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
     let omiga_dir = home.join(".omiga");
     std::fs::create_dir_all(&omiga_dir).map_err(|e| format!("Cannot create ~/.omiga: {e}"))?;
 
     // SOUL.md — 写模板，Agent 引导后会用实际内容覆盖（已存在则跳过，保留用户已有配置）
-    let soul_path = omiga_dir.join("SOUL.md");
-    if !soul_path.exists() {
-        std::fs::write(&soul_path, TEMPLATE_SOUL_MD.as_bytes())
-            .map_err(|e| format!("Failed to write SOUL.md: {e}"))?;
-    }
+    write_user_profile_template_if_missing(&omiga_dir, "SOUL.md")?;
 
     // USER.md — 同上
-    let user_path = omiga_dir.join("USER.md");
-    if !user_path.exists() {
-        std::fs::write(&user_path, TEMPLATE_USER_MD.as_bytes())
-            .map_err(|e| format!("Failed to write USER.md: {e}"))?;
-    }
+    write_user_profile_template_if_missing(&omiga_dir, "USER.md")?;
 
     // MEMORY.md — 仅首次创建，保留已有笔记
-    let memory_path = omiga_dir.join("MEMORY.md");
-    if !memory_path.exists() {
-        std::fs::write(&memory_path, TEMPLATE_MEMORY_MD.as_bytes())
-            .map_err(|e| format!("Failed to write MEMORY.md: {e}"))?;
-    }
+    write_user_profile_template_if_missing(&omiga_dir, "MEMORY.md")?;
 
     // BOOTSTRAP.md — 每次 onboarding 都写入，Agent 看到后执行引导并自行删除
     std::fs::write(
@@ -1218,6 +1283,40 @@ pub fn init_user_context_files() -> Result<(), String> {
     .map_err(|e| format!("Failed to write BOOTSTRAP.md: {e}"))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod user_omiga_file_tests {
+    use super::validate_user_omiga_filename;
+
+    #[test]
+    fn accepts_simple_markdown_and_text_filenames() {
+        assert_eq!(
+            validate_user_omiga_filename(" SOUL.md ").unwrap(),
+            "SOUL.md"
+        );
+        assert_eq!(
+            validate_user_omiga_filename("notes.txt").unwrap(),
+            "notes.txt"
+        );
+    }
+
+    #[test]
+    fn rejects_path_traversal_and_non_text_files() {
+        for bad in [
+            "../SOUL.md",
+            "nested/USER.md",
+            "nested\\USER.md",
+            "SOUL.json",
+            "",
+            "..md",
+        ] {
+            assert!(
+                validate_user_omiga_filename(bad).is_err(),
+                "{bad} should be rejected"
+            );
+        }
+    }
 }
 
 /// Get supported file extensions for explicit memory import
