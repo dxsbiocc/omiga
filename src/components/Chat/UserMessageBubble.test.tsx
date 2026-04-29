@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   UserMessageBubble,
   formatUserMessageTimestamp,
+  splitUserMessageInlineCommand,
 } from "./UserMessageBubble";
 import { getChatTokens } from "./chatTokens";
 
@@ -47,9 +48,34 @@ describe("UserMessageBubble", () => {
     expect(html).toContain("hello");
     expect(html).toContain("/executor");
     expect(html).toContain("@src/App.tsx");
+    expect(html).toContain("user-msg-inline-flow");
+    expect(html).toContain("user-msg-inline-chip");
+    expect(html).toContain("user-msg-agent-chip");
+    expect(html).toContain("user-msg-file-chip");
+    expect(html).toContain("user-msg-body-text");
     expect(html).toContain("aria-label=\"重试\"");
     expect(html).toContain("aria-label=\"编辑\"");
     expect(html).toContain("aria-label=\"复制\"");
+  });
+
+  it("splits workflow slash commands so command chips flow inline with body text", () => {
+    const command = splitUserMessageInlineCommand(
+      "/plan 提取文件中与 QS 核心相关的分组、基因",
+    );
+
+    expect(command?.command.label).toBe("/plan");
+    expect(command?.body).toBe("提取文件中与 QS 核心相关的分组、基因");
+
+    const html = renderBubble({
+      displayText: "/plan 提取文件中与 QS 核心相关的分组、基因",
+      composerAgentType: undefined,
+    });
+
+    expect(html).toContain("/plan");
+    expect(html).toContain("提取文件中与 QS 核心相关的分组、基因");
+    expect(html).toContain("user-msg-inline-flow");
+    expect(html).toContain("user-msg-inline-chip");
+    expect(html).toContain("user-msg-command-chip");
   });
 
   it("server-renders edit controls while editing", () => {

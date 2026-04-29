@@ -13,12 +13,17 @@ import { alpha, useTheme } from "@mui/material/styles";
 import {
   SmartToy,
   InsertDriveFile as InsertDriveFileIcon,
+  Route as RouteIcon,
   Replay as ReplayIcon,
   Edit as EditIcon,
   ContentCopy as ContentCopyIcon,
   InfoOutlined as InfoOutlinedIcon,
 } from "@mui/icons-material";
 import type { ChatTokenSet } from "./chatTokens";
+import {
+  WORKFLOW_SLASH_COMMANDS,
+  type WorkflowSlashCommandDefinition,
+} from "../../utils/workflowCommands";
 
 export function formatUserMessageTimestamp(ts: number | undefined): string {
   try {
@@ -53,6 +58,28 @@ interface UserMessageBubbleProps {
   onSaveEdit: () => void;
 }
 
+interface UserMessageInlineCommand {
+  command: WorkflowSlashCommandDefinition;
+  body: string;
+}
+
+export function splitUserMessageInlineCommand(
+  displayText: string,
+): UserMessageInlineCommand | null {
+  const match = displayText.match(
+    /^\/(plan|schedule|team|autopilot|research)(?:\s+([\s\S]*))?$/iu,
+  );
+  if (!match) return null;
+  const command = WORKFLOW_SLASH_COMMANDS.find(
+    (item) => item.id === match[1].toLowerCase(),
+  );
+  if (!command) return null;
+  return {
+    command,
+    body: match[2] ?? "",
+  };
+}
+
 /**
  * Memoized user message bubble. It keeps historical user rows from rebuilding
  * their chip/edit/action chrome when Chat's streaming/activity state changes.
@@ -75,27 +102,38 @@ export const UserMessageBubble = memo(function UserMessageBubble({
   onSaveEdit,
 }: UserMessageBubbleProps) {
   const theme = useTheme();
+  const inlineCommand = isEditing
+    ? null
+    : splitUserMessageInlineCommand(displayText);
+  const inlineText = inlineCommand ? inlineCommand.body : displayText;
+  const isDark = theme.palette.mode === "dark";
+  const commandTone = theme.palette.success.main;
+  const fileTone = theme.palette.info.main;
+  const agentTone = chat.accent;
 
-  const chipSx = {
+  const semanticChipSx = (tone: string) => ({
     flexShrink: 0,
     maxWidth: "min(100%, 220px)",
     height: 22,
+    display: "inline-flex",
+    verticalAlign: "middle",
     fontSize: 11,
     fontWeight: 600,
-    bgcolor: chat.userChipBg,
-    borderColor: chat.userChipBorder,
-    color: chat.userBubbleText,
-    boxShadow: `0 1px 2px ${alpha(chat.userBubbleText, 0.12)}`,
+    bgcolor: alpha(tone, isDark ? 0.18 : 0.11),
+    borderColor: alpha(tone, isDark ? 0.62 : 0.45),
+    color: tone,
+    boxShadow: `0 1px 2px ${alpha(tone, isDark ? 0.2 : 0.16)}`,
     "& .MuiChip-icon": {
-      color: chat.accent,
+      color: tone,
       marginLeft: "6px",
     },
     "& .MuiChip-label": {
       px: 0.5,
       overflow: "hidden",
       textOverflow: "ellipsis",
+      color: tone,
     },
-  } as const;
+  } as const);
 
   const iconButtonSx = {
     p: 0.35,
@@ -148,7 +186,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
             color: isEditing ? chat.textPrimary : chat.userBubbleText,
             fontFamily: chat.font,
             overflow: "hidden",
-            display: "flex",
+            display: isEditing ? "flex" : "block",
             flexDirection: isEditing ? "column" : "row",
             flexWrap: isEditing ? "nowrap" : "wrap",
             alignItems: isEditing ? "stretch" : "center",
@@ -161,43 +199,44 @@ export const UserMessageBubble = memo(function UserMessageBubble({
               : undefined,
           }}
         >
-          {composerAgentType || attachedPaths.length > 0 ? (
-            <Box
-              sx={{
-                display: "flex",
-                flexDirection: "row",
-                flexWrap: "wrap",
-                alignItems: "center",
-                alignContent: "center",
-                gap: 0.25,
-                flexShrink: 0,
-              }}
-            >
-              {composerAgentType ? (
-                <Chip
-                  size="small"
-                  variant="outlined"
-                  icon={<SmartToy sx={{ fontSize: 14, opacity: 0.9 }} />}
-                  label={`/${composerAgentType}`}
-                  sx={chipSx}
-                />
-              ) : null}
-              {attachedPaths.map((p) => (
-                <Tooltip key={p} title={p} placement="top">
-                  <Chip
-                    size="small"
-                    variant="outlined"
-                    icon={<InsertDriveFileIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
-                    label={`@${p}`}
-                    sx={chipSx}
-                  />
-                </Tooltip>
-              ))}
-            </Box>
-          ) : null}
-
           {isEditing ? (
             <>
+              {composerAgentType || attachedPaths.length > 0 ? (
+                <Box
+                  sx={{
+                    display: "flex",
+                    flexDirection: "row",
+                    flexWrap: "wrap",
+                    alignItems: "center",
+                    alignContent: "center",
+                    gap: 0.25,
+                    flexShrink: 0,
+                  }}
+                >
+                  {composerAgentType ? (
+                    <Chip
+                      className="user-msg-agent-chip"
+                      size="small"
+                      variant="outlined"
+                      icon={<SmartToy sx={{ fontSize: 14, opacity: 0.9 }} />}
+                      label={`/${composerAgentType}`}
+                      sx={semanticChipSx(agentTone)}
+                    />
+                  ) : null}
+                  {attachedPaths.map((p) => (
+                    <Tooltip key={p} title={p} placement="top">
+                      <Chip
+                        className="user-msg-file-chip"
+                        size="small"
+                        variant="outlined"
+                        icon={<InsertDriveFileIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
+                        label={`@${p}`}
+                        sx={semanticChipSx(fileTone)}
+                      />
+                    </Tooltip>
+                  ))}
+                </Box>
+              ) : null}
               <TextField
                 autoFocus
                 multiline
@@ -268,21 +307,100 @@ export const UserMessageBubble = memo(function UserMessageBubble({
                 </Button>
               </Stack>
             </>
-          ) : displayText ? (
+          ) : inlineText || inlineCommand || composerAgentType || attachedPaths.length > 0 ? (
             <Typography
-              component="span"
+              component="div"
+              className="user-msg-inline-flow"
               sx={{
                 fontSize: 13,
                 lineHeight: 1.45,
                 whiteSpace: "pre-wrap",
                 wordBreak: "break-word",
                 overflowWrap: "anywhere",
-                flex: "1 1 0",
                 minWidth: 0,
                 textAlign: "left",
               }}
             >
-              {displayText}
+              {inlineCommand ? (
+                <Tooltip
+                  placement="top"
+                  enterDelay={180}
+                  title={inlineCommand.command.description}
+                >
+                  <Box
+                    component="span"
+                    className="user-msg-inline-chip"
+                    sx={{
+                      display: "inline-flex",
+                      verticalAlign: "middle",
+                      mr: 0.5,
+                      mb: 0.2,
+                    }}
+                  >
+                    <Chip
+                      size="small"
+                      className="user-msg-command-chip"
+                      variant="outlined"
+                      icon={<RouteIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
+                      label={inlineCommand.command.label}
+                      sx={semanticChipSx(commandTone)}
+                    />
+                  </Box>
+                </Tooltip>
+              ) : null}
+              {composerAgentType ? (
+                <Box
+                  component="span"
+                  className="user-msg-inline-chip"
+                  sx={{
+                    display: "inline-flex",
+                    verticalAlign: "middle",
+                    mr: 0.5,
+                    mb: 0.2,
+                  }}
+                >
+                  <Chip
+                    className="user-msg-agent-chip"
+                    size="small"
+                    variant="outlined"
+                    icon={<SmartToy sx={{ fontSize: 14, opacity: 0.9 }} />}
+                    label={`/${composerAgentType}`}
+                    sx={semanticChipSx(agentTone)}
+                  />
+                </Box>
+              ) : null}
+              {attachedPaths.map((p) => (
+                <Tooltip key={p} title={p} placement="top">
+                  <Box
+                    component="span"
+                    className="user-msg-inline-chip"
+                    sx={{
+                      display: "inline-flex",
+                      verticalAlign: "middle",
+                      mr: 0.5,
+                      mb: 0.2,
+                    }}
+                  >
+                    <Chip
+                      className="user-msg-file-chip"
+                      size="small"
+                      variant="outlined"
+                      icon={<InsertDriveFileIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
+                      label={`@${p}`}
+                      sx={semanticChipSx(fileTone)}
+                    />
+                  </Box>
+                </Tooltip>
+              ))}
+              {inlineText ? (
+                <Box
+                  component="span"
+                  className="user-msg-body-text"
+                  sx={{ color: chat.userBubbleText }}
+                >
+                  {inlineText}
+                </Box>
+              ) : null}
             </Typography>
           ) : null}
         </Box>

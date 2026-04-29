@@ -125,6 +125,12 @@ import {
   parseWorkflowCommand,
 } from "../../utils/workflowCommands";
 import {
+  formatComposerPathPreview,
+  mergeComposerPathsAndBody,
+  pathsStillMatchMergedContent,
+  splitLeadingPathPrefixFromMerged,
+} from "./composerPathMentions";
+import {
   buildSchedulerPlanHierarchy,
   schedulerStageLabel,
 } from "../../utils/schedulerPlanHierarchy";
@@ -279,13 +285,6 @@ function renderItemHasVisibleContent(item: RenderMsgItem): boolean {
   });
 }
 
-/** Build payload text: `@a @b` + optional body (matches composer chips + input). */
-function mergeComposerPathsAndBody(paths: string[], body: string): string {
-  const pathLine = paths.length > 0 ? paths.map((p) => `@${p}`).join(" ") : "";
-  if (pathLine && body) return `${pathLine}\n\n${body}`;
-  return pathLine || body;
-}
-
 /** One item in the main-session FIFO queue while a previous turn is still streaming. */
 interface QueuedMainSend {
   id: string;
@@ -298,30 +297,6 @@ interface QueuedMainSend {
   /** SSH 服务器名称（仅在 environment === "ssh" 时有效） */
   sshServer: string | null;
   sandboxBackend: SandboxBackend;
-}
-
-/** User bubble: show body only when paths are shown as chips (content still stores full payload). */
-function stripLeadingPathPrefixFromMerged(
-  full: string,
-  paths: string[],
-): string {
-  if (!paths.length) return full;
-  const pathLine = paths.map((p) => `@${p}`).join(" ");
-  const prefix = `${pathLine}\n\n`;
-  if (full.startsWith(prefix)) return full.slice(prefix.length);
-  if (full === pathLine) return "";
-  return full;
-}
-
-/** `@a @b` + body 与 `composerAttachedPaths` 是否仍一致 */
-function pathsStillMatchMergedContent(
-  paths: string[],
-  content: string,
-): boolean {
-  if (paths.length === 0) return true;
-  const pathLine = paths.map((p) => `@${p}`).join(" ");
-  const prefix = `${pathLine}\n\n`;
-  return content.startsWith(prefix) || content.trim() === pathLine;
 }
 
 function compactSuggestionLabel(label: string, prompt: string): string {
@@ -1420,10 +1395,17 @@ const MessageRowRenderItem = memo(function MessageRowRenderItem({
   const dividerBefore = item.dividerBefore === true;
   const userRowPb =
     message.role === "user" ? (nextRowIsUser ? 1 : 2) : null;
-  const userAttachPaths = message.composerAttachedPaths ?? [];
+  const userContentParts =
+    message.role === "user"
+      ? splitLeadingPathPrefixFromMerged(
+          message.content,
+          message.composerAttachedPaths ?? [],
+        )
+      : null;
+  const userAttachPaths = userContentParts?.paths ?? [];
   const userBubbleDisplayText =
-    message.role === "user" && userAttachPaths.length > 0
-      ? stripLeadingPathPrefixFromMerged(message.content, userAttachPaths)
+    message.role === "user"
+      ? (userContentParts?.body ?? message.content)
       : message.content;
 
   return (
@@ -1507,10 +1489,7 @@ const MessageRowRenderItem = memo(function MessageRowRenderItem({
             onRevisePlan={() => {
               const request =
                 message.schedulerPlan?.originalRequest?.trim() ||
-                stripLeadingPathPrefixFromMerged(
-                  message.content,
-                  message.composerAttachedPaths ?? [],
-                )
+                (userContentParts?.body ?? message.content)
                   .replace(/^\/plan\s+/iu, "")
                   .trim();
               onDispatchWorkflowCommand(
@@ -2098,10 +2077,11 @@ export function Chat({ sessionId }: ChatProps) {
   const queuedMainMessagesForComposer = useMemo(() => {
     void queueRevision;
     return queuedMainSendQueueRef.current.map((item) => {
-      const merged = mergeComposerPathsAndBody(
-        item.composerAttachedPaths,
-        item.body,
-      );
+      const pathLine = formatComposerPathPreview(item.composerAttachedPaths);
+      const merged =
+        pathLine && item.body
+          ? `${pathLine}\n\n${item.body}`
+          : pathLine || item.body;
       const previewText =
         merged.length > 200 ? `${merged.slice(0, 200)}…` : merged;
       return { id: item.id, previewText, fullText: merged };
@@ -2167,7 +2147,7 @@ export function Chat({ sessionId }: ChatProps) {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef = useRef<HTMLElement>(null);
   /** Populated by `follow_up_suggestions` stream frame; consumed when attaching the final assistant row */
   const pendingFollowUpSuggestionsRef = useRef<Array<{
     label: string;
@@ -5061,12 +5041,26 @@ export function Chat({ sessionId }: ChatProps) {
 
   const openEditUserMessage = useCallback((message: Message) => {
     if (message.role !== "user") return;
-    setUserMessageEdit({ id: message.id, draft: message.content });
+    const parts = splitLeadingPathPrefixFromMerged(
+      message.content,
+      message.composerAttachedPaths ?? [],
+    );
+    setUserMessageEdit({
+      id: message.id,
+      draft: parts.body,
+    });
   }, []);
 
   const copyUserMessageText = useCallback(async (message: Message) => {
     try {
-      await navigator.clipboard.writeText(message.content);
+      const { paths, body } = splitLeadingPathPrefixFromMerged(
+        message.content,
+        message.composerAttachedPaths ?? [],
+      );
+      const pathLine = formatComposerPathPreview(paths);
+      await navigator.clipboard.writeText(
+        pathLine && body ? `${pathLine}\n\n${body}` : pathLine || body,
+      );
       setCopySuccessToast(true);
     } catch (e) {
       console.error("[Chat] clipboard copy failed", e);
@@ -5104,10 +5098,11 @@ export function Chat({ sessionId }: ChatProps) {
         setBgToast("消息为空，无法重试");
         return;
       }
-      const rawRetryBody = stripLeadingPathPrefixFromMerged(
+      const retryContentParts = splitLeadingPathPrefixFromMerged(
         messageContent,
         message.composerAttachedPaths ?? [],
       );
+      const rawRetryBody = retryContentParts.body;
       const researchRetry = parseResearchCommand(rawRetryBody);
       const composeAgent = message.composerAgentType ?? "general-purpose";
       if (researchRetry) {
@@ -5121,7 +5116,7 @@ export function Chat({ sessionId }: ChatProps) {
         composerAgentType: composeAgent,
       });
       const backendRetryContent = mergeComposerPathsAndBody(
-        message.composerAttachedPaths ?? [],
+        retryContentParts.paths,
         retryPrepared.content,
       );
 
@@ -5367,14 +5362,26 @@ export function Chat({ sessionId }: ChatProps) {
       return;
     }
 
-    const paths = row.composerAttachedPaths ?? [];
-    const keepPaths = pathsStillMatchMergedContent(paths, trimmed)
-      ? paths
-      : undefined;
-    const attached = keepPaths && keepPaths.length > 0 ? keepPaths : undefined;
+    const rowContentParts = splitLeadingPathPrefixFromMerged(
+      row.content,
+      row.composerAttachedPaths ?? [],
+    );
+    const paths = rowContentParts.paths;
+    const keepPaths =
+      paths.length > 0
+        ? paths
+        : pathsStillMatchMergedContent(paths, trimmed)
+          ? paths
+          : undefined;
+    const attached =
+      keepPaths && keepPaths.length > 0 ? keepPaths : undefined;
+    const content =
+      attached && !pathsStillMatchMergedContent(attached, trimmed)
+        ? mergeComposerPathsAndBody(attached, trimmed)
+        : trimmed;
     const updated: Message = {
       ...row,
-      content: trimmed,
+      content,
       composerAttachedPaths: attached,
       timestamp: Date.now(),
       schedulerPlan: undefined,
@@ -5559,7 +5566,7 @@ export function Chat({ sessionId }: ChatProps) {
     act.resetExecutionState();
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLElement>) => {
     if (e.key === "Escape") {
       const act = useActivityStore.getState();
       const agentBusy =
