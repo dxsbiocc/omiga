@@ -49,6 +49,7 @@ fn working_memory_query_text(
 
     let preferred_keys: &[&str] = match canonical.as_str() {
         "recall" | "search" => &["query"],
+        "query" => &["query", "id", "url", "accession"],
         "fetch" | "read_mcp_resource" => &["url", "uri"],
         _ => &[
             "query", "prompt", "message", "url", "uri", "path", "title", "text",
@@ -1852,6 +1853,17 @@ mod tests {
         );
 
         assert_eq!(query.as_deref(), Some("氧化还原节律"));
+    }
+
+    #[test]
+    fn working_memory_query_reads_query_tool_identifiers() {
+        let query = working_memory_query_text(
+            "query",
+            r#"{"category":"dataset","operation":"fetch","id":"GSE12345"}"#,
+            None,
+        );
+
+        assert_eq!(query.as_deref(), Some("GSE12345"));
     }
 
     #[test]

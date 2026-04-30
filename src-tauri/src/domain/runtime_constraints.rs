@@ -141,6 +141,7 @@ impl RuntimeConstraintState {
                     | "ripgrep"
                     | "file_read"
                     | "fetch"
+                    | "query"
                     | "search"
                     | "list_skills"
                     | "skills_list"

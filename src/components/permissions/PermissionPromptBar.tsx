@@ -90,6 +90,9 @@ function inferIntent(toolNameRaw: string, args: AnyArgs): { title: string; detai
   if (toolName === "fetch" || toolName === "Fetch") {
     return { title: "访问网页" };
   }
+  if (toolName === "query" || toolName === "Query") {
+    return { title: "查询数据库" };
+  }
   if (toolName === "search" || toolName === "Search") {
     return { title: "联网搜索" };
   }

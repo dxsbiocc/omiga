@@ -1,9 +1,16 @@
 import { useMemo } from "react";
+import { Alert, Box, Typography } from "@mui/material";
 import { CsvViewer } from "./CsvViewer";
 import { CodeViewer, extToLanguage } from "./CodeViewer";
 import { ImageViewer } from "./ImageViewer";
 import { IpynbViewer } from "./IpynbViewer";
 import { PdfViewer } from "./PdfViewer";
+import { useExtensionStore } from "../../state/extensionStore";
+import {
+  findCustomEditorForFile,
+  languageForFile,
+  type CustomEditorContribution,
+} from "../../utils/vscodeExtensions";
 
 const IMAGE_EXTS = new Set([
   "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tiff", "tif", "avif",
@@ -30,8 +37,13 @@ interface FileRendererProps {
 }
 
 export function FileRenderer({ fileName, filePath, content, onChange }: FileRendererProps) {
+  const installedExtensions = useExtensionStore((s) => s.installedExtensions);
   const ext = useMemo(() => fileName.split(".").pop()?.toLowerCase() ?? "", [fileName]);
-  
+  const customEditor = useMemo(
+    () => findCustomEditorForFile(fileName, filePath, installedExtensions),
+    [fileName, filePath, installedExtensions],
+  );
+
   // Determine viewer type - stable across renders
   const viewerType = useMemo(() => {
     if (IMAGE_EXTS.has(ext)) return "image";
@@ -42,9 +54,10 @@ export function FileRenderer({ fileName, filePath, content, onChange }: FileRend
   }, [ext]);
 
   // Memoize language to prevent unnecessary re-renders
-  const language = useMemo(() => 
-    CODE_EXTS.has(ext) ? extToLanguage(ext) : "plaintext", 
-    [ext]
+  const language = useMemo(() =>
+    languageForFile(fileName, installedExtensions) ??
+    (CODE_EXTS.has(ext) ? extToLanguage(ext) : "plaintext"),
+    [ext, fileName, installedExtensions]
   );
 
   // For empty filePath (file closed), just show empty code viewer
@@ -55,7 +68,8 @@ export function FileRenderer({ fileName, filePath, content, onChange }: FileRend
 
   // Use key based on filePath to ensure clean state when switching files
   // but keep editor instance alive for code files
-  switch (viewerType) {
+  const viewer = (() => {
+    switch (viewerType) {
     case "image":
       return <ImageViewer key={filePath} filePath={filePath} />;
     case "pdf":
@@ -69,5 +83,49 @@ export function FileRenderer({ fileName, filePath, content, onChange }: FileRend
       // Don't use filePath as key for code viewer to keep editor instance alive
       // The CodeViewer uses theme as key to prevent re-mount on dark/light toggle
       return <CodeViewer content={content} language={language} onChange={onChange} />;
-  }
+    }
+  })();
+
+  if (!customEditor) return viewer;
+
+  return (
+    <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+      <PluginRendererNotice customEditor={customEditor} />
+      <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {viewer}
+      </Box>
+    </Box>
+  );
+}
+
+function PluginRendererNotice({
+  customEditor,
+}: {
+  customEditor: CustomEditorContribution;
+}) {
+  return (
+    <Alert
+      severity="info"
+      variant="outlined"
+      sx={{
+        flexShrink: 0,
+        borderRadius: 0,
+        borderLeft: 0,
+        borderRight: 0,
+        borderTop: 0,
+        py: 0.75,
+        "& .MuiAlert-message": { width: "100%" },
+      }}
+    >
+      <Typography variant="caption" color="text.secondary">
+        已匹配 VS Code 渲染插件{" "}
+        <Typography component="span" variant="caption" fontWeight={700}>
+          {customEditor.displayName}
+        </Typography>
+        {" "}({customEditor.viewType})，来自 {customEditor.extensionName}。当前版本先启用
+        VSIX 贡献点识别并回退到内置查看器；完整 Webview/custom editor runtime
+        将在扩展主机阶段接入。
+      </Typography>
+    </Alert>
+  );
 }

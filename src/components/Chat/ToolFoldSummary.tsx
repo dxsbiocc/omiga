@@ -43,6 +43,7 @@ export function summarizeToolGroup(
       n.includes("file_write") ||
       n.includes("file_edit") ||
       n === "fetch" ||
+      n === "query" ||
       n === "search" ||
       n.includes("todo_write") ||
       n.includes("notebook_edit") ||

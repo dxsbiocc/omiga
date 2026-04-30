@@ -230,6 +230,11 @@ pub fn run() {
             commands::integrations_settings::list_available_skills,
             commands::integrations_settings::get_integrations_catalog,
             commands::integrations_settings::save_integrations_state,
+            commands::extensions::vscode_extensions_dir,
+            commands::extensions::install_vscode_extension,
+            commands::extensions::uninstall_vscode_extension,
+            commands::extensions::list_vscode_extensions,
+            commands::extensions::read_vscode_extension_file,
 
             // Execution environments configuration
             commands::execution_envs::get_execution_envs_config,

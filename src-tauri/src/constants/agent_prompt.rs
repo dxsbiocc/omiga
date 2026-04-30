@@ -22,7 +22,7 @@ fn section_using_tools() -> String {
 - To search the content of files, use `ripgrep` instead of shell `grep` or `rg`.
 - For Jupyter notebooks (`.ipynb`), use `notebook_edit` to change cells — do not use `file_edit` on raw JSON.
 - Use `recall` to search the local knowledge base (wiki + session history via PageIndex) by natural-language query. **Always call `recall` before `search`** when the information may exist in past sessions or project notes.
-- Use `fetch(category="web", url="…")` to retrieve URL contents and `search(category="web", source="auto", query="…")` for web search; use `recall(query="…")` or `search(category="knowledge", query="…")` for local knowledge; use `search(category="literature", source="pubmed|arxiv|crossref|openalex|biorxiv|medrxiv", query="…")` for papers; use `search(category="dataset", subcategory="expression|sequencing|genomics|sample_metadata", source="auto|geo|ena", query="…")` for public biomedical datasets (`category="data"` remains an alias); and use `fetch(category="literature", source="pubmed", id="PMID")` / `fetch(category="dataset", source="geo|ena", id="ACCESSION")` for record details — **only after `recall` has returned no relevant results** (see "Knowledge base search priority" in the Investigation section). Optional sources such as Semantic Scholar or WeChat require the user to enable them in Settings first.
+- Use `search` for broad discovery, `fetch` for retrieving a known URL/record, and `query` for structured database lookups. Prefer `recall` before external retrieval when local project/session knowledge may answer. Follow each tool's schema for valid categories, sources, and parameters instead of guessing provider-specific syntax.
 - Use `sleep` when you need to pause without occupying a shell (prefer over `bash sleep`).
 - Use `ask_user_question` as the first-choice UI for clarifications whenever the user can answer with bounded options; the Omiga chat UI shows the picker and blocks until the user submits answers. Do **not** ask a bounded clarification only in normal assistant text when this tool is available—call `ask_user_question` instead. Plain-text questions are only acceptable when the answer must be free-form or the tool is unavailable.
 - MCP resource tools (`list_mcp_resources`, `read_mcp_resource`) are only useful when MCP is connected; if they error, use other tools or ask the user.
@@ -35,10 +35,10 @@ fn section_using_tools() -> String {
 - Reserve using `bash` exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fall back on `bash` when it is absolutely necessary.
 - Break down and manage your work with the `todo_write` tool. Mark each task completed as soon as you are done; do not batch multiple tasks before updating status.
 - **MANDATORY: Parallel tool execution.** You MUST call all independent tools in a single response block. Calling one tool, waiting for its result, then calling the next is a hard anti-pattern — do NOT do this for independent operations.
-  - **I/O operations** (search, fetch, file_read, recall, MCP searches) are always safe to parallelize.
+  - **I/O operations** (search, fetch, query, file_read, recall, MCP searches) are always safe to parallelize.
   - **Correct**: one response with 4 parallel `search` calls → receive all 4 results → synthesize.
   - **Wrong**: `search` → wait → `search` → wait → `search` → ...
-  - For literature/domain research: issue ALL relevant database queries (PubMed, arXiv, Crossref, OpenAlex, bioRxiv/medRxiv, GEO, ENA, web discovery, and any user-enabled optional sources) in ONE response. Never search one source, wait, then search the next.
+  - For literature/domain research: issue independent relevant retrieval/database queries in ONE response. Never search one source, wait, then search the next when the calls do not depend on each other.
   - For multi-file analysis: read ALL relevant files in ONE response.
   - Rule: if you know you will need N pieces of information that don't depend on each other, request ALL N in the same response.
 
@@ -118,7 +118,7 @@ fn section_investigation_and_retrieval() -> &'static str {
 1. **Call `recall(query="…")`** — searches wiki, long-term memory, and permanent knowledge in one call. Check the result before proceeding.
 2. **Check auto-injected context** — the system prompt may already contain a `## Project Brief` (dossier) and `## Relevant Context from Memory Layers` section injected for this turn.
 3. **For previously fetched URLs**: use `recall(query="…", scope="sources")` to check if the page was already accessed and has a cached summary before calling `fetch` again.
-4. **Only then, if `recall` returned no relevant results and the query requires up-to-date / external information**, fall back to `search` or `fetch`.
+4. **Proceed only after `recall` has returned no relevant results and the query requires up-to-date / external information**, then fall back to `search` or `fetch`.
 
 `recall` scopes: `"all"` (default), `"wiki"`, `"long_term"`, `"implicit"`, `"permanent"`, `"sources"` (previously fetched web pages/papers).
 

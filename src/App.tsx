@@ -17,6 +17,7 @@ import {
   useWorkspaceStore,
   useUiStore,
   usePermissionStore,
+  useExtensionStore,
   LAYOUT_LEFT_MIN,
   LAYOUT_LEFT_MAX,
   LAYOUT_RIGHT_MIN,
@@ -24,6 +25,11 @@ import {
   LAYOUT_PANEL_MIN,
 } from "./state";
 import { listenTauriEvent } from "./utils/tauriEvents";
+import {
+  defaultWebSearchQuerySettings,
+  parseStoredWebSearchSettings,
+  WEB_SEARCH_KEYS_STORAGE,
+} from "./utils/webSearchSettings";
 
 const CodeWorkspace = lazy(() =>
   import("./components/CodeWorkspace").then((mod) => ({
@@ -228,45 +234,14 @@ export default function App() {
   }, [loadSessions]);
 
   useEffect(() => {
-    const WEB_SEARCH_KEYS_STORAGE = "omiga_web_search_api_keys";
+    void useExtensionStore.getState().loadExtensions();
+  }, []);
+
+  useEffect(() => {
     const raw = localStorage.getItem(WEB_SEARCH_KEYS_STORAGE);
     if (raw) {
-      try {
-        const j = JSON.parse(raw) as Record<string, unknown>;
-        const payload = {
-          tavily: String(j.tavily ?? "").trim(),
-          exa: String(j.exa ?? "").trim(),
-          parallel: String(j.parallel ?? "").trim(),
-          firecrawl: String(j.firecrawl ?? "").trim(),
-          firecrawlUrl: String(j.firecrawlUrl ?? "").trim(),
-          semanticScholarEnabled:
-            j.semanticScholarEnabled === "true" ||
-            j.semanticScholarEnabled === true,
-          semanticScholarApiKey: String(j.semanticScholarApiKey ?? "").trim(),
-          wechatSearchEnabled:
-            j.wechatSearchEnabled === "true" || j.wechatSearchEnabled === true,
-          pubmedApiKey: String(j.pubmedApiKey ?? "").trim(),
-          pubmedEmail: String(j.pubmedEmail ?? "omiga@example.invalid").trim(),
-          pubmedToolName: String(j.pubmedToolName ?? "omiga").trim(),
-        };
-        if (
-          payload.tavily ||
-          payload.exa ||
-          payload.parallel ||
-          payload.firecrawl ||
-          payload.firecrawlUrl ||
-          payload.semanticScholarEnabled ||
-          payload.semanticScholarApiKey ||
-          payload.wechatSearchEnabled ||
-          payload.pubmedApiKey ||
-          payload.pubmedEmail ||
-          payload.pubmedToolName
-        ) {
-          void invoke("set_web_search_api_keys", payload).catch(() => {});
-        }
-      } catch {
-        /* ignore */
-      }
+      const payload = parseStoredWebSearchSettings(raw);
+      if (payload) void invoke("set_web_search_api_keys", { ...payload }).catch(() => {});
       return;
     }
     const tavily = localStorage.getItem("omiga_tavily_search_api_key");
@@ -285,6 +260,7 @@ export default function App() {
         pubmedApiKey: "",
         pubmedEmail: "omiga@example.invalid",
         pubmedToolName: "omiga",
+        ...defaultWebSearchQuerySettings(),
       }).catch(() => {});
     }
   }, []);

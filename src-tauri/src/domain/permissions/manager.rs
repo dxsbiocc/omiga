@@ -1071,7 +1071,7 @@ impl PermissionManager {
                 recommendations: vec![],
                 detected_risks: vec![],
             },
-            "fetch" | "search" => RiskAssessment {
+            "fetch" | "query" | "search" => RiskAssessment {
                 level: RiskLevel::Low,
                 categories: vec![RiskCategory::Network],
                 description: "网络请求".to_string(),

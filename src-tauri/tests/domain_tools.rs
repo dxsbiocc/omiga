@@ -11,6 +11,8 @@ mod file_edit;
 mod grep;
 #[path = "domain_tools/notebook_edit.rs"]
 mod notebook_edit;
+#[path = "domain_tools/query.rs"]
+mod query;
 #[path = "domain_tools/search.rs"]
 mod search;
 #[path = "domain_tools/todo_write.rs"]

@@ -20,6 +20,7 @@ export const PERMISSION_PRESETS: PermissionPreset[] = [
   },
   { rule: "Glob", label: "Glob 文件匹配", aliases: ["glob", "Glob"] },
   { rule: "Fetch", label: "网页抓取", aliases: ["fetch", "Fetch"] },
+  { rule: "Query", label: "数据库查询", aliases: ["query", "Query"] },
   { rule: "Search", label: "网络搜索", aliases: ["search", "Search"] },
   { rule: "Agent", label: "子代理 (Agent)", aliases: ["Agent", "agent"] },
   { rule: "skill", label: "Skill 工具", aliases: ["skill", "Skill", "SkillTool"] },

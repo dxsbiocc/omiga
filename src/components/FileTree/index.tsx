@@ -61,9 +61,16 @@ import {
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useSessionStore } from "../../state/sessionStore";
 import { useChatComposerStore } from "../../state/chatComposerStore";
+import { useExtensionStore } from "../../state/extensionStore";
 import { usePencilPalette } from "../../theme";
 import { NotificationToast } from "../NotificationToast";
 import { FileTreeSkeleton } from "./FileTreeSkeleton";
+import {
+  filePathToAssetSrc,
+  resolveIconForFileNode,
+  type InstalledVscodeExtension,
+  type ResolvedIconTheme,
+} from "../../utils/vscodeExtensions";
 
 export interface FileNode {
   name: string;
@@ -167,12 +174,21 @@ function parentWithinRoot(current: string, root: string): string | null {
   return p;
 }
 
-/** VS Code Material Icon Theme 风格（react-material-icon-theme）。 */
-function FileTypeIcon({ node }: { node: FileNode }) {
+/** VS Code Material Icon Theme 风格；如安装了 VSIX iconTheme，则优先使用插件图标。 */
+function FileTypeIcon({
+  node,
+  activeIconTheme,
+  installedExtensions,
+}: {
+  node: FileNode;
+  activeIconTheme: ResolvedIconTheme | null;
+  installedExtensions: InstalledVscodeExtension[];
+}) {
   const theme = useTheme();
   const pen = usePencilPalette();
   const light = theme.palette.mode === "dark";
   const size = 18;
+  const pluginIcon = resolveIconForFileNode(activeIconTheme, node, installedExtensions);
 
   return (
     <Box
@@ -189,7 +205,19 @@ function FileTypeIcon({ node }: { node: FileNode }) {
         verticalAlign: "middle",
       }}
     >
-      {node.isDirectory ? (
+      {pluginIcon ? (
+        <Box
+          component="img"
+          src={filePathToAssetSrc(pluginIcon.iconPath)}
+          alt=""
+          sx={{
+            width: size,
+            height: size,
+            objectFit: "contain",
+            display: "block",
+          }}
+        />
+      ) : node.isDirectory ? (
         <FolderIcon
           folderName={node.name}
           isOpen={false}
@@ -272,6 +300,8 @@ export function FileTree() {
     [pen.textHeader],
   );
   const openFile = useWorkspaceStore((s) => s.openFile);
+  const activeIconTheme = useExtensionStore((s) => s.activeIconTheme);
+  const installedExtensions = useExtensionStore((s) => s.installedExtensions);
   const currentSession = useSessionStore((s) => s.currentSession);
   const sessionId = currentSession?.id;
   const projectPath = (currentSession?.projectPath ?? ".").trim() || ".";
@@ -720,7 +750,11 @@ export function FileTree() {
                 pr: 1,
               }}
             >
-              <FileTypeIcon node={node} />
+              <FileTypeIcon
+                node={node}
+                activeIconTheme={activeIconTheme}
+                installedExtensions={installedExtensions}
+              />
               <Typography
                 noWrap
                 title={node.name}

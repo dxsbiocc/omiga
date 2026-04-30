@@ -1504,6 +1504,8 @@ pub(super) fn is_parallelizable_tool(tool_name: &str) -> bool {
             tool_name,
             "search"
                 | "Search"
+                | "query"
+                | "Query"
                 | "fetch"
                 | "Fetch"
                 | "file_read"

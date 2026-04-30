@@ -20,6 +20,7 @@ pub mod grep;
 pub mod list_mcp_resources;
 pub mod list_skills;
 pub mod notebook_edit;
+pub mod query;
 pub mod read_mcp_resource;
 pub mod recall;
 pub mod search;
@@ -64,6 +65,7 @@ pub enum ToolKind {
     Grep,
     Glob,
     Fetch,
+    Query,
     Search,
     TodoWrite,
     NotebookEdit,
@@ -112,6 +114,7 @@ impl fmt::Display for ToolKind {
             ToolKind::Grep => write!(f, "ripgrep"),
             ToolKind::Glob => write!(f, "glob"),
             ToolKind::Fetch => write!(f, "fetch"),
+            ToolKind::Query => write!(f, "query"),
             ToolKind::Search => write!(f, "search"),
             ToolKind::TodoWrite => write!(f, "todo_write"),
             ToolKind::NotebookEdit => write!(f, "notebook_edit"),
@@ -150,6 +153,7 @@ pub enum Tool {
     Grep(grep::GrepArgs),
     Glob(glob::GlobArgs),
     Fetch(fetch::FetchArgs),
+    Query(query::QueryArgs),
     Search(search::SearchArgs),
     TodoWrite(todo_write::TodoWriteArgs),
     NotebookEdit(notebook_edit::NotebookEditArgs),
@@ -189,6 +193,7 @@ impl Tool {
             Tool::Grep(_) => ToolKind::Grep,
             Tool::Glob(_) => ToolKind::Glob,
             Tool::Fetch(_) => ToolKind::Fetch,
+            Tool::Query(_) => ToolKind::Query,
             Tool::Search(_) => ToolKind::Search,
             Tool::TodoWrite(_) => ToolKind::TodoWrite,
             Tool::NotebookEdit(_) => ToolKind::NotebookEdit,
@@ -225,6 +230,7 @@ impl Tool {
             Tool::Grep(_) => "Ripgrep",
             Tool::Glob(_) => "Glob",
             Tool::Fetch(_) => "fetch",
+            Tool::Query(_) => "query",
             Tool::Search(_) => "search",
             Tool::TodoWrite(_) => "TodoWrite",
             Tool::NotebookEdit(_) => "NotebookEdit",
@@ -261,6 +267,7 @@ impl Tool {
             Tool::Grep(_) => grep::DESCRIPTION,
             Tool::Glob(_) => glob::DESCRIPTION,
             Tool::Fetch(_) => fetch::DESCRIPTION,
+            Tool::Query(_) => query::DESCRIPTION,
             Tool::Search(_) => search::DESCRIPTION,
             Tool::TodoWrite(_) => todo_write::DESCRIPTION,
             Tool::NotebookEdit(_) => notebook_edit::DESCRIPTION,
@@ -300,6 +307,7 @@ impl Tool {
             Tool::Grep(args) => grep::GrepTool::execute(ctx, args).await?,
             Tool::Glob(args) => glob::GlobTool::execute(ctx, args).await?,
             Tool::Fetch(args) => fetch::FetchTool::execute(ctx, args).await?,
+            Tool::Query(args) => query::QueryTool::execute(ctx, args).await?,
             Tool::Search(args) => search::SearchTool::execute(ctx, args).await?,
             Tool::TodoWrite(args) => todo_write::TodoWriteTool::execute(ctx, args).await?,
             Tool::NotebookEdit(args) => notebook_edit::NotebookEditTool::execute(ctx, args).await?,
@@ -419,6 +427,12 @@ impl Tool {
                     message: format!("Invalid fetch arguments: {}", e),
                 })?;
                 Ok(Tool::Fetch(args))
+            }
+            ToolKind::Query => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid query arguments: {}", e),
+                })?;
+                Ok(Tool::Query(args))
             }
             ToolKind::Search => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
@@ -571,6 +585,7 @@ impl Tool {
             "ripgrep" | "Ripgrep" | "grep" | "Grep" => ToolKind::Grep,
             "glob" => ToolKind::Glob,
             "fetch" => ToolKind::Fetch,
+            "query" => ToolKind::Query,
             "search" => ToolKind::Search,
             "todo_write" => ToolKind::TodoWrite,
             "notebook_edit" => ToolKind::NotebookEdit,
@@ -627,6 +642,140 @@ pub struct WebSearchApiKeys {
     pub pubmed_email: Option<String>,
     /// NCBI tool identifier. Defaults to `omiga` when unset.
     pub pubmed_tool_name: Option<String>,
+    /// Enabled dataset subcategories for structured `query(category="dataset")` routing.
+    /// `None` means the product default; `Some(vec![])` intentionally disables all.
+    pub query_dataset_types: Option<Vec<String>>,
+    /// Enabled dataset/data sources. `ena` covers all ENA child source variants.
+    /// `None` means the product default; `Some(vec![])` intentionally disables all.
+    pub query_dataset_sources: Option<Vec<String>>,
+    /// Enabled external structured knowledge sources.
+    /// `None` means the product default; `Some(vec![])` intentionally disables all.
+    pub query_knowledge_sources: Option<Vec<String>>,
+}
+
+pub const QUERY_DATASET_TYPE_IDS: &[&str] = &[
+    "expression",
+    "sequencing",
+    "genomics",
+    "sample_metadata",
+    "multi_omics",
+];
+pub const DEFAULT_QUERY_DATASET_TYPE_IDS: &[&str] =
+    &["expression", "sequencing", "genomics", "sample_metadata"];
+
+pub const QUERY_DATASET_SOURCE_IDS: &[&str] = &[
+    "geo",
+    "ena",
+    "cbioportal",
+    "gtex",
+    "arrayexpress",
+    "biosample",
+];
+pub const DEFAULT_QUERY_DATASET_SOURCE_IDS: &[&str] = &["geo", "ena"];
+
+pub const QUERY_KNOWLEDGE_SOURCE_IDS: &[&str] = &["ncbi_gene", "ensembl", "uniprot"];
+pub const DEFAULT_QUERY_KNOWLEDGE_SOURCE_IDS: &[&str] = &["ncbi_gene"];
+
+fn normalize_query_setting_id(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace(['-', ' '], "_")
+}
+
+fn effective_query_setting(
+    configured: Option<&Vec<String>>,
+    allowed: &[&str],
+    defaults: &[&str],
+) -> Vec<String> {
+    match configured {
+        None => defaults.iter().map(|id| (*id).to_string()).collect(),
+        Some(values) => {
+            let normalized: Vec<String> = values
+                .iter()
+                .map(|value| normalize_query_setting_id(value))
+                .collect();
+            allowed
+                .iter()
+                .filter(|id| normalized.iter().any(|value| value == **id))
+                .map(|id| (*id).to_string())
+                .collect()
+        }
+    }
+}
+
+impl WebSearchApiKeys {
+    pub fn enabled_query_dataset_types(&self) -> Vec<String> {
+        effective_query_setting(
+            self.query_dataset_types.as_ref(),
+            QUERY_DATASET_TYPE_IDS,
+            DEFAULT_QUERY_DATASET_TYPE_IDS,
+        )
+    }
+
+    pub fn enabled_query_dataset_sources(&self) -> Vec<String> {
+        effective_query_setting(
+            self.query_dataset_sources.as_ref(),
+            QUERY_DATASET_SOURCE_IDS,
+            DEFAULT_QUERY_DATASET_SOURCE_IDS,
+        )
+    }
+
+    pub fn enabled_query_knowledge_sources(&self) -> Vec<String> {
+        effective_query_setting(
+            self.query_knowledge_sources.as_ref(),
+            QUERY_KNOWLEDGE_SOURCE_IDS,
+            DEFAULT_QUERY_KNOWLEDGE_SOURCE_IDS,
+        )
+    }
+
+    pub fn is_query_dataset_type_enabled(&self, type_id: &str) -> bool {
+        let normalized = normalize_query_setting_id(type_id);
+        self.enabled_query_dataset_types()
+            .iter()
+            .any(|id| id == &normalized)
+    }
+
+    pub fn is_query_dataset_source_enabled(&self, source_id: &str) -> bool {
+        let normalized = normalize_query_setting_id(source_id);
+        let group = match normalized.as_str() {
+            "gds" | "ncbi_geo" | "ncbi_gds" => "geo",
+            "cbioportal" | "cbio_portal" | "cbio" | "cancer_genomics" | "multi_omics"
+            | "multiomics" | "projects" | "tcga" => "cbioportal",
+            "ena"
+            | "ena_study"
+            | "study"
+            | "read_study"
+            | "european_nucleotide_archive"
+            | "ena_run"
+            | "run"
+            | "read_run"
+            | "ena_experiment"
+            | "experiment"
+            | "read_experiment"
+            | "ena_sample"
+            | "sample"
+            | "read_sample"
+            | "ena_analysis"
+            | "analysis"
+            | "ena_assembly"
+            | "assembly"
+            | "ena_sequence"
+            | "sequence" => "ena",
+            other => other,
+        };
+        self.enabled_query_dataset_sources()
+            .iter()
+            .any(|id| id == group)
+    }
+
+    pub fn is_query_knowledge_source_enabled(&self, source_id: &str) -> bool {
+        let normalized = normalize_query_setting_id(source_id);
+        let source = match normalized.as_str() {
+            "gene" | "ncbi_gene" => "ncbi_gene",
+            other => other,
+        };
+        self.enabled_query_knowledge_sources()
+            .iter()
+            .any(|id| id == source)
+    }
 }
 
 /// Execution context passed to all tools
@@ -932,6 +1081,7 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         grep::schema(),
         glob::schema(),
         fetch::schema(),
+        query::schema(),
         search::schema(),
         todo_write::schema(),
         visualization::schema(),
@@ -1002,6 +1152,7 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
             | "grep"
             | "glob"
             | "fetch"
+            | "query"
             | "search"
             | "ToolSearch"
             | "tool_search"

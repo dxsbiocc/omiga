@@ -70,3 +70,4 @@ export {
   type RiskInfo,
   type PermissionRule,
 } from "./permissionStore";
+export { useExtensionStore } from "./extensionStore";

@@ -10,6 +10,8 @@ pub mod literature;
 
 pub mod data;
 
+pub mod ncbi_gene;
+
 pub mod semantic_scholar;
 
 pub mod wechat;

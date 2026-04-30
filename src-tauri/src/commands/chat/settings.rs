@@ -353,6 +353,23 @@ fn normalize_optional_search_key_field(s: Option<String>) -> Option<String> {
     s.and_then(|value| normalize_web_search_key_field(&value))
 }
 
+fn normalize_query_setting_list(
+    values: Option<Vec<String>>,
+    allowed: &[&str],
+) -> Option<Vec<String>> {
+    values.map(|values| {
+        let mut out = Vec::new();
+        for value in values {
+            let normalized = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+            if allowed.contains(&normalized.as_str()) && !out.iter().any(|item| item == &normalized)
+            {
+                out.push(normalized);
+            }
+        }
+        out
+    })
+}
+
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
 pub async fn set_web_search_api_keys(
@@ -368,6 +385,9 @@ pub async fn set_web_search_api_keys(
     pubmed_api_key: Option<String>,
     pubmed_email: Option<String>,
     pubmed_tool_name: Option<String>,
+    query_dataset_types: Option<Vec<String>>,
+    query_dataset_sources: Option<Vec<String>>,
+    query_knowledge_sources: Option<Vec<String>>,
 ) -> CommandResult<()> {
     let mut g = state.chat.web_search_api_keys.lock().await;
     g.tavily = normalize_web_search_key_field(&tavily);
@@ -383,6 +403,24 @@ pub async fn set_web_search_api_keys(
         .or_else(|| Some(DEFAULT_PUBMED_EMAIL.to_string()));
     g.pubmed_tool_name = normalize_optional_search_key_field(pubmed_tool_name)
         .or_else(|| Some(DEFAULT_PUBMED_TOOL_NAME.to_string()));
+    if let Some(values) = normalize_query_setting_list(
+        query_dataset_types,
+        crate::domain::tools::QUERY_DATASET_TYPE_IDS,
+    ) {
+        g.query_dataset_types = Some(values);
+    }
+    if let Some(values) = normalize_query_setting_list(
+        query_dataset_sources,
+        crate::domain::tools::QUERY_DATASET_SOURCE_IDS,
+    ) {
+        g.query_dataset_sources = Some(values);
+    }
+    if let Some(values) = normalize_query_setting_list(
+        query_knowledge_sources,
+        crate::domain::tools::QUERY_KNOWLEDGE_SOURCE_IDS,
+    ) {
+        g.query_knowledge_sources = Some(values);
+    }
     Ok(())
 }
 
@@ -407,6 +445,9 @@ pub struct WebSearchApiKeysState {
     pub pubmed_api_key: WebSearchKeyFieldState,
     pub pubmed_email: WebSearchKeyFieldState,
     pub pubmed_tool_name: WebSearchKeyFieldState,
+    pub query_dataset_types: Vec<String>,
+    pub query_dataset_sources: Vec<String>,
+    pub query_knowledge_sources: Vec<String>,
 }
 
 fn web_search_key_field_state(key: &Option<String>) -> WebSearchKeyFieldState {
@@ -455,6 +496,9 @@ pub async fn get_web_search_api_keys_state(
                 .clone()
                 .or_else(|| Some(DEFAULT_PUBMED_TOOL_NAME.to_string())),
         ),
+        query_dataset_types: g.enabled_query_dataset_types(),
+        query_dataset_sources: g.enabled_query_dataset_sources(),
+        query_knowledge_sources: g.enabled_query_knowledge_sources(),
     })
 }
 

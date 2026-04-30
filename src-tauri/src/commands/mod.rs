@@ -11,6 +11,7 @@ pub mod citation;
 pub mod claude_import;
 pub mod context_snapshot;
 pub mod execution_envs;
+pub mod extensions;
 pub mod fs;
 pub mod git_workspace;
 pub mod integrations_settings;

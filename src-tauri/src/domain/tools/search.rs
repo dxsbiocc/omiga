@@ -40,8 +40,8 @@ const SEARCH_MAX_TIMEOUT_SECS: u64 = 30;
 pub const DESCRIPTION: &str = r#"Search across typed data-source categories and return formatted results. Web/literature/dataset/social return SerpAPI-style JSON; knowledge returns recall excerpts.
 
 - `category` is required. Categories: `literature`, `dataset` (`data` alias), `knowledge`, `web`, `social`.
-- `source` is optional and defaults to `auto`. Web sources: `auto`, `tavily`, `exa`, `firecrawl`, `parallel`, `google`, `bing`, `ddg`. Literature sources: `auto`, `pubmed`, `arxiv`, `crossref`, `openalex`, `biorxiv`, `medrxiv`, `semantic_scholar` (opt-in, API key required). Dataset sources: `auto`, `geo`, `ena`, `ena_run`, `ena_experiment`, `ena_sample`, `ena_analysis`, `ena_assembly`, `ena_sequence`. Knowledge sources/scopes: `all`, `wiki`, `implicit`, `long_term`, `permanent`, `sources`. Social sources: `wechat` (opt-in).
-- `subcategory` is optional. Dataset subcategories include `expression`, `sequencing`, `genomics`, `sample_metadata`, and `multi_omics`; when `source=auto`, supported subcategories route to GEO/ENA automatically.
+- `source` is optional and defaults to `auto`. Web sources: `auto`, `tavily`, `exa`, `firecrawl`, `parallel`, `google`, `bing`, `ddg`. Literature sources: `auto`, `pubmed`, `arxiv`, `crossref`, `openalex`, `biorxiv`, `medrxiv`, `semantic_scholar` (opt-in, API key required). Dataset sources: `auto`, `geo`, `ena`, `ena_run`, `ena_experiment`, `ena_sample`, `ena_analysis`, `ena_assembly`, `ena_sequence`, `cbioportal`. Knowledge sources/scopes: `all`, `wiki`, `implicit`, `long_term`, `permanent`, `sources`. Social sources: `wechat` (opt-in).
+- `subcategory` is optional. Prefer `query(category="dataset", operation="search", …)` for structured dataset/database lookup; this dataset path remains as a compatibility search wrapper.
 - `source=auto` uses Settings → Search priority for web, PubMed for literature, and a combined GEO + ENA query for dataset.
 - Results are returned as formatted JSON with a top-level `results` array and SerpAPI-style fields (`position`, `title`, `name`, `link`, `url`, `displayed_link`, `favicon`, `snippet`, `metadata`).
 - Optional `allowed_domains` or `blocked_domains` filter web result URLs (not both).
@@ -1723,6 +1723,80 @@ fn normalized_subcategory(value: Option<&str>) -> Option<String> {
         .map(|s| s.to_ascii_lowercase().replace(['-', ' '], "_"))
 }
 
+async fn dataset_auto_search(
+    ctx: &ToolContext,
+    client: &crate::domain::search::data::PublicDataClient,
+    data_args: crate::domain::search::data::DataSearchArgs,
+) -> Result<crate::domain::search::data::DataSearchResponse, ToolError> {
+    let enabled = ctx.web_search_api_keys.enabled_query_dataset_sources();
+    let mut sources = Vec::new();
+    if enabled.iter().any(|source| source == "geo") {
+        sources.push(crate::domain::search::data::PublicDataSource::Geo);
+    }
+    if enabled.iter().any(|source| source == "ena") {
+        sources.push(crate::domain::search::data::PublicDataSource::EnaStudy);
+    }
+    if enabled.iter().any(|source| source == "cbioportal") {
+        sources.push(crate::domain::search::data::PublicDataSource::CbioPortal);
+    }
+    if sources.is_empty() {
+        return Ok(crate::domain::search::data::DataSearchResponse {
+            query: data_args.query.trim().to_string(),
+            source: "auto".to_string(),
+            total: Some(0),
+            results: Vec::new(),
+            notes: vec!["All dataset sources are disabled in Settings → Search.".to_string()],
+        });
+    }
+    let mut results = Vec::new();
+    let mut total = 0u64;
+    let mut saw_total = false;
+    let mut notes = vec!["Combined enabled dataset-source search".to_string()];
+    for source in sources {
+        let response = tokio::select! {
+            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+            r = client.search(source, data_args.clone()) => r,
+        };
+        match response {
+            Ok(response) => {
+                if let Some(count) = response.total {
+                    total = total.saturating_add(count);
+                    saw_total = true;
+                }
+                notes.extend(response.notes);
+                results.extend(response.results);
+            }
+            Err(err) => notes.push(format!("{} source failed: {err}", source.as_str())),
+        }
+    }
+    results.truncate(data_args.normalized_max_results() as usize);
+    Ok(crate::domain::search::data::DataSearchResponse {
+        query: data_args.query.trim().to_string(),
+        source: "auto".to_string(),
+        total: saw_total.then_some(total),
+        results,
+        notes,
+    })
+}
+
+fn dataset_subcategory_id(subcategory: Option<&str>) -> Result<Option<&'static str>, ToolError> {
+    let Some(subcategory) = subcategory else {
+        return Ok(None);
+    };
+    match subcategory {
+        "expression" | "gene_expression" | "transcriptomics" | "transcriptome" => {
+            Ok(Some("expression"))
+        }
+        "sequencing" | "sequence_reads" | "raw_reads" | "reads" | "sra" => Ok(Some("sequencing")),
+        "genomics" | "genome" | "genomes" | "assembly" | "assemblies" => Ok(Some("genomics")),
+        "sample_metadata" | "sample" | "samples" | "metadata" => Ok(Some("sample_metadata")),
+        "multi_omics" | "multiomics" | "projects" | "project" => Ok(Some("multi_omics")),
+        other => Err(ToolError::InvalidArguments {
+            message: format!("Unsupported dataset subcategory: {other}"),
+        }),
+    }
+}
+
 fn dataset_source_for_subcategory(
     subcategory: Option<&str>,
 ) -> Result<Option<crate::domain::search::data::PublicDataSource>, ToolError> {
@@ -1733,20 +1807,18 @@ fn dataset_source_for_subcategory(
         "expression" | "gene_expression" | "transcriptomics" | "transcriptome" => {
             Ok(Some(crate::domain::search::data::PublicDataSource::Geo))
         }
-        "sequencing" | "sequence_reads" | "raw_reads" | "reads" | "sra" => Ok(Some(
-            crate::domain::search::data::PublicDataSource::EnaRun,
-        )),
+        "sequencing" | "sequence_reads" | "raw_reads" | "reads" | "sra" => {
+            Ok(Some(crate::domain::search::data::PublicDataSource::EnaRun))
+        }
         "genomics" | "genome" | "genomes" | "assembly" | "assemblies" => Ok(Some(
             crate::domain::search::data::PublicDataSource::EnaAssembly,
         )),
         "sample_metadata" | "sample" | "samples" | "metadata" => Ok(Some(
             crate::domain::search::data::PublicDataSource::EnaSample,
         )),
-        "multi_omics" | "multiomics" | "projects" | "project" => {
-            Err(ToolError::InvalidArguments {
-                message: "Dataset subcategory `multi_omics` is not connected yet; use source=geo or source=ena, or search(category=web) for TCGA/ICGC portals.".to_string(),
-            })
-        }
+        "multi_omics" | "multiomics" | "projects" | "project" => Ok(Some(
+            crate::domain::search::data::PublicDataSource::CbioPortal,
+        )),
         other => Err(ToolError::InvalidArguments {
             message: format!("Unsupported dataset subcategory: {other}"),
         }),
@@ -2052,57 +2124,99 @@ impl super::ToolImpl for SearchTool {
                 )
                 .await
             }
-            "data" => match source.as_str() {
-                "auto" => {
-                    let client =
-                        crate::domain::search::data::PublicDataClient::from_tool_context(ctx)
-                            .map_err(|message| ToolError::ExecutionFailed { message })?;
-                    let data_args = crate::domain::search::data::DataSearchArgs {
-                        query: args.query.trim().to_string(),
-                        max_results: args.max_results,
-                    };
-                    let response = if let Some(source_kind) =
-                        dataset_source_for_subcategory(subcategory.as_deref())?
+            "data" => {
+                if let Some(type_id) = dataset_subcategory_id(subcategory.as_deref())? {
+                    if !ctx
+                        .web_search_api_keys
+                        .is_query_dataset_type_enabled(type_id)
                     {
-                        tokio::select! {
-                            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                            r = client.search(source_kind, data_args) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
-                        }
-                    } else {
-                        tokio::select! {
-                            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                            r = client.search_auto(data_args) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
-                        }
-                    };
-                    Ok(json_stream(
-                        crate::domain::search::data::search_response_to_json(&response),
-                    ))
+                        return Ok(json_stream(structured_error_json(
+                            "source_disabled",
+                            "data",
+                            &source,
+                            format!("data.{type_id} is disabled. Enable it in Settings → Search.",),
+                        )));
+                    }
                 }
-                source
-                    if crate::domain::search::data::PublicDataSource::parse(source).is_some() =>
-                {
-                    let source_kind = crate::domain::search::data::PublicDataSource::parse(source)
-                        .ok_or_else(|| ToolError::InvalidArguments {
-                            message: format!("Unsupported data search source: {source}"),
-                        })?;
-                    let client =
-                        crate::domain::search::data::PublicDataClient::from_tool_context(ctx)
-                            .map_err(|message| ToolError::ExecutionFailed { message })?;
-                    let response = tokio::select! {
-                        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                        r = client.search(source_kind, crate::domain::search::data::DataSearchArgs {
+                match source.as_str() {
+                    "auto" => {
+                        let client =
+                            crate::domain::search::data::PublicDataClient::from_tool_context(ctx)
+                                .map_err(|message| ToolError::ExecutionFailed { message })?;
+                        let data_args = crate::domain::search::data::DataSearchArgs {
                             query: args.query.trim().to_string(),
                             max_results: args.max_results,
-                        }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
-                    };
-                    Ok(json_stream(
-                        crate::domain::search::data::search_response_to_json(&response),
-                    ))
+                        };
+                        let response = if let Some(source_kind) =
+                            dataset_source_for_subcategory(subcategory.as_deref())?
+                        {
+                            if !ctx
+                                .web_search_api_keys
+                                .is_query_dataset_source_enabled(source_kind.as_str())
+                            {
+                                return Ok(json_stream(structured_error_json(
+                                    "source_disabled",
+                                    "data",
+                                    source_kind.as_str(),
+                                    format!(
+                                        "data.{} is disabled. Enable it in Settings → Search.",
+                                        source_kind.as_str()
+                                    ),
+                                )));
+                            }
+                            tokio::select! {
+                                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                                r = client.search(source_kind, data_args) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+                            }
+                        } else {
+                            dataset_auto_search(ctx, &client, data_args).await?
+                        };
+                        Ok(json_stream(
+                            crate::domain::search::data::search_response_to_json(&response),
+                        ))
+                    }
+                    source
+                        if crate::domain::search::data::PublicDataSource::parse(source)
+                            .is_some() =>
+                    {
+                        let source_kind =
+                            crate::domain::search::data::PublicDataSource::parse(source)
+                                .ok_or_else(|| ToolError::InvalidArguments {
+                                    message: format!("Unsupported data search source: {source}"),
+                                })?;
+                        if !ctx
+                            .web_search_api_keys
+                            .is_query_dataset_source_enabled(source_kind.as_str())
+                        {
+                            return Ok(json_stream(structured_error_json(
+                                "source_disabled",
+                                "data",
+                                source_kind.as_str(),
+                                format!(
+                                    "data.{} is disabled. Enable it in Settings → Search.",
+                                    source_kind.as_str()
+                                ),
+                            )));
+                        }
+                        let client =
+                            crate::domain::search::data::PublicDataClient::from_tool_context(ctx)
+                                .map_err(|message| ToolError::ExecutionFailed { message })?;
+                        let response = tokio::select! {
+                            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                            r = client.search(source_kind, crate::domain::search::data::DataSearchArgs {
+                                query: args.query.trim().to_string(),
+                                max_results: args.max_results,
+                            }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+                        };
+                        Ok(json_stream(
+                            crate::domain::search::data::search_response_to_json(&response),
+                        ))
+                    }
+                    other => Err(ToolError::InvalidArguments {
+                        message: format!("Unsupported data search source: {other}"),
+                    }),
                 }
-                other => Err(ToolError::InvalidArguments {
-                    message: format!("Unsupported data search source: {other}"),
-                }),
-            },
+            }
             "social" => match source.as_str() {
                 "auto" | "wechat" => {
                     if !ctx.web_search_api_keys.wechat_search_enabled {

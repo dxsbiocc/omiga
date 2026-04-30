@@ -51,6 +51,7 @@ import { ThemeAppearancePanel } from "./ThemeAppearancePanel";
 import { ProviderManager } from "./ProviderManager";
 import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 import { RuntimeConstraintsPanel } from "./RuntimeConstraintsPanel";
+import { VscodeExtensionsPanel } from "./VscodeExtensionsPanel";
 import {
   DEFAULT_WEB_SEARCH_METHODS,
   moveItemToIndex,
@@ -159,6 +160,15 @@ type SearchMethodDragState = {
   overIndex: number;
 };
 
+type QuerySourceOption = {
+  id: string;
+  label: string;
+  helper: string;
+  defaultEnabled: boolean;
+  available: boolean;
+  badge?: string;
+};
+
 const SEARCH_METHOD_OPTIONS: SearchMethodOption[] = [
   {
     id: "tavily",
@@ -218,7 +228,7 @@ const SEARCH_SOURCE_TABS: {
   {
     id: "knowledge",
     label: "知识库",
-    description: "本地记忆",
+    description: "本地 / 数据库",
     icon: InfoOutlined,
   },
   {
@@ -235,61 +245,190 @@ const SEARCH_SOURCE_TABS: {
   },
 ];
 
-const DATASET_TYPE_OPTIONS = [
+const DATASET_TYPE_OPTIONS: QuerySourceOption[] = [
   {
+    id: "expression",
     label: "Expression",
     helper: "表达矩阵 / 芯片 / RNA-seq 数据集",
-    checked: true,
+    defaultEnabled: true,
+    available: true,
   },
   {
+    id: "sequencing",
     label: "Sequencing",
     helper: "原始 reads / run / experiment",
-    checked: true,
+    defaultEnabled: true,
+    available: true,
   },
   {
+    id: "genomics",
     label: "Genomics",
     helper: "assembly / sequence / annotation 元数据",
-    checked: true,
+    defaultEnabled: true,
+    available: true,
   },
   {
+    id: "sample_metadata",
     label: "Sample metadata",
     helper: "样本、组织、物种、采样地点等元数据",
-    checked: true,
+    defaultEnabled: true,
+    available: true,
   },
   {
+    id: "multi_omics",
     label: "Multi-omics / Projects",
-    helper: "TCGA / ICGC 等项目级数据源待接入",
-    checked: false,
+    helper: "TCGA / cancer genomics 项目级数据",
+    defaultEnabled: false,
+    available: true,
   },
 ];
 
-const DATASET_SOURCE_OPTIONS = [
+const DATASET_SOURCE_OPTIONS: QuerySourceOption[] = [
   {
+    id: "geo",
     label: "GEO",
     helper: "Expression / NCBI GEO DataSets",
-    checked: true,
+    defaultEnabled: true,
+    available: true,
   },
   {
+    id: "ena",
     label: "ENA",
     helper: "Sequencing / Genomics / Sample metadata",
-    checked: true,
+    defaultEnabled: true,
+    available: true,
   },
   {
+    id: "cbioportal",
+    label: "cBioPortal",
+    helper: "Cancer genomics / TCGA studies",
+    defaultEnabled: false,
+    available: true,
+  },
+  {
+    id: "gtex",
     label: "GTEx",
     helper: "待接入",
-    checked: false,
+    defaultEnabled: false,
+    available: false,
+    badge: "待接入",
   },
   {
+    id: "arrayexpress",
     label: "ArrayExpress",
     helper: "待接入",
-    checked: false,
+    defaultEnabled: false,
+    available: false,
+    badge: "待接入",
   },
   {
+    id: "biosample",
     label: "BioSample",
     helper: "待接入",
-    checked: false,
+    defaultEnabled: false,
+    available: false,
+    badge: "待接入",
   },
 ];
+
+const KNOWLEDGE_LOCAL_OPTIONS = [
+  ["Project wiki", "项目知识库与文档化笔记"],
+  ["Session memory", "历史会话与隐式记忆"],
+  ["Long-term", "沉淀后的长期偏好、决策和经验"],
+  ["Sources", "过去记录过的网页、论文与数据来源"],
+];
+
+const KNOWLEDGE_DATABASE_OPTIONS: QuerySourceOption[] = [
+  {
+    id: "ncbi_gene",
+    label: "NCBI Gene",
+    helper: "Gene ID / symbol / organism；官方 E-utilities",
+    defaultEnabled: true,
+    available: true,
+    badge: "无需 API",
+  },
+  {
+    id: "ensembl",
+    label: "Ensembl",
+    helper: "待接入",
+    defaultEnabled: false,
+    available: false,
+    badge: "待接入",
+  },
+  {
+    id: "uniprot",
+    label: "UniProt",
+    helper: "待接入",
+    defaultEnabled: false,
+    available: false,
+    badge: "待接入",
+  },
+];
+
+const DEFAULT_QUERY_DATASET_TYPES = DATASET_TYPE_OPTIONS.filter(
+  (option) => option.defaultEnabled,
+).map((option) => option.id);
+const DEFAULT_QUERY_DATASET_SOURCES = DATASET_SOURCE_OPTIONS.filter(
+  (option) => option.defaultEnabled,
+).map((option) => option.id);
+const DEFAULT_QUERY_KNOWLEDGE_SOURCES = KNOWLEDGE_DATABASE_OPTIONS.filter(
+  (option) => option.defaultEnabled,
+).map((option) => option.id);
+
+function normalizeQuerySelection(
+  raw: unknown,
+  options: QuerySourceOption[],
+  fallback: string[],
+): string[] {
+  if (!Array.isArray(raw)) return fallback;
+  const selected = new Set(
+    raw
+      .map((value) => String(value).trim().toLowerCase().replace(/[-\s]+/g, "_"))
+      .filter(Boolean),
+  );
+  return options
+    .filter((option) => option.available && selected.has(option.id))
+    .map((option) => option.id);
+}
+
+function toggleQuerySelection(
+  current: string[],
+  id: string,
+  checked: boolean,
+): string[] {
+  if (checked) {
+    return current.includes(id) ? current : [...current, id];
+  }
+  return current.filter((item) => item !== id);
+}
+
+function SourceStatusDot({
+  active,
+  color = "success",
+}: {
+  active: boolean;
+  color?: "success" | "info";
+}) {
+  return (
+    <Box
+      aria-hidden
+      sx={(theme) => {
+        const main =
+          color === "info" ? theme.palette.info.main : theme.palette.success.main;
+        const muted = alpha(theme.palette.text.secondary, 0.4);
+        return {
+          width: 10,
+          height: 10,
+          mt: 0.7,
+          borderRadius: "50%",
+          bgcolor: active ? main : "transparent",
+          border: `2px solid ${active ? main : muted}`,
+          boxShadow: active ? `0 0 0 3px ${alpha(main, 0.12)}` : "none",
+        };
+      }}
+    />
+  );
+}
 
 function searchMethodDragTransform(
   rowIndex: number,
@@ -728,6 +867,15 @@ export function Settings({
   const [webSearchMethods, setWebSearchMethods] = useState<
     WebSearchMethod[]
   >(DEFAULT_WEB_SEARCH_METHODS);
+  const [queryDatasetTypes, setQueryDatasetTypes] = useState<string[]>(
+    DEFAULT_QUERY_DATASET_TYPES,
+  );
+  const [queryDatasetSources, setQueryDatasetSources] = useState<string[]>(
+    DEFAULT_QUERY_DATASET_SOURCES,
+  );
+  const [queryKnowledgeSources, setQueryKnowledgeSources] = useState<string[]>(
+    DEFAULT_QUERY_KNOWLEDGE_SOURCES,
+  );
   const [activeSearchSourceTab, setActiveSearchSourceTab] =
     useState<SearchSourceTab>("literature");
   const [searchMethodDrag, setSearchMethodDrag] =
@@ -798,6 +946,27 @@ export function Settings({
           setWebUseProxy(parseSettingBool(j.webUseProxy, true));
           setWebSearchEngine(normalizeWebSearchEngine(j.webSearchEngine));
           setWebSearchMethods(normalizeWebSearchMethods(j.webSearchMethods));
+          setQueryDatasetTypes(
+            normalizeQuerySelection(
+              j.queryDatasetTypes,
+              DATASET_TYPE_OPTIONS,
+              DEFAULT_QUERY_DATASET_TYPES,
+            ),
+          );
+          setQueryDatasetSources(
+            normalizeQuerySelection(
+              j.queryDatasetSources,
+              DATASET_SOURCE_OPTIONS,
+              DEFAULT_QUERY_DATASET_SOURCES,
+            ),
+          );
+          setQueryKnowledgeSources(
+            normalizeQuerySelection(
+              j.queryKnowledgeSources,
+              KNOWLEDGE_DATABASE_OPTIONS,
+              DEFAULT_QUERY_KNOWLEDGE_SOURCES,
+            ),
+          );
         } catch {
           /* ignore */
         }
@@ -858,6 +1027,9 @@ export function Settings({
         pubmedApiKey: string;
         pubmedEmail: string;
         pubmedToolName: string;
+        queryDatasetTypes: string[];
+        queryDatasetSources: string[];
+        queryKnowledgeSources: string[];
       };
       if (rawWebKeys) {
         try {
@@ -874,6 +1046,21 @@ export function Settings({
             pubmedApiKey: String(j.pubmedApiKey ?? "").trim(),
             pubmedEmail: String(j.pubmedEmail ?? DEFAULT_PUBMED_EMAIL).trim(),
             pubmedToolName: String(j.pubmedToolName ?? DEFAULT_PUBMED_TOOL_NAME).trim(),
+            queryDatasetTypes: normalizeQuerySelection(
+              j.queryDatasetTypes,
+              DATASET_TYPE_OPTIONS,
+              DEFAULT_QUERY_DATASET_TYPES,
+            ),
+            queryDatasetSources: normalizeQuerySelection(
+              j.queryDatasetSources,
+              DATASET_SOURCE_OPTIONS,
+              DEFAULT_QUERY_DATASET_SOURCES,
+            ),
+            queryKnowledgeSources: normalizeQuerySelection(
+              j.queryKnowledgeSources,
+              KNOWLEDGE_DATABASE_OPTIONS,
+              DEFAULT_QUERY_KNOWLEDGE_SOURCES,
+            ),
           };
         } catch {
           wsPayload = {
@@ -888,6 +1075,9 @@ export function Settings({
             pubmedApiKey: "",
             pubmedEmail: DEFAULT_PUBMED_EMAIL,
             pubmedToolName: DEFAULT_PUBMED_TOOL_NAME,
+            queryDatasetTypes: DEFAULT_QUERY_DATASET_TYPES,
+            queryDatasetSources: DEFAULT_QUERY_DATASET_SOURCES,
+            queryKnowledgeSources: DEFAULT_QUERY_KNOWLEDGE_SOURCES,
           };
         }
       } else {
@@ -908,6 +1098,9 @@ export function Settings({
           pubmedApiKey: "",
           pubmedEmail: DEFAULT_PUBMED_EMAIL,
           pubmedToolName: DEFAULT_PUBMED_TOOL_NAME,
+          queryDatasetTypes: DEFAULT_QUERY_DATASET_TYPES,
+          queryDatasetSources: DEFAULT_QUERY_DATASET_SOURCES,
+          queryKnowledgeSources: DEFAULT_QUERY_KNOWLEDGE_SOURCES,
         };
       }
       if (
@@ -1083,6 +1276,9 @@ export function Settings({
         pubmedApiKey: pubmedApiKey.trim(),
         pubmedEmail: pubmedEmail.trim() || DEFAULT_PUBMED_EMAIL,
         pubmedToolName: pubmedToolName.trim() || DEFAULT_PUBMED_TOOL_NAME,
+        queryDatasetTypes,
+        queryDatasetSources,
+        queryKnowledgeSources,
       };
       await invoke("set_web_search_api_keys", {
         tavily: ws.tavily,
@@ -1096,6 +1292,9 @@ export function Settings({
         pubmedApiKey: ws.pubmedApiKey,
         pubmedEmail: ws.pubmedEmail,
         pubmedToolName: ws.pubmedToolName,
+        queryDatasetTypes: ws.queryDatasetTypes,
+        queryDatasetSources: ws.queryDatasetSources,
+        queryKnowledgeSources: ws.queryKnowledgeSources,
       });
       await invoke("save_global_settings_to_config", {
         webUseProxy,
@@ -2195,37 +2394,61 @@ export function Settings({
                               数据类型
                             </Typography>
                             <Stack spacing={0.75}>
-                              {DATASET_TYPE_OPTIONS.map((item) => (
-                                <Box
-                                  key={item.label}
+                              {DATASET_TYPE_OPTIONS.map((item) => {
+                                const checked = queryDatasetTypes.includes(item.id);
+                                return (
+                                  <Box
+                                    key={item.id}
+                                    component="label"
                                   sx={{
                                     display: "grid",
-                                    gridTemplateColumns: "24px minmax(0, 1fr)",
-                                    columnGap: 0.75,
+                                      gridTemplateColumns: "32px minmax(0, 1fr)",
+                                      columnGap: 0.5,
                                     alignItems: "start",
+                                      cursor: item.available ? "pointer" : "not-allowed",
                                   }}
                                 >
-                                  <Checkbox
-                                    checked={item.checked}
-                                    readOnly
-                                    disableRipple
-                                    tabIndex={-1}
-                                    size="small"
-                                    sx={(theme) => ({
-                                      p: 0,
-                                      color: alpha(theme.palette.text.secondary, 0.55),
-                                      "&.Mui-checked": { color: "success.main" },
-                                    })}
-                                  />
+                                    <Checkbox
+                                      size="small"
+                                      checked={checked}
+                                      disabled={!item.available || isLoading}
+                                      onChange={(_, nextChecked) =>
+                                        setQueryDatasetTypes((current) =>
+                                          toggleQuerySelection(
+                                            current,
+                                            item.id,
+                                            nextChecked,
+                                          ),
+                                        )
+                                      }
+                                      sx={{ p: 0.25, mt: -0.1 }}
+                                    />
                                   <Box sx={{ minWidth: 0 }}>
-                                    <Typography
-                                      variant="body2"
-                                      fontWeight={700}
-                                      color={item.checked ? "text.primary" : "text.secondary"}
-                                      noWrap
-                                    >
-                                      {item.label}
-                                    </Typography>
+                                      <Stack
+                                        direction="row"
+                                        spacing={0.75}
+                                        alignItems="center"
+                                        useFlexGap
+                                      >
+                                        <Typography
+                                          variant="body2"
+                                          fontWeight={700}
+                                          color={
+                                            checked ? "text.primary" : "text.secondary"
+                                          }
+                                          noWrap
+                                        >
+                                          {item.label}
+                                        </Typography>
+                                        {item.badge && (
+                                          <Chip
+                                            label={item.badge}
+                                            size="small"
+                                            variant="outlined"
+                                            sx={{ height: 18, borderRadius: 999, fontSize: 10 }}
+                                          />
+                                        )}
+                                      </Stack>
                                     <Typography
                                       variant="caption"
                                       color="text.secondary"
@@ -2239,8 +2462,9 @@ export function Settings({
                                       {item.helper}
                                     </Typography>
                                   </Box>
-                                </Box>
-                              ))}
+                                  </Box>
+                                );
+                              })}
                             </Stack>
                           </Box>
 
@@ -2249,37 +2473,61 @@ export function Settings({
                               数据来源（自动匹配或可选）
                             </Typography>
                             <Stack spacing={0.75}>
-                              {DATASET_SOURCE_OPTIONS.map((item) => (
-                                <Box
-                                  key={item.label}
+                              {DATASET_SOURCE_OPTIONS.map((item) => {
+                                const checked = queryDatasetSources.includes(item.id);
+                                return (
+                                  <Box
+                                    key={item.id}
+                                    component="label"
                                   sx={{
                                     display: "grid",
-                                    gridTemplateColumns: "24px minmax(0, 1fr)",
-                                    columnGap: 0.75,
+                                      gridTemplateColumns: "32px minmax(0, 1fr)",
+                                      columnGap: 0.5,
                                     alignItems: "start",
+                                      cursor: item.available ? "pointer" : "not-allowed",
                                   }}
                                 >
-                                  <Checkbox
-                                    checked={item.checked}
-                                    readOnly
-                                    disableRipple
-                                    tabIndex={-1}
-                                    size="small"
-                                    sx={(theme) => ({
-                                      p: 0,
-                                      color: alpha(theme.palette.text.secondary, 0.55),
-                                      "&.Mui-checked": { color: "success.main" },
-                                    })}
-                                  />
+                                    <Checkbox
+                                      size="small"
+                                      checked={checked}
+                                      disabled={!item.available || isLoading}
+                                      onChange={(_, nextChecked) =>
+                                        setQueryDatasetSources((current) =>
+                                          toggleQuerySelection(
+                                            current,
+                                            item.id,
+                                            nextChecked,
+                                          ),
+                                        )
+                                      }
+                                      sx={{ p: 0.25, mt: -0.1 }}
+                                    />
                                   <Box sx={{ minWidth: 0 }}>
-                                    <Typography
-                                      variant="body2"
-                                      fontWeight={700}
-                                      color={item.checked ? "text.primary" : "text.secondary"}
-                                      noWrap
-                                    >
-                                      {item.label}
-                                    </Typography>
+                                      <Stack
+                                        direction="row"
+                                        spacing={0.75}
+                                        alignItems="center"
+                                        useFlexGap
+                                      >
+                                        <Typography
+                                          variant="body2"
+                                          fontWeight={700}
+                                          color={
+                                            checked ? "text.primary" : "text.secondary"
+                                          }
+                                          noWrap
+                                        >
+                                          {item.label}
+                                        </Typography>
+                                        {item.badge && (
+                                          <Chip
+                                            label={item.badge}
+                                            size="small"
+                                            variant="outlined"
+                                            sx={{ height: 18, borderRadius: 999, fontSize: 10 }}
+                                          />
+                                        )}
+                                      </Stack>
                                     <Typography
                                       variant="caption"
                                       color="text.secondary"
@@ -2293,8 +2541,9 @@ export function Settings({
                                       {item.helper}
                                     </Typography>
                                   </Box>
-                                </Box>
-                              ))}
+                                  </Box>
+                                );
+                              })}
                             </Stack>
                           </Box>
                         </Box>
@@ -2303,21 +2552,18 @@ export function Settings({
                           <AccordionSummary expandIcon={<ExpandMore />}>
                             <Box>
                               <Typography variant="body2" fontWeight={700}>
-                                Dataset 路由
+                                Query 路由
                               </Typography>
                               <Typography variant="caption" color="text.secondary">
-                                使用子分类自动匹配 GEO / ENA；也可显式指定 source。
+                                子分类自动匹配 GEO / ENA；旧 search / fetch 入口保留兼容。
                               </Typography>
                             </Box>
                           </AccordionSummary>
                           <AccordionDetails>
                             <Stack spacing={1}>
                               <Typography variant="caption" color="text.secondary">
-                                常规调用：
-                                <code> search(category="dataset", subcategory="expression", query="...")</code>
-                                ，或显式指定
-                                <code> source="geo|ena"</code>。旧的
-                                <code> category="data"</code> 仍兼容。
+                                数据集检索已迁移到结构化 <code>query</code> 入口；具体
+                                category、source、operation 和参数以工具 schema 为准。
                               </Typography>
                               <Typography variant="caption" color="text.secondary">
                                 ENA 统一作为前端来源展示；内部会按需要路由到 Study / Run /
@@ -2351,38 +2597,156 @@ export function Settings({
 
                     {activeSearchSourceTab === "knowledge" && (
                       <Box>
-                        <Alert severity="info" sx={{ mb: 2 }}>
-                          知识库是本地检索层，不需要 API key。优先使用
-                          <code> recall(query="...")</code>；也支持
-                          <code> search(category="knowledge", query="...")</code> 作为统一入口。
-                        </Alert>
                         <Box
                           sx={(theme) => ({
                             display: "grid",
-                            gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
-                            gap: 1,
-                            p: 1.5,
-                            border: `1px solid ${theme.palette.divider}`,
+                            gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" },
+                            gap: 2,
+                            mb: 2,
+                            p: 2,
+                            border: `1px solid ${alpha(theme.palette.info.main, 0.18)}`,
                             borderRadius: 2,
-                            bgcolor: alpha(theme.palette.background.paper, 0.72),
+                            bgcolor: alpha(theme.palette.info.main, 0.05),
                           })}
                         >
-                          {[
-                            ["Project wiki", "项目知识库与文档化笔记"],
-                            ["Session memory", "历史会话与隐式记忆"],
-                            ["Long-term", "沉淀后的长期偏好、决策和经验"],
-                            ["Sources", "过去 fetch / 记录过的网页与论文来源"],
-                          ].map(([label, helper]) => (
-                            <Box key={label} sx={{ minWidth: 0 }}>
-                              <Typography variant="body2" fontWeight={700} noWrap>
-                                {label}
+                          <Box>
+                            <Typography variant="body2" fontWeight={800} sx={{ mb: 1 }}>
+                              本地知识
+                            </Typography>
+                            <Stack spacing={0.75}>
+                              {KNOWLEDGE_LOCAL_OPTIONS.map(([label, helper]) => (
+                                <Box
+                                  key={label}
+                                  sx={{
+                                    display: "grid",
+                                    gridTemplateColumns: "24px minmax(0, 1fr)",
+                                    columnGap: 0.75,
+                                    alignItems: "start",
+                                  }}
+                                >
+                                  <SourceStatusDot active color="info" />
+                                  <Box sx={{ minWidth: 0 }}>
+                                    <Typography variant="body2" fontWeight={700} noWrap>
+                                      {label}
+                                    </Typography>
+                                    <Typography
+                                      variant="caption"
+                                      color="text.secondary"
+                                      sx={{
+                                        display: "-webkit-box",
+                                        overflow: "hidden",
+                                        WebkitBoxOrient: "vertical",
+                                        WebkitLineClamp: 1,
+                                      }}
+                                    >
+                                      {helper}
+                                    </Typography>
+                                  </Box>
+                                </Box>
+                              ))}
+                            </Stack>
+                          </Box>
+
+                          <Box>
+                            <Typography variant="body2" fontWeight={800} sx={{ mb: 1 }}>
+                              结构化数据库
+                            </Typography>
+                            <Stack spacing={0.75}>
+                              {KNOWLEDGE_DATABASE_OPTIONS.map((item) => {
+                                const checked = queryKnowledgeSources.includes(item.id);
+                                return (
+                                  <Box
+                                    key={item.id}
+                                    component="label"
+                                  sx={{
+                                    display: "grid",
+                                      gridTemplateColumns: "32px minmax(0, auto)",
+                                      columnGap: 0.5,
+                                    alignItems: "start",
+                                      cursor: item.available ? "pointer" : "not-allowed",
+                                  }}
+                                >
+                                    <Checkbox
+                                      size="small"
+                                      checked={checked}
+                                      disabled={!item.available || isLoading}
+                                      onChange={(_, nextChecked) =>
+                                        setQueryKnowledgeSources((current) =>
+                                          toggleQuerySelection(
+                                            current,
+                                            item.id,
+                                            nextChecked,
+                                          ),
+                                        )
+                                      }
+                                      sx={{ p: 0.25, mt: -0.1 }}
+                                    />
+                                  <Box sx={{ minWidth: 0 }}>
+                                    <Stack
+                                      direction="row"
+                                      spacing={0.75}
+                                      alignItems="center"
+                                      useFlexGap
+                                      flexWrap="wrap"
+                                    >
+                                      <Typography
+                                        variant="body2"
+                                        fontWeight={700}
+                                        color={
+                                            checked ? "text.primary" : "text.secondary"
+                                        }
+                                        noWrap
+                                      >
+                                        {item.label}
+                                      </Typography>
+                                        {item.badge && (
+                                        <Chip
+                                            label={item.badge}
+                                          size="small"
+                                            color={checked ? "success" : "default"}
+                                          variant="outlined"
+                                          sx={{ height: 20, borderRadius: 999, fontSize: 11 }}
+                                        />
+                                      )}
+                                    </Stack>
+                                    <Typography
+                                      variant="caption"
+                                      color="text.secondary"
+                                      sx={{
+                                        display: "-webkit-box",
+                                        overflow: "hidden",
+                                        WebkitBoxOrient: "vertical",
+                                        WebkitLineClamp: 1,
+                                      }}
+                                    >
+                                      {item.helper}
+                                    </Typography>
+                                  </Box>
+                                  </Box>
+                                );
+                              })}
+                            </Stack>
+                          </Box>
+                        </Box>
+
+                        <Accordion defaultExpanded disableGutters>
+                          <AccordionSummary expandIcon={<ExpandMore />}>
+                            <Box>
+                              <Typography variant="body2" fontWeight={700}>
+                                Knowledge 路由
                               </Typography>
                               <Typography variant="caption" color="text.secondary">
-                                {helper}
+                                本地知识优先走 recall；外部结构化知识库走 query。
                               </Typography>
                             </Box>
-                          ))}
-                        </Box>
+                          </AccordionSummary>
+                          <AccordionDetails>
+                            <Typography variant="caption" color="text.secondary">
+                              具体数据库 source、operation 和参数由工具 schema 与路由器维护；
+                              system prompt 只保留工具选择策略。
+                            </Typography>
+                          </AccordionDetails>
+                        </Accordion>
                       </Box>
                     )}
 
@@ -2468,17 +2832,7 @@ export function Settings({
             )}
 
             {activeTab === 4 && (
-              <Box>
-                <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
-                  In-app plugin management (install, enable, and configure
-                  extensions for Omiga) is planned. Until then, use the host
-                  environment and project tooling you already rely on alongside
-                  Omiga.
-                </Alert>
-                <Typography variant="body2" color="text.secondary">
-                  Plugin-related options will appear here in a future release.
-                </Typography>
-              </Box>
+              <VscodeExtensionsPanel />
             )}
 
             {activeTab === 5 && (
