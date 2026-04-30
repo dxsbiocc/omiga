@@ -5,7 +5,9 @@
 //! 会话快照在初始化时捕获一次，每个命令前重新加载
 //! CWD 通过 stdout 标记或临时文件持久化
 
-use super::types::{ExecOptions, ExecResult, ExecutionError, ProcessHandle};
+use super::types::{
+    ExecOptions, ExecResult, ExecutionError, ExternalTerminalCommand, ProcessHandle,
+};
 use async_trait::async_trait;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
@@ -65,6 +67,14 @@ pub trait BaseEnvironment: Send + Sync {
     /// 是否在本地文件系统执行（决定是否读取本地 cwd 文件）
     fn is_local_filesystem(&self) -> bool {
         false
+    }
+
+    /// Optional interactive command for opening this environment in the user's system terminal.
+    ///
+    /// Most environments execute commands through non-interactive APIs; those should return
+    /// `None` until there is a real CLI/session that can attach to the same backend.
+    fn external_terminal_command(&self) -> Option<ExternalTerminalCommand> {
+        None
     }
 
     /// 执行 bash 命令 - 子类必须实现

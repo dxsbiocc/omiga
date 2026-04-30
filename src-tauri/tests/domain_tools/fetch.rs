@@ -9,6 +9,29 @@ fn old_web_fetch_name_is_not_registered() {
     assert!(Tool::from_json_str("web_fetch", j).is_err());
 }
 
+#[test]
+fn fetch_from_json_accepts_public_literature_sources() {
+    for source in ["arxiv", "crossref", "openalex", "biorxiv", "medrxiv"] {
+        let j =
+            format!(r#"{{"category":"literature","source":"{source}","id":"10.1000/example"}}"#);
+        assert!(Tool::from_json_str("fetch", &j).is_ok(), "{source}");
+    }
+}
+
+#[test]
+fn fetch_from_json_accepts_semantic_scholar_source() {
+    let j = r#"{"category":"literature","source":"semantic_scholar","id":"DOI:10.1000/example"}"#;
+    assert!(Tool::from_json_str("fetch", j).is_ok());
+}
+
+#[test]
+fn fetch_from_json_accepts_data_sources() {
+    for (source, id) in [("geo", "GSE12345"), ("ena", "PRJEB12345")] {
+        let j = format!(r#"{{"category":"data","source":"{source}","id":"{id}"}}"#);
+        assert!(Tool::from_json_str("fetch", &j).is_ok(), "{source}");
+    }
+}
+
 #[tokio::test]
 async fn fetch_rejects_private_loopback_target() {
     let ctx = ToolContext::new(std::env::temp_dir());

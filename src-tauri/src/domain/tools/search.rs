@@ -39,9 +39,9 @@ const SEARCH_MAX_TIMEOUT_SECS: u64 = 30;
 
 pub const DESCRIPTION: &str = r#"Search across typed data-source categories and return SerpAPI-style JSON.
 
-- `category` is required. First-version categories: `web`, `literature`, `social`.
-- `source` is optional and defaults to `auto`. Web sources: `auto`, `tavily`, `exa`, `firecrawl`, `parallel`, `google`, `bing`, `ddg`. Literature sources: `auto`, `pubmed`, `arxiv`, `crossref`, `openalex`, `biorxiv`, `medrxiv`, `semantic_scholar` (opt-in, API key required). Social sources: `wechat` (opt-in).
-- `source=auto` uses Settings → Search priority for web, and PubMed for literature.
+- `category` is required. Categories: `web`, `literature`, `data`, `social`.
+- `source` is optional and defaults to `auto`. Web sources: `auto`, `tavily`, `exa`, `firecrawl`, `parallel`, `google`, `bing`, `ddg`. Literature sources: `auto`, `pubmed`, `arxiv`, `crossref`, `openalex`, `biorxiv`, `medrxiv`, `semantic_scholar` (opt-in, API key required). Data sources: `auto`, `geo`, `ena`. Social sources: `wechat` (opt-in).
+- `source=auto` uses Settings → Search priority for web, PubMed for literature, and a combined GEO + ENA query for data.
 - Results are returned as formatted JSON with a top-level `results` array and SerpAPI-style fields (`position`, `title`, `name`, `link`, `url`, `displayed_link`, `favicon`, `snippet`, `metadata`).
 - Optional `allowed_domains` or `blocked_domains` filter web result URLs (not both).
 - `max_results` (default 5, max 10) limits how many hits are returned.
@@ -1983,6 +1983,47 @@ impl super::ToolImpl for SearchTool {
                     message: format!("Unsupported literature search source: {other}"),
                 }),
             },
+            "data" => match source.as_str() {
+                "auto" => {
+                    let client =
+                        crate::domain::search::data::PublicDataClient::from_tool_context(ctx)
+                            .map_err(|message| ToolError::ExecutionFailed { message })?;
+                    let response = tokio::select! {
+                        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                        r = client.search_auto(crate::domain::search::data::DataSearchArgs {
+                            query: args.query.trim().to_string(),
+                            max_results: args.max_results,
+                        }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+                    };
+                    Ok(json_stream(
+                        crate::domain::search::data::search_response_to_json(&response),
+                    ))
+                }
+                source
+                    if crate::domain::search::data::PublicDataSource::parse(source).is_some() =>
+                {
+                    let source_kind = crate::domain::search::data::PublicDataSource::parse(source)
+                        .ok_or_else(|| ToolError::InvalidArguments {
+                            message: format!("Unsupported data search source: {source}"),
+                        })?;
+                    let client =
+                        crate::domain::search::data::PublicDataClient::from_tool_context(ctx)
+                            .map_err(|message| ToolError::ExecutionFailed { message })?;
+                    let response = tokio::select! {
+                        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                        r = client.search(source_kind, crate::domain::search::data::DataSearchArgs {
+                            query: args.query.trim().to_string(),
+                            max_results: args.max_results,
+                        }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+                    };
+                    Ok(json_stream(
+                        crate::domain::search::data::search_response_to_json(&response),
+                    ))
+                }
+                other => Err(ToolError::InvalidArguments {
+                    message: format!("Unsupported data search source: {other}"),
+                }),
+            },
             "social" => match source.as_str() {
                 "auto" | "wechat" => {
                     if !ctx.web_search_api_keys.wechat_search_enabled {
@@ -2044,11 +2085,11 @@ pub fn schema() -> ToolSchema {
             "properties": {
                 "category": {
                     "type": "string",
-                    "description": "Data-source category. First version supports web, literature, social."
+                    "description": "Data-source category. Supports web, literature, data, social."
                 },
                 "source": {
                     "type": "string",
-                    "description": "Source within the category. Defaults to auto. Examples: google, ddg, bing, tavily, pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar (opt-in), wechat (opt-in)."
+                    "description": "Source within the category. Defaults to auto. Examples: google, ddg, bing, tavily, pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar (opt-in), geo, ena, wechat (opt-in)."
                 },
                 "query": {
                     "type": "string",

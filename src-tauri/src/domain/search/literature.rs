@@ -160,6 +160,25 @@ impl PublicLiteratureClient {
         }
     }
 
+    pub async fn fetch(
+        &self,
+        source: PublicLiteratureSource,
+        identifier: &str,
+    ) -> Result<LiteraturePaper, String> {
+        let identifier = identifier.trim();
+        if identifier.is_empty() {
+            return Err(format!("{} fetch requires a non-empty id", source.as_str()));
+        }
+        match source {
+            PublicLiteratureSource::Arxiv => self.fetch_arxiv(identifier).await,
+            PublicLiteratureSource::Crossref => self.fetch_crossref(identifier).await,
+            PublicLiteratureSource::OpenAlex => self.fetch_openalex(identifier).await,
+            PublicLiteratureSource::Biorxiv | PublicLiteratureSource::Medrxiv => {
+                self.fetch_preprint(source, identifier).await
+            }
+        }
+    }
+
     async fn search_arxiv(
         &self,
         args: LiteratureSearchArgs,
@@ -200,6 +219,34 @@ impl PublicLiteratureClient {
                 .collect(),
             notes: vec!["arXiv official Atom API".to_string()],
         })
+    }
+
+    async fn fetch_arxiv(&self, identifier: &str) -> Result<LiteraturePaper, String> {
+        let arxiv_id = normalize_arxiv_identifier(identifier)
+            .ok_or_else(|| "arXiv fetch requires an arXiv id or arxiv.org URL".to_string())?;
+        let response = self
+            .http
+            .get(ARXIV_API_URL)
+            .query(&[("id_list", arxiv_id.clone())])
+            .send()
+            .await
+            .map_err(|e| format!("arXiv fetch request failed: {e}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("read arXiv fetch response: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "arXiv fetch returned HTTP {}: {}",
+                status.as_u16(),
+                truncate_chars(&body, 240)
+            ));
+        }
+        parse_arxiv_atom(&body)
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("arXiv did not return a record for `{arxiv_id}`"))
     }
 
     async fn search_crossref(
@@ -249,6 +296,37 @@ impl PublicLiteratureClient {
         })
     }
 
+    async fn fetch_crossref(&self, identifier: &str) -> Result<LiteraturePaper, String> {
+        let doi = normalize_doi(identifier);
+        if doi.is_empty() {
+            return Err("Crossref fetch requires a DOI or DOI URL".to_string());
+        }
+        let url = format!("{CROSSREF_WORKS_URL}/{}", encode_path_segment(&doi));
+        let response = self
+            .http
+            .get(url)
+            .query(&[("mailto", self.mailto.clone())])
+            .send()
+            .await
+            .map_err(|e| format!("Crossref fetch request failed: {e}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("read Crossref fetch response: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "Crossref fetch returned HTTP {}: {}",
+                status.as_u16(),
+                truncate_chars(&body, 240)
+            ));
+        }
+        let json: Json =
+            serde_json::from_str(&body).map_err(|e| format!("parse Crossref JSON: {e}"))?;
+        parse_crossref_item(json.get("message").unwrap_or(&json))
+            .ok_or_else(|| format!("Crossref did not return a parseable work for `{doi}`"))
+    }
+
     async fn search_openalex(
         &self,
         args: LiteratureSearchArgs,
@@ -290,6 +368,35 @@ impl PublicLiteratureClient {
                 .collect(),
             notes: vec!["OpenAlex Works API metadata search".to_string()],
         })
+    }
+
+    async fn fetch_openalex(&self, identifier: &str) -> Result<LiteraturePaper, String> {
+        let work_id = normalize_openalex_identifier(identifier)
+            .ok_or_else(|| "OpenAlex fetch requires an OpenAlex work id/URL or DOI".to_string())?;
+        let url = format!("{OPENALEX_WORKS_URL}/{}", encode_path_segment(&work_id));
+        let response = self
+            .http
+            .get(url)
+            .query(&[("mailto", self.mailto.clone())])
+            .send()
+            .await
+            .map_err(|e| format!("OpenAlex fetch request failed: {e}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("read OpenAlex fetch response: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "OpenAlex fetch returned HTTP {}: {}",
+                status.as_u16(),
+                truncate_chars(&body, 240)
+            ));
+        }
+        let json: Json =
+            serde_json::from_str(&body).map_err(|e| format!("parse OpenAlex JSON: {e}"))?;
+        parse_openalex_item(&json)
+            .ok_or_else(|| format!("OpenAlex did not return a parseable work for `{work_id}`"))
     }
 
     async fn search_preprint(
@@ -357,6 +464,56 @@ impl PublicLiteratureClient {
             )],
         })
     }
+
+    async fn fetch_preprint(
+        &self,
+        source: PublicLiteratureSource,
+        identifier: &str,
+    ) -> Result<LiteraturePaper, String> {
+        let doi = normalize_doi(identifier);
+        if doi.is_empty() {
+            return Err(format!(
+                "{} fetch requires a DOI or DOI URL",
+                source.as_str()
+            ));
+        }
+        let base_url = match source {
+            PublicLiteratureSource::Biorxiv => BIORXIV_API_URL,
+            PublicLiteratureSource::Medrxiv => MEDRXIV_API_URL,
+            _ => return Err(format!("unsupported preprint source {}", source.as_str())),
+        };
+        let url = format!("{base_url}/{doi}/na/json");
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("{} fetch request failed: {e}", source.as_str()))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("read {} fetch response: {e}", source.as_str()))?;
+        if !status.is_success() {
+            return Err(format!(
+                "{} fetch returned HTTP {}: {}",
+                source.as_str(),
+                status.as_u16(),
+                truncate_chars(&body, 240)
+            ));
+        }
+        let json: Json = serde_json::from_str(&body)
+            .map_err(|e| format!("parse {} JSON: {e}", source.as_str()))?;
+        parse_preprint_json(source, &json, "")
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                format!(
+                    "{} did not return a parseable work for `{doi}`",
+                    source.as_str()
+                )
+            })
+    }
 }
 
 pub fn search_response_to_json(response: &LiteratureSearchResponse) -> Json {
@@ -391,6 +548,40 @@ fn paper_to_serp_result(item: &LiteraturePaper, position: usize) -> Json {
         "favicon": item.source.favicon(),
         "snippet": paper_snippet(item),
         "id": item.id,
+        "metadata": {
+            "authors": item.authors,
+            "author_names": item.authors,
+            "article_title": item.title,
+            "paper_title": item.title,
+            "abstract": item.abstract_text,
+            "doi": item.doi,
+            "published_date": item.published_date,
+            "updated_date": item.updated_date,
+            "venue": item.venue,
+            "pdf_url": item.pdf_url,
+            "categories": item.categories,
+            "citation_count": item.citation_count,
+            "source_specific": item.extra,
+        }
+    })
+}
+
+pub fn paper_to_detail_json(item: &LiteraturePaper) -> Json {
+    json!({
+        "category": "literature",
+        "source": item.source.as_str(),
+        "effective_source": item.source.as_str(),
+        "title": item.title,
+        "name": item.title,
+        "article_title": item.title,
+        "paper_title": item.title,
+        "link": item.url,
+        "url": item.url,
+        "displayed_link": displayed_link_for_url(&item.url),
+        "favicon": item.source.favicon(),
+        "id": item.id,
+        "authors": item.authors,
+        "content": paper_detail_content(item),
         "metadata": {
             "authors": item.authors,
             "author_names": item.authors,
@@ -503,102 +694,101 @@ pub fn parse_crossref_json(root: &Json) -> Vec<LiteraturePaper> {
         .and_then(Json::as_array)
         .cloned()
         .unwrap_or_default();
-    items
-        .iter()
-        .filter_map(|item| {
-            let title = first_json_string_array(item.get("title"))
-                .or_else(|| item.get("title").and_then(Json::as_str).map(str::to_string))?;
-            let title = clean_html_text(&title);
-            if title.is_empty() {
-                return None;
-            }
-            let doi = item
-                .get("DOI")
-                .and_then(Json::as_str)
-                .map(normalize_doi)
-                .filter(|s| !s.is_empty());
-            let id = doi.clone().unwrap_or_else(|| {
-                item.get("URL")
-                    .and_then(Json::as_str)
-                    .unwrap_or("")
-                    .to_string()
-            });
-            let url = item
-                .get("URL")
-                .and_then(Json::as_str)
-                .map(str::to_string)
-                .or_else(|| doi.as_ref().map(|d| format!("https://doi.org/{d}")))
-                .unwrap_or_default();
-            let authors = item
-                .get("author")
-                .and_then(Json::as_array)
-                .map(|authors| {
-                    authors
-                        .iter()
-                        .filter_map(crossref_author_name)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let abstract_text = item
-                .get("abstract")
-                .and_then(Json::as_str)
-                .map(clean_html_text)
-                .filter(|s| !s.is_empty());
-            let published_date = crossref_date(item, "published")
-                .or_else(|| crossref_date(item, "issued"))
-                .or_else(|| crossref_date(item, "created"));
-            let venue = first_json_string_array(item.get("container-title"));
-            let pdf_url = item.get("link").and_then(Json::as_array).and_then(|links| {
-                links.iter().find_map(|link| {
-                    let content_type = link
-                        .get("content-type")
-                        .and_then(Json::as_str)
-                        .unwrap_or_default()
-                        .to_ascii_lowercase();
-                    if content_type.contains("pdf") {
-                        link.get("URL").and_then(Json::as_str).map(str::to_string)
-                    } else {
-                        None
-                    }
-                })
-            });
-            let categories = item
-                .get("subject")
-                .and_then(Json::as_array)
-                .map(|items| json_string_vec(items))
-                .unwrap_or_else(|| {
-                    item.get("type")
-                        .and_then(Json::as_str)
-                        .map(|s| vec![s.to_string()])
-                        .unwrap_or_default()
-                });
-            let citation_count = item.get("is-referenced-by-count").and_then(Json::as_u64);
-            let mut extra = JsonMap::new();
-            for key in ["publisher", "type", "volume", "issue", "page"] {
-                if let Some(value) = item.get(key).and_then(Json::as_str) {
-                    if !value.is_empty() {
-                        extra.insert(key.to_string(), json!(value));
-                    }
-                }
-            }
-            Some(LiteraturePaper {
-                id,
-                source: PublicLiteratureSource::Crossref,
-                title,
-                authors,
-                abstract_text,
-                url,
-                pdf_url,
-                doi,
-                published_date,
-                updated_date: None,
-                venue,
-                categories,
-                citation_count,
-                extra,
-            })
+    items.iter().filter_map(parse_crossref_item).collect()
+}
+
+fn parse_crossref_item(item: &Json) -> Option<LiteraturePaper> {
+    let title = first_json_string_array(item.get("title"))
+        .or_else(|| item.get("title").and_then(Json::as_str).map(str::to_string))?;
+    let title = clean_html_text(&title);
+    if title.is_empty() {
+        return None;
+    }
+    let doi = item
+        .get("DOI")
+        .and_then(Json::as_str)
+        .map(normalize_doi)
+        .filter(|s| !s.is_empty());
+    let id = doi.clone().unwrap_or_else(|| {
+        item.get("URL")
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .to_string()
+    });
+    let url = item
+        .get("URL")
+        .and_then(Json::as_str)
+        .map(str::to_string)
+        .or_else(|| doi.as_ref().map(|d| format!("https://doi.org/{d}")))
+        .unwrap_or_default();
+    let authors = item
+        .get("author")
+        .and_then(Json::as_array)
+        .map(|authors| {
+            authors
+                .iter()
+                .filter_map(crossref_author_name)
+                .collect::<Vec<_>>()
         })
-        .collect()
+        .unwrap_or_default();
+    let abstract_text = item
+        .get("abstract")
+        .and_then(Json::as_str)
+        .map(clean_html_text)
+        .filter(|s| !s.is_empty());
+    let published_date = crossref_date(item, "published")
+        .or_else(|| crossref_date(item, "issued"))
+        .or_else(|| crossref_date(item, "created"));
+    let venue = first_json_string_array(item.get("container-title"));
+    let pdf_url = item.get("link").and_then(Json::as_array).and_then(|links| {
+        links.iter().find_map(|link| {
+            let content_type = link
+                .get("content-type")
+                .and_then(Json::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if content_type.contains("pdf") {
+                link.get("URL").and_then(Json::as_str).map(str::to_string)
+            } else {
+                None
+            }
+        })
+    });
+    let categories = item
+        .get("subject")
+        .and_then(Json::as_array)
+        .map(|items| json_string_vec(items))
+        .unwrap_or_else(|| {
+            item.get("type")
+                .and_then(Json::as_str)
+                .map(|s| vec![s.to_string()])
+                .unwrap_or_default()
+        });
+    let citation_count = item.get("is-referenced-by-count").and_then(Json::as_u64);
+    let mut extra = JsonMap::new();
+    for key in ["publisher", "type", "volume", "issue", "page"] {
+        if let Some(value) = item.get(key).and_then(Json::as_str) {
+            if !value.is_empty() {
+                extra.insert(key.to_string(), json!(value));
+            }
+        }
+    }
+    Some(LiteraturePaper {
+        id,
+        source: PublicLiteratureSource::Crossref,
+        title,
+        authors,
+        abstract_text,
+        url,
+        pdf_url,
+        doi,
+        published_date,
+        updated_date: None,
+        venue,
+        categories,
+        citation_count,
+        extra,
+    })
 }
 
 pub fn parse_openalex_json(root: &Json) -> Vec<LiteraturePaper> {
@@ -607,116 +797,115 @@ pub fn parse_openalex_json(root: &Json) -> Vec<LiteraturePaper> {
         .and_then(Json::as_array)
         .cloned()
         .unwrap_or_default();
-    items
-        .iter()
-        .filter_map(|item| {
-            let title = item
-                .get("title")
-                .or_else(|| item.get("display_name"))
-                .and_then(Json::as_str)
-                .map(clean_html_text)?;
-            if title.is_empty() {
-                return None;
-            }
-            let openalex_id = item.get("id").and_then(Json::as_str).unwrap_or_default();
-            let id = openalex_id
-                .trim_start_matches("https://openalex.org/")
-                .to_string();
-            let doi = item
-                .get("doi")
-                .and_then(Json::as_str)
-                .map(normalize_doi)
-                .filter(|s| !s.is_empty());
-            let primary_location = item.get("primary_location");
-            let url = primary_location
-                .and_then(|v| v.get("landing_page_url"))
-                .and_then(Json::as_str)
-                .map(str::to_string)
-                .or_else(|| doi.as_ref().map(|d| format!("https://doi.org/{d}")))
-                .unwrap_or_else(|| openalex_id.to_string());
-            let pdf_url = primary_location
-                .and_then(|v| v.get("pdf_url"))
-                .and_then(Json::as_str)
-                .map(str::to_string)
-                .or_else(|| {
-                    item.pointer("/open_access/oa_url")
-                        .and_then(Json::as_str)
-                        .map(str::to_string)
-                });
-            let authors = item
-                .get("authorships")
-                .and_then(Json::as_array)
-                .map(|authors| {
-                    authors
-                        .iter()
-                        .filter_map(|a| a.pointer("/author/display_name").and_then(Json::as_str))
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let abstract_text = item
-                .get("abstract_inverted_index")
-                .and_then(reconstruct_openalex_abstract)
-                .filter(|s| !s.is_empty());
-            let published_date = item
-                .get("publication_date")
+    items.iter().filter_map(parse_openalex_item).collect()
+}
+
+fn parse_openalex_item(item: &Json) -> Option<LiteraturePaper> {
+    let title = item
+        .get("title")
+        .or_else(|| item.get("display_name"))
+        .and_then(Json::as_str)
+        .map(clean_html_text)?;
+    if title.is_empty() {
+        return None;
+    }
+    let openalex_id = item.get("id").and_then(Json::as_str).unwrap_or_default();
+    let id = openalex_id
+        .trim_start_matches("https://openalex.org/")
+        .to_string();
+    let doi = item
+        .get("doi")
+        .and_then(Json::as_str)
+        .map(normalize_doi)
+        .filter(|s| !s.is_empty());
+    let primary_location = item.get("primary_location");
+    let url = primary_location
+        .and_then(|v| v.get("landing_page_url"))
+        .and_then(Json::as_str)
+        .map(str::to_string)
+        .or_else(|| doi.as_ref().map(|d| format!("https://doi.org/{d}")))
+        .unwrap_or_else(|| openalex_id.to_string());
+    let pdf_url = primary_location
+        .and_then(|v| v.get("pdf_url"))
+        .and_then(Json::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            item.pointer("/open_access/oa_url")
                 .and_then(Json::as_str)
                 .map(str::to_string)
-                .or_else(|| {
-                    item.get("publication_year")
-                        .and_then(Json::as_u64)
-                        .map(|year| year.to_string())
-                });
-            let venue = item
-                .pointer("/primary_location/source/display_name")
-                .and_then(Json::as_str)
+        });
+    let authors = item
+        .get("authorships")
+        .and_then(Json::as_array)
+        .map(|authors| {
+            authors
+                .iter()
+                .filter_map(|a| a.pointer("/author/display_name").and_then(Json::as_str))
                 .map(str::to_string)
-                .or_else(|| {
-                    item.get("host_venue")
-                        .and_then(|v| v.get("display_name"))
-                        .and_then(Json::as_str)
-                        .map(str::to_string)
-                });
-            let categories = item
-                .get("concepts")
-                .and_then(Json::as_array)
-                .map(|concepts| {
-                    concepts
-                        .iter()
-                        .filter_map(|c| c.get("display_name").and_then(Json::as_str))
-                        .take(6)
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let mut extra = JsonMap::new();
-            if let Some(work_type) = item.get("type").and_then(Json::as_str) {
-                extra.insert("type".to_string(), json!(work_type));
-            }
-            if let Some(is_oa) = item.pointer("/open_access/is_oa").and_then(Json::as_bool) {
-                extra.insert("is_open_access".to_string(), json!(is_oa));
-            }
-            Some(LiteraturePaper {
-                id,
-                source: PublicLiteratureSource::OpenAlex,
-                title,
-                authors,
-                abstract_text,
-                url,
-                pdf_url,
-                doi,
-                published_date,
-                updated_date: item
-                    .get("updated_date")
-                    .and_then(Json::as_str)
-                    .map(str::to_string),
-                venue,
-                categories,
-                citation_count: item.get("cited_by_count").and_then(Json::as_u64),
-                extra,
-            })
+                .collect::<Vec<_>>()
         })
-        .collect()
+        .unwrap_or_default();
+    let abstract_text = item
+        .get("abstract_inverted_index")
+        .and_then(reconstruct_openalex_abstract)
+        .filter(|s| !s.is_empty());
+    let published_date = item
+        .get("publication_date")
+        .and_then(Json::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            item.get("publication_year")
+                .and_then(Json::as_u64)
+                .map(|year| year.to_string())
+        });
+    let venue = item
+        .pointer("/primary_location/source/display_name")
+        .and_then(Json::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            item.get("host_venue")
+                .and_then(|v| v.get("display_name"))
+                .and_then(Json::as_str)
+                .map(str::to_string)
+        });
+    let categories = item
+        .get("concepts")
+        .and_then(Json::as_array)
+        .map(|concepts| {
+            concepts
+                .iter()
+                .filter_map(|c| c.get("display_name").and_then(Json::as_str))
+                .take(6)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut extra = JsonMap::new();
+    if let Some(work_type) = item.get("type").and_then(Json::as_str) {
+        extra.insert("type".to_string(), json!(work_type));
+    }
+    if let Some(is_oa) = item.pointer("/open_access/is_oa").and_then(Json::as_bool) {
+        extra.insert("is_open_access".to_string(), json!(is_oa));
+    }
+    Some(LiteraturePaper {
+        id,
+        source: PublicLiteratureSource::OpenAlex,
+        title,
+        authors,
+        abstract_text,
+        url,
+        pdf_url,
+        doi,
+        published_date,
+        updated_date: item
+            .get("updated_date")
+            .and_then(Json::as_str)
+            .map(str::to_string),
+        venue,
+        categories,
+        citation_count: item.get("cited_by_count").and_then(Json::as_u64),
+        extra,
+    })
 }
 
 pub fn parse_preprint_json(
@@ -975,6 +1164,55 @@ fn paper_snippet(item: &LiteraturePaper) -> String {
     pieces.join(" — ")
 }
 
+fn paper_detail_content(item: &LiteraturePaper) -> String {
+    let mut out = String::new();
+    out.push_str(&item.title);
+    out.push_str("\n\n");
+    if !item.authors.is_empty() {
+        out.push_str("Authors: ");
+        out.push_str(&item.authors.join(", "));
+        out.push('\n');
+    }
+    if let Some(venue) = item.venue.as_deref().filter(|s| !s.trim().is_empty()) {
+        out.push_str("Venue: ");
+        out.push_str(venue);
+        out.push('\n');
+    }
+    if let Some(date) = item
+        .published_date
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        out.push_str("Published: ");
+        out.push_str(date);
+        out.push('\n');
+    }
+    if let Some(doi) = item.doi.as_deref().filter(|s| !s.trim().is_empty()) {
+        out.push_str("DOI: ");
+        out.push_str(doi);
+        out.push('\n');
+    }
+    if !item.categories.is_empty() {
+        out.push_str("Categories: ");
+        out.push_str(&item.categories.join(", "));
+        out.push('\n');
+    }
+    if let Some(pdf) = item.pdf_url.as_deref().filter(|s| !s.trim().is_empty()) {
+        out.push_str("PDF: ");
+        out.push_str(pdf);
+        out.push('\n');
+    }
+    if let Some(abstract_text) = item
+        .abstract_text
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        out.push_str("\nAbstract\n");
+        out.push_str(abstract_text);
+    }
+    out.trim().to_string()
+}
+
 fn clean_xml_text(value: &str) -> String {
     clean_html_text(value)
 }
@@ -1002,13 +1240,85 @@ fn decode_html_entities(value: &str) -> String {
 }
 
 fn normalize_doi(value: &str) -> String {
-    value
-        .trim()
-        .trim_start_matches("https://doi.org/")
-        .trim_start_matches("http://doi.org/")
-        .trim_start_matches("doi:")
-        .trim()
-        .to_string()
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    for prefix in ["https://doi.org/", "http://doi.org/", "doi:"] {
+        if lower.starts_with(prefix) {
+            return trimmed[prefix.len()..].trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn normalize_arxiv_identifier(value: &str) -> Option<String> {
+    let mut value = value.trim().trim_end_matches('/').to_string();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = reqwest::Url::parse(&value) {
+        let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+        if host.ends_with("arxiv.org") {
+            let path = parsed.path().trim_matches('/');
+            value = path
+                .strip_prefix("abs/")
+                .or_else(|| path.strip_prefix("pdf/"))
+                .unwrap_or(path)
+                .trim_end_matches(".pdf")
+                .to_string();
+        }
+    }
+    value = value.trim_end_matches(".pdf").trim().to_string();
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("arxiv:") {
+        value = value["arxiv:".len()..].trim().to_string();
+    }
+    (!value.is_empty()).then_some(value)
+}
+
+fn normalize_openalex_identifier(value: &str) -> Option<String> {
+    let value = value.trim().trim_end_matches('/').to_string();
+    if value.is_empty() {
+        return None;
+    }
+    if value.to_ascii_lowercase().starts_with("doi:")
+        || value.to_ascii_lowercase().starts_with("pmid:")
+        || value.to_ascii_lowercase().starts_with("pmcid:")
+        || value.to_ascii_uppercase().starts_with('W')
+    {
+        return Some(value);
+    }
+    if let Ok(parsed) = reqwest::Url::parse(&value) {
+        let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+        if host.ends_with("openalex.org") {
+            return parsed
+                .path_segments()
+                .and_then(|mut segments| segments.next_back())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+        }
+        if host == "doi.org" || host.ends_with(".doi.org") {
+            return Some(format!("doi:{}", normalize_doi(&value)));
+        }
+    }
+    let doi = normalize_doi(&value);
+    if doi.contains('/') {
+        Some(format!("doi:{doi}"))
+    } else {
+        Some(value)
+    }
+}
+
+fn encode_path_segment(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 fn normalize_date_string(value: &str) -> Option<String> {
@@ -1212,5 +1522,57 @@ mod tests {
             json["results"][0]["favicon"],
             "https://arxiv.org/favicon.ico"
         );
+    }
+
+    #[test]
+    fn literature_detail_json_preserves_fetch_fields() {
+        let item = LiteraturePaper {
+            id: "10.1000/example".to_string(),
+            source: PublicLiteratureSource::Crossref,
+            title: "Fetched Paper".to_string(),
+            authors: vec!["Alice".to_string(), "Bob".to_string()],
+            abstract_text: Some("Detailed abstract".to_string()),
+            url: "https://doi.org/10.1000/example".to_string(),
+            pdf_url: Some("https://example.org/paper.pdf".to_string()),
+            doi: Some("10.1000/example".to_string()),
+            published_date: Some("2024-01-02".to_string()),
+            updated_date: None,
+            venue: Some("Journal".to_string()),
+            categories: vec!["AI".to_string()],
+            citation_count: Some(12),
+            extra: JsonMap::new(),
+        };
+
+        let json = paper_to_detail_json(&item);
+        assert_eq!(json["category"], "literature");
+        assert_eq!(json["source"], "crossref");
+        assert_eq!(json["metadata"]["doi"], "10.1000/example");
+        assert_eq!(json["authors"][0], "Alice");
+        assert!(json["content"]
+            .as_str()
+            .unwrap()
+            .contains("Detailed abstract"));
+        assert_eq!(json["favicon"], "https://www.crossref.org/favicon.ico");
+    }
+
+    #[test]
+    fn normalizes_fetch_identifiers() {
+        assert_eq!(
+            normalize_arxiv_identifier("https://arxiv.org/pdf/2401.01234v2.pdf").as_deref(),
+            Some("2401.01234v2")
+        );
+        assert_eq!(
+            normalize_arxiv_identifier("ARXIV:2401.01234").as_deref(),
+            Some("2401.01234")
+        );
+        assert_eq!(
+            normalize_openalex_identifier("https://openalex.org/W123").as_deref(),
+            Some("W123")
+        );
+        assert_eq!(
+            normalize_openalex_identifier("https://doi.org/10.1000/example").as_deref(),
+            Some("doi:10.1000/example")
+        );
+        assert_eq!(normalize_doi("DOI:10.1000/example"), "10.1000/example");
     }
 }

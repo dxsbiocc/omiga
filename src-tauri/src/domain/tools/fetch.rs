@@ -3,6 +3,8 @@
 //! The public model-visible function is `fetch`; first-version adapters are:
 //! - `category="web"`: safe public HTTP(S) fetch and text extraction.
 //! - `category="literature", source="pubmed"`: official NCBI EFetch by PMID.
+//! - `category="literature", source="arxiv|crossref|openalex|biorxiv|medrxiv"`:
+//!   public source metadata fetch by source id/DOI/arXiv/OpenAlex URL.
 
 use super::{ToolContext, ToolError, ToolSchema};
 use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
@@ -22,11 +24,14 @@ const PUBMED_HOST: &str = "pubmed.ncbi.nlm.nih.gov";
 
 pub const DESCRIPTION: &str = r#"Fetch one document/detail from a typed data source and return formatted JSON.
 
-- `category` is required. First-version categories: `web`, `literature`, `social`.
-- `source` is optional and defaults to `auto`. First-version concrete sources: `web.auto`, `literature.pubmed`, optional `social.wechat`.
+- `category` is required. Categories: `web`, `literature`, `data`, `social`.
+- `source` is optional and defaults to `auto`. Concrete sources: `web.auto`, `literature.pubmed|arxiv|crossref|openalex|biorxiv|medrxiv|semantic_scholar`, `data.geo|ena`, optional `social.wechat`.
 - Locate the document with one of: `url`, `id` + `source`, or a full `result` object returned by `search`.
 - `web` fetch sends a safe public HTTP(S) GET, follows public-safe redirects, blocks private/loopback targets, converts HTML to text, and pretty-prints JSON.
 - `literature.pubmed` fetch expects a numeric PMID in `id` (or a PubMed URL / search result) and uses official NCBI EFetch.
+- Public literature sources fetch source-specific metadata records: arXiv by arXiv id/URL, Crossref/bioRxiv/medRxiv by DOI, and OpenAlex by work id/URL/DOI.
+- `literature.semantic_scholar` is opt-in and requires the user-enabled API key; it fetches by Semantic Scholar paper id or supported external id prefix.
+- `data.geo` fetches GEO DataSets/Series/Samples/Platforms by UID or GEO accession via official NCBI E-utilities; `data.ena` fetches ENA study metadata by accession via ENA Portal/Browser APIs.
 - `social.wechat` is disabled by default; when enabled it fetches the article URL with the safe web fetcher.
 - Results are returned as formatted JSON with `title`, `link`, `url`, `favicon`, `content`, and `metadata`."#;
 
@@ -93,8 +98,8 @@ impl super::ToolImpl for FetchTool {
         let source = normalized_source(args.source.as_deref());
         match category.as_str() {
             "web" => fetch_web(ctx, &args, &source).await,
-            "literature" => match source.as_str() {
-                "auto" | "pubmed" => fetch_pubmed(ctx, &args).await,
+            "literature" => match resolve_literature_source(&args, &source).as_str() {
+                "pubmed" => fetch_pubmed(ctx, &args).await,
                 "semantic_scholar" | "semanticscholar" => {
                     if !ctx.web_search_api_keys.semantic_scholar_enabled {
                         return Ok(json_stream(structured_error_json(
@@ -104,23 +109,29 @@ impl super::ToolImpl for FetchTool {
                             "literature.semantic_scholar is disabled. Enable it and configure an API key in Settings → Search.",
                         )));
                     }
-                    Ok(json_stream(structured_error_json(
-                        "source_not_implemented",
-                        "literature",
-                        &source,
-                        format!("literature source `{source}` fetch is registered but not implemented in the first version"),
-                    )))
+                    fetch_semantic_scholar(ctx, &args).await
                 }
-                "arxiv" | "openalex" => {
-                    Ok(json_stream(structured_error_json(
-                        "source_not_implemented",
-                        "literature",
-                        &source,
-                        format!("literature source `{source}` is registered but not implemented in the first version"),
-                    )))
+                public_source
+                    if crate::domain::search::literature::PublicLiteratureSource::parse(
+                        public_source,
+                    )
+                    .is_some() =>
+                {
+                    fetch_public_literature(ctx, &args, public_source).await
                 }
                 other => Err(ToolError::InvalidArguments {
                     message: format!("Unsupported literature fetch source: {other}"),
+                }),
+            },
+            "data" => match resolve_data_source(&args, &source).as_str() {
+                data_source
+                    if crate::domain::search::data::PublicDataSource::parse(data_source)
+                        .is_some() =>
+                {
+                    fetch_public_data(ctx, &args, data_source).await
+                }
+                other => Err(ToolError::InvalidArguments {
+                    message: format!("Unsupported data fetch source: {other}"),
                 }),
             },
             "social" => match source.as_str() {
@@ -144,6 +155,82 @@ impl super::ToolImpl for FetchTool {
             }),
         }
     }
+}
+
+async fn fetch_public_data(
+    ctx: &ToolContext,
+    args: &FetchArgs,
+    source: &str,
+) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+    let source = crate::domain::search::data::PublicDataSource::parse(source).ok_or_else(|| {
+        ToolError::InvalidArguments {
+            message: format!("Unsupported public data source: {source}"),
+        }
+    })?;
+    let identifier = resolve_data_identifier(args).ok_or_else(|| ToolError::InvalidArguments {
+        message: format!(
+            "fetch(category=data, source={}) requires `id`, `url`, accession, or a search `result`",
+            source.as_str()
+        ),
+    })?;
+    let client = crate::domain::search::data::PublicDataClient::from_tool_context(ctx)
+        .map_err(|message| ToolError::ExecutionFailed { message })?;
+    let record = tokio::select! {
+        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+        r = client.fetch(source, &identifier) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+    };
+    Ok(json_stream(crate::domain::search::data::detail_to_json(
+        &record,
+    )))
+}
+
+async fn fetch_public_literature(
+    ctx: &ToolContext,
+    args: &FetchArgs,
+    source: &str,
+) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+    let source = crate::domain::search::literature::PublicLiteratureSource::parse(source)
+        .ok_or_else(|| ToolError::InvalidArguments {
+            message: format!("Unsupported public literature source: {source}"),
+        })?;
+    let identifier = resolve_literature_identifier(args, source.as_str()).ok_or_else(|| {
+        ToolError::InvalidArguments {
+            message: format!(
+                "fetch(category=literature, source={}) requires `id`, `url`, DOI/arXiv/OpenAlex identifier, or a search `result`",
+                source.as_str()
+            ),
+        }
+    })?;
+    let client = crate::domain::search::literature::PublicLiteratureClient::from_tool_context(ctx)
+        .map_err(|message| ToolError::ExecutionFailed { message })?;
+    let paper = tokio::select! {
+        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+        r = client.fetch(source, &identifier) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+    };
+    Ok(json_stream(
+        crate::domain::search::literature::paper_to_detail_json(&paper),
+    ))
+}
+
+async fn fetch_semantic_scholar(
+    ctx: &ToolContext,
+    args: &FetchArgs,
+) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+    let paper_id = resolve_semantic_scholar_id(args).ok_or_else(|| {
+        ToolError::InvalidArguments {
+            message: "Semantic Scholar fetch requires a paper id, DOI/arXiv/PubMed external id, URL, or search result".to_string(),
+        }
+    })?;
+    let client =
+        crate::domain::search::semantic_scholar::SemanticScholarClient::from_tool_context(ctx)
+            .map_err(|message| ToolError::ExecutionFailed { message })?;
+    let paper = tokio::select! {
+        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+        r = client.fetch(&paper_id) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+    };
+    Ok(json_stream(
+        crate::domain::search::semantic_scholar::detail_to_json(&paper),
+    ))
 }
 
 async fn fetch_pubmed(
@@ -387,6 +474,276 @@ fn resolve_pubmed_pmid(args: &FetchArgs) -> Option<String> {
         .then(|| trimmed.to_string())
 }
 
+fn resolve_literature_source(args: &FetchArgs, requested_source: &str) -> String {
+    if requested_source != "auto" {
+        return requested_source.to_string();
+    }
+    if let Some(source) = string_from_result(args, &["source", "effective_source"])
+        .map(|s| normalized_source(Some(&s)))
+        .filter(|s| s != "auto")
+    {
+        return source;
+    }
+    if resolve_pubmed_pmid(args).is_some() {
+        return "pubmed".to_string();
+    }
+    if let Some(id) = args.id.as_deref().and_then(clean_nonempty) {
+        if looks_like_arxiv_identifier(&id) {
+            return "arxiv".to_string();
+        }
+        if looks_like_openalex_identifier(&id) {
+            return "openalex".to_string();
+        }
+        if looks_like_doi_identifier(&id) {
+            return "crossref".to_string();
+        }
+    }
+    if let Some(url) = resolve_url(args) {
+        let lower = url.to_ascii_lowercase();
+        if lower.contains("arxiv.org/") {
+            return "arxiv".to_string();
+        }
+        if lower.contains("openalex.org/") {
+            return "openalex".to_string();
+        }
+        if lower.contains("biorxiv.org/") {
+            return "biorxiv".to_string();
+        }
+        if lower.contains("medrxiv.org/") {
+            return "medrxiv".to_string();
+        }
+        if lower.contains("doi.org/") {
+            return "crossref".to_string();
+        }
+    }
+    if let Some(arxiv_id) = metadata_string_from_result(args, &["arxiv_id", "arxiv"]) {
+        if !arxiv_id.is_empty() {
+            return "arxiv".to_string();
+        }
+    }
+    if let Some(doi) = metadata_string_from_result(args, &["doi"]) {
+        if !doi.is_empty() {
+            return "crossref".to_string();
+        }
+    }
+    "pubmed".to_string()
+}
+
+fn resolve_literature_identifier(args: &FetchArgs, source: &str) -> Option<String> {
+    let source = normalized_source(Some(source));
+    match source.as_str() {
+        "pubmed" => resolve_pubmed_pmid(args),
+        "arxiv" => args
+            .id
+            .as_deref()
+            .and_then(clean_nonempty)
+            .or_else(|| metadata_string_from_result(args, &["arxiv_id", "arxiv"]))
+            .or_else(|| string_from_result(args, &["id"]))
+            .or_else(|| resolve_url(args)),
+        "openalex" => metadata_string_from_result(args, &["openalex_id", "openalex"])
+            .or_else(|| args.id.as_deref().and_then(clean_nonempty))
+            .or_else(|| string_from_result(args, &["id"]))
+            .or_else(|| metadata_string_from_result(args, &["doi"]))
+            .or_else(|| resolve_url(args)),
+        "crossref" | "biorxiv" | "medrxiv" => metadata_string_from_result(args, &["doi"])
+            .or_else(|| args.id.as_deref().and_then(clean_nonempty))
+            .or_else(|| string_from_result(args, &["id"]))
+            .or_else(|| resolve_url(args)),
+        _ => args
+            .id
+            .as_deref()
+            .and_then(clean_nonempty)
+            .or_else(|| string_from_result(args, &["id"]))
+            .or_else(|| resolve_url(args)),
+    }
+}
+
+fn resolve_data_source(args: &FetchArgs, requested_source: &str) -> String {
+    if requested_source != "auto" {
+        return requested_source.to_string();
+    }
+    if let Some(source) = string_from_result(args, &["source", "effective_source"])
+        .map(|s| normalized_source(Some(&s)))
+        .filter(|s| s != "auto")
+    {
+        if crate::domain::search::data::PublicDataSource::parse(&source).is_some() {
+            return source;
+        }
+    }
+    if let Some(value) = resolve_data_identifier(args) {
+        if crate::domain::search::data::looks_like_geo_accession(&value) {
+            return "geo".to_string();
+        }
+        if crate::domain::search::data::looks_like_ena_accession(&value) {
+            return "ena".to_string();
+        }
+    }
+    if let Some(url) = resolve_url(args) {
+        let lower = url.to_ascii_lowercase();
+        if lower.contains("ncbi.nlm.nih.gov/geo") || lower.contains("ncbi.nlm.nih.gov/gds") {
+            return "geo".to_string();
+        }
+        if lower.contains("ebi.ac.uk/ena") {
+            return "ena".to_string();
+        }
+    }
+    "geo".to_string()
+}
+
+fn resolve_data_identifier(args: &FetchArgs) -> Option<String> {
+    args.id
+        .as_deref()
+        .and_then(clean_nonempty)
+        .or_else(|| {
+            metadata_string_from_result(args, &["accession", "geo_accession", "ena_accession"])
+        })
+        .or_else(|| string_from_result(args, &["accession", "id"]))
+        .or_else(|| resolve_url(args))
+}
+
+fn resolve_semantic_scholar_id(args: &FetchArgs) -> Option<String> {
+    if let Some(id) = args.id.as_deref().and_then(clean_nonempty) {
+        return Some(normalize_semantic_scholar_id(&id));
+    }
+    if let Some(paper_id) = metadata_string_from_result(args, &["paper_id", "paperId"]) {
+        return Some(paper_id);
+    }
+    if let Some(id) = string_from_result(args, &["id"]) {
+        if !id.trim().is_empty() {
+            return Some(normalize_semantic_scholar_id(&id));
+        }
+    }
+    if let Some(url) = resolve_url(args) {
+        if let Some(id) = semantic_scholar_id_from_url(&url) {
+            return Some(id);
+        }
+    }
+    if let Some(doi) = metadata_string_from_result(args, &["doi"]) {
+        return Some(format!("DOI:{}", strip_doi_prefix(&doi)));
+    }
+    if let Some(arxiv) = metadata_string_from_result(args, &["arxiv_id", "arxiv"]) {
+        return Some(format!("ARXIV:{arxiv}"));
+    }
+    if let Some(pmid) = metadata_string_from_result(args, &["pubmed_id", "pmid"]) {
+        return Some(format!("PMID:{pmid}"));
+    }
+    None
+}
+
+fn normalize_semantic_scholar_id(value: &str) -> String {
+    let value = value.trim();
+    if let Some(id) = semantic_scholar_id_from_url(value) {
+        return id;
+    }
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("https://doi.org/") || lower.starts_with("http://doi.org/") {
+        return format!("DOI:{}", strip_doi_prefix(value));
+    }
+    if lower.starts_with("doi:") {
+        return format!("DOI:{}", strip_doi_prefix(value));
+    }
+    if lower.starts_with("arxiv:") {
+        return format!("ARXIV:{}", value["arxiv:".len()..].trim());
+    }
+    if lower.starts_with("pmid:") {
+        return format!("PMID:{}", value["pmid:".len()..].trim());
+    }
+    if !value.contains(':') && value.contains('/') && value.starts_with("10.") {
+        return format!("DOI:{}", strip_doi_prefix(value));
+    }
+    value.to_string()
+}
+
+fn semantic_scholar_id_from_url(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if !host.ends_with("semanticscholar.org") {
+        return None;
+    }
+    let segments = parsed
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    segments
+        .iter()
+        .position(|segment| *segment == "paper")
+        .and_then(|idx| segments.get(idx + 1..))
+        .and_then(|remaining| remaining.last().or_else(|| remaining.first()))
+        .map(|s| s.to_string())
+}
+
+fn strip_doi_prefix(value: &str) -> String {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    for prefix in ["https://doi.org/", "http://doi.org/", "doi:"] {
+        if lower.starts_with(prefix) {
+            return trimmed[prefix.len()..].trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn looks_like_doi_identifier(value: &str) -> bool {
+    let value = value.trim();
+    let lower = value.to_ascii_lowercase();
+    lower.starts_with("doi:")
+        || lower.starts_with("https://doi.org/")
+        || lower.starts_with("http://doi.org/")
+        || (value.starts_with("10.") && value.contains('/'))
+}
+
+fn looks_like_arxiv_identifier(value: &str) -> bool {
+    let value = value.trim().trim_end_matches(".pdf");
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("arxiv:") || lower.contains("arxiv.org/") {
+        return true;
+    }
+    let id = lower.trim_start_matches("arxiv:");
+    let id = id
+        .rsplit_once('v')
+        .filter(|(_, version)| version.chars().all(|c| c.is_ascii_digit()))
+        .map(|(base, _)| base)
+        .unwrap_or(id);
+    let mut parts = id.split('.');
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(ym), Some(seq), None)
+            if ym.len() == 4
+                && ym.chars().all(|c| c.is_ascii_digit())
+                && seq.len() >= 4
+                && seq.chars().all(|c| c.is_ascii_digit())
+    )
+}
+
+fn looks_like_openalex_identifier(value: &str) -> bool {
+    let value = value.trim();
+    let lower = value.to_ascii_lowercase();
+    lower.contains("openalex.org/")
+        || value
+            .strip_prefix('W')
+            .or_else(|| value.strip_prefix('w'))
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn metadata_string_from_result(args: &FetchArgs, keys: &[&str]) -> Option<String> {
+    let metadata = args.result.as_ref()?.get("metadata")?.as_object()?;
+    for key in keys {
+        let value = metadata
+            .get(*key)
+            .and_then(JsonValue::as_str)
+            .and_then(clean_nonempty);
+        if value.is_some() {
+            return value;
+        }
+    }
+    None
+}
+
+fn clean_nonempty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 fn pmid_from_pubmed_url(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url).ok()?;
     let host = parsed.host_str()?.to_ascii_lowercase();
@@ -496,23 +853,23 @@ pub fn schema() -> ToolSchema {
             "properties": {
                 "category": {
                     "type": "string",
-                    "description": "Data-source category. First version supports web, literature, social."
+                    "description": "Data-source category. Supports web, literature, data, social."
                 },
                 "source": {
                     "type": "string",
-                    "description": "Source within the category. Defaults to auto. For literature, first version supports pubmed."
+                    "description": "Source within the category. Defaults to auto. Literature supports pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar. Data supports geo, ena."
                 },
                 "url": {
                     "type": "string",
-                    "description": "Fully qualified URL to fetch, or a PubMed URL for literature.pubmed"
+                    "description": "Fully qualified URL to fetch, or a source-specific literature/data URL (PubMed/arXiv/OpenAlex/DOI/preprint/Semantic Scholar/GEO/ENA)"
                 },
                 "id": {
                     "type": "string",
-                    "description": "Source-specific identifier. PubMed fetch currently expects PMID."
+                    "description": "Source-specific identifier such as PMID, arXiv id, DOI, OpenAlex work id, preprint DOI, Semantic Scholar paper id, GEO accession/UID, or ENA accession."
                 },
                 "result": {
                     "type": "object",
-                    "description": "A single result object returned by search; fetch will read url/link/id/metadata.pmid from it."
+                    "description": "A single result object returned by search; fetch will read source, url/link, id, and metadata identifiers from it."
                 },
                 "prompt": {
                     "type": "string",
@@ -579,5 +936,169 @@ mod tests {
             prompt: None,
         };
         assert_eq!(resolve_pubmed_pmid(&from_result).as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn resolves_literature_source_and_identifier_for_public_sources() {
+        let from_arxiv_result = FetchArgs {
+            category: "literature".into(),
+            source: None,
+            url: None,
+            id: None,
+            result: Some(json!({
+                "source": "arxiv",
+                "link": "https://arxiv.org/abs/2401.01234",
+                "metadata": {"arxiv_id": "2401.01234"}
+            })),
+            prompt: None,
+        };
+        assert_eq!(
+            resolve_literature_source(&from_arxiv_result, "auto"),
+            "arxiv"
+        );
+        assert_eq!(
+            resolve_literature_identifier(&from_arxiv_result, "arxiv").as_deref(),
+            Some("2401.01234")
+        );
+
+        let from_doi_url = FetchArgs {
+            category: "literature".into(),
+            source: None,
+            url: Some("https://doi.org/10.1000/example".into()),
+            id: None,
+            result: None,
+            prompt: None,
+        };
+        assert_eq!(resolve_literature_source(&from_doi_url, "auto"), "crossref");
+        assert_eq!(
+            resolve_literature_identifier(&from_doi_url, "crossref").as_deref(),
+            Some("https://doi.org/10.1000/example")
+        );
+
+        let from_openalex_metadata = FetchArgs {
+            category: "literature".into(),
+            source: Some("openalex".into()),
+            url: None,
+            id: None,
+            result: Some(json!({
+                "id": "ignored",
+                "metadata": {"openalex_id": "W123"}
+            })),
+            prompt: None,
+        };
+        assert_eq!(
+            resolve_literature_identifier(&from_openalex_metadata, "openalex").as_deref(),
+            Some("W123")
+        );
+
+        let from_doi_id = FetchArgs {
+            category: "literature".into(),
+            source: None,
+            url: None,
+            id: Some("10.1000/example".into()),
+            result: None,
+            prompt: None,
+        };
+        assert_eq!(resolve_literature_source(&from_doi_id, "auto"), "crossref");
+
+        let from_arxiv_id = FetchArgs {
+            category: "literature".into(),
+            source: None,
+            url: None,
+            id: Some("2401.01234v2".into()),
+            result: None,
+            prompt: None,
+        };
+        assert_eq!(resolve_literature_source(&from_arxiv_id, "auto"), "arxiv");
+    }
+
+    #[test]
+    fn resolves_data_source_and_identifier() {
+        let from_geo_result = FetchArgs {
+            category: "data".into(),
+            source: None,
+            url: None,
+            id: None,
+            result: Some(json!({
+                "source": "geo",
+                "accession": "GSE123",
+                "metadata": {"accession": "GSE123"}
+            })),
+            prompt: None,
+        };
+        assert_eq!(resolve_data_source(&from_geo_result, "auto"), "geo");
+        assert_eq!(
+            resolve_data_identifier(&from_geo_result).as_deref(),
+            Some("GSE123")
+        );
+
+        let from_ena_url = FetchArgs {
+            category: "data".into(),
+            source: None,
+            url: Some("https://www.ebi.ac.uk/ena/browser/view/PRJEB123".into()),
+            id: None,
+            result: None,
+            prompt: None,
+        };
+        assert_eq!(resolve_data_source(&from_ena_url, "auto"), "ena");
+
+        let from_geo_url = FetchArgs {
+            category: "data".into(),
+            source: None,
+            url: Some("https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM575".into()),
+            id: None,
+            result: None,
+            prompt: None,
+        };
+        assert_eq!(resolve_data_source(&from_geo_url, "auto"), "geo");
+    }
+
+    #[test]
+    fn resolves_semantic_scholar_ids_from_common_inputs() {
+        let from_doi = FetchArgs {
+            category: "literature".into(),
+            source: Some("semantic_scholar".into()),
+            url: None,
+            id: Some("10.1000/example".into()),
+            result: None,
+            prompt: None,
+        };
+        assert_eq!(
+            resolve_semantic_scholar_id(&from_doi).as_deref(),
+            Some("DOI:10.1000/example")
+        );
+
+        let from_slug_url = FetchArgs {
+            category: "literature".into(),
+            source: Some("semantic_scholar".into()),
+            url: Some("https://www.semanticscholar.org/paper/A-title/abcdef123456".into()),
+            id: None,
+            result: None,
+            prompt: None,
+        };
+        assert_eq!(
+            resolve_semantic_scholar_id(&from_slug_url).as_deref(),
+            Some("abcdef123456")
+        );
+
+        let from_metadata = FetchArgs {
+            category: "literature".into(),
+            source: Some("semantic_scholar".into()),
+            url: None,
+            id: None,
+            result: Some(json!({
+                "metadata": {"paper_id": "paper-1", "doi": "10.1000/fallback"}
+            })),
+            prompt: None,
+        };
+        assert_eq!(
+            resolve_semantic_scholar_id(&from_metadata).as_deref(),
+            Some("paper-1")
+        );
+
+        assert_eq!(
+            normalize_semantic_scholar_id("doi:10.1000/example"),
+            "DOI:10.1000/example"
+        );
     }
 }

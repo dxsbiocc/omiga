@@ -25,6 +25,14 @@ fn search_from_json_accepts_public_literature_sources() {
 }
 
 #[test]
+fn search_from_json_accepts_data_sources() {
+    for source in ["geo", "ena"] {
+        let j = format!(r#"{{"category":"data","source":"{source}","query":"single cell"}}"#);
+        assert!(Tool::from_json_str("search", &j).is_ok(), "{source}");
+    }
+}
+
+#[test]
 fn search_from_json_accepts_wechat_source() {
     let j = r#"{"category":"social","source":"wechat","query":"人工智能"}"#;
     assert!(Tool::from_json_str("search", j).is_ok());

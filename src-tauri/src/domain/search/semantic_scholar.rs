@@ -180,6 +180,44 @@ impl SemanticScholarClient {
         parsed.results.truncate(limit as usize);
         Ok(parsed)
     }
+
+    pub async fn fetch(&self, paper_id: &str) -> Result<SemanticScholarPaper, String> {
+        let paper_id = paper_id.trim();
+        if paper_id.is_empty() {
+            return Err("Semantic Scholar fetch requires a paper id".to_string());
+        }
+        let url = format!("{}/paper/{}", self.base_url, encode_path_segment(paper_id));
+        let mut request = self
+            .http
+            .get(&url)
+            .query(&[("fields", DEFAULT_FIELDS.to_string())]);
+        if let Some(api_key) = &self.api_key {
+            request = request.header("x-api-key", api_key);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("Semantic Scholar fetch request failed: {e}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("read Semantic Scholar fetch response: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "Semantic Scholar fetch returned HTTP {}: {}",
+                status.as_u16(),
+                truncate_for_error(&body)
+            ));
+        }
+        let raw: RawSemanticScholarPaper = serde_json::from_str(&body).map_err(|e| {
+            format!(
+                "Semantic Scholar fetch returned invalid JSON: {e}; body: {}",
+                truncate_for_error(&body)
+            )
+        })?;
+        Ok(raw.into())
+    }
 }
 
 pub fn search_response_to_json(response: &SemanticScholarSearchResponse) -> Json {
@@ -244,6 +282,52 @@ fn paper_to_serp_result(item: &SemanticScholarPaper, position: usize) -> Json {
     })
 }
 
+pub fn detail_to_json(item: &SemanticScholarPaper) -> Json {
+    let authors: Vec<String> = item
+        .authors
+        .iter()
+        .map(|a| a.name.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let doi = external_id(&item.external_ids, "DOI");
+    let arxiv_id = external_id(&item.external_ids, "ArXiv");
+    let pubmed_id = external_id(&item.external_ids, "PubMed");
+    json!({
+        "category": "literature",
+        "source": "semantic_scholar",
+        "effective_source": "semantic_scholar",
+        "title": item.title,
+        "name": item.title,
+        "article_title": item.title,
+        "paper_title": item.title,
+        "link": item.url,
+        "url": item.url,
+        "displayed_link": displayed_link_for_url(&item.url),
+        "favicon": SEMANTIC_SCHOLAR_FAVICON,
+        "id": item.paper_id,
+        "authors": authors,
+        "content": semantic_scholar_detail_content(item, &authors, &doi, &arxiv_id, &pubmed_id),
+        "metadata": {
+            "paper_id": item.paper_id,
+            "doi": doi,
+            "arxiv_id": arxiv_id,
+            "pubmed_id": pubmed_id,
+            "authors": item.authors,
+            "year": item.year,
+            "venue": item.venue,
+            "publication_types": item.publication_types,
+            "publication_date": item.publication_date,
+            "external_ids": item.external_ids,
+            "citation_count": item.citation_count,
+            "influential_citation_count": item.influential_citation_count,
+            "is_open_access": item.is_open_access,
+            "open_access_pdf": item.open_access_pdf,
+            "fields_of_study": item.fields_of_study,
+            "abstract": item.abstract_text,
+        }
+    })
+}
+
 fn semantic_scholar_snippet(item: &SemanticScholarPaper, authors: &[String]) -> String {
     if let Some(abstract_text) = item
         .abstract_text
@@ -265,6 +349,81 @@ fn semantic_scholar_snippet(item: &SemanticScholarPaper, authors: &[String]) -> 
     .filter(|s| !s.is_empty())
     .collect::<Vec<_>>()
     .join(" | ")
+}
+
+fn semantic_scholar_detail_content(
+    item: &SemanticScholarPaper,
+    authors: &[String],
+    doi: &Option<String>,
+    arxiv_id: &Option<String>,
+    pubmed_id: &Option<String>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&item.title);
+    out.push_str("\n\n");
+    if !authors.is_empty() {
+        out.push_str("Authors: ");
+        out.push_str(&authors.join(", "));
+        out.push('\n');
+    }
+    if let Some(venue) = item.venue.as_deref().filter(|s| !s.trim().is_empty()) {
+        out.push_str("Venue: ");
+        out.push_str(venue);
+        out.push('\n');
+    }
+    if let Some(year) = item.year {
+        out.push_str("Year: ");
+        out.push_str(&year.to_string());
+        out.push('\n');
+    }
+    if let Some(date) = item
+        .publication_date
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        out.push_str("Publication date: ");
+        out.push_str(date);
+        out.push('\n');
+    }
+    if let Some(doi) = doi.as_deref() {
+        out.push_str("DOI: ");
+        out.push_str(doi);
+        out.push('\n');
+    }
+    if let Some(arxiv_id) = arxiv_id.as_deref() {
+        out.push_str("arXiv: ");
+        out.push_str(arxiv_id);
+        out.push('\n');
+    }
+    if let Some(pubmed_id) = pubmed_id.as_deref() {
+        out.push_str("PubMed: ");
+        out.push_str(pubmed_id);
+        out.push('\n');
+    }
+    if let Some(count) = item.citation_count {
+        out.push_str("Citations: ");
+        out.push_str(&count.to_string());
+        out.push('\n');
+    }
+    if let Some(pdf) = item
+        .open_access_pdf
+        .as_ref()
+        .and_then(|pdf| pdf.url.as_deref())
+        .filter(|s| !s.trim().is_empty())
+    {
+        out.push_str("Open access PDF: ");
+        out.push_str(pdf);
+        out.push('\n');
+    }
+    if let Some(abstract_text) = item
+        .abstract_text
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        out.push_str("\nAbstract\n");
+        out.push_str(abstract_text);
+    }
+    out.trim().to_string()
 }
 
 fn displayed_link_for_url(url: &str) -> String {
@@ -297,6 +456,19 @@ fn resolve_api_key(keys: &WebSearchApiKeys) -> Option<String> {
         .or_else(|| clean_optional(&std::env::var("OMIGA_SEMANTIC_SCHOLAR_API_KEY").ok()))
         .or_else(|| clean_optional(&std::env::var("SEMANTIC_SCHOLAR_API_KEY").ok()))
         .or_else(|| clean_optional(&std::env::var("S2_API_KEY").ok()))
+}
+
+fn encode_path_segment(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 fn clean_optional(value: &Option<String>) -> Option<String> {
@@ -525,6 +697,25 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("semanticscholar"));
+    }
+
+    #[test]
+    fn semantic_scholar_detail_json_preserves_fetch_fields() {
+        let raw: RawSemanticScholarSearchResponse =
+            serde_json::from_str(sample_response()).unwrap();
+        let response = raw.into_response("AI interaction");
+        let json = detail_to_json(&response.results[0]);
+
+        assert_eq!(json["category"], "literature");
+        assert_eq!(json["source"], "semantic_scholar");
+        assert_eq!(json["id"], "001720a782840652b573bb4794774aee826510ca");
+        assert_eq!(json["metadata"]["doi"], "10.1234/example");
+        assert_eq!(json["metadata"]["arxiv_id"], "2401.00001");
+        assert_eq!(json["authors"][0], "Alice Example");
+        assert!(json["content"]
+            .as_str()
+            .unwrap()
+            .contains("Open access PDF"));
     }
 
     #[test]

@@ -8,6 +8,8 @@ pub mod pubmed;
 
 pub mod literature;
 
+pub mod data;
+
 pub mod semantic_scholar;
 
 pub mod wechat;

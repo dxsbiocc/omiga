@@ -212,6 +212,7 @@ pub fn run() {
             commands::sandbox_fs::sandbox_write_file,
             commands::local_envs::list_local_venvs,
             commands::fs::agent_tools_directory,
+            commands::shell::open_system_terminal,
             commands::shell::render_rmarkdown,
             commands::shell::render_quarto,
             commands::notebook::execute_ipynb_cell,

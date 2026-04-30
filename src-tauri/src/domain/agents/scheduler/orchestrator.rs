@@ -241,8 +241,17 @@ impl AgentOrchestrator {
             .values()
             .filter(|r| r.status == ExecutionStatus::Failed)
             .count();
+        let cancelled = result
+            .subtask_results
+            .values()
+            .filter(|r| r.status == ExecutionStatus::Cancelled)
+            .count();
+        let recorded = result.subtask_results.len();
+        let missing = total_subtasks.saturating_sub(recorded);
 
-        result.status = if failed == 0 {
+        result.status = if cancelled > 0 {
+            ExecutionStatus::Cancelled
+        } else if failed == 0 && missing == 0 {
             ExecutionStatus::Completed
         } else if completed == 0 {
             ExecutionStatus::Failed
@@ -264,8 +273,8 @@ impl AgentOrchestrator {
         result.completed_at = Some(unix_timestamp_secs());
 
         let summary = format!(
-            "计划执行完成: {}/{} 成功, {} 失败",
-            completed, total_subtasks, failed
+            "计划执行完成: {}/{} 成功, {} 失败, {} 取消, {} 未记录",
+            completed, total_subtasks, failed, cancelled, missing
         );
         result.final_summary = summary.clone();
         let reviewer_count = result
@@ -1160,6 +1169,125 @@ agent_def,
                         .unwrap_or_default();
                     result.subtask_results.insert(sid.clone(), subtask_result);
                     if is_critical {
+                        let critical_failure_reason = critical_err.clone().unwrap_or_else(|| {
+                            "critical subtask failed; cancelling unfinished plan work".to_string()
+                        });
+                        for (other_sid, other_bg_id) in &bg_task_ids {
+                            if other_sid == &sid || result.subtask_results.contains_key(other_sid) {
+                                continue;
+                            }
+                            let _ = manager.cancel_task(other_bg_id).await;
+                            let other_task = subtask_meta.get(other_sid).map(|(_, _, t)| t);
+                            let other_agent = other_task
+                                .map(|t| t.agent_type.clone())
+                                .unwrap_or_else(|| "general-purpose".to_string());
+                            let cancel_message = format!(
+                                "Cancelled because critical subtask `{}` failed: {}",
+                                sid, critical_failure_reason
+                            );
+                            persist_subtask!(
+                                other_sid,
+                                "cancelled",
+                                0u32,
+                                Some(other_bg_id.clone()),
+                                Some(cancel_message.clone())
+                            );
+                            let _ = app.emit(
+                                "team-worker-update",
+                                serde_json::json!({
+                                    "sessionId": session_id,
+                                    "subtaskId": other_sid,
+                                    "agentType": other_agent.clone(),
+                                    "status": "cancelled",
+                                    "error": cancel_message,
+                                }),
+                            );
+                            append_orchestration_runtime_event(
+                                repo,
+                                RuntimeOrchestrationEvent {
+                                    session_id,
+                                    round_id: Some(runtime.round_id()),
+                                    mode: Some(orchestration_mode),
+                                    event_type: "worker_cancelled",
+                                    phase: Some("executing"),
+                                    task_id: Some(other_sid),
+                                    payload: serde_json::json!({
+                                        "planId": plan_id,
+                                        "agentType": other_task.map(|t| t.agent_type.clone()),
+                                        "supervisorAgentType": other_task.and_then(|t| t.supervisor_agent_type.clone()),
+                                        "stage": other_task.and_then(subtask_stage_label),
+                                        "description": other_task.map(|t| t.description.clone()).unwrap_or_default(),
+                                        "backgroundTaskId": other_bg_id,
+                                        "reason": "critical_failure",
+                                        "failedSubtaskId": sid,
+                                    }),
+                                },
+                            )
+                            .await;
+                            result.subtask_results.insert(
+                                other_sid.clone(),
+                                SubTaskResult {
+                                    subtask_id: other_sid.clone(),
+                                    agent_type: Some(other_agent),
+                                    status: ExecutionStatus::Cancelled,
+                                    output: None,
+                                    error: Some(cancel_message),
+                                    started_at: None,
+                                    completed_at: Some(unix_timestamp_secs()),
+                                },
+                            );
+                        }
+
+                        for pending_subtask in &plan.subtasks {
+                            if result.subtask_results.contains_key(&pending_subtask.id) {
+                                continue;
+                            }
+                            let skip_message = format!(
+                                "Skipped because critical subtask `{}` failed: {}",
+                                sid, critical_failure_reason
+                            );
+                            persist_subtask!(
+                                &pending_subtask.id,
+                                "cancelled",
+                                0u32,
+                                None::<String>,
+                                Some(skip_message.clone())
+                            );
+                            append_orchestration_runtime_event(
+                                repo,
+                                RuntimeOrchestrationEvent {
+                                    session_id,
+                                    round_id: Some(runtime.round_id()),
+                                    mode: Some(orchestration_mode),
+                                    event_type: "worker_cancelled",
+                                    phase: Some("executing"),
+                                    task_id: Some(&pending_subtask.id),
+                                    payload: serde_json::json!({
+                                        "planId": plan_id,
+                                        "agentType": pending_subtask.agent_type.clone(),
+                                        "supervisorAgentType": pending_subtask.supervisor_agent_type.clone(),
+                                        "stage": subtask_stage_label(pending_subtask),
+                                        "description": pending_subtask.description.clone(),
+                                        "reason": "critical_failure_skip",
+                                        "failedSubtaskId": sid,
+                                    }),
+                                },
+                            )
+                            .await;
+                            result.subtask_results.insert(
+                                pending_subtask.id.clone(),
+                                SubTaskResult {
+                                    subtask_id: pending_subtask.id.clone(),
+                                    agent_type: Some(pending_subtask.agent_type.clone()),
+                                    status: ExecutionStatus::Cancelled,
+                                    output: None,
+                                    error: Some(skip_message),
+                                    started_at: None,
+                                    completed_at: Some(unix_timestamp_secs()),
+                                },
+                            );
+                        }
+
                         team_st.phase = TeamPhase::Failed;
                         team_st.touch();
                         let _ = team_state::write_state(project_root, &team_st).await;
@@ -1174,7 +1302,16 @@ agent_def,
                             }),
                         );
                         result.status = ExecutionStatus::Failed;
-                        result.final_summary = format!("关键任务 {} 失败，中止执行", sid);
+                        result.completed_at = Some(unix_timestamp_secs());
+                        let cancelled_after_critical = result
+                            .subtask_results
+                            .values()
+                            .filter(|r| r.status == ExecutionStatus::Cancelled)
+                            .count();
+                        result.final_summary = format!(
+                            "关键任务 {} 失败，中止执行；已取消/跳过 {} 个未完成任务",
+                            sid, cancelled_after_critical
+                        );
                         append_orchestration_runtime_event(
                             repo,
                             RuntimeOrchestrationEvent {
@@ -2067,5 +2204,55 @@ mod finalize_tests {
         AgentOrchestrator::new().finalize_result(&mut result, 2);
         assert_eq!(result.status, ExecutionStatus::Failed);
         assert!(result.final_summary.contains("hard"));
+    }
+
+    #[test]
+    fn missing_subtask_results_do_not_complete_the_plan() {
+        let mut result = OrchestrationResult {
+            plan_id: "p".to_string(),
+            status: ExecutionStatus::Running,
+            subtask_results: HashMap::from([("exec".to_string(), subtask("executor", "done"))]),
+            execution_log: vec![],
+            started_at: None,
+            completed_at: None,
+            final_summary: String::new(),
+        };
+
+        AgentOrchestrator::new().finalize_result(&mut result, 2);
+
+        assert_eq!(result.status, ExecutionStatus::PartiallyCompleted);
+        assert!(result.final_summary.contains("1 未记录"));
+    }
+
+    #[test]
+    fn cancelled_subtask_results_do_not_complete_the_plan() {
+        let mut result = OrchestrationResult {
+            plan_id: "p".to_string(),
+            status: ExecutionStatus::Running,
+            subtask_results: HashMap::from([
+                ("exec".to_string(), subtask("executor", "done")),
+                (
+                    "cancelled".to_string(),
+                    SubTaskResult {
+                        subtask_id: "cancelled".to_string(),
+                        agent_type: Some("executor".to_string()),
+                        status: ExecutionStatus::Cancelled,
+                        output: None,
+                        error: Some("cancelled".to_string()),
+                        started_at: None,
+                        completed_at: None,
+                    },
+                ),
+            ]),
+            execution_log: vec![],
+            started_at: None,
+            completed_at: None,
+            final_summary: String::new(),
+        };
+
+        AgentOrchestrator::new().finalize_result(&mut result, 2);
+
+        assert_eq!(result.status, ExecutionStatus::Cancelled);
+        assert!(result.final_summary.contains("1 取消"));
     }
 }

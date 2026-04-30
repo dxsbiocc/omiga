@@ -37,6 +37,7 @@ import {
   Language,
   MenuBook,
   Forum,
+  Storage,
 } from "@mui/icons-material";
 import { useSessionStore } from "../../state/sessionStore";
 import { useColorModeStore } from "../../state/themeStore";
@@ -139,7 +140,7 @@ type SearchMethodOption = {
   description: string;
 };
 
-type SearchSourceTab = "web" | "literature" | "social";
+type SearchSourceTab = "web" | "literature" | "data" | "social";
 
 const SEARCH_METHOD_DND_TYPE = "settings/search-method";
 
@@ -213,6 +214,12 @@ const SEARCH_SOURCE_TABS: {
     label: "文献检索",
     description: "PubMed 与论文数据源",
     icon: MenuBook,
+  },
+  {
+    id: "data",
+    label: "数据检索",
+    description: "GEO / ENA 数据源",
+    icon: Storage,
   },
   {
     id: "social",
@@ -2091,6 +2098,147 @@ export function Settings({
                                 Semantic Scholar API
                                 <OpenInNew fontSize="inherit" />
                               </Link>
+                            </Typography>
+                          </AccordionDetails>
+                        </Accordion>
+                      </Box>
+                    )}
+
+                    {activeSearchSourceTab === "data" && (
+                      <Box>
+                        <Box
+                          sx={(theme) => ({
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 1.5,
+                            mb: 2,
+                            p: 1.5,
+                            border: `1px solid ${alpha(theme.palette.success.main, 0.18)}`,
+                            borderRadius: 2,
+                            bgcolor: alpha(theme.palette.success.main, 0.05),
+                          })}
+                        >
+                          <Box sx={{ minWidth: 0 }}>
+                            <Typography variant="body2" fontWeight={700}>
+                              内置数据源
+                            </Typography>
+                            <Stack
+                              direction="row"
+                              spacing={0.75}
+                              useFlexGap
+                              flexWrap="wrap"
+                              alignItems="center"
+                              sx={{ mt: 1.25 }}
+                            >
+                              <Typography
+                                variant="caption"
+                                fontWeight={800}
+                                color="success.main"
+                                sx={{ width: 58, flexShrink: 0 }}
+                              >
+                                无需 API
+                              </Typography>
+                              {["GEO", "ENA"].map((sourceName) => (
+                                <Chip
+                                  key={sourceName}
+                                  label={sourceName}
+                                  size="small"
+                                  color="success"
+                                  variant="outlined"
+                                  sx={(theme) => ({
+                                    height: 24,
+                                    fontWeight: 700,
+                                    borderRadius: 999,
+                                    color: "success.light",
+                                    borderColor: alpha(
+                                      theme.palette.success.main,
+                                      0.52,
+                                    ),
+                                    bgcolor: alpha(theme.palette.success.main, 0.08),
+                                  })}
+                                />
+                              ))}
+                            </Stack>
+                          </Box>
+                          <Tooltip
+                            arrow
+                            placement="left"
+                            title={
+                              <Box sx={{ maxWidth: 360 }}>
+                                <Typography variant="caption" component="div">
+                                  GEO 走官方 NCBI E-utilities db=gds；ENA 走
+                                  Portal API 元数据搜索，并在 fetch 时使用 Browser
+                                  XML 作为详情回退。
+                                </Typography>
+                                <Typography
+                                  variant="caption"
+                                  component="div"
+                                  sx={{ mt: 0.75 }}
+                                >
+                                  可直接调用
+                                  <code> search(category="data", source="geo|ena")</code>
+                                  和
+                                  <code> fetch(category="data", source="geo|ena")</code>。
+                                </Typography>
+                              </Box>
+                            }
+                          >
+                            <IconButton
+                              size="small"
+                              aria-label="查看数据源说明"
+                              sx={(theme) => ({
+                                flexShrink: 0,
+                                color: "text.secondary",
+                                bgcolor: alpha(theme.palette.background.paper, 0.7),
+                                "&:hover": {
+                                  color: "primary.main",
+                                  bgcolor: alpha(theme.palette.primary.main, 0.1),
+                                },
+                              })}
+                            >
+                              <InfoOutlined fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        </Box>
+
+                        <Accordion defaultExpanded disableGutters>
+                          <AccordionSummary expandIcon={<ExpandMore />}>
+                            <Box>
+                              <Typography variant="body2" fontWeight={700}>
+                                GEO / NCBI
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                Gene Expression Omnibus DataSets；支持 Entrez 字段查询。
+                              </Typography>
+                            </Box>
+                          </AccordionSummary>
+                          <AccordionDetails>
+                            <Typography variant="caption" color="text.secondary">
+                              示例：
+                              <code> search(category="data", source="geo", query="breast cancer AND Homo sapiens[Organism]")</code>
+                              。GEO 复用上方 PubMed / NCBI 的 email、tool 与可选 API
+                              key 配置。
+                            </Typography>
+                          </AccordionDetails>
+                        </Accordion>
+
+                        <Accordion disableGutters>
+                          <AccordionSummary expandIcon={<ExpandMore />}>
+                            <Box>
+                              <Typography variant="body2" fontWeight={700}>
+                                ENA
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                European Nucleotide Archive；支持 Study 元数据与高级查询。
+                              </Typography>
+                            </Box>
+                          </AccordionSummary>
+                          <AccordionDetails>
+                            <Typography variant="caption" color="text.secondary">
+                              普通关键词会转为 study title / description 通配查询；包含
+                              <code> AND </code>、<code> OR </code>、<code>=</code>
+                              或 <code>tax_</code> 的查询会按 ENA Portal API 高级语法直传。
                             </Typography>
                           </AccordionDetails>
                         </Accordion>

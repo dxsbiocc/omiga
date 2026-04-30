@@ -4,7 +4,8 @@
 //! 在 Docker 容器中执行命令，提供隔离的执行环境
 
 use super::base::{generate_session_id, BaseEnvironment};
-use super::types::{ExecResult, ExecutionError, ProcessHandle};
+use super::types::{ExecResult, ExecutionError, ExternalTerminalCommand, ProcessHandle};
+use crate::utils::shell::shell_single_quote;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -463,6 +464,23 @@ impl BaseEnvironment for DockerEnvironment {
 
     fn snapshot_timeout_secs(&self) -> u64 {
         60 // Docker 冷启动可能较慢
+    }
+
+    fn external_terminal_command(&self) -> Option<ExternalTerminalCommand> {
+        let container_id = self.container_id.as_ref()?;
+        let cwd = shell_single_quote(&self.cwd);
+        Some(ExternalTerminalCommand::new(
+            self.docker_exe.clone(),
+            vec![
+                "exec".to_string(),
+                "-it".to_string(),
+                container_id.clone(),
+                "bash".to_string(),
+                "-lc".to_string(),
+                format!("cd {cwd} || exit 126; exec bash -l"),
+            ],
+            "Docker 容器",
+        ))
     }
 
     async fn run_bash(

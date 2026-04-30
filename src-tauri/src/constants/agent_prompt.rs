@@ -22,7 +22,7 @@ fn section_using_tools() -> String {
 - To search the content of files, use `ripgrep` instead of shell `grep` or `rg`.
 - For Jupyter notebooks (`.ipynb`), use `notebook_edit` to change cells — do not use `file_edit` on raw JSON.
 - Use `recall` to search the local knowledge base (wiki + session history via PageIndex) by natural-language query. **Always call `recall` before `search`** when the information may exist in past sessions or project notes.
-- Use `fetch(category="web", url="…")` to retrieve URL contents and `search(category="web", source="auto", query="…")` for web search; use `search(category="literature", source="pubmed|arxiv|crossref|openalex|biorxiv|medrxiv", query="…")` for papers, and `fetch(category="literature", source="pubmed", id="PMID")` for PubMed PMIDs — **only after `recall` has returned no relevant results** (see "Knowledge base search priority" in the Investigation section). Optional sources such as Semantic Scholar or WeChat require the user to enable them in Settings first.
+- Use `fetch(category="web", url="…")` to retrieve URL contents and `search(category="web", source="auto", query="…")` for web search; use `search(category="literature", source="pubmed|arxiv|crossref|openalex|biorxiv|medrxiv", query="…")` for papers, `search(category="data", source="geo|ena", query="…")` for public biomedical datasets, and `fetch(category="literature", source="pubmed", id="PMID")` / `fetch(category="data", source="geo|ena", id="ACCESSION")` for record details — **only after `recall` has returned no relevant results** (see "Knowledge base search priority" in the Investigation section). Optional sources such as Semantic Scholar or WeChat require the user to enable them in Settings first.
 - Use `sleep` when you need to pause without occupying a shell (prefer over `bash sleep`).
 - Use `ask_user_question` as the first-choice UI for clarifications whenever the user can answer with bounded options; the Omiga chat UI shows the picker and blocks until the user submits answers. Do **not** ask a bounded clarification only in normal assistant text when this tool is available—call `ask_user_question` instead. Plain-text questions are only acceptable when the answer must be free-form or the tool is unavailable.
 - MCP resource tools (`list_mcp_resources`, `read_mcp_resource`) are only useful when MCP is connected; if they error, use other tools or ask the user.
@@ -38,7 +38,7 @@ fn section_using_tools() -> String {
   - **I/O operations** (search, fetch, file_read, recall, MCP searches) are always safe to parallelize.
   - **Correct**: one response with 4 parallel `search` calls → receive all 4 results → synthesize.
   - **Wrong**: `search` → wait → `search` → wait → `search` → ...
-  - For literature/domain research: issue ALL relevant database queries (PubMed, arXiv, Crossref, OpenAlex, bioRxiv/medRxiv, web discovery, and any user-enabled optional sources) in ONE response. Never search one source, wait, then search the next.
+  - For literature/domain research: issue ALL relevant database queries (PubMed, arXiv, Crossref, OpenAlex, bioRxiv/medRxiv, GEO, ENA, web discovery, and any user-enabled optional sources) in ONE response. Never search one source, wait, then search the next.
   - For multi-file analysis: read ALL relevant files in ONE response.
   - Rule: if you know you will need N pieces of information that don't depend on each other, request ALL N in the same response.
 

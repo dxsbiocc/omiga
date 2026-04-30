@@ -15,6 +15,29 @@ pub struct ExecResult {
     pub returncode: i32,
 }
 
+/// Command that can be handed to the user's desktop terminal for an interactive shell
+/// attached to the same execution surface (e.g. `docker exec -it ...`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalTerminalCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    pub display_name: String,
+}
+
+impl ExternalTerminalCommand {
+    pub fn new(
+        program: impl Into<String>,
+        args: Vec<String>,
+        display_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            args,
+            display_name: display_name.into(),
+        }
+    }
+}
+
 impl ExecResult {
     pub fn new(output: impl Into<String>, returncode: i32) -> Self {
         Self {

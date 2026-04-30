@@ -5865,7 +5865,7 @@ export function Chat({ sessionId }: ChatProps) {
       <Tabs
         value={panelTab}
         onChange={(_, v) => setPanelTab(v)}
-        aria-label="Chat or terminal"
+        aria-label="聊天或终端"
         sx={{
           flexShrink: 0,
           minHeight: 40,
@@ -5881,8 +5881,8 @@ export function Chat({ sessionId }: ChatProps) {
           "& .MuiTabs-indicator": { height: 2 },
         }}
       >
-        <Tab label="Chat" id="omiga-tab-chat" />
-        <Tab label="Terminal" id="omiga-tab-terminal" />
+        <Tab label="聊天" id="omiga-tab-chat" />
+        <Tab label="终端" id="omiga-tab-terminal" />
       </Tabs>
 
       {panelTab === 1 ? (
@@ -5895,7 +5895,11 @@ export function Chat({ sessionId }: ChatProps) {
             flexDirection: "column",
           }}
         >
-          <Terminal embedded />
+          <Terminal
+            embedded
+            sessionId={sessionId}
+            workspacePath={currentSession?.projectPath ?? null}
+          />
         </Box>
       ) : (
         <Box
