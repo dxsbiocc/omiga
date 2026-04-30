@@ -67,6 +67,15 @@ interface TerminalThemeColors {
   text: string;
   muted: string;
   chipBg: string;
+  iconBg: string;
+  iconBorder: string;
+  iconColor: string;
+  statusBg: string;
+  buttonBg: string;
+  buttonBorder: string;
+  buttonHover: string;
+  buttonActive: string;
+  buttonShadow: string;
   control: string;
   disabled: string;
   cursorBg: string;
@@ -92,6 +101,41 @@ function segmentSx(style: TerminalCellStyle, colors: TerminalThemeColors) {
   };
 }
 
+function toolbarButtonSx(colors: TerminalThemeColors, danger = false) {
+  return {
+    width: 34,
+    height: 34,
+    borderRadius: "12px",
+    color: danger ? "error.main" : colors.control,
+    bgcolor: colors.buttonBg,
+    border: `1px solid ${colors.buttonBorder}`,
+    transition:
+      "transform 160ms ease, background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease, color 160ms ease",
+    "&:hover": {
+      bgcolor: danger ? "error.main" : colors.buttonHover,
+      borderColor: danger ? "error.main" : colors.focusRing,
+      color: danger ? "error.contrastText" : colors.text,
+      boxShadow: colors.buttonShadow,
+      transform: "translateY(-1px)",
+    },
+    "&:active": {
+      bgcolor: colors.buttonActive,
+      boxShadow: "none",
+      transform: "translateY(0)",
+    },
+    "&.Mui-disabled": {
+      color: colors.disabled,
+      bgcolor: "transparent",
+      borderColor: colors.buttonBorder,
+      boxShadow: "none",
+    },
+    "@media (prefers-reduced-motion: reduce)": {
+      transition: "none",
+      "&:hover": { transform: "none" },
+    },
+  };
+}
+
 export function Terminal({
   embedded = false,
   active = true,
@@ -112,6 +156,18 @@ export function Terminal({
       text: theme.palette.text.primary,
       muted: theme.palette.text.secondary,
       chipBg: alpha(theme.palette.primary.main, isDark ? 0.2 : 0.08),
+      iconBg: alpha(theme.palette.primary.main, isDark ? 0.2 : 0.1),
+      iconBorder: alpha(theme.palette.primary.main, isDark ? 0.34 : 0.18),
+      iconColor: theme.palette.primary.main,
+      statusBg: alpha(theme.palette.success.main, isDark ? 0.18 : 0.1),
+      buttonBg: alpha(theme.palette.text.primary, isDark ? 0.045 : 0.035),
+      buttonBorder: alpha(theme.palette.text.primary, isDark ? 0.12 : 0.08),
+      buttonHover: alpha(theme.palette.primary.main, isDark ? 0.18 : 0.1),
+      buttonActive: alpha(theme.palette.primary.main, isDark ? 0.24 : 0.16),
+      buttonShadow: `0 8px 18px ${alpha(
+        theme.palette.primary.main,
+        isDark ? 0.16 : 0.12,
+      )}`,
       control: theme.palette.text.secondary,
       disabled: alpha(theme.palette.text.primary, isDark ? 0.28 : 0.22),
       cursorBg: theme.palette.text.primary,
@@ -393,6 +449,14 @@ export function Terminal({
         : status === "error"
           ? "error.main"
           : "text.disabled";
+  const statusLabel =
+    status === "running"
+      ? "运行中"
+      : status === "connecting"
+        ? "连接中"
+        : status === "error"
+          ? "错误"
+          : "已退出";
 
   return (
     <Box
@@ -411,45 +475,151 @@ export function Terminal({
         justifyContent="space-between"
         sx={{
           minHeight: embedded ? 38 : 42,
-          px: 1.25,
+          px: 1,
+          gap: 1,
           borderBottom: 1,
           borderColor: terminalColors.border,
-          bgcolor: terminalColors.chrome,
+          background: `linear-gradient(135deg, ${terminalColors.chrome} 0%, ${alpha(
+            theme.palette.primary.main,
+            theme.palette.mode === "dark" ? 0.08 : 0.04,
+          )} 100%)`,
           backdropFilter: "blur(12px) saturate(140%)",
           WebkitBackdropFilter: "blur(12px) saturate(140%)",
+          boxShadow: `inset 0 1px 0 ${alpha(
+            theme.palette.common.white,
+            theme.palette.mode === "dark" ? 0.05 : 0.72,
+          )}`,
         }}
       >
-        <Stack direction="row" alignItems="center" spacing={1} sx={{ minWidth: 0 }}>
-          <TerminalIcon fontSize="small" />
-          <Typography variant="body2" fontWeight={800} noWrap>
-            内嵌终端
-          </Typography>
+        <Stack
+          direction="row"
+          alignItems="center"
+          spacing={0.875}
+          sx={{ minWidth: 0, flex: 1 }}
+        >
+          <Tooltip title="终端">
+            <Box
+              aria-label="终端"
+              role="img"
+              sx={{
+                width: 32,
+                height: 32,
+                borderRadius: "12px",
+                display: "grid",
+                placeItems: "center",
+                color: terminalColors.iconColor,
+                bgcolor: terminalColors.iconBg,
+                border: `1px solid ${terminalColors.iconBorder}`,
+                boxShadow: `inset 0 1px 0 ${alpha(
+                  theme.palette.common.white,
+                  theme.palette.mode === "dark" ? 0.08 : 0.82,
+                )}`,
+                flexShrink: 0,
+              }}
+            >
+              <TerminalIcon sx={{ fontSize: 18 }} />
+            </Box>
+          </Tooltip>
+          <Stack
+            direction="row"
+            alignItems="center"
+            spacing={0.75}
+            sx={{ minWidth: 0, flex: 1 }}
+          >
+            <Stack
+              direction="row"
+              alignItems="center"
+              spacing={0.5}
+              aria-label={`终端状态：${statusLabel}`}
+              sx={{
+                height: 24,
+                px: 0.9,
+                borderRadius: 999,
+                color: terminalColors.text,
+                bgcolor:
+                  status === "running"
+                    ? terminalColors.statusBg
+                    : alpha(
+                        theme.palette.text.primary,
+                        theme.palette.mode === "dark" ? 0.08 : 0.05,
+                      ),
+                border: `1px solid ${alpha(
+                  theme.palette.text.primary,
+                  theme.palette.mode === "dark" ? 0.1 : 0.06,
+                )}`,
+                flexShrink: 0,
+              }}
+            >
+              <Circle sx={{ fontSize: 8, color: statusColor }} />
+              <Typography variant="caption" fontWeight={700} sx={{ lineHeight: 1 }}>
+                {statusLabel}
+              </Typography>
+            </Stack>
           <Chip
             size="small"
             label={terminalInfo?.label ?? envLabel}
             sx={{
-              height: 22,
+              height: 24,
               color: terminalColors.text,
               bgcolor: terminalColors.chipBg,
+              border: `1px solid ${alpha(
+                theme.palette.primary.main,
+                theme.palette.mode === "dark" ? 0.22 : 0.12,
+              )}`,
               fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: 0.01,
+              flexShrink: 0,
             }}
           />
-          <Circle sx={{ fontSize: 9, color: statusColor }} />
           <Typography
             variant="caption"
             noWrap
-            sx={{ color: terminalColors.muted, maxWidth: 460 }}
+            title={terminalInfo?.cwd ?? workspaceLabel}
+            sx={{
+              color: terminalColors.muted,
+              minWidth: 0,
+              maxWidth: 520,
+              fontFamily: "JetBrains Mono, Monaco, Consolas, monospace",
+              px: 1,
+              py: 0.35,
+              borderRadius: 999,
+              bgcolor: alpha(
+                theme.palette.text.primary,
+                theme.palette.mode === "dark" ? 0.035 : 0.025,
+              ),
+              border: `1px solid ${alpha(
+                theme.palette.text.primary,
+                theme.palette.mode === "dark" ? 0.08 : 0.05,
+              )}`,
+            }}
           >
             {terminalInfo?.cwd ?? workspaceLabel}
           </Typography>
+          </Stack>
         </Stack>
 
-        <Stack direction="row" alignItems="center" spacing={0.25}>
+        <Stack
+          direction="row"
+          alignItems="center"
+          spacing={0.35}
+          sx={{
+            p: 0.25,
+            borderRadius: "14px",
+            bgcolor: alpha(
+              theme.palette.text.primary,
+              theme.palette.mode === "dark" ? 0.035 : 0.03,
+            ),
+            border: `1px solid ${terminalColors.border}`,
+            flexShrink: 0,
+          }}
+        >
           <Tooltip title="重启终端">
             <IconButton
               size="small"
+              aria-label="重启终端"
               onClick={() => void startTerminal()}
-              sx={{ color: terminalColors.control }}
+              sx={toolbarButtonSx(terminalColors)}
             >
               <PlayArrow fontSize="small" />
             </IconButton>
@@ -458,12 +628,10 @@ export function Terminal({
             <span>
               <IconButton
                 size="small"
+                aria-label="停止终端"
                 disabled={!activeTerminalId || status !== "running"}
                 onClick={() => void stopTerminal()}
-                sx={{
-                  color: terminalColors.control,
-                  "&.Mui-disabled": { color: terminalColors.disabled },
-                }}
+                sx={toolbarButtonSx(terminalColors, true)}
               >
                 <Stop fontSize="small" />
               </IconButton>
@@ -472,8 +640,9 @@ export function Terminal({
           <Tooltip title="复制输出">
             <IconButton
               size="small"
+              aria-label="复制终端输出"
               onClick={() => void copyOutput()}
-              sx={{ color: terminalColors.control }}
+              sx={toolbarButtonSx(terminalColors)}
             >
               <ContentCopy fontSize="small" />
             </IconButton>
@@ -481,11 +650,12 @@ export function Terminal({
           <Tooltip title="清空输出">
             <IconButton
               size="small"
+              aria-label="清空终端输出"
               onClick={() => {
                 screenRef.current.clear();
                 setLines(screenRef.current.snapshot());
               }}
-              sx={{ color: terminalColors.control }}
+              sx={toolbarButtonSx(terminalColors)}
             >
               <Clear fontSize="small" />
             </IconButton>
