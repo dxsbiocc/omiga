@@ -3,6 +3,7 @@ name = "omiga"
 version = "0.2.0"
 description = "An IDE-like AI coding assistant built with Tauri"
 authors = ["omiga contributors"]
+license = "MIT"
 edition = "2021"
 rust-version = "1.75"
 

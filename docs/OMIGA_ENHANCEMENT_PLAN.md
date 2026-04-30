@@ -582,7 +582,7 @@ once_cell = "1"                    # 全局注册表
 ### C. 设计文档
 
 - `docs/unified-memory-design.md` - 统一记忆系统设计
-- `docs/AGENT_MIGRATION_COMPLETE.md` - Agent 迁移总结
+- `docs/AGENT_SYSTEM_MIGRATION_PLAN.md` - Agent 系统迁移规划
 
 ---
 
