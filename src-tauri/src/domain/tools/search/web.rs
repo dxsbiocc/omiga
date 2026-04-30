@@ -1,25 +1,16 @@
 use super::super::{ToolContext, ToolError};
 use super::common::*;
-use base64::{
-    engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
-    Engine as _,
-};
-use lazy_static::lazy_static;
-use regex::Regex;
-use serde::Serialize;
 use serde_json::{json, Value as JsonValue};
-use std::collections::HashSet;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-const MAX_SNIPPET_CHARS: usize = 512;
-const MAX_TITLE_CHARS: usize = 220;
+mod html_sources;
+mod providers;
+mod web_common;
+
 const SEARCH_METHOD_RETRY_DELAY_MS: u64 = 400;
 const SEARCH_METHOD_MAX_ATTEMPTS: usize = 3;
 const SEARCH_MAX_TIMEOUT_SECS: u64 = 30;
-const DDG_HTML_SEARCH_BASE: &str = "https://html.duckduckgo.com/html/";
-const BING_SEARCH_BASE: &str = "https://www.bing.com/search";
-const GOOGLE_SEARCH_BASE: &str = "https://www.google.com/search";
 
 fn join_labels(labels: &[String]) -> String {
     if labels.is_empty() {
@@ -193,7 +184,7 @@ async fn search_once_with_method(
             let key = resolve_tavily_api_key(ctx).ok_or_else(|| ToolError::ExecutionFailed {
                 message: "Tavily API key is not configured".to_string(),
             })?;
-            search_tavily_once(
+            providers::search_tavily_once(
                 client,
                 &key,
                 request.query,
@@ -207,23 +198,23 @@ async fn search_once_with_method(
             let key = resolve_exa_api_key(ctx).ok_or_else(|| ToolError::ExecutionFailed {
                 message: "Exa API key is not configured".to_string(),
             })?;
-            search_exa_once(client, &key, request.query, max_u32).await
+            providers::search_exa_once(client, &key, request.query, max_u32).await
         }
         SearchMethod::Firecrawl => {
             let key = resolve_firecrawl_api_key(ctx).ok_or_else(|| ToolError::ExecutionFailed {
                 message: "Firecrawl API key is not configured".to_string(),
             })?;
             let base = resolve_firecrawl_base_url(ctx);
-            search_firecrawl_once(client, &key, &base, request.query, max_u32).await
+            providers::search_firecrawl_once(client, &key, &base, request.query, max_u32).await
         }
         SearchMethod::Parallel => {
             let key = resolve_parallel_api_key(ctx).ok_or_else(|| ToolError::ExecutionFailed {
                 message: "Parallel API key is not configured".to_string(),
             })?;
-            search_parallel_once(client, &key, request.query, max_u32).await
+            providers::search_parallel_once(client, &key, request.query, max_u32).await
         }
         SearchMethod::Ddg => {
-            search_ddg(
+            html_sources::search_ddg(
                 client,
                 request.query,
                 request.max_results,
@@ -231,8 +222,12 @@ async fn search_once_with_method(
             )
             .await
         }
-        SearchMethod::Bing => search_bing(client, request.query, request.max_results).await,
-        SearchMethod::Google => search_google(client, request.query, request.max_results).await,
+        SearchMethod::Bing => {
+            html_sources::search_bing(client, request.query, request.max_results).await
+        }
+        SearchMethod::Google => {
+            html_sources::search_google(client, request.query, request.max_results).await
+        }
     }
 }
 
@@ -280,8 +275,13 @@ async fn search_ordered_methods(
             let result = search_once_with_method(client, ctx, method, &request).await;
             match result {
                 Ok(hits) => {
-                    let filtered =
-                        filter_hits(&ctx.project_root, hits, allowed, blocked, max_results);
+                    let filtered = web_common::filter_hits(
+                        &ctx.project_root,
+                        hits,
+                        allowed,
+                        blocked,
+                        max_results,
+                    );
                     if !filtered.is_empty() {
                         exec.hits = filtered;
                         exec.effective_source = Some(search_method_source_key(method).to_string());
@@ -319,946 +319,181 @@ async fn search_ordered_methods(
     Ok(exec)
 }
 
-fn host_of_url(url: &str) -> Option<String> {
-    reqwest::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+fn search_method_source_key(method: SearchMethod) -> &'static str {
+    match method {
+        SearchMethod::Tavily => "tavily",
+        SearchMethod::Exa => "exa",
+        SearchMethod::Firecrawl => "firecrawl",
+        SearchMethod::Parallel => "parallel",
+        SearchMethod::Ddg => "ddg",
+        SearchMethod::Bing => "bing",
+        SearchMethod::Google => "google",
+    }
 }
 
-fn domain_matches(host: &str, pattern: &str) -> bool {
-    let p = pattern
-        .trim()
-        .trim_start_matches("www.")
-        .to_ascii_lowercase();
-    let h = host.trim().trim_start_matches("www.");
-    h == p || h.ends_with(&format!(".{}", p))
+fn web_methods_for_source(ctx: &ToolContext, source: &str) -> Result<Vec<SearchMethod>, ToolError> {
+    match source {
+        "auto" => Ok(ordered_search_methods(
+            &ctx.web_search_methods,
+            &ctx.web_search_engine,
+        )),
+        "tavily" => Ok(vec![SearchMethod::Tavily]),
+        "exa" => Ok(vec![SearchMethod::Exa]),
+        "firecrawl" => Ok(vec![SearchMethod::Firecrawl]),
+        "parallel" => Ok(vec![SearchMethod::Parallel]),
+        "google" => Ok(vec![SearchMethod::Google]),
+        "bing" => Ok(vec![SearchMethod::Bing]),
+        "ddg" | "duckduckgo" | "duck_duck_go" => Ok(vec![SearchMethod::Ddg]),
+        other => Err(ToolError::InvalidArguments {
+            message: format!("Unsupported web search source: {other}"),
+        }),
+    }
 }
 
-fn url_passes_filters(
-    url: &str,
-    allowed: &Option<Vec<String>>,
-    blocked: &Option<Vec<String>>,
-) -> bool {
-    let Some(host) = host_of_url(url) else {
-        return false;
+fn displayed_link_for_url(url: &str) -> String {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return url.to_string();
     };
-    if let Some(blocks) = blocked {
-        for d in blocks {
-            if domain_matches(&host, d) {
-                return false;
-            }
-        }
-    }
-    if let Some(allows) = allowed {
-        if allows.is_empty() {
-            return true;
-        }
-        return allows.iter().any(|d| domain_matches(&host, d));
-    }
-    true
-}
-
-fn filter_hits(
-    project_root: &std::path::Path,
-    hits: Vec<SearchHit>,
-    allowed: &Option<Vec<String>>,
-    blocked: &Option<Vec<String>>,
-    limit: usize,
-) -> Vec<SearchHit> {
-    hits.into_iter()
-        .filter(|h| url_passes_filters(&h.url, allowed, blocked))
-        .filter(|h| crate::domain::tools::web_safety::is_safe_result_url(project_root, &h.url))
-        .take(limit)
-        .collect()
-}
-
-fn normalize_url_for_dedup(url: &str) -> String {
-    url.trim().trim_end_matches('/').to_lowercase()
-}
-
-/// Strip inline base64 image payloads (Hermes `clean_base64_images`) and cap length.
-fn sanitize_search_text(s: &str, max_chars: usize) -> String {
-    lazy_static! {
-        static ref RE_BASE64_PARENS: Regex =
-            Regex::new(r"\(data:image/[^;]+;base64,[A-Za-z0-9+/=]+\)").expect("regex");
-        static ref RE_BASE64_PLAIN: Regex =
-            Regex::new(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+").expect("regex");
-        static ref WS: Regex = Regex::new(r"\s+").expect("ws");
-    }
-    let t = RE_BASE64_PARENS.replace_all(s, "[image omitted]");
-    let t = RE_BASE64_PLAIN.replace_all(t.as_ref(), "[image omitted]");
-    let t = WS.replace_all(t.trim(), " ");
-    let t = t.trim();
-    if t.len() <= max_chars {
-        t.to_string()
-    } else {
-        format!(
-            "{}…",
-            t.chars()
-                .take(max_chars.saturating_sub(1))
-                .collect::<String>()
-        )
-    }
-}
-
-fn sanitize_hit(h: SearchHit) -> SearchHit {
-    SearchHit {
-        title: sanitize_search_text(&h.title, MAX_TITLE_CHARS),
-        url: h.url.trim().to_string(),
-        snippet: sanitize_search_text(&h.snippet, MAX_SNIPPET_CHARS),
-    }
-}
-
-fn dedupe_hits_preserve_order(hits: Vec<SearchHit>) -> Vec<SearchHit> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::with_capacity(hits.len());
-    for h in hits {
-        let k = normalize_url_for_dedup(&h.url);
-        if k.is_empty() {
-            continue;
-        }
-        if seen.insert(k) {
-            out.push(h);
-        }
+    let host = parsed
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches("www.");
+    let mut out = host.to_string();
+    let path = parsed.path().trim_end_matches('/');
+    if !path.is_empty() && path != "/" {
+        out.push_str(path);
     }
     out
 }
 
-#[derive(Serialize)]
-struct TavilySearchRequest<'a> {
-    api_key: &'a str,
-    query: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    include_domains: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exclude_domains: Option<Vec<String>>,
-    max_results: u32,
-    search_depth: &'static str,
-    /// Hermes-style: smaller payloads, fewer parse edge cases.
-    include_raw_content: bool,
-    include_images: bool,
+fn favicon_for_url(url: &str) -> Option<String> {
+    let host = web_common::host_of_url(url)?;
+    Some(format!(
+        "https://www.google.com/s2/favicons?domain={}&sz=64",
+        host.trim_start_matches("www.")
+    ))
 }
 
-async fn search_tavily_once(
-    client: &reqwest::Client,
-    key: &str,
-    query: &str,
-    allowed: &Option<Vec<String>>,
-    blocked: &Option<Vec<String>>,
-    max_results: u32,
-) -> Result<Vec<SearchHit>, ToolError> {
-    let include_domains = allowed
-        .as_ref()
-        .filter(|v| !v.is_empty())
-        .map(|v| v.iter().map(|s| s.trim().to_string()).collect::<Vec<_>>());
-    let exclude_domains = blocked
-        .as_ref()
-        .filter(|v| !v.is_empty())
-        .map(|v| v.iter().map(|s| s.trim().to_string()).collect::<Vec<_>>());
-
-    let body = TavilySearchRequest {
-        api_key: key,
-        query,
-        include_domains,
-        exclude_domains,
-        max_results: max_results.min(20),
-        search_depth: "basic",
-        include_raw_content: false,
-        include_images: false,
-    };
-
-    let resp = client
-        .post("https://api.tavily.com/search")
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Tavily request failed: {}", e),
-        })?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let body_text = resp.text().await.unwrap_or_default();
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "Tavily HTTP {}: {}",
-                status,
-                body_text.chars().take(500).collect::<String>()
-            ),
-        });
-    }
-
-    let v: serde_json::Value = resp.json().await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Tavily JSON: {}", e),
-    })?;
-
-    let mut out = Vec::new();
-    if let Some(arr) = v.get("results").and_then(|r| r.as_array()) {
-        for r in arr {
-            let title = r
-                .get("title")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string();
-            let url = r.get("url").and_then(|x| x.as_str()).unwrap_or("");
-            let snippet = r
-                .get("content")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string();
-            if !url.is_empty() {
-                out.push(SearchHit {
-                    title,
-                    url: url.to_string(),
-                    snippet,
-                });
-            }
-        }
-    }
-    Ok(out)
-}
-
-async fn search_exa_once(
-    client: &reqwest::Client,
-    api_key: &str,
-    query: &str,
-    max_results: u32,
-) -> Result<Vec<SearchHit>, ToolError> {
-    let n = max_results.clamp(1, 20);
-    let body = serde_json::json!({
-        "query": query,
-        "numResults": n,
-        "contents": { "text": true }
-    });
-    let resp = client
-        .post("https://api.exa.ai/search")
-        .header("x-api-key", api_key)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Exa request failed: {}", e),
-        })?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body_text = resp.text().await.unwrap_or_default();
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "Exa HTTP {}: {}",
-                status,
-                body_text.chars().take(500).collect::<String>()
-            ),
-        });
-    }
-    let v: serde_json::Value = resp.json().await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Exa JSON: {}", e),
-    })?;
-    let mut out = Vec::new();
-    if let Some(arr) = v.get("results").and_then(|r| r.as_array()) {
-        for r in arr {
-            let title = r
-                .get("title")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string();
-            let url = r.get("url").and_then(|x| x.as_str()).unwrap_or("");
-            let snippet = r
-                .get("text")
-                .and_then(|x| x.as_str())
-                .or_else(|| r.get("snippet").and_then(|x| x.as_str()))
-                .unwrap_or("")
-                .to_string();
-            if !url.is_empty() {
-                out.push(SearchHit {
-                    title,
-                    url: url.to_string(),
-                    snippet,
-                });
-            }
-        }
-    }
-    Ok(out)
-}
-
-async fn search_firecrawl_once(
-    client: &reqwest::Client,
-    api_key: &str,
-    base_url: &str,
-    query: &str,
-    max_results: u32,
-) -> Result<Vec<SearchHit>, ToolError> {
-    let n = max_results.clamp(1, 20);
-    let url = format!("{}/v1/search", base_url);
-    let body = serde_json::json!({
-        "query": query,
-        "limit": n
-    });
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Firecrawl request failed: {}", e),
-        })?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body_text = resp.text().await.unwrap_or_default();
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "Firecrawl HTTP {}: {}",
-                status,
-                body_text.chars().take(500).collect::<String>()
-            ),
-        });
-    }
-    let v: serde_json::Value = resp.json().await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Firecrawl JSON: {}", e),
-    })?;
-    let mut out = Vec::new();
-    let data = v
-        .get("data")
-        .and_then(|d| d.as_array())
-        .or_else(|| v.get("results").and_then(|r| r.as_array()));
-    if let Some(arr) = data {
-        for r in arr {
-            let title = r
-                .get("title")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string();
-            let url = r.get("url").and_then(|x| x.as_str()).unwrap_or("");
-            let snippet = r
-                .get("description")
-                .and_then(|x| x.as_str())
-                .or_else(|| r.get("markdown").and_then(|x| x.as_str()))
-                .or_else(|| r.get("snippet").and_then(|x| x.as_str()))
-                .unwrap_or("")
-                .to_string();
-            if !url.is_empty() {
-                out.push(SearchHit {
-                    title,
-                    url: url.to_string(),
-                    snippet,
-                });
-            }
-        }
-    }
-    Ok(out)
-}
-
-async fn search_parallel_once(
-    client: &reqwest::Client,
-    api_key: &str,
-    query: &str,
-    max_results: u32,
-) -> Result<Vec<SearchHit>, ToolError> {
-    let n = max_results.clamp(1, 20);
-    let body = serde_json::json!({
-        "objective": query,
-        "search_queries": [query],
-        "mode": "fast",
-        "max_results": n
-    });
-    let resp = client
-        .post("https://api.parallel.ai/v1beta/search")
-        .header("x-api-key", api_key)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Parallel request failed: {}", e),
-        })?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body_text = resp.text().await.unwrap_or_default();
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "Parallel HTTP {}: {}",
-                status,
-                body_text.chars().take(500).collect::<String>()
-            ),
-        });
-    }
-    let v: serde_json::Value = resp.json().await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Parallel JSON: {}", e),
-    })?;
-    let mut out = Vec::new();
-    let items = v
-        .pointer("/results")
-        .and_then(|x| x.as_array())
-        .or_else(|| v.get("search_results").and_then(|x| x.as_array()))
-        .or_else(|| v.as_array());
-    if let Some(arr) = items {
-        for r in arr {
-            if r.is_object() {
-                let title = r
-                    .get("title")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let url = r.get("url").and_then(|x| x.as_str()).unwrap_or("");
-                let snippet = r
-                    .get("excerpt")
-                    .and_then(|x| x.as_str())
-                    .or_else(|| r.get("snippet").and_then(|x| x.as_str()))
-                    .or_else(|| r.get("text").and_then(|x| x.as_str()))
-                    .unwrap_or("")
-                    .to_string();
-                if !url.is_empty() {
-                    out.push(SearchHit {
-                        title,
-                        url: url.to_string(),
-                        snippet,
-                    });
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// Browser-like UA; DDG often returns non-JSON or empty payloads for generic `reqwest` defaults.
-const DDG_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-
-fn ddg_api_headers() -> reqwest::header::HeaderMap {
-    let mut h = reqwest::header::HeaderMap::new();
-    h.insert(
-        reqwest::header::USER_AGENT,
-        reqwest::header::HeaderValue::from_static(DDG_USER_AGENT),
-    );
-    h.insert(
-        reqwest::header::ACCEPT,
-        reqwest::header::HeaderValue::from_static("application/json, text/javascript, */*;q=0.1"),
-    );
-    h.insert(
-        reqwest::header::REFERER,
-        reqwest::header::HeaderValue::from_static("https://duckduckgo.com/html/"),
-    );
-    h.insert(
-        reqwest::header::HeaderName::from_static("accept-language"),
-        reqwest::header::HeaderValue::from_static("en-US,en;q=0.9"),
-    );
-    h
-}
-
-fn ddg_html_headers() -> reqwest::header::HeaderMap {
-    let mut h = reqwest::header::HeaderMap::new();
-    h.insert(
-        reqwest::header::USER_AGENT,
-        reqwest::header::HeaderValue::from_static(DDG_USER_AGENT),
-    );
-    h.insert(
-        reqwest::header::ACCEPT,
-        reqwest::header::HeaderValue::from_static(
-            "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-        ),
-    );
-    h.insert(
-        reqwest::header::REFERER,
-        reqwest::header::HeaderValue::from_static("https://duckduckgo.com/html/"),
-    );
-    h.insert(
-        reqwest::header::HeaderName::from_static("accept-language"),
-        reqwest::header::HeaderValue::from_static("en-US,en;q=0.9"),
-    );
-    h
-}
-
-fn bing_html_headers() -> reqwest::header::HeaderMap {
-    let mut h = ddg_html_headers();
-    h.insert(
-        reqwest::header::REFERER,
-        reqwest::header::HeaderValue::from_static("https://www.bing.com/"),
-    );
-    h
-}
-
-fn google_html_headers() -> reqwest::header::HeaderMap {
-    let mut h = ddg_html_headers();
-    h.insert(
-        reqwest::header::REFERER,
-        reqwest::header::HeaderValue::from_static("https://www.google.com/"),
-    );
-    h
-}
-
-fn ddg_href_for_parse(raw: &str) -> String {
-    raw.replace("&amp;", "&")
-}
-
-fn decode_bing_redirect_candidate(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    let candidates = if let Some(stripped) = trimmed.strip_prefix("a1") {
-        vec![trimmed, stripped]
-    } else {
-        vec![trimmed]
-    };
-
-    for candidate in candidates {
-        for decoded in [
-            URL_SAFE_NO_PAD.decode(candidate.as_bytes()),
-            URL_SAFE.decode(candidate.as_bytes()),
-            BASE64_STANDARD.decode(candidate.as_bytes()),
-        ] {
-            let Ok(bytes) = decoded else {
-                continue;
-            };
-            let Ok(text) = String::from_utf8(bytes) else {
-                continue;
-            };
-            if text.starts_with("http://") || text.starts_with("https://") {
-                return Some(text);
-            }
-        }
-    }
-
-    None
-}
-
-/// Match OpenHarness: unwrap `uddg` on DDG `/l/` redirects; otherwise return the URL unchanged.
-fn normalize_result_url(raw_url: &str) -> String {
-    let raw = ddg_href_for_parse(raw_url.trim());
-    let fixed = if raw.starts_with("//") {
-        format!("https:{}", raw)
-    } else if raw.starts_with('/') {
-        format!("https://www.google.com{}", raw)
-    } else {
-        raw
-    };
-    let Ok(u) = reqwest::Url::parse(&fixed) else {
-        return raw_url.to_string();
-    };
-    let host = u.host_str().unwrap_or("").to_ascii_lowercase();
-    if host.ends_with("duckduckgo.com") && u.path().starts_with("/l") {
-        for (k, v) in u.query_pairs() {
-            if k == "uddg" && !v.is_empty() {
-                return v.into_owned();
-            }
-        }
-    }
-    if host.ends_with("bing.com") && u.path().starts_with("/ck/") {
-        for (k, v) in u.query_pairs() {
-            if k == "u" && !v.is_empty() {
-                if let Some(decoded) = decode_bing_redirect_candidate(&v) {
-                    return decoded;
-                }
-            }
-        }
-    }
-    if host.ends_with("google.com") && u.path().starts_with("/url") {
-        for (k, v) in u.query_pairs() {
-            if k == "q" && !v.is_empty() {
-                return v.into_owned();
-            }
-        }
-    }
-    fixed
-}
-
-fn clean_html_fragment(fragment: &str) -> String {
-    lazy_static! {
-        static ref TAGS: Regex = Regex::new(r"(?s)<[^>]+>").expect("regex");
-        static ref WS: Regex = Regex::new(r"\s+").expect("ws");
-    }
-    let t = TAGS.replace_all(fragment, " ");
-    let t = t
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-        .replace("&nbsp;", " ");
-    WS.replace_all(t.trim(), " ").to_string()
-}
-
-fn collect_ddg_topics(topics: &[serde_json::Value], out: &mut Vec<SearchHit>, max: usize) {
-    for item in topics {
-        if out.len() >= max {
-            break;
-        }
-        if let Some(obj) = item.as_object() {
-            if let (Some(u), Some(text)) = (
-                obj.get("FirstURL").and_then(|x| x.as_str()),
-                obj.get("Text").and_then(|x| x.as_str()),
-            ) {
-                if !u.is_empty() {
-                    let title = if text.len() > 160 {
-                        format!("{}…", &text[..160])
-                    } else {
-                        text.to_string()
-                    };
-                    out.push(SearchHit {
-                        title,
-                        url: u.to_string(),
-                        snippet: String::new(),
-                    });
-                }
-                continue;
-            }
-        }
-        if let Some(nested) = item.get("Topics").and_then(|x| x.as_array()) {
-            collect_ddg_topics(nested, out, max);
-        }
-    }
-}
-
-/// Parse instant-answer JSON from `api.duckduckgo.com`.
-fn parse_ddg_instant_answer_json(body: &str, max: usize) -> Result<Vec<SearchHit>, ToolError> {
-    let t = body.trim_start();
-    if !t.starts_with('{') {
-        return Err(ToolError::ExecutionFailed {
-            message: "DuckDuckGo API returned non-JSON body (likely blocked or HTML).".to_string(),
-        });
-    }
-    let v: serde_json::Value =
-        serde_json::from_str(body).map_err(|e| ToolError::ExecutionFailed {
-            message: format!("DuckDuckGo JSON parse: {}", e),
-        })?;
-
-    let mut out = Vec::new();
-
-    if let Some(u) = v.get("AbstractURL").and_then(|x| x.as_str()) {
-        if !u.is_empty() && out.len() < max {
-            let title = v
-                .get("Heading")
-                .and_then(|x| x.as_str())
-                .or_else(|| v.get("Abstract").and_then(|x| x.as_str()))
-                .unwrap_or(u)
-                .to_string();
-            let title = if title.len() > 160 {
-                format!("{}…", &title[..160])
+fn web_results_json(
+    args: &SearchArgs,
+    requested_source: &str,
+    execution: SearchExecution,
+    hits: Vec<SearchHit>,
+    duration: f32,
+) -> JsonValue {
+    let effective_source = execution
+        .effective_source
+        .clone()
+        .unwrap_or_else(|| requested_source.to_string());
+    let results: Vec<JsonValue> = hits
+        .iter()
+        .enumerate()
+        .map(|(idx, h)| {
+            let title = if h.title.trim().is_empty() {
+                &h.url
             } else {
-                title
+                &h.title
             };
-            out.push(SearchHit {
-                title,
-                url: u.to_string(),
-                snippet: String::new(),
-            });
-        }
-    }
-
-    if let Some(topics) = v.get("RelatedTopics").and_then(|x| x.as_array()) {
-        collect_ddg_topics(topics, &mut out, max);
-    }
-
-    Ok(out)
-}
-
-lazy_static! {
-    /// OpenHarness-style: `result__snippet` / `result-snippet` blocks.
-    static ref RE_DDG_SNIPPET: Regex = Regex::new(
-        r#"(?is)<(?:a|div|span)[^>]+class="[^"]*(?:result__snippet|result-snippet)[^"]*"[^>]*>(?P<snippet>.*?)</(?:a|div|span)>"#,
-    )
-    .expect("regex");
-    /// All `<a …>title</a>` for class scan + href extraction (aligned with OpenHarness).
-    static ref RE_DDG_ANCHOR: Regex =
-        Regex::new(r#"(?is)<a(?P<attrs>[^>]+)>(?P<title>.*?)</a>"#).expect("regex");
-    static ref RE_CLASS_ATTR: Regex = Regex::new(r#"(?i)class="(?P<class>[^"]+)""#).expect("regex");
-    static ref RE_HREF_ATTR: Regex = Regex::new(r#"(?i)href="(?P<href>[^"]+)""#).expect("regex");
-    static ref RE_BING_BLOCK: Regex =
-        Regex::new(r#"(?is)<li[^>]+class="[^"]*\bb_algo\b[^"]*"[^>]*>(?P<body>.*?)</li>"#)
-            .expect("regex");
-    static ref RE_BING_SNIPPET: Regex =
-        Regex::new(r#"(?is)<p[^>]*>(?P<snippet>.*?)</p>"#).expect("regex");
-}
-
-fn extract_ddg_snippets(body: &str) -> Vec<String> {
-    RE_DDG_SNIPPET
-        .captures_iter(body)
-        .filter_map(|c| c.name("snippet").map(|m| clean_html_fragment(m.as_str())))
-        .collect()
-}
-
-/// HTML result page parser (OpenHarness-style): `result__a` / `result-link`, snippets, `uddg` URLs.
-fn parse_ddg_html_results_openharness(body: &str, limit: usize) -> Vec<SearchHit> {
-    let snippets = extract_ddg_snippets(body);
-    let mut results = Vec::new();
-    let mut snip_i = 0usize;
-
-    for cap in RE_DDG_ANCHOR.captures_iter(body) {
-        if results.len() >= limit {
-            break;
-        }
-        let attrs = cap.name("attrs").map(|m| m.as_str()).unwrap_or("");
-        let Some(class_m) = RE_CLASS_ATTR.captures(attrs) else {
-            continue;
-        };
-        let class_names = class_m.name("class").map(|m| m.as_str()).unwrap_or("");
-        if !class_names.contains("result__a") && !class_names.contains("result-link") {
-            continue;
-        }
-        let Some(href_m) = RE_HREF_ATTR.captures(attrs) else {
-            continue;
-        };
-        let raw_href = href_m.name("href").map(|m| m.as_str()).unwrap_or("");
-        let title_raw = cap.name("title").map(|m| m.as_str()).unwrap_or("");
-        let title = clean_html_fragment(title_raw);
-        let url = normalize_result_url(raw_href);
-        let snippet = snippets
-            .get(snip_i)
-            .map(|s| s.as_str())
-            .unwrap_or("")
-            .to_string();
-        snip_i += 1;
-
-        if title.is_empty() || url.is_empty() {
-            continue;
-        }
-        let title = if title.len() > 160 {
-            format!("{}…", &title[..160])
-        } else {
-            title
-        };
-        results.push(SearchHit {
-            title,
-            url,
-            snippet,
-        });
-    }
-
-    results
-}
-
-fn parse_bing_html_results(body: &str, limit: usize) -> Vec<SearchHit> {
-    let mut results = Vec::new();
-
-    for block in RE_BING_BLOCK.captures_iter(body) {
-        if results.len() >= limit {
-            break;
-        }
-        let block = block.name("body").map(|m| m.as_str()).unwrap_or("");
-        let Some(anchor) = RE_DDG_ANCHOR.captures(block) else {
-            continue;
-        };
-        let attrs = anchor.name("attrs").map(|m| m.as_str()).unwrap_or("");
-        let Some(href_m) = RE_HREF_ATTR.captures(attrs) else {
-            continue;
-        };
-        let raw_href = href_m.name("href").map(|m| m.as_str()).unwrap_or("");
-        let title_raw = anchor.name("title").map(|m| m.as_str()).unwrap_or("");
-        let title = clean_html_fragment(title_raw);
-        let url = normalize_result_url(raw_href);
-        let snippet = RE_BING_SNIPPET
-            .captures(block)
-            .and_then(|c| c.name("snippet").map(|m| clean_html_fragment(m.as_str())))
-            .unwrap_or_default();
-
-        if title.is_empty() || url.is_empty() {
-            continue;
-        }
-        let title = if title.len() > 160 {
-            format!("{}…", &title[..160])
-        } else {
-            title
-        };
-        results.push(SearchHit {
-            title,
-            url,
-            snippet,
-        });
-    }
-
-    dedupe_hits_preserve_order(results.into_iter().map(sanitize_hit).collect())
-}
-
-fn parse_google_html_results(body: &str, limit: usize) -> Vec<SearchHit> {
-    let mut results = Vec::new();
-
-    for anchor in RE_DDG_ANCHOR.captures_iter(body) {
-        if results.len() >= limit {
-            break;
-        }
-        let attrs = anchor.name("attrs").map(|m| m.as_str()).unwrap_or("");
-        let Some(href_m) = RE_HREF_ATTR.captures(attrs) else {
-            continue;
-        };
-        let raw_href = href_m.name("href").map(|m| m.as_str()).unwrap_or("");
-        let title_raw = anchor.name("title").map(|m| m.as_str()).unwrap_or("");
-        let title = clean_html_fragment(title_raw);
-        let url = normalize_result_url(raw_href);
-        let host = host_of_url(&url).unwrap_or_default();
-
-        if title.is_empty()
-            || url.is_empty()
-            || !url.starts_with("http")
-            || host.ends_with("google.com")
-        {
-            continue;
-        }
-        let title = if title.len() > 160 {
-            format!("{}…", &title[..160])
-        } else {
-            title
-        };
-        results.push(SearchHit {
-            title,
-            url,
-            snippet: String::new(),
-        });
-    }
-
-    dedupe_hits_preserve_order(results.into_iter().map(sanitize_hit).collect())
-}
-
-async fn fetch_ddg_instant_answer_body(
-    client: &reqwest::Client,
-    query: &str,
-) -> Result<String, ToolError> {
-    let resp = client
-        .get("https://api.duckduckgo.com/")
-        .query(&[
-            ("q", query),
-            ("format", "json"),
-            ("no_html", "1"),
-            ("skip_disambig", "1"),
-        ])
-        .headers(ddg_api_headers())
-        .send()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("DuckDuckGo API request failed: {}", e),
-        })?;
-
-    if !resp.status().is_success() {
-        return Err(ToolError::ExecutionFailed {
-            message: format!("DuckDuckGo API HTTP {}", resp.status()),
-        });
-    }
-
-    resp.text().await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("DuckDuckGo API read body: {}", e),
+            json!({
+                "position": idx + 1,
+                "category": "web",
+                "source": effective_source,
+                "title": title,
+                "name": title,
+                "link": h.url,
+                "url": h.url,
+                "displayed_link": displayed_link_for_url(&h.url),
+                "favicon": favicon_for_url(&h.url),
+                "snippet": h.snippet,
+                "id": JsonValue::Null,
+                "metadata": {},
+            })
+        })
+        .collect();
+    json!({
+        "query": args.query.trim(),
+        "category": "web",
+        "source": requested_source,
+        "effective_source": effective_source,
+        "source_label": join_labels(&execution.source_labels),
+        "duration_seconds": duration,
+        "route_notes": execution.notes,
+        "results": results,
     })
 }
 
-async fn fetch_ddg_html_body(
-    client: &reqwest::Client,
-    query: &str,
-    base: &str,
-) -> Result<String, ToolError> {
-    let url = reqwest::Url::parse(base.trim()).map_err(|_| ToolError::ExecutionFailed {
-        message: "Invalid search_url for DuckDuckGo HTML fetch".to_string(),
-    })?;
-    let resp = client
-        .get(url)
-        .query(&[("q", query)])
-        .headers(ddg_html_headers())
-        .send()
-        .await
+pub(super) async fn search_web_json(
+    ctx: &ToolContext,
+    args: &SearchArgs,
+    source: &str,
+    max_n: usize,
+    start: Instant,
+) -> Result<JsonValue, ToolError> {
+    let timeout = effective_search_timeout(ctx.timeout_secs);
+    let mut client_builder = reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(concat!("Omiga/", env!("CARGO_PKG_VERSION"), " Search"));
+    if !ctx.web_use_proxy {
+        client_builder = client_builder.no_proxy();
+    }
+    let client = client_builder
+        .build()
         .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("DuckDuckGo HTML request failed: {}", e),
+            message: format!("HTTP client: {}", e),
         })?;
 
-    if !resp.status().is_success() {
-        return Err(ToolError::ExecutionFailed {
-            message: format!("DuckDuckGo HTML HTTP {}", resp.status()),
-        });
+    let allowed = &args.allowed_domains;
+    let blocked = &args.blocked_domains;
+    let search_url = args.search_url.as_deref().filter(|s| !s.trim().is_empty());
+    if let Some(search_url) = search_url {
+        crate::domain::tools::web_safety::validate_public_http_url(
+            &ctx.project_root,
+            search_url,
+            false,
+        )
+        .map_err(|message| ToolError::InvalidArguments { message })?;
     }
 
-    resp.text().await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("DuckDuckGo HTML read body: {}", e),
-    })
-}
-
-async fn fetch_bing_html_body(client: &reqwest::Client, query: &str) -> Result<String, ToolError> {
-    let resp = client
-        .get(BING_SEARCH_BASE)
-        .query(&[("q", query), ("count", "10")])
-        .headers(bing_html_headers())
-        .send()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Bing HTML request failed: {}", e),
-        })?;
-
-    if !resp.status().is_success() {
-        return Err(ToolError::ExecutionFailed {
-            message: format!("Bing HTML HTTP {}", resp.status()),
-        });
-    }
-
-    resp.text().await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Bing HTML read body: {}", e),
-    })
-}
-
-async fn fetch_google_html_body(
-    client: &reqwest::Client,
-    query: &str,
-) -> Result<String, ToolError> {
-    let resp = client
-        .get(GOOGLE_SEARCH_BASE)
-        .query(&[("q", query), ("num", "10")])
-        .headers(google_html_headers())
-        .send()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Google HTML request failed: {}", e),
-        })?;
-
-    if !resp.status().is_success() {
-        return Err(ToolError::ExecutionFailed {
-            message: format!("Google HTML HTTP {}", resp.status()),
-        });
-    }
-
-    resp.text().await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Google HTML read body: {}", e),
-    })
-}
-
-/// Instant answer JSON; if empty or unusable, HTML result page (`search_url` or default DDG HTML).
-async fn search_ddg(
-    client: &reqwest::Client,
-    query: &str,
-    max_results: usize,
-    search_url: Option<&str>,
-) -> Result<Vec<SearchHit>, ToolError> {
-    let html_base = search_url
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(DDG_HTML_SEARCH_BASE);
-
-    let mut hits = match fetch_ddg_instant_answer_body(client, query).await {
-        Ok(body) => parse_ddg_instant_answer_json(&body, max_results).unwrap_or_default(),
-        Err(_) => Vec::new(),
+    let execution = tokio::select! {
+        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+        r = enforce_search_timeout(timeout, async {
+            let strategy_fut = search_ordered_methods(
+                &client,
+                ctx,
+                args.query.trim(),
+                allowed,
+                blocked,
+                max_n,
+                search_url,
+                source,
+            );
+            tokio::select! {
+                _ = ctx.cancel.cancelled() => Err(ToolError::Cancelled),
+                r = strategy_fut => r,
+            }
+        }) => r?,
     };
 
-    if hits.is_empty() {
-        let html = fetch_ddg_html_body(client, query, html_base).await?;
-        hits = parse_ddg_html_results_openharness(&html, max_results);
-    }
-
-    Ok(hits)
-}
-
-async fn search_bing(
-    client: &reqwest::Client,
-    query: &str,
-    max_results: usize,
-) -> Result<Vec<SearchHit>, ToolError> {
-    let html = fetch_bing_html_body(client, query).await?;
-    Ok(parse_bing_html_results(&html, max_results))
-}
-
-async fn search_google(
-    client: &reqwest::Client,
-    query: &str,
-    max_results: usize,
-) -> Result<Vec<SearchHit>, ToolError> {
-    let html = fetch_google_html_body(client, query).await?;
-    Ok(parse_google_html_results(&html, max_results))
+    let processed = web_common::dedupe_hits_preserve_order(
+        execution
+            .hits
+            .iter()
+            .cloned()
+            .map(web_common::sanitize_hit)
+            .collect::<Vec<_>>(),
+    );
+    let hits = web_common::filter_hits(&ctx.project_root, processed, allowed, blocked, max_n);
+    let duration = start.elapsed().as_secs_f32();
+    Ok(web_results_json(args, source, execution, hits, duration))
 }
 
 #[cfg(test)]
 mod ddg_tests {
+    use super::html_sources::{
+        normalize_result_url, parse_bing_html_results, parse_ddg_html_results_openharness,
+        parse_ddg_instant_answer_json, parse_google_html_results, search_ddg,
+    };
+    use super::web_common::{dedupe_hits_preserve_order, filter_hits, sanitize_search_text};
     use super::*;
 
     #[test]
@@ -1495,172 +730,4 @@ mod ddg_tests {
             other => panic!("expected timeout execution failure, got {other:?}"),
         }
     }
-}
-
-fn search_method_source_key(method: SearchMethod) -> &'static str {
-    match method {
-        SearchMethod::Tavily => "tavily",
-        SearchMethod::Exa => "exa",
-        SearchMethod::Firecrawl => "firecrawl",
-        SearchMethod::Parallel => "parallel",
-        SearchMethod::Ddg => "ddg",
-        SearchMethod::Bing => "bing",
-        SearchMethod::Google => "google",
-    }
-}
-
-fn web_methods_for_source(ctx: &ToolContext, source: &str) -> Result<Vec<SearchMethod>, ToolError> {
-    match source {
-        "auto" => Ok(ordered_search_methods(
-            &ctx.web_search_methods,
-            &ctx.web_search_engine,
-        )),
-        "tavily" => Ok(vec![SearchMethod::Tavily]),
-        "exa" => Ok(vec![SearchMethod::Exa]),
-        "firecrawl" => Ok(vec![SearchMethod::Firecrawl]),
-        "parallel" => Ok(vec![SearchMethod::Parallel]),
-        "google" => Ok(vec![SearchMethod::Google]),
-        "bing" => Ok(vec![SearchMethod::Bing]),
-        "ddg" | "duckduckgo" | "duck_duck_go" => Ok(vec![SearchMethod::Ddg]),
-        other => Err(ToolError::InvalidArguments {
-            message: format!("Unsupported web search source: {other}"),
-        }),
-    }
-}
-
-fn displayed_link_for_url(url: &str) -> String {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return url.to_string();
-    };
-    let host = parsed
-        .host_str()
-        .unwrap_or_default()
-        .trim_start_matches("www.");
-    let mut out = host.to_string();
-    let path = parsed.path().trim_end_matches('/');
-    if !path.is_empty() && path != "/" {
-        out.push_str(path);
-    }
-    out
-}
-
-fn favicon_for_url(url: &str) -> Option<String> {
-    let host = host_of_url(url)?;
-    Some(format!(
-        "https://www.google.com/s2/favicons?domain={}&sz=64",
-        host.trim_start_matches("www.")
-    ))
-}
-
-fn web_results_json(
-    args: &SearchArgs,
-    requested_source: &str,
-    execution: SearchExecution,
-    hits: Vec<SearchHit>,
-    duration: f32,
-) -> JsonValue {
-    let effective_source = execution
-        .effective_source
-        .clone()
-        .unwrap_or_else(|| requested_source.to_string());
-    let results: Vec<JsonValue> = hits
-        .iter()
-        .enumerate()
-        .map(|(idx, h)| {
-            let title = if h.title.trim().is_empty() {
-                &h.url
-            } else {
-                &h.title
-            };
-            json!({
-                "position": idx + 1,
-                "category": "web",
-                "source": effective_source,
-                "title": title,
-                "name": title,
-                "link": h.url,
-                "url": h.url,
-                "displayed_link": displayed_link_for_url(&h.url),
-                "favicon": favicon_for_url(&h.url),
-                "snippet": h.snippet,
-                "id": JsonValue::Null,
-                "metadata": {},
-            })
-        })
-        .collect();
-    json!({
-        "query": args.query.trim(),
-        "category": "web",
-        "source": requested_source,
-        "effective_source": effective_source,
-        "source_label": join_labels(&execution.source_labels),
-        "duration_seconds": duration,
-        "route_notes": execution.notes,
-        "results": results,
-    })
-}
-
-pub(super) async fn search_web_json(
-    ctx: &ToolContext,
-    args: &SearchArgs,
-    source: &str,
-    max_n: usize,
-    start: Instant,
-) -> Result<JsonValue, ToolError> {
-    let timeout = effective_search_timeout(ctx.timeout_secs);
-    let mut client_builder = reqwest::Client::builder()
-        .timeout(timeout)
-        .user_agent(concat!("Omiga/", env!("CARGO_PKG_VERSION"), " Search"));
-    if !ctx.web_use_proxy {
-        client_builder = client_builder.no_proxy();
-    }
-    let client = client_builder
-        .build()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("HTTP client: {}", e),
-        })?;
-
-    let allowed = &args.allowed_domains;
-    let blocked = &args.blocked_domains;
-    let search_url = args.search_url.as_deref().filter(|s| !s.trim().is_empty());
-    if let Some(search_url) = search_url {
-        crate::domain::tools::web_safety::validate_public_http_url(
-            &ctx.project_root,
-            search_url,
-            false,
-        )
-        .map_err(|message| ToolError::InvalidArguments { message })?;
-    }
-
-    let execution = tokio::select! {
-        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-        r = enforce_search_timeout(timeout, async {
-            let strategy_fut = search_ordered_methods(
-                &client,
-                ctx,
-                args.query.trim(),
-                allowed,
-                blocked,
-                max_n,
-                search_url,
-                source,
-            );
-            tokio::select! {
-                _ = ctx.cancel.cancelled() => Err(ToolError::Cancelled),
-                r = strategy_fut => r,
-            }
-        }) => r?,
-    };
-
-    let processed = dedupe_hits_preserve_order(
-        execution
-            .hits
-            .iter()
-            .cloned()
-            .map(sanitize_hit)
-            .collect::<Vec<_>>(),
-    );
-    let hits = filter_hits(&ctx.project_root, processed, allowed, blocked, max_n);
-    let duration = start.elapsed().as_secs_f32();
-    Ok(web_results_json(args, source, execution, hits, duration))
 }

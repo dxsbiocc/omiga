@@ -32,15 +32,15 @@ pub struct SearchArgs {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct SearchHit {
-    pub(super) title: String,
-    pub(super) url: String,
+pub(in crate::domain::tools::search) struct SearchHit {
+    pub(in crate::domain::tools::search) title: String,
+    pub(in crate::domain::tools::search) url: String,
     /// Populated for DuckDuckGo HTML / Tavily `content` when available.
-    pub(super) snippet: String,
+    pub(in crate::domain::tools::search) snippet: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SearchApiProvider {
+pub(in crate::domain::tools::search) enum SearchApiProvider {
     Tavily,
     Exa,
     Firecrawl,
@@ -48,7 +48,7 @@ pub(super) enum SearchApiProvider {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SearchMethod {
+pub(in crate::domain::tools::search) enum SearchMethod {
     Tavily,
     Exa,
     Firecrawl,
@@ -59,19 +59,19 @@ pub(super) enum SearchMethod {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct SearchExecution {
-    pub(super) hits: Vec<SearchHit>,
-    pub(super) source_labels: Vec<String>,
-    pub(super) effective_source: Option<String>,
-    pub(super) notes: Vec<String>,
+pub(in crate::domain::tools::search) struct SearchExecution {
+    pub(in crate::domain::tools::search) hits: Vec<SearchHit>,
+    pub(in crate::domain::tools::search) source_labels: Vec<String>,
+    pub(in crate::domain::tools::search) effective_source: Option<String>,
+    pub(in crate::domain::tools::search) notes: Vec<String>,
 }
 
-pub(super) struct SearchMethodRequest<'a> {
-    pub(super) query: &'a str,
-    pub(super) allowed: &'a Option<Vec<String>>,
-    pub(super) blocked: &'a Option<Vec<String>>,
-    pub(super) max_results: usize,
-    pub(super) search_url: Option<&'a str>,
+pub(in crate::domain::tools::search) struct SearchMethodRequest<'a> {
+    pub(in crate::domain::tools::search) query: &'a str,
+    pub(in crate::domain::tools::search) allowed: &'a Option<Vec<String>>,
+    pub(in crate::domain::tools::search) blocked: &'a Option<Vec<String>>,
+    pub(in crate::domain::tools::search) max_results: usize,
+    pub(in crate::domain::tools::search) search_url: Option<&'a str>,
 }
 
 impl SearchExecution {
