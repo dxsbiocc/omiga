@@ -68,6 +68,7 @@ interface SessionListProps {
 /** External links — adjust when Omiga has public docs */
 const HELP_CENTER_URL = "https://support.anthropic.com/";
 const LEARN_MORE_URL = "https://www.anthropic.com/claude";
+const LANGUAGE_SUBMENU_BRIDGE_MS = 90;
 
 export function SessionList({ onSelectSession }: SessionListProps) {
   const theme = useTheme();
@@ -309,6 +310,11 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     setUserMenuAnchorEl(null);
   };
 
+  const closeLanguageSubmenuNow = () => {
+    clearLanguageSubmenuLeaveTimer();
+    setLanguageSubmenuAnchor(null);
+  };
+
   const handleOpenSettings = (tab?: string) => {
     handleUserMenuClose();
     window.dispatchEvent(new CustomEvent("openSettings", { detail: { tab } }));
@@ -323,7 +329,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     clearLanguageSubmenuLeaveTimer();
     languageSubmenuLeaveTimerRef.current = setTimeout(() => {
       setLanguageSubmenuAnchor(null);
-    }, 200);
+    }, LANGUAGE_SUBMENU_BRIDGE_MS);
   };
 
   const handleOpenHelp = async () => {
@@ -729,7 +735,10 @@ export function SessionList({ onSelectSession }: SessionListProps) {
           sx: { width: 240, borderRadius: 2 },
         }}
       >
-        <MenuItem onClick={() => handleOpenSettings()}>
+        <MenuItem
+          onMouseEnter={closeLanguageSubmenuNow}
+          onClick={() => handleOpenSettings()}
+        >
           <ListItemIcon>
             <SettingsIcon fontSize="small" />
           </ListItemIcon>
@@ -748,52 +757,76 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             sx={{ ml: "auto", color: "text.secondary" }}
           />
         </MenuItem>
-        <MenuItem onClick={() => handleOpenSettings("theme")}>
+        <MenuItem
+          onMouseEnter={closeLanguageSubmenuNow}
+          onClick={() => handleOpenSettings("theme")}
+        >
           <ListItemIcon>
             <PaletteIcon fontSize="small" />
           </ListItemIcon>
           <ListItemText>{t("theme")}</ListItemText>
         </MenuItem>
         <Divider />
-        <MenuItem onClick={() => handleOpenSettings("plugins")}>
+        <MenuItem
+          onMouseEnter={closeLanguageSubmenuNow}
+          onClick={() => handleOpenSettings("plugins")}
+        >
           <ListItemIcon>
             <ExtensionIcon fontSize="small" />
           </ListItemIcon>
           <ListItemText>{t("plugins")}</ListItemText>
         </MenuItem>
-        <MenuItem onClick={() => handleOpenSettings("mcp")}>
+        <MenuItem
+          onMouseEnter={closeLanguageSubmenuNow}
+          onClick={() => handleOpenSettings("mcp")}
+        >
           <ListItemIcon>
             <StorageIcon fontSize="small" />
           </ListItemIcon>
           <ListItemText>{t("mcp")}</ListItemText>
         </MenuItem>
-        <MenuItem onClick={() => handleOpenSettings("skills")}>
+        <MenuItem
+          onMouseEnter={closeLanguageSubmenuNow}
+          onClick={() => handleOpenSettings("skills")}
+        >
           <ListItemIcon>
             <AutoAwesomeIcon fontSize="small" />
           </ListItemIcon>
           <ListItemText>{t("skills")}</ListItemText>
         </MenuItem>
         <Divider />
-        <MenuItem onClick={() => void handleOpenHelp()}>
+        <MenuItem
+          onMouseEnter={closeLanguageSubmenuNow}
+          onClick={() => void handleOpenHelp()}
+        >
           <ListItemIcon>
             <HelpOutlineIcon fontSize="small" />
           </ListItemIcon>
           <ListItemText>{t("getHelp")}</ListItemText>
         </MenuItem>
-        <MenuItem onClick={() => void handleLearnMore()}>
+        <MenuItem
+          onMouseEnter={closeLanguageSubmenuNow}
+          onClick={() => void handleLearnMore()}
+        >
           <ListItemIcon>
             <MenuBookIcon fontSize="small" />
           </ListItemIcon>
           <ListItemText>{t("learnMore")}</ListItemText>
         </MenuItem>
-        <MenuItem onClick={() => void handleOpenGithubUpdates()}>
+        <MenuItem
+          onMouseEnter={closeLanguageSubmenuNow}
+          onClick={() => void handleOpenGithubUpdates()}
+        >
           <ListItemIcon>
             <GitHubIcon fontSize="small" />
           </ListItemIcon>
           <ListItemText>{t("githubUpdates")}</ListItemText>
         </MenuItem>
         <Divider />
-        <MenuItem onClick={() => void handleLogOut()}>
+        <MenuItem
+          onMouseEnter={closeLanguageSubmenuNow}
+          onClick={() => void handleLogOut()}
+        >
           <ListItemIcon>
             <LogoutIcon fontSize="small" />
           </ListItemIcon>
