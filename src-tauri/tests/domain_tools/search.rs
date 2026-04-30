@@ -26,10 +26,31 @@ fn search_from_json_accepts_public_literature_sources() {
 
 #[test]
 fn search_from_json_accepts_data_sources() {
-    for source in ["geo", "ena"] {
+    for source in [
+        "geo",
+        "ena",
+        "ena_run",
+        "ena_experiment",
+        "ena_sample",
+        "ena_analysis",
+        "ena_assembly",
+        "ena_sequence",
+    ] {
         let j = format!(r#"{{"category":"data","source":"{source}","query":"single cell"}}"#);
         assert!(Tool::from_json_str("search", &j).is_ok(), "{source}");
     }
+}
+
+#[test]
+fn search_from_json_accepts_dataset_alias_and_subcategory() {
+    let j = r#"{"category":"dataset","subcategory":"sequencing","query":"rumen metagenome"}"#;
+    assert!(Tool::from_json_str("search", j).is_ok());
+}
+
+#[test]
+fn search_from_json_accepts_knowledge_category() {
+    let j = r#"{"category":"knowledge","source":"wiki","query":"prior decisions"}"#;
+    assert!(Tool::from_json_str("search", j).is_ok());
 }
 
 #[test]
@@ -50,6 +71,7 @@ async fn search_execute_rejects_both_domain_filters() {
     let args = SearchArgs {
         category: "web".into(),
         source: None,
+        subcategory: None,
         query: "hello".into(),
         allowed_domains: Some(vec!["a.com".into()]),
         blocked_domains: Some(vec!["b.com".into()]),

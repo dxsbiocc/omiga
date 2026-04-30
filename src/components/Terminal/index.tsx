@@ -3,9 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Alert,
   Box,
-  Button,
   Chip,
-  Divider,
   IconButton,
   Stack,
   Tooltip,
@@ -14,52 +12,75 @@ import {
   useTheme,
 } from "@mui/material";
 import {
-  CheckCircleOutline,
+  Circle,
+  Clear,
   ContentCopy,
-  FolderOpen,
-  Launch,
+  PlayArrow,
+  Stop,
   Terminal as TerminalIcon,
 } from "@mui/icons-material";
 import { extractErrorMessage } from "../../utils/errorMessage";
+import { listenTauriEvent } from "../../utils/tauriEvents";
 import { useChatComposerStore } from "../../state/chatComposerStore";
 import {
   normalizeTerminalWorkspacePath,
   terminalWorkspaceDisplayName,
 } from "./systemTerminal";
+import { TerminalScreen, type TerminalRenderLine, type TerminalCellStyle } from "./terminalScreen";
 
 interface TerminalProps {
   /** Hide the built-in title bar when embedded inside another tabbed shell (e.g. Chat). */
   embedded?: boolean;
-  /** Local workspace path for the current session; empty / "." means no folder selected. */
+  /** Start lazily when first shown, then keep the same terminal process while hidden. */
+  active?: boolean;
+  /** Current session workspace path. SSH uses a remote path; sandbox falls back to /workspace. */
   workspacePath?: string | null;
-  /** Optional session id used only for copy/status context in this view. */
   sessionId?: string | null;
 }
 
-interface OpenSystemTerminalResponse {
+interface TerminalStartResponse {
+  terminalId: string;
   cwd: string;
-  terminal: string;
-  execution_environment: string;
+  label: string;
+  executionEnvironment: string;
 }
 
-const recentAutoOpenKeys = new Map<string, number>();
-const AUTO_OPEN_DEDUP_MS = 2_500;
+interface TerminalOutputEvent {
+  terminalId: string;
+  stream: "stdout" | "stderr" | "system";
+  data: string;
+}
 
-function formatOpenedAt(timestamp: number | null): string | null {
-  if (!timestamp) return null;
-  try {
-    return new Date(timestamp).toLocaleTimeString(undefined, {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  } catch {
-    return null;
-  }
+interface TerminalExitEvent {
+  terminalId: string;
+  code?: number | null;
+}
+
+function terminalId() {
+  return `term-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function segmentSx(style: TerminalCellStyle) {
+  const fg = style.inverse ? style.bg ?? "#0b1020" : style.fg;
+  const bg = style.cursor
+    ? "#d7deea"
+    : style.inverse
+      ? style.fg ?? "#d7deea"
+      : style.bg;
+  return {
+    color: style.cursor ? "#0b1020" : fg,
+    backgroundColor: bg,
+    fontWeight: style.bold ? 800 : 500,
+    fontStyle: style.italic ? "italic" : "normal",
+    textDecoration: style.underline ? "underline" : "none",
+    opacity: style.dim ? 0.72 : 1,
+    animation: style.cursor ? "terminal-cursor-blink 1s steps(1) infinite" : undefined,
+  };
 }
 
 export function Terminal({
   embedded = false,
+  active = true,
   workspacePath,
   sessionId,
 }: TerminalProps) {
@@ -71,28 +92,29 @@ export function Terminal({
     () => normalizeTerminalWorkspacePath(workspacePath),
     [workspacePath],
   );
-  const workspace = environment === "sandbox"
-    ? normalizedWorkspace ?? "/workspace"
-    : normalizedWorkspace;
+  const workspace =
+    environment === "sandbox" ? normalizedWorkspace ?? "/workspace" : normalizedWorkspace;
   const workspaceLabel = useMemo(
-    () =>
-      environment === "sandbox"
-        ? terminalWorkspaceDisplayName(workspace)
-        : terminalWorkspaceDisplayName(workspacePath),
-    [environment, workspace, workspacePath],
+    () => terminalWorkspaceDisplayName(workspace),
+    [workspace],
   );
-  const [isOpening, setIsOpening] = useState(false);
-  const [openError, setOpenError] = useState<string | null>(null);
-  const [lastOpened, setLastOpened] = useState<{
-    cwd: string;
-    terminal: string;
-    at: number;
-  } | null>(null);
-  const [copied, setCopied] = useState(false);
 
-  const autoOpenStartedRef = useRef(false);
+  const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
+  const [terminalInfo, setTerminalInfo] = useState<TerminalStartResponse | null>(null);
+  const screenRef = useRef(new TerminalScreen());
+  const [lines, setLines] = useState<TerminalRenderLine[]>(() => screenRef.current.snapshot());
+  const [status, setStatus] = useState<"connecting" | "running" | "exited" | "error">(
+    "connecting",
+  );
+  const [error, setError] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const terminalRef = useRef<HTMLDivElement>(null);
+  const cleanupRef = useRef<(() => void) | undefined>();
+  const startedTargetRef = useRef<string | null>(null);
 
-  const environmentLabel =
+  const targetKey = `${sessionId ?? ""}|${environment}|${sshServer ?? ""}|${sandboxBackend}|${workspace ?? ""}`;
+  const startKey = active || startedTargetRef.current === targetKey ? targetKey : "__terminal_idle__";
+  const envLabel =
     environment === "ssh"
       ? sshServer
         ? `SSH · ${sshServer}`
@@ -101,74 +123,242 @@ export function Terminal({
         ? `容器 · ${sandboxBackend}`
         : "本地";
 
-  const canOpen =
-    !isOpening &&
-    (environment === "sandbox"
+  const canStart =
+    environment === "sandbox"
       ? Boolean(sessionId && sandboxBackend)
       : environment === "ssh"
         ? Boolean(workspace && sshServer)
-        : Boolean(workspace));
-  const openedAtLabel = formatOpenedAt(lastOpened?.at ?? null);
+        : Boolean(workspace);
 
-  const openTargetKey = `${sessionId ?? ""}|${environment}|${sshServer ?? ""}|${sandboxBackend}|${workspace ?? ""}`;
+  const writeToScreen = useCallback((data: string) => {
+    screenRef.current.write(data);
+    setLines(screenRef.current.snapshot());
+  }, []);
 
-  useEffect(() => {
-    autoOpenStartedRef.current = false;
-  }, [openTargetKey]);
+  const writeSystem = useCallback((message: string, color = "94") => {
+    writeToScreen(`\r\n\x1b[${color}m${message}\x1b[0m\r\n`);
+  }, [writeToScreen]);
 
-  const handleOpenSystemTerminal = useCallback(async () => {
-    if (!workspace || isOpening) return;
-    if (environment === "ssh" && !sshServer?.trim()) {
-      setOpenError("请先在执行环境中选择 SSH 服务器。");
-      return;
-    }
-    if (environment === "sandbox" && !sessionId?.trim()) {
-      setOpenError("打开容器终端需要当前会话。");
-      return;
-    }
-    setIsOpening(true);
-    setOpenError(null);
+  const stopTerminal = useCallback(async (id: string | null = activeTerminalId) => {
+    if (!id) return;
     try {
-      const result = await invoke<OpenSystemTerminalResponse>(
-        "open_system_terminal",
-        {
-          request: {
-            cwd: workspace,
-            executionEnvironment: environment,
-            sshProfileName: sshServer,
-            sandboxBackend,
-            sessionId,
-          },
+      await invoke("terminal_stop", { terminalId: id });
+    } catch {
+      // Ignore shutdown races.
+    }
+  }, [activeTerminalId]);
+
+  const startTerminal = useCallback(async () => {
+    cleanupRef.current?.();
+    cleanupRef.current = undefined;
+
+    const id = terminalId();
+    setActiveTerminalId(id);
+    setTerminalInfo(null);
+    screenRef.current.clear();
+    setLines(screenRef.current.snapshot());
+    setStatus("connecting");
+    setError(null);
+
+    if (!canStart) {
+      const message =
+        environment === "ssh"
+          ? "请先选择 SSH 服务器和远端工作区。"
+          : environment === "sandbox"
+            ? "请先创建会话并选择容器/沙箱后端。"
+            : "请先选择本地工作区。";
+      setStatus("error");
+      setError(message);
+      writeSystem(message, "91");
+      return;
+    }
+
+    let unlistenOutput: (() => void) | undefined;
+    let unlistenExit: (() => void) | undefined;
+    try {
+      unlistenOutput = await listenTauriEvent<TerminalOutputEvent>(
+        `terminal-output-${id}`,
+        (event) => {
+          writeToScreen(event.payload.data);
         },
       );
-      setLastOpened({ ...result, at: Date.now() });
-    } catch (error) {
-      setOpenError(extractErrorMessage(error));
-    } finally {
-      setIsOpening(false);
+      unlistenExit = await listenTauriEvent<TerminalExitEvent>(
+        `terminal-exit-${id}`,
+        (event) => {
+          if (event.payload.terminalId !== id) return;
+          setStatus("exited");
+          writeSystem(
+            `[terminal exited${event.payload.code != null ? `: ${event.payload.code}` : ""}]`,
+          );
+        },
+      );
+
+      const response = await invoke<TerminalStartResponse>("terminal_start", {
+        request: {
+          terminalId: id,
+          cwd: workspace,
+          executionEnvironment: environment,
+          sshProfileName: sshServer,
+          sandboxBackend,
+          sessionId,
+        },
+      });
+      setTerminalInfo(response);
+      setStatus("running");
+      queueMicrotask(() => terminalRef.current?.focus());
+    } catch (err) {
+      unlistenOutput?.();
+      unlistenExit?.();
+      void stopTerminal(id);
+      const message = extractErrorMessage(err);
+      setStatus("error");
+      setError(message);
+      writeSystem(message, "91");
     }
-  }, [environment, isOpening, sandboxBackend, sessionId, sshServer, workspace]);
+
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      unlistenOutput?.();
+      unlistenExit?.();
+      void stopTerminal(id);
+      if (cleanupRef.current === cleanup) {
+        cleanupRef.current = undefined;
+      }
+    };
+    cleanupRef.current = cleanup;
+    return cleanup;
+  }, [
+    canStart,
+    environment,
+    sandboxBackend,
+    sessionId,
+    sshServer,
+    stopTerminal,
+    writeSystem,
+    writeToScreen,
+    workspace,
+  ]);
 
   useEffect(() => {
-    if (!canOpen || autoOpenStartedRef.current) return;
-    const now = Date.now();
-    const last = recentAutoOpenKeys.get(openTargetKey) ?? 0;
-    if (now - last < AUTO_OPEN_DEDUP_MS) return;
-    autoOpenStartedRef.current = true;
-    recentAutoOpenKeys.set(openTargetKey, now);
-    void handleOpenSystemTerminal();
-  }, [canOpen, handleOpenSystemTerminal, openTargetKey]);
+    if (startKey === "__terminal_idle__") return undefined;
+    const startedKey = startKey;
+    startedTargetRef.current = startedKey;
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void startTerminal().then((fn) => {
+      if (disposed) {
+        fn?.();
+      } else {
+        cleanup = fn;
+      }
+    });
+    return () => {
+      disposed = true;
+      cleanupRef.current?.();
+      cleanupRef.current = undefined;
+      cleanup?.();
+      if (startedTargetRef.current === startedKey) {
+        startedTargetRef.current = null;
+      }
+    };
+    // startKey intentionally captures the session/environment surface after lazy activation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startKey]);
 
-  const handleCopyWorkspace = async () => {
-    if (!workspace) return;
+  useEffect(() => {
+    scrollRef.current?.scrollIntoView({ behavior: "auto" });
+  }, [lines]);
+
+  const writeTerminalData = useCallback(async (data: string) => {
+    if (!activeTerminalId || status !== "running") return;
     try {
-      await navigator.clipboard.writeText(workspace);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch (error) {
-      setOpenError(`复制路径失败：${extractErrorMessage(error)}`);
+      await invoke("terminal_write", {
+        terminalId: activeTerminalId,
+        data,
+      });
+    } catch (err) {
+      writeSystem(extractErrorMessage(err), "91");
+    }
+  }, [activeTerminalId, status, writeSystem]);
+
+  const handleKeyDown = (event: React.KeyboardEvent) => {
+    const native = event.nativeEvent;
+    if (native.isComposing || native.keyCode === 229) return;
+    if (event.metaKey) return;
+
+    let data: string | null = null;
+    if (event.ctrlKey && event.key.length === 1) {
+      data = String.fromCharCode(event.key.toUpperCase().charCodeAt(0) - 64);
+    } else {
+      switch (event.key) {
+        case "Enter":
+          data = "\r";
+          break;
+        case "Backspace":
+          data = "\x7f";
+          break;
+        case "Tab":
+          data = "\t";
+          break;
+        case "Escape":
+          data = "\x1b";
+          break;
+        case "ArrowUp":
+          data = "\x1b[A";
+          break;
+        case "ArrowDown":
+          data = "\x1b[B";
+          break;
+        case "ArrowRight":
+          data = "\x1b[C";
+          break;
+        case "ArrowLeft":
+          data = "\x1b[D";
+          break;
+        case "Home":
+          data = "\x1b[H";
+          break;
+        case "End":
+          data = "\x1b[F";
+          break;
+        case "Delete":
+          data = "\x1b[3~";
+          break;
+        default:
+          if (event.key.length === 1) data = `${event.altKey ? "\x1b" : ""}${event.key}`;
+      }
+    }
+
+    if (!data) return;
+    event.preventDefault();
+    void writeTerminalData(data);
+  };
+
+  const handlePaste = (event: React.ClipboardEvent) => {
+    const text = event.clipboardData.getData("text");
+    if (!text) return;
+    event.preventDefault();
+    void writeTerminalData(text);
+  };
+
+  const copyOutput = async () => {
+    try {
+      await navigator.clipboard.writeText(screenRef.current.toPlainText());
+    } catch (err) {
+      writeSystem(`复制输出失败：${extractErrorMessage(err)}`, "91");
     }
   };
+
+  const statusColor =
+    status === "running"
+      ? "success.main"
+      : status === "connecting"
+        ? "warning.main"
+        : status === "error"
+          ? "error.main"
+          : "text.disabled";
 
   return (
     <Box
@@ -177,216 +367,155 @@ export function Terminal({
         minHeight: 0,
         display: "flex",
         flexDirection: "column",
-        bgcolor: "background.default",
+        bgcolor: "#0b1020",
+        color: "#d7deea",
       }}
     >
-      {!embedded && (
-        <Box
-          sx={{
-            px: 2,
-            py: 1,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            borderBottom: 1,
-            borderColor: "divider",
-            bgcolor: alpha(theme.palette.background.paper, 0.86),
-          }}
-        >
-          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-            <TerminalIcon fontSize="small" color="primary" />
-            <Typography variant="body2" fontWeight={700}>
-              系统终端
-            </Typography>
-          </Box>
-          {workspace && (
-            <Tooltip title="复制工作区路径">
+      <Stack
+        direction="row"
+        alignItems="center"
+        justifyContent="space-between"
+        sx={{
+          minHeight: embedded ? 38 : 42,
+          px: 1.25,
+          borderBottom: 1,
+          borderColor: alpha("#ffffff", 0.12),
+          bgcolor: alpha("#111827", 0.92),
+        }}
+      >
+        <Stack direction="row" alignItems="center" spacing={1} sx={{ minWidth: 0 }}>
+          <TerminalIcon fontSize="small" />
+          <Typography variant="body2" fontWeight={800} noWrap>
+            内嵌终端
+          </Typography>
+          <Chip
+            size="small"
+            label={terminalInfo?.label ?? envLabel}
+            sx={{
+              height: 22,
+              color: "#d7deea",
+              bgcolor: alpha("#ffffff", 0.08),
+              fontSize: 11,
+            }}
+          />
+          <Circle sx={{ fontSize: 9, color: statusColor }} />
+          <Typography variant="caption" noWrap sx={{ color: "#93a4bd", maxWidth: 460 }}>
+            {terminalInfo?.cwd ?? workspaceLabel}
+          </Typography>
+        </Stack>
+
+        <Stack direction="row" alignItems="center" spacing={0.25}>
+          <Tooltip title="重启终端">
+            <IconButton size="small" onClick={() => void startTerminal()} sx={{ color: "#d7deea" }}>
+              <PlayArrow fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="停止终端">
+            <span>
               <IconButton
                 size="small"
-                onClick={() => void handleCopyWorkspace()}
-                aria-label="复制工作区路径"
+                disabled={!activeTerminalId || status !== "running"}
+                onClick={() => void stopTerminal()}
+                sx={{ color: "#d7deea" }}
               >
-                {copied ? (
-                  <CheckCircleOutline fontSize="small" color="success" />
-                ) : (
-                  <ContentCopy fontSize="small" />
-                )}
+                <Stop fontSize="small" />
               </IconButton>
-            </Tooltip>
-          )}
-        </Box>
+            </span>
+          </Tooltip>
+          <Tooltip title="复制输出">
+            <IconButton size="small" onClick={() => void copyOutput()} sx={{ color: "#d7deea" }}>
+              <ContentCopy fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="清空输出">
+            <IconButton
+              size="small"
+              onClick={() => {
+                screenRef.current.clear();
+                setLines(screenRef.current.snapshot());
+              }}
+              sx={{ color: "#d7deea" }}
+            >
+              <Clear fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Stack>
+      </Stack>
+
+      {error && (
+        <Alert severity="error" variant="filled" sx={{ borderRadius: 0 }}>
+          {error}
+        </Alert>
       )}
 
       <Box
+        ref={terminalRef}
+        tabIndex={0}
+        onClick={() => terminalRef.current?.focus()}
+        onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
         sx={{
           flex: 1,
           minHeight: 0,
           overflow: "auto",
-          p: embedded ? 2 : 2.5,
+          px: 1.5,
+          py: 1.25,
+          fontFamily: "JetBrains Mono, Monaco, Consolas, monospace",
+          fontSize: 12.5,
+          lineHeight: 1.55,
+          cursor: "text",
+          outline: "none",
+          "&:focus": {
+            boxShadow: `inset 0 0 0 1px ${alpha(theme.palette.primary.main, 0.35)}`,
+          },
+          "@keyframes terminal-cursor-blink": {
+            "0%, 49%": { opacity: 1 },
+            "50%, 100%": { opacity: 0 },
+          },
         }}
       >
-        <Stack spacing={2}>
-          <Stack direction="row" alignItems="center" spacing={1.25}>
-            <Box
-              sx={{
-                width: 38,
-                height: 38,
-                borderRadius: 2,
-                display: "grid",
-                placeItems: "center",
-                bgcolor: alpha(theme.palette.primary.main, 0.1),
-                color: "primary.main",
-                flexShrink: 0,
-              }}
-            >
-              <TerminalIcon fontSize="small" />
-            </Box>
-            <Box sx={{ minWidth: 0 }}>
-              <Typography variant="subtitle2" fontWeight={800} noWrap>
-                Terminal
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                切换到系统默认终端，并连接当前执行环境。
-              </Typography>
-            </Box>
-          </Stack>
-
+        {lines.map((line) => (
           <Box
+            key={line.key}
+            component="div"
             sx={{
-              border: 1,
-              borderColor: "divider",
-              borderRadius: 2,
-              bgcolor: alpha(theme.palette.background.paper, 0.72),
-              overflow: "hidden",
+              display: "block",
+              minHeight: "1.55em",
+              whiteSpace: "pre",
+              wordBreak: "break-word",
+              color: "#d7deea",
             }}
           >
-            <Stack
-              direction="row"
-              alignItems="center"
-              justifyContent="space-between"
-              spacing={1}
-              sx={{ px: 1.5, py: 1.25 }}
-            >
-              <Stack direction="row" alignItems="center" spacing={1} sx={{ minWidth: 0 }}>
-                <FolderOpen
-                  fontSize="small"
-                  sx={{ color: workspace ? "primary.main" : "text.disabled" }}
-                />
-                <Box sx={{ minWidth: 0 }}>
-                  <Typography variant="caption" color="text.secondary">
-                    {environment === "ssh"
-                      ? "远端工作区"
-                      : environment === "sandbox"
-                        ? "容器工作区"
-                        : "工作区"}
-                  </Typography>
-                  <Typography
-                    variant="body2"
-                    fontWeight={700}
-                    noWrap
-                    title={workspace ?? undefined}
-                    sx={{ fontFamily: "JetBrains Mono, Monaco, Consolas, monospace" }}
-                  >
-                    {workspaceLabel}
-                  </Typography>
-                </Box>
-              </Stack>
-              {sessionId && (
-                <Chip
-                  size="small"
-                  label={environmentLabel}
-                  sx={{ height: 22, fontSize: 11, flexShrink: 0 }}
-                />
-              )}
-            </Stack>
-
-            <Divider />
-
-            <Stack spacing={1.25} sx={{ p: 1.5 }}>
-              {!workspace && environment !== "sandbox" && (
-                <Alert severity="warning" variant="outlined">
-                  {environment === "ssh"
-                    ? "请先为当前会话选择远端工作区，再打开 SSH 终端。"
-                    : "请先为当前会话选择本地工作区，再打开系统终端。"}
-                </Alert>
-              )}
-
-              {environment === "ssh" && !sshServer && (
-                <Alert severity="warning" variant="outlined">
-                  当前是 SSH 执行环境，请先选择 SSH 服务器。
-                </Alert>
-              )}
-
-              {openError && (
-                <Alert severity="error" variant="outlined">
-                  {openError}
-                </Alert>
-              )}
-
-              {lastOpened && (
-                <Alert severity="success" variant="outlined">
-                  已通过 {lastOpened.terminal} 打开：{lastOpened.cwd}
-                  {openedAtLabel ? `（${openedAtLabel}）` : ""}
-                </Alert>
-              )}
-
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
-                <Button
-                  variant="contained"
-                  disableElevation
-                  startIcon={<Launch />}
-                  disabled={!canOpen}
-                  onClick={() => void handleOpenSystemTerminal()}
-                  sx={{ textTransform: "none", fontWeight: 700 }}
-                >
-                  {isOpening ? "正在连接…" : "重新打开系统终端"}
-                </Button>
-                <Button
-                  variant="outlined"
-                  startIcon={
-                    copied ? <CheckCircleOutline color="success" /> : <ContentCopy />
-                  }
-                  disabled={!workspace}
-                  onClick={() => void handleCopyWorkspace()}
-                  sx={{ textTransform: "none", fontWeight: 700 }}
-                >
-                  {copied ? "已复制" : "复制路径"}
-                </Button>
-              </Stack>
-            </Stack>
-          </Box>
-
-          <Box
-            sx={{
-              borderRadius: 2,
-              px: 1.5,
-              py: 1.25,
-              bgcolor: alpha(theme.palette.info.main, 0.06),
-              border: 1,
-              borderColor: alpha(theme.palette.info.main, 0.16),
-            }}
-          >
-            <Typography variant="caption" fontWeight={800} color="info.main">
-              代码分析提示
-            </Typography>
-            <Typography
-              component="div"
-              variant="caption"
-              color="text.secondary"
-              sx={{ mt: 0.5, lineHeight: 1.7 }}
-            >
-              打开后可直接运行{" "}
-              <Box component="code" sx={{ fontFamily: "JetBrains Mono, monospace" }}>
-                rg
+            {line.segments.map((segment) => (
+              <Box key={segment.key} component="span" sx={segmentSx(segment.style)}>
+                {segment.text}
               </Box>
-              、{" "}
-              <Box component="code" sx={{ fontFamily: "JetBrains Mono, monospace" }}>
-                git status
-              </Box>
-              、测试命令或项目脚本；SSH/容器环境会在系统终端中自动连接到对应 shell。
-            </Typography>
+            ))}
           </Box>
-        </Stack>
+        ))}
+        <div ref={scrollRef} />
+      </Box>
+
+      <Box
+        sx={{
+          px: 1.25,
+          py: 1,
+          borderTop: 1,
+          borderColor: alpha("#ffffff", 0.12),
+          bgcolor: alpha("#111827", 0.92),
+        }}
+      >
+        <Typography
+          variant="caption"
+          sx={{
+            color: "#93a4bd",
+            fontFamily: "JetBrains Mono, Monaco, Consolas, monospace",
+          }}
+        >
+          {status === "running"
+            ? "已启用按键直通：Enter / Tab / ↑↓ / Ctrl+C 会发送到 shell；点击终端后粘贴可直接输入。"
+            : "终端未运行"}
+        </Typography>
       </Box>
     </Box>
   );

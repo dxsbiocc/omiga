@@ -483,6 +483,26 @@ impl BaseEnvironment for DockerEnvironment {
         ))
     }
 
+    fn embedded_terminal_command(&self, shell: &str) -> Option<ExternalTerminalCommand> {
+        if !matches!(shell, "bash" | "zsh") {
+            return None;
+        }
+        let container_id = self.container_id.as_ref()?;
+        let cwd = shell_single_quote(&self.cwd);
+        Some(ExternalTerminalCommand::new(
+            self.docker_exe.clone(),
+            vec![
+                "exec".to_string(),
+                "-it".to_string(),
+                container_id.clone(),
+                shell.to_string(),
+                "-lc".to_string(),
+                format!("cd {cwd} || exit 126; exec {shell} -l"),
+            ],
+            "Docker 容器",
+        ))
+    }
+
     async fn run_bash(
         &self,
         _cmd_string: &str,

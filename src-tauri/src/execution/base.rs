@@ -77,6 +77,14 @@ pub trait BaseEnvironment: Send + Sync {
         None
     }
 
+    /// Optional non-PTY command for the embedded Terminal tab.
+    ///
+    /// This command is spawned by the Tauri backend with piped stdin/stdout/stderr and
+    /// rendered inside Omiga. It must not require a real desktop terminal or TTY.
+    fn embedded_terminal_command(&self, _shell: &str) -> Option<ExternalTerminalCommand> {
+        None
+    }
+
     /// 执行 bash 命令 - 子类必须实现
     ///
     /// # Arguments

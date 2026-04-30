@@ -724,6 +724,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
         onClose={handleUserMenuClose}
         anchorOrigin={{ vertical: "top", horizontal: "center" }}
         transformOrigin={{ vertical: "bottom", horizontal: "center" }}
+        disableAutoFocusItem
         PaperProps={{
           sx: { width: 240, borderRadius: 2 },
         }}

@@ -1,4 +1,4 @@
-/** Normalize a session workspace path for opening in the system terminal. */
+/** Normalize a session workspace path for the embedded terminal. */
 export function normalizeTerminalWorkspacePath(
   path: string | null | undefined,
 ): string | null {
@@ -7,7 +7,7 @@ export function normalizeTerminalWorkspacePath(
   return trimmed;
 }
 
-/** Compact display name for the terminal workspace card. */
+/** Compact display name for the embedded terminal workspace label. */
 export function terminalWorkspaceDisplayName(
   path: string | null | undefined,
 ): string {

@@ -4,7 +4,7 @@ import {
   terminalWorkspaceDisplayName,
 } from "./systemTerminal";
 
-describe("system terminal workspace helpers", () => {
+describe("embedded terminal workspace helpers", () => {
   it("treats empty and dot paths as unset workspaces", () => {
     expect(normalizeTerminalWorkspacePath("")).toBeNull();
     expect(normalizeTerminalWorkspacePath("   ")).toBeNull();

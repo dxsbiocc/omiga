@@ -24,14 +24,15 @@ const PUBMED_HOST: &str = "pubmed.ncbi.nlm.nih.gov";
 
 pub const DESCRIPTION: &str = r#"Fetch one document/detail from a typed data source and return formatted JSON.
 
-- `category` is required. Categories: `web`, `literature`, `data`, `social`.
-- `source` is optional and defaults to `auto`. Concrete sources: `web.auto`, `literature.pubmed|arxiv|crossref|openalex|biorxiv|medrxiv|semantic_scholar`, `data.geo|ena`, optional `social.wechat`.
+- `category` is required. Categories: `literature`, `dataset` (`data` alias), `knowledge` (use `recall` for search), `web`, `social`.
+- `source` is optional and defaults to `auto`. Concrete sources: `web.auto`, `literature.pubmed|arxiv|crossref|openalex|biorxiv|medrxiv|semantic_scholar`, `dataset.geo|ena|ena_run|ena_experiment|ena_sample|ena_analysis|ena_assembly|ena_sequence`, optional `social.wechat`.
+- `subcategory` is optional for dataset routing: `expression`, `sequencing`, `genomics`, `sample_metadata`, `multi_omics`.
 - Locate the document with one of: `url`, `id` + `source`, or a full `result` object returned by `search`.
 - `web` fetch sends a safe public HTTP(S) GET, follows public-safe redirects, blocks private/loopback targets, converts HTML to text, and pretty-prints JSON.
 - `literature.pubmed` fetch expects a numeric PMID in `id` (or a PubMed URL / search result) and uses official NCBI EFetch.
 - Public literature sources fetch source-specific metadata records: arXiv by arXiv id/URL, Crossref/bioRxiv/medRxiv by DOI, and OpenAlex by work id/URL/DOI.
 - `literature.semantic_scholar` is opt-in and requires the user-enabled API key; it fetches by Semantic Scholar paper id or supported external id prefix.
-- `data.geo` fetches GEO DataSets/Series/Samples/Platforms by UID or GEO accession via official NCBI E-utilities; `data.ena` fetches ENA study metadata by accession via ENA Portal/Browser APIs.
+- `data.geo` fetches GEO DataSets/Series/Samples/Platforms by UID or GEO accession via official NCBI E-utilities; `data.ena*` fetches ENA study/run/experiment/sample/analysis/assembly/sequence metadata by accession via ENA Portal/Browser APIs.
 - `social.wechat` is disabled by default; when enabled it fetches the article URL with the safe web fetcher.
 - Results are returned as formatted JSON with `title`, `link`, `url`, `favicon`, `content`, and `metadata`."#;
 
@@ -40,6 +41,8 @@ pub struct FetchArgs {
     pub category: String,
     #[serde(default)]
     pub source: Option<String>,
+    #[serde(default, alias = "subCategory", alias = "dataset_type", alias = "type")]
+    pub subcategory: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
@@ -134,6 +137,11 @@ impl super::ToolImpl for FetchTool {
                     message: format!("Unsupported data fetch source: {other}"),
                 }),
             },
+            "knowledge" => Err(ToolError::InvalidArguments {
+                message:
+                    "fetch(category=knowledge) is not supported; use recall(query=...) or search(category=knowledge)."
+                        .to_string(),
+            }),
             "social" => match source.as_str() {
                 "auto" | "wechat" => {
                     if !ctx.web_search_api_keys.wechat_search_enabled {
@@ -410,7 +418,11 @@ async fn fetch_web(
 }
 
 fn normalized_category(value: &str) -> String {
-    value.trim().to_ascii_lowercase().replace('-', "_")
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "dataset" | "datasets" => "data".to_string(),
+        "knowledge_base" | "kb" | "memory" => "knowledge".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn normalized_source(value: Option<&str>) -> String {
@@ -420,6 +432,23 @@ fn normalized_source(value: Option<&str>) -> String {
         .unwrap_or("auto")
         .to_ascii_lowercase()
         .replace('-', "_")
+}
+
+fn normalized_subcategory(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase().replace(['-', ' '], "_"))
+}
+
+fn data_source_for_subcategory(subcategory: Option<&str>) -> Option<&'static str> {
+    match subcategory? {
+        "expression" | "gene_expression" | "transcriptomics" | "transcriptome" => Some("geo"),
+        "sequencing" | "sequence_reads" | "raw_reads" | "reads" | "sra" => Some("ena_run"),
+        "genomics" | "genome" | "genomes" | "assembly" | "assemblies" => Some("ena_assembly"),
+        "sample_metadata" | "sample" | "samples" | "metadata" => Some("ena_sample"),
+        _ => None,
+    }
 }
 
 fn resolve_url(args: &FetchArgs) -> Option<String> {
@@ -574,8 +603,8 @@ fn resolve_data_source(args: &FetchArgs, requested_source: &str) -> String {
         if crate::domain::search::data::looks_like_geo_accession(&value) {
             return "geo".to_string();
         }
-        if crate::domain::search::data::looks_like_ena_accession(&value) {
-            return "ena".to_string();
+        if let Some(source) = crate::domain::search::data::inferred_ena_source_key(&value) {
+            return source.to_string();
         }
     }
     if let Some(url) = resolve_url(args) {
@@ -586,6 +615,11 @@ fn resolve_data_source(args: &FetchArgs, requested_source: &str) -> String {
         if lower.contains("ebi.ac.uk/ena") {
             return "ena".to_string();
         }
+    }
+    if let Some(source) =
+        data_source_for_subcategory(normalized_subcategory(args.subcategory.as_deref()).as_deref())
+    {
+        return source.to_string();
     }
     "geo".to_string()
 }
@@ -853,11 +887,15 @@ pub fn schema() -> ToolSchema {
             "properties": {
                 "category": {
                     "type": "string",
-                    "description": "Data-source category. Supports web, literature, data, social."
+                    "description": "Source category. Supports literature, dataset (alias: data), web, social. Knowledge retrieval uses recall/search."
                 },
                 "source": {
                     "type": "string",
-                    "description": "Source within the category. Defaults to auto. Literature supports pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar. Data supports geo, ena."
+                    "description": "Source within the category. Defaults to auto. Literature supports pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar. Dataset supports geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence."
+                },
+                "subcategory": {
+                    "type": "string",
+                    "description": "Optional dataset subcategory hint: expression, sequencing, genomics, sample_metadata, multi_omics."
                 },
                 "url": {
                     "type": "string",
@@ -906,6 +944,7 @@ mod tests {
         let args = FetchArgs {
             category: "web".into(),
             source: None,
+            subcategory: None,
             url: None,
             id: None,
             result: Some(json!({"title":"A","link":"https://example.org/a"})),
@@ -920,6 +959,7 @@ mod tests {
         let from_url = FetchArgs {
             category: "literature".into(),
             source: Some("pubmed".into()),
+            subcategory: None,
             url: Some("https://pubmed.ncbi.nlm.nih.gov/12345678/".into()),
             id: None,
             result: None,
@@ -930,6 +970,7 @@ mod tests {
         let from_result = FetchArgs {
             category: "literature".into(),
             source: Some("pubmed".into()),
+            subcategory: None,
             url: None,
             id: None,
             result: Some(json!({"metadata":{"pmid":"42"}})),
@@ -943,6 +984,7 @@ mod tests {
         let from_arxiv_result = FetchArgs {
             category: "literature".into(),
             source: None,
+            subcategory: None,
             url: None,
             id: None,
             result: Some(json!({
@@ -964,6 +1006,7 @@ mod tests {
         let from_doi_url = FetchArgs {
             category: "literature".into(),
             source: None,
+            subcategory: None,
             url: Some("https://doi.org/10.1000/example".into()),
             id: None,
             result: None,
@@ -978,6 +1021,7 @@ mod tests {
         let from_openalex_metadata = FetchArgs {
             category: "literature".into(),
             source: Some("openalex".into()),
+            subcategory: None,
             url: None,
             id: None,
             result: Some(json!({
@@ -994,6 +1038,7 @@ mod tests {
         let from_doi_id = FetchArgs {
             category: "literature".into(),
             source: None,
+            subcategory: None,
             url: None,
             id: Some("10.1000/example".into()),
             result: None,
@@ -1004,6 +1049,7 @@ mod tests {
         let from_arxiv_id = FetchArgs {
             category: "literature".into(),
             source: None,
+            subcategory: None,
             url: None,
             id: Some("2401.01234v2".into()),
             result: None,
@@ -1017,6 +1063,7 @@ mod tests {
         let from_geo_result = FetchArgs {
             category: "data".into(),
             source: None,
+            subcategory: None,
             url: None,
             id: None,
             result: Some(json!({
@@ -1035,6 +1082,7 @@ mod tests {
         let from_ena_url = FetchArgs {
             category: "data".into(),
             source: None,
+            subcategory: None,
             url: Some("https://www.ebi.ac.uk/ena/browser/view/PRJEB123".into()),
             id: None,
             result: None,
@@ -1045,6 +1093,7 @@ mod tests {
         let from_geo_url = FetchArgs {
             category: "data".into(),
             source: None,
+            subcategory: None,
             url: Some("https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM575".into()),
             id: None,
             result: None,
@@ -1058,6 +1107,7 @@ mod tests {
         let from_doi = FetchArgs {
             category: "literature".into(),
             source: Some("semantic_scholar".into()),
+            subcategory: None,
             url: None,
             id: Some("10.1000/example".into()),
             result: None,
@@ -1071,6 +1121,7 @@ mod tests {
         let from_slug_url = FetchArgs {
             category: "literature".into(),
             source: Some("semantic_scholar".into()),
+            subcategory: None,
             url: Some("https://www.semanticscholar.org/paper/A-title/abcdef123456".into()),
             id: None,
             result: None,
@@ -1084,6 +1135,7 @@ mod tests {
         let from_metadata = FetchArgs {
             category: "literature".into(),
             source: Some("semantic_scholar".into()),
+            subcategory: None,
             url: None,
             id: None,
             result: Some(json!({

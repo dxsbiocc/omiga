@@ -475,20 +475,29 @@ fn push_canonical_if_dir(roots: &mut Vec<PathBuf>, path: PathBuf) {
 }
 
 fn trusted_unscoped_read_roots() -> Vec<PathBuf> {
+    trusted_unscoped_read_roots_from(dirs::home_dir(), dirs::data_dir(), dirs::cache_dir())
+}
+
+fn trusted_unscoped_read_roots_from(
+    home_dir: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = home_dir {
         // Skill previews may read installed skill bundles, but not the whole
-        // ~/.codex tree where sessions and credentials can live.
+        // ~/.codex / ~/.omiga trees where sessions and credentials can live.
         push_canonical_if_dir(&mut roots, home.join(".codex").join("skills"));
         push_canonical_if_dir(&mut roots, home.join(".codex").join("plugins"));
+        push_canonical_if_dir(&mut roots, home.join(".omiga").join("skills"));
     }
-    if let Some(data_dir) = dirs::data_dir() {
+    if let Some(data_dir) = data_dir {
         // Background agent output is written under the Tauri app data dir.
         for app_dir in ["com.omiga.desktop", "com.omiga.app", "Omiga", "omiga"] {
             push_canonical_if_dir(&mut roots, data_dir.join(app_dir));
         }
     }
-    if let Some(cache_dir) = dirs::cache_dir() {
+    if let Some(cache_dir) = cache_dir {
         for app_dir in ["com.omiga.desktop", "com.omiga.app", "Omiga", "omiga"] {
             push_canonical_if_dir(&mut roots, cache_dir.join(app_dir));
         }
@@ -957,4 +966,24 @@ pub async fn read_local_file_for_view(
 ) -> CommandResult<LocalFileViewResponse> {
     let workspace_root = resolve_read_workspace_root(&state, session_id, workspace_root).await?;
     read_local_file_for_view_scoped(path, workspace_root).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trusted_unscoped_read_roots_include_user_omiga_skills() {
+        let home = tempfile::tempdir().expect("temp home");
+        let skills = home.path().join(".omiga").join("skills");
+        std::fs::create_dir_all(&skills).expect("create skills root");
+        let canonical_skills = skills.canonicalize().expect("canonical skills root");
+
+        let roots = trusted_unscoped_read_roots_from(Some(home.path().to_path_buf()), None, None);
+
+        assert!(
+            roots.iter().any(|root| root == &canonical_skills),
+            "expected trusted roots to include user Omiga skills root {canonical_skills:?}; got {roots:?}",
+        );
+    }
 }

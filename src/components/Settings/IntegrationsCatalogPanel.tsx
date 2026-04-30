@@ -30,6 +30,7 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import { SkillPreviewDialog } from "./SkillPreviewDialog";
+import { extractErrorMessage } from "../../utils/errorMessage";
 
 type McpToolCatalogEntry = {
   wireName: string;
@@ -147,7 +148,7 @@ export function IntegrationsCatalogPanel({
         setCatalog(null);
         setMessage({
           kind: "error",
-          text: e instanceof Error ? e.message : String(e),
+          text: extractErrorMessage(e),
         });
       } finally {
         setLoading(false);
@@ -184,7 +185,7 @@ export function IntegrationsCatalogPanel({
       } catch (e) {
         setMessage({
           kind: "error",
-          text: e instanceof Error ? e.message : String(e),
+          text: extractErrorMessage(e),
         });
       } finally {
         setSaving(false);
@@ -241,7 +242,7 @@ export function IntegrationsCatalogPanel({
       } catch (e) {
         setMessage({
           kind: "error",
-          text: e instanceof Error ? e.message : String(e),
+          text: extractErrorMessage(e),
         });
       } finally {
         setRemovingKey(null);

@@ -5885,31 +5885,33 @@ export function Chat({ sessionId }: ChatProps) {
         <Tab label="终端" id="omiga-tab-terminal" />
       </Tabs>
 
-      {panelTab === 1 ? (
-        <Box
-          sx={{
-            flex: 1,
-            minHeight: 0,
-            overflow: "hidden",
-            display: "flex",
-            flexDirection: "column",
-          }}
-        >
-          <Terminal
-            embedded
-            sessionId={sessionId}
-            workspacePath={currentSession?.projectPath ?? null}
-          />
-        </Box>
-      ) : (
-        <Box
-          sx={{
-            flex: 1,
-            minHeight: 0,
-            display: "flex",
-            flexDirection: "column",
-          }}
-        >
+      <Box
+        aria-hidden={panelTab !== 1}
+        sx={{
+          flex: panelTab === 1 ? 1 : 0,
+          minHeight: 0,
+          overflow: "hidden",
+          display: panelTab === 1 ? "flex" : "none",
+          flexDirection: "column",
+        }}
+      >
+        <Terminal
+          embedded
+          active={panelTab === 1}
+          sessionId={sessionId}
+          workspacePath={currentSession?.projectPath ?? null}
+        />
+      </Box>
+
+      <Box
+        aria-hidden={panelTab !== 0}
+        sx={{
+          flex: panelTab === 0 ? 1 : 0,
+          minHeight: 0,
+          display: panelTab === 0 ? "flex" : "none",
+          flexDirection: "column",
+        }}
+      >
           {/* Chat Header */}
           {currentSession && (
             <Box
@@ -6828,7 +6830,6 @@ export function Chat({ sessionId }: ChatProps) {
             </Box>
           </Box>
         </Box>
-      )}
 
       <SshDirectoryTreeDialog
         open={sshWorkspaceDialogOpen}

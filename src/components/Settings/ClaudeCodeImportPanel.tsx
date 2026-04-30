@@ -14,6 +14,7 @@ import UploadFileIcon from "@mui/icons-material/UploadFile";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
+import { extractErrorMessage } from "../../utils/errorMessage";
 
 type ClaudeDefaultPaths = {
   claudeConfigHome: string;
@@ -79,7 +80,7 @@ export function ClaudeCodeImportPanel({
       } catch (e) {
         if (!cancelled) {
           setDefaults(null);
-          setDefaultsError(e instanceof Error ? e.message : String(e));
+          setDefaultsError(extractErrorMessage(e));
         }
       }
     })();
@@ -114,7 +115,7 @@ export function ClaudeCodeImportPanel({
     } catch (e) {
       setMessage({
         kind: "error",
-        text: e instanceof Error ? e.message : String(e),
+        text: extractErrorMessage(e),
       });
     } finally {
       setBusy(null);
@@ -140,7 +141,7 @@ export function ClaudeCodeImportPanel({
     } catch (e) {
       setMessage({
         kind: "error",
-        text: e instanceof Error ? e.message : String(e),
+        text: extractErrorMessage(e),
       });
     } finally {
       setBusy(null);
@@ -179,7 +180,7 @@ export function ClaudeCodeImportPanel({
       } catch (e) {
         setMessage({
           kind: "error",
-          text: e instanceof Error ? e.message : String(e),
+          text: extractErrorMessage(e),
         });
       } finally {
         setBusy(null);
@@ -213,7 +214,7 @@ export function ClaudeCodeImportPanel({
       } catch (e) {
         setMessage({
           kind: "error",
-          text: e instanceof Error ? e.message : String(e),
+          text: extractErrorMessage(e),
         });
       } finally {
         setBusy(null);

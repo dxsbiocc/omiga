@@ -24,6 +24,7 @@ pub mod search;
 pub mod session;
 pub mod shell;
 pub mod ssh_fs;
+pub mod terminal;
 pub mod tools;
 
 use crate::errors::AppError;

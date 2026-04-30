@@ -26,6 +26,7 @@ import { FileIcon, FolderIcon } from "react-material-icon-theme";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { materialIconFileExtension } from "../../utils/materialIconTheme";
+import { extractErrorMessage } from "../../utils/errorMessage";
 import { useSessionStore } from "../../state/sessionStore";
 
 export type SkillPreviewTarget = {
@@ -574,7 +575,7 @@ export function SkillPreviewDialog({ open, skill, onClose }: Props) {
       })
       .catch((e) => {
         if (!cancelled) {
-          setTreeError(e instanceof Error ? e.message : String(e));
+          setTreeError(extractErrorMessage(e));
           setTree([]);
         }
       })
@@ -603,7 +604,7 @@ export function SkillPreviewDialog({ open, skill, onClose }: Props) {
         setImageDataUrl(`data:${res.mime_type};base64,${res.data}`);
         setPreviewKind("image");
       } catch (e) {
-        setFileError(e instanceof Error ? e.message : String(e));
+        setFileError(extractErrorMessage(e));
         setPreviewKind("empty");
       } finally {
         setFileLoading(false);
@@ -646,7 +647,7 @@ export function SkillPreviewDialog({ open, skill, onClose }: Props) {
 
       setPreviewKind("text");
     } catch (e) {
-      setFileError(e instanceof Error ? e.message : String(e));
+      setFileError(extractErrorMessage(e));
       setPreviewKind("empty");
       setScriptLanguage(null);
     } finally {

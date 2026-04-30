@@ -140,7 +140,7 @@ type SearchMethodOption = {
   description: string;
 };
 
-type SearchSourceTab = "web" | "literature" | "data" | "social";
+type SearchSourceTab = "literature" | "dataset" | "knowledge" | "web" | "social";
 
 const SEARCH_METHOD_DND_TYPE = "settings/search-method";
 
@@ -204,28 +204,90 @@ const SEARCH_SOURCE_TABS: {
   icon: typeof Language;
 }[] = [
   {
-    id: "web",
-    label: "网页搜索",
-    description: "来源顺序、代理与 API",
-    icon: Language,
-  },
-  {
     id: "literature",
-    label: "文献检索",
-    description: "PubMed 与论文数据源",
+    label: "文献",
+    description: "论文 / 预印本",
     icon: MenuBook,
   },
   {
-    id: "data",
-    label: "数据检索",
-    description: "GEO / ENA 数据源",
+    id: "dataset",
+    label: "数据集",
+    description: "表达 / 测序",
     icon: Storage,
   },
   {
+    id: "knowledge",
+    label: "知识库",
+    description: "本地记忆",
+    icon: InfoOutlined,
+  },
+  {
+    id: "web",
+    label: "通用网页",
+    description: "网页搜索",
+    icon: Language,
+  },
+  {
     id: "social",
-    label: "社交平台",
-    description: "公众号等社交来源",
+    label: "社交内容",
+    description: "公众号等",
     icon: Forum,
+  },
+];
+
+const DATASET_TYPE_OPTIONS = [
+  {
+    label: "Expression",
+    helper: "表达矩阵 / 芯片 / RNA-seq 数据集",
+    checked: true,
+  },
+  {
+    label: "Sequencing",
+    helper: "原始 reads / run / experiment",
+    checked: true,
+  },
+  {
+    label: "Genomics",
+    helper: "assembly / sequence / annotation 元数据",
+    checked: true,
+  },
+  {
+    label: "Sample metadata",
+    helper: "样本、组织、物种、采样地点等元数据",
+    checked: true,
+  },
+  {
+    label: "Multi-omics / Projects",
+    helper: "TCGA / ICGC 等项目级数据源待接入",
+    checked: false,
+  },
+];
+
+const DATASET_SOURCE_OPTIONS = [
+  {
+    label: "GEO",
+    helper: "Expression / NCBI GEO DataSets",
+    checked: true,
+  },
+  {
+    label: "ENA",
+    helper: "Sequencing / Genomics / Sample metadata",
+    checked: true,
+  },
+  {
+    label: "GTEx",
+    helper: "待接入",
+    checked: false,
+  },
+  {
+    label: "ArrayExpress",
+    helper: "待接入",
+    checked: false,
+  },
+  {
+    label: "BioSample",
+    helper: "待接入",
+    checked: false,
   },
 ];
 
@@ -667,7 +729,7 @@ export function Settings({
     WebSearchMethod[]
   >(DEFAULT_WEB_SEARCH_METHODS);
   const [activeSearchSourceTab, setActiveSearchSourceTab] =
-    useState<SearchSourceTab>("web");
+    useState<SearchSourceTab>("literature");
   const [searchMethodDrag, setSearchMethodDrag] =
     useState<SearchMethodDragState | null>(null);
   const searchMethodDragRef = useRef<SearchMethodDragState | null>(null);
@@ -1373,7 +1435,8 @@ export function Settings({
                       display: "grid",
                       gridTemplateColumns: {
                         xs: "1fr",
-                        sm: "repeat(3, minmax(0, 1fr))",
+                        sm: "repeat(2, minmax(0, 1fr))",
+                        lg: "repeat(5, minmax(0, 1fr))",
                       },
                       gap: 1,
                       p: 1,
@@ -1397,10 +1460,10 @@ export function Settings({
                           }}
                           sx={(theme) => ({
                             display: "flex",
-                            alignItems: "flex-start",
-                            gap: 1.25,
-                            minHeight: 86,
-                            p: 1.75,
+                            alignItems: "center",
+                            gap: 0.9,
+                            minHeight: 66,
+                            p: 1.25,
                             borderRadius: 2,
                             cursor: "pointer",
                             color: selected ? "text.primary" : "text.secondary",
@@ -1438,26 +1501,35 @@ export function Settings({
                         >
                           <Icon
                             fontSize="small"
-                            sx={{
-                              mt: 0.25,
+                            sx={(theme) => ({
                               flexShrink: 0,
+                              fontSize: 21,
                               opacity: selected ? 1 : 0.72,
-                            }}
+                              color: selected
+                                ? "text.primary"
+                                : alpha(theme.palette.text.secondary, 0.82),
+                            })}
                           />
-                          <Box sx={{ minWidth: 0 }}>
-                            <Typography variant="body1" fontWeight={800} noWrap>
+                          <Box sx={{ minWidth: 0, flex: 1 }}>
+                            <Typography
+                              variant="body1"
+                              fontWeight={800}
+                              noWrap
+                              sx={{ lineHeight: 1.2 }}
+                            >
                               {tab.label}
                             </Typography>
                             <Typography
-                              variant="body2"
+                              variant="caption"
                               color="text.secondary"
                               sx={{
-                                mt: 0.75,
-                                lineHeight: 1.45,
+                                mt: 0.25,
+                                lineHeight: 1.25,
                                 display: "-webkit-box",
                                 overflow: "hidden",
                                 WebkitBoxOrient: "vertical",
                                 WebkitLineClamp: 1,
+                                maxWidth: "12ch",
                               }}
                             >
                               {tab.description}
@@ -2104,122 +2176,154 @@ export function Settings({
                       </Box>
                     )}
 
-                    {activeSearchSourceTab === "data" && (
+                    {activeSearchSourceTab === "dataset" && (
                       <Box>
                         <Box
                           sx={(theme) => ({
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            gap: 1.5,
+                            display: "grid",
+                            gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" },
+                            gap: 2,
                             mb: 2,
-                            p: 1.5,
+                            p: 2,
                             border: `1px solid ${alpha(theme.palette.success.main, 0.18)}`,
                             borderRadius: 2,
                             bgcolor: alpha(theme.palette.success.main, 0.05),
                           })}
                         >
-                          <Box sx={{ minWidth: 0 }}>
-                            <Typography variant="body2" fontWeight={700}>
-                              内置数据源
+                          <Box>
+                            <Typography variant="body2" fontWeight={800} sx={{ mb: 1 }}>
+                              数据类型
                             </Typography>
-                            <Stack
-                              direction="row"
-                              spacing={0.75}
-                              useFlexGap
-                              flexWrap="wrap"
-                              alignItems="center"
-                              sx={{ mt: 1.25 }}
-                            >
-                              <Typography
-                                variant="caption"
-                                fontWeight={800}
-                                color="success.main"
-                                sx={{ width: 58, flexShrink: 0 }}
-                              >
-                                无需 API
-                              </Typography>
-                              {["GEO", "ENA"].map((sourceName) => (
-                                <Chip
-                                  key={sourceName}
-                                  label={sourceName}
-                                  size="small"
-                                  color="success"
-                                  variant="outlined"
-                                  sx={(theme) => ({
-                                    height: 24,
-                                    fontWeight: 700,
-                                    borderRadius: 999,
-                                    color: "success.light",
-                                    borderColor: alpha(
-                                      theme.palette.success.main,
-                                      0.52,
-                                    ),
-                                    bgcolor: alpha(theme.palette.success.main, 0.08),
-                                  })}
-                                />
+                            <Stack spacing={0.75}>
+                              {DATASET_TYPE_OPTIONS.map((item) => (
+                                <Box
+                                  key={item.label}
+                                  sx={{
+                                    display: "grid",
+                                    gridTemplateColumns: "24px minmax(0, 1fr)",
+                                    columnGap: 0.75,
+                                    alignItems: "start",
+                                  }}
+                                >
+                                  <Checkbox
+                                    checked={item.checked}
+                                    readOnly
+                                    disableRipple
+                                    tabIndex={-1}
+                                    size="small"
+                                    sx={(theme) => ({
+                                      p: 0,
+                                      color: alpha(theme.palette.text.secondary, 0.55),
+                                      "&.Mui-checked": { color: "success.main" },
+                                    })}
+                                  />
+                                  <Box sx={{ minWidth: 0 }}>
+                                    <Typography
+                                      variant="body2"
+                                      fontWeight={700}
+                                      color={item.checked ? "text.primary" : "text.secondary"}
+                                      noWrap
+                                    >
+                                      {item.label}
+                                    </Typography>
+                                    <Typography
+                                      variant="caption"
+                                      color="text.secondary"
+                                      sx={{
+                                        display: "-webkit-box",
+                                        overflow: "hidden",
+                                        WebkitBoxOrient: "vertical",
+                                        WebkitLineClamp: 1,
+                                      }}
+                                    >
+                                      {item.helper}
+                                    </Typography>
+                                  </Box>
+                                </Box>
                               ))}
                             </Stack>
                           </Box>
-                          <Tooltip
-                            arrow
-                            placement="left"
-                            title={
-                              <Box sx={{ maxWidth: 360 }}>
-                                <Typography variant="caption" component="div">
-                                  GEO 走官方 NCBI E-utilities db=gds；ENA 走
-                                  Portal API 元数据搜索，并在 fetch 时使用 Browser
-                                  XML 作为详情回退。
-                                </Typography>
-                                <Typography
-                                  variant="caption"
-                                  component="div"
-                                  sx={{ mt: 0.75 }}
+
+                          <Box>
+                            <Typography variant="body2" fontWeight={800} sx={{ mb: 1 }}>
+                              数据来源（自动匹配或可选）
+                            </Typography>
+                            <Stack spacing={0.75}>
+                              {DATASET_SOURCE_OPTIONS.map((item) => (
+                                <Box
+                                  key={item.label}
+                                  sx={{
+                                    display: "grid",
+                                    gridTemplateColumns: "24px minmax(0, 1fr)",
+                                    columnGap: 0.75,
+                                    alignItems: "start",
+                                  }}
                                 >
-                                  可直接调用
-                                  <code> search(category="data", source="geo|ena")</code>
-                                  和
-                                  <code> fetch(category="data", source="geo|ena")</code>。
-                                </Typography>
-                              </Box>
-                            }
-                          >
-                            <IconButton
-                              size="small"
-                              aria-label="查看数据源说明"
-                              sx={(theme) => ({
-                                flexShrink: 0,
-                                color: "text.secondary",
-                                bgcolor: alpha(theme.palette.background.paper, 0.7),
-                                "&:hover": {
-                                  color: "primary.main",
-                                  bgcolor: alpha(theme.palette.primary.main, 0.1),
-                                },
-                              })}
-                            >
-                              <InfoOutlined fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
+                                  <Checkbox
+                                    checked={item.checked}
+                                    readOnly
+                                    disableRipple
+                                    tabIndex={-1}
+                                    size="small"
+                                    sx={(theme) => ({
+                                      p: 0,
+                                      color: alpha(theme.palette.text.secondary, 0.55),
+                                      "&.Mui-checked": { color: "success.main" },
+                                    })}
+                                  />
+                                  <Box sx={{ minWidth: 0 }}>
+                                    <Typography
+                                      variant="body2"
+                                      fontWeight={700}
+                                      color={item.checked ? "text.primary" : "text.secondary"}
+                                      noWrap
+                                    >
+                                      {item.label}
+                                    </Typography>
+                                    <Typography
+                                      variant="caption"
+                                      color="text.secondary"
+                                      sx={{
+                                        display: "-webkit-box",
+                                        overflow: "hidden",
+                                        WebkitBoxOrient: "vertical",
+                                        WebkitLineClamp: 1,
+                                      }}
+                                    >
+                                      {item.helper}
+                                    </Typography>
+                                  </Box>
+                                </Box>
+                              ))}
+                            </Stack>
+                          </Box>
                         </Box>
 
                         <Accordion defaultExpanded disableGutters>
                           <AccordionSummary expandIcon={<ExpandMore />}>
                             <Box>
                               <Typography variant="body2" fontWeight={700}>
-                                GEO / NCBI
+                                Dataset 路由
                               </Typography>
                               <Typography variant="caption" color="text.secondary">
-                                Gene Expression Omnibus DataSets；支持 Entrez 字段查询。
+                                使用子分类自动匹配 GEO / ENA；也可显式指定 source。
                               </Typography>
                             </Box>
                           </AccordionSummary>
                           <AccordionDetails>
-                            <Typography variant="caption" color="text.secondary">
-                              示例：
-                              <code> search(category="data", source="geo", query="breast cancer AND Homo sapiens[Organism]")</code>
-                              。GEO 复用上方 PubMed / NCBI 的 email、tool 与可选 API
-                              key 配置。
-                            </Typography>
+                            <Stack spacing={1}>
+                              <Typography variant="caption" color="text.secondary">
+                                常规调用：
+                                <code> search(category="dataset", subcategory="expression", query="...")</code>
+                                ，或显式指定
+                                <code> source="geo|ena"</code>。旧的
+                                <code> category="data"</code> 仍兼容。
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                ENA 统一作为前端来源展示；内部会按需要路由到 Study / Run /
+                                Experiment / Sample / Analysis / Assembly / Sequence。
+                              </Typography>
+                            </Stack>
                           </AccordionDetails>
                         </Accordion>
 
@@ -2227,21 +2331,58 @@ export function Settings({
                           <AccordionSummary expandIcon={<ExpandMore />}>
                             <Box>
                               <Typography variant="body2" fontWeight={700}>
-                                ENA
+                                查询语法
                               </Typography>
                               <Typography variant="caption" color="text.secondary">
-                                European Nucleotide Archive；支持 Study 元数据与高级查询。
+                                普通关键词自动转字段查询；高级语法直传到官方 API。
                               </Typography>
                             </Box>
                           </AccordionSummary>
                           <AccordionDetails>
                             <Typography variant="caption" color="text.secondary">
-                              普通关键词会转为 study title / description 通配查询；包含
+                              GEO 支持 Entrez 字段查询；ENA 查询包含
                               <code> AND </code>、<code> OR </code>、<code>=</code>
-                              或 <code>tax_</code> 的查询会按 ENA Portal API 高级语法直传。
+                              或 <code>tax_</code> 时按 ENA Portal API 高级语法直传。
                             </Typography>
                           </AccordionDetails>
                         </Accordion>
+                      </Box>
+                    )}
+
+                    {activeSearchSourceTab === "knowledge" && (
+                      <Box>
+                        <Alert severity="info" sx={{ mb: 2 }}>
+                          知识库是本地检索层，不需要 API key。优先使用
+                          <code> recall(query="...")</code>；也支持
+                          <code> search(category="knowledge", query="...")</code> 作为统一入口。
+                        </Alert>
+                        <Box
+                          sx={(theme) => ({
+                            display: "grid",
+                            gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" },
+                            gap: 1,
+                            p: 1.5,
+                            border: `1px solid ${theme.palette.divider}`,
+                            borderRadius: 2,
+                            bgcolor: alpha(theme.palette.background.paper, 0.72),
+                          })}
+                        >
+                          {[
+                            ["Project wiki", "项目知识库与文档化笔记"],
+                            ["Session memory", "历史会话与隐式记忆"],
+                            ["Long-term", "沉淀后的长期偏好、决策和经验"],
+                            ["Sources", "过去 fetch / 记录过的网页与论文来源"],
+                          ].map(([label, helper]) => (
+                            <Box key={label} sx={{ minWidth: 0 }}>
+                              <Typography variant="body2" fontWeight={700} noWrap>
+                                {label}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {helper}
+                              </Typography>
+                            </Box>
+                          ))}
+                        </Box>
                       </Box>
                     )}
 
