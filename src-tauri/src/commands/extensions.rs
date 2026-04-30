@@ -22,9 +22,6 @@ const MAX_VSIX_ENTRY_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_VSIX_TOTAL_BYTES: u64 = 250 * 1024 * 1024;
 const MAX_VSIX_DOWNLOAD_BYTES: u64 = 300 * 1024 * 1024;
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
-const VSCODE_JUPYTER_ID: &str = "ms-toolsai.jupyter";
-const VSCODE_JUPYTER_DOWNLOAD_URL: &str =
-    "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/ms-toolsai/vsextensions/jupyter/latest/vspackage";
 
 fn extensions_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -130,84 +127,7 @@ fn extension_info_from_dir(ext_dir: &Path) -> Result<InstalledVscodeExtension, S
 }
 
 fn recommended_vscode_extensions_catalog() -> Vec<RecommendedVscodeExtension> {
-    vec![
-        {
-            let mut extension = recommended_extension(
-                "ms-toolsai",
-                "jupyter",
-                "Jupyter",
-                "Microsoft's Jupyter extension for notebook metadata, language, and renderer contributions.",
-                "https://github.com/Microsoft/vscode-jupyter",
-            );
-            debug_assert_eq!(extension.id, VSCODE_JUPYTER_ID);
-            extension.download_url = VSCODE_JUPYTER_DOWNLOAD_URL.to_string();
-            extension
-        },
-        recommended_extension(
-            "ms-toolsai",
-            "jupyter-renderers",
-            "Jupyter Notebook Renderers",
-            "Common notebook output renderers for images, Plotly, Vega/Vega-Lite, GeoJSON, and related MIME types.",
-            "https://github.com/microsoft/vscode-notebook-renderers",
-        ),
-        recommended_extension(
-            "ms-python",
-            "python",
-            "Python",
-            "Microsoft's Python extension contributes Python language metadata and pairs naturally with Jupyter notebooks.",
-            "https://github.com/microsoft/vscode-python",
-        ),
-        recommended_extension(
-            "PKief",
-            "material-icon-theme",
-            "Material Icon Theme",
-            "A rich file and folder icon theme that Omiga can use immediately in the file tree.",
-            "https://github.com/PKief/vscode-material-icon-theme",
-        ),
-        recommended_extension(
-            "redhat",
-            "vscode-yaml",
-            "YAML",
-            "YAML language support for Kubernetes, CI, and configuration files.",
-            "https://github.com/redhat-developer/vscode-yaml",
-        ),
-        recommended_extension(
-            "tamasfe",
-            "even-better-toml",
-            "Even Better TOML",
-            "TOML language support backed by Taplo for Cargo, pyproject, and config files.",
-            "https://github.com/tamasfe/taplo",
-        ),
-        recommended_extension(
-            "mechatroner",
-            "rainbow-csv",
-            "Rainbow CSV",
-            "CSV/TSV and delimiter-separated file language support for data-heavy projects.",
-            "https://github.com/mechatroner/vscode_rainbow_csv",
-        ),
-    ]
-}
-
-fn recommended_extension(
-    publisher: &str,
-    name: &str,
-    display_name: &str,
-    description: &str,
-    repository_url: &str,
-) -> RecommendedVscodeExtension {
-    let id = format!("{publisher}.{name}");
-    RecommendedVscodeExtension {
-        id: id.clone(),
-        name: name.to_string(),
-        publisher: publisher.to_string(),
-        display_name: display_name.to_string(),
-        description: description.to_string(),
-        repository_url: repository_url.to_string(),
-        marketplace_url: format!("https://marketplace.visualstudio.com/items?itemName={id}"),
-        download_url: format!(
-            "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{publisher}/vsextensions/{name}/latest/vspackage"
-        ),
-    }
+    Vec::new()
 }
 
 fn recommended_vscode_extension_by_id(id: &str) -> Option<RecommendedVscodeExtension> {
@@ -496,6 +416,9 @@ pub struct RecommendedVscodeExtension {
     pub repository_url: String,
     pub marketplace_url: String,
     pub download_url: String,
+    pub support_level: String,
+    pub support_note: String,
+    pub installable_now: bool,
 }
 
 #[tauri::command]
@@ -831,55 +754,12 @@ mod tests {
     }
 
     #[test]
-    fn exposes_jupyter_as_recommended_extension() {
+    fn recommended_extension_catalog_is_empty_without_extension_host() {
         let extensions = recommended_vscode_extensions_catalog();
-        let jupyter = extensions
-            .iter()
-            .find(|extension| extension.id == VSCODE_JUPYTER_ID)
-            .expect("Jupyter recommendation");
-
-        assert_eq!(jupyter.publisher, "ms-toolsai");
-        assert_eq!(jupyter.name, "jupyter");
-        assert_eq!(
-            jupyter.repository_url,
-            "https://github.com/Microsoft/vscode-jupyter"
-        );
-        assert_eq!(jupyter.download_url, VSCODE_JUPYTER_DOWNLOAD_URL);
-        assert!(recommended_vscode_extension_by_id("MS-TOOLSAI.JUPYTER").is_some());
+        assert!(extensions.is_empty());
+        assert!(recommended_vscode_extension_by_id("PKIEF.MATERIAL-ICON-THEME").is_none());
+        assert!(recommended_vscode_extension_by_id("ms-toolsai.jupyter").is_none());
         assert!(recommended_vscode_extension_by_id("unknown.extension").is_none());
-    }
-
-    #[test]
-    fn recommended_extension_catalog_contains_static_contribution_plugins() {
-        let extensions = recommended_vscode_extensions_catalog();
-        let ids = extensions
-            .iter()
-            .map(|extension| extension.id.as_str())
-            .collect::<std::collections::HashSet<_>>();
-
-        for id in [
-            "ms-toolsai.jupyter",
-            "ms-toolsai.jupyter-renderers",
-            "ms-python.python",
-            "PKief.material-icon-theme",
-            "redhat.vscode-yaml",
-            "tamasfe.even-better-toml",
-            "mechatroner.rainbow-csv",
-        ] {
-            assert!(ids.contains(id), "missing recommended extension {id}");
-        }
-
-        assert_eq!(
-            ids.len(),
-            extensions.len(),
-            "recommendations should be unique"
-        );
-        for extension in extensions {
-            assert!(extension
-                .marketplace_url
-                .ends_with(&format!("itemName={}", extension.id)));
-            assert!(extension.download_url.ends_with("/latest/vspackage"));
-        }
     }
 
     #[test]
@@ -905,8 +785,9 @@ mod tests {
 
     #[test]
     fn appends_target_platform_to_download_url() {
-        let url = with_target_platform(VSCODE_JUPYTER_DOWNLOAD_URL, "darwin-arm64").unwrap();
-        assert!(url.starts_with(VSCODE_JUPYTER_DOWNLOAD_URL));
+        let base = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/acme/vsextensions/demo/latest/vspackage";
+        let url = with_target_platform(base, "darwin-arm64").unwrap();
+        assert!(url.starts_with(base));
         assert!(url.contains("targetPlatform=darwin-arm64"));
     }
 

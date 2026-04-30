@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   findCustomEditorForFile,
+  findNotebookForFile,
+  findNotebookRuntimeForFile,
   getIconThemeContributions,
+  getNotebookRuntimeContributions,
   globToRegExp,
   isExtensionInstalled,
   languageForFile,
@@ -67,6 +70,60 @@ describe("VS Code extension contribution helpers", () => {
     expect(isExtensionInstalled([ext], "acme.demo")).toBe(true);
     expect(isExtensionInstalled([ext], "ACME.DEMO")).toBe(true);
     expect(isExtensionInstalled([ext], "missing.demo")).toBe(false);
+  });
+
+  it("matches VS Code notebook filename patterns", () => {
+    const ext = extension({
+      contributes: {
+        notebooks: [
+          {
+            type: "jupyter-notebook",
+            displayName: "Jupyter Notebook",
+            selector: [{ filenamePattern: "*.ipynb" }],
+          },
+        ],
+      },
+    });
+
+    expect(findNotebookForFile("demo.ipynb", "/repo/demo.ipynb", [ext]))
+      .toMatchObject({ type: "jupyter-notebook", extensionId: "acme.demo" });
+    expect(findNotebookForFile("demo.py", "/repo/demo.py", [ext])).toBeNull();
+  });
+
+  it("detects notebook renderer and preload metadata separately from notebook UI", () => {
+    const ext = extension({
+      contributes: {
+        notebookRenderer: [
+          {
+            id: "jupyter-ipywidget-renderer",
+            displayName: "IPyWidget renderer",
+            entrypoint: "./dist/renderer.js",
+            mimeTypes: ["application/vnd.jupyter.widget-view+json"],
+          },
+        ],
+        notebookPreload: [
+          {
+            type: "jupyter-notebook",
+            entrypoint: "./dist/preload.js",
+          },
+        ],
+      },
+    });
+
+    expect(getNotebookRuntimeContributions([ext])).toEqual([
+      expect.objectContaining({
+        kind: "renderer",
+        id: "jupyter-ipywidget-renderer",
+        extensionId: "acme.demo",
+      }),
+      expect.objectContaining({
+        kind: "preload",
+        type: "jupyter-notebook",
+        extensionId: "acme.demo",
+      }),
+    ]);
+    expect(findNotebookRuntimeForFile("demo.ipynb", [ext])).toHaveLength(2);
+    expect(findNotebookRuntimeForFile("demo.py", [ext])).toHaveLength(0);
   });
 
   it("resolves icon themes with file names, compound extensions, and folders", () => {

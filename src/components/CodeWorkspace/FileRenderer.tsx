@@ -8,8 +8,12 @@ import { PdfViewer } from "./PdfViewer";
 import { useExtensionStore } from "../../state/extensionStore";
 import {
   findCustomEditorForFile,
+  findNotebookForFile,
+  findNotebookRuntimeForFile,
   languageForFile,
   type CustomEditorContribution,
+  type NotebookContribution,
+  type NotebookRuntimeContribution,
 } from "../../utils/vscodeExtensions";
 
 const IMAGE_EXTS = new Set([
@@ -42,6 +46,14 @@ export function FileRenderer({ fileName, filePath, content, onChange }: FileRend
   const customEditor = useMemo(
     () => findCustomEditorForFile(fileName, filePath, installedExtensions),
     [fileName, filePath, installedExtensions],
+  );
+  const notebookContribution = useMemo(
+    () => findNotebookForFile(fileName, filePath, installedExtensions),
+    [fileName, filePath, installedExtensions],
+  );
+  const notebookRuntimeContributions = useMemo(
+    () => findNotebookRuntimeForFile(fileName, installedExtensions),
+    [fileName, installedExtensions],
   );
 
   // Determine viewer type - stable across renders
@@ -86,15 +98,88 @@ export function FileRenderer({ fileName, filePath, content, onChange }: FileRend
     }
   })();
 
-  if (!customEditor) return viewer;
+  if (!customEditor && !notebookContribution && notebookRuntimeContributions.length === 0) {
+    return viewer;
+  }
 
   return (
     <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <PluginRendererNotice customEditor={customEditor} />
+      {customEditor && <PluginRendererNotice customEditor={customEditor} />}
+      {!customEditor && notebookContribution && (
+        <NotebookPluginNotice notebook={notebookContribution} />
+      )}
+      {!customEditor && !notebookContribution && notebookRuntimeContributions.length > 0 && (
+        <NotebookRuntimeNotice runtimes={notebookRuntimeContributions} />
+      )}
       <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
         {viewer}
       </Box>
     </Box>
+  );
+}
+
+function NotebookRuntimeNotice({
+  runtimes,
+}: {
+  runtimes: NotebookRuntimeContribution[];
+}) {
+  const extensionNames = Array.from(new Set(runtimes.map((runtime) => runtime.extensionName)));
+  const hasRenderer = runtimes.some((runtime) => runtime.kind === "renderer");
+  const hasPreload = runtimes.some((runtime) => runtime.kind === "preload");
+
+  return (
+    <Alert
+      severity="warning"
+      variant="outlined"
+      sx={{
+        flexShrink: 0,
+        borderRadius: 0,
+        borderLeft: 0,
+        borderRight: 0,
+        borderTop: 0,
+        py: 0.75,
+        "& .MuiAlert-message": { width: "100%" },
+      }}
+    >
+      <Typography variant="caption" color="text.secondary">
+        已安装 VS Code notebook 扩展元数据：{extensionNames.join("、")}
+        {hasRenderer ? "，包含输出 renderer" : ""}
+        {hasPreload ? "，包含 notebook preload" : ""}。但 Omiga 当前没有运行 VS Code
+        Extension Host / Webview runtime，所以没有使用 VS Code Jupyter 的真实界面或
+        kernel provider；下方仍是 Omiga 内置 Notebook 查看器。
+      </Typography>
+    </Alert>
+  );
+}
+
+function NotebookPluginNotice({
+  notebook,
+}: {
+  notebook: NotebookContribution;
+}) {
+  return (
+    <Alert
+      severity="info"
+      variant="outlined"
+      sx={{
+        flexShrink: 0,
+        borderRadius: 0,
+        borderLeft: 0,
+        borderRight: 0,
+        borderTop: 0,
+        py: 0.75,
+        "& .MuiAlert-message": { width: "100%" },
+      }}
+    >
+      <Typography variant="caption" color="text.secondary">
+        已识别 VS Code notebook 文件关联{" "}
+        <Typography component="span" variant="caption" fontWeight={700}>
+          {notebook.displayName}
+        </Typography>
+        {" "}({notebook.type})，来自 {notebook.extensionName}。但这只是
+        package.json 贡献点匹配；当前版本仍使用 Omiga 内置 notebook 查看器。
+      </Typography>
+    </Alert>
   );
 }
 

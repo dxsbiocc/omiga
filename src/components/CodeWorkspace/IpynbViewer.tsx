@@ -1,5 +1,5 @@
 import "../../lib/monacoWorkers";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useNotebookViewerStore, useUiStore } from "../../state";
 import SettingsIcon from "@mui/icons-material/Settings";
@@ -10,6 +10,7 @@ import remarkGfm from "remark-gfm";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { alpha } from "@mui/material/styles";
 import {
+  Alert,
   Box,
   Button,
   Chip,
@@ -48,6 +49,24 @@ interface NotebookDoc {
   metadata?: Record<string, unknown>;
   nbformat?: number;
   nbformat_minor?: number;
+}
+
+function createEmptyNotebook(): NotebookDoc {
+  return {
+    cells: [],
+    metadata: {
+      kernelspec: {
+        display_name: "Python 3",
+        language: "python",
+        name: "python3",
+      },
+      language_info: {
+        name: "python",
+      },
+    },
+    nbformat: 4,
+    nbformat_minor: 5,
+  };
 }
 
 function getCellSource(cell: NbCell): string {
@@ -625,17 +644,41 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
   const setRightPanelMode = useUiStore((s) => s.setRightPanelMode);
 
+  const isEmptyNotebookFile = content.trim().length === 0;
+  const autoInitializedEmptyFileRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isEmptyNotebookFile) {
+      if (autoInitializedEmptyFileRef.current === filePath) {
+        autoInitializedEmptyFileRef.current = null;
+      }
+      return;
+    }
+    if (!onChange || autoInitializedEmptyFileRef.current === filePath) return;
+    autoInitializedEmptyFileRef.current = filePath;
+    onChange(serializeNotebook(createEmptyNotebook()));
+  }, [filePath, isEmptyNotebookFile, onChange]);
+
   const parsed = useMemo(() => {
+    if (isEmptyNotebookFile) {
+      return { ok: true as const, nb: createEmptyNotebook() };
+    }
     try {
       const nb = JSON.parse(content) as NotebookDoc;
       if (!nb.cells || !Array.isArray(nb.cells)) {
-        return { ok: false as const, error: "无效的 .ipynb：缺少 cells 数组" };
+        return {
+          ok: false as const,
+          error: "无效的 .ipynb：缺少 cells 数组",
+        };
       }
       return { ok: true as const, nb };
     } catch {
-      return { ok: false as const, error: "无法解析 JSON" };
+      return {
+        ok: false as const,
+        error: "无法解析 JSON",
+      };
     }
-  }, [content]);
+  }, [content, isEmptyNotebookFile]);
 
   const pushNotebook = useCallback(
     (nb: NotebookDoc) => {
@@ -880,9 +923,15 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
   if (!parsed.ok) {
     return (
       <Box sx={{ p: 2 }}>
-        <Typography color="error" variant="body2">
-          {parsed.error}
-        </Typography>
+        <Alert severity="error" sx={{ borderRadius: 2 }}>
+          <Typography variant="body2" fontWeight={600}>
+            {parsed.error}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            VS Code Jupyter 插件只能提供 notebook 文件关联；当前文件内容仍必须是有效
+            .ipynb JSON。空 notebook 会自动初始化，若仍看到此错误说明文件内容不是合法 JSON。
+          </Typography>
+        </Alert>
       </Box>
     );
   }
@@ -917,6 +966,7 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
           bgcolor: "action.hover",
         }}
       >
+        <Chip size="small" label="Omiga 内置 Notebook" color="default" variant="filled" />
         <Chip size="small" label={`Kernel: ${kernelName}`} variant="outlined" />
         <Chip size="small" label={`Lang: ${kernelLang}`} variant="outlined" />
         <Typography variant="caption" color="text.secondary" sx={{ display: { xs: "none", md: "block" } }}>

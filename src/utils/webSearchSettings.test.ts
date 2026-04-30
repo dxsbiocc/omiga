@@ -43,7 +43,7 @@ describe("web search settings rehydration", () => {
     );
 
     expect(parsed?.enabledSourcesByCategory).toMatchObject({
-      dataset: ["cbioportal"],
+      dataset: ["cbioportal", "gtex"],
       knowledge: ["project_wiki", "uniprot"],
       social: ["wechat"],
     });

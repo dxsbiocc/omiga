@@ -487,7 +487,7 @@ const SEARCH_SOURCE_TABS: {
   {
     id: "knowledge",
     label: "知识库",
-    description: "本地 / 数据库",
+    description: "Gene / UniProt",
     icon: InfoOutlined,
   },
   {
@@ -567,10 +567,10 @@ const DATASET_SOURCE_OPTIONS: QuerySourceOption[] = [
   {
     id: "gtex",
     label: "GTEx",
-    helper: "待接入",
+    helper: "Tissue expression / GTEx Portal API",
     defaultEnabled: false,
-    available: false,
-    badge: "待接入",
+    available: true,
+    badge: "无需 API",
   },
   {
     id: "arrayexpress",
@@ -3162,6 +3162,13 @@ export function Settings({
                             <Typography variant="body2" fontWeight={800} sx={{ mb: 1 }}>
                               结构化数据库
                             </Typography>
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              sx={{ display: "block", mb: 1 }}
+                            >
+                              可用：NCBI Gene、UniProt；其余为待接入。
+                            </Typography>
                             <Stack spacing={0.75}>
                               {knowledgeDatabaseOptions.map((item) => {
                                 const checked = queryKnowledgeSources.includes(item.id);
@@ -3204,7 +3211,9 @@ export function Settings({
                                         variant="body2"
                                         fontWeight={700}
                                         color={
-                                            checked ? "text.primary" : "text.secondary"
+                                          item.available
+                                            ? "text.primary"
+                                            : "text.secondary"
                                         }
                                         noWrap
                                       >

@@ -91,6 +91,7 @@ import {
   messageRenderItemKey,
   shouldAnimateMessageItem,
 } from "./renderItemUtils";
+import { selectLiveReActFoldTraceText } from "./liveFoldTrace";
 import {
   applyToolResultMessage,
   normalizeAssistantToolCallPrefaces,
@@ -2988,21 +2989,23 @@ export function Chat({ sessionId }: ChatProps) {
     activeReactFoldIdRef.current = activeReactFoldId;
   }, [activeReactFoldId]);
   const currentResponseHasVisibleText = currentResponse.trim().length > 0;
-  const shouldRenderCurrentResponseInFold = Boolean(
-    isStreaming &&
-      activeReactFoldId &&
-      (currentResponse.trim() || currentFoldIntermediate.trim()),
-  );
+  const liveReActFoldTraceText = selectLiveReActFoldTraceText({
+    isStreaming,
+    activeReactFoldId,
+    currentResponse,
+    currentFoldIntermediate,
+  });
+  const shouldRenderLiveTraceInFold = liveReActFoldTraceText.length > 0;
 
   useEffect(() => {
-    if (!shouldRenderCurrentResponseInFold || !activeReactFoldId) return;
+    if (!shouldRenderLiveTraceInFold || !activeReactFoldId) return;
     setExpandedToolGroups((prev) => {
       if (prev.has(activeReactFoldId)) return prev;
       const next = new Set(prev);
       next.add(activeReactFoldId);
       return next;
     });
-  }, [activeReactFoldId, shouldRenderCurrentResponseInFold]);
+  }, [activeReactFoldId, shouldRenderLiveTraceInFold]);
 
   // Phase-1: show only the most-recent items so the viewport is populated
   // on the very first paint. Phase-2 (allItemsVisible=true) adds all older
@@ -6276,10 +6279,8 @@ export function Chat({ sessionId }: ChatProps) {
                       expanded={expandedToolGroups.has(item.id)}
                       isLastFold={item.id === activeReactFoldId}
                       liveIntermediateText={
-                        item.id === activeReactFoldId && shouldRenderCurrentResponseInFold
-                          ? [currentFoldIntermediate.trim(), currentResponse.trim()]
-                              .filter(Boolean)
-                              .join("\n\n")
+                        item.id === activeReactFoldId
+                          ? liveReActFoldTraceText
                           : ""
                       }
                       activityIsStreaming={activityIsStreaming}
@@ -6343,8 +6344,9 @@ export function Chat({ sessionId }: ChatProps) {
               </Box>
             )}
 
-            {/* Streaming: before any tool, show normal assistant text; after tools, attach live text to the active ReAct fold. */}
-            {isStreaming && currentResponseHasVisibleText && !shouldRenderCurrentResponseInFold && (
+            {/* Streaming: visible assistant text is always a normal reply draft.
+                Hidden/thinking text is rendered separately inside the active ReAct fold. */}
+            {isStreaming && currentResponseHasVisibleText && (
               <Box
                 sx={{
                   width: "100%",

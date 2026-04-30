@@ -33,6 +33,7 @@ import {
   contributionSummary,
   getCustomEditorContributions,
   getNotebookContributions,
+  getNotebookRuntimeContributions,
   isExtensionInstalled,
 } from "../../utils/vscodeExtensions";
 import { useExtensionStore } from "../../state/extensionStore";
@@ -43,6 +44,14 @@ function contributionChips(summary: ReturnType<typeof contributionSummary>) {
     { label: `${summary.languages} languages`, show: summary.languages > 0 },
     { label: `${summary.customEditors} renderers`, show: summary.customEditors > 0 },
     { label: `${summary.notebooks} notebooks`, show: summary.notebooks > 0 },
+    {
+      label: `${summary.notebookRenderers} notebook renderers`,
+      show: summary.notebookRenderers > 0,
+    },
+    {
+      label: `${summary.notebookPreloads} notebook preloads`,
+      show: summary.notebookPreloads > 0,
+    },
   ].filter((chip) => chip.show);
 }
 
@@ -97,6 +106,22 @@ export function VscodeExtensionsPanel() {
     () => getNotebookContributions(installedExtensions).length,
     [installedExtensions],
   );
+  const notebookRuntimeCount = useMemo(
+    () => getNotebookRuntimeContributions(installedExtensions).length,
+    [installedExtensions],
+  );
+  const usableRecommendedCount = useMemo(
+    () => recommendedExtensions.filter((extension) => extension.installableNow).length,
+    [recommendedExtensions],
+  );
+  const sortedRecommendedExtensions = useMemo(
+    () =>
+      [...recommendedExtensions].sort((a, b) => {
+        if (a.installableNow !== b.installableNow) return a.installableNow ? -1 : 1;
+        return a.displayName.localeCompare(b.displayName);
+      }),
+    [recommendedExtensions],
+  );
 
   const handleInstallVsix = async () => {
     setMessage(null);
@@ -125,14 +150,6 @@ export function VscodeExtensionsPanel() {
 
   return (
     <Stack spacing={2}>
-      <Alert severity="info" sx={{ borderRadius: 2 }}>
-        支持安装 VS Code <code>.vsix</code> 包并读取标准{" "}
-        <code>package.json</code> 贡献点：图标主题、语言关联、notebook/custom
-        editor 文件匹配。图标主题可立即用于文件树；custom editor
-        插件会被识别并在文件区显示匹配状态，完整 VS Code Webview/Extension Host
-        UI 运行时将作为后续增强。
-      </Alert>
-
       {(error || message) && (
         <Alert severity={error ? "error" : "success"} sx={{ borderRadius: 2 }}>
           {error || message}
@@ -180,13 +197,15 @@ export function VscodeExtensionsPanel() {
                 Recommended plugins
               </Typography>
               <Chip size="small" variant="outlined" label={`${recommendedExtensions.length} plugins`} />
+              <Chip size="small" color="success" variant="outlined" label={`${usableRecommendedCount} useful now`} />
             </Stack>
           </AccordionSummary>
           <AccordionDetails sx={{ px: 2, pt: 0, pb: 2 }}>
             <Box sx={extensionListSx} role="region" aria-label="Recommended plugins list">
-              {recommendedExtensions.map((extension) => {
+              {sortedRecommendedExtensions.map((extension) => {
                 const installed = isExtensionInstalled(installedExtensions, extension.id);
                 const installing = installingRecommendedId === extension.id;
+                const blockedUntilExtensionHost = !extension.installableNow && !installed;
                 return (
                   <Paper key={extension.id} variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
                     <Stack spacing={1.25}>
@@ -199,8 +218,20 @@ export function VscodeExtensionsPanel() {
                             </Typography>
                             <Chip
                               size="small"
-                              label={installed ? "Installed" : "Official"}
-                              color={installed ? "success" : "primary"}
+                              label={
+                                installed
+                                  ? "Installed"
+                                  : extension.installableNow
+                                    ? "Useful now"
+                                    : "Needs Extension Host"
+                              }
+                              color={
+                                installed
+                                  ? "success"
+                                  : extension.installableNow
+                                    ? "primary"
+                                    : "warning"
+                              }
                               variant={installed ? "filled" : "outlined"}
                             />
                           </Stack>
@@ -213,18 +244,36 @@ export function VscodeExtensionsPanel() {
                           variant={installed ? "outlined" : "contained"}
                           disableElevation
                           startIcon={installing ? <CircularProgress size={16} color="inherit" /> : <CloudDownloadRounded />}
-                          disabled={installed || isInstalling}
+                          disabled={installed || isInstalling || blockedUntilExtensionHost}
                           onClick={() => void handleInstallRecommended(extension.id)}
                           sx={{ textTransform: "none", borderRadius: 1.5 }}
                         >
-                          {installed ? "Installed" : installing ? "Installing…" : "Install plugin"}
+                          {installed
+                            ? "Installed"
+                            : blockedUntilExtensionHost
+                              ? "Needs Extension Host"
+                              : installing
+                                ? "Installing…"
+                                : "Install plugin"}
                         </Button>
                       </Stack>
 
                       <Typography variant="body2" color="text.secondary">
-                        {extension.description} Omiga 会下载安装官方 VSIX，并读取标准
-                        <code> package.json </code>贡献点；当前继续回退到内置
-                        notebook 查看器，后续可接入完整 VS Code extension host。
+                        {extension.description}
+                      </Typography>
+                      <Alert
+                        severity={extension.installableNow ? "info" : "warning"}
+                        variant="outlined"
+                        sx={{ py: 0.5, borderRadius: 1.5 }}
+                      >
+                        <Typography variant="caption" color="text.secondary">
+                          {extension.supportNote}
+                        </Typography>
+                      </Alert>
+                      <Typography variant="caption" color="text.secondary">
+                        Omiga 会下载安装官方 VSIX，并读取标准
+                        <code> package.json </code>贡献点；当前不会运行 VS Code
+                        extension host。
                       </Typography>
 
                       <Stack direction="row" gap={1.25} flexWrap="wrap">
@@ -281,7 +330,8 @@ export function VscodeExtensionsPanel() {
           </FormControl>
           <Typography variant="caption" color="text.secondary">
             Installed icon themes: {iconThemes.length}. Custom renderers detected:{" "}
-            {customEditorCount}. Notebook contributions: {notebookCount}.
+            {customEditorCount}. Notebook file associations: {notebookCount}. Notebook
+            renderer/preload metadata: {notebookRuntimeCount}.
           </Typography>
         </Stack>
       </Paper>

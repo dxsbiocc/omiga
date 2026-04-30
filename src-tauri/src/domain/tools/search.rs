@@ -40,7 +40,7 @@ const SEARCH_MAX_TIMEOUT_SECS: u64 = 30;
 pub const DESCRIPTION: &str = r#"Search across typed data-source categories and return formatted results. Web/literature/dataset/social return SerpAPI-style JSON; knowledge returns recall excerpts.
 
 - `category` is required. Categories: `literature`, `dataset` (`data` alias), `knowledge`, `web`, `social`.
-- `source` is optional and defaults to `auto`. Web sources: `auto`, `tavily`, `exa`, `firecrawl`, `parallel`, `google`, `bing`, `ddg`. Literature sources: `auto`, `pubmed`, `arxiv`, `crossref`, `openalex`, `biorxiv`, `medrxiv`, `semantic_scholar` (opt-in, API key required). Dataset sources: `auto`, `geo`, `ena`, `ena_run`, `ena_experiment`, `ena_sample`, `ena_analysis`, `ena_assembly`, `ena_sequence`, `cbioportal`. Knowledge sources/scopes: `all`, `wiki`, `implicit`, `long_term`, `permanent`, `sources`. Social sources: `wechat` (opt-in).
+- `source` is optional and defaults to `auto`. Web sources: `auto`, `tavily`, `exa`, `firecrawl`, `parallel`, `google`, `bing`, `ddg`. Literature sources: `auto`, `pubmed`, `arxiv`, `crossref`, `openalex`, `biorxiv`, `medrxiv`, `semantic_scholar` (opt-in, API key required). Dataset sources: `auto`, `geo`, `ena`, `ena_run`, `ena_experiment`, `ena_sample`, `ena_analysis`, `ena_assembly`, `ena_sequence`, `cbioportal`, `gtex`. Knowledge sources/scopes: `all`, `wiki`, `implicit`, `long_term`, `permanent`, `sources`. Social sources: `wechat` (opt-in).
 - `subcategory` is optional. Prefer `query(category="dataset", operation="search", …)` for structured dataset/database lookup; this dataset path remains as a compatibility search wrapper.
 - `source=auto` uses Settings → Search priority for web, PubMed for literature, and a combined GEO + ENA query for dataset.
 - Results are returned as formatted JSON with a top-level `results` array and SerpAPI-style fields (`position`, `title`, `name`, `link`, `url`, `displayed_link`, `favicon`, `snippet`, `metadata`).
@@ -1739,6 +1739,9 @@ async fn dataset_auto_search(
     if enabled.iter().any(|source| source == "cbioportal") {
         sources.push(crate::domain::search::data::PublicDataSource::CbioPortal);
     }
+    if enabled.iter().any(|source| source == "gtex") {
+        sources.push(crate::domain::search::data::PublicDataSource::Gtex);
+    }
     if sources.is_empty() {
         return Ok(crate::domain::search::data::DataSearchResponse {
             query: data_args.query.trim().to_string(),
@@ -2146,6 +2149,7 @@ impl super::ToolImpl for SearchTool {
                         let data_args = crate::domain::search::data::DataSearchArgs {
                             query: args.query.trim().to_string(),
                             max_results: args.max_results,
+                            params: None,
                         };
                         let response = if let Some(source_kind) =
                             dataset_source_for_subcategory(subcategory.as_deref())?
@@ -2206,6 +2210,7 @@ impl super::ToolImpl for SearchTool {
                             r = client.search(source_kind, crate::domain::search::data::DataSearchArgs {
                                 query: args.query.trim().to_string(),
                                 max_results: args.max_results,
+                                params: None,
                             }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
                         };
                         Ok(json_stream(
@@ -2282,7 +2287,7 @@ pub fn schema() -> ToolSchema {
                 },
                 "source": {
                     "type": "string",
-                    "description": "Source within the category. Defaults to auto. Examples: google, ddg, bing, tavily, pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar (opt-in), geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, wiki, implicit, long_term, sources, wechat (opt-in)."
+                    "description": "Source within the category. Defaults to auto. Examples: google, ddg, bing, tavily, pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar (opt-in), geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, cbioportal, gtex, wiki, implicit, long_term, sources, wechat (opt-in)."
                 },
                 "subcategory": {
                     "type": "string",

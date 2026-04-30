@@ -77,7 +77,7 @@ export function extToLabel(ext: string): string {
     sql: "SQL",
     graphql: "GraphQL", gql: "GraphQL",
     csv: "CSV", tsv: "TSV",
-    ipynb: "Jupyter Notebook",
+    ipynb: "Jupyter Notebook (Omiga built-in)",
     txt: "Plain Text",
     tf: "Terraform HCL", hcl: "HCL",
   };

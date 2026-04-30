@@ -939,6 +939,9 @@ pub struct ToolContext {
     pub plan_mode: Option<Arc<tokio::sync::Mutex<bool>>>,
     /// Search/fetch adapter API keys from Omiga Settings.
     pub web_search_api_keys: WebSearchApiKeys,
+    /// Override for public biological-data API roots.
+    /// Defaults to official endpoints; tests use this to point tools at mock servers.
+    pub data_api_base_urls: crate::domain::search::data::DataApiBaseUrls,
     /// Whether web tools should honor system/env proxy settings.
     pub web_use_proxy: bool,
     /// Preferred public search engine for `search(category="web")`: ddg, bing, or google.
@@ -1003,6 +1006,7 @@ impl ToolContext {
             tool_results_dir: None,
             plan_mode: None,
             web_search_api_keys: WebSearchApiKeys::default(),
+            data_api_base_urls: crate::domain::search::data::DataApiBaseUrls::default(),
             web_use_proxy: true,
             web_search_engine: "ddg".to_string(),
             web_search_methods: vec!["ddg".to_string(), "google".to_string(), "bing".to_string()],
@@ -1094,6 +1098,14 @@ impl ToolContext {
     /// Search/fetch adapter API keys from settings.
     pub fn with_web_search_api_keys(mut self, keys: WebSearchApiKeys) -> Self {
         self.web_search_api_keys = keys;
+        self
+    }
+
+    pub fn with_data_api_base_urls(
+        mut self,
+        urls: crate::domain::search::data::DataApiBaseUrls,
+    ) -> Self {
+        self.data_api_base_urls = urls;
         self
     }
 

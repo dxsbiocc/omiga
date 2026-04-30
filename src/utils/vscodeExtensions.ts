@@ -21,6 +21,9 @@ export interface RecommendedVscodeExtension {
   repositoryUrl: string;
   marketplaceUrl: string;
   downloadUrl: string;
+  supportLevel: "staticContributions" | "extensionHostRequired" | string;
+  supportNote: string;
+  installableNow: boolean;
 }
 
 export interface VscodePackageJson {
@@ -39,6 +42,8 @@ export interface VscodeContributes {
   iconThemes?: VscodeIconThemeContributionManifest[];
   customEditors?: VscodeCustomEditorContributionManifest[];
   notebooks?: VscodeNotebookContributionManifest[];
+  notebookRenderer?: VscodeNotebookRendererContributionManifest[];
+  notebookPreload?: VscodeNotebookPreloadContributionManifest[];
   [key: string]: unknown;
 }
 
@@ -73,6 +78,21 @@ export interface VscodeNotebookContributionManifest {
   [key: string]: unknown;
 }
 
+export interface VscodeNotebookRendererContributionManifest {
+  id?: string;
+  displayName?: string;
+  entrypoint?: string;
+  mimeTypes?: string[];
+  [key: string]: unknown;
+}
+
+export interface VscodeNotebookPreloadContributionManifest {
+  type?: string;
+  entrypoint?: string;
+  localResourceRoots?: string[];
+  [key: string]: unknown;
+}
+
 export interface IconThemeContribution {
   id: string;
   label: string;
@@ -95,6 +115,17 @@ export interface NotebookContribution {
   type: string;
   displayName: string;
   selector: Array<{ filenamePattern: string }>;
+  extensionId: string;
+  extensionName: string;
+}
+
+export interface NotebookRuntimeContribution {
+  kind: "renderer" | "preload";
+  id: string;
+  displayName: string;
+  type?: string;
+  entrypoint?: string;
+  mimeTypes: string[];
   extensionId: string;
   extensionName: string;
 }
@@ -334,6 +365,82 @@ export function getNotebookContributions(
   );
 }
 
+export function findNotebookForFile(
+  fileName: string,
+  filePath: string,
+  extensions: InstalledVscodeExtension[],
+): NotebookContribution | null {
+  const matches = getNotebookContributions(extensions).filter((notebook) =>
+    notebook.selector.some((entry) =>
+      matchesFilenamePattern(entry.filenamePattern, fileName, filePath || fileName),
+    ),
+  );
+  matches.sort((a, b) => a.displayName.localeCompare(b.displayName));
+  return matches[0] ?? null;
+}
+
+export function getNotebookRuntimeContributions(
+  extensions: InstalledVscodeExtension[],
+): NotebookRuntimeContribution[] {
+  return extensions.flatMap((extension) => {
+    const contributes = extension.packageJson.contributes;
+    const extensionId = extension.id;
+    const extensionName = getExtensionName(extension);
+    const renderers = asArray<VscodeNotebookRendererContributionManifest>(
+      contributes?.notebookRenderer,
+    )
+      .map((renderer) => {
+        const id = String(renderer.id ?? "").trim();
+        return {
+          kind: "renderer" as const,
+          id,
+          displayName: String(renderer.displayName ?? renderer.id ?? "").trim(),
+          entrypoint: String(renderer.entrypoint ?? "").trim() || undefined,
+          mimeTypes: asArray<string>(renderer.mimeTypes)
+            .map((mime) => String(mime).trim())
+            .filter(Boolean),
+          extensionId,
+          extensionName,
+        };
+      })
+      .filter((renderer) => renderer.id || renderer.displayName || renderer.mimeTypes.length > 0);
+
+    const preloads = asArray<VscodeNotebookPreloadContributionManifest>(
+      contributes?.notebookPreload,
+    )
+      .map((preload) => {
+        const type = String(preload.type ?? "").trim();
+        const entrypoint = String(preload.entrypoint ?? "").trim();
+        return {
+          kind: "preload" as const,
+          id: type || entrypoint,
+          displayName: type || entrypoint || "Notebook preload",
+          type: type || undefined,
+          entrypoint: entrypoint || undefined,
+          mimeTypes: [],
+          extensionId,
+          extensionName,
+        };
+      })
+      .filter((preload) => preload.id);
+
+    return [...renderers, ...preloads];
+  });
+}
+
+export function findNotebookRuntimeForFile(
+  fileName: string,
+  extensions: InstalledVscodeExtension[],
+): NotebookRuntimeContribution[] {
+  if (!fileName.toLowerCase().endsWith(".ipynb")) return [];
+  return getNotebookRuntimeContributions(extensions).filter(
+    (runtime) =>
+      runtime.kind === "renderer" ||
+      runtime.type === "jupyter-notebook" ||
+      runtime.type === "interactive",
+  );
+}
+
 export function languageForFile(
   fileName: string,
   extensions: InstalledVscodeExtension[],
@@ -482,11 +589,15 @@ export function contributionSummary(extension: InstalledVscodeExtension): {
   iconThemes: number;
   customEditors: number;
   notebooks: number;
+  notebookRenderers: number;
+  notebookPreloads: number;
 } {
   return {
     languages: asArray(extension.packageJson.contributes?.languages).length,
     iconThemes: asArray(extension.packageJson.contributes?.iconThemes).length,
     customEditors: asArray(extension.packageJson.contributes?.customEditors).length,
     notebooks: asArray(extension.packageJson.contributes?.notebooks).length,
+    notebookRenderers: asArray(extension.packageJson.contributes?.notebookRenderer).length,
+    notebookPreloads: asArray(extension.packageJson.contributes?.notebookPreload).length,
   };
 }

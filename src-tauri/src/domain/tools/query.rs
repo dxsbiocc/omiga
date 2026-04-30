@@ -16,12 +16,12 @@ use std::pin::Pin;
 pub const DESCRIPTION: &str = r#"Run a structured query against a typed database source and return formatted JSON.
 
 Use `query` when the user wants database-native lookup/query semantics rather than broad discovery:
-- `category="dataset"` (`data` alias) supports built-in dataset sources: `geo`, `ena`, `ena_run`, `ena_experiment`, `ena_sample`, `ena_analysis`, `ena_assembly`, `ena_sequence`, `cbioportal`.
+- `category="dataset"` (`data` alias) supports built-in dataset sources: `geo`, `ena`, `ena_run`, `ena_experiment`, `ena_sample`, `ena_analysis`, `ena_assembly`, `ena_sequence`, `cbioportal`, `gtex`.
 - `category="knowledge", source="ncbi_gene"` searches/fetches NCBI Gene via official NCBI E-utilities (`db=gene`).
 - `category="knowledge", source="uniprot"` searches/fetches UniProtKB protein entries through the public UniProt REST API.
 - `operation="search"` searches records by keyword or database query string. `operation="fetch"`/`"get"` retrieves one record by accession, URL, or search result.
 - `source="auto"` chooses a source from `subcategory` for search or from the identifier for fetch. Dataset subcategories: `expression` → GEO, `sequencing` → ENA run, `genomics` → ENA assembly, `sample_metadata` → ENA sample, `multi_omics` → cBioPortal.
-- `params` may carry database-specific filters; NCBI Gene accepts `organism`, `taxon_id`, `ret_start`, and `sort`; UniProt accepts `organism`, `taxon_id`, and `reviewed`.
+- `params` may carry database-specific filters; GTEx accepts `endpoint` (`gene`, `median_expression`, `tissues`, `top_expressed`), `datasetId`, `gencodeId`, and `tissueSiteDetailId`; NCBI Gene accepts `organism`, `taxon_id`, `ret_start`, and `sort`; UniProt accepts `organism`, `taxon_id`, and `reviewed`.
 - `search`/`fetch` remain compatibility wrappers for discovery/detail flows; new structured dataset/database integrations should be added here one source at a time."#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,7 +262,11 @@ async fn query_dataset(
             let max_results = args
                 .max_results
                 .or_else(|| param_u32(args, &["max_results", "maxResults", "limit", "retmax"]));
-            let data_args = crate::domain::search::data::DataSearchArgs { query, max_results };
+            let data_args = crate::domain::search::data::DataSearchArgs {
+                query,
+                max_results,
+                params: args.params.clone(),
+            };
             let response = if source == "auto" {
                 if let Some(source_kind) = dataset_source_for_subcategory(subcategory.as_deref())? {
                     ensure_dataset_source_enabled(ctx, source_kind)?;
@@ -435,6 +439,9 @@ async fn dataset_auto_search(
     if enabled.iter().any(|source| source == "cbioportal") {
         sources.push(crate::domain::search::data::PublicDataSource::CbioPortal);
     }
+    if enabled.iter().any(|source| source == "gtex") {
+        sources.push(crate::domain::search::data::PublicDataSource::Gtex);
+    }
     if sources.is_empty() {
         return Err(ToolError::InvalidArguments {
             message: "All dataset sources are disabled in Settings → Search. Enable at least one dataset source before using query(category=dataset).".to_string(),
@@ -558,6 +565,11 @@ fn infer_dataset_source(
     }
     if identifier.to_ascii_lowercase().contains("ebi.ac.uk/ena") {
         return Ok(crate::domain::search::data::PublicDataSource::EnaStudy);
+    }
+    if crate::domain::search::data::looks_like_gtex_identifier(identifier)
+        || identifier.to_ascii_lowercase().contains("gtexportal.org")
+    {
+        return Ok(crate::domain::search::data::PublicDataSource::Gtex);
     }
     if let Some(source) = dataset_source_for_subcategory(subcategory)? {
         return Ok(source);
@@ -691,7 +703,7 @@ pub fn schema() -> ToolSchema {
                 },
                 "source": {
                     "type": "string",
-                    "description": "Database source. Dataset supports auto, geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, cbioportal. Knowledge supports ncbi_gene and uniprot."
+                    "description": "Database source. Dataset supports auto, geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, cbioportal, gtex. Knowledge supports ncbi_gene and uniprot."
                 },
                 "operation": {
                     "type": "string",
@@ -719,7 +731,7 @@ pub fn schema() -> ToolSchema {
                 },
                 "params": {
                     "type": "object",
-                    "description": "Database-specific structured parameters. Dataset sources accept query/q, id/accession/url, source, operation, subcategory, and max_results/limit. NCBI Gene accepts organism, taxon_id/taxid, ret_start/retstart, and sort. UniProt accepts organism, taxon_id/taxid, and reviewed."
+                    "description": "Database-specific structured parameters. Dataset sources accept query/q, id/accession/url, source, operation, subcategory, and max_results/limit. GTEx accepts endpoint/mode, datasetId, gencodeId, tissueSiteDetailId, and filterMtGene. NCBI Gene accepts organism, taxon_id/taxid, ret_start/retstart, and sort. UniProt accepts organism, taxon_id/taxid, and reviewed."
                 },
                 "max_results": {
                     "type": "integer",

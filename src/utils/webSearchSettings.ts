@@ -39,7 +39,7 @@ const CATEGORY_SOURCE_IDS: Record<string, readonly string[]> = {
     "medrxiv",
     "semantic_scholar",
   ],
-  dataset: ["geo", "ena", "cbioportal"],
+  dataset: ["geo", "ena", "cbioportal", "gtex"],
   knowledge: [
     "project_wiki",
     "session_memory",

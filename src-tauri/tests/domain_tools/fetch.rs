@@ -36,6 +36,7 @@ fn fetch_from_json_accepts_data_sources() {
         ("ena_assembly", "GCA_000001405.29"),
         ("ena_sequence", "DQ285577"),
         ("cbioportal", "brca_tcga"),
+        ("gtex", "ENSG00000012048.21"),
     ] {
         let j = format!(r#"{{"category":"data","source":"{source}","id":"{id}"}}"#);
         assert!(Tool::from_json_str("fetch", &j).is_ok(), "{source}");

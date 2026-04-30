@@ -316,7 +316,7 @@ fn categories() -> Vec<RetrievalCategoryDefinition> {
         RetrievalCategoryDefinition {
             id: "knowledge",
             label: "知识库",
-            description: "本地 / 数据库",
+            description: "Gene / UniProt",
             priority: 30,
         },
         RetrievalCategoryDefinition {
@@ -752,11 +752,11 @@ fn sources() -> Vec<RetrievalSourceDefinition> {
             "gtex",
             "dataset",
             "GTEx",
-            "组织特异表达资源，待接入。",
-            &[],
+            "组织特异表达、组织清单与 top expressed gene。",
+            &["genotype_tissue_expression", "tissue_expression"],
             &["expression"],
-            &[Query],
-            Planned,
+            &[Search, Fetch, Query],
+            Available,
             Builtin,
             false,
             false,
@@ -765,9 +765,9 @@ fn sources() -> Vec<RetrievalSourceDefinition> {
             &[],
             40,
             Merge,
-            &[],
+            GTEX_PARAMS,
             Low,
-            &["计划接入；当前不可执行。"],
+            &["官方 GTEx Portal API v2；公共免 key。"],
             Some("https://gtexportal.org/"),
             Some("https://gtexportal.org/api/v2/redoc"),
         ),
@@ -1428,6 +1428,39 @@ const UNIPROT_PARAMS: &[RetrievalParameterDefinition] = &[
         "reviewed",
         RetrievalParameterType::Boolean,
         "仅返回 Swiss-Prot reviewed 条目。",
+        false,
+    ),
+];
+
+const GTEX_PARAMS: &[RetrievalParameterDefinition] = &[
+    param(
+        "query",
+        RetrievalParameterType::String,
+        "Gene symbol、GENCODE ID、tissue 关键词或 tissueSiteDetailId。",
+        true,
+    ),
+    param(
+        "endpoint",
+        RetrievalParameterType::String,
+        "gene、median_expression、tissues 或 top_expressed。",
+        false,
+    ),
+    param(
+        "datasetId",
+        RetrievalParameterType::String,
+        "GTEx datasetId，默认 gtex_v8。",
+        false,
+    ),
+    param(
+        "gencodeId",
+        RetrievalParameterType::String,
+        "Versioned GENCODE gene ID。",
+        false,
+    ),
+    param(
+        "tissueSiteDetailId",
+        RetrievalParameterType::String,
+        "GTEx tissueSiteDetailId，例如 Whole_Blood。",
         false,
     ),
 ];
