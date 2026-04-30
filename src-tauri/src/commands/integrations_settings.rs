@@ -10,6 +10,7 @@ use crate::domain::mcp::client::list_tools_for_server;
 use crate::domain::mcp::config::merged_mcp_servers;
 use crate::domain::mcp::names::{build_mcp_tool_name, normalize_name_for_mcp};
 use crate::domain::skills::{self, SkillSource};
+use serde::Serialize;
 use std::path::PathBuf;
 use std::time::Duration;
 use tauri::State;
@@ -33,6 +34,41 @@ pub(crate) fn resolve_project_root(project_root: &str) -> CommandResult<PathBuf>
 /// Short timeout used only for the settings catalog UI — avoids blocking on dead/auth-required servers.
 /// Chat sessions use their own (longer) timeout from `mcp_tool_pool`.
 const CATALOG_TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableSkillInfo {
+    pub name: String,
+    pub description: String,
+    pub source: SkillSource,
+    pub tags: Vec<String>,
+}
+
+/// Lightweight skills-only catalog for the chat composer `$` picker.
+///
+/// Unlike `get_integrations_catalog`, this does not query MCP servers, so opening the picker
+/// cannot block on external tool discovery.
+#[tauri::command]
+pub async fn list_available_skills(
+    app_state: State<'_, OmigaAppState>,
+    project_root: String,
+) -> CommandResult<Vec<AvailableSkillInfo>> {
+    let root = resolve_project_root(&project_root)?;
+    let cfg = integrations_config::load_integrations_config(&root);
+    let mut skill_list = skills::load_skills_cached(&root, &app_state.skill_cache).await;
+    skill_list = integrations_config::filter_skill_entries(skill_list, &cfg);
+    let mut out: Vec<AvailableSkillInfo> = skill_list
+        .into_iter()
+        .map(|e| AvailableSkillInfo {
+            name: e.name,
+            description: e.description,
+            source: e.source,
+            tags: e.tags,
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
 
 /// Build catalog (MCP parallel + skills from disk). Used by the command and startup warm task.
 pub(crate) async fn build_integrations_catalog(

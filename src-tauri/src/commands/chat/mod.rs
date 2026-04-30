@@ -1311,6 +1311,7 @@ pub async fn send_message(
         .as_deref()
         .map(str::trim)
         .filter(|cmd| !cmd.is_empty());
+    let direct_skill_route = crate::domain::routing::parse_direct_skill_command(routing_content);
     let keyword_skill_route = if request.use_tools {
         match explicit_workflow_command {
             Some("plan") => Some(crate::domain::routing::SkillRoute {
@@ -1328,7 +1329,8 @@ pub async fn send_message(
                 args: routing_content.to_string(),
                 priority: 12,
             }),
-            _ => crate::domain::routing::detect_skill_route(routing_content),
+            _ => direct_skill_route
+                .or_else(|| crate::domain::routing::detect_skill_route(routing_content)),
         }
     } else {
         None

@@ -10,6 +10,28 @@ pub struct SkillRoute {
     pub priority: u8,
 }
 
+/// Parse an explicit composer skill command: `$skill-name optional args`.
+///
+/// `$` commands are user-directed, so they outrank keyword detection. The skill name is the
+/// first non-whitespace token after `$`; everything after it is passed as skill arguments.
+pub fn parse_direct_skill_command(message: &str) -> Option<SkillRoute> {
+    let trimmed = message.trim();
+    let rest = trimmed.strip_prefix('$')?.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let skill_name = parts.next()?.trim();
+    if skill_name.is_empty() || skill_name.contains('$') {
+        return None;
+    }
+    Some(SkillRoute {
+        skill_name: skill_name.to_string(),
+        args: parts.next().unwrap_or("").trim().to_string(),
+        priority: 20,
+    })
+}
+
 struct KeywordRule {
     keywords: &'static [&'static str],
     skill: &'static str,
@@ -408,6 +430,27 @@ fn extract_args(message: &str, keywords: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_direct_skill_command() {
+        let r = parse_direct_skill_command("$code-review inspect the staged diff").unwrap();
+        assert_eq!(r.skill_name, "code-review");
+        assert_eq!(r.args, "inspect the staged diff");
+        assert_eq!(r.priority, 20);
+    }
+
+    #[test]
+    fn parses_direct_skill_without_args() {
+        let r = parse_direct_skill_command("$tdd").unwrap();
+        assert_eq!(r.skill_name, "tdd");
+        assert_eq!(r.args, "");
+    }
+
+    #[test]
+    fn ignores_non_direct_skill_command() {
+        assert!(parse_direct_skill_command("$").is_none());
+        assert!(parse_direct_skill_command("please use $tdd").is_none());
+    }
 
     #[test]
     fn detects_pipeline() {

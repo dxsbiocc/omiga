@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  parseSkillCommand,
   parseResearchCommand,
   parseWorkflowCommand,
 } from "./workflowCommands";
@@ -49,5 +50,27 @@ describe("parseWorkflowCommand", () => {
     });
     expect(parseWorkflowCommand("/research run hello")).toBeNull();
     expect(parseResearchCommand("/orchestrate run hello")).toBeNull();
+  });
+});
+
+describe("parseSkillCommand", () => {
+  it("parses $skill with optional args", () => {
+    expect(parseSkillCommand("$tdd fix the login test")).toEqual({
+      skill: "tdd",
+      args: "fix the login test",
+    });
+  });
+
+  it("parses hyphenated skill names without args", () => {
+    expect(parseSkillCommand("$code-review")).toEqual({
+      skill: "code-review",
+      args: "",
+    });
+  });
+
+  it("ignores empty or non-skill inputs", () => {
+    expect(parseSkillCommand("$")).toBeNull();
+    expect(parseSkillCommand("$   ")).toBeNull();
+    expect(parseSkillCommand("please use $tdd")).toBeNull();
   });
 });

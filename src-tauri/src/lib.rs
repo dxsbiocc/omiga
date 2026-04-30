@@ -227,6 +227,7 @@ pub fn run() {
             commands::claude_import::list_omiga_imported_skills,
             commands::claude_import::remove_omiga_imported_skill,
             commands::claude_import::get_claude_default_paths,
+            commands::integrations_settings::list_available_skills,
             commands::integrations_settings::get_integrations_catalog,
             commands::integrations_settings::save_integrations_state,
 

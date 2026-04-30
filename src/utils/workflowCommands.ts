@@ -71,3 +71,21 @@ export function parseResearchCommand(
     body: (match[1] ?? "").trim(),
   };
 }
+
+export interface ParsedSkillCommand {
+  skill: string;
+  args: string;
+}
+
+export function parseSkillCommand(input: string): ParsedSkillCommand | null {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("$")) return null;
+  const body = trimmed.slice(1).trimStart();
+  if (!body) return null;
+  const match = body.match(/^([^\s$]+)(?:\s+([\s\S]*))?$/u);
+  if (!match) return null;
+  return {
+    skill: match[1],
+    args: (match[2] ?? "").trim(),
+  };
+}

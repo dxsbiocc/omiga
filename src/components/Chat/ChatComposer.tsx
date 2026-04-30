@@ -51,6 +51,7 @@ import {
   Square,
   SmartToy,
   Route as RouteIcon,
+  AutoAwesome,
   ForumOutlined,
   Close,
   InsertDriveFile,
@@ -283,9 +284,16 @@ function permissionModeAccent(theme: Theme, mode: PermissionMode): string {
 }
 
 type AvailableAgentRow = { agentType: string; description: string; background: boolean };
+type AvailableSkillRow = {
+  name: string;
+  description: string;
+  source: "claudeUser" | "omigaUser" | "omigaProject";
+  tags: string[];
+};
 type SlashPickerOption =
   | { kind: "command"; command: WorkflowSlashCommandDefinition }
-  | { kind: "agent"; agent: AvailableAgentRow };
+  | { kind: "agent"; agent: AvailableAgentRow }
+  | { kind: "skill"; skill: AvailableSkillRow };
 
 function normalizeFsPath(p: string): string {
   return p.replace(/\\/g, "/");
@@ -514,11 +522,13 @@ export const ChatComposer = memo(function ChatComposer({
   const [input, setInput] = useState(initialInput ?? "");
   const [selectedSlashCommandId, setSelectedSlashCommandId] =
     useState<SlashCommandId | null>(null);
+  const [selectedSkillCommandName, setSelectedSkillCommandName] =
+    useState<string | null>(null);
   const inputValueRef = useRef(input);
   inputValueRef.current = input;
   const editableRef = useRef<HTMLSpanElement | null>(null);
   const editableCompositionRef = useRef(false);
-  const normalizeSlashValue = useCallback(
+  const normalizeCommandValue = useCallback(
     (
       rawValue: string,
     ): { commandId: SlashCommandId | null; body: string } => {
@@ -544,8 +554,9 @@ export const ChatComposer = memo(function ChatComposer({
   );
   const setInputValue = useCallback(
     (v: string) => {
-      const normalized = normalizeSlashValue(v);
+      const normalized = normalizeCommandValue(v);
       setSelectedSlashCommandId(normalized.commandId);
+      setSelectedSkillCommandName(null);
       setInput(normalized.body);
       const outgoing = normalized.commandId
         ? normalized.body.trim().length > 0
@@ -554,7 +565,7 @@ export const ChatComposer = memo(function ChatComposer({
         : normalized.body;
       onInputChange?.(outgoing);
     },
-    [normalizeSlashValue, onInputChange],
+    [normalizeCommandValue, onInputChange],
   );
   const commitEditableInput = useCallback(
     (nextValue: string) => {
@@ -567,9 +578,23 @@ export const ChatComposer = memo(function ChatComposer({
         );
         return;
       }
+      if (selectedSkillCommandName) {
+        setInput(nextValue);
+        onInputChange?.(
+          nextValue.trim().length > 0
+            ? `$${selectedSkillCommandName} ${nextValue}`
+            : `$${selectedSkillCommandName}`,
+        );
+        return;
+      }
       setInputValue(nextValue);
     },
-    [onInputChange, selectedSlashCommandId, setInputValue],
+    [
+      onInputChange,
+      selectedSkillCommandName,
+      selectedSlashCommandId,
+      setInputValue,
+    ],
   );
   const focusEditableEnd = useCallback(() => {
     const el = editableRef.current;
@@ -585,6 +610,10 @@ export const ChatComposer = memo(function ChatComposer({
           ? inputValueRef.current.trim().length > 0
             ? `/${selectedSlashCommandId} ${inputValueRef.current}`
             : `/${selectedSlashCommandId}`
+          : selectedSkillCommandName
+            ? inputValueRef.current.trim().length > 0
+              ? `$${selectedSkillCommandName} ${inputValueRef.current}`
+              : `$${selectedSkillCommandName}`
           : inputValueRef.current,
       setValue: (v: string) => setInputValue(v),
       appendValue: (text: string) => {
@@ -593,12 +622,18 @@ export const ChatComposer = memo(function ChatComposer({
       },
       focus: () => focusEditableEnd(),
     }),
-    [selectedSlashCommandId, setInputValue, focusEditableEnd],
+    [
+      selectedSkillCommandName,
+      selectedSlashCommandId,
+      setInputValue,
+      focusEditableEnd,
+    ],
   );
   const theme = useTheme();
   const pen = usePencilPalette();
   const accent = theme.palette.primary.main;
   const commandTone = theme.palette.success.main;
+  const skillTone = theme.palette.secondary.main;
   const fileTone = theme.palette.info.main;
   const agentTone = accent;
   const paper = theme.palette.background.paper;
@@ -886,6 +921,9 @@ export const ChatComposer = memo(function ChatComposer({
   const [availableAgents, setAvailableAgents] = useState<AvailableAgentRow[]>(
     [],
   );
+  const [availableSkills, setAvailableSkills] = useState<AvailableSkillRow[]>(
+    [],
+  );
   const [queuedPanelExpanded, setQueuedPanelExpanded] = useState(true);
 
   useEffect(() => {
@@ -905,6 +943,22 @@ export const ChatComposer = memo(function ChatComposer({
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<AvailableSkillRow[]>("list_available_skills", {
+      projectRoot: workspacePath || ".",
+    })
+      .then((rows) => {
+        if (!cancelled) setAvailableSkills(rows ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setAvailableSkills([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspacePath]);
 
   useEffect(() => {
     if (!workspacePath || needsWorkspacePath) {
@@ -941,14 +995,53 @@ export const ChatComposer = memo(function ChatComposer({
   }, [availableAgents, composerAgentType]);
 
   const composerInputAnchorRef = useRef<HTMLDivElement | null>(null);
+  const [composerPopoverWidth, setComposerPopoverWidth] = useState<number | null>(
+    null,
+  );
+
+  useLayoutEffect(() => {
+    const el = composerInputAnchorRef.current;
+    if (!el) return;
+    const updateWidth = () => {
+      const next = Math.round(el.getBoundingClientRect().width);
+      setComposerPopoverWidth(next > 0 ? next : null);
+    };
+    updateWidth();
+    const resizeObserver =
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(updateWidth)
+        : null;
+    resizeObserver?.observe(el);
+    if (typeof window !== "undefined") {
+      window.addEventListener("resize", updateWidth);
+    }
+    return () => {
+      resizeObserver?.disconnect();
+      if (typeof window !== "undefined") {
+        window.removeEventListener("resize", updateWidth);
+      }
+    };
+  }, []);
 
   /** `/`：工作流命令或 Agent 选择（整段输入仅为 `/` 或 `/query`） */
   const slashParse = useMemo(() => {
-    if (selectedSlashCommandId) return { active: false as const, query: "" };
+    if (selectedSlashCommandId || selectedSkillCommandName) {
+      return { active: false as const, query: "" };
+    }
     const t = input;
     if (!/^\/[^\s]*$/u.test(t)) return { active: false as const, query: "" };
     return { active: true as const, query: t.slice(1) };
-  }, [input, selectedSlashCommandId]);
+  }, [input, selectedSkillCommandName, selectedSlashCommandId]);
+
+  /** `$`：Skill 选择（整段输入仅为 `$` 或 `$query`） */
+  const skillParse = useMemo(() => {
+    if (selectedSlashCommandId || selectedSkillCommandName) {
+      return { active: false as const, query: "" };
+    }
+    const t = input;
+    if (!/^\$[^\s]*$/u.test(t)) return { active: false as const, query: "" };
+    return { active: true as const, query: t.slice(1) };
+  }, [input, selectedSkillCommandName, selectedSlashCommandId]);
 
   /** `@`：工作区相对路径选择（支持 `@dir/child` 逐级选择） */
   const fileParse = useMemo(() => {
@@ -988,15 +1081,40 @@ export const ChatComposer = memo(function ChatComposer({
     });
   }, [slashParse]);
 
+  const filteredSkillCommands = useMemo(() => {
+    if (!skillParse.active) return [];
+    const q = skillParse.query.toLowerCase();
+    return availableSkills.filter((skill) => {
+      const name = skill.name.toLowerCase();
+      const desc = skill.description.toLowerCase();
+      const tags = (skill.tags ?? []).join(" ").toLowerCase();
+      return !q || name.includes(q) || desc.includes(q) || tags.includes(q);
+    });
+  }, [availableSkills, skillParse]);
+
   const filteredSlashOptions = useMemo<SlashPickerOption[]>(
-    () => [
-      ...filteredWorkflowCommands.map((command) => ({
-        kind: "command" as const,
-        command,
-      })),
-      ...filteredAtAgents.map((agent) => ({ kind: "agent" as const, agent })),
+    () =>
+      skillParse.active
+        ? filteredSkillCommands.map((skill) => ({
+            kind: "skill" as const,
+            skill,
+          }))
+        : [
+            ...filteredWorkflowCommands.map((command) => ({
+              kind: "command" as const,
+              command,
+            })),
+            ...filteredAtAgents.map((agent) => ({
+              kind: "agent" as const,
+              agent,
+            })),
+          ],
+    [
+      filteredAtAgents,
+      filteredSkillCommands,
+      filteredWorkflowCommands,
+      skillParse.active,
     ],
-    [filteredAtAgents, filteredWorkflowCommands],
   );
 
   const explicitSlashCommandId = useMemo(() => {
@@ -1010,14 +1128,16 @@ export const ChatComposer = memo(function ChatComposer({
         .map((item) =>
           item.kind === "command"
             ? `cmd:${item.command.id}`
-            : `agent:${item.agent.agentType}`,
+            : item.kind === "agent"
+              ? `agent:${item.agent.agentType}`
+              : `skill:${item.skill.name}`,
         )
         .join("\u0001"),
     [filteredSlashOptions],
   );
 
-  const [slashHighlightIndex, setSlashHighlightIndex] = useState(0);
-  const slashHighlightIndexRef = useRef(0);
+  const [slashHighlightIndex, setSlashHighlightIndex] = useState(-1);
+  const slashHighlightIndexRef = useRef(-1);
   const slashListRef = useRef<HTMLUListElement>(null);
   /** User clicked outside the / picker; hide until input changes or textarea refocuses. */
   const [slashPickerDismissed, setSlashPickerDismissed] = useState(false);
@@ -1030,14 +1150,29 @@ export const ChatComposer = memo(function ChatComposer({
         ) ?? null
       );
     }
-    if (!slashParse.active || filteredSlashOptions.length === 0) return null;
-    const pick = filteredSlashOptions[slashHighlightIndex] ?? filteredSlashOptions[0];
-    return pick?.kind === "command" ? pick.command : null;
+    return null;
   }, [
     explicitSlashCommandId,
-    filteredSlashOptions,
-    slashHighlightIndex,
-    slashParse.active,
+  ]);
+
+  const highlightedSkillCommand = useMemo(() => {
+    if (selectedSkillCommandName) {
+      return (
+        availableSkills.find(
+          (skill) =>
+            skill.name.toLowerCase() === selectedSkillCommandName.toLowerCase(),
+        ) ?? {
+          name: selectedSkillCommandName,
+          description: "直接使用该 Skill",
+          source: "omigaProject" as const,
+          tags: [],
+        }
+      );
+    }
+    return null;
+  }, [
+    availableSkills,
+    selectedSkillCommandName,
   ]);
 
   const [fileGlobMatches, setFileGlobMatches] = useState<
@@ -1055,8 +1190,8 @@ export const ChatComposer = memo(function ChatComposer({
   }, [input]);
 
   useEffect(() => {
-    slashHighlightIndexRef.current = 0;
-    setSlashHighlightIndex(0);
+    slashHighlightIndexRef.current = -1;
+    setSlashHighlightIndex(-1);
   }, [slashFilterKey]);
 
   useEffect(() => {
@@ -1168,7 +1303,13 @@ export const ChatComposer = memo(function ChatComposer({
   }, [fileFilterKey]);
 
   useEffect(() => {
-    if (!slashParse.active || filteredSlashOptions.length === 0) return;
+    if (
+      !(slashParse.active || skillParse.active) ||
+      filteredSlashOptions.length === 0 ||
+      slashHighlightIndex < 0
+    ) {
+      return;
+    }
     const el = slashListRef.current?.querySelector(
       `[data-slash-index="${slashHighlightIndex}"]`,
     );
@@ -1176,6 +1317,7 @@ export const ChatComposer = memo(function ChatComposer({
   }, [
     slashHighlightIndex,
     slashParse.active,
+    skillParse.active,
     filteredSlashOptions.length,
     slashFilterKey,
   ]);
@@ -1205,9 +1347,22 @@ export const ChatComposer = memo(function ChatComposer({
   const pickWorkflowCommand = useCallback(
     (commandId: WorkflowSlashCommandDefinition["id"]) => {
       setSelectedSlashCommandId(commandId);
+      setSelectedSkillCommandName(null);
       setComposerAgentType("auto");
       setInput("");
       onInputChange?.(`/${commandId}`);
+      queueMicrotask(() => focusEditableEnd());
+    },
+    [focusEditableEnd, onInputChange, setComposerAgentType],
+  );
+
+  const pickSkillCommand = useCallback(
+    (skillName: string) => {
+      setSelectedSlashCommandId(null);
+      setSelectedSkillCommandName(skillName);
+      setComposerAgentType("auto");
+      setInput("");
+      onInputChange?.(`$${skillName}`);
       queueMicrotask(() => focusEditableEnd());
     },
     [focusEditableEnd, onInputChange, setComposerAgentType],
@@ -1331,10 +1486,21 @@ export const ChatComposer = memo(function ChatComposer({
         return;
       }
       if (
+        selectedSkillCommandName &&
+        (e.key === "Backspace" || e.key === "Delete") &&
+        input.trim() === ""
+      ) {
+        e.preventDefault();
+        setSelectedSkillCommandName(null);
+        setInputValue("");
+        return;
+      }
+      if (
         e.key === "Enter" &&
         e.shiftKey &&
         !fileParse.active &&
-        !slashParse.active
+        !slashParse.active &&
+        !skillParse.active
       ) {
         const el = editableRef.current;
         if (el) {
@@ -1407,7 +1573,7 @@ export const ChatComposer = memo(function ChatComposer({
           }
         }
       }
-      if (slashParse.active) {
+      if (slashParse.active || skillParse.active) {
         if (e.key === "Escape") {
           setInputValue("");
           e.preventDefault();
@@ -1417,7 +1583,7 @@ export const ChatComposer = memo(function ChatComposer({
           if (e.key === "ArrowDown") {
             e.preventDefault();
             setSlashHighlightIndex((i) => {
-              const next = (i + 1) % filteredSlashOptions.length;
+              const next = i < 0 ? 0 : (i + 1) % filteredSlashOptions.length;
               slashHighlightIndexRef.current = next;
               return next;
             });
@@ -1427,8 +1593,10 @@ export const ChatComposer = memo(function ChatComposer({
             e.preventDefault();
             setSlashHighlightIndex((i) => {
               const next =
-                (i - 1 + filteredSlashOptions.length) %
-                filteredSlashOptions.length;
+                i < 0
+                  ? filteredSlashOptions.length - 1
+                  : (i - 1 + filteredSlashOptions.length) %
+                    filteredSlashOptions.length;
               slashHighlightIndexRef.current = next;
               return next;
             });
@@ -1440,6 +1608,7 @@ export const ChatComposer = memo(function ChatComposer({
             const pick = filteredSlashOptions[idx] ?? filteredSlashOptions[0];
             if (pick?.kind === "command") pickWorkflowCommand(pick.command.id);
             if (pick?.kind === "agent") pickAtAgent(pick.agent.agentType);
+            if (pick?.kind === "skill") pickSkillCommand(pick.skill.name);
             return;
           }
           if (e.key === "Tab" && !e.shiftKey) {
@@ -1448,6 +1617,7 @@ export const ChatComposer = memo(function ChatComposer({
             const pick = filteredSlashOptions[idx] ?? filteredSlashOptions[0];
             if (pick?.kind === "command") pickWorkflowCommand(pick.command.id);
             if (pick?.kind === "agent") pickAtAgent(pick.agent.agentType);
+            if (pick?.kind === "skill") pickSkillCommand(pick.skill.name);
             return;
           }
         }
@@ -1456,10 +1626,12 @@ export const ChatComposer = memo(function ChatComposer({
     },
     [
       slashParse.active,
+      skillParse.active,
       fileParse.active,
       fileParse.directory,
       explicitSlashCommandBody,
       explicitSlashCommandId,
+      selectedSkillCommandName,
       composerAgentType,
       composerAttachedPaths,
       filteredSlashOptions,
@@ -1471,6 +1643,7 @@ export const ChatComposer = memo(function ChatComposer({
       onKeyDown,
       pickAtAgent,
       pickWorkflowCommand,
+      pickSkillCommand,
       pickFilePath,
       enterFileDirectory,
       goUpFileDirectory,
@@ -1493,7 +1666,7 @@ export const ChatComposer = memo(function ChatComposer({
       ? "请先选择工作目录后再发送消息…"
       : followUpTaskId
         ? "追加说明将进入该后台 Agent 的下一轮工具循环…"
-        : "输入 / 选择工作流命令或 Agent；输入 @ 从当前工作目录选择…";
+        : "输入 / 选择工作流命令或 Agent；输入 $ 选择 Skill；输入 @ 从当前工作目录选择…";
 
   /** 允许排队时：连接中 / 流式中均可继续输入；否则与旧行为一致（等待响应或生成时禁用）。 */
   const inputDisabled =
@@ -1501,10 +1674,12 @@ export const ChatComposer = memo(function ChatComposer({
     askUserBlocksInput;
 
   const showSlashPopover =
-    slashParse.active &&
+    (slashParse.active || skillParse.active) &&
     !slashPickerDismissed &&
     !inputDisabled &&
-    (availableAgents.length > 0 || WORKFLOW_SLASH_COMMANDS.length > 0);
+    (skillParse.active ||
+      availableAgents.length > 0 ||
+      WORKFLOW_SLASH_COMMANDS.length > 0);
 
   const showFilePopover =
     fileParse.active &&
@@ -1524,9 +1699,11 @@ export const ChatComposer = memo(function ChatComposer({
     composerAgentType !== "general-purpose" &&
     composerAgentType !== "auto" &&
     !isBackgroundAgent &&
-    !highlightedSlashCommand;
+    !highlightedSlashCommand &&
+    !highlightedSkillCommand;
   const hasInlineComposerChips =
     Boolean(highlightedSlashCommand) ||
+    Boolean(highlightedSkillCommand) ||
     showComposerAgentChip ||
     composerAttachedPaths.length > 0;
 
@@ -2033,6 +2210,45 @@ export const ChatComposer = memo(function ChatComposer({
               </Box>
             </Tooltip>
           ) : null}
+          {highlightedSkillCommand ? (
+            <Tooltip
+              placement="top"
+              enterDelay={180}
+              title={
+                highlightedSkillCommand.description ||
+                "直接使用该 Skill"
+              }
+            >
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  alignSelf: "center",
+                  flexShrink: 0,
+                  height: "var(--composer-chip-h)",
+                  fontSize: "var(--composer-fs)",
+                  lineHeight: "var(--composer-lh)",
+                }}
+              >
+                <Chip
+                  className="composer-skill-chip"
+                  size="small"
+                  variant="outlined"
+                  icon={<AutoAwesome sx={{ fontSize: 16 }} />}
+                  label={`$${highlightedSkillCommand.name}`}
+                  sx={{
+                    ...semanticChipSurface(skillTone),
+                    flexShrink: 0,
+                    height: "var(--composer-chip-h)",
+                    maxHeight: "var(--composer-chip-h)",
+                    fontWeight: 700,
+                    maxWidth: { xs: 170, sm: 240 },
+                  }}
+                />
+              </Box>
+            </Tooltip>
+          ) : null}
           {showComposerAgentChip ? (
             <Tooltip
               placement="top"
@@ -2195,7 +2411,9 @@ export const ChatComposer = memo(function ChatComposer({
               commitEditableInput(nextValue);
             }}
             onFocus={() => {
-              if (slashParse.active) setSlashPickerDismissed(false);
+              if (slashParse.active || skillParse.active) {
+                setSlashPickerDismissed(false);
+              }
               if (fileParse.active) setFilePickerDismissed(false);
               if (
                 normalizeEditableText(editableRef.current?.textContent ?? "") ===
@@ -2266,7 +2484,7 @@ export const ChatComposer = memo(function ChatComposer({
                 sx: {
                   mt: 0.5,
                   maxHeight: 280,
-                  width: 320,
+                  width: composerPopoverWidth ?? 320,
                   borderRadius: 2,
                   overflow: "hidden",
                 },
@@ -2281,8 +2499,14 @@ export const ChatComposer = memo(function ChatComposer({
               {filteredSlashOptions.length === 0 ? (
                 <ListItemButton disabled>
                   <ListItemText
-                    primary="无匹配命令或 Agent"
-                    secondary="继续输入或按 Esc 取消"
+                    primary={
+                      skillParse.active ? "无匹配 Skill" : "无匹配命令或 Agent"
+                    }
+                    secondary={
+                      skillParse.active
+                        ? "输入 $skill 参数，或按 Esc 取消"
+                        : "继续输入或按 Esc 取消"
+                    }
                   />
                 </ListItemButton>
               ) : (
@@ -2291,12 +2515,16 @@ export const ChatComposer = memo(function ChatComposer({
                     key={
                       item.kind === "command"
                         ? `cmd-${item.command.id}`
-                        : item.agent.agentType
+                        : item.kind === "agent"
+                          ? `agent-${item.agent.agentType}`
+                          : `skill-${item.skill.name}`
                     }
                     title={
                       item.kind === "command"
                         ? item.command.description
-                        : item.agent.description
+                        : item.kind === "agent"
+                          ? item.agent.description
+                          : item.skill.description
                     }
                     placement="right"
                     enterDelay={200}
@@ -2307,8 +2535,10 @@ export const ChatComposer = memo(function ChatComposer({
                       onClick={() => {
                         if (item.kind === "command") {
                           pickWorkflowCommand(item.command.id);
-                        } else {
+                        } else if (item.kind === "agent") {
                           pickAtAgent(item.agent.agentType);
+                        } else {
+                          pickSkillCommand(item.skill.name);
                         }
                       }}
                     >
@@ -2316,32 +2546,45 @@ export const ChatComposer = memo(function ChatComposer({
                         sx={{
                           minWidth: 36,
                           color:
-                            item.kind === "command" ? commandTone : agentTone,
+                            item.kind === "command"
+                              ? commandTone
+                              : item.kind === "agent"
+                                ? agentTone
+                                : skillTone,
                         }}
                       >
                         {item.kind === "command" ? (
                           <RouteIcon fontSize="small" />
-                        ) : (
+                        ) : item.kind === "agent" ? (
                           <SmartToy fontSize="small" />
+                        ) : (
+                          <AutoAwesome fontSize="small" />
                         )}
                       </ListItemIcon>
                       <ListItemText
+                        sx={{ minWidth: 0 }}
                         primary={
                           item.kind === "command"
                             ? item.command.label
-                            : normalizeAgentDisplayName(item.agent.agentType)
+                            : item.kind === "agent"
+                              ? normalizeAgentDisplayName(item.agent.agentType)
+                              : `$${item.skill.name}`
                         }
                         secondary={
                           item.kind === "command"
                             ? item.command.description
-                            : "设置当前输入框角色"
+                            : item.kind === "agent"
+                              ? "设置当前输入框角色"
+                              : item.skill.description || "直接使用该 Skill"
                         }
                         primaryTypographyProps={{
                           sx: {
                             color:
                               item.kind === "command"
                                 ? commandTone
-                                : agentTone,
+                                : item.kind === "agent"
+                                  ? agentTone
+                                  : skillTone,
                             fontWeight: 700,
                           },
                         }}
@@ -2350,9 +2593,19 @@ export const ChatComposer = memo(function ChatComposer({
                             color: alpha(
                               item.kind === "command"
                                 ? commandTone
-                                : agentTone,
+                                : item.kind === "agent"
+                                  ? agentTone
+                                  : skillTone,
                               0.76,
                             ),
+                            ...(item.kind === "skill"
+                              ? {
+                                  display: "block",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }
+                              : null),
                           },
                         }}
                       />
@@ -2379,7 +2632,7 @@ export const ChatComposer = memo(function ChatComposer({
                 sx: {
                   mt: 0.75,
                   maxHeight: 300,
-                  width: 380,
+                  width: composerPopoverWidth ?? 380,
                   borderRadius: 2.5,
                   overflow: "hidden",
                   bgcolor: alpha(paper, isDark ? 0.98 : 1),

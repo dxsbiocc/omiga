@@ -121,6 +121,7 @@ import {
   type ReviewerVerdictChip,
 } from "../../utils/reviewerVerdict";
 import {
+  parseSkillCommand,
   parseResearchCommand,
   parseWorkflowCommand,
 } from "../../utils/workflowCommands";
@@ -4468,6 +4469,7 @@ export function Chat({ sessionId }: ChatProps) {
     /** Prefer ref payload after queue flush — `getValue` reads the latest composer state. */
     const trimmed = flushPayload ? flushPayload.body.trim() : (composerRef.current?.getValue() ?? "").trim();
     const researchParsed = parseResearchCommand(trimmed);
+    const skillParsed = parseSkillCommand(trimmed);
 
     if (!trimmed && composerAttachedPaths.length === 0) {
       if (flushPayload) restoreFlushToQueue(flushPayload);
@@ -4475,6 +4477,10 @@ export function Chat({ sessionId }: ChatProps) {
     }
     /** Composer is still in bare `/…` or `@…` picker mode — do not send as message */
     if (trimmed && /^\/[^\s]*$/u.test(trimmed) && !researchParsed) {
+      if (flushPayload) restoreFlushToQueue(flushPayload);
+      return;
+    }
+    if (trimmed && /^\$[^\s]*$/u.test(trimmed) && !skillParsed) {
       if (flushPayload) restoreFlushToQueue(flushPayload);
       return;
     }
@@ -4793,7 +4799,7 @@ export function Chat({ sessionId }: ChatProps) {
       trimmed,
     );
     const workflowTitleSeed =
-      parseWorkflowCommand(trimmed)?.body || trimmed;
+      parseWorkflowCommand(trimmed)?.body || skillParsed?.args || trimmed;
     const backendMessageContent = mergeComposerPathsAndBody(
       composerAttachedPaths,
       workflowPrepared.content,
