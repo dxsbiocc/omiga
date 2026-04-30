@@ -10,9 +10,12 @@ const surfaceContext = {
   toolHintFallback: null,
 };
 
-function renderSteps(steps: ExecutionStep[]): string {
+function renderSteps(
+  steps: ExecutionStep[],
+  context = surfaceContext,
+): string {
   return renderToStaticMarkup(
-    <ReactStepList steps={steps} elapsedLabel="12s" surfaceContext={surfaceContext} />,
+    <ReactStepList steps={steps} elapsedLabel="12s" surfaceContext={context} />,
   );
 }
 
@@ -66,5 +69,29 @@ describe("ReactStepList", () => {
 
     expect(html).toContain("生成下一步建议");
     expect(html).toContain("后台");
+  });
+
+  it("folds stale running tool rows into completed calls once the stream is idle", () => {
+    const html = renderSteps(
+      [
+        {
+          id: "tool-bash-1",
+          title: "bash",
+          status: "running",
+          toolName: "bash",
+        },
+      ],
+      {
+        isConnecting: false,
+        isStreaming: false,
+        waitingFirstChunk: false,
+        toolHintFallback: null,
+      },
+    );
+
+    expect(html).toContain("已完成");
+    expect(html).not.toContain("正在执行");
+    expect(html).toContain("成功调用（最近优先）");
+    expect(html).toContain("1 次成功");
   });
 });

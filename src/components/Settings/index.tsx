@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState, useEffect } from "react";
+import { Fragment, useMemo, useRef, useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useDrag, useDragLayer, useDrop } from "react-dnd";
 import {
@@ -168,6 +168,246 @@ type QuerySourceOption = {
   available: boolean;
   badge?: string;
 };
+
+type RetrievalStatus =
+  | "available"
+  | "requires_api_key"
+  | "opt_in"
+  | "planned"
+  | "extension";
+
+type RetrievalCapability = "search" | "fetch" | "query";
+
+type RetrievalCategory = {
+  id: SearchSourceTab;
+  label: string;
+  description: string;
+  priority: number;
+};
+
+type RetrievalSubcategory = {
+  id: string;
+  category: SearchSourceTab;
+  label: string;
+  description: string;
+  defaultEnabled: boolean;
+  available: boolean;
+  status: RetrievalStatus;
+  priority: number;
+};
+
+type RetrievalSource = {
+  id: string;
+  category: SearchSourceTab;
+  label: string;
+  description: string;
+  aliases: string[];
+  subcategories: string[];
+  capabilities: RetrievalCapability[];
+  status: RetrievalStatus;
+  available: boolean;
+  defaultEnabled: boolean;
+  requiresApiKey: boolean;
+  requiresOptIn: boolean;
+  requiredCredentialRefs: string[];
+  optionalCredentialRefs: string[];
+  priority: number;
+  riskLevel: "low" | "medium" | "high";
+  riskNotes: string[];
+  homepageUrl?: string | null;
+  docsUrl?: string | null;
+};
+
+type RetrievalSourceRegistry = {
+  categories: RetrievalCategory[];
+  subcategories: RetrievalSubcategory[];
+  sources: RetrievalSource[];
+};
+
+type EnabledByCategory = Partial<Record<SearchSourceTab, string[]>>;
+
+function sourceBadge(status: RetrievalStatus): string | undefined {
+  switch (status) {
+    case "requires_api_key":
+      return "需要 API";
+    case "opt_in":
+      return "需开启";
+    case "planned":
+      return "待接入";
+    case "extension":
+      return "扩展";
+    default:
+      return "无需 API";
+  }
+}
+
+function subcategoryOptionsForCategory(
+  registry: RetrievalSourceRegistry | null,
+  category: SearchSourceTab,
+  fallback: QuerySourceOption[],
+): QuerySourceOption[] {
+  if (!registry) return fallback;
+  return registry.subcategories
+    .filter((item) => item.category === category)
+    .sort((a, b) => a.priority - b.priority)
+    .map((item) => ({
+      id: item.id,
+      label: item.label,
+      helper: item.description,
+      defaultEnabled: item.defaultEnabled,
+      available: item.available,
+      badge: item.status === "planned" ? "待接入" : undefined,
+    }));
+}
+
+function sourceOptionsForCategory(
+  registry: RetrievalSourceRegistry | null,
+  category: SearchSourceTab,
+  fallback: QuerySourceOption[],
+  capability?: RetrievalCapability,
+  subcategory?: string,
+): QuerySourceOption[] {
+  if (!registry) return fallback;
+  return registry.sources
+    .filter((item) => item.category === category)
+    .filter((item) => !capability || item.capabilities.includes(capability))
+    .filter((item) => !subcategory || item.subcategories.includes(subcategory))
+    .sort((a, b) => a.priority - b.priority)
+    .map((item) => ({
+      id: item.id,
+      label: item.label,
+      helper: item.description,
+      defaultEnabled: item.defaultEnabled,
+      available: item.available,
+      badge: sourceBadge(item.status),
+    }));
+}
+
+function defaultEnabledIds(options: QuerySourceOption[]): string[] {
+  return options
+    .filter((item) => item.defaultEnabled && item.available)
+    .map((item) => item.id);
+}
+
+function normalizeRegistryCategoryMap(
+  raw: unknown,
+  registry: RetrievalSourceRegistry | null,
+  kind: "source" | "subcategory",
+): EnabledByCategory | null {
+  if (!raw || typeof raw !== "object") return null;
+  const input = raw as Record<string, unknown>;
+  const out: EnabledByCategory = {};
+  const categories: SearchSourceTab[] = [
+    "literature",
+    "dataset",
+    "knowledge",
+    "web",
+    "social",
+  ];
+  for (const category of categories) {
+    const value = input[category];
+    if (!Array.isArray(value)) continue;
+    const allowed =
+      kind === "source"
+        ? sourceOptionsForCategory(registry, category, [])
+            .filter((item) => item.available)
+            .map((item) => item.id)
+        : subcategoryOptionsForCategory(registry, category, []).map(
+            (item) => item.id,
+          );
+    const selected = new Set(
+      value
+        .map((item) =>
+          String(item).trim().toLowerCase().replace(/[-\s]+/gu, "_"),
+        )
+        .filter(Boolean),
+    );
+    out[category] = allowed.filter((id) => selected.has(id));
+  }
+  return out;
+}
+
+function categoryDefaults(
+  registry: RetrievalSourceRegistry | null,
+  category: SearchSourceTab,
+  kind: "source" | "subcategory",
+): string[] {
+  const options =
+    kind === "source"
+      ? sourceOptionsForCategory(registry, category, [])
+      : subcategoryOptionsForCategory(registry, category, []);
+  return defaultEnabledIds(options);
+}
+
+function buildEnabledSourcesByCategory(
+  registry: RetrievalSourceRegistry | null,
+  args: {
+    queryDatasetSources: string[];
+    queryKnowledgeSources: string[];
+    semanticScholarEnabled: boolean;
+    wechatSearchEnabled: boolean;
+    webSearchMethods: WebSearchMethod[];
+  },
+): EnabledByCategory {
+  const literature = categoryDefaults(registry, "literature", "source").filter(
+    (id) => id !== "semantic_scholar",
+  );
+  if (args.semanticScholarEnabled) literature.push("semantic_scholar");
+
+  const knowledge = categoryDefaults(registry, "knowledge", "source").filter(
+    (id) =>
+      !sourceOptionsForCategory(registry, "knowledge", [], "query").some(
+        (item) => item.id === id,
+      ),
+  );
+  for (const id of args.queryKnowledgeSources) {
+    if (!knowledge.includes(id)) knowledge.push(id);
+  }
+
+  return {
+    literature,
+    dataset: args.queryDatasetSources,
+    knowledge,
+    web: args.webSearchMethods,
+    social: args.wechatSearchEnabled ? ["wechat"] : [],
+  };
+}
+
+function buildEnabledSubcategoriesByCategory(
+  registry: RetrievalSourceRegistry | null,
+  args: {
+    queryDatasetTypes: string[];
+    queryKnowledgeSources: string[];
+    wechatSearchEnabled: boolean;
+  },
+): EnabledByCategory {
+  const knowledge = categoryDefaults(registry, "knowledge", "subcategory");
+  const knowledgeSources = sourceOptionsForCategory(
+    registry,
+    "knowledge",
+    [],
+    "query",
+  );
+  for (const sourceId of args.queryKnowledgeSources) {
+    const source = registry?.sources.find(
+      (item) => item.category === "knowledge" && item.id === sourceId,
+    );
+    for (const subcategory of source?.subcategories ?? []) {
+      if (!knowledge.includes(subcategory)) knowledge.push(subcategory);
+    }
+  }
+  if (knowledgeSources.length === 0 && args.queryKnowledgeSources.includes("uniprot")) {
+    knowledge.push("protein");
+  }
+
+  return {
+    literature: categoryDefaults(registry, "literature", "subcategory"),
+    dataset: args.queryDatasetTypes,
+    knowledge: Array.from(new Set(knowledge)),
+    web: categoryDefaults(registry, "web", "subcategory"),
+    social: args.wechatSearchEnabled ? ["public_account"] : [],
+  };
+}
 
 const SEARCH_METHOD_OPTIONS: SearchMethodOption[] = [
   {
@@ -358,10 +598,10 @@ const KNOWLEDGE_DATABASE_OPTIONS: QuerySourceOption[] = [
   {
     id: "uniprot",
     label: "UniProt",
-    helper: "待接入",
+    helper: "蛋白功能、序列、GO 与交叉引用",
     defaultEnabled: false,
-    available: false,
-    badge: "待接入",
+    available: true,
+    badge: "无需 API",
   },
 ];
 
@@ -867,6 +1107,8 @@ export function Settings({
   const [webSearchMethods, setWebSearchMethods] = useState<
     WebSearchMethod[]
   >(DEFAULT_WEB_SEARCH_METHODS);
+  const [retrievalRegistry, setRetrievalRegistry] =
+    useState<RetrievalSourceRegistry | null>(null);
   const [queryDatasetTypes, setQueryDatasetTypes] = useState<string[]>(
     DEFAULT_QUERY_DATASET_TYPES,
   );
@@ -906,12 +1148,91 @@ export function Settings({
     searchMethodDragRef.current = searchMethodDrag;
   }, [searchMethodDrag]);
 
+  const searchSourceTabs = useMemo(() => {
+    if (!retrievalRegistry) return SEARCH_SOURCE_TABS;
+    const icons = new Map(SEARCH_SOURCE_TABS.map((tab) => [tab.id, tab.icon]));
+    return retrievalRegistry.categories
+      .filter((category) => icons.has(category.id))
+      .sort((a, b) => a.priority - b.priority)
+      .map((category) => ({
+        id: category.id,
+        label: category.label,
+        description: category.description,
+        icon: icons.get(category.id) ?? Language,
+      }));
+  }, [retrievalRegistry]);
+
+  const datasetTypeOptions = useMemo(
+    () =>
+      subcategoryOptionsForCategory(
+        retrievalRegistry,
+        "dataset",
+        DATASET_TYPE_OPTIONS,
+      ),
+    [retrievalRegistry],
+  );
+  const datasetSourceOptions = useMemo(
+    () =>
+      sourceOptionsForCategory(
+        retrievalRegistry,
+        "dataset",
+        DATASET_SOURCE_OPTIONS,
+        "query",
+      ),
+    [retrievalRegistry],
+  );
+  const knowledgeLocalOptions = useMemo(
+    () =>
+      sourceOptionsForCategory(
+        retrievalRegistry,
+        "knowledge",
+        KNOWLEDGE_LOCAL_OPTIONS.map(([label, helper]) => ({
+          id: String(label).toLowerCase().replace(/\s+/gu, "_"),
+          label,
+          helper,
+          defaultEnabled: true,
+          available: true,
+        })),
+        "search",
+        "local",
+      ),
+    [retrievalRegistry],
+  );
+  const knowledgeDatabaseOptions = useMemo(
+    () =>
+      sourceOptionsForCategory(
+        retrievalRegistry,
+        "knowledge",
+        KNOWLEDGE_DATABASE_OPTIONS,
+        "query",
+      ),
+    [retrievalRegistry],
+  );
+  const literatureSourceOptions = useMemo(
+    () =>
+      sourceOptionsForCategory(retrievalRegistry, "literature", [], "search"),
+    [retrievalRegistry],
+  );
+
   // Do NOT auto-fill model in a useEffect([provider]) when model is empty.
   // On restart, loadSavedConfig applies localStorage synchronously before the first await,
   // but a [provider] effect would still see the initial render (anthropic + empty model) and
   // overwrite the restored model with Anthropic's default — e.g. claude-3-5-sonnet-20241022
   // after the user had saved DeepSeek + deepseek-chat. First-time defaults are set in
   // loadSavedConfig when nothing is stored.
+
+  const loadRetrievalRegistry = async (): Promise<RetrievalSourceRegistry | null> => {
+    try {
+      const registry = await invoke<RetrievalSourceRegistry>(
+        "get_retrieval_source_registry",
+        {},
+      );
+      setRetrievalRegistry(registry);
+      return registry;
+    } catch {
+      return retrievalRegistry;
+    }
+  };
 
   const loadSavedConfig = async () => {
     try {
@@ -928,18 +1249,64 @@ export function Settings({
         );
       }
 
+      const registryForLoad = await loadRetrievalRegistry();
+      const datasetTypeOptionsForLoad = subcategoryOptionsForCategory(
+        registryForLoad,
+        "dataset",
+        DATASET_TYPE_OPTIONS,
+      );
+      const datasetSourceOptionsForLoad = sourceOptionsForCategory(
+        registryForLoad,
+        "dataset",
+        DATASET_SOURCE_OPTIONS,
+        "query",
+      );
+      const knowledgeDatabaseOptionsForLoad = sourceOptionsForCategory(
+        registryForLoad,
+        "knowledge",
+        KNOWLEDGE_DATABASE_OPTIONS,
+        "query",
+      );
+      const defaultDatasetTypesForLoad = defaultEnabledIds(
+        datasetTypeOptionsForLoad,
+      );
+      const defaultDatasetSourcesForLoad = defaultEnabledIds(
+        datasetSourceOptionsForLoad,
+      );
+      const defaultKnowledgeSourcesForLoad = defaultEnabledIds(
+        knowledgeDatabaseOptionsForLoad,
+      );
+
       const rawWebKeys = localStorage.getItem(WEB_SEARCH_KEYS_STORAGE);
       if (rawWebKeys) {
         try {
           const j = JSON.parse(rawWebKeys) as Record<string, unknown>;
+          const sourceMap = normalizeRegistryCategoryMap(
+            j.enabledSourcesByCategory,
+            registryForLoad,
+            "source",
+          );
+          const subcategoryMap = normalizeRegistryCategoryMap(
+            j.enabledSubcategoriesByCategory,
+            registryForLoad,
+            "subcategory",
+          );
           setTavilyApiKey(String(j.tavily ?? ""));
           setExaApiKey(String(j.exa ?? ""));
           setParallelApiKey(String(j.parallel ?? ""));
           setFirecrawlApiKey(String(j.firecrawl ?? ""));
           setFirecrawlUrl(String(j.firecrawlUrl ?? ""));
-          setSemanticScholarEnabled(parseSettingBool(j.semanticScholarEnabled, false));
+          setSemanticScholarEnabled(
+            sourceMap?.literature
+              ? sourceMap.literature.includes("semantic_scholar")
+              : parseSettingBool(j.semanticScholarEnabled, false),
+          );
           setSemanticScholarApiKey(String(j.semanticScholarApiKey ?? ""));
-          setWechatSearchEnabled(parseSettingBool(j.wechatSearchEnabled, false));
+          setWechatSearchEnabled(
+            sourceMap?.social
+              ? sourceMap.social.includes("wechat")
+              : parseSettingBool(j.wechatSearchEnabled, false),
+          );
           setPubmedApiKey(String(j.pubmedApiKey ?? ""));
           setPubmedEmail(String(j.pubmedEmail ?? DEFAULT_PUBMED_EMAIL));
           setPubmedToolName(String(j.pubmedToolName ?? DEFAULT_PUBMED_TOOL_NAME));
@@ -947,25 +1314,30 @@ export function Settings({
           setWebSearchEngine(normalizeWebSearchEngine(j.webSearchEngine));
           setWebSearchMethods(normalizeWebSearchMethods(j.webSearchMethods));
           setQueryDatasetTypes(
-            normalizeQuerySelection(
-              j.queryDatasetTypes,
-              DATASET_TYPE_OPTIONS,
-              DEFAULT_QUERY_DATASET_TYPES,
-            ),
+            subcategoryMap?.dataset ??
+              normalizeQuerySelection(
+                j.queryDatasetTypes,
+                datasetTypeOptionsForLoad,
+                defaultDatasetTypesForLoad,
+              ),
           );
           setQueryDatasetSources(
-            normalizeQuerySelection(
-              j.queryDatasetSources,
-              DATASET_SOURCE_OPTIONS,
-              DEFAULT_QUERY_DATASET_SOURCES,
-            ),
+            sourceMap?.dataset ??
+              normalizeQuerySelection(
+                j.queryDatasetSources,
+                datasetSourceOptionsForLoad,
+                defaultDatasetSourcesForLoad,
+              ),
           );
           setQueryKnowledgeSources(
-            normalizeQuerySelection(
-              j.queryKnowledgeSources,
-              KNOWLEDGE_DATABASE_OPTIONS,
-              DEFAULT_QUERY_KNOWLEDGE_SOURCES,
-            ),
+            sourceMap?.knowledge?.filter((id) =>
+              knowledgeDatabaseOptionsForLoad.some((item) => item.id === id),
+            ) ??
+              normalizeQuerySelection(
+                j.queryKnowledgeSources,
+                knowledgeDatabaseOptionsForLoad,
+                defaultKnowledgeSourcesForLoad,
+              ),
           );
         } catch {
           /* ignore */
@@ -1030,37 +1402,65 @@ export function Settings({
         queryDatasetTypes: string[];
         queryDatasetSources: string[];
         queryKnowledgeSources: string[];
+        enabledSourcesByCategory: EnabledByCategory;
+        enabledSubcategoriesByCategory: EnabledByCategory;
       };
       if (rawWebKeys) {
         try {
           const j = JSON.parse(rawWebKeys) as Record<string, unknown>;
+          const sourceMap = normalizeRegistryCategoryMap(
+            j.enabledSourcesByCategory,
+            registryForLoad,
+            "source",
+          );
+          const subcategoryMap = normalizeRegistryCategoryMap(
+            j.enabledSubcategoriesByCategory,
+            registryForLoad,
+            "subcategory",
+          );
+          const semanticEnabled = sourceMap?.literature
+            ? sourceMap.literature.includes("semantic_scholar")
+            : parseSettingBool(j.semanticScholarEnabled, false);
+          const wechatEnabled = sourceMap?.social
+            ? sourceMap.social.includes("wechat")
+            : parseSettingBool(j.wechatSearchEnabled, false);
           wsPayload = {
             tavily: String(j.tavily ?? "").trim(),
             exa: String(j.exa ?? "").trim(),
             parallel: String(j.parallel ?? "").trim(),
             firecrawl: String(j.firecrawl ?? "").trim(),
             firecrawlUrl: String(j.firecrawlUrl ?? "").trim(),
-            semanticScholarEnabled: parseSettingBool(j.semanticScholarEnabled, false),
+            semanticScholarEnabled: semanticEnabled,
             semanticScholarApiKey: String(j.semanticScholarApiKey ?? "").trim(),
-            wechatSearchEnabled: parseSettingBool(j.wechatSearchEnabled, false),
+            wechatSearchEnabled: wechatEnabled,
             pubmedApiKey: String(j.pubmedApiKey ?? "").trim(),
             pubmedEmail: String(j.pubmedEmail ?? DEFAULT_PUBMED_EMAIL).trim(),
             pubmedToolName: String(j.pubmedToolName ?? DEFAULT_PUBMED_TOOL_NAME).trim(),
-            queryDatasetTypes: normalizeQuerySelection(
-              j.queryDatasetTypes,
-              DATASET_TYPE_OPTIONS,
-              DEFAULT_QUERY_DATASET_TYPES,
-            ),
-            queryDatasetSources: normalizeQuerySelection(
-              j.queryDatasetSources,
-              DATASET_SOURCE_OPTIONS,
-              DEFAULT_QUERY_DATASET_SOURCES,
-            ),
-            queryKnowledgeSources: normalizeQuerySelection(
-              j.queryKnowledgeSources,
-              KNOWLEDGE_DATABASE_OPTIONS,
-              DEFAULT_QUERY_KNOWLEDGE_SOURCES,
-            ),
+            queryDatasetTypes:
+              subcategoryMap?.dataset ??
+              normalizeQuerySelection(
+                j.queryDatasetTypes,
+                datasetTypeOptionsForLoad,
+                defaultDatasetTypesForLoad,
+              ),
+            queryDatasetSources:
+              sourceMap?.dataset ??
+              normalizeQuerySelection(
+                j.queryDatasetSources,
+                datasetSourceOptionsForLoad,
+                defaultDatasetSourcesForLoad,
+              ),
+            queryKnowledgeSources:
+              sourceMap?.knowledge?.filter((id) =>
+                knowledgeDatabaseOptionsForLoad.some((item) => item.id === id),
+              ) ??
+              normalizeQuerySelection(
+                j.queryKnowledgeSources,
+                knowledgeDatabaseOptionsForLoad,
+                defaultKnowledgeSourcesForLoad,
+              ),
+            enabledSourcesByCategory: sourceMap ?? {},
+            enabledSubcategoriesByCategory: subcategoryMap ?? {},
           };
         } catch {
           wsPayload = {
@@ -1075,9 +1475,11 @@ export function Settings({
             pubmedApiKey: "",
             pubmedEmail: DEFAULT_PUBMED_EMAIL,
             pubmedToolName: DEFAULT_PUBMED_TOOL_NAME,
-            queryDatasetTypes: DEFAULT_QUERY_DATASET_TYPES,
-            queryDatasetSources: DEFAULT_QUERY_DATASET_SOURCES,
-            queryKnowledgeSources: DEFAULT_QUERY_KNOWLEDGE_SOURCES,
+            queryDatasetTypes: defaultDatasetTypesForLoad,
+            queryDatasetSources: defaultDatasetSourcesForLoad,
+            queryKnowledgeSources: defaultKnowledgeSourcesForLoad,
+            enabledSourcesByCategory: {},
+            enabledSubcategoriesByCategory: {},
           };
         }
       } else {
@@ -1098,9 +1500,11 @@ export function Settings({
           pubmedApiKey: "",
           pubmedEmail: DEFAULT_PUBMED_EMAIL,
           pubmedToolName: DEFAULT_PUBMED_TOOL_NAME,
-          queryDatasetTypes: DEFAULT_QUERY_DATASET_TYPES,
-          queryDatasetSources: DEFAULT_QUERY_DATASET_SOURCES,
-          queryKnowledgeSources: DEFAULT_QUERY_KNOWLEDGE_SOURCES,
+          queryDatasetTypes: defaultDatasetTypesForLoad,
+          queryDatasetSources: defaultDatasetSourcesForLoad,
+          queryKnowledgeSources: defaultKnowledgeSourcesForLoad,
+          enabledSourcesByCategory: {},
+          enabledSubcategoriesByCategory: {},
         };
       }
       if (
@@ -1264,6 +1668,22 @@ export function Settings({
     setIsLoading(true);
     setMessage(null);
     try {
+      const enabledSourcesByCategory = buildEnabledSourcesByCategory(
+        retrievalRegistry,
+        {
+          queryDatasetSources,
+          queryKnowledgeSources,
+          semanticScholarEnabled,
+          wechatSearchEnabled,
+          webSearchMethods,
+        },
+      );
+      const enabledSubcategoriesByCategory =
+        buildEnabledSubcategoriesByCategory(retrievalRegistry, {
+          queryDatasetTypes,
+          queryKnowledgeSources,
+          wechatSearchEnabled,
+        });
       const ws = {
         tavily: tavilyApiKey.trim(),
         exa: exaApiKey.trim(),
@@ -1279,6 +1699,8 @@ export function Settings({
         queryDatasetTypes,
         queryDatasetSources,
         queryKnowledgeSources,
+        enabledSourcesByCategory,
+        enabledSubcategoriesByCategory,
       };
       await invoke("set_web_search_api_keys", {
         tavily: ws.tavily,
@@ -1295,6 +1717,8 @@ export function Settings({
         queryDatasetTypes: ws.queryDatasetTypes,
         queryDatasetSources: ws.queryDatasetSources,
         queryKnowledgeSources: ws.queryKnowledgeSources,
+        enabledSourcesByCategory: ws.enabledSourcesByCategory,
+        enabledSubcategoriesByCategory: ws.enabledSubcategoriesByCategory,
       });
       await invoke("save_global_settings_to_config", {
         webUseProxy,
@@ -1641,7 +2065,7 @@ export function Settings({
                       p: 1,
                     }}
                   >
-                    {SEARCH_SOURCE_TABS.map((tab) => {
+                    {searchSourceTabs.map((tab) => {
                       const selected = activeSearchSourceTab === tab.id;
                       const Icon = tab.icon;
                       return (
@@ -2102,88 +2526,69 @@ export function Settings({
                               spacing={1}
                               sx={{ mt: 1.25 }}
                             >
-                              <Stack
-                                direction="row"
-                                spacing={0.75}
-                                useFlexGap
-                                flexWrap="wrap"
-                                alignItems="center"
-                              >
-                                <Typography
-                                  variant="caption"
-                                  fontWeight={800}
-                                  color="success.main"
-                                  sx={{ width: 58, flexShrink: 0 }}
-                                >
-                                  无需 API
-                                </Typography>
-                                {[
-                                  "PubMed",
-                                  "arXiv",
-                                  "Crossref",
-                                  "OpenAlex",
-                                  "bioRxiv",
-                                  "medRxiv",
-                                ].map((sourceName) => (
-                                  <Chip
-                                    key={sourceName}
-                                    label={sourceName}
-                                    size="small"
-                                    color="success"
-                                    variant="outlined"
-                                    sx={(theme) => ({
-                                      height: 24,
-                                      fontWeight: 700,
-                                      borderRadius: 999,
-                                      color: "success.light",
-                                      borderColor: alpha(
-                                        theme.palette.success.main,
-                                        0.52,
-                                      ),
-                                      bgcolor: alpha(
-                                        theme.palette.success.main,
-                                        0.08,
-                                      ),
-                                    })}
-                                  />
-                                ))}
-                              </Stack>
-                              <Stack
-                                direction="row"
-                                spacing={0.75}
-                                useFlexGap
-                                flexWrap="wrap"
-                                alignItems="center"
-                              >
-                                <Typography
-                                  variant="caption"
-                                  fontWeight={800}
-                                  color="warning.main"
-                                  sx={{ width: 58, flexShrink: 0 }}
-                                >
-                                  需要 API
-                                </Typography>
-                                <Chip
-                                  label="Semantic Scholar"
-                                  size="small"
-                                  color="warning"
-                                  variant="outlined"
-                                  sx={(theme) => ({
-                                    height: 24,
-                                    fontWeight: 700,
-                                    borderRadius: 999,
-                                    color: "warning.light",
-                                    borderColor: alpha(
-                                      theme.palette.warning.main,
-                                      0.64,
-                                    ),
-                                    bgcolor: alpha(
-                                      theme.palette.warning.main,
-                                      0.1,
-                                    ),
-                                  })}
-                                />
-                              </Stack>
+                              {["无需 API", "需要 API"].map((badge) => {
+                                const items = literatureSourceOptions.filter(
+                                  (item) => item.badge === badge,
+                                );
+                                if (items.length === 0) return null;
+                                const color =
+                                  badge === "需要 API" ? "warning" : "success";
+                                return (
+                                  <Stack
+                                    key={badge}
+                                    direction="row"
+                                    spacing={0.75}
+                                    useFlexGap
+                                    flexWrap="wrap"
+                                    alignItems="center"
+                                  >
+                                    <Typography
+                                      variant="caption"
+                                      fontWeight={800}
+                                      color={`${color}.main`}
+                                      sx={{ width: 58, flexShrink: 0 }}
+                                    >
+                                      {badge}
+                                    </Typography>
+                                    {items.map((item) => (
+                                      <Tooltip
+                                        key={item.id}
+                                        title={item.helper}
+                                        arrow
+                                        placement="top"
+                                      >
+                                        <Chip
+                                          label={item.label}
+                                          size="small"
+                                          color={color as "success" | "warning"}
+                                          variant="outlined"
+                                          sx={(theme) => ({
+                                            height: 24,
+                                            fontWeight: 700,
+                                            borderRadius: 999,
+                                            color:
+                                              badge === "需要 API"
+                                                ? "warning.light"
+                                                : "success.light",
+                                            borderColor: alpha(
+                                              badge === "需要 API"
+                                                ? theme.palette.warning.main
+                                                : theme.palette.success.main,
+                                              badge === "需要 API" ? 0.64 : 0.52,
+                                            ),
+                                            bgcolor: alpha(
+                                              badge === "需要 API"
+                                                ? theme.palette.warning.main
+                                                : theme.palette.success.main,
+                                              badge === "需要 API" ? 0.1 : 0.08,
+                                            ),
+                                          })}
+                                        />
+                                      </Tooltip>
+                                    ))}
+                                  </Stack>
+                                );
+                              })}
                             </Stack>
                           </Box>
                           <Tooltip
@@ -2394,7 +2799,7 @@ export function Settings({
                               数据类型
                             </Typography>
                             <Stack spacing={0.75}>
-                              {DATASET_TYPE_OPTIONS.map((item) => {
+                              {datasetTypeOptions.map((item) => {
                                 const checked = queryDatasetTypes.includes(item.id);
                                 return (
                                   <Box
@@ -2473,7 +2878,7 @@ export function Settings({
                               数据来源（自动匹配或可选）
                             </Typography>
                             <Stack spacing={0.75}>
-                              {DATASET_SOURCE_OPTIONS.map((item) => {
+                              {datasetSourceOptions.map((item) => {
                                 const checked = queryDatasetSources.includes(item.id);
                                 return (
                                   <Box
@@ -2614,9 +3019,9 @@ export function Settings({
                               本地知识
                             </Typography>
                             <Stack spacing={0.75}>
-                              {KNOWLEDGE_LOCAL_OPTIONS.map(([label, helper]) => (
+                              {knowledgeLocalOptions.map((item) => (
                                 <Box
-                                  key={label}
+                                  key={item.id}
                                   sx={{
                                     display: "grid",
                                     gridTemplateColumns: "24px minmax(0, 1fr)",
@@ -2627,7 +3032,7 @@ export function Settings({
                                   <SourceStatusDot active color="info" />
                                   <Box sx={{ minWidth: 0 }}>
                                     <Typography variant="body2" fontWeight={700} noWrap>
-                                      {label}
+                                      {item.label}
                                     </Typography>
                                     <Typography
                                       variant="caption"
@@ -2639,7 +3044,7 @@ export function Settings({
                                         WebkitLineClamp: 1,
                                       }}
                                     >
-                                      {helper}
+                                      {item.helper}
                                     </Typography>
                                   </Box>
                                 </Box>
@@ -2652,7 +3057,7 @@ export function Settings({
                               结构化数据库
                             </Typography>
                             <Stack spacing={0.75}>
-                              {KNOWLEDGE_DATABASE_OPTIONS.map((item) => {
+                              {knowledgeDatabaseOptions.map((item) => {
                                 const checked = queryKnowledgeSources.includes(item.id);
                                 return (
                                   <Box

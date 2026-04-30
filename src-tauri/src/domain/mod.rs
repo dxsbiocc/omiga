@@ -20,6 +20,7 @@ pub mod persistence;
 pub mod post_turn_settings;
 pub mod ralph_state;
 pub mod research_system;
+pub mod retrieval_registry;
 pub mod routing;
 pub mod runtime_constraints;
 pub mod search;

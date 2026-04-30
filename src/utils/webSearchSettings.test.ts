@@ -27,6 +27,32 @@ describe("web search settings rehydration", () => {
     );
   });
 
+  it("preserves registry-backed grouped selections", () => {
+    const parsed = parseStoredWebSearchSettings(
+      JSON.stringify({
+        enabledSourcesByCategory: {
+          dataset: ["cbioportal", "gtex"],
+          knowledge: ["project_wiki", "uniprot", "unknown"],
+          social: ["wechat"],
+        },
+        enabledSubcategoriesByCategory: {
+          dataset: ["multi_omics"],
+          knowledge: ["protein"],
+        },
+      }),
+    );
+
+    expect(parsed?.enabledSourcesByCategory).toMatchObject({
+      dataset: ["cbioportal"],
+      knowledge: ["project_wiki", "uniprot"],
+      social: ["wechat"],
+    });
+    expect(parsed?.enabledSubcategoriesByCategory).toMatchObject({
+      dataset: ["multi_omics"],
+      knowledge: ["protein"],
+    });
+  });
+
   it("ignores corrupt stored settings", () => {
     expect(parseStoredWebSearchSettings("{")).toBeNull();
   });

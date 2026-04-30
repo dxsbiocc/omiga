@@ -72,6 +72,7 @@ export function getExecutionSurfaceView(
   steps: ExecutionStep[],
   ctx: ExecutionSurfaceContext,
 ): { label: string; kind: ExecutionSurfaceKind; toolName: string | null } {
+  const streamActive = ctx.isConnecting || ctx.isStreaming || ctx.waitingFirstChunk;
   if (ctx.isConnecting) {
     const connectStep = steps.find(
       (step) => step.id === "connect" && step.status === "running",
@@ -83,7 +84,9 @@ export function getExecutionSurfaceView(
     };
   }
 
-  const run = steps.find((s) => s.status === "running");
+  const run = steps.find(
+    (s) => s.status === "running" && (streamActive || !s.id.startsWith("tool-")),
+  );
   if (run) {
     if (run.id === "connect") {
       // Stream is live but the connect row was not cleared (e.g. `Start` event not handled).
@@ -121,7 +124,14 @@ export function getExecutionSurfaceView(
     return { label: "解析输出", kind: "generating", toolName: null };
   }
 
-  if (steps.length > 0 && steps.every((s) => s.status === "done")) {
+  if (
+    steps.length > 0 &&
+    steps.every(
+      (s) =>
+        s.status === "done" ||
+        (!streamActive && s.status === "running" && s.id.startsWith("tool-")),
+    )
+  ) {
     return { label: "已完成", kind: "finished", toolName: null };
   }
 

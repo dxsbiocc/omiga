@@ -388,6 +388,8 @@ pub async fn set_web_search_api_keys(
     query_dataset_types: Option<Vec<String>>,
     query_dataset_sources: Option<Vec<String>>,
     query_knowledge_sources: Option<Vec<String>>,
+    enabled_sources_by_category: Option<HashMap<String, Vec<String>>>,
+    enabled_subcategories_by_category: Option<HashMap<String, Vec<String>>>,
 ) -> CommandResult<()> {
     let mut g = state.chat.web_search_api_keys.lock().await;
     g.tavily = normalize_web_search_key_field(&tavily);
@@ -421,6 +423,20 @@ pub async fn set_web_search_api_keys(
     ) {
         g.query_knowledge_sources = Some(values);
     }
+    if let Some(values) = enabled_sources_by_category {
+        g.enabled_sources_by_category =
+            Some(crate::domain::retrieval_registry::normalize_enabled_map(
+                values,
+                crate::domain::retrieval_registry::RegistryEntryKind::Source,
+            ));
+    }
+    if let Some(values) = enabled_subcategories_by_category {
+        g.enabled_subcategories_by_category =
+            Some(crate::domain::retrieval_registry::normalize_enabled_map(
+                values,
+                crate::domain::retrieval_registry::RegistryEntryKind::Subcategory,
+            ));
+    }
     Ok(())
 }
 
@@ -448,6 +464,8 @@ pub struct WebSearchApiKeysState {
     pub query_dataset_types: Vec<String>,
     pub query_dataset_sources: Vec<String>,
     pub query_knowledge_sources: Vec<String>,
+    pub enabled_sources_by_category: HashMap<String, Vec<String>>,
+    pub enabled_subcategories_by_category: HashMap<String, Vec<String>>,
 }
 
 fn web_search_key_field_state(key: &Option<String>) -> WebSearchKeyFieldState {
@@ -499,7 +517,15 @@ pub async fn get_web_search_api_keys_state(
         query_dataset_types: g.enabled_query_dataset_types(),
         query_dataset_sources: g.enabled_query_dataset_sources(),
         query_knowledge_sources: g.enabled_query_knowledge_sources(),
+        enabled_sources_by_category: g.enabled_sources_by_category(),
+        enabled_subcategories_by_category: g.enabled_subcategories_by_category(),
     })
+}
+
+#[tauri::command]
+pub fn get_retrieval_source_registry() -> crate::domain::retrieval_registry::RetrievalSourceRegistry
+{
+    crate::domain::retrieval_registry::registry()
 }
 
 /// Store Tavily API key for built-in search (empty clears user override; env still works).

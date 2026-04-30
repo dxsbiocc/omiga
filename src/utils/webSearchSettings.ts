@@ -29,6 +29,62 @@ const DEFAULT_QUERY_DATASET_TYPES = [
 const DEFAULT_QUERY_DATASET_SOURCES = ["geo", "ena"];
 const DEFAULT_QUERY_KNOWLEDGE_SOURCES = ["ncbi_gene"];
 
+const CATEGORY_SOURCE_IDS: Record<string, readonly string[]> = {
+  literature: [
+    "pubmed",
+    "arxiv",
+    "crossref",
+    "openalex",
+    "biorxiv",
+    "medrxiv",
+    "semantic_scholar",
+  ],
+  dataset: ["geo", "ena", "cbioportal"],
+  knowledge: [
+    "project_wiki",
+    "session_memory",
+    "long_term",
+    "sources",
+    "ncbi_gene",
+    "uniprot",
+  ],
+  web: ["tavily", "ddg", "google", "bing", "exa", "firecrawl", "parallel"],
+  social: ["wechat"],
+};
+
+const CATEGORY_SUBCATEGORY_IDS: Record<string, readonly string[]> = {
+  literature: ["paper", "preprint"],
+  dataset: QUERY_DATASET_TYPE_IDS,
+  knowledge: [
+    "local",
+    "gene",
+    "protein",
+    "pathway",
+    "disease",
+    "variant",
+    "drug",
+    "interaction",
+  ],
+  web: ["web_page"],
+  social: ["public_account"],
+};
+
+const DEFAULT_ENABLED_SOURCES_BY_CATEGORY: Record<string, string[]> = {
+  literature: ["pubmed", "arxiv", "crossref", "openalex", "biorxiv", "medrxiv"],
+  dataset: [...DEFAULT_QUERY_DATASET_SOURCES],
+  knowledge: ["project_wiki", "session_memory", "long_term", "sources", "ncbi_gene"],
+  web: ["ddg", "google", "bing"],
+  social: [],
+};
+
+const DEFAULT_ENABLED_SUBCATEGORIES_BY_CATEGORY: Record<string, string[]> = {
+  literature: ["paper", "preprint"],
+  dataset: [...DEFAULT_QUERY_DATASET_TYPES],
+  knowledge: ["local", "gene"],
+  web: ["web_page"],
+  social: [],
+};
+
 export interface StoredWebSearchPayload {
   tavily: string;
   exa: string;
@@ -44,6 +100,8 @@ export interface StoredWebSearchPayload {
   queryDatasetTypes: string[];
   queryDatasetSources: string[];
   queryKnowledgeSources: string[];
+  enabledSourcesByCategory: Record<string, string[]>;
+  enabledSubcategoriesByCategory: Record<string, string[]>;
 }
 
 function parseSettingBool(value: unknown, fallback: boolean): boolean {
@@ -69,14 +127,50 @@ function normalizeQuerySelection(
   return allowed.filter((id) => selected.has(id));
 }
 
+function normalizeCategorySelectionMap(
+  raw: unknown,
+  allowedByCategory: Record<string, readonly string[]>,
+  fallbackByCategory: Record<string, string[]>,
+): Record<string, string[]> {
+  if (!raw || typeof raw !== "object") {
+    return Object.fromEntries(
+      Object.entries(fallbackByCategory).map(([key, value]) => [key, [...value]]),
+    );
+  }
+  const input = raw as Record<string, unknown>;
+  const out: Record<string, string[]> = {};
+  for (const [category, allowed] of Object.entries(allowedByCategory)) {
+    out[category] = normalizeQuerySelection(
+      input[category],
+      allowed,
+      fallbackByCategory[category] ?? [],
+    );
+  }
+  return out;
+}
+
 export function defaultWebSearchQuerySettings(): Pick<
   StoredWebSearchPayload,
-  "queryDatasetTypes" | "queryDatasetSources" | "queryKnowledgeSources"
+  | "queryDatasetTypes"
+  | "queryDatasetSources"
+  | "queryKnowledgeSources"
+  | "enabledSourcesByCategory"
+  | "enabledSubcategoriesByCategory"
 > {
   return {
     queryDatasetTypes: [...DEFAULT_QUERY_DATASET_TYPES],
     queryDatasetSources: [...DEFAULT_QUERY_DATASET_SOURCES],
     queryKnowledgeSources: [...DEFAULT_QUERY_KNOWLEDGE_SOURCES],
+    enabledSourcesByCategory: normalizeCategorySelectionMap(
+      null,
+      CATEGORY_SOURCE_IDS,
+      DEFAULT_ENABLED_SOURCES_BY_CATEGORY,
+    ),
+    enabledSubcategoriesByCategory: normalizeCategorySelectionMap(
+      null,
+      CATEGORY_SUBCATEGORY_IDS,
+      DEFAULT_ENABLED_SUBCATEGORIES_BY_CATEGORY,
+    ),
   };
 }
 
@@ -109,6 +203,16 @@ export function parseStoredWebSearchSettings(raw: string): StoredWebSearchPayloa
         j.queryKnowledgeSources,
         QUERY_KNOWLEDGE_SOURCE_IDS,
         DEFAULT_QUERY_KNOWLEDGE_SOURCES,
+      ),
+      enabledSourcesByCategory: normalizeCategorySelectionMap(
+        j.enabledSourcesByCategory,
+        CATEGORY_SOURCE_IDS,
+        DEFAULT_ENABLED_SOURCES_BY_CATEGORY,
+      ),
+      enabledSubcategoriesByCategory: normalizeCategorySelectionMap(
+        j.enabledSubcategoriesByCategory,
+        CATEGORY_SUBCATEGORY_IDS,
+        DEFAULT_ENABLED_SUBCATEGORIES_BY_CATEGORY,
       ),
     };
   } catch {

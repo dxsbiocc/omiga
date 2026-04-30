@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
   Box,
   Button,
@@ -9,6 +12,7 @@ import {
   Divider,
   FormControl,
   InputLabel,
+  Link,
   MenuItem,
   Paper,
   Select,
@@ -16,8 +20,11 @@ import {
   Typography,
 } from "@mui/material";
 import {
+  CloudDownloadRounded,
   DeleteOutlineRounded,
   ExtensionRounded,
+  ExpandMoreRounded,
+  OpenInNewRounded,
   RefreshRounded,
   UploadFileRounded,
 } from "@mui/icons-material";
@@ -26,6 +33,7 @@ import {
   contributionSummary,
   getCustomEditorContributions,
   getNotebookContributions,
+  isExtensionInstalled,
 } from "../../utils/vscodeExtensions";
 import { useExtensionStore } from "../../state/extensionStore";
 
@@ -38,10 +46,31 @@ function contributionChips(summary: ReturnType<typeof contributionSummary>) {
   ].filter((chip) => chip.show);
 }
 
+const extensionListSx = {
+  maxHeight: { xs: 420, md: 520 },
+  overflowY: "auto",
+  overscrollBehavior: "contain",
+  pr: 0.5,
+  display: "flex",
+  flexDirection: "column",
+  gap: 1.5,
+  scrollbarGutter: "stable",
+};
+
+const accordionSx = {
+  border: 1,
+  borderColor: "divider",
+  borderRadius: 2,
+  overflow: "hidden",
+  "&:before": { display: "none" },
+  "&.Mui-expanded": { my: 0 },
+};
+
 export function VscodeExtensionsPanel() {
   const {
     extensionsDir,
     installedExtensions,
+    recommendedExtensions,
     iconThemes,
     activeIconThemeId,
     isLoading,
@@ -49,10 +78,12 @@ export function VscodeExtensionsPanel() {
     error,
     loadExtensions,
     installVsix,
+    installRecommendedExtension,
     uninstallExtension,
     setActiveIconTheme,
   } = useExtensionStore();
   const [message, setMessage] = useState<string | null>(null);
+  const [installingRecommendedId, setInstallingRecommendedId] = useState<string | null>(null);
 
   useEffect(() => {
     void loadExtensions();
@@ -77,6 +108,19 @@ export function VscodeExtensionsPanel() {
     if (typeof selected !== "string") return;
     const installed = await installVsix(selected);
     setMessage(`Installed ${installed.displayName || installed.id}`);
+  };
+
+  const handleInstallRecommended = async (extensionId: string) => {
+    setMessage(null);
+    setInstallingRecommendedId(extensionId);
+    try {
+      const installed = await installRecommendedExtension(extensionId);
+      setMessage(`Installed ${installed.displayName || installed.id}`);
+    } catch {
+      // Store already exposes the error banner.
+    } finally {
+      setInstallingRecommendedId(null);
+    }
   };
 
   return (
@@ -123,6 +167,97 @@ export function VscodeExtensionsPanel() {
         </Stack>
       </Paper>
 
+      {recommendedExtensions.length > 0 && (
+        <Accordion defaultExpanded disableGutters elevation={0} sx={accordionSx}>
+          <AccordionSummary
+            expandIcon={<ExpandMoreRounded />}
+            aria-controls="recommended-plugins-content"
+            id="recommended-plugins-header"
+            sx={{ px: 2, minHeight: 56, "& .MuiAccordionSummary-content": { my: 1.25 } }}
+          >
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+              <Typography variant="subtitle2" fontWeight={700}>
+                Recommended plugins
+              </Typography>
+              <Chip size="small" variant="outlined" label={`${recommendedExtensions.length} plugins`} />
+            </Stack>
+          </AccordionSummary>
+          <AccordionDetails sx={{ px: 2, pt: 0, pb: 2 }}>
+            <Box sx={extensionListSx} role="region" aria-label="Recommended plugins list">
+              {recommendedExtensions.map((extension) => {
+                const installed = isExtensionInstalled(installedExtensions, extension.id);
+                const installing = installingRecommendedId === extension.id;
+                return (
+                  <Paper key={extension.id} variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
+                    <Stack spacing={1.25}>
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ xs: "stretch", sm: "flex-start" }}>
+                        <ExtensionRounded color="primary" sx={{ mt: 0.25, display: { xs: "none", sm: "block" } }} />
+                        <Box sx={{ minWidth: 0, flex: 1 }}>
+                          <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+                            <Typography variant="subtitle2" fontWeight={700}>
+                              {extension.displayName}
+                            </Typography>
+                            <Chip
+                              size="small"
+                              label={installed ? "Installed" : "Official"}
+                              color={installed ? "success" : "primary"}
+                              variant={installed ? "filled" : "outlined"}
+                            />
+                          </Stack>
+                          <Typography variant="caption" color="text.secondary" display="block">
+                            {extension.id}
+                          </Typography>
+                        </Box>
+                        <Button
+                          size="small"
+                          variant={installed ? "outlined" : "contained"}
+                          disableElevation
+                          startIcon={installing ? <CircularProgress size={16} color="inherit" /> : <CloudDownloadRounded />}
+                          disabled={installed || isInstalling}
+                          onClick={() => void handleInstallRecommended(extension.id)}
+                          sx={{ textTransform: "none", borderRadius: 1.5 }}
+                        >
+                          {installed ? "Installed" : installing ? "Installing…" : "Install plugin"}
+                        </Button>
+                      </Stack>
+
+                      <Typography variant="body2" color="text.secondary">
+                        {extension.description} Omiga 会下载安装官方 VSIX，并读取标准
+                        <code> package.json </code>贡献点；当前继续回退到内置
+                        notebook 查看器，后续可接入完整 VS Code extension host。
+                      </Typography>
+
+                      <Stack direction="row" gap={1.25} flexWrap="wrap">
+                        <Link
+                          href={extension.repositoryUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          underline="hover"
+                          variant="caption"
+                          sx={{ display: "inline-flex", alignItems: "center", gap: 0.25 }}
+                        >
+                          GitHub <OpenInNewRounded sx={{ fontSize: 14 }} />
+                        </Link>
+                        <Link
+                          href={extension.marketplaceUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          underline="hover"
+                          variant="caption"
+                          sx={{ display: "inline-flex", alignItems: "center", gap: 0.25 }}
+                        >
+                          Marketplace <OpenInNewRounded sx={{ fontSize: 14 }} />
+                        </Link>
+                      </Stack>
+                    </Stack>
+                  </Paper>
+                );
+              })}
+            </Box>
+          </AccordionDetails>
+        </Accordion>
+      )}
+
       <Paper variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
         <Stack spacing={1.5}>
           <Typography variant="subtitle2" fontWeight={700}>
@@ -151,72 +286,86 @@ export function VscodeExtensionsPanel() {
         </Stack>
       </Paper>
 
-      <Stack spacing={1.5}>
-        <Typography variant="subtitle2" fontWeight={700}>
-          Installed VS Code extensions
-        </Typography>
-        {installedExtensions.length === 0 ? (
-          <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, textAlign: "center" }}>
-            <ExtensionRounded sx={{ color: "text.secondary", mb: 1 }} />
-            <Typography variant="body2" color="text.secondary">
-              No VS Code extensions installed yet. Install a .vsix package to
-              enable compatible static contribution points.
+      <Accordion defaultExpanded disableGutters elevation={0} sx={accordionSx}>
+        <AccordionSummary
+          expandIcon={<ExpandMoreRounded />}
+          aria-controls="installed-extensions-content"
+          id="installed-extensions-header"
+          sx={{ px: 2, minHeight: 56, "& .MuiAccordionSummary-content": { my: 1.25 } }}
+        >
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+            <Typography variant="subtitle2" fontWeight={700}>
+              Installed VS Code extensions
             </Typography>
-          </Paper>
-        ) : (
-          installedExtensions.map((extension) => {
-            const summary = contributionSummary(extension);
-            const chips = contributionChips(summary);
-            return (
-              <Paper key={extension.id} variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
-                <Stack spacing={1.25}>
-                  <Stack direction="row" spacing={1.5} alignItems="flex-start">
-                    <ExtensionRounded color="primary" sx={{ mt: 0.25 }} />
-                    <Box sx={{ minWidth: 0, flex: 1 }}>
-                      <Typography variant="subtitle2" fontWeight={700} noWrap title={extension.displayName}>
-                        {extension.displayName || extension.name}
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary" display="block" noWrap title={extension.id}>
-                        {extension.id} · v{extension.version}
-                      </Typography>
-                    </Box>
-                    <Button
-                      size="small"
-                      color="error"
-                      variant="text"
-                      startIcon={<DeleteOutlineRounded />}
-                      disabled={isLoading}
-                      onClick={() => void uninstallExtension(extension.id)}
-                      sx={{ textTransform: "none", borderRadius: 1.5 }}
-                    >
-                      Uninstall
-                    </Button>
-                  </Stack>
-
-                  {extension.description && (
-                    <Typography variant="body2" color="text.secondary">
-                      {extension.description}
-                    </Typography>
-                  )}
-
-                  {chips.length > 0 && (
-                    <Stack direction="row" gap={0.75} flexWrap="wrap">
-                      {chips.map((chip) => (
-                        <Chip key={chip.label} size="small" label={chip.label} variant="outlined" />
-                      ))}
-                    </Stack>
-                  )}
-
-                  <Divider />
-                  <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                    {extension.path}
-                  </Typography>
-                </Stack>
+            <Chip size="small" variant="outlined" label={`${installedExtensions.length} installed`} />
+          </Stack>
+        </AccordionSummary>
+        <AccordionDetails sx={{ px: 2, pt: 0, pb: 2 }}>
+          <Box sx={extensionListSx} role="region" aria-label="Installed VS Code extensions list">
+            {installedExtensions.length === 0 ? (
+              <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, textAlign: "center" }}>
+                <ExtensionRounded sx={{ color: "text.secondary", mb: 1 }} />
+                <Typography variant="body2" color="text.secondary">
+                  No VS Code extensions installed yet. Install a .vsix package to
+                  enable compatible static contribution points.
+                </Typography>
               </Paper>
-            );
-          })
-        )}
-      </Stack>
+            ) : (
+              installedExtensions.map((extension) => {
+                const summary = contributionSummary(extension);
+                const chips = contributionChips(summary);
+                return (
+                  <Paper key={extension.id} variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
+                    <Stack spacing={1.25}>
+                      <Stack direction="row" spacing={1.5} alignItems="flex-start">
+                        <ExtensionRounded color="primary" sx={{ mt: 0.25 }} />
+                        <Box sx={{ minWidth: 0, flex: 1 }}>
+                          <Typography variant="subtitle2" fontWeight={700} noWrap title={extension.displayName}>
+                            {extension.displayName || extension.name}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary" display="block" noWrap title={extension.id}>
+                            {extension.id} · v{extension.version}
+                          </Typography>
+                        </Box>
+                        <Button
+                          size="small"
+                          color="error"
+                          variant="text"
+                          startIcon={<DeleteOutlineRounded />}
+                          disabled={isLoading}
+                          onClick={() => void uninstallExtension(extension.id)}
+                          sx={{ textTransform: "none", borderRadius: 1.5 }}
+                        >
+                          Uninstall
+                        </Button>
+                      </Stack>
+
+                      {extension.description && (
+                        <Typography variant="body2" color="text.secondary">
+                          {extension.description}
+                        </Typography>
+                      )}
+
+                      {chips.length > 0 && (
+                        <Stack direction="row" gap={0.75} flexWrap="wrap">
+                          {chips.map((chip) => (
+                            <Chip key={chip.label} size="small" label={chip.label} variant="outlined" />
+                          ))}
+                        </Stack>
+                      )}
+
+                      <Divider />
+                      <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
+                        {extension.path}
+                      </Typography>
+                    </Stack>
+                  </Paper>
+                );
+              })
+            )}
+          </Box>
+        </AccordionDetails>
+      </Accordion>
     </Stack>
   );
 }

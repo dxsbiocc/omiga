@@ -6,6 +6,7 @@ import {
   resolveIconTheme,
   type IconThemeContribution,
   type InstalledVscodeExtension,
+  type RecommendedVscodeExtension,
   type ResolvedIconTheme,
   type VscodeIconThemeDocument,
 } from "../utils/vscodeExtensions";
@@ -45,6 +46,7 @@ async function loadResolvedIconTheme(
 interface ExtensionState {
   extensionsDir: string | null;
   installedExtensions: InstalledVscodeExtension[];
+  recommendedExtensions: RecommendedVscodeExtension[];
   iconThemes: IconThemeContribution[];
   activeIconThemeId: string;
   activeIconTheme: ResolvedIconTheme | null;
@@ -53,6 +55,7 @@ interface ExtensionState {
   error: string | null;
   loadExtensions: () => Promise<void>;
   installVsix: (vsixPath: string) => Promise<InstalledVscodeExtension>;
+  installRecommendedExtension: (extensionId: string) => Promise<InstalledVscodeExtension>;
   uninstallExtension: (extensionId: string) => Promise<void>;
   setActiveIconTheme: (themeId: string) => Promise<void>;
 }
@@ -60,6 +63,7 @@ interface ExtensionState {
 export const useExtensionStore = create<ExtensionState>((set, get) => ({
   extensionsDir: null,
   installedExtensions: [],
+  recommendedExtensions: [],
   iconThemes: [],
   activeIconThemeId: readStoredIconThemeId(),
   activeIconTheme: null,
@@ -70,9 +74,10 @@ export const useExtensionStore = create<ExtensionState>((set, get) => ({
   loadExtensions: async () => {
     set({ isLoading: true, error: null });
     try {
-      const [extensionsDir, installedExtensions] = await Promise.all([
+      const [extensionsDir, installedExtensions, recommendedExtensions] = await Promise.all([
         invoke<string>("vscode_extensions_dir"),
         invoke<InstalledVscodeExtension[]>("list_vscode_extensions"),
+        invoke<RecommendedVscodeExtension[]>("list_recommended_vscode_extensions"),
       ]);
       const iconThemes = getIconThemeContributions(installedExtensions);
       const storedThemeId = get().activeIconThemeId;
@@ -97,6 +102,7 @@ export const useExtensionStore = create<ExtensionState>((set, get) => ({
       set({
         extensionsDir,
         installedExtensions,
+        recommendedExtensions,
         iconThemes,
         activeIconThemeId,
         activeIconTheme,
@@ -145,6 +151,45 @@ export const useExtensionStore = create<ExtensionState>((set, get) => ({
         installedExtensions,
         iconThemes,
         activeIconThemeId,
+        activeIconTheme,
+        isInstalling: false,
+        error: themeError,
+      });
+      return installed;
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isInstalling: false, error });
+      throw new Error(error);
+    }
+  },
+
+  installRecommendedExtension: async (extensionId: string) => {
+    set({ isInstalling: true, error: null });
+    try {
+      const installed = await invoke<InstalledVscodeExtension>(
+        "install_recommended_vscode_extension",
+        { extensionId },
+      );
+
+      const installedExtensions = await invoke<InstalledVscodeExtension[]>(
+        "list_vscode_extensions",
+      );
+      const iconThemes = getIconThemeContributions(installedExtensions);
+      const activeIconThemeId = get().activeIconThemeId;
+      let activeIconTheme: ResolvedIconTheme | null = null;
+      let themeError: string | null = null;
+      try {
+        activeIconTheme = await loadResolvedIconTheme(
+          installedExtensions,
+          activeIconThemeId,
+        );
+      } catch (e) {
+        themeError = `Icon theme failed to load: ${extractErrorMessage(e)}`;
+      }
+
+      set({
+        installedExtensions,
+        iconThemes,
         activeIconTheme,
         isInstalling: false,
         error: themeError,

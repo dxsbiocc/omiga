@@ -46,10 +46,12 @@ pub mod workflow;
 
 use crate::domain::agents::subagent_tool_filter::env_workflow_scripts_enabled;
 use crate::domain::background_shell::BackgroundShellHandle;
+use crate::domain::retrieval_registry::{self, RegistryEntryKind};
 use crate::domain::session::AgentTask;
 use crate::errors::ToolError;
 use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Unique identifier for a tool type
@@ -651,6 +653,14 @@ pub struct WebSearchApiKeys {
     /// Enabled external structured knowledge sources.
     /// `None` means the product default; `Some(vec![])` intentionally disables all.
     pub query_knowledge_sources: Option<Vec<String>>,
+    /// New registry-backed enabled sources grouped by retrieval category.
+    /// `None` means derive from legacy fields/defaults; per-category `Some(vec![])`
+    /// intentionally disables that category's sources.
+    pub enabled_sources_by_category: Option<HashMap<String, Vec<String>>>,
+    /// New registry-backed enabled subcategories grouped by retrieval category.
+    /// `None` means derive from legacy fields/defaults; per-category `Some(vec![])`
+    /// intentionally disables that category's subcategories.
+    pub enabled_subcategories_by_category: Option<HashMap<String, Vec<String>>>,
 }
 
 pub const QUERY_DATASET_TYPE_IDS: &[&str] = &[
@@ -702,7 +712,112 @@ fn effective_query_setting(
 }
 
 impl WebSearchApiKeys {
+    pub fn enabled_sources_for_category(&self, category: &str) -> Vec<String> {
+        let category = retrieval_registry::normalize_id(category);
+        if let Some(values) = self
+            .enabled_sources_by_category
+            .as_ref()
+            .and_then(|map| map.get(&category))
+        {
+            return retrieval_registry::normalize_enabled_ids(
+                &category,
+                values,
+                RegistryEntryKind::Source,
+                false,
+            );
+        }
+
+        match category.as_str() {
+            "dataset" => self.enabled_query_dataset_sources(),
+            "knowledge" => self.enabled_query_knowledge_sources(),
+            "literature" => {
+                let mut values = retrieval_registry::default_source_ids("literature")
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                if self.semantic_scholar_enabled
+                    && !values.iter().any(|id| id == "semantic_scholar")
+                {
+                    values.push("semantic_scholar".to_string());
+                }
+                values
+            }
+            "social" => {
+                if self.wechat_search_enabled {
+                    vec!["wechat".to_string()]
+                } else {
+                    retrieval_registry::default_source_ids("social")
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect()
+                }
+            }
+            other => retrieval_registry::default_source_ids(other)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    pub fn enabled_subcategories_for_category(&self, category: &str) -> Vec<String> {
+        let category = retrieval_registry::normalize_id(category);
+        if let Some(values) = self
+            .enabled_subcategories_by_category
+            .as_ref()
+            .and_then(|map| map.get(&category))
+        {
+            return retrieval_registry::normalize_enabled_ids(
+                &category,
+                values,
+                RegistryEntryKind::Subcategory,
+                false,
+            );
+        }
+
+        match category.as_str() {
+            "dataset" => self.enabled_query_dataset_types(),
+            other => retrieval_registry::default_subcategory_ids(other)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    pub fn enabled_sources_by_category(&self) -> HashMap<String, Vec<String>> {
+        let mut out = retrieval_registry::defaults_by_category(RegistryEntryKind::Source);
+        for category in retrieval_registry::category_ids() {
+            out.insert(
+                category.to_string(),
+                self.enabled_sources_for_category(category),
+            );
+        }
+        out
+    }
+
+    pub fn enabled_subcategories_by_category(&self) -> HashMap<String, Vec<String>> {
+        let mut out = retrieval_registry::defaults_by_category(RegistryEntryKind::Subcategory);
+        for category in retrieval_registry::category_ids() {
+            out.insert(
+                category.to_string(),
+                self.enabled_subcategories_for_category(category),
+            );
+        }
+        out
+    }
+
     pub fn enabled_query_dataset_types(&self) -> Vec<String> {
+        if let Some(values) = self
+            .enabled_subcategories_by_category
+            .as_ref()
+            .and_then(|map| map.get("dataset"))
+        {
+            return retrieval_registry::normalize_enabled_ids(
+                "dataset",
+                values,
+                RegistryEntryKind::Subcategory,
+                false,
+            );
+        }
         effective_query_setting(
             self.query_dataset_types.as_ref(),
             QUERY_DATASET_TYPE_IDS,
@@ -711,6 +826,18 @@ impl WebSearchApiKeys {
     }
 
     pub fn enabled_query_dataset_sources(&self) -> Vec<String> {
+        if let Some(values) = self
+            .enabled_sources_by_category
+            .as_ref()
+            .and_then(|map| map.get("dataset"))
+        {
+            return retrieval_registry::normalize_enabled_ids(
+                "dataset",
+                values,
+                RegistryEntryKind::Source,
+                false,
+            );
+        }
         effective_query_setting(
             self.query_dataset_sources.as_ref(),
             QUERY_DATASET_SOURCE_IDS,
@@ -719,6 +846,26 @@ impl WebSearchApiKeys {
     }
 
     pub fn enabled_query_knowledge_sources(&self) -> Vec<String> {
+        if let Some(values) = self
+            .enabled_sources_by_category
+            .as_ref()
+            .and_then(|map| map.get("knowledge"))
+        {
+            let query_sources = values
+                .iter()
+                .filter_map(|source| {
+                    let def = retrieval_registry::find_source("knowledge", source)?;
+                    def.supports(retrieval_registry::RetrievalCapability::Query)
+                        .then_some(def.id.to_string())
+                })
+                .collect::<Vec<_>>();
+            return retrieval_registry::normalize_enabled_ids(
+                "knowledge",
+                &query_sources,
+                RegistryEntryKind::Source,
+                false,
+            );
+        }
         effective_query_setting(
             self.query_knowledge_sources.as_ref(),
             QUERY_KNOWLEDGE_SOURCE_IDS,
@@ -734,44 +881,16 @@ impl WebSearchApiKeys {
     }
 
     pub fn is_query_dataset_source_enabled(&self, source_id: &str) -> bool {
-        let normalized = normalize_query_setting_id(source_id);
-        let group = match normalized.as_str() {
-            "gds" | "ncbi_geo" | "ncbi_gds" => "geo",
-            "cbioportal" | "cbio_portal" | "cbio" | "cancer_genomics" | "multi_omics"
-            | "multiomics" | "projects" | "tcga" => "cbioportal",
-            "ena"
-            | "ena_study"
-            | "study"
-            | "read_study"
-            | "european_nucleotide_archive"
-            | "ena_run"
-            | "run"
-            | "read_run"
-            | "ena_experiment"
-            | "experiment"
-            | "read_experiment"
-            | "ena_sample"
-            | "sample"
-            | "read_sample"
-            | "ena_analysis"
-            | "analysis"
-            | "ena_assembly"
-            | "assembly"
-            | "ena_sequence"
-            | "sequence" => "ena",
-            other => other,
-        };
+        let group =
+            retrieval_registry::canonical_source_id("dataset", source_id).unwrap_or(source_id);
         self.enabled_query_dataset_sources()
             .iter()
             .any(|id| id == group)
     }
 
     pub fn is_query_knowledge_source_enabled(&self, source_id: &str) -> bool {
-        let normalized = normalize_query_setting_id(source_id);
-        let source = match normalized.as_str() {
-            "gene" | "ncbi_gene" => "ncbi_gene",
-            other => other,
-        };
+        let source =
+            retrieval_registry::canonical_source_id("knowledge", source_id).unwrap_or(source_id);
         self.enabled_query_knowledge_sources()
             .iter()
             .any(|id| id == source)

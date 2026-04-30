@@ -60,54 +60,6 @@ fn clamp_label(s: &str) -> String {
     }
 }
 
-fn looks_like_code_or_data_only(s: &str) -> bool {
-    let non_empty: Vec<&str> = s.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    if non_empty.is_empty() {
-        return true;
-    }
-    let code_like = non_empty
-        .iter()
-        .filter(|line| {
-            line.starts_with("```")
-                || line.starts_with('{')
-                || line.starts_with('[')
-                || line.starts_with('<')
-                || line.starts_with("import ")
-                || line.starts_with("export ")
-                || line.starts_with("const ")
-                || line.starts_with("let ")
-                || line.starts_with("fn ")
-                || line.starts_with("def ")
-                || line.starts_with("#!")
-                || line.contains(" = ")
-                || line.ends_with(';')
-        })
-        .count();
-    code_like * 2 >= non_empty.len()
-}
-
-fn fallback_follow_up_suggestions(assistant_reply: &str) -> Vec<FollowUpSuggestion> {
-    let trimmed = assistant_reply.trim();
-    if trimmed.chars().count() < 80 || looks_like_code_or_data_only(trimmed) {
-        return vec![];
-    }
-
-    vec![
-        FollowUpSuggestion {
-            label: "展开依据".to_string(),
-            prompt: "请基于上文继续展开最关键结论的依据、证据强度和局限。".to_string(),
-        },
-        FollowUpSuggestion {
-            label: "整理下一步".to_string(),
-            prompt: "请把上文结论整理成可以继续执行的下一步计划。".to_string(),
-        },
-        FollowUpSuggestion {
-            label: "补充验证".to_string(),
-            prompt: "请列出上文还需要补充验证、查证或进一步分析的点。".to_string(),
-        },
-    ]
-}
-
 pub fn parse_follow_up_suggestions_json(raw: &str) -> Vec<FollowUpSuggestion> {
     let Some(slice) = extract_json_array_slice(raw) else {
         return vec![];
@@ -187,12 +139,7 @@ pub async fn generate_follow_up_suggestions(
     )
     .await
     .map_err(|_| ApiError::Timeout)??;
-    let parsed = parse_follow_up_suggestions_json(&raw);
-    if parsed.is_empty() {
-        Ok(fallback_follow_up_suggestions(trimmed))
-    } else {
-        Ok(parsed)
-    }
+    Ok(parse_follow_up_suggestions_json(&raw))
 }
 
 #[cfg(test)]
@@ -273,7 +220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn substantive_empty_model_output_gets_safe_fallback_suggestions() {
+    async fn empty_model_output_returns_no_suggestions_instead_of_generic_fallback() {
         let calls = Arc::new(AtomicUsize::new(0));
         let client = StaticClient {
             config: LlmConfig::new(LlmProvider::OpenAi, "test-key"),
@@ -287,7 +234,6 @@ mod tests {
             .expect("suggestions");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(suggestions.len() >= 3);
-        assert_eq!(suggestions[0].label, "展开依据");
+        assert!(suggestions.is_empty());
     }
 }

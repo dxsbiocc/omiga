@@ -3107,13 +3107,21 @@ export function Chat({ sessionId }: ChatProps) {
         if (event.payload.sessionId !== sessionId) return;
         const { messageId } = event.payload;
         setCurrentStreamId(messageId);
+        currentStreamIdRef.current = messageId;
         setCurrentResponse("");
+        currentResponseRef.current = "";
         setCurrentFoldIntermediate("");
         currentFoldIntermediateRef.current = "";
         activeReactFoldIdRef.current = null;
+        pendingTextBufferRef.current = "";
         pendingFoldIntermediateBufferRef.current = "";
+        pendingToolTraceTextRef.current = "";
+        setIsStreaming(false);
+        isStreamingRef.current = false;
         useActivityStore.getState().resetExecutionState();
+        useActivityStore.getState().beginExecutionRun("等待综合结果");
         useActivityStore.getState().setConnecting(true);
+        useActivityStore.getState().setStreaming(false, false);
         void setupStreamListener(messageId);
       },
     ).then((fn) => {
@@ -3529,7 +3537,10 @@ export function Chat({ sessionId }: ChatProps) {
     if (
       payload.type === "complete" ||
       payload.type === "error" ||
-      payload.type === "cancelled"
+      payload.type === "cancelled" ||
+      payload.type === "turn_summary" ||
+      payload.type === "follow_up_suggestions" ||
+      payload.type === "suggestions_complete"
     ) {
       clearStreamSnapshot(ownerSessionId);
       return;
@@ -3849,6 +3860,140 @@ export function Chat({ sessionId }: ChatProps) {
           setCurrentFoldIntermediate("");
           currentFoldIntermediateRef.current = "";
         }
+      };
+
+      const isEventForReplacedStream = () =>
+        currentStreamIdRef.current !== null &&
+        currentStreamIdRef.current !== streamId;
+
+      const hasUnflushedAssistantDraft = () =>
+        currentResponseRef.current.length > 0 ||
+        pendingTextBufferRef.current.length > 0 ||
+        currentFoldIntermediateRef.current.trim().length > 0 ||
+        pendingFoldIntermediateBufferRef.current.trim().length > 0;
+
+      /**
+       * Complete must be idempotent and stream-scoped. Synthesis/post-turn
+       * events can outlive the main turn; if the first `complete` races ahead
+       * of listener registration, the next post-turn marker still settles the
+       * UI instead of leaving the previous tool (often `bash`) stuck running.
+       */
+      const finalizeSuccessfulStream = (source: "complete" | "post-turn-meta") => {
+        if (isEventForReplacedStream()) return false;
+
+        const act = useActivityStore.getState();
+        const hasActiveStreamState =
+          currentStreamIdRef.current === streamId ||
+          isStreamingRef.current ||
+          act.isConnecting ||
+          act.isStreaming;
+        if (!hasActiveStreamState && !hasUnflushedAssistantDraft()) {
+          return false;
+        }
+
+        clearCancelFallbackTimer();
+        clearAllToolWatchdogs();
+        flushPendingText();
+        flushPendingFoldIntermediate();
+        setAwaitingResumeAfterCancel(false);
+        isStreamingRef.current = false;
+        setIsStreaming(false);
+        setCurrentStreamId(null);
+        currentStreamIdRef.current = null;
+        setCurrentRoundId(null);
+        retrySendInFlightRef.current = false;
+        act.finalizeExecutionRun();
+        act.clearTransient();
+        const roundId = currentRoundIdRef.current;
+        if (roundId) {
+          updateRoundStatus(roundId, "completed");
+        }
+        currentRoundIdRef.current = null;
+
+        const finalResponse = currentResponseRef.current;
+        const finalFoldIntermediate = currentFoldIntermediateRef.current.trim();
+        const followUps = pendingFollowUpSuggestionsRef.current;
+        pendingFollowUpSuggestionsRef.current = null;
+        const turnSum = pendingTurnSummaryRef.current;
+        pendingTurnSummaryRef.current = null;
+        const tok = pendingTokenUsageRef.current;
+        pendingTokenUsageRef.current = null;
+        setMessages((prev) => {
+          let next = settleRunningToolCalls(prev);
+          if (finalFoldIntermediate && activeReactFoldIdRef.current) {
+            next = [
+              ...next,
+              {
+                id: `assistant-intermediate-${Date.now()}`,
+                role: "assistant",
+                content: finalFoldIntermediate,
+                intermediate: true,
+                timestamp: Date.now(),
+              },
+            ];
+          }
+          if (finalResponse) {
+            const assistantMsg: Message = {
+              id: `assistant-${Date.now()}`,
+              role: "assistant",
+              content: finalResponse,
+              timestamp: Date.now(),
+              ...(followUps && followUps.length > 0
+                ? { followUpSuggestions: followUps }
+                : {}),
+              ...(turnSum ? { turnSummary: turnSum } : {}),
+              ...(tok
+                ? {
+                    tokenUsage: {
+                      input: tok.input,
+                      output: tok.output,
+                      total: tok.total,
+                      ...(tok.provider ? { provider: tok.provider } : {}),
+                    },
+                  }
+                : {}),
+            };
+            next = [...next, assistantMsg];
+          }
+          replaceStoreMessagesSnapshot(next.map(chatMessageToStore));
+          messagesRef.current = next;
+          return next;
+        });
+        setCurrentResponse("");
+        currentResponseRef.current = "";
+        setCurrentFoldIntermediate("");
+        currentFoldIntermediateRef.current = "";
+        pendingTextBufferRef.current = "";
+        pendingFoldIntermediateBufferRef.current = "";
+        pendingToolTraceTextRef.current = "";
+        clearRunningToolTracking();
+        activeReactFoldIdRef.current = null;
+
+        if (ownerSessionId) {
+          clearStreamSnapshot(ownerSessionId);
+        }
+
+        if (isDev) {
+          console.debug("[OmigaDev][AgentComplete]", {
+            streamId,
+            source,
+            final: finalResponse,
+          });
+        }
+        flushQueuedMainSendIfAnyRef.current();
+        return true;
+      };
+
+      const finalizeIfPostTurnMetaOutranComplete = () => {
+        const act = useActivityStore.getState();
+        const streamLooksActive =
+          currentStreamIdRef.current === streamId ||
+          isStreamingRef.current ||
+          act.isConnecting ||
+          act.isStreaming;
+        if (!streamLooksActive) return false;
+        if (activeRunningToolIdsRef.current.size > 0) return false;
+        return finalizeSuccessfulStream("post-turn-meta");
       };
 
       switch (payload.type) {
@@ -4212,6 +4357,7 @@ export function Chat({ sessionId }: ChatProps) {
           break;
         }
         case "turn_summary": {
+          if (isEventForReplacedStream()) break;
           const raw = payload.data;
           let text: string | null = null;
           if (raw != null && typeof raw === "object" && "text" in raw) {
@@ -4219,6 +4365,17 @@ export function Chat({ sessionId }: ChatProps) {
             if (typeof v === "string" && v.trim().length > 0) {
               text = v.trim();
             }
+          }
+          if (
+            activeRunningToolIdsRef.current.size === 0 &&
+            (currentStreamIdRef.current === streamId ||
+              isStreamingRef.current ||
+              useActivityStore.getState().isConnecting ||
+              useActivityStore.getState().isStreaming)
+          ) {
+            pendingTurnSummaryRef.current = text;
+            finalizeSuccessfulStream("post-turn-meta");
+            break;
           }
           if (!isStreamingRef.current) {
             if (text) {
@@ -4239,6 +4396,7 @@ export function Chat({ sessionId }: ChatProps) {
           break;
         }
         case "follow_up_suggestions": {
+          if (isEventForReplacedStream()) break;
           const raw = payload.data;
           const rows = Array.isArray(raw)
             ? (raw as Array<{ label?: unknown; prompt?: unknown }>)
@@ -4250,6 +4408,19 @@ export function Chat({ sessionId }: ChatProps) {
             }))
             .filter((r) => r.label.length > 0 && r.prompt.length > 0)
             .slice(0, 5);
+
+          if (
+            activeRunningToolIdsRef.current.size === 0 &&
+            (currentStreamIdRef.current === streamId ||
+              isStreamingRef.current ||
+              useActivityStore.getState().isConnecting ||
+              useActivityStore.getState().isStreaming)
+          ) {
+            pendingFollowUpSuggestionsRef.current = parsed;
+            setSuggestionsGenerating(false);
+            finalizeSuccessfulStream("post-turn-meta");
+            break;
+          }
 
           // If complete already fired (isStreamingRef is false), patch the last assistant message directly.
           // Do NOT call replaceStoreMessagesSnapshot here — the user may have already sent a new
@@ -4277,14 +4448,19 @@ export function Chat({ sessionId }: ChatProps) {
           break;
         }
         case "suggestions_generating": {
+          if (isEventForReplacedStream()) break;
+          finalizeIfPostTurnMetaOutranComplete();
           setSuggestionsGenerating(true);
           break;
         }
         case "suggestions_complete": {
+          if (isEventForReplacedStream()) break;
+          finalizeIfPostTurnMetaOutranComplete();
           setSuggestionsGenerating(false);
           break;
         }
         case "token_usage": {
+          if (isEventForReplacedStream()) break;
           const raw = payload.data as
             | {
                 prompt_tokens?: unknown;
@@ -4307,99 +4483,19 @@ export function Chat({ sessionId }: ChatProps) {
           } else {
             pendingTokenUsageRef.current = null;
           }
+          if (
+            activeRunningToolIdsRef.current.size === 0 &&
+            (currentStreamIdRef.current === streamId ||
+              isStreamingRef.current ||
+              useActivityStore.getState().isConnecting ||
+              useActivityStore.getState().isStreaming)
+          ) {
+            finalizeSuccessfulStream("post-turn-meta");
+          }
           break;
         }
         case "complete": {
-          clearCancelFallbackTimer();
-          clearAllToolWatchdogs();
-          flushPendingText();
-          flushPendingFoldIntermediate();
-          setAwaitingResumeAfterCancel(false);
-          isStreamingRef.current = false;
-          setIsStreaming(false);
-          setCurrentStreamId(null);
-          setCurrentRoundId(null);
-          retrySendInFlightRef.current = false;
-          useActivityStore.getState().finalizeExecutionRun();
-          useActivityStore.getState().clearTransient();
-          // Mark round as completed - use ref to get latest round ID
-          const roundId = currentRoundIdRef.current;
-          if (roundId) {
-            updateRoundStatus(roundId, "completed");
-          }
-          // Use ref to get the latest accumulated response
-          const finalResponse = currentResponseRef.current;
-          const finalFoldIntermediate = currentFoldIntermediateRef.current.trim();
-          const followUps = pendingFollowUpSuggestionsRef.current;
-          pendingFollowUpSuggestionsRef.current = null;
-          const turnSum = pendingTurnSummaryRef.current;
-          pendingTurnSummaryRef.current = null;
-          const tok = pendingTokenUsageRef.current;
-          pendingTokenUsageRef.current = null;
-          setMessages((prev) => {
-            let next = settleRunningToolCalls(prev);
-            if (finalFoldIntermediate && activeReactFoldIdRef.current) {
-              next = [
-                ...next,
-                {
-                  id: `assistant-intermediate-${Date.now()}`,
-                  role: "assistant",
-                  content: finalFoldIntermediate,
-                  intermediate: true,
-                  timestamp: Date.now(),
-                },
-              ];
-            }
-            if (finalResponse) {
-              const assistantMsg: Message = {
-                id: `assistant-${Date.now()}`,
-                role: "assistant",
-                content: finalResponse,
-                timestamp: Date.now(),
-                ...(followUps && followUps.length > 0
-                  ? { followUpSuggestions: followUps }
-                  : {}),
-                ...(turnSum ? { turnSummary: turnSum } : {}),
-                ...(tok
-                  ? {
-                      tokenUsage: {
-                        input: tok.input,
-                        output: tok.output,
-                        total: tok.total,
-                        ...(tok.provider ? { provider: tok.provider } : {}),
-                      },
-                    }
-                  : {}),
-              };
-              next = [...next, assistantMsg];
-            }
-            // Full transcript (user + tools + assistant) so useEffect does not drop tool rows
-            replaceStoreMessagesSnapshot(next.map(chatMessageToStore));
-            return next;
-          });
-          setCurrentResponse("");
-          currentResponseRef.current = "";
-          setCurrentFoldIntermediate("");
-          currentFoldIntermediateRef.current = "";
-          pendingToolTraceTextRef.current = "";
-          clearRunningToolTracking();
-          activeReactFoldIdRef.current = null;
-
-          // Stream is done: remove the snapshot so switching back to this
-          // session starts fresh (no stale "streaming" state to restore).
-          if (ownerSessionId) {
-            clearStreamSnapshot(ownerSessionId);
-          }
-
-          // Memory indexing status is driven by chat-index-* Tauri events below.
-
-          if (isDev) {
-            console.debug("[OmigaDev][AgentComplete]", {
-              streamId,
-              final: finalResponse,
-            });
-          }
-          flushQueuedMainSendIfAnyRef.current();
+          finalizeSuccessfulStream("complete");
           break;
         }
       }

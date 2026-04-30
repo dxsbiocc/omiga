@@ -947,6 +947,13 @@ pub async fn cancel_agent_schedule(
     Ok(true)
 }
 
+fn emit_agent_schedule_complete(app: &tauri::AppHandle, session_id: &str, message_id: &str) {
+    let _ = app.emit(
+        "agent-schedule-complete",
+        serde_json::json!({ "sessionId": session_id, "messageId": message_id }),
+    );
+}
+
 /// Persist a synthesized assistant message after orchestration and notify the frontend.
 ///
 /// Attempts to call the LLM once to synthesize all sub-agent outputs into a coherent
@@ -1143,6 +1150,17 @@ pub(crate) async fn inject_schedule_summary_message(
                         "messageId": stream_msg_id,
                     }),
                 );
+                // Match the main chat stream handshake: the frontend registers
+                // the `chat-stream-{id}` listener asynchronously after
+                // `chat-synthesis-start`. A fast synthesis response can
+                // otherwise emit text + Complete before the listener exists,
+                // leaving the visible session stuck on the previous tool step
+                // until a manual session reload.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let _ = app.emit(
+                    &format!("chat-stream-{}", stream_msg_id),
+                    &StreamOutputItem::Start,
+                );
 
                 let stream_result = stream_llm_response_with_cancel(StreamLlmRequest {
                     client: client.as_ref(),
@@ -1256,6 +1274,12 @@ pub(crate) async fn inject_schedule_summary_message(
         tracing::warn!(target: "omiga::scheduler", "Failed to save schedule summary message: {}", e);
         return;
     }
+
+    // The visible orchestration reply is persisted now. Refresh the parent chat
+    // immediately instead of waiting for optional post-turn metadata LLM calls.
+    // Those calls can be slow, and their stream events are intentionally
+    // best-effort because the summary already lives in SQLite.
+    emit_agent_schedule_complete(app, session_id, &msg_id_to_use);
 
     let (summary_enabled, follow_enabled) =
         crate::domain::post_turn_settings::load_post_turn_meta_flags(&state.repo)
@@ -1383,12 +1407,9 @@ pub(crate) async fn inject_schedule_summary_message(
         }
     }
 
-    // Notify the frontend: the streamed message is now persisted; scroll to it.
-    use tauri::Emitter as _;
-    let _ = app.emit(
-        "agent-schedule-complete",
-        serde_json::json!({ "sessionId": session_id, "messageId": msg_id_to_use }),
-    );
+    // Notify again after post-turn metadata is persisted so the rendered chips
+    // and recap update even if late stream events were missed.
+    emit_agent_schedule_complete(app, session_id, &msg_id_to_use);
 }
 
 /// Handle the `skill_config` tool: get / set / list skill configuration variables.

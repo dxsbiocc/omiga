@@ -45,9 +45,23 @@ function isBackgroundOperationStep(step: ExecutionStep): boolean {
   return step.id.startsWith("op-");
 }
 
-function buildDisplayRows(steps: ExecutionStep[]): StepDisplayRow[] {
+function coerceStaleToolStep(
+  step: ExecutionStep,
+  streamActive: boolean,
+): ExecutionStep {
+  if (streamActive || step.status !== "running" || !step.id.startsWith("tool-")) {
+    return step;
+  }
+  return { ...step, status: "done" };
+}
+
+function buildDisplayRows(
+  steps: ExecutionStep[],
+  streamActive: boolean,
+): StepDisplayRow[] {
   const rows: StepDisplayRow[] = [];
-  for (const step of steps) {
+  for (const rawStep of steps) {
+    const step = coerceStaleToolStep(rawStep, streamActive);
     const label = stepLineLabel(step);
     const failed = Boolean(step.failed);
     const background = isBackgroundOperationStep(step);
@@ -122,16 +136,21 @@ export function ReactStepList({
   if (steps.length === 0) return null;
 
   const current = getExecutionSurfacePrimaryLabel(steps, surfaceContext);
-  const rows = buildDisplayRows(steps);
+  const streamActive =
+    surfaceContext.isConnecting ||
+    surfaceContext.isStreaming ||
+    surfaceContext.waitingFirstChunk;
+  const displaySteps = steps.map((step) => coerceStaleToolStep(step, streamActive));
+  const rows = buildDisplayRows(steps, streamActive);
   const runningRows = rows.filter((row) => row.status === "running");
   const failedRows = buildGroupedFailureRows(steps);
   const completedRows = rows
     .filter((row) => row.status === "done" && !row.failed)
     .reverse();
-  const successfulToolCount = steps.filter(
+  const successfulToolCount = displaySteps.filter(
     (step) => step.id.startsWith("tool-") && step.status === "done" && !step.failed,
   ).length;
-  const failedToolCount = steps.filter(
+  const failedToolCount = displaySteps.filter(
     (step) => step.id.startsWith("tool-") && step.status === "done" && step.failed,
   ).length;
 

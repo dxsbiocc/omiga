@@ -6,17 +6,25 @@
 //! the frontend so Omiga can honor static contribution points such as icon
 //! themes, languages, custom editors, and notebook/file associations.
 
+use flate2::read::GzDecoder;
 use serde::Serialize;
 use serde_json::Value;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 const EXTENSION_PACKAGE_JSON: &str = "package.json";
 const VSIX_EXTENSION_PREFIX: &str = "extension/";
 const MAX_EXTENSION_FILE_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_VSIX_ENTRY_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_VSIX_TOTAL_BYTES: u64 = 250 * 1024 * 1024;
+const MAX_VSIX_DOWNLOAD_BYTES: u64 = 300 * 1024 * 1024;
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+const VSCODE_JUPYTER_ID: &str = "ms-toolsai.jupyter";
+const VSCODE_JUPYTER_DOWNLOAD_URL: &str =
+    "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/ms-toolsai/vsextensions/jupyter/latest/vspackage";
 
 fn extensions_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -119,6 +127,186 @@ fn extension_info_from_dir(ext_dir: &Path) -> Result<InstalledVscodeExtension, S
         enabled: true,
         package_json: manifest,
     })
+}
+
+fn recommended_vscode_extensions_catalog() -> Vec<RecommendedVscodeExtension> {
+    vec![
+        {
+            let mut extension = recommended_extension(
+                "ms-toolsai",
+                "jupyter",
+                "Jupyter",
+                "Microsoft's Jupyter extension for notebook metadata, language, and renderer contributions.",
+                "https://github.com/Microsoft/vscode-jupyter",
+            );
+            debug_assert_eq!(extension.id, VSCODE_JUPYTER_ID);
+            extension.download_url = VSCODE_JUPYTER_DOWNLOAD_URL.to_string();
+            extension
+        },
+        recommended_extension(
+            "ms-toolsai",
+            "jupyter-renderers",
+            "Jupyter Notebook Renderers",
+            "Common notebook output renderers for images, Plotly, Vega/Vega-Lite, GeoJSON, and related MIME types.",
+            "https://github.com/microsoft/vscode-notebook-renderers",
+        ),
+        recommended_extension(
+            "ms-python",
+            "python",
+            "Python",
+            "Microsoft's Python extension contributes Python language metadata and pairs naturally with Jupyter notebooks.",
+            "https://github.com/microsoft/vscode-python",
+        ),
+        recommended_extension(
+            "PKief",
+            "material-icon-theme",
+            "Material Icon Theme",
+            "A rich file and folder icon theme that Omiga can use immediately in the file tree.",
+            "https://github.com/PKief/vscode-material-icon-theme",
+        ),
+        recommended_extension(
+            "redhat",
+            "vscode-yaml",
+            "YAML",
+            "YAML language support for Kubernetes, CI, and configuration files.",
+            "https://github.com/redhat-developer/vscode-yaml",
+        ),
+        recommended_extension(
+            "tamasfe",
+            "even-better-toml",
+            "Even Better TOML",
+            "TOML language support backed by Taplo for Cargo, pyproject, and config files.",
+            "https://github.com/tamasfe/taplo",
+        ),
+        recommended_extension(
+            "mechatroner",
+            "rainbow-csv",
+            "Rainbow CSV",
+            "CSV/TSV and delimiter-separated file language support for data-heavy projects.",
+            "https://github.com/mechatroner/vscode_rainbow_csv",
+        ),
+    ]
+}
+
+fn recommended_extension(
+    publisher: &str,
+    name: &str,
+    display_name: &str,
+    description: &str,
+    repository_url: &str,
+) -> RecommendedVscodeExtension {
+    let id = format!("{publisher}.{name}");
+    RecommendedVscodeExtension {
+        id: id.clone(),
+        name: name.to_string(),
+        publisher: publisher.to_string(),
+        display_name: display_name.to_string(),
+        description: description.to_string(),
+        repository_url: repository_url.to_string(),
+        marketplace_url: format!("https://marketplace.visualstudio.com/items?itemName={id}"),
+        download_url: format!(
+            "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{publisher}/vsextensions/{name}/latest/vspackage"
+        ),
+    }
+}
+
+fn recommended_vscode_extension_by_id(id: &str) -> Option<RecommendedVscodeExtension> {
+    recommended_vscode_extensions_catalog()
+        .into_iter()
+        .find(|extension| extension.id.eq_ignore_ascii_case(id.trim()))
+}
+
+fn vscode_target_platform_for(os: &str, arch: &str) -> Option<&'static str> {
+    match (os, arch) {
+        ("macos", "aarch64") => Some("darwin-arm64"),
+        ("macos", "x86_64") => Some("darwin-x64"),
+        ("windows", "aarch64") => Some("win32-arm64"),
+        ("windows", "x86_64") => Some("win32-x64"),
+        ("linux", "aarch64") => Some("linux-arm64"),
+        ("linux", "arm") => Some("linux-armhf"),
+        ("linux", "x86_64") => Some("linux-x64"),
+        _ => None,
+    }
+}
+
+fn vscode_target_platform() -> Option<&'static str> {
+    vscode_target_platform_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn with_target_platform(download_url: &str, target_platform: &str) -> Result<String, String> {
+    let mut url =
+        reqwest::Url::parse(download_url).map_err(|e| format!("invalid VSIX download URL: {e}"))?;
+    url.query_pairs_mut()
+        .append_pair("targetPlatform", target_platform);
+    Ok(url.to_string())
+}
+
+fn download_attempt_urls(download_url: &str) -> Result<Vec<String>, String> {
+    let mut urls = Vec::new();
+    if let Some(target_platform) = vscode_target_platform() {
+        urls.push(with_target_platform(download_url, target_platform)?);
+    }
+    urls.push(download_url.to_string());
+    Ok(urls)
+}
+
+fn file_starts_with(path: &Path, prefix: &[u8]) -> Result<bool, String> {
+    let mut file = File::open(path).map_err(|e| format!("open VSIX: {e}"))?;
+    let mut buf = vec![0_u8; prefix.len()];
+    let bytes_read = file
+        .read(&mut buf)
+        .map_err(|e| format!("read VSIX header: {e}"))?;
+    Ok(bytes_read == prefix.len() && buf == prefix)
+}
+
+fn gunzip_vsix_to_file(source: &Path, target: &Path) -> Result<(), String> {
+    let input = File::open(source).map_err(|e| format!("open gzip-compressed VSIX: {e}"))?;
+    let mut decoder = GzDecoder::new(input);
+    let mut output = File::create(target).map_err(|e| format!("create decoded VSIX: {e}"))?;
+    let mut buf = [0_u8; 64 * 1024];
+    let mut decoded_bytes = 0_u64;
+
+    loop {
+        let bytes_read = decoder
+            .read(&mut buf)
+            .map_err(|e| format!("decode gzip-compressed VSIX: {e}"))?;
+        if bytes_read == 0 {
+            break;
+        }
+        decoded_bytes = decoded_bytes
+            .checked_add(bytes_read as u64)
+            .ok_or_else(|| "decoded VSIX size overflowed".to_string())?;
+        if decoded_bytes > MAX_VSIX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "decoded VSIX exceeded limit: {decoded_bytes} bytes (max {MAX_VSIX_DOWNLOAD_BYTES})"
+            ));
+        }
+        output
+            .write_all(&buf[..bytes_read])
+            .map_err(|e| format!("write decoded VSIX: {e}"))?;
+    }
+
+    output
+        .flush()
+        .map_err(|e| format!("flush decoded VSIX: {e}"))?;
+    if decoded_bytes == 0 {
+        return Err("decoded VSIX was empty".to_string());
+    }
+    Ok(())
+}
+
+fn prepare_vsix_archive_path(
+    vsix: &Path,
+    base_dir: &Path,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
+    if !file_starts_with(vsix, &GZIP_MAGIC)? {
+        return Ok((vsix.to_path_buf(), None));
+    }
+
+    fs::create_dir_all(base_dir).map_err(|e| format!("create extensions dir: {e}"))?;
+    let decoded = base_dir.join(format!(".decoded-vsix-{}.vsix", uuid::Uuid::new_v4()));
+    gunzip_vsix_to_file(vsix, &decoded)?;
+    Ok((decoded.clone(), Some(decoded)))
 }
 
 fn read_vsix_manifest(archive: &mut zip::ZipArchive<File>) -> Result<Value, String> {
@@ -297,6 +485,19 @@ pub struct InstalledVscodeExtension {
     pub package_json: Value,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecommendedVscodeExtension {
+    pub id: String,
+    pub name: String,
+    pub publisher: String,
+    pub display_name: String,
+    pub description: String,
+    pub repository_url: String,
+    pub marketplace_url: String,
+    pub download_url: String,
+}
+
 #[tauri::command]
 pub fn vscode_extensions_dir() -> Result<String, String> {
     let dir = extensions_dir();
@@ -313,6 +514,125 @@ pub async fn install_vscode_extension(
     install_vscode_extension_from_vsix(vsix, &base_dir)
 }
 
+#[tauri::command]
+pub fn list_recommended_vscode_extensions() -> Vec<RecommendedVscodeExtension> {
+    recommended_vscode_extensions_catalog()
+}
+
+#[tauri::command]
+pub async fn install_recommended_vscode_extension(
+    extension_id: String,
+) -> Result<InstalledVscodeExtension, String> {
+    let extension = recommended_vscode_extension_by_id(&extension_id)
+        .ok_or_else(|| format!("unknown recommended VS Code extension: {extension_id}"))?;
+    let base_dir = extensions_dir();
+    fs::create_dir_all(&base_dir).map_err(|e| format!("create extensions dir: {e}"))?;
+    let safe_id = sanitize_extension_id(&extension.id)?;
+    let temp_vsix = base_dir.join(format!(".download-{safe_id}-{}.vsix", uuid::Uuid::new_v4()));
+
+    let result = async {
+        download_recommended_vsix(&extension, &temp_vsix).await?;
+        install_vscode_extension_from_vsix(&temp_vsix, &base_dir)
+    }
+    .await;
+
+    cleanup_path(&temp_vsix);
+    result
+}
+
+async fn download_recommended_vsix(
+    extension: &RecommendedVscodeExtension,
+    target_path: &Path,
+) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("build VSIX download client: {e}"))?;
+    let mut last_error = None;
+
+    for url in download_attempt_urls(&extension.download_url)? {
+        match try_download_vsix(&client, &url, target_path).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                cleanup_path(target_path);
+                last_error = Some(error);
+            }
+        }
+    }
+
+    Err(format!(
+        "download {} VSIX failed: {}",
+        extension.display_name,
+        last_error.unwrap_or_else(|| "no download URL attempted".to_string())
+    ))
+}
+
+async fn try_download_vsix(
+    client: &reqwest::Client,
+    url: &str,
+    target_path: &Path,
+) -> Result<(), String> {
+    let mut response = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "Omiga")
+        .header(
+            reqwest::header::ACCEPT,
+            "application/vsix, application/octet-stream, */*",
+        )
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .send()
+        .await
+        .map_err(|e| format!("download request failed: {e}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("download returned HTTP {status} from {url}"));
+    }
+    if let Some(content_length) = response.content_length() {
+        if content_length > MAX_VSIX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "VSIX download is too large: {content_length} bytes (max {MAX_VSIX_DOWNLOAD_BYTES})"
+            ));
+        }
+    }
+
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create VSIX download directory: {e}"))?;
+    }
+    let mut file = tokio::fs::File::create(target_path)
+        .await
+        .map_err(|e| format!("create VSIX download: {e}"))?;
+    let mut downloaded = 0_u64;
+
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("read VSIX download: {e}"))?
+    {
+        downloaded = downloaded
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| "VSIX download size overflowed".to_string())?;
+        if downloaded > MAX_VSIX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "VSIX download exceeded limit: {downloaded} bytes (max {MAX_VSIX_DOWNLOAD_BYTES})"
+            ));
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("write VSIX download: {e}"))?;
+    }
+
+    file.flush()
+        .await
+        .map_err(|e| format!("flush VSIX download: {e}"))?;
+
+    if downloaded == 0 {
+        return Err("VSIX download was empty".to_string());
+    }
+    Ok(())
+}
+
 fn install_vscode_extension_from_vsix(
     vsix: &Path,
     base_dir: &Path,
@@ -321,36 +641,44 @@ fn install_vscode_extension_from_vsix(
         return Err(format!("VSIX not found: {}", vsix.display()));
     }
 
-    let file = File::open(vsix).map_err(|e| format!("open VSIX: {e}"))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("bad VSIX archive: {e}"))?;
-    let manifest = read_vsix_manifest(&mut archive)?;
-    let identity = manifest_identity(&manifest, None)?;
-    let safe_id = sanitize_extension_id(&identity.id)?;
-
-    fs::create_dir_all(base_dir).map_err(|e| format!("create extensions dir: {e}"))?;
-    let ext_dir = base_dir.join(&safe_id);
-    let install_id = uuid::Uuid::new_v4();
-    let temp_dir = base_dir.join(format!(".installing-{safe_id}-{install_id}"));
-    let backup_dir = base_dir.join(format!(".backup-{safe_id}-{install_id}"));
-
+    let (archive_path, decoded_vsix) = prepare_vsix_archive_path(vsix, base_dir)?;
     let result = (|| {
-        fs::create_dir_all(&temp_dir).map_err(|e| format!("create staging dir: {e}"))?;
-        extract_vsix_archive_to_dir(
-            &mut archive,
-            &temp_dir,
-            MAX_VSIX_ENTRY_BYTES,
-            MAX_VSIX_TOTAL_BYTES,
-        )?;
-        extension_info_from_dir(&temp_dir)?;
-        replace_extension_dir_atomically(&temp_dir, &ext_dir, &backup_dir)?;
-        extension_info_from_dir(&ext_dir)
-    })();
+        let file = File::open(&archive_path).map_err(|e| format!("open VSIX: {e}"))?;
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(|e| format!("bad VSIX archive: {e}"))?;
+        let manifest = read_vsix_manifest(&mut archive)?;
+        let identity = manifest_identity(&manifest, None)?;
+        let safe_id = sanitize_extension_id(&identity.id)?;
 
-    if result.is_err() {
-        cleanup_path(&temp_dir);
-    }
-    if result.is_ok() && backup_dir.exists() {
-        cleanup_path(&backup_dir);
+        fs::create_dir_all(base_dir).map_err(|e| format!("create extensions dir: {e}"))?;
+        let ext_dir = base_dir.join(&safe_id);
+        let install_id = uuid::Uuid::new_v4();
+        let temp_dir = base_dir.join(format!(".installing-{safe_id}-{install_id}"));
+        let backup_dir = base_dir.join(format!(".backup-{safe_id}-{install_id}"));
+
+        let install_result = (|| {
+            fs::create_dir_all(&temp_dir).map_err(|e| format!("create staging dir: {e}"))?;
+            extract_vsix_archive_to_dir(
+                &mut archive,
+                &temp_dir,
+                MAX_VSIX_ENTRY_BYTES,
+                MAX_VSIX_TOTAL_BYTES,
+            )?;
+            extension_info_from_dir(&temp_dir)?;
+            replace_extension_dir_atomically(&temp_dir, &ext_dir, &backup_dir)?;
+            extension_info_from_dir(&ext_dir)
+        })();
+
+        if install_result.is_err() {
+            cleanup_path(&temp_dir);
+        }
+        if install_result.is_ok() && backup_dir.exists() {
+            cleanup_path(&backup_dir);
+        }
+        install_result
+    })();
+    if let Some(path) = decoded_vsix {
+        cleanup_path(&path);
     }
 
     result
@@ -503,6 +831,86 @@ mod tests {
     }
 
     #[test]
+    fn exposes_jupyter_as_recommended_extension() {
+        let extensions = recommended_vscode_extensions_catalog();
+        let jupyter = extensions
+            .iter()
+            .find(|extension| extension.id == VSCODE_JUPYTER_ID)
+            .expect("Jupyter recommendation");
+
+        assert_eq!(jupyter.publisher, "ms-toolsai");
+        assert_eq!(jupyter.name, "jupyter");
+        assert_eq!(
+            jupyter.repository_url,
+            "https://github.com/Microsoft/vscode-jupyter"
+        );
+        assert_eq!(jupyter.download_url, VSCODE_JUPYTER_DOWNLOAD_URL);
+        assert!(recommended_vscode_extension_by_id("MS-TOOLSAI.JUPYTER").is_some());
+        assert!(recommended_vscode_extension_by_id("unknown.extension").is_none());
+    }
+
+    #[test]
+    fn recommended_extension_catalog_contains_static_contribution_plugins() {
+        let extensions = recommended_vscode_extensions_catalog();
+        let ids = extensions
+            .iter()
+            .map(|extension| extension.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+
+        for id in [
+            "ms-toolsai.jupyter",
+            "ms-toolsai.jupyter-renderers",
+            "ms-python.python",
+            "PKief.material-icon-theme",
+            "redhat.vscode-yaml",
+            "tamasfe.even-better-toml",
+            "mechatroner.rainbow-csv",
+        ] {
+            assert!(ids.contains(id), "missing recommended extension {id}");
+        }
+
+        assert_eq!(
+            ids.len(),
+            extensions.len(),
+            "recommendations should be unique"
+        );
+        for extension in extensions {
+            assert!(extension
+                .marketplace_url
+                .ends_with(&format!("itemName={}", extension.id)));
+            assert!(extension.download_url.ends_with("/latest/vspackage"));
+        }
+    }
+
+    #[test]
+    fn maps_host_to_vscode_target_platform() {
+        assert_eq!(
+            vscode_target_platform_for("macos", "aarch64"),
+            Some("darwin-arm64")
+        );
+        assert_eq!(
+            vscode_target_platform_for("macos", "x86_64"),
+            Some("darwin-x64")
+        );
+        assert_eq!(
+            vscode_target_platform_for("windows", "x86_64"),
+            Some("win32-x64")
+        );
+        assert_eq!(
+            vscode_target_platform_for("linux", "aarch64"),
+            Some("linux-arm64")
+        );
+        assert_eq!(vscode_target_platform_for("freebsd", "x86_64"), None);
+    }
+
+    #[test]
+    fn appends_target_platform_to_download_url() {
+        let url = with_target_platform(VSCODE_JUPYTER_DOWNLOAD_URL, "darwin-arm64").unwrap();
+        assert!(url.starts_with(VSCODE_JUPYTER_DOWNLOAD_URL));
+        assert!(url.contains("targetPlatform=darwin-arm64"));
+    }
+
+    #[test]
     fn rejects_vsix_entries_over_configured_size_limit() {
         let dir = tempfile::tempdir().expect("tempdir");
         let vsix = dir.path().join("too-large.vsix");
@@ -553,6 +961,45 @@ mod tests {
             "2.0.0"
         );
         assert!(existing.join("media").join("icon.svg").is_file());
+    }
+
+    #[test]
+    fn installs_gzip_wrapped_vsix_downloads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base_dir = dir.path().join("extensions");
+        let raw_vsix = dir.path().join("raw.vsix");
+        let gz_vsix = dir.path().join("downloaded.vsix");
+        let manifest = package_json("3.0.0");
+        write_vsix(
+            &raw_vsix,
+            &[
+                ("extension/package.json", manifest.as_bytes()),
+                ("extension/media/icon.svg", b"<svg/>"),
+            ],
+        );
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(&fs::read(&raw_vsix).expect("read raw vsix"))
+            .expect("gzip write");
+        fs::write(&gz_vsix, encoder.finish().expect("gzip finish")).expect("write gzip vsix");
+
+        let installed =
+            install_vscode_extension_from_vsix(&gz_vsix, &base_dir).expect("install gzip vsix");
+        assert_eq!(installed.version, "3.0.0");
+        assert_eq!(installed.id, "acme.demo");
+        assert!(base_dir
+            .join("acme.demo")
+            .join("media")
+            .join("icon.svg")
+            .is_file());
+        assert!(fs::read_dir(&base_dir)
+            .expect("read base dir")
+            .flatten()
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".decoded-vsix-")));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! databases are added one source at a time through this module.
 
 use super::{ToolContext, ToolError, ToolSchema};
+use crate::domain::retrieval_registry::{self, RetrievalCapability, RetrievalSourceStatus};
 use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -16,10 +17,11 @@ pub const DESCRIPTION: &str = r#"Run a structured query against a typed database
 
 Use `query` when the user wants database-native lookup/query semantics rather than broad discovery:
 - `category="dataset"` (`data` alias) supports built-in dataset sources: `geo`, `ena`, `ena_run`, `ena_experiment`, `ena_sample`, `ena_analysis`, `ena_assembly`, `ena_sequence`, `cbioportal`.
-- `category="knowledge", source="ncbi_gene"` supports the first migrated knowledge database: NCBI Gene via official NCBI E-utilities (`db=gene`).
+- `category="knowledge", source="ncbi_gene"` searches/fetches NCBI Gene via official NCBI E-utilities (`db=gene`).
+- `category="knowledge", source="uniprot"` searches/fetches UniProtKB protein entries through the public UniProt REST API.
 - `operation="search"` searches records by keyword or database query string. `operation="fetch"`/`"get"` retrieves one record by accession, URL, or search result.
 - `source="auto"` chooses a source from `subcategory` for search or from the identifier for fetch. Dataset subcategories: `expression` → GEO, `sequencing` → ENA run, `genomics` → ENA assembly, `sample_metadata` → ENA sample, `multi_omics` → cBioPortal.
-- `params` may carry future database-specific filters; for NCBI Gene it can include `organism`, `taxon_id`, `ret_start`, and `sort`.
+- `params` may carry database-specific filters; NCBI Gene accepts `organism`, `taxon_id`, `ret_start`, and `sort`; UniProt accepts `organism`, `taxon_id`, and `reviewed`.
 - `search`/`fetch` remain compatibility wrappers for discovery/detail flows; new structured dataset/database integrations should be added here one source at a time."#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,19 +76,8 @@ async fn query_knowledge(
     ctx: &ToolContext,
     args: &QueryArgs,
 ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
-    let source = requested_source(args);
-    let source = if source == "auto" {
-        "ncbi_gene".to_string()
-    } else {
-        source
-    };
-    if !matches!(source.as_str(), "ncbi_gene" | "gene") {
-        return Err(ToolError::InvalidArguments {
-            message: format!(
-                "Unsupported knowledge query source: {source}. First migrated source is ncbi_gene."
-            ),
-        });
-    }
+    let requested = requested_source(args);
+    let source = canonical_knowledge_source(&requested)?;
     if !ctx
         .web_search_api_keys
         .is_query_knowledge_source_enabled(&source)
@@ -98,6 +89,41 @@ async fn query_knowledge(
         });
     }
 
+    match source.as_str() {
+        "ncbi_gene" => query_ncbi_gene(ctx, args).await,
+        "uniprot" => query_uniprot(ctx, args).await,
+        _ => Err(ToolError::InvalidArguments {
+            message: format!("Unsupported knowledge query source: {source}"),
+        }),
+    }
+}
+
+fn canonical_knowledge_source(source: &str) -> Result<String, ToolError> {
+    let source = if source == "auto" {
+        "ncbi_gene"
+    } else {
+        source
+    };
+    let Some(def) = retrieval_registry::find_source("knowledge", source) else {
+        return Err(ToolError::InvalidArguments {
+            message: format!(
+                "Unsupported knowledge query source: {source}. Supported available query sources: ncbi_gene, uniprot."
+            ),
+        });
+    };
+    ensure_registry_source_can_query(&def)?;
+    if !def.supports(RetrievalCapability::Query) {
+        return Err(ToolError::InvalidArguments {
+            message: format!("Knowledge source `{}` does not support query.", def.id),
+        });
+    }
+    Ok(def.id.to_string())
+}
+
+async fn query_ncbi_gene(
+    ctx: &ToolContext,
+    args: &QueryArgs,
+) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
     let operation = normalized_operation(args);
     let client = crate::domain::search::ncbi_gene::NcbiGeneClient::from_tool_context(ctx)
         .map_err(|message| ToolError::ExecutionFailed { message })?;
@@ -143,6 +169,58 @@ async fn query_knowledge(
         }
         other => Err(ToolError::InvalidArguments {
             message: format!("Unsupported NCBI Gene query operation: {other}"),
+        }),
+    }
+}
+
+async fn query_uniprot(
+    ctx: &ToolContext,
+    args: &QueryArgs,
+) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+    let operation = normalized_operation(args);
+    let client = crate::domain::search::uniprot::UniProtClient::from_tool_context(ctx)
+        .map_err(|message| ToolError::ExecutionFailed { message })?;
+
+    match operation.as_str() {
+        "search" | "query" => {
+            let query = query_text(args).ok_or_else(|| ToolError::InvalidArguments {
+                message:
+                    "query(category=knowledge, source=uniprot, operation=search) requires `query` or params.query"
+                        .to_string(),
+            })?;
+            let protein_args = crate::domain::search::uniprot::UniProtSearchArgs {
+                query,
+                organism: param_string(args, &["organism", "species"]),
+                taxon_id: param_string(args, &["taxon_id", "taxid", "tax_id", "taxonomy_id"]),
+                reviewed: param_bool(args, &["reviewed", "swiss_prot", "swissprot"]),
+                max_results: args
+                    .max_results
+                    .or_else(|| param_u32(args, &["max_results", "maxResults", "limit", "size"])),
+            };
+            let response = tokio::select! {
+                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                r = client.search(protein_args) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+            };
+            let mut json = crate::domain::search::uniprot::search_response_to_json(&response);
+            annotate_query_json(&mut json, "search", "knowledge");
+            Ok(json_stream(json))
+        }
+        "fetch" | "get" | "detail" => {
+            let identifier = identifier_text(args).ok_or_else(|| ToolError::InvalidArguments {
+                message:
+                    "query(category=knowledge, source=uniprot, operation=fetch) requires a UniProt accession, URL, result, or params.id"
+                        .to_string(),
+            })?;
+            let record = tokio::select! {
+                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                r = client.fetch(&identifier) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+            };
+            let mut json = crate::domain::search::uniprot::detail_to_json(&record);
+            annotate_query_json(&mut json, "fetch", "knowledge");
+            Ok(json_stream(json))
+        }
+        other => Err(ToolError::InvalidArguments {
+            message: format!("Unsupported UniProt query operation: {other}"),
         }),
     }
 }
@@ -196,6 +274,11 @@ async fn query_dataset(
                     dataset_auto_search(ctx, &client, data_args).await?
                 }
             } else {
+                let registry_source = retrieval_registry::find_source("dataset", &source)
+                    .ok_or_else(|| ToolError::InvalidArguments {
+                        message: format!("Unsupported dataset query source: {source}"),
+                    })?;
+                ensure_registry_source_can_query(&registry_source)?;
                 let source_kind = crate::domain::search::data::PublicDataSource::parse(&source)
                     .ok_or_else(|| ToolError::InvalidArguments {
                         message: format!("Unsupported dataset query source: {source}"),
@@ -219,6 +302,11 @@ async fn query_dataset(
             let source_kind = if source == "auto" {
                 infer_dataset_source(&identifier, subcategory.as_deref())?
             } else {
+                let registry_source = retrieval_registry::find_source("dataset", &source)
+                    .ok_or_else(|| ToolError::InvalidArguments {
+                        message: format!("Unsupported dataset query source: {source}"),
+                    })?;
+                ensure_registry_source_can_query(&registry_source)?;
                 crate::domain::search::data::PublicDataSource::parse(&source).ok_or_else(|| {
                     ToolError::InvalidArguments {
                         message: format!("Unsupported dataset query source: {source}"),
@@ -258,6 +346,41 @@ fn annotate_query_json(value: &mut JsonValue, operation: &str, default_category:
         obj.entry("category".to_string())
             .or_insert_with(|| json!(default_category));
     }
+}
+
+fn ensure_registry_source_can_query(
+    source: &retrieval_registry::RetrievalSourceDefinition,
+) -> Result<(), ToolError> {
+    match source.status {
+        RetrievalSourceStatus::Planned => {
+            return Err(ToolError::InvalidArguments {
+                message: format!(
+                    "{} source `{}` is planned but not implemented yet.",
+                    source.category, source.id
+                ),
+            });
+        }
+        RetrievalSourceStatus::Extension => {
+            return Err(ToolError::InvalidArguments {
+                message: format!(
+                    "{} source `{}` is provided by an extension and is not built in.",
+                    source.category, source.id
+                ),
+            });
+        }
+        RetrievalSourceStatus::Available
+        | RetrievalSourceStatus::RequiresApiKey
+        | RetrievalSourceStatus::OptIn => {}
+    }
+    if !source.supports(RetrievalCapability::Query) {
+        return Err(ToolError::InvalidArguments {
+            message: format!(
+                "{} source `{}` does not support query.",
+                source.category, source.id
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn normalized_category(value: &str) -> String {
@@ -489,6 +612,20 @@ fn param_u32(args: &QueryArgs, keys: &[&str]) -> Option<u32> {
     })
 }
 
+fn param_bool(args: &QueryArgs, keys: &[&str]) -> Option<bool> {
+    let map = args.params.as_ref()?.as_object()?;
+    keys.iter().find_map(|key| {
+        let value = map.get(*key)?;
+        value.as_bool().or_else(
+            || match value.as_str()?.trim().to_ascii_lowercase().as_str() {
+                "true" | "yes" | "1" | "reviewed" => Some(true),
+                "false" | "no" | "0" | "unreviewed" => Some(false),
+                _ => None,
+            },
+        )
+    })
+}
+
 fn string_from_result(args: &QueryArgs, keys: &[&str]) -> Option<String> {
     let result = args.result.as_ref()?.as_object()?;
     keys.iter()
@@ -554,7 +691,7 @@ pub fn schema() -> ToolSchema {
                 },
                 "source": {
                     "type": "string",
-                    "description": "Database source. Dataset supports auto, geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence. Knowledge supports ncbi_gene."
+                    "description": "Database source. Dataset supports auto, geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, cbioportal. Knowledge supports ncbi_gene and uniprot."
                 },
                 "operation": {
                     "type": "string",
@@ -582,7 +719,7 @@ pub fn schema() -> ToolSchema {
                 },
                 "params": {
                     "type": "object",
-                    "description": "Database-specific structured parameters. Dataset sources accept query/q, id/accession/url, source, operation, subcategory, and max_results/limit. NCBI Gene accepts organism, taxon_id/taxid, ret_start/retstart, and sort."
+                    "description": "Database-specific structured parameters. Dataset sources accept query/q, id/accession/url, source, operation, subcategory, and max_results/limit. NCBI Gene accepts organism, taxon_id/taxid, ret_start/retstart, and sort. UniProt accepts organism, taxon_id/taxid, and reviewed."
                 },
                 "max_results": {
                     "type": "integer",
@@ -668,5 +805,43 @@ mod tests {
         assert_eq!(normalized_operation(&args), "fetch");
         assert_eq!(requested_source(&args), "ncbi_gene");
         assert_eq!(identifier_text(&args).as_deref(), Some("7157"));
+    }
+
+    #[test]
+    fn canonicalizes_uniprot_knowledge_aliases() {
+        assert_eq!(canonical_knowledge_source("uniprotkb").unwrap(), "uniprot");
+        assert_eq!(canonical_knowledge_source("protein").unwrap(), "uniprot");
+    }
+
+    #[test]
+    fn rejects_planned_knowledge_sources_from_registry() {
+        let err = canonical_knowledge_source("ensembl").unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments { .. }));
+    }
+
+    #[test]
+    fn available_query_registry_sources_are_routable() {
+        for source in retrieval_registry::registry().sources {
+            if !source.can_execute() || !source.supports(RetrievalCapability::Query) {
+                continue;
+            }
+            match source.category {
+                "dataset" => {
+                    assert!(
+                        crate::domain::search::data::PublicDataSource::parse(source.id).is_some(),
+                        "dataset source `{}` must route to a data adapter",
+                        source.id
+                    );
+                }
+                "knowledge" => {
+                    assert!(
+                        canonical_knowledge_source(source.id).is_ok(),
+                        "knowledge source `{}` must route to a knowledge adapter",
+                        source.id
+                    );
+                }
+                other => panic!("query-capable source in unsupported category: {other}"),
+            }
+        }
     }
 }

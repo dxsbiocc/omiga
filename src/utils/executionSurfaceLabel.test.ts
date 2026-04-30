@@ -18,4 +18,21 @@ describe("getExecutionSurfaceView", () => {
       kind: "waiting",
     });
   });
+
+  it("does not report a stale tool as running after streaming is already idle", () => {
+    expect(
+      getExecutionSurfaceView(
+        [{ id: "tool-bash-1", title: "bash", status: "running", toolName: "bash" }],
+        {
+          isConnecting: false,
+          isStreaming: false,
+          waitingFirstChunk: false,
+          toolHintFallback: null,
+        },
+      ),
+    ).toMatchObject({
+      label: "已完成",
+      kind: "finished",
+    });
+  });
 });

@@ -12,6 +12,17 @@ export interface InstalledVscodeExtension {
   packageJson: VscodePackageJson;
 }
 
+export interface RecommendedVscodeExtension {
+  id: string;
+  name: string;
+  publisher: string;
+  displayName: string;
+  description: string;
+  repositoryUrl: string;
+  marketplaceUrl: string;
+  downloadUrl: string;
+}
+
 export interface VscodePackageJson {
   name?: string;
   displayName?: string;
@@ -149,6 +160,14 @@ function extensionSuffixes(fileName: string): string[] {
 
 function getExtensionName(ext: InstalledVscodeExtension): string {
   return ext.displayName || ext.packageJson.displayName || ext.name || ext.id;
+}
+
+export function isExtensionInstalled(
+  extensions: InstalledVscodeExtension[],
+  extensionId: string,
+): boolean {
+  const normalizedId = extensionId.trim().toLowerCase();
+  return extensions.some((extension) => extension.id.toLowerCase() === normalizedId);
 }
 
 function normalizeSelector(

@@ -102,3 +102,38 @@ fn query_from_json_accepts_ncbi_gene_fetch() {
         Ok(Tool::Query(_))
     ));
 }
+
+#[test]
+fn query_from_json_accepts_uniprot_search() {
+    let j = r#"{
+        "category": "knowledge",
+        "source": "uniprot",
+        "operation": "search",
+        "query": "gene_exact:BRCA1",
+        "params": {
+            "taxon_id": "9606",
+            "reviewed": true,
+            "limit": 3
+        }
+    }"#;
+
+    assert!(matches!(
+        Tool::from_json_str("query", j),
+        Ok(Tool::Query(_))
+    ));
+}
+
+#[test]
+fn query_from_json_accepts_uniprot_fetch() {
+    let j = r#"{
+        "category": "knowledge",
+        "source": "uniprot",
+        "operation": "fetch",
+        "id": "P38398"
+    }"#;
+
+    assert!(matches!(
+        Tool::from_json_str("query", j),
+        Ok(Tool::Query(_))
+    ));
+}

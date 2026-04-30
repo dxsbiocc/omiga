@@ -3,6 +3,7 @@ import {
   findCustomEditorForFile,
   getIconThemeContributions,
   globToRegExp,
+  isExtensionInstalled,
   languageForFile,
   resolveIconForFileNode,
   resolveIconTheme,
@@ -58,6 +59,14 @@ describe("VS Code extension contribution helpers", () => {
     expect(languageForFile("Card.astro", [ext])).toBe("astro");
     expect(languageForFile("index.d.ts", [ext])).toBe("typescript");
     expect(languageForFile(".env.local", [ext])).toBe("dotenv");
+  });
+
+  it("detects installed extension IDs case-insensitively", () => {
+    const ext = extension({});
+
+    expect(isExtensionInstalled([ext], "acme.demo")).toBe(true);
+    expect(isExtensionInstalled([ext], "ACME.DEMO")).toBe(true);
+    expect(isExtensionInstalled([ext], "missing.demo")).toBe(false);
   });
 
   it("resolves icon themes with file names, compound extensions, and folders", () => {
