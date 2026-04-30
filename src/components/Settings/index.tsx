@@ -447,6 +447,25 @@ const SEARCH_METHOD_OPTIONS: SearchMethodOption[] = [
   },
 ];
 
+const WEB_SEARCH_METHOD_IDS = SEARCH_METHOD_OPTIONS.map((option) => option.id);
+
+function isWebSearchMethodId(id: string): id is WebSearchMethod {
+  return WEB_SEARCH_METHOD_IDS.includes(id as WebSearchMethod);
+}
+
+function toSearchMethodOptions(options: QuerySourceOption[]): SearchMethodOption[] {
+  const converted = options
+    .filter((option): option is QuerySourceOption & { id: WebSearchMethod } =>
+      isWebSearchMethodId(option.id),
+    )
+    .map((option) => ({
+      id: option.id,
+      label: option.label,
+      description: option.helper,
+    }));
+  return converted.length > 0 ? converted : SEARCH_METHOD_OPTIONS;
+}
+
 const SEARCH_SOURCE_TABS: {
   id: SearchSourceTab;
   label: string;
@@ -877,7 +896,16 @@ function SearchMethodPriorityRow({
         <Typography variant="body2" fontWeight={600}>
           {index + 1}. {option.label}
         </Typography>
-        <Typography variant="caption" color="text.secondary">
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{
+            display: "-webkit-box",
+            overflow: "hidden",
+            WebkitBoxOrient: "vertical",
+            WebkitLineClamp: 2,
+          }}
+        >
           {option.description}
         </Typography>
       </Box>
@@ -932,7 +960,16 @@ function SearchMethodDragLayer() {
           <Typography variant="body2" fontWeight={600}>
             {item.option.label}
           </Typography>
-          <Typography variant="caption" color="text.secondary">
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{
+              display: "-webkit-box",
+              overflow: "hidden",
+              WebkitBoxOrient: "vertical",
+              WebkitLineClamp: 2,
+            }}
+          >
             {item.option.description}
           </Typography>
         </Box>
@@ -1213,6 +1250,32 @@ export function Settings({
       sourceOptionsForCategory(retrievalRegistry, "literature", [], "search"),
     [retrievalRegistry],
   );
+  const webSourceOptions = useMemo(
+    () => sourceOptionsForCategory(retrievalRegistry, "web", [], "search"),
+    [retrievalRegistry],
+  );
+  const webSearchMethodOptions = useMemo(
+    () => toSearchMethodOptions(webSourceOptions),
+    [webSourceOptions],
+  );
+  const webExtensionOptions = useMemo(
+    () =>
+      webSourceOptions.filter((option) => !isWebSearchMethodId(option.id)),
+    [webSourceOptions],
+  );
+  const socialSourceOptions = useMemo(
+    () => sourceOptionsForCategory(retrievalRegistry, "social", [], "search"),
+    [retrievalRegistry],
+  );
+  const wechatSourceOption =
+    socialSourceOptions.find((option) => option.id === "wechat") ?? {
+      id: "wechat",
+      label: "微信公众号搜索",
+      helper: "Sogou 微信公开 HTML 搜索；默认关闭。",
+      defaultEnabled: false,
+      available: true,
+      badge: "需开启",
+    };
 
   // Do NOT auto-fill model in a useEffect([provider]) when model is empty.
   // On restart, loadSavedConfig applies localStorage synchronously before the first await,
@@ -1568,12 +1631,11 @@ export function Settings({
   };
 
   const selectedSearchMethodOptions = webSearchMethods
-    .map((method) => SEARCH_METHOD_OPTIONS.find((option) => option.id === method))
-    .filter(
-      (option): option is (typeof SEARCH_METHOD_OPTIONS)[number] =>
-        Boolean(option),
-    );
-  const inactiveSearchMethodOptions = SEARCH_METHOD_OPTIONS.filter(
+    .map((method) =>
+      webSearchMethodOptions.find((option) => option.id === method),
+    )
+    .filter((option): option is SearchMethodOption => Boolean(option));
+  const inactiveSearchMethodOptions = webSearchMethodOptions.filter(
     (option) => !webSearchMethods.includes(option.id),
   );
   const toggleWebSearchMethod = (method: WebSearchMethod, checked: boolean) => {
@@ -2299,6 +2361,12 @@ export function Settings({
                                         <Typography
                                           variant="caption"
                                           color="text.secondary"
+                                          sx={{
+                                            display: "-webkit-box",
+                                            overflow: "hidden",
+                                            WebkitBoxOrient: "vertical",
+                                            WebkitLineClamp: 2,
+                                          }}
                                         >
                                           {option.description}
                                         </Typography>
@@ -2309,12 +2377,50 @@ export function Settings({
                               </Box>
                             )}
 
+                            {webExtensionOptions.length > 0 && (
+                              <Box
+                                sx={(theme) => ({
+                                  border: `1px dashed ${theme.palette.divider}`,
+                                  borderRadius: 2,
+                                  p: 1.25,
+                                  mb: 2,
+                                  bgcolor: alpha(theme.palette.background.default, 0.22),
+                                })}
+                              >
+                                <Typography
+                                  variant="caption"
+                                  color="text.secondary"
+                                  sx={{ display: "block", mb: 1 }}
+                                >
+                                  扩展来源
+                                </Typography>
+                                <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+                                  {webExtensionOptions.map((option) => (
+                                    <Tooltip
+                                      key={option.id}
+                                      title={option.helper}
+                                      placement="top"
+                                    >
+                                      <span>
+                                        <Chip
+                                          label={`${option.label}${option.badge ? ` · ${option.badge}` : ""}`}
+                                          disabled
+                                          size="small"
+                                          sx={{ fontWeight: 600 }}
+                                        />
+                                      </span>
+                                    </Tooltip>
+                                  ))}
+                                </Stack>
+                              </Box>
+                            )}
+
                             <Typography variant="caption" color="text.secondary">
                               当前顺序：{" "}
                               {webSearchMethods
                                 .map(
                                   (method) =>
-                                    SEARCH_METHOD_OPTIONS.find(
+                                    webSearchMethodOptions.find(
                                       (option) => option.id === method,
                                     )?.label ?? method,
                                 )
@@ -3161,10 +3267,10 @@ export function Settings({
                           <AccordionSummary expandIcon={<ExpandMore />}>
                             <Box>
                               <Typography variant="body2" fontWeight={700}>
-                                微信公众号搜索
+                                {wechatSourceOption.label}
                               </Typography>
                               <Typography variant="caption" color="text.secondary">
-                                Sogou 微信公开 HTML 搜索；默认关闭。
+                                {wechatSourceOption.helper}
                               </Typography>
                             </Box>
                           </AccordionSummary>
@@ -3181,12 +3287,18 @@ export function Settings({
                               label={
                                 <Box>
                                   <Typography variant="body2" fontWeight={600}>
-                                    启用微信公众号搜索（Sogou 微信）
+                                    启用 {wechatSourceOption.label}
+                                    {wechatSourceOption.badge && (
+                                      <Chip
+                                        label={wechatSourceOption.badge}
+                                        size="small"
+                                        variant="outlined"
+                                        sx={{ ml: 1, height: 22, fontWeight: 600 }}
+                                      />
+                                    )}
                                   </Typography>
                                   <Typography variant="caption" color="text.secondary">
-                                    默认关闭；开启后允许
-                                    <code> search(category="social", source="wechat")</code>。
-                                    该来源依赖公开 HTML 页面，可能被验证码/限流影响。
+                                    开启后允许 social/wechat 搜索；公开页面可能限流。
                                   </Typography>
                                 </Box>
                               }

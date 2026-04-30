@@ -1506,5 +1506,7 @@ mod tests {
                 "ncbi_gene"
             ]
         );
+        assert_eq!(default_source_ids("web"), vec!["ddg", "google", "bing"]);
+        assert_eq!(default_source_ids("social"), Vec::<&str>::new());
     }
 }
