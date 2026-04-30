@@ -60,15 +60,29 @@ function terminalId() {
   return `term-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function segmentSx(style: TerminalCellStyle) {
-  const fg = style.inverse ? style.bg ?? "#0b1020" : style.fg;
+interface TerminalThemeColors {
+  surface: string;
+  chrome: string;
+  border: string;
+  text: string;
+  muted: string;
+  chipBg: string;
+  control: string;
+  disabled: string;
+  cursorBg: string;
+  cursorText: string;
+  focusRing: string;
+}
+
+function segmentSx(style: TerminalCellStyle, colors: TerminalThemeColors) {
+  const fg = style.inverse ? style.bg ?? colors.surface : style.fg;
   const bg = style.cursor
-    ? "#d7deea"
+    ? colors.cursorBg
     : style.inverse
-      ? style.fg ?? "#d7deea"
+      ? style.fg ?? colors.text
       : style.bg;
   return {
-    color: style.cursor ? "#0b1020" : fg,
+    color: style.cursor ? colors.cursorText : fg ?? "inherit",
     backgroundColor: bg,
     fontWeight: style.bold ? 800 : 500,
     fontStyle: style.italic ? "italic" : "normal",
@@ -85,6 +99,26 @@ export function Terminal({
   sessionId,
 }: TerminalProps) {
   const theme = useTheme();
+  const terminalColors = useMemo<TerminalThemeColors>(() => {
+    const isDark = theme.palette.mode === "dark";
+    return {
+      surface: isDark
+        ? alpha(theme.palette.background.default, 0.96)
+        : alpha(theme.palette.background.paper, 0.92),
+      chrome: isDark
+        ? alpha(theme.palette.background.paper, 0.72)
+        : alpha(theme.palette.background.paper, 0.82),
+      border: alpha(theme.palette.text.primary, isDark ? 0.16 : 0.1),
+      text: theme.palette.text.primary,
+      muted: theme.palette.text.secondary,
+      chipBg: alpha(theme.palette.primary.main, isDark ? 0.2 : 0.08),
+      control: theme.palette.text.secondary,
+      disabled: alpha(theme.palette.text.primary, isDark ? 0.28 : 0.22),
+      cursorBg: theme.palette.text.primary,
+      cursorText: theme.palette.background.default,
+      focusRing: alpha(theme.palette.primary.main, isDark ? 0.48 : 0.36),
+    };
+  }, [theme]);
   const environment = useChatComposerStore((s) => s.environment);
   const sshServer = useChatComposerStore((s) => s.sshServer);
   const sandboxBackend = useChatComposerStore((s) => s.sandboxBackend);
@@ -367,8 +401,8 @@ export function Terminal({
         minHeight: 0,
         display: "flex",
         flexDirection: "column",
-        bgcolor: "#0b1020",
-        color: "#d7deea",
+        bgcolor: terminalColors.surface,
+        color: terminalColors.text,
       }}
     >
       <Stack
@@ -379,8 +413,10 @@ export function Terminal({
           minHeight: embedded ? 38 : 42,
           px: 1.25,
           borderBottom: 1,
-          borderColor: alpha("#ffffff", 0.12),
-          bgcolor: alpha("#111827", 0.92),
+          borderColor: terminalColors.border,
+          bgcolor: terminalColors.chrome,
+          backdropFilter: "blur(12px) saturate(140%)",
+          WebkitBackdropFilter: "blur(12px) saturate(140%)",
         }}
       >
         <Stack direction="row" alignItems="center" spacing={1} sx={{ minWidth: 0 }}>
@@ -393,20 +429,28 @@ export function Terminal({
             label={terminalInfo?.label ?? envLabel}
             sx={{
               height: 22,
-              color: "#d7deea",
-              bgcolor: alpha("#ffffff", 0.08),
+              color: terminalColors.text,
+              bgcolor: terminalColors.chipBg,
               fontSize: 11,
             }}
           />
           <Circle sx={{ fontSize: 9, color: statusColor }} />
-          <Typography variant="caption" noWrap sx={{ color: "#93a4bd", maxWidth: 460 }}>
+          <Typography
+            variant="caption"
+            noWrap
+            sx={{ color: terminalColors.muted, maxWidth: 460 }}
+          >
             {terminalInfo?.cwd ?? workspaceLabel}
           </Typography>
         </Stack>
 
         <Stack direction="row" alignItems="center" spacing={0.25}>
           <Tooltip title="重启终端">
-            <IconButton size="small" onClick={() => void startTerminal()} sx={{ color: "#d7deea" }}>
+            <IconButton
+              size="small"
+              onClick={() => void startTerminal()}
+              sx={{ color: terminalColors.control }}
+            >
               <PlayArrow fontSize="small" />
             </IconButton>
           </Tooltip>
@@ -416,14 +460,21 @@ export function Terminal({
                 size="small"
                 disabled={!activeTerminalId || status !== "running"}
                 onClick={() => void stopTerminal()}
-                sx={{ color: "#d7deea" }}
+                sx={{
+                  color: terminalColors.control,
+                  "&.Mui-disabled": { color: terminalColors.disabled },
+                }}
               >
                 <Stop fontSize="small" />
               </IconButton>
             </span>
           </Tooltip>
           <Tooltip title="复制输出">
-            <IconButton size="small" onClick={() => void copyOutput()} sx={{ color: "#d7deea" }}>
+            <IconButton
+              size="small"
+              onClick={() => void copyOutput()}
+              sx={{ color: terminalColors.control }}
+            >
               <ContentCopy fontSize="small" />
             </IconButton>
           </Tooltip>
@@ -434,7 +485,7 @@ export function Terminal({
                 screenRef.current.clear();
                 setLines(screenRef.current.snapshot());
               }}
-              sx={{ color: "#d7deea" }}
+              sx={{ color: terminalColors.control }}
             >
               <Clear fontSize="small" />
             </IconButton>
@@ -466,7 +517,7 @@ export function Terminal({
           cursor: "text",
           outline: "none",
           "&:focus": {
-            boxShadow: `inset 0 0 0 1px ${alpha(theme.palette.primary.main, 0.35)}`,
+            boxShadow: `inset 0 0 0 1px ${terminalColors.focusRing}`,
           },
           "@keyframes terminal-cursor-blink": {
             "0%, 49%": { opacity: 1 },
@@ -483,11 +534,15 @@ export function Terminal({
               minHeight: "1.55em",
               whiteSpace: "pre",
               wordBreak: "break-word",
-              color: "#d7deea",
+              color: terminalColors.text,
             }}
           >
             {line.segments.map((segment) => (
-              <Box key={segment.key} component="span" sx={segmentSx(segment.style)}>
+              <Box
+                key={segment.key}
+                component="span"
+                sx={segmentSx(segment.style, terminalColors)}
+              >
                 {segment.text}
               </Box>
             ))}
@@ -501,14 +556,16 @@ export function Terminal({
           px: 1.25,
           py: 1,
           borderTop: 1,
-          borderColor: alpha("#ffffff", 0.12),
-          bgcolor: alpha("#111827", 0.92),
+          borderColor: terminalColors.border,
+          bgcolor: terminalColors.chrome,
+          backdropFilter: "blur(12px) saturate(140%)",
+          WebkitBackdropFilter: "blur(12px) saturate(140%)",
         }}
       >
         <Typography
           variant="caption"
           sx={{
-            color: "#93a4bd",
+            color: terminalColors.muted,
             fontFamily: "JetBrains Mono, Monaco, Consolas, monospace",
           }}
         >
