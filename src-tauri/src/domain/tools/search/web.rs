@@ -1,147 +1,22 @@
-//! Unified search tool — web, literature, and extension-ready source routing
-//!
-//! Public fallback engines:
-//! - DuckDuckGo: the public `api.duckduckgo.com` endpoint is an **instant-answer** API, not full
-//!   web search — many queries return empty `AbstractURL` / `RelatedTopics`. HTML results at
-//!   `html.duckduckgo.com` are used when the JSON API yields nothing.
-//! - Bing / Google: lightweight HTML fallbacks used after configured APIs.
-//!
-//! Result links are often search-engine redirects (`duckduckgo.com/l/?uddg=…`,
-//! `bing.com/ck/a?u=…`, `google.com/url?q=…`); we unwrap them to the real destination URL.
-
-use super::{ToolContext, ToolError, ToolSchema};
-use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
-use async_trait::async_trait;
+use super::super::{ToolContext, ToolError};
+use super::common::*;
 use base64::{
     engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
     Engine as _,
 };
 use lazy_static::lazy_static;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value as JsonValue};
 use std::collections::HashSet;
 use std::future::Future;
-use std::pin::Pin;
 use std::time::{Duration, Instant};
 
-/// Hard cap for safety (Tavily / HTML parsing).
-const MAX_RESULTS_CAP: usize = 12;
-const MAX_OUTPUT_CHARS: usize = 100_000;
-/// Per-result snippet cap (Hermes-style: keep tool output lean).
 const MAX_SNIPPET_CHARS: usize = 512;
 const MAX_TITLE_CHARS: usize = 220;
 const SEARCH_METHOD_RETRY_DELAY_MS: u64 = 400;
 const SEARCH_METHOD_MAX_ATTEMPTS: usize = 3;
-/// `search` is an interactive chat tool: a search that cannot return within
-/// this budget is not useful enough to keep the turn blocked.
 const SEARCH_MAX_TIMEOUT_SECS: u64 = 30;
-
-pub const DESCRIPTION: &str = r#"Search across typed data-source categories and return formatted results. Web/literature/dataset/social return SerpAPI-style JSON; knowledge returns recall excerpts.
-
-- `category` is required. Categories: `literature`, `dataset` (`data` alias), `knowledge`, `web`, `social`.
-- `source` is optional and defaults to `auto`. Web sources: `auto`, `tavily`, `exa`, `firecrawl`, `parallel`, `google`, `bing`, `ddg`. Literature sources: `auto`, `pubmed`, `arxiv`, `crossref`, `openalex`, `biorxiv`, `medrxiv`, `semantic_scholar` (opt-in, API key required). Dataset sources: `auto`, `geo`, `ena`, `ena_run`, `ena_experiment`, `ena_sample`, `ena_analysis`, `ena_assembly`, `ena_sequence`, `cbioportal`, `gtex`. Knowledge sources/scopes: `all`, `wiki`, `implicit`, `long_term`, `permanent`, `sources`. Social sources: `wechat` (opt-in).
-- `subcategory` is optional. Prefer `query(category="dataset", operation="search", …)` for structured dataset/database lookup; this dataset path remains as a compatibility search wrapper.
-- `source=auto` uses Settings → Search priority for web, PubMed for literature, and a combined GEO + ENA query for dataset.
-- Results are returned as formatted JSON with a top-level `results` array and SerpAPI-style fields (`position`, `title`, `name`, `link`, `url`, `displayed_link`, `favicon`, `snippet`, `metadata`).
-- Optional `allowed_domains` or `blocked_domains` filter web result URLs (not both).
-- `max_results` (default 5, max 10) limits how many hits are returned.
-- Optional `search_url` overrides the DuckDuckGo HTML endpoint (for private search proxies or tests).
-- Unsafe/private result URLs are filtered out; `search_url` must also be a public-safe HTTP(S) URL.
-- After answering, cite sources with markdown links when you use this tool."#;
-
-fn default_max_results() -> Option<u32> {
-    Some(5)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SearchArgs {
-    pub category: String,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default, alias = "subCategory", alias = "dataset_type", alias = "type")]
-    pub subcategory: Option<String>,
-    pub query: String,
-    #[serde(default)]
-    pub allowed_domains: Option<Vec<String>>,
-    #[serde(default)]
-    pub blocked_domains: Option<Vec<String>>,
-    /// Maximum hits to return (1–10). Default 5.
-    #[serde(default = "default_max_results")]
-    pub max_results: Option<u32>,
-    /// Override HTML search base URL (e.g. `https://html.duckduckgo.com/html/`).
-    #[serde(default)]
-    pub search_url: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct SearchHit {
-    title: String,
-    url: String,
-    /// Populated for DuckDuckGo HTML / Tavily `content` when available.
-    snippet: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SearchApiProvider {
-    Tavily,
-    Exa,
-    Firecrawl,
-    Parallel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SearchMethod {
-    Tavily,
-    Exa,
-    Firecrawl,
-    Parallel,
-    Ddg,
-    Bing,
-    Google,
-}
-
-#[derive(Debug, Clone)]
-struct SearchExecution {
-    hits: Vec<SearchHit>,
-    source_labels: Vec<String>,
-    effective_source: Option<String>,
-    notes: Vec<String>,
-}
-
-struct SearchMethodRequest<'a> {
-    query: &'a str,
-    allowed: &'a Option<Vec<String>>,
-    blocked: &'a Option<Vec<String>>,
-    max_results: usize,
-    search_url: Option<&'a str>,
-}
-
-impl SearchExecution {
-    fn new() -> Self {
-        Self {
-            hits: Vec::new(),
-            source_labels: Vec::new(),
-            effective_source: None,
-            notes: Vec::new(),
-        }
-    }
-
-    fn push_source(&mut self, label: impl Into<String>) {
-        let label = label.into();
-        if !label.trim().is_empty() && !self.source_labels.iter().any(|s| s == &label) {
-            self.source_labels.push(label);
-        }
-    }
-
-    fn push_note(&mut self, note: impl Into<String>) {
-        let note = note.into();
-        if !note.trim().is_empty() && !self.notes.iter().any(|s| s == &note) {
-            self.notes.push(note);
-        }
-    }
-}
-
 const DDG_HTML_SEARCH_BASE: &str = "https://html.duckduckgo.com/html/";
 const BING_SEARCH_BASE: &str = "https://www.bing.com/search";
 const GOOGLE_SEARCH_BASE: &str = "https://www.google.com/search";
@@ -163,19 +38,6 @@ fn api_provider_label(provider: SearchApiProvider) -> &'static str {
     }
 }
 
-fn search_method_from_setting(value: &str) -> Option<SearchMethod> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "tavily" => Some(SearchMethod::Tavily),
-        "exa" => Some(SearchMethod::Exa),
-        "firecrawl" => Some(SearchMethod::Firecrawl),
-        "parallel" => Some(SearchMethod::Parallel),
-        "google" => Some(SearchMethod::Google),
-        "bing" => Some(SearchMethod::Bing),
-        "duckduckgo" | "duck-duck-go" | "ddg" => Some(SearchMethod::Ddg),
-        _ => None,
-    }
-}
-
 fn search_method_label(method: SearchMethod) -> &'static str {
     match method {
         SearchMethod::Tavily => "Tavily",
@@ -186,33 +48,6 @@ fn search_method_label(method: SearchMethod) -> &'static str {
         SearchMethod::Bing => "Bing",
         SearchMethod::Google => "Google",
     }
-}
-
-fn default_search_methods() -> Vec<SearchMethod> {
-    vec![SearchMethod::Ddg, SearchMethod::Google, SearchMethod::Bing]
-}
-
-fn ordered_search_methods(settings: &[String], legacy_preferred_engine: &str) -> Vec<SearchMethod> {
-    let mut out = Vec::new();
-    for value in settings {
-        let Some(method) = search_method_from_setting(value) else {
-            continue;
-        };
-        if !out.contains(&method) {
-            out.push(method);
-        }
-    }
-    if out.is_empty() {
-        if let Some(method) = search_method_from_setting(legacy_preferred_engine) {
-            out.push(method);
-        }
-        for method in default_search_methods() {
-            if !out.contains(&method) {
-                out.push(method);
-            }
-        }
-    }
-    out
 }
 
 fn search_method_missing_config(ctx: &ToolContext, method: SearchMethod) -> Option<&'static str> {
@@ -251,11 +86,6 @@ fn search_method_source_label(method: SearchMethod) -> String {
     }
 }
 
-fn effective_max_results(args: &SearchArgs) -> usize {
-    let m = args.max_results.unwrap_or(5).clamp(1, 10) as usize;
-    m.min(MAX_RESULTS_CAP)
-}
-
 fn effective_search_timeout(timeout_secs: u64) -> Duration {
     Duration::from_secs(timeout_secs.clamp(5, SEARCH_MAX_TIMEOUT_SECS))
 }
@@ -280,9 +110,6 @@ where
     }
 }
 
-pub struct SearchTool;
-
-/// Settings key wins, then env vars.
 fn resolve_tavily_api_key(ctx: &ToolContext) -> Option<String> {
     if let Some(ref k) = ctx.web_search_api_keys.tavily {
         let t = k.trim();
@@ -492,35 +319,6 @@ async fn search_ordered_methods(
     Ok(exec)
 }
 
-fn validate(args: &SearchArgs) -> Result<(), ToolError> {
-    if args.query.trim().len() < 2 {
-        return Err(ToolError::InvalidArguments {
-            message: "query must be at least 2 characters".to_string(),
-        });
-    }
-    if args.allowed_domains.is_some() && args.blocked_domains.is_some() {
-        return Err(ToolError::InvalidArguments {
-            message: "Cannot specify both allowed_domains and blocked_domains".to_string(),
-        });
-    }
-    if let Some(ref u) = args.search_url {
-        let t = u.trim();
-        if !t.is_empty() {
-            if !t.starts_with("http://") && !t.starts_with("https://") {
-                return Err(ToolError::InvalidArguments {
-                    message: "search_url must be an http(s) URL".to_string(),
-                });
-            }
-            if reqwest::Url::parse(t).is_err() {
-                return Err(ToolError::InvalidArguments {
-                    message: "search_url is not a valid URL".to_string(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
 fn host_of_url(url: &str) -> Option<String> {
     reqwest::Url::parse(url)
         .ok()
@@ -569,7 +367,7 @@ fn filter_hits(
 ) -> Vec<SearchHit> {
     hits.into_iter()
         .filter(|h| url_passes_filters(&h.url, allowed, blocked))
-        .filter(|h| super::web_safety::is_safe_result_url(project_root, &h.url))
+        .filter(|h| crate::domain::tools::web_safety::is_safe_result_url(project_root, &h.url))
         .take(limit)
         .collect()
 }
@@ -1699,148 +1497,6 @@ mod ddg_tests {
     }
 }
 
-fn normalized_category(value: &str) -> String {
-    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-        "dataset" | "datasets" => "data".to_string(),
-        "knowledge_base" | "kb" | "memory" => "knowledge".to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn normalized_source(value: Option<&str>) -> String {
-    value
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("auto")
-        .to_ascii_lowercase()
-        .replace('-', "_")
-}
-
-fn normalized_subcategory(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_ascii_lowercase().replace(['-', ' '], "_"))
-}
-
-async fn dataset_auto_search(
-    ctx: &ToolContext,
-    client: &crate::domain::search::data::PublicDataClient,
-    data_args: crate::domain::search::data::DataSearchArgs,
-) -> Result<crate::domain::search::data::DataSearchResponse, ToolError> {
-    let enabled = ctx.web_search_api_keys.enabled_query_dataset_sources();
-    let mut sources = Vec::new();
-    if enabled.iter().any(|source| source == "geo") {
-        sources.push(crate::domain::search::data::PublicDataSource::Geo);
-    }
-    if enabled.iter().any(|source| source == "ena") {
-        sources.push(crate::domain::search::data::PublicDataSource::EnaStudy);
-    }
-    if enabled.iter().any(|source| source == "cbioportal") {
-        sources.push(crate::domain::search::data::PublicDataSource::CbioPortal);
-    }
-    if enabled.iter().any(|source| source == "gtex") {
-        sources.push(crate::domain::search::data::PublicDataSource::Gtex);
-    }
-    if sources.is_empty() {
-        return Ok(crate::domain::search::data::DataSearchResponse {
-            query: data_args.query.trim().to_string(),
-            source: "auto".to_string(),
-            total: Some(0),
-            results: Vec::new(),
-            notes: vec!["All dataset sources are disabled in Settings → Search.".to_string()],
-        });
-    }
-    let mut results = Vec::new();
-    let mut total = 0u64;
-    let mut saw_total = false;
-    let mut notes = vec!["Combined enabled dataset-source search".to_string()];
-    for source in sources {
-        let response = tokio::select! {
-            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-            r = client.search(source, data_args.clone()) => r,
-        };
-        match response {
-            Ok(response) => {
-                if let Some(count) = response.total {
-                    total = total.saturating_add(count);
-                    saw_total = true;
-                }
-                notes.extend(response.notes);
-                results.extend(response.results);
-            }
-            Err(err) => notes.push(format!("{} source failed: {err}", source.as_str())),
-        }
-    }
-    results.truncate(data_args.normalized_max_results() as usize);
-    Ok(crate::domain::search::data::DataSearchResponse {
-        query: data_args.query.trim().to_string(),
-        source: "auto".to_string(),
-        total: saw_total.then_some(total),
-        results,
-        notes,
-    })
-}
-
-fn dataset_subcategory_id(subcategory: Option<&str>) -> Result<Option<&'static str>, ToolError> {
-    let Some(subcategory) = subcategory else {
-        return Ok(None);
-    };
-    match subcategory {
-        "expression" | "gene_expression" | "transcriptomics" | "transcriptome" => {
-            Ok(Some("expression"))
-        }
-        "sequencing" | "sequence_reads" | "raw_reads" | "reads" | "sra" => Ok(Some("sequencing")),
-        "genomics" | "genome" | "genomes" | "assembly" | "assemblies" => Ok(Some("genomics")),
-        "sample_metadata" | "sample" | "samples" | "metadata" => Ok(Some("sample_metadata")),
-        "multi_omics" | "multiomics" | "projects" | "project" => Ok(Some("multi_omics")),
-        other => Err(ToolError::InvalidArguments {
-            message: format!("Unsupported dataset subcategory: {other}"),
-        }),
-    }
-}
-
-fn dataset_source_for_subcategory(
-    subcategory: Option<&str>,
-) -> Result<Option<crate::domain::search::data::PublicDataSource>, ToolError> {
-    let Some(subcategory) = subcategory else {
-        return Ok(None);
-    };
-    match subcategory {
-        "expression" | "gene_expression" | "transcriptomics" | "transcriptome" => {
-            Ok(Some(crate::domain::search::data::PublicDataSource::Geo))
-        }
-        "sequencing" | "sequence_reads" | "raw_reads" | "reads" | "sra" => {
-            Ok(Some(crate::domain::search::data::PublicDataSource::EnaRun))
-        }
-        "genomics" | "genome" | "genomes" | "assembly" | "assemblies" => Ok(Some(
-            crate::domain::search::data::PublicDataSource::EnaAssembly,
-        )),
-        "sample_metadata" | "sample" | "samples" | "metadata" => Ok(Some(
-            crate::domain::search::data::PublicDataSource::EnaSample,
-        )),
-        "multi_omics" | "multiomics" | "projects" | "project" => Ok(Some(
-            crate::domain::search::data::PublicDataSource::CbioPortal,
-        )),
-        other => Err(ToolError::InvalidArguments {
-            message: format!("Unsupported dataset subcategory: {other}"),
-        }),
-    }
-}
-
-fn recall_scope_for_source(source: &str) -> String {
-    match source {
-        "auto" => "all",
-        "memory" => "implicit",
-        "knowledge" | "knowledge_base" => "wiki",
-        "session" | "sessions" => "implicit",
-        "source" => "sources",
-        "all" | "implicit" | "wiki" | "long_term" | "permanent" | "sources" => source,
-        _ => "all",
-    }
-    .to_string()
-}
-
 fn search_method_source_key(method: SearchMethod) -> &'static str {
     match method {
         SearchMethod::Tavily => "tavily",
@@ -1944,381 +1600,67 @@ fn web_results_json(
     })
 }
 
-fn structured_error_json(
-    code: &str,
-    category: &str,
+pub(super) async fn search_web_json(
+    ctx: &ToolContext,
+    args: &SearchArgs,
     source: &str,
-    message: impl Into<String>,
-) -> JsonValue {
-    json!({
-        "error": code,
-        "category": category,
-        "source": source,
-        "message": message.into(),
-        "results": [],
-    })
-}
-
-fn json_stream(value: JsonValue) -> crate::infrastructure::streaming::StreamOutputBox {
-    let mut text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-    if text.len() > MAX_OUTPUT_CHARS {
-        text.truncate(MAX_OUTPUT_CHARS);
-        text.push_str("\n/* Output truncated */");
+    max_n: usize,
+    start: Instant,
+) -> Result<JsonValue, ToolError> {
+    let timeout = effective_search_timeout(ctx.timeout_secs);
+    let mut client_builder = reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(concat!("Omiga/", env!("CARGO_PKG_VERSION"), " Search"));
+    if !ctx.web_use_proxy {
+        client_builder = client_builder.no_proxy();
     }
-    SearchOutput { text }.into_stream()
-}
+    let client = client_builder
+        .build()
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("HTTP client: {}", e),
+        })?;
 
-#[async_trait]
-impl super::ToolImpl for SearchTool {
-    type Args = SearchArgs;
-
-    const DESCRIPTION: &'static str = DESCRIPTION;
-
-    async fn execute(
-        ctx: &ToolContext,
-        args: Self::Args,
-    ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
-        validate(&args)?;
-        let start = Instant::now();
-        let category = normalized_category(&args.category);
-        let source = normalized_source(args.source.as_deref());
-        let subcategory = normalized_subcategory(args.subcategory.as_deref());
-        let max_n = effective_max_results(&args);
-
-        match category.as_str() {
-            "web" => {
-                let timeout = effective_search_timeout(ctx.timeout_secs);
-                let mut client_builder = reqwest::Client::builder()
-                    .timeout(timeout)
-                    .user_agent(concat!("Omiga/", env!("CARGO_PKG_VERSION"), " Search"));
-                if !ctx.web_use_proxy {
-                    client_builder = client_builder.no_proxy();
-                }
-                let client = client_builder
-                    .build()
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("HTTP client: {}", e),
-                    })?;
-
-                let allowed = &args.allowed_domains;
-                let blocked = &args.blocked_domains;
-                let search_url = args.search_url.as_deref().filter(|s| !s.trim().is_empty());
-                if let Some(search_url) = search_url {
-                    super::web_safety::validate_public_http_url(
-                        &ctx.project_root,
-                        search_url,
-                        false,
-                    )
-                    .map_err(|message| ToolError::InvalidArguments { message })?;
-                }
-
-                let execution = tokio::select! {
-                    _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                    r = enforce_search_timeout(timeout, async {
-                        let strategy_fut = search_ordered_methods(
-                            &client,
-                            ctx,
-                            args.query.trim(),
-                            allowed,
-                            blocked,
-                            max_n,
-                            search_url,
-                            &source,
-                        );
-                        tokio::select! {
-                            _ = ctx.cancel.cancelled() => Err(ToolError::Cancelled),
-                            r = strategy_fut => r,
-                        }
-                    }) => r?,
-                };
-
-                let processed = dedupe_hits_preserve_order(
-                    execution
-                        .hits
-                        .iter()
-                        .cloned()
-                        .map(sanitize_hit)
-                        .collect::<Vec<_>>(),
-                );
-                let hits = filter_hits(&ctx.project_root, processed, allowed, blocked, max_n);
-                let duration = start.elapsed().as_secs_f32();
-                Ok(json_stream(web_results_json(
-                    &args, &source, execution, hits, duration,
-                )))
-            }
-            "literature" => match source.as_str() {
-                "auto" | "pubmed" => {
-                    let client =
-                        crate::domain::search::pubmed::EntrezClient::from_tool_context(ctx)
-                            .map_err(|message| ToolError::ExecutionFailed { message })?;
-                    let response = tokio::select! {
-                        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                        r = client.search(crate::domain::search::pubmed::PubmedSearchArgs {
-                            query: args.query.trim().to_string(),
-                            max_results: args.max_results,
-                            ret_start: None,
-                            sort: None,
-                            date_type: None,
-                            mindate: None,
-                            maxdate: None,
-                        }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
-                    };
-                    Ok(json_stream(
-                        crate::domain::search::pubmed::search_response_to_json(&response),
-                    ))
-                }
-                "semantic_scholar" | "semanticscholar" | "s2" => {
-                    if !ctx.web_search_api_keys.semantic_scholar_enabled {
-                        return Ok(json_stream(structured_error_json(
-                            "source_disabled",
-                            "literature",
-                            &source,
-                            "literature.semantic_scholar is disabled. Enable it and configure an API key in Settings → Search.",
-                        )));
-                    }
-                    let client =
-                        crate::domain::search::semantic_scholar::SemanticScholarClient::from_tool_context(ctx)
-                            .map_err(|message| ToolError::ExecutionFailed { message })?;
-                    let response = tokio::select! {
-                        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                        r = client.search(crate::domain::search::semantic_scholar::SemanticScholarSearchArgs {
-                            query: args.query.trim().to_string(),
-                            max_results: args.max_results,
-                            token: None,
-                        }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
-                    };
-                    Ok(json_stream(
-                        crate::domain::search::semantic_scholar::search_response_to_json(&response),
-                    ))
-                }
-                "arxiv" | "crossref" | "openalex" | "biorxiv" | "bio_rxiv" | "medrxiv"
-                | "med_rxiv" => {
-                    let source_kind =
-                        crate::domain::search::literature::PublicLiteratureSource::parse(&source)
-                            .ok_or_else(|| ToolError::InvalidArguments {
-                            message: format!("Unsupported literature search source: {source}"),
-                        })?;
-                    let client =
-                        crate::domain::search::literature::PublicLiteratureClient::from_tool_context(ctx)
-                            .map_err(|message| ToolError::ExecutionFailed { message })?;
-                    let response = tokio::select! {
-                        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                        r = client.search(source_kind, crate::domain::search::literature::LiteratureSearchArgs {
-                            query: args.query.trim().to_string(),
-                            max_results: args.max_results,
-                        }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
-                    };
-                    Ok(json_stream(
-                        crate::domain::search::literature::search_response_to_json(&response),
-                    ))
-                }
-                other => Err(ToolError::InvalidArguments {
-                    message: format!("Unsupported literature search source: {other}"),
-                }),
-            },
-            "knowledge" => {
-                <super::recall::RecallTool as super::ToolImpl>::execute(
-                    ctx,
-                    super::recall::RecallArgs {
-                        query: args.query.trim().to_string(),
-                        limit: max_n.clamp(1, 20),
-                        scope: recall_scope_for_source(&source),
-                    },
-                )
-                .await
-            }
-            "data" => {
-                if let Some(type_id) = dataset_subcategory_id(subcategory.as_deref())? {
-                    if !ctx
-                        .web_search_api_keys
-                        .is_query_dataset_type_enabled(type_id)
-                    {
-                        return Ok(json_stream(structured_error_json(
-                            "source_disabled",
-                            "data",
-                            &source,
-                            format!("data.{type_id} is disabled. Enable it in Settings → Search.",),
-                        )));
-                    }
-                }
-                match source.as_str() {
-                    "auto" => {
-                        let client =
-                            crate::domain::search::data::PublicDataClient::from_tool_context(ctx)
-                                .map_err(|message| ToolError::ExecutionFailed { message })?;
-                        let data_args = crate::domain::search::data::DataSearchArgs {
-                            query: args.query.trim().to_string(),
-                            max_results: args.max_results,
-                            params: None,
-                        };
-                        let response = if let Some(source_kind) =
-                            dataset_source_for_subcategory(subcategory.as_deref())?
-                        {
-                            if !ctx
-                                .web_search_api_keys
-                                .is_query_dataset_source_enabled(source_kind.as_str())
-                            {
-                                return Ok(json_stream(structured_error_json(
-                                    "source_disabled",
-                                    "data",
-                                    source_kind.as_str(),
-                                    format!(
-                                        "data.{} is disabled. Enable it in Settings → Search.",
-                                        source_kind.as_str()
-                                    ),
-                                )));
-                            }
-                            tokio::select! {
-                                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                                r = client.search(source_kind, data_args) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
-                            }
-                        } else {
-                            dataset_auto_search(ctx, &client, data_args).await?
-                        };
-                        Ok(json_stream(
-                            crate::domain::search::data::search_response_to_json(&response),
-                        ))
-                    }
-                    source
-                        if crate::domain::search::data::PublicDataSource::parse(source)
-                            .is_some() =>
-                    {
-                        let source_kind =
-                            crate::domain::search::data::PublicDataSource::parse(source)
-                                .ok_or_else(|| ToolError::InvalidArguments {
-                                    message: format!("Unsupported data search source: {source}"),
-                                })?;
-                        if !ctx
-                            .web_search_api_keys
-                            .is_query_dataset_source_enabled(source_kind.as_str())
-                        {
-                            return Ok(json_stream(structured_error_json(
-                                "source_disabled",
-                                "data",
-                                source_kind.as_str(),
-                                format!(
-                                    "data.{} is disabled. Enable it in Settings → Search.",
-                                    source_kind.as_str()
-                                ),
-                            )));
-                        }
-                        let client =
-                            crate::domain::search::data::PublicDataClient::from_tool_context(ctx)
-                                .map_err(|message| ToolError::ExecutionFailed { message })?;
-                        let response = tokio::select! {
-                            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                            r = client.search(source_kind, crate::domain::search::data::DataSearchArgs {
-                                query: args.query.trim().to_string(),
-                                max_results: args.max_results,
-                                params: None,
-                            }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
-                        };
-                        Ok(json_stream(
-                            crate::domain::search::data::search_response_to_json(&response),
-                        ))
-                    }
-                    other => Err(ToolError::InvalidArguments {
-                        message: format!("Unsupported data search source: {other}"),
-                    }),
-                }
-            }
-            "social" => match source.as_str() {
-                "auto" | "wechat" => {
-                    if !ctx.web_search_api_keys.wechat_search_enabled {
-                        return Ok(json_stream(structured_error_json(
-                            "source_disabled",
-                            "social",
-                            &source,
-                            "social.wechat is disabled. Enable WeChat public-account search in Settings → Search.",
-                        )));
-                    }
-                    let client =
-                        crate::domain::search::wechat::WechatClient::from_tool_context(ctx)
-                            .map_err(|message| ToolError::ExecutionFailed { message })?;
-                    let response = tokio::select! {
-                        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-                        r = client.search(crate::domain::search::wechat::WechatSearchArgs {
-                            query: args.query.trim().to_string(),
-                            max_results: args.max_results,
-                            page: None,
-                        }) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
-                    };
-                    Ok(json_stream(
-                        crate::domain::search::wechat::search_response_to_json(&response),
-                    ))
-                }
-                other => Err(ToolError::InvalidArguments {
-                    message: format!("Unsupported social search source: {other}"),
-                }),
-            },
-            other => Err(ToolError::InvalidArguments {
-                message: format!("Unsupported search category: {other}"),
-            }),
-        }
+    let allowed = &args.allowed_domains;
+    let blocked = &args.blocked_domains;
+    let search_url = args.search_url.as_deref().filter(|s| !s.trim().is_empty());
+    if let Some(search_url) = search_url {
+        crate::domain::tools::web_safety::validate_public_http_url(
+            &ctx.project_root,
+            search_url,
+            false,
+        )
+        .map_err(|message| ToolError::InvalidArguments { message })?;
     }
-}
 
-#[derive(Debug, Clone)]
-struct SearchOutput {
-    text: String,
-}
+    let execution = tokio::select! {
+        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+        r = enforce_search_timeout(timeout, async {
+            let strategy_fut = search_ordered_methods(
+                &client,
+                ctx,
+                args.query.trim(),
+                allowed,
+                blocked,
+                max_n,
+                search_url,
+                source,
+            );
+            tokio::select! {
+                _ = ctx.cancel.cancelled() => Err(ToolError::Cancelled),
+                r = strategy_fut => r,
+            }
+        }) => r?,
+    };
 
-impl StreamOutput for SearchOutput {
-    fn into_stream(self) -> Pin<Box<dyn futures::Stream<Item = StreamOutputItem> + Send>> {
-        use futures::stream;
-        Box::pin(stream::iter(vec![
-            StreamOutputItem::Start,
-            StreamOutputItem::Content(self.text),
-            StreamOutputItem::Complete,
-        ]))
-    }
-}
-
-pub fn schema() -> ToolSchema {
-    ToolSchema::new(
-        "search",
-        DESCRIPTION,
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "category": {
-                    "type": "string",
-                    "description": "Source category. Supports literature, dataset (alias: data), knowledge, web, social."
-                },
-                "source": {
-                    "type": "string",
-                    "description": "Source within the category. Defaults to auto. Examples: google, ddg, bing, tavily, pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar (opt-in), geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, cbioportal, gtex, wiki, implicit, long_term, sources, wechat (opt-in)."
-                },
-                "subcategory": {
-                    "type": "string",
-                    "description": "Optional subcategory. For dataset: expression, sequencing, genomics, sample_metadata, multi_omics. With source=auto, supported dataset subcategories choose the best built-in source automatically."
-                },
-                "query": {
-                    "type": "string",
-                    "description": "Search query (at least 2 characters)"
-                },
-                "allowed_domains": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Only include results whose URL host matches one of these domains"
-                },
-                "blocked_domains": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Exclude results from these domains"
-                },
-                "max_results": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10,
-                    "description": "Maximum number of results (default 5)"
-                },
-                "search_url": {
-                    "type": "string",
-                    "description": "Optional override for the DuckDuckGo HTML search endpoint (http(s) URL)"
-                }
-            },
-            "required": ["category", "query"]
-        }),
-    )
+    let processed = dedupe_hits_preserve_order(
+        execution
+            .hits
+            .iter()
+            .cloned()
+            .map(sanitize_hit)
+            .collect::<Vec<_>>(),
+    );
+    let hits = filter_hits(&ctx.project_root, processed, allowed, blocked, max_n);
+    let duration = start.elapsed().as_secs_f32();
+    Ok(web_results_json(args, source, execution, hits, duration))
 }
