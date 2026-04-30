@@ -52,7 +52,32 @@ export interface ScheduleRequest {
   maxAgents?: number;
   autoDecompose?: boolean;
   strategy?: string;
+  modeHint?: string;
   skipConfirmation?: boolean;
+}
+
+/** 后端 TaskPlan 的 camelCase JSON 形态；用于确认后执行已批准计划，避免重新规划。 */
+export interface AgentScheduleTaskPlan {
+  planId: string;
+  originalRequest: string;
+  entryAgentType?: string;
+  executionSupervisorAgentType?: string;
+  subtasks: Array<{
+    id: string;
+    description: string;
+    agentType: string;
+    dependencies: string[];
+    critical: boolean;
+    estimatedSecs: number;
+    timeoutSecs?: number;
+    maxRetries?: number;
+    supervisorAgentType?: string;
+    stage?: string;
+    context: string;
+  }>;
+  executionOrder: string[];
+  allowParallel: boolean;
+  globalContext: string;
 }
 
 /** 确认请求载荷（来自 agent-schedule-confirmation-required 事件） */
@@ -62,6 +87,10 @@ export interface ScheduleConfirmationPayload {
   summary: string;
   estimatedMinutes: number;
   agents: string[];
+  plan: AgentScheduleTaskPlan;
+  projectRoot: string;
+  strategy?: string;
+  modeHint?: string;
   originalRequest: ScheduleRequest;
 }
 

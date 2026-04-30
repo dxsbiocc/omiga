@@ -4690,26 +4690,39 @@ pub async fn send_message(
                     && !is_team_mode_for_spawn
                     && !is_explicit_execution_workflow_for_spawn;
                 if needs_confirm {
-                    use crate::domain::agents::scheduler::SchedulingStrategy;
+                    let pending_plan = sched.plan.clone();
+                    let pending_plan_id = pending_plan.plan_id.clone();
+                    let pending_original_request = pending_plan.original_request.clone();
+                    let pending_task_count = pending_plan.subtasks.len();
+                    let pending_mode_hint = keyword_skill_route
+                        .as_ref()
+                        .map(|r| r.skill_name.clone())
+                        .unwrap_or_else(|| "schedule".to_string());
                     let _ = app_clone.emit(
                         "agent-schedule-confirmation-required",
                         serde_json::json!({
-                            "sessionId": session_id_clone,
-                            "planId": sched.plan.plan_id,
+                            "sessionId": session_id_clone.clone(),
+                            "planId": pending_plan_id,
                             "summary": sched.confirmation_message
                                 .as_deref()
                                 .unwrap_or("此计划需要用户确认后才能执行"),
                             "estimatedMinutes": sched.estimated_duration_secs.div_ceil(60),
-                            "agents": sched.selected_agents,
+                            "agents": sched.selected_agents.clone(),
+                            // Send the reviewed plan so confirmation executes exactly this decomposition.
+                            "plan": pending_plan,
+                            "projectRoot": project_root_str_for_spawn.clone(),
+                            "strategy": sched.recommended_strategy,
+                            "modeHint": pending_mode_hint.clone(),
                             "originalRequest": {
-                                "userRequest": sched.plan.original_request,
+                                "userRequest": pending_original_request,
                                 "projectRoot": project_root_str_for_spawn.clone(),
-                                "sessionId": session_id_clone,
-                                "maxAgents": sched.plan.subtasks.len(),
+                                "sessionId": session_id_clone.clone(),
+                                "maxAgents": pending_task_count,
                                 "autoDecompose": true,
                                 "strategy": serde_json::to_value(
-                                    SchedulingStrategy::Auto
+                                    sched.recommended_strategy
                                 ).unwrap_or(serde_json::Value::Null),
+                                "modeHint": pending_mode_hint,
                                 "skipConfirmation": true,
                             }
                         }),

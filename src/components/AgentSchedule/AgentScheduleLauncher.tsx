@@ -21,7 +21,11 @@ import {
   Chip,
   Stack,
 } from "@mui/material";
-import { useAgentStore, type ScheduleRequest } from "../../state/agentStore";
+import {
+  useAgentStore,
+  type ScheduleConfirmationPayload,
+  type ScheduleRequest,
+} from "../../state/agentStore";
 
 type SchedulingStrategy =
   | "Auto"
@@ -54,6 +58,24 @@ function fireSchedule(req: ScheduleRequest, onError: (msg: string) => void) {
   useAgentStore.getState().setTaskPanelVisible(true);
 }
 
+function fireConfirmedPlan(
+  payload: ScheduleConfirmationPayload,
+  onError: (msg: string) => void,
+) {
+  invoke("run_existing_agent_plan", {
+    request: {
+      plan: payload.plan,
+      projectRoot: payload.projectRoot || payload.originalRequest.projectRoot,
+      sessionId: payload.sessionId || payload.originalRequest.sessionId,
+      modeHint: payload.modeHint ?? payload.originalRequest.modeHint ?? "schedule",
+      strategy: payload.strategy ?? payload.originalRequest.strategy ?? "Phased",
+    },
+  }).catch((err: unknown) => {
+    onError(String(err));
+  });
+  useAgentStore.getState().setTaskPanelVisible(true);
+}
+
 /** 确认对话框：当计划需要用户审批时弹出（在 App 根级挂载，不依赖 projectRoot） */
 export function ConfirmationDialog() {
   const { pendingConfirmation, setPendingConfirmation } = useAgentStore();
@@ -62,9 +84,10 @@ export function ConfirmationDialog() {
   if (!pendingConfirmation) return null;
 
   const handleConfirm = () => {
+    const confirmed = pendingConfirmation;
     setPendingConfirmation(null);
     setError(null);
-    fireSchedule(pendingConfirmation.originalRequest, setError);
+    fireConfirmedPlan(confirmed, setError);
   };
 
   const handleCancel = () => {

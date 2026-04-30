@@ -616,6 +616,34 @@ fn default_auto_decompose() -> bool {
     true
 }
 
+async fn register_active_orchestration(
+    app_state: &OmigaAppState,
+    session_id: &str,
+    token: tokio_util::sync::CancellationToken,
+) -> String {
+    let orch_id = uuid::Uuid::new_v4().to_string();
+    let mut orch_map = app_state.chat.active_orchestrations.lock().await;
+    orch_map
+        .entry(session_id.to_string())
+        .or_default()
+        .insert(orch_id.clone(), token);
+    orch_id
+}
+
+async fn deregister_active_orchestration(
+    app_state: &OmigaAppState,
+    session_id: &str,
+    orch_id: &str,
+) {
+    let mut orch_map = app_state.chat.active_orchestrations.lock().await;
+    if let Some(inner) = orch_map.get_mut(session_id) {
+        inner.remove(orch_id);
+        if inner.is_empty() {
+            orch_map.remove(session_id);
+        }
+    }
+}
+
 /// Run the agent scheduler: decompose `user_request`, then execute subtasks in
 /// parallel using real LLM sub-agents backed by `spawn_background_agent`.
 ///
@@ -628,18 +656,6 @@ pub(crate) async fn run_agent_schedule_inner(
 ) -> Result<crate::domain::agents::scheduler::OrchestrationResult, OmigaError> {
     use crate::domain::agents::scheduler::{AgentScheduler, SchedulingRequest};
     use crate::errors::ChatError;
-
-    // Register a cancel token for this orchestration so cancel_agent_schedule can abort it.
-    // Multiple concurrent orchestrations on the same session are each tracked by orch_id.
-    let orch_cancel = tokio_util::sync::CancellationToken::new();
-    let orch_id = uuid::Uuid::new_v4().to_string();
-    {
-        let mut orch_map = app_state.chat.active_orchestrations.lock().await;
-        orch_map
-            .entry(request.session_id.clone())
-            .or_default()
-            .insert(orch_id.clone(), orch_cancel.clone());
-    }
 
     // Build runtime inheriting execution environment and constraints from the caller's session.
     let project_root_path = std::path::Path::new(&request.project_root);
@@ -680,25 +696,32 @@ pub(crate) async fn run_agent_schedule_inner(
 
     // Step 1b: confirmation gate — emit event and return early when the plan requires approval.
     if sched_result.requires_confirmation && !request.skip_confirmation {
+        let pending_plan = sched_result.plan.clone();
+        let pending_plan_id = pending_plan.plan_id.clone();
         let _ = app.emit(
             "agent-schedule-confirmation-required",
             serde_json::json!({
-                "sessionId": request.session_id,
-                "planId": sched_result.plan.plan_id,
+                "sessionId": request.session_id.clone(),
+                "planId": pending_plan_id,
                 "summary": sched_result.confirmation_message
                     .as_deref()
                     .unwrap_or("此计划需要用户确认后才能执行"),
                 "estimatedMinutes": sched_result.estimated_duration_secs.div_ceil(60),
-                "agents": sched_result.selected_agents,
-                // Echo back the original request so the frontend can re-fire with skip_confirmation=true
+                "agents": sched_result.selected_agents.clone(),
+                // Send the exact plan that was reviewed so approval never triggers a re-plan.
+                "plan": pending_plan,
+                "projectRoot": request.project_root.clone(),
+                "strategy": sched_result.recommended_strategy,
+                "modeHint": request.mode_hint.clone(),
+                // Legacy echo for older UI surfaces; confirmation approval should prefer `plan`.
                 "originalRequest": {
-                    "userRequest": request.user_request,
-                    "projectRoot": request.project_root,
-                    "sessionId": request.session_id,
+                    "userRequest": request.user_request.clone(),
+                    "projectRoot": request.project_root.clone(),
+                    "sessionId": request.session_id.clone(),
                     "maxAgents": request.max_agents,
                     "autoDecompose": request.auto_decompose,
                     "strategy": request.strategy,
-                    "modeHint": request.mode_hint,
+                    "modeHint": request.mode_hint.clone(),
                     "skipConfirmation": true,
                 }
             }),
@@ -726,6 +749,11 @@ pub(crate) async fn run_agent_schedule_inner(
                 .strategy
                 .unwrap_or(crate::domain::agents::scheduler::SchedulingStrategy::Auto),
         );
+    // Register only once execution actually starts. Pending confirmation plans are not
+    // cancellable work yet and must not leave stale active-orchestration tokens behind.
+    let orch_cancel = tokio_util::sync::CancellationToken::new();
+    let orch_id =
+        register_active_orchestration(app_state, &request.session_id, orch_cancel.clone()).await;
     let orch_result = scheduler
         .execute_plan_with_runtime(
             &sched_result.plan,
@@ -739,15 +767,7 @@ pub(crate) async fn run_agent_schedule_inner(
         .map_err(|e| OmigaError::Chat(ChatError::StreamError(e)));
 
     // Deregister this orchestration's cancel token when execution finishes.
-    {
-        let mut orch_map = app_state.chat.active_orchestrations.lock().await;
-        if let Some(inner) = orch_map.get_mut(&request.session_id) {
-            inner.remove(&orch_id);
-            if inner.is_empty() {
-                orch_map.remove(&request.session_id);
-            }
-        }
-    }
+    deregister_active_orchestration(app_state, &request.session_id, &orch_id).await;
 
     let orch_result = orch_result?;
 
@@ -786,16 +806,6 @@ pub async fn run_existing_agent_plan(
 ) -> CommandResult<crate::domain::agents::scheduler::OrchestrationResult> {
     use crate::domain::agents::scheduler::{AgentScheduler, SchedulingRequest, TaskPlanner};
     use crate::errors::ChatError;
-
-    let orch_cancel = tokio_util::sync::CancellationToken::new();
-    let orch_id = uuid::Uuid::new_v4().to_string();
-    {
-        let mut orch_map = app_state.chat.active_orchestrations.lock().await;
-        orch_map
-            .entry(request.session_id.clone())
-            .or_default()
-            .insert(orch_id.clone(), orch_cancel.clone());
-    }
 
     let project_root_path = std::path::Path::new(&request.project_root);
     let runtime = AgentLlmRuntime::from_app(&app, Some(request.session_id.as_str()))
@@ -844,6 +854,9 @@ pub async fn run_existing_agent_plan(
         .await;
 
     let scheduler = AgentScheduler::new();
+    let orch_cancel = tokio_util::sync::CancellationToken::new();
+    let orch_id =
+        register_active_orchestration(&app_state, &request.session_id, orch_cancel.clone()).await;
     let orch_result = scheduler
         .execute_plan_with_runtime(
             &plan,
@@ -856,15 +869,7 @@ pub async fn run_existing_agent_plan(
         .await
         .map_err(|e| OmigaError::Chat(ChatError::StreamError(e)));
 
-    {
-        let mut orch_map = app_state.chat.active_orchestrations.lock().await;
-        if let Some(inner) = orch_map.get_mut(&request.session_id) {
-            inner.remove(&orch_id);
-            if inner.is_empty() {
-                orch_map.remove(&request.session_id);
-            }
-        }
-    }
+    deregister_active_orchestration(&app_state, &request.session_id, &orch_id).await;
 
     let orch_result = orch_result?;
     inject_schedule_summary_message(

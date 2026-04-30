@@ -32,6 +32,25 @@ fn bash_alias_matches() {
 }
 
 #[test]
+fn legacy_web_aliases_match_replacement_tools() {
+    for legacy in ["WebFetch", "web_fetch", "webFetch"] {
+        let r = permission_rule_value_from_string(legacy);
+        assert!(
+            blanket_deny_rule_matches(&r, "fetch"),
+            "{legacy} should deny replacement fetch tool"
+        );
+    }
+
+    for legacy in ["WebSearch", "web_search", "webSearch"] {
+        let r = permission_rule_value_from_string(legacy);
+        assert!(
+            blanket_deny_rule_matches(&r, "search"),
+            "{legacy} should deny replacement search tool"
+        );
+    }
+}
+
+#[test]
 fn mcp_server_rule() {
     let r = permission_rule_value_from_string("mcp__figma");
     assert!(blanket_deny_rule_matches(
