@@ -15,18 +15,24 @@ pub const EXIT_PLAN_MODE_V2_TOOL_PROMPT: &str = include_str!("plan_mode/exit_pla
 
 /// Short confirmation — matches `EnterPlanModeTool.call` return `data.message` in TypeScript.
 pub const ENTER_PLAN_MODE_SUCCESS_MESSAGE: &str =
-    "Entered plan mode. You should now focus on exploring the codebase and designing an implementation approach.";
+    "Entered plan mode. First build shared understanding with the user, then design an implementation approach.";
 
 /// Follow-up after a successful `EnterPlanMode` call — combines TS `mapToolResultToToolResultBlockParam`
 /// non-interview instructions with plan-file-only rules from `getPlanModeV2Instructions` (`messages.ts`).
 pub const ENTER_PLAN_MODE_TOOL_RESULT_FOLLOWUP: &str = r#"In plan mode, you should:
-1. Thoroughly explore the codebase to understand existing patterns
-2. Identify similar features and architectural approaches
-3. Consider multiple approaches and their trade-offs
-4. Use AskUserQuestion as the first-choice UI if you need to clarify the approach; do not ask bounded clarification choices only in plain text when the tool is available
-5. Design a concrete implementation strategy
-6. Write and refine your plan in a single markdown plan file in the project (use `file_write` / `file_edit` on that path only). Do not edit implementation files or run non-readonly actions until the user approves after you exit plan mode.
-7. When the plan is ready, use ExitPlanMode to request user approval.
+1. Run the requirements interview gate before planning.
+   - Separate facts, assumptions, unknowns, decisions, constraints, non-goals, and success criteria.
+   - If a question can be answered by exploring the codebase, explore the codebase instead of asking the user.
+   - Ask one user-facing question at a time. Include your recommended answer and the trade-off for that question.
+   - Continue across multiple turns until the important branches of the decision tree are resolved.
+   - Do **not** present a concrete plan, write a plan file, or call ExitPlanMode while material requirements are still unknown.
+2. Thoroughly explore the codebase to understand existing patterns.
+3. Identify similar features and architectural approaches.
+4. Consider multiple approaches and their trade-offs.
+5. Use AskUserQuestion as the first-choice UI if you need to clarify the approach; do not ask bounded clarification choices only in plain text when the tool is available.
+6. Only after the requirements gate is satisfied, design a concrete implementation strategy.
+7. Write and refine your plan in a single markdown plan file in the project (use `file_write` / `file_edit` on that path only). Do not edit implementation files or run non-readonly actions until the user approves after you exit plan mode.
+8. When the plan is ready, use ExitPlanMode to request user approval.
 
 **Important:** Use AskUserQuestion only to clarify requirements or choose between approaches, and prefer it over plain-text questions for bounded choices. Use ExitPlanMode to request plan approval. Do NOT ask "Is this plan okay?" via AskUserQuestion — that is what ExitPlanMode is for.
 
@@ -39,3 +45,19 @@ pub const EXIT_PLAN_MODE_DESCRIPTION: &str = concat!(
 
 **Omiga:** Plan approval is reviewed in chat (not the Claude Code approval dialog). `allowedPrompts` still records semantic permission hints for later execution."#
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enter_plan_followup_requires_interview_before_planning() {
+        assert!(ENTER_PLAN_MODE_SUCCESS_MESSAGE.contains("shared understanding"));
+        assert!(ENTER_PLAN_MODE_TOOL_RESULT_FOLLOWUP.contains("requirements interview gate"));
+        assert!(
+            ENTER_PLAN_MODE_TOOL_RESULT_FOLLOWUP.contains("Ask one user-facing question at a time")
+        );
+        assert!(ENTER_PLAN_MODE_TOOL_RESULT_FOLLOWUP.contains("Do **not** present a concrete plan"));
+        assert!(ENTER_PLAN_MODE_TOOL_RESULT_FOLLOWUP.contains("ExitPlanMode"));
+    }
+}

@@ -1578,9 +1578,21 @@ pub async fn send_message(
         .set_session_composer_stance(&session_id, request.permission_mode.as_deref())
         .await;
 
-    // 检测是否为 Plan mode（Composer Plan Agent 或显式 /plan 命令）
+    let session_plan_mode_flag = {
+        let sessions = app_state.chat.sessions.read().await;
+        sessions
+            .get(&session_id)
+            .map(|runtime| runtime.plan_mode.clone())
+    };
+    let session_plan_mode_active = match session_plan_mode_flag {
+        Some(flag) => *flag.lock().await,
+        None => false,
+    };
+
+    // 检测是否为 Plan mode（Composer Plan Agent、显式 /plan 命令、或 EnterPlanMode 后的后续轮次）
     let is_plan_mode = request.composer_agent_type.as_deref() == Some("Plan")
-        || matches!(explicit_workflow_command, Some("plan"));
+        || matches!(explicit_workflow_command, Some("plan"))
+        || session_plan_mode_active;
 
     // ===== 智能调度系统集成 =====
     // 检测是否使用自动调度模式（用户选择 auto 或未指定特定 Agent）
@@ -1814,14 +1826,14 @@ pub async fn send_message(
         })
         .or(mode_strategy_override);
 
-    let use_scheduler = is_plan_command
-        || is_schedule_command
+    let use_scheduler = is_schedule_command
         || is_team_keyword_route
-        || request
-            .composer_agent_type
-            .as_deref()
-            .map(|t| t == "auto" || t == "general-purpose" || t.is_empty())
-            .unwrap_or(true);
+        || (!is_plan_mode
+            && request
+                .composer_agent_type
+                .as_deref()
+                .map(|t| t == "auto" || t == "general-purpose" || t.is_empty())
+                .unwrap_or(true));
 
     // 如果是自动模式或 Team 关键词路由，检测任务复杂度并可能进行任务分解
     // Pre-fetch LLM config for the planner (needed before llm_config is built below).
@@ -2352,6 +2364,9 @@ pub async fn send_message(
             &project_root,
             &llm_config.model,
         ));
+        if is_plan_mode {
+            prompt_parts.push(agent_prompt::active_plan_mode_turn_addendum().to_string());
+        }
         if coordinator::is_coordinator_mode() {
             prompt_parts.push(agent_prompt::coordinator_mode_addendum().to_string());
         }

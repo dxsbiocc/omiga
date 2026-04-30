@@ -39,4 +39,4 @@ settings:
   enable_tools: true
   web_use_proxy: true
   web_search_engine: ddg
-  web_search_methods: [tavily, exa, firecrawl, parallel, google, bing, ddg]
+  web_search_methods: [ddg, google, bing]

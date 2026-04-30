@@ -54,9 +54,23 @@ fn section_plan_mode() -> &'static str {
     r#"## Plan mode (Claude Code parity)
 
 - Full behavior is defined on the `EnterPlanMode` and `ExitPlanMode` tools — their text matches upstream `src/tools/EnterPlanModeTool/prompt.ts` and `src/tools/ExitPlanModeTool/prompt.ts`. Prefer those definitions over this summary.
+- Plan mode has a requirements interview gate before planning. Build shared understanding first: distinguish facts, assumptions, unknowns, decisions, constraints, non-goals, and success criteria. If codebase exploration can answer a question, explore instead of asking. Otherwise ask one user-facing question at a time and include your recommended answer with the trade-off.
+- Do not draft a concrete plan, write the plan file, or call `ExitPlanMode` until the important branches of the decision tree are resolved.
 - While in plan mode: explore with read-only tools (`glob`, `ripgrep`, `file_read`, …). Edit **only** your plan markdown file via `file_write` / `file_edit` until you exit. Do not implement product changes, broad refactors, or non-readonly shell work until the user approves after `ExitPlanMode`.
 - Use `AskUserQuestion` as the first-choice UI to clarify requirements or compare bounded approaches. Do not ask those clarification choices only in plain text when the tool is available. Use `ExitPlanMode` to request plan approval — not `AskUserQuestion` for phrases like "Is this plan okay?".
 - Omiga does not inject a fixed plan file path on every turn (unlike Claude Code `plan_mode` attachments). Choose a stable path under the project (for example `docs/plan-<topic>.md`) and reuse it until you call `ExitPlanMode`."#
+}
+
+pub fn active_plan_mode_turn_addendum() -> &'static str {
+    r#"## Active Plan-mode turn
+
+The user intentionally chose Plan mode (or `/plan`). Treat this as an interview-first planning turn:
+
+- For non-trivial work, enter plan mode with `EnterPlanMode` if the session is not already there.
+- Before making a plan, run the requirements interview gate from the Plan mode section.
+- Ask one user-facing question at a time; include your recommended answer and why.
+- Explore the codebase instead of asking when the answer is discoverable locally.
+- Do not emit a final plan, create plan todos, write a plan file, or call `ExitPlanMode` until material requirements, constraints, non-goals, and success criteria are clear."#
 }
 
 fn section_doing_tasks() -> &'static str {
@@ -376,6 +390,8 @@ mod tests {
         assert!(s.contains("EnterPlanMode"));
         assert!(s.contains("ExitPlanMode"));
         assert!(s.contains("Plan mode (Claude Code parity)"));
+        assert!(s.contains("requirements interview gate"));
+        assert!(s.contains("one user-facing question at a time"));
         assert!(s.contains("ToolSearch"));
         assert!(s.contains("TaskCreate"));
         assert!(s.contains("todo_write"));
@@ -391,5 +407,14 @@ mod tests {
         assert!(s.contains("Knowledge base search priority"));
         assert!(s.contains("recall"));
         assert!(s.contains("only after `recall` has returned no relevant results"));
+    }
+
+    #[test]
+    fn active_plan_mode_addendum_blocks_premature_plans() {
+        let s = active_plan_mode_turn_addendum();
+        assert!(s.contains("interview-first planning turn"));
+        assert!(s.contains("EnterPlanMode"));
+        assert!(s.contains("Do not emit a final plan"));
+        assert!(s.contains("one user-facing question at a time"));
     }
 }

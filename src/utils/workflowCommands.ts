@@ -8,7 +8,7 @@ export const WORKFLOW_SLASH_COMMANDS: WorkflowSlashCommandDefinition[] = [
   {
     id: "plan",
     label: "/plan",
-    description: "进入 Plan 模式：先生成科研分析方案，不直接执行。",
+    description: "进入 Plan 模式：先多轮澄清需求，再生成方案，不直接执行。",
   },
   {
     id: "schedule",

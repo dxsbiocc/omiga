@@ -22,6 +22,7 @@ const SOURCE_TTL_DAYS: i64 = 90;
 
 use crate::domain::pageindex::{derive_query_terms, score_terms_against_text};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
@@ -343,32 +344,18 @@ pub fn entries_from_search_output(
     session_id: Option<&str>,
     query: &str,
 ) -> Vec<SourceEntry> {
-    extract_urls_from_text(output)
-        .into_iter()
-        .map(|url| {
-            let canonical = canonicalize_url(&url);
-            let domain = extract_domain(&url);
-            let now = chrono::Utc::now().to_rfc3339();
-            let expires_at =
-                (chrono::Utc::now() + chrono::Duration::days(SOURCE_TTL_DAYS)).to_rfc3339();
-            SourceEntry {
-                url: url.clone(),
-                canonical_url: canonical,
+    let urls = extract_urls_from_search_json(output).unwrap_or_else(|| {
+        extract_urls_from_text(output)
+            .into_iter()
+            .map(|url| SearchSourceSeed {
+                url,
                 title: None,
-                domain,
                 gist: None,
-                accessed_at: now.clone(),
-                last_used_at: now,
-                use_count: 1,
-                sessions: session_id.map(|s| vec![s.to_string()]).unwrap_or_default(),
-                query_context: if query.trim().is_empty() {
-                    vec![]
-                } else {
-                    vec![query.to_string()]
-                },
-                expires_at: Some(expires_at),
-            }
-        })
+            })
+            .collect()
+    });
+    urls.into_iter()
+        .map(|seed| source_entry_from_search_seed(seed, session_id, query))
         .collect()
 }
 
@@ -515,6 +502,89 @@ fn extract_urls_from_text(text: &str) -> Vec<String> {
     urls
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchSourceSeed {
+    url: String,
+    title: Option<String>,
+    gist: Option<String>,
+}
+
+fn source_entry_from_search_seed(
+    seed: SearchSourceSeed,
+    session_id: Option<&str>,
+    query: &str,
+) -> SourceEntry {
+    let canonical = canonicalize_url(&seed.url);
+    let domain = extract_domain(&seed.url);
+    let now = chrono::Utc::now().to_rfc3339();
+    let expires_at = (chrono::Utc::now() + chrono::Duration::days(SOURCE_TTL_DAYS)).to_rfc3339();
+    SourceEntry {
+        url: seed.url,
+        canonical_url: canonical,
+        title: seed.title,
+        domain,
+        gist: seed.gist,
+        accessed_at: now.clone(),
+        last_used_at: now,
+        use_count: 1,
+        sessions: session_id.map(|s| vec![s.to_string()]).unwrap_or_default(),
+        query_context: if query.trim().is_empty() {
+            vec![]
+        } else {
+            vec![query.to_string()]
+        },
+        expires_at: Some(expires_at),
+    }
+}
+
+fn extract_urls_from_search_json(output: &str) -> Option<Vec<SearchSourceSeed>> {
+    let value = parse_json_value_from_output(output)?;
+    let results = value.get("results")?.as_array()?;
+    let mut seeds = Vec::new();
+    for result in results {
+        let Some(url) = string_field(result, &["url", "link", "href"]) else {
+            continue;
+        };
+        if !is_http_url(&url) || seeds.iter().any(|seed: &SearchSourceSeed| seed.url == url) {
+            continue;
+        }
+        seeds.push(SearchSourceSeed {
+            url,
+            title: string_field(result, &["title", "name"]),
+            gist: string_field(result, &["snippet", "abstract", "summary"]),
+        });
+        if seeds.len() >= 10 {
+            break;
+        }
+    }
+    Some(seeds)
+}
+
+fn parse_json_value_from_output(output: &str) -> Option<JsonValue> {
+    serde_json::from_str::<JsonValue>(output).ok().or_else(|| {
+        let start = output.find('{')?;
+        let end = output.rfind('}')?;
+        if end <= start {
+            return None;
+        }
+        serde_json::from_str::<JsonValue>(&output[start..=end]).ok()
+    })
+}
+
+fn string_field(value: &JsonValue, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        let candidate = value.get(*key).and_then(JsonValue::as_str);
+        if let Some(s) = candidate.map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+fn is_http_url(value: &str) -> bool {
+    (value.starts_with("https://") || value.starts_with("http://")) && value.len() > 12
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,6 +674,39 @@ mod tests {
         let urls = extract_urls_from_text(text);
         assert_eq!(urls.len(), 2);
         assert!(urls[0].contains("example.com"));
+    }
+
+    #[test]
+    fn search_output_entries_prefer_result_urls_over_favicons() {
+        let output = serde_json::json!({
+            "query": "metagenomics",
+            "category": "web",
+            "results": (1..=6)
+                .map(|i| serde_json::json!({
+                    "position": i,
+                    "title": format!("Result {i}"),
+                    "link": format!("https://example.com/article-{i}"),
+                    "url": format!("https://example.com/article-{i}"),
+                    "displayed_link": format!("example.com/article-{i}"),
+                    "favicon": format!("https://www.google.com/s2/favicons?domain=example.com&sz=64&n={i}"),
+                    "snippet": format!("Snippet {i}"),
+                }))
+                .collect::<Vec<_>>()
+        })
+        .to_string();
+
+        let entries = entries_from_search_output(&output, Some("sess-1"), "metagenomics");
+
+        assert_eq!(entries.len(), 6);
+        assert!(entries
+            .iter()
+            .all(|entry| entry.url.contains("example.com/article-")));
+        assert!(entries
+            .iter()
+            .all(|entry| !entry.url.contains("google.com/s2/favicons")));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.url.ends_with("/article-6")));
     }
 
     #[tokio::test]
