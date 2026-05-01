@@ -55,6 +55,7 @@ const CATEGORY_SOURCE_IDS: Record<string, readonly string[]> = {
     "long_term",
     "sources",
     "ncbi_gene",
+    "ensembl",
     "uniprot",
   ],
   web: ["tavily", "ddg", "google", "bing", "exa", "firecrawl", "parallel"],

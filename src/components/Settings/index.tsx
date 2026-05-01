@@ -617,10 +617,10 @@ const KNOWLEDGE_DATABASE_OPTIONS: QuerySourceOption[] = [
   {
     id: "ensembl",
     label: "Ensembl",
-    helper: "待接入",
+    helper: "基因 / 转录本 / 变异注释",
     defaultEnabled: false,
-    available: false,
-    badge: "待接入",
+    available: true,
+    badge: "无需 API",
   },
   {
     id: "uniprot",
@@ -3175,7 +3175,7 @@ export function Settings({
                               color="text.secondary"
                               sx={{ display: "block", mb: 1 }}
                             >
-                              可用：NCBI Gene、UniProt；其余为待接入。
+                              可选开启：NCBI Gene、Ensembl、UniProt。
                             </Typography>
                             <Stack spacing={0.75}>
                               {knowledgeDatabaseOptions.map((item) => {

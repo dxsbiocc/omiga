@@ -32,7 +32,7 @@ describe("web search settings rehydration", () => {
       JSON.stringify({
         enabledSourcesByCategory: {
           dataset: ["cbioportal", "gtex", "arrayexpress", "biosample"],
-          knowledge: ["project_wiki", "uniprot", "unknown"],
+          knowledge: ["project_wiki", "ensembl", "uniprot", "unknown"],
           social: ["wechat"],
         },
         enabledSubcategoriesByCategory: {
@@ -44,7 +44,7 @@ describe("web search settings rehydration", () => {
 
     expect(parsed?.enabledSourcesByCategory).toMatchObject({
       dataset: ["cbioportal", "gtex", "arrayexpress", "biosample"],
-      knowledge: ["project_wiki", "uniprot"],
+      knowledge: ["project_wiki", "ensembl", "uniprot"],
       social: ["wechat"],
     });
     expect(parsed?.enabledSubcategoriesByCategory).toMatchObject({

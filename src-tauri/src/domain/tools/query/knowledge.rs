@@ -25,6 +25,7 @@ pub(super) async fn query_knowledge(
 
     match source.as_str() {
         "ncbi_gene" => query_ncbi_gene(ctx, args).await,
+        "ensembl" => query_ensembl(ctx, args).await,
         "uniprot" => query_uniprot(ctx, args).await,
         _ => Err(ToolError::InvalidArguments {
             message: format!("Unsupported knowledge query source: {source}"),
@@ -41,7 +42,7 @@ fn canonical_knowledge_source(source: &str) -> Result<String, ToolError> {
     let Some(def) = retrieval_registry::find_source("knowledge", source) else {
         return Err(ToolError::InvalidArguments {
             message: format!(
-                "Unsupported knowledge query source: {source}. Supported available query sources: ncbi_gene, uniprot."
+                "Unsupported knowledge query source: {source}. Supported available query sources: ncbi_gene, ensembl, uniprot."
             ),
         });
     };
@@ -52,6 +53,58 @@ fn canonical_knowledge_source(source: &str) -> Result<String, ToolError> {
         });
     }
     Ok(def.id.to_string())
+}
+
+async fn query_ensembl(
+    ctx: &ToolContext,
+    args: &QueryArgs,
+) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+    let operation = normalized_operation(args);
+    let client = crate::domain::search::ensembl::EnsemblClient::from_tool_context(ctx)
+        .map_err(|message| ToolError::ExecutionFailed { message })?;
+
+    match operation.as_str() {
+        "search" | "query" => {
+            let query = query_text(args).ok_or_else(|| ToolError::InvalidArguments {
+                message:
+                    "query(category=knowledge, source=ensembl, operation=search) requires `query` or params.query"
+                        .to_string(),
+            })?;
+            let ensembl_args = crate::domain::search::ensembl::EnsemblSearchArgs {
+                query,
+                species: param_string(args, &["species", "organism"]),
+                object_type: param_string(args, &["object_type", "type"]),
+                max_results: args
+                    .max_results
+                    .or_else(|| param_u32(args, &["max_results", "maxResults", "limit", "size"])),
+            };
+            let response = tokio::select! {
+                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                r = client.search(ensembl_args) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+            };
+            let mut json = crate::domain::search::ensembl::search_response_to_json(&response);
+            annotate_query_json(&mut json, "search", "knowledge");
+            Ok(json_stream(json))
+        }
+        "fetch" | "get" | "detail" => {
+            let identifier = identifier_text(args).ok_or_else(|| ToolError::InvalidArguments {
+                message:
+                    "query(category=knowledge, source=ensembl, operation=fetch) requires an Ensembl stable ID, rsID, symbol, URL, result, or params.id"
+                        .to_string(),
+            })?;
+            let species = param_string(args, &["species", "organism"]);
+            let record = tokio::select! {
+                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                r = client.fetch(&identifier, species.as_deref()) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+            };
+            let mut json = crate::domain::search::ensembl::detail_to_json(&record);
+            annotate_query_json(&mut json, "fetch", "knowledge");
+            Ok(json_stream(json))
+        }
+        other => Err(ToolError::InvalidArguments {
+            message: format!("Unsupported Ensembl query operation: {other}"),
+        }),
+    }
 }
 
 async fn query_ncbi_gene(
@@ -170,8 +223,20 @@ mod tests {
     }
 
     #[test]
+    fn canonicalizes_ensembl_knowledge_aliases() {
+        assert_eq!(
+            canonical_knowledge_source("ensembl_gene").unwrap(),
+            "ensembl"
+        );
+        assert_eq!(
+            canonical_knowledge_source("transcripts").unwrap(),
+            "ensembl"
+        );
+    }
+
+    #[test]
     fn rejects_planned_knowledge_sources_from_registry() {
-        let err = canonical_knowledge_source("ensembl").unwrap_err();
+        let err = canonical_knowledge_source("reactome").unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments { .. }));
     }
 

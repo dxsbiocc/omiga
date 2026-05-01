@@ -225,6 +225,44 @@ fn query_from_json_accepts_uniprot_fetch() {
     ));
 }
 
+#[test]
+fn query_from_json_accepts_ensembl_search() {
+    let j = r#"{
+        "category": "knowledge",
+        "source": "ensembl",
+        "operation": "search",
+        "query": "BRCA2",
+        "params": {
+            "species": "homo_sapiens",
+            "object_type": "gene"
+        },
+        "max_results": 3
+    }"#;
+
+    assert!(matches!(
+        Tool::from_json_str("query", j),
+        Ok(Tool::Query(_))
+    ));
+}
+
+#[test]
+fn query_from_json_accepts_ensembl_fetch() {
+    let j = r#"{
+        "category": "knowledge",
+        "source": "ensembl",
+        "operation": "fetch",
+        "id": "ENSG00000139618",
+        "params": {
+            "species": "homo_sapiens"
+        }
+    }"#;
+
+    assert!(matches!(
+        Tool::from_json_str("query", j),
+        Ok(Tool::Query(_))
+    ));
+}
+
 #[tokio::test]
 async fn query_tool_executes_gtex_against_mock_api() {
     let mut enabled = HashMap::new();
@@ -581,6 +619,41 @@ async fn query_tool_executes_gtex_against_live_api() {
             .is_some_and(|title| title.contains("BRCA1")),
         "{json:#}"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires live network access to rest.ensembl.org"]
+async fn query_tool_executes_ensembl_against_live_api() {
+    let mut enabled = HashMap::new();
+    enabled.insert("knowledge".to_string(), vec!["ensembl".to_string()]);
+    let keys = WebSearchApiKeys {
+        enabled_sources_by_category: Some(enabled),
+        ..WebSearchApiKeys::default()
+    };
+    let ctx = ToolContext::new(std::env::temp_dir())
+        .with_web_search_api_keys(keys)
+        .with_web_use_proxy(false);
+
+    let args = QueryArgs {
+        category: "knowledge".to_string(),
+        source: Some("ensembl".to_string()),
+        operation: Some("search".to_string()),
+        subcategory: None,
+        query: Some("BRCA2".to_string()),
+        id: None,
+        url: None,
+        result: None,
+        params: Some(serde_json::json!({
+            "species": "homo_sapiens",
+            "object_type": "gene"
+        })),
+        max_results: Some(1),
+    };
+    let json = execute_query_json(&ctx, args).await;
+
+    assert_eq!(json["tool"], "query");
+    assert_eq!(json["source"], "ensembl");
+    assert_eq!(json["results"][0]["id"], "ENSG00000139618");
 }
 
 async fn execute_query_json(ctx: &ToolContext, args: QueryArgs) -> JsonValue {

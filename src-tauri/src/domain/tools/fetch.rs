@@ -18,7 +18,7 @@ mod web;
 
 pub const DESCRIPTION: &str = r#"Fetch one document/detail from a typed data source and return formatted JSON.
 
-- `category` is required. Categories: `literature`, `dataset` (`data` alias), `knowledge` (use `recall` for search), `web`, `social`.
+- `category` is required. Categories: `literature`, `dataset` (`data` alias), `knowledge` (use `query` for structured knowledge records and `recall` for local knowledge), `web`, `social`.
 - `source` is optional and defaults to `auto`. Concrete sources: `web.auto`, `literature.pubmed|arxiv|crossref|openalex|biorxiv|medrxiv|semantic_scholar`, `dataset.geo|ena|ena_run|ena_experiment|ena_sample|ena_analysis|ena_assembly|ena_sequence|cbioportal|gtex|ncbi_datasets|arrayexpress|biosample`, optional `social.wechat`.
 - `subcategory` is optional for dataset routing. Prefer `query(category="dataset", operation="fetch", …)` for structured dataset/database record lookup; this dataset path remains as a compatibility fetch wrapper.
 - Locate the document with one of: `url`, `id` + `source`, or a full `result` object returned by `search`.
@@ -117,7 +117,7 @@ impl super::ToolImpl for FetchTool {
             }
             "knowledge" => Err(ToolError::InvalidArguments {
                 message:
-                    "fetch(category=knowledge) is not supported; use recall(query=...) or search(category=knowledge)."
+                    "fetch(category=knowledge) is not supported; use query(category=knowledge, operation=fetch) for structured knowledge records or recall(query=...) for local knowledge."
                         .to_string(),
             }),
             "social" => match source.as_str() {
@@ -152,7 +152,7 @@ pub fn schema() -> ToolSchema {
             "properties": {
                 "category": {
                     "type": "string",
-                    "description": "Source category. Supports literature, dataset (alias: data), web, social. Knowledge retrieval uses recall/search."
+                    "description": "Source category. Supports literature, dataset (alias: data), web, social. Knowledge records use query(category=knowledge, operation=fetch); local knowledge uses recall."
                 },
                 "source": {
                     "type": "string",

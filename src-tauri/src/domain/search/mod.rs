@@ -14,6 +14,8 @@ pub mod ncbi_gene;
 
 pub mod uniprot;
 
+pub mod ensembl;
+
 pub mod semantic_scholar;
 
 pub mod wechat;
