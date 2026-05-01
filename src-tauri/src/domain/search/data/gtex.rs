@@ -1,6 +1,7 @@
 //! GTEx Portal API v2 adapter.
 
 mod client;
+mod gene;
 #[cfg(debug_assertions)]
 mod mock;
 mod operations;
