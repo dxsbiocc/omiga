@@ -18,6 +18,7 @@ impl PublicDataClient {
             PublicDataSource::Gtex => self.search_gtex(args).await,
             PublicDataSource::NcbiDatasets => self.search_ncbi_datasets(args).await,
             PublicDataSource::BioSample => self.search_biosample(args).await,
+            PublicDataSource::ArrayExpress => self.search_arrayexpress(args).await,
             source => self.search_ena(source, args).await,
         }
     }
@@ -32,21 +33,25 @@ impl PublicDataClient {
         let gtex_args = args.clone();
         let ncbi_datasets_args = args.clone();
         let biosample_args = args.clone();
-        let (geo, ena, gtex, ncbi_datasets, biosample) = tokio::join!(
+        let arrayexpress_args = args.clone();
+        let (geo, ena, gtex, ncbi_datasets, biosample, arrayexpress) = tokio::join!(
             self.search_geo(geo_args),
             self.search_ena(PublicDataSource::EnaStudy, ena_args),
             self.search_gtex(gtex_args),
             self.search_ncbi_datasets(ncbi_datasets_args),
-            self.search_biosample(biosample_args)
+            self.search_biosample(biosample_args),
+            self.search_arrayexpress(arrayexpress_args)
         );
 
         let mut results = Vec::new();
         let mut total = 0u64;
         let mut saw_total = false;
-        let mut notes =
-            vec!["Combined GEO + ENA + GTEx + NCBI Datasets + BioSample data search".to_string()];
+        let mut notes = vec![
+            "Combined GEO + ENA + GTEx + NCBI Datasets + BioSample + ArrayExpress data search"
+                .to_string(),
+        ];
 
-        for response in [geo, ena, gtex, ncbi_datasets, biosample] {
+        for response in [geo, ena, gtex, ncbi_datasets, biosample, arrayexpress] {
             match response {
                 Ok(response) => {
                     if let Some(count) = response.total {
@@ -85,6 +90,7 @@ impl PublicDataClient {
             PublicDataSource::Gtex => self.fetch_gtex(identifier).await,
             PublicDataSource::NcbiDatasets => self.fetch_ncbi_datasets(identifier).await,
             PublicDataSource::BioSample => self.fetch_biosample(identifier).await,
+            PublicDataSource::ArrayExpress => self.fetch_arrayexpress(identifier).await,
             source => self.fetch_ena(source, identifier).await,
         }
     }

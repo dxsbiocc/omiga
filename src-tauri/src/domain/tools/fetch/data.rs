@@ -59,6 +59,9 @@ pub(super) fn resolve_data_source(args: &FetchArgs, requested_source: &str) -> S
         if crate::domain::search::data::looks_like_geo_accession(&value) {
             return "geo".to_string();
         }
+        if crate::domain::search::data::looks_like_arrayexpress_accession(&value) {
+            return "arrayexpress".to_string();
+        }
         if crate::domain::search::data::looks_like_biosample_accession(&value) {
             return "biosample".to_string();
         }
@@ -76,6 +79,9 @@ pub(super) fn resolve_data_source(args: &FetchArgs, requested_source: &str) -> S
         let lower = url.to_ascii_lowercase();
         if lower.contains("ncbi.nlm.nih.gov/geo") || lower.contains("ncbi.nlm.nih.gov/gds") {
             return "geo".to_string();
+        }
+        if lower.contains("ebi.ac.uk/biostudies/arrayexpress") {
+            return "arrayexpress".to_string();
         }
         if lower.contains("ncbi.nlm.nih.gov/biosample")
             || lower.contains("api.ncbi.nlm.nih.gov/datasets/v2/biosample")
@@ -113,6 +119,8 @@ fn resolve_data_identifier(args: &FetchArgs) -> Option<String> {
                     "accession",
                     "geo_accession",
                     "ena_accession",
+                    "arrayexpress_accession",
+                    "arrayexpress",
                     "gencodeId",
                     "gencode_id",
                     "biosample_accession",
@@ -184,5 +192,19 @@ mod tests {
             prompt: None,
         };
         assert_eq!(resolve_data_source(&from_biosample, "auto"), "biosample");
+
+        let from_arrayexpress = FetchArgs {
+            category: "data".into(),
+            source: None,
+            subcategory: None,
+            url: None,
+            id: Some("E-MTAB-9999".into()),
+            result: None,
+            prompt: None,
+        };
+        assert_eq!(
+            resolve_data_source(&from_arrayexpress, "auto"),
+            "arrayexpress"
+        );
     }
 }

@@ -28,6 +28,9 @@ pub(super) async fn dataset_auto_search(
     if enabled.iter().any(|source| source == "biosample") {
         sources.push(PublicDataSource::BioSample);
     }
+    if enabled.iter().any(|source| source == "arrayexpress") {
+        sources.push(PublicDataSource::ArrayExpress);
+    }
     if sources.is_empty() {
         return Err(ToolError::InvalidArguments {
             message: "All dataset sources are disabled in Settings → Search. Enable at least one dataset source before using query(category=dataset).".to_string(),

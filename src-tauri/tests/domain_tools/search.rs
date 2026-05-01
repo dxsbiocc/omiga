@@ -38,6 +38,7 @@ fn search_from_json_accepts_data_sources() {
         "cbioportal",
         "gtex",
         "ncbi_datasets",
+        "arrayexpress",
         "biosample",
     ] {
         let j = format!(r#"{{"category":"data","source":"{source}","query":"single cell"}}"#);

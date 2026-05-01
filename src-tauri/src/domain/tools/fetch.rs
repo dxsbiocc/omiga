@@ -19,14 +19,14 @@ mod web;
 pub const DESCRIPTION: &str = r#"Fetch one document/detail from a typed data source and return formatted JSON.
 
 - `category` is required. Categories: `literature`, `dataset` (`data` alias), `knowledge` (use `recall` for search), `web`, `social`.
-- `source` is optional and defaults to `auto`. Concrete sources: `web.auto`, `literature.pubmed|arxiv|crossref|openalex|biorxiv|medrxiv|semantic_scholar`, `dataset.geo|ena|ena_run|ena_experiment|ena_sample|ena_analysis|ena_assembly|ena_sequence|cbioportal|gtex|ncbi_datasets|biosample`, optional `social.wechat`.
+- `source` is optional and defaults to `auto`. Concrete sources: `web.auto`, `literature.pubmed|arxiv|crossref|openalex|biorxiv|medrxiv|semantic_scholar`, `dataset.geo|ena|ena_run|ena_experiment|ena_sample|ena_analysis|ena_assembly|ena_sequence|cbioportal|gtex|ncbi_datasets|arrayexpress|biosample`, optional `social.wechat`.
 - `subcategory` is optional for dataset routing. Prefer `query(category="dataset", operation="fetch", …)` for structured dataset/database record lookup; this dataset path remains as a compatibility fetch wrapper.
 - Locate the document with one of: `url`, `id` + `source`, or a full `result` object returned by `search`.
 - `web` fetch sends a safe public HTTP(S) GET, follows public-safe redirects, blocks private/loopback targets, converts HTML to text, and pretty-prints JSON.
 - `literature.pubmed` fetch expects a numeric PMID in `id` (or a PubMed URL / search result) and uses official NCBI EFetch.
 - Public literature sources fetch source-specific metadata records: arXiv by arXiv id/URL, Crossref/bioRxiv/medRxiv by DOI, and OpenAlex by work id/URL/DOI.
 - `literature.semantic_scholar` is opt-in and requires the user-enabled API key; it fetches by Semantic Scholar paper id or supported external id prefix.
-- `data.geo` fetches GEO DataSets/Series/Samples/Platforms by UID or GEO accession via official NCBI E-utilities; `data.ena*` fetches ENA study/run/experiment/sample/analysis/assembly/sequence metadata by accession via ENA Portal/Browser APIs; `data.cbioportal` fetches cBioPortal study metadata by study id; `data.gtex` fetches GTEx gene metadata by symbol or GENCODE ID; `data.ncbi_datasets` fetches genome assembly reports by GCA_/GCF_ accession via NCBI Datasets v2; `data.biosample` fetches BioSample reports by SAMN/SAMEA/SAMD accession.
+- `data.geo` fetches GEO DataSets/Series/Samples/Platforms by UID or GEO accession via official NCBI E-utilities; `data.ena*` fetches ENA study/run/experiment/sample/analysis/assembly/sequence metadata by accession via ENA Portal/Browser APIs; `data.cbioportal` fetches cBioPortal study metadata by study id; `data.gtex` fetches GTEx gene metadata by symbol or GENCODE ID; `data.ncbi_datasets` fetches genome assembly reports by GCA_/GCF_ accession via NCBI Datasets v2; `data.arrayexpress` fetches BioStudies ArrayExpress studies by E-* accession; `data.biosample` fetches BioSample reports by SAMN/SAMEA/SAMD accession.
 - `social.wechat` is disabled by default; when enabled it fetches the article URL with the safe web fetcher.
 - Results are returned as formatted JSON with `title`, `link`, `url`, `favicon`, `content`, and `metadata`."#;
 
@@ -156,7 +156,7 @@ pub fn schema() -> ToolSchema {
                 },
                 "source": {
                     "type": "string",
-                    "description": "Source within the category. Defaults to auto. Literature supports pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar. Dataset supports geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, cbioportal, gtex, ncbi_datasets, biosample."
+                    "description": "Source within the category. Defaults to auto. Literature supports pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar. Dataset supports geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, cbioportal, gtex, ncbi_datasets, arrayexpress, biosample."
                 },
                 "subcategory": {
                     "type": "string",
@@ -164,11 +164,11 @@ pub fn schema() -> ToolSchema {
                 },
                 "url": {
                     "type": "string",
-                    "description": "Fully qualified URL to fetch, or a source-specific literature/data URL (PubMed/arXiv/OpenAlex/DOI/preprint/Semantic Scholar/GEO/ENA/BioSample)"
+                    "description": "Fully qualified URL to fetch, or a source-specific literature/data URL (PubMed/arXiv/OpenAlex/DOI/preprint/Semantic Scholar/GEO/ENA/ArrayExpress/BioSample)"
                 },
                 "id": {
                     "type": "string",
-                    "description": "Source-specific identifier such as PMID, arXiv id, DOI, OpenAlex work id, preprint DOI, Semantic Scholar paper id, GEO accession/UID, ENA accession, or BioSample accession."
+                    "description": "Source-specific identifier such as PMID, arXiv id, DOI, OpenAlex work id, preprint DOI, Semantic Scholar paper id, GEO accession/UID, ENA accession, ArrayExpress accession, or BioSample accession."
                 },
                 "result": {
                     "type": "object",

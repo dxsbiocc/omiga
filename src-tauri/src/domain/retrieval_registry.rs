@@ -806,11 +806,17 @@ fn sources() -> Vec<RetrievalSourceDefinition> {
             "arrayexpress",
             "dataset",
             "ArrayExpress",
-            "EBI 表达实验资源，待接入。",
-            &["array_express"],
+            "Functional genomics studies via EMBL-EBI BioStudies ArrayExpress collection。",
+            &[
+                "array_express",
+                "ae",
+                "ebi_arrayexpress",
+                "biostudies_arrayexpress",
+                "functional_genomics",
+            ],
             &["expression"],
-            &[Query],
-            Planned,
+            &[Search, Fetch, Query],
+            Available,
             Builtin,
             false,
             false,
@@ -819,11 +825,11 @@ fn sources() -> Vec<RetrievalSourceDefinition> {
             &[],
             50,
             Merge,
-            &[],
+            ARRAYEXPRESS_PARAMS,
             Low,
-            &["计划接入；当前不可执行。"],
+            &["Public BioStudies API；ArrayExpress accessions are preserved after migration to BioStudies。"],
             Some("https://www.ebi.ac.uk/biostudies/arrayexpress"),
-            None,
+            Some("https://www.ebi.ac.uk/biostudies/arrayexpress-in-biostudies"),
         ),
         source(
             "biosample",
@@ -1531,6 +1537,39 @@ const NCBI_DATASETS_PARAMS: &[RetrievalParameterDefinition] = &[
     ),
 ];
 
+const ARRAYEXPRESS_PARAMS: &[RetrievalParameterDefinition] = &[
+    param(
+        "query",
+        RetrievalParameterType::String,
+        "ArrayExpress/BioStudies keyword query。",
+        true,
+    ),
+    param(
+        "id",
+        RetrievalParameterType::String,
+        "ArrayExpress accession such as E-MTAB-1234 for fetch/get。",
+        false,
+    ),
+    param(
+        "organism",
+        RetrievalParameterType::String,
+        "Optional organism keyword appended to the search query。",
+        false,
+    ),
+    param(
+        "study_type",
+        RetrievalParameterType::String,
+        "Optional study type keyword such as RNA-seq。",
+        false,
+    ),
+    param(
+        "max_results",
+        RetrievalParameterType::Integer,
+        "Maximum ArrayExpress studies to return。",
+        false,
+    ),
+];
+
 const BIOSAMPLE_PARAMS: &[RetrievalParameterDefinition] = &[
     param(
         "query",
@@ -1659,6 +1698,10 @@ mod tests {
         assert_eq!(
             canonical_source_id("dataset", "ncbi_biosample"),
             Some("biosample")
+        );
+        assert_eq!(
+            canonical_source_id("dataset", "array_express"),
+            Some("arrayexpress")
         );
     }
 

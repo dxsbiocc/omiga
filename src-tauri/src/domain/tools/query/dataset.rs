@@ -184,6 +184,10 @@ mod tests {
             crate::domain::search::data::PublicDataSource::EnaRun
         );
         assert_eq!(
+            infer_dataset_source("E-MTAB-9999", None).unwrap(),
+            crate::domain::search::data::PublicDataSource::ArrayExpress
+        );
+        assert_eq!(
             infer_dataset_source("SAMN15960293", None).unwrap(),
             crate::domain::search::data::PublicDataSource::BioSample
         );

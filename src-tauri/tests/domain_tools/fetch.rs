@@ -38,6 +38,7 @@ fn fetch_from_json_accepts_data_sources() {
         ("cbioportal", "brca_tcga"),
         ("gtex", "ENSG00000012048.21"),
         ("ncbi_datasets", "GCF_000001405.40"),
+        ("arrayexpress", "E-MTAB-9999"),
         ("biosample", "SAMN15960293"),
     ] {
         let j = format!(r#"{{"category":"data","source":"{source}","id":"{id}"}}"#);

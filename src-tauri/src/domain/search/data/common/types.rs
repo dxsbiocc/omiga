@@ -9,6 +9,7 @@ const ENA_BROWSER_XML_BASE_URL: &str = "https://www.ebi.ac.uk/ena/browser/api/xm
 const CBIOPORTAL_API_BASE_URL: &str = "https://www.cbioportal.org/api";
 const GTEX_API_BASE_URL: &str = "https://gtexportal.org/api/v2";
 const NCBI_DATASETS_API_BASE_URL: &str = "https://api.ncbi.nlm.nih.gov/datasets/v2";
+const BIOSTUDIES_API_BASE_URL: &str = "https://www.ebi.ac.uk/biostudies/api/v1";
 const DEFAULT_MAX_RESULTS: u32 = 10;
 pub(in crate::domain::search::data) const MAX_RESULTS_CAP: u32 = 25;
 const DEFAULT_EMAIL: &str = "omiga@example.invalid";
@@ -18,6 +19,7 @@ const ENA_FAVICON: &str = "https://www.ebi.ac.uk/favicon.ico";
 const CBIOPORTAL_FAVICON: &str = "https://www.cbioportal.org/favicon.ico";
 const GTEX_FAVICON: &str = "https://gtexportal.org/favicon.ico";
 const NCBI_FAVICON: &str = "https://www.ncbi.nlm.nih.gov/favicon.ico";
+const EBI_FAVICON: &str = "https://www.ebi.ac.uk/favicon.ico";
 
 #[derive(Clone, Debug)]
 pub struct DataApiBaseUrls {
@@ -27,6 +29,7 @@ pub struct DataApiBaseUrls {
     pub cbioportal: String,
     pub gtex: String,
     pub ncbi_datasets: String,
+    pub biostudies: String,
 }
 
 impl Default for DataApiBaseUrls {
@@ -38,6 +41,7 @@ impl Default for DataApiBaseUrls {
             cbioportal: CBIOPORTAL_API_BASE_URL.to_string(),
             gtex: GTEX_API_BASE_URL.to_string(),
             ncbi_datasets: NCBI_DATASETS_API_BASE_URL.to_string(),
+            biostudies: BIOSTUDIES_API_BASE_URL.to_string(),
         }
     }
 }
@@ -56,6 +60,7 @@ pub enum PublicDataSource {
     Gtex,
     NcbiDatasets,
     BioSample,
+    ArrayExpress,
 }
 
 impl PublicDataSource {
@@ -78,6 +83,12 @@ impl PublicDataSource {
             | "ncbi_assemblies" | "genome_datasets" | "genome_dataset" => Some(Self::NcbiDatasets),
             "biosample" | "biosamples" | "bio_sample" | "ncbi_biosample" | "ncbi_biosamples"
             | "ncbi_sample" | "ncbi_samples" | "sample_metadata" => Some(Self::BioSample),
+            "arrayexpress"
+            | "array_express"
+            | "ae"
+            | "ebi_arrayexpress"
+            | "biostudies_arrayexpress"
+            | "functional_genomics" => Some(Self::ArrayExpress),
             _ => None,
         }
     }
@@ -96,6 +107,7 @@ impl PublicDataSource {
             Self::Gtex => "gtex",
             Self::NcbiDatasets => "ncbi_datasets",
             Self::BioSample => "biosample",
+            Self::ArrayExpress => "arrayexpress",
         }
     }
 
@@ -113,6 +125,7 @@ impl PublicDataSource {
             Self::Gtex => "GTEx tissue expression",
             Self::NcbiDatasets => "NCBI Datasets genome assemblies",
             Self::BioSample => "NCBI BioSample metadata",
+            Self::ArrayExpress => "ArrayExpress functional genomics studies",
         }
     }
 
@@ -129,6 +142,7 @@ impl PublicDataSource {
             Self::CbioPortal => CBIOPORTAL_FAVICON,
             Self::Gtex => GTEX_FAVICON,
             Self::NcbiDatasets | Self::BioSample => NCBI_FAVICON,
+            Self::ArrayExpress => EBI_FAVICON,
         }
     }
 
@@ -142,7 +156,11 @@ impl PublicDataSource {
             Self::EnaAnalysis => Some("analysis"),
             Self::EnaAssembly => Some("assembly"),
             Self::EnaSequence => Some("sequence"),
-            Self::CbioPortal | Self::Gtex | Self::NcbiDatasets | Self::BioSample => None,
+            Self::CbioPortal
+            | Self::Gtex
+            | Self::NcbiDatasets
+            | Self::BioSample
+            | Self::ArrayExpress => None,
         }
     }
 }

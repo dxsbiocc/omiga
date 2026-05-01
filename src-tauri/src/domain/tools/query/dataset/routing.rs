@@ -95,6 +95,13 @@ pub(super) fn infer_dataset_source(
     {
         return Ok(PublicDataSource::Geo);
     }
+    if crate::domain::search::data::looks_like_arrayexpress_accession(identifier)
+        || identifier
+            .to_ascii_lowercase()
+            .contains("ebi.ac.uk/biostudies/arrayexpress")
+    {
+        return Ok(PublicDataSource::ArrayExpress);
+    }
     if crate::domain::search::data::looks_like_biosample_accession(identifier)
         || identifier
             .to_ascii_lowercase()

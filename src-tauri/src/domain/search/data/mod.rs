@@ -7,6 +7,7 @@
 //! v2 for gene/tissue/expression metadata. NCBI Datasets uses the official v2
 //! REST API for genome assembly metadata and metadata-only package links.
 
+mod arrayexpress;
 mod biosample;
 mod cbioportal;
 mod client;
@@ -17,6 +18,7 @@ mod gtex;
 mod ncbi_datasets;
 mod routing;
 
+pub use arrayexpress::looks_like_arrayexpress_accession;
 pub use biosample::looks_like_biosample_accession;
 pub use client::PublicDataClient;
 pub use common::{
@@ -92,6 +94,9 @@ mod tests {
         assert!(looks_like_ncbi_datasets_accession("GCF_000001405.40"));
         assert!(looks_like_ncbi_datasets_accession(
             "https://www.ncbi.nlm.nih.gov/datasets/genome/GCA_000001405.29/"
+        ));
+        assert!(looks_like_arrayexpress_accession(
+            "https://www.ebi.ac.uk/biostudies/arrayexpress/studies/E-MTAB-9999"
         ));
         assert!(looks_like_biosample_accession(
             "https://www.ncbi.nlm.nih.gov/biosample/SAMN15960293"

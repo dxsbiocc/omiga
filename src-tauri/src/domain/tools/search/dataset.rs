@@ -25,6 +25,9 @@ pub(super) async fn dataset_auto_search(
     if enabled.iter().any(|source| source == "biosample") {
         sources.push(crate::domain::search::data::PublicDataSource::BioSample);
     }
+    if enabled.iter().any(|source| source == "arrayexpress") {
+        sources.push(crate::domain::search::data::PublicDataSource::ArrayExpress);
+    }
     if sources.is_empty() {
         return Ok(crate::domain::search::data::DataSearchResponse {
             query: data_args.query.trim().to_string(),

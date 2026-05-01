@@ -583,10 +583,10 @@ const DATASET_SOURCE_OPTIONS: QuerySourceOption[] = [
   {
     id: "arrayexpress",
     label: "ArrayExpress",
-    helper: "待接入",
+    helper: "Expression / BioStudies API",
     defaultEnabled: false,
-    available: false,
-    badge: "待接入",
+    available: true,
+    badge: "无需 API",
   },
   {
     id: "biosample",
