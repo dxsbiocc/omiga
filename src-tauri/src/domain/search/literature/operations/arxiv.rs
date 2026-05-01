@@ -1,10 +1,10 @@
 //! arXiv HTTP operations.
 
 use super::super::{
-    normalize_arxiv_identifier, parse_arxiv_atom, truncate_chars, LiteraturePaper,
-    LiteratureSearchArgs, LiteratureSearchResponse, PublicLiteratureClient, PublicLiteratureSource,
-    ARXIV_API_URL,
+    normalize_arxiv_identifier, parse_arxiv_atom, LiteraturePaper, LiteratureSearchArgs,
+    LiteratureSearchResponse, PublicLiteratureClient, PublicLiteratureSource, ARXIV_API_URL,
 };
+use super::common::read_success_body;
 
 impl PublicLiteratureClient {
     pub(in crate::domain::search::literature) async fn search_arxiv(
@@ -25,18 +25,7 @@ impl PublicLiteratureClient {
             .send()
             .await
             .map_err(|e| format!("arXiv search request failed: {e}"))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| format!("read arXiv response: {e}"))?;
-        if !status.is_success() {
-            return Err(format!(
-                "arXiv search returned HTTP {}: {}",
-                status.as_u16(),
-                truncate_chars(&body, 240)
-            ));
-        }
+        let body = read_success_body(response, "arXiv response", "arXiv search").await?;
         Ok(LiteratureSearchResponse {
             query: args.query.trim().to_string(),
             source: PublicLiteratureSource::Arxiv,
@@ -62,18 +51,7 @@ impl PublicLiteratureClient {
             .send()
             .await
             .map_err(|e| format!("arXiv fetch request failed: {e}"))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| format!("read arXiv fetch response: {e}"))?;
-        if !status.is_success() {
-            return Err(format!(
-                "arXiv fetch returned HTTP {}: {}",
-                status.as_u16(),
-                truncate_chars(&body, 240)
-            ));
-        }
+        let body = read_success_body(response, "arXiv fetch response", "arXiv fetch").await?;
         parse_arxiv_atom(&body)
             .into_iter()
             .next()

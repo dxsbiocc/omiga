@@ -1,10 +1,11 @@
 //! bioRxiv/medRxiv HTTP operations.
 
 use super::super::{
-    normalize_doi, parse_preprint_json, truncate_chars, LiteraturePaper, LiteratureSearchArgs,
+    normalize_doi, parse_preprint_json, LiteraturePaper, LiteratureSearchArgs,
     LiteratureSearchResponse, PublicLiteratureClient, PublicLiteratureSource, BIORXIV_API_URL,
     MEDRXIV_API_URL, PREPRINT_MAX_SCAN_PAGES, PREPRINT_SEARCH_WINDOW_DAYS,
 };
+use super::common::read_success_body;
 use serde_json::Value as Json;
 
 impl PublicLiteratureClient {
@@ -30,19 +31,9 @@ impl PublicLiteratureClient {
                 .send()
                 .await
                 .map_err(|e| format!("{} search request failed: {e}", source.as_str()))?;
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .map_err(|e| format!("read {} response: {e}", source.as_str()))?;
-            if !status.is_success() {
-                return Err(format!(
-                    "{} search returned HTTP {}: {}",
-                    source.as_str(),
-                    status.as_u16(),
-                    truncate_chars(&body, 240)
-                ));
-            }
+            let read_context = format!("{} response", source.as_str());
+            let status_context = format!("{} search", source.as_str());
+            let body = read_success_body(response, &read_context, &status_context).await?;
             let json: Json = serde_json::from_str(&body)
                 .map_err(|e| format!("parse {} JSON: {e}", source.as_str()))?;
             let mut page = parse_preprint_json(source, &json, &query);
@@ -98,19 +89,9 @@ impl PublicLiteratureClient {
             .send()
             .await
             .map_err(|e| format!("{} fetch request failed: {e}", source.as_str()))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| format!("read {} fetch response: {e}", source.as_str()))?;
-        if !status.is_success() {
-            return Err(format!(
-                "{} fetch returned HTTP {}: {}",
-                source.as_str(),
-                status.as_u16(),
-                truncate_chars(&body, 240)
-            ));
-        }
+        let read_context = format!("{} fetch response", source.as_str());
+        let status_context = format!("{} fetch", source.as_str());
+        let body = read_success_body(response, &read_context, &status_context).await?;
         let json: Json = serde_json::from_str(&body)
             .map_err(|e| format!("parse {} JSON: {e}", source.as_str()))?;
         parse_preprint_json(source, &json, "")

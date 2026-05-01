@@ -1,10 +1,11 @@
 //! Crossref HTTP operations.
 
 use super::super::{
-    encode_path_segment, normalize_doi, parse_crossref_item, parse_crossref_json, truncate_chars,
-    LiteraturePaper, LiteratureSearchArgs, LiteratureSearchResponse, PublicLiteratureClient,
-    PublicLiteratureSource, CROSSREF_WORKS_URL,
+    encode_path_segment, normalize_doi, parse_crossref_item, parse_crossref_json, LiteraturePaper,
+    LiteratureSearchArgs, LiteratureSearchResponse, PublicLiteratureClient, PublicLiteratureSource,
+    CROSSREF_WORKS_URL,
 };
+use super::common::read_success_body;
 use serde_json::Value as Json;
 
 impl PublicLiteratureClient {
@@ -26,18 +27,7 @@ impl PublicLiteratureClient {
             .send()
             .await
             .map_err(|e| format!("Crossref search request failed: {e}"))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| format!("read Crossref response: {e}"))?;
-        if !status.is_success() {
-            return Err(format!(
-                "Crossref search returned HTTP {}: {}",
-                status.as_u16(),
-                truncate_chars(&body, 240)
-            ));
-        }
+        let body = read_success_body(response, "Crossref response", "Crossref search").await?;
         let json: Json =
             serde_json::from_str(&body).map_err(|e| format!("parse Crossref JSON: {e}"))?;
         let total = json
@@ -71,18 +61,7 @@ impl PublicLiteratureClient {
             .send()
             .await
             .map_err(|e| format!("Crossref fetch request failed: {e}"))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| format!("read Crossref fetch response: {e}"))?;
-        if !status.is_success() {
-            return Err(format!(
-                "Crossref fetch returned HTTP {}: {}",
-                status.as_u16(),
-                truncate_chars(&body, 240)
-            ));
-        }
+        let body = read_success_body(response, "Crossref fetch response", "Crossref fetch").await?;
         let json: Json =
             serde_json::from_str(&body).map_err(|e| format!("parse Crossref JSON: {e}"))?;
         parse_crossref_item(json.get("message").unwrap_or(&json))

@@ -2,9 +2,10 @@
 
 use super::super::{
     encode_path_segment, normalize_openalex_identifier, parse_openalex_item, parse_openalex_json,
-    truncate_chars, LiteraturePaper, LiteratureSearchArgs, LiteratureSearchResponse,
-    PublicLiteratureClient, PublicLiteratureSource, OPENALEX_WORKS_URL,
+    LiteraturePaper, LiteratureSearchArgs, LiteratureSearchResponse, PublicLiteratureClient,
+    PublicLiteratureSource, OPENALEX_WORKS_URL,
 };
+use super::common::read_success_body;
 use serde_json::Value as Json;
 
 impl PublicLiteratureClient {
@@ -24,18 +25,7 @@ impl PublicLiteratureClient {
             .send()
             .await
             .map_err(|e| format!("OpenAlex search request failed: {e}"))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| format!("read OpenAlex response: {e}"))?;
-        if !status.is_success() {
-            return Err(format!(
-                "OpenAlex search returned HTTP {}: {}",
-                status.as_u16(),
-                truncate_chars(&body, 240)
-            ));
-        }
+        let body = read_success_body(response, "OpenAlex response", "OpenAlex search").await?;
         let json: Json =
             serde_json::from_str(&body).map_err(|e| format!("parse OpenAlex JSON: {e}"))?;
         let total = json.pointer("/meta/count").and_then(Json::as_u64);
@@ -65,18 +55,7 @@ impl PublicLiteratureClient {
             .send()
             .await
             .map_err(|e| format!("OpenAlex fetch request failed: {e}"))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| format!("read OpenAlex fetch response: {e}"))?;
-        if !status.is_success() {
-            return Err(format!(
-                "OpenAlex fetch returned HTTP {}: {}",
-                status.as_u16(),
-                truncate_chars(&body, 240)
-            ));
-        }
+        let body = read_success_body(response, "OpenAlex fetch response", "OpenAlex fetch").await?;
         let json: Json =
             serde_json::from_str(&body).map_err(|e| format!("parse OpenAlex JSON: {e}"))?;
         parse_openalex_item(&json)
