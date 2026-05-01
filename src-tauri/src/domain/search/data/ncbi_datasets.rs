@@ -156,7 +156,7 @@ impl PublicDataClient {
         ))
     }
 
-    async fn get_ncbi_datasets_json(
+    pub(in crate::domain::search::data) async fn get_ncbi_datasets_json(
         &self,
         endpoint: &str,
         params: &[(String, String)],
@@ -843,6 +843,38 @@ fn ncbi_datasets_download_url(accession: &str) -> String {
 
 #[cfg(debug_assertions)]
 fn mock_ncbi_datasets_json(endpoint: &str) -> Option<Json> {
+    if endpoint.contains("/biosample/accession/SAMN15960293/biosample_report")
+        || endpoint.contains("biosample/accession/SAMN15960293/biosample_report")
+    {
+        return Some(json!({
+            "reports": [{
+                "accession": "SAMN15960293",
+                "last_updated": "2024-08-20T04:05:23.840",
+                "publication_date": "2020-09-01T00:00:00.000",
+                "submission_date": "2020-09-01T13:51:06.390",
+                "sample_ids": [
+                    {"label": "Sample name", "value": "bGalGal1"},
+                    {"db": "SRA", "value": "SRS22402101"}
+                ],
+                "description": {
+                    "title": "Animal sample from Gallus gallus (bGalGal3)",
+                    "organism": {"tax_id": 9031, "organism_name": "Gallus gallus"},
+                    "comment": "Chicken reference genome sample."
+                },
+                "owner": {"name": "G10K"},
+                "models": ["Model organism or animal"],
+                "package": "Model.organism.animal.1.0",
+                "attributes": [
+                    {"name": "isolate", "value": "bGalGal1"},
+                    {"name": "sex", "value": "female"},
+                    {"name": "tissue", "value": "Blood"}
+                ],
+                "status": {"status": "live", "when": "2020-09-01T13:51:06.392"},
+                "sex": "female",
+                "tissue": "Blood"
+            }]
+        }));
+    }
     if endpoint.contains("GCF_000001405.40") && endpoint.ends_with("/download_summary") {
         return Some(json!({
             "record_count": 1,

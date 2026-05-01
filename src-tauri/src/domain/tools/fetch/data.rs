@@ -59,6 +59,9 @@ pub(super) fn resolve_data_source(args: &FetchArgs, requested_source: &str) -> S
         if crate::domain::search::data::looks_like_geo_accession(&value) {
             return "geo".to_string();
         }
+        if crate::domain::search::data::looks_like_biosample_accession(&value) {
+            return "biosample".to_string();
+        }
         if let Some(source) = crate::domain::search::data::inferred_ena_source_key(&value) {
             return source.to_string();
         }
@@ -73,6 +76,11 @@ pub(super) fn resolve_data_source(args: &FetchArgs, requested_source: &str) -> S
         let lower = url.to_ascii_lowercase();
         if lower.contains("ncbi.nlm.nih.gov/geo") || lower.contains("ncbi.nlm.nih.gov/gds") {
             return "geo".to_string();
+        }
+        if lower.contains("ncbi.nlm.nih.gov/biosample")
+            || lower.contains("api.ncbi.nlm.nih.gov/datasets/v2/biosample")
+        {
+            return "biosample".to_string();
         }
         if lower.contains("ebi.ac.uk/ena") {
             return "ena".to_string();
@@ -107,6 +115,8 @@ fn resolve_data_identifier(args: &FetchArgs) -> Option<String> {
                     "ena_accession",
                     "gencodeId",
                     "gencode_id",
+                    "biosample_accession",
+                    "biosample",
                     "current_accession",
                     "paired_accession",
                 ],
@@ -163,5 +173,16 @@ mod tests {
             prompt: None,
         };
         assert_eq!(resolve_data_source(&from_geo_url, "auto"), "geo");
+
+        let from_biosample = FetchArgs {
+            category: "data".into(),
+            source: None,
+            subcategory: None,
+            url: None,
+            id: Some("SAMN15960293".into()),
+            result: None,
+            prompt: None,
+        };
+        assert_eq!(resolve_data_source(&from_biosample, "auto"), "biosample");
     }
 }

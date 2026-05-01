@@ -591,10 +591,10 @@ const DATASET_SOURCE_OPTIONS: QuerySourceOption[] = [
   {
     id: "biosample",
     label: "BioSample",
-    helper: "待接入",
+    helper: "Sample metadata / NCBI BioSample",
     defaultEnabled: false,
-    available: false,
-    badge: "待接入",
+    available: true,
+    badge: "无需 API",
   },
 ];
 

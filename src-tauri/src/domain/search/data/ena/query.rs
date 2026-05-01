@@ -42,7 +42,8 @@ pub(super) fn ena_accession_query_fields(
             PublicDataSource::Geo
             | PublicDataSource::CbioPortal
             | PublicDataSource::Gtex
-            | PublicDataSource::NcbiDatasets,
+            | PublicDataSource::NcbiDatasets
+            | PublicDataSource::BioSample,
             _,
         ) => vec!["accession"],
         (PublicDataSource::EnaStudy, _) => vec!["study_accession", "secondary_study_accession"],

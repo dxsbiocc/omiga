@@ -829,24 +829,35 @@ fn sources() -> Vec<RetrievalSourceDefinition> {
             "biosample",
             "dataset",
             "BioSample",
-            "样本元数据资源，待接入。",
-            &["bio_sample"],
+            "Sample metadata via NCBI BioSample。",
+            &[
+                "bio_sample",
+                "biosamples",
+                "ncbi_biosample",
+                "ncbi_biosamples",
+                "ncbi_sample",
+                "ncbi_samples",
+                "sample_metadata",
+            ],
             &["sample_metadata"],
-            &[Query],
-            Planned,
+            &[Search, Fetch, Query],
+            Available,
             Builtin,
-            false,
+            true,
             false,
             false,
             &[],
-            &[],
+            &["pubmed_api_key", "pubmed_email", "pubmed_tool_name"],
             60,
             Merge,
-            &[],
+            BIOSAMPLE_PARAMS,
             Low,
-            &["计划接入；当前不可执行。"],
+            &[
+                "Search uses official NCBI E-utilities db=biosample; fetch uses NCBI Datasets v2 BioSample reports。",
+                "NCBI API key optional；email/tool 使用设置中的 PubMed/NCBI 配置。",
+            ],
             Some("https://www.ncbi.nlm.nih.gov/biosample"),
-            Some("https://www.ncbi.nlm.nih.gov/books/NBK25501/"),
+            Some("https://www.ncbi.nlm.nih.gov/datasets/docs/v2/api/rest-api/"),
         ),
         source(
             "project_wiki",
@@ -1520,6 +1531,39 @@ const NCBI_DATASETS_PARAMS: &[RetrievalParameterDefinition] = &[
     ),
 ];
 
+const BIOSAMPLE_PARAMS: &[RetrievalParameterDefinition] = &[
+    param(
+        "query",
+        RetrievalParameterType::String,
+        "BioSample keyword query for E-utilities db=biosample。",
+        true,
+    ),
+    param(
+        "id",
+        RetrievalParameterType::String,
+        "BioSample accession such as SAMN15960293 for fetch/get。",
+        false,
+    ),
+    param(
+        "organism",
+        RetrievalParameterType::String,
+        "Optional organism name filter。",
+        false,
+    ),
+    param(
+        "taxon_id",
+        RetrievalParameterType::String,
+        "Optional NCBI taxonomy id filter。",
+        false,
+    ),
+    param(
+        "max_results",
+        RetrievalParameterType::Integer,
+        "Maximum BioSample records to return。",
+        false,
+    ),
+];
+
 const GTEX_PARAMS: &[RetrievalParameterDefinition] = &[
     param(
         "query",
@@ -1612,6 +1656,10 @@ mod tests {
             canonical_source_id("dataset", "ncbi_genome"),
             Some("ncbi_datasets")
         );
+        assert_eq!(
+            canonical_source_id("dataset", "ncbi_biosample"),
+            Some("biosample")
+        );
     }
 
     #[test]
@@ -1620,7 +1668,10 @@ mod tests {
             default_subcategory_ids("dataset"),
             vec!["expression", "sequencing", "genomics", "sample_metadata"]
         );
-        assert_eq!(default_source_ids("dataset"), vec!["geo", "ena"]);
+        assert_eq!(
+            default_source_ids("dataset"),
+            vec!["geo", "ena", "biosample"]
+        );
         assert_eq!(
             default_source_ids("knowledge"),
             vec![

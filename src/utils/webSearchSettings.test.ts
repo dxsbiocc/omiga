@@ -31,7 +31,7 @@ describe("web search settings rehydration", () => {
     const parsed = parseStoredWebSearchSettings(
       JSON.stringify({
         enabledSourcesByCategory: {
-          dataset: ["cbioportal", "gtex"],
+          dataset: ["cbioportal", "gtex", "biosample"],
           knowledge: ["project_wiki", "uniprot", "unknown"],
           social: ["wechat"],
         },
@@ -43,7 +43,7 @@ describe("web search settings rehydration", () => {
     );
 
     expect(parsed?.enabledSourcesByCategory).toMatchObject({
-      dataset: ["cbioportal", "gtex"],
+      dataset: ["cbioportal", "gtex", "biosample"],
       knowledge: ["project_wiki", "uniprot"],
       social: ["wechat"],
     });

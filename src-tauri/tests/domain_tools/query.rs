@@ -100,6 +100,25 @@ fn query_from_json_accepts_ncbi_datasets_source() {
 }
 
 #[test]
+fn query_from_json_accepts_biosample_source() {
+    let j = r#"{
+        "category": "dataset",
+        "operation": "search",
+        "source": "biosample",
+        "query": "Gallus gallus blood",
+        "params": {
+            "organism": "Gallus gallus"
+        },
+        "max_results": 2
+    }"#;
+
+    assert!(matches!(
+        Tool::from_json_str("query", j),
+        Ok(Tool::Query(_))
+    ));
+}
+
+#[test]
 fn query_from_json_accepts_params_aliases() {
     let j = r#"{
         "category": "dataset",
@@ -322,6 +341,83 @@ async fn query_tool_executes_ncbi_datasets_download_summary_against_mock_api() {
     assert!(json["content"]
         .as_str()
         .is_some_and(|content| content.contains("Available files")));
+}
+
+#[tokio::test]
+async fn query_tool_executes_biosample_search_against_mock_api() {
+    let mut enabled = HashMap::new();
+    enabled.insert("dataset".to_string(), vec!["biosample".to_string()]);
+    let keys = WebSearchApiKeys {
+        enabled_sources_by_category: Some(enabled),
+        ..WebSearchApiKeys::default()
+    };
+    let ctx = ToolContext::new(std::env::temp_dir())
+        .with_web_search_api_keys(keys)
+        .with_web_use_proxy(false)
+        .with_data_api_base_urls(DataApiBaseUrls {
+            entrez: "mock://entrez".to_string(),
+            ..DataApiBaseUrls::default()
+        });
+
+    let args = QueryArgs {
+        category: "dataset".to_string(),
+        source: Some("biosample".to_string()),
+        operation: Some("search".to_string()),
+        subcategory: Some("sample_metadata".to_string()),
+        query: Some("Gallus gallus".to_string()),
+        id: None,
+        url: None,
+        result: None,
+        params: None,
+        max_results: Some(1),
+    };
+    let json = execute_query_json(&ctx, args).await;
+
+    assert_eq!(json["source"], "biosample");
+    assert_eq!(json["results"][0]["accession"], "SAMN15960293");
+    assert_eq!(
+        json["results"][0]["metadata"]["source_label"],
+        "NCBI BioSample metadata"
+    );
+}
+
+#[tokio::test]
+async fn query_tool_executes_biosample_fetch_against_mock_api() {
+    let mut enabled = HashMap::new();
+    enabled.insert("dataset".to_string(), vec!["biosample".to_string()]);
+    let keys = WebSearchApiKeys {
+        enabled_sources_by_category: Some(enabled),
+        ..WebSearchApiKeys::default()
+    };
+    let ctx = ToolContext::new(std::env::temp_dir())
+        .with_web_search_api_keys(keys)
+        .with_web_use_proxy(false)
+        .with_data_api_base_urls(DataApiBaseUrls {
+            ncbi_datasets: "mock://ncbi_datasets".to_string(),
+            ..DataApiBaseUrls::default()
+        });
+
+    let args = QueryArgs {
+        category: "dataset".to_string(),
+        source: Some("biosample".to_string()),
+        operation: Some("fetch".to_string()),
+        subcategory: Some("sample_metadata".to_string()),
+        query: None,
+        id: Some("SAMN15960293".to_string()),
+        url: None,
+        result: None,
+        params: None,
+        max_results: None,
+    };
+    let json = execute_query_json(&ctx, args).await;
+
+    assert_eq!(json["operation"], "fetch");
+    assert_eq!(json["source"], "biosample");
+    assert_eq!(json["accession"], "SAMN15960293");
+    assert_eq!(
+        json["metadata"]["source_specific"]["attributes"]["tissue"],
+        "Blood"
+    );
 }
 
 #[tokio::test]

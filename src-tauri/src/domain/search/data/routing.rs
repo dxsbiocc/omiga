@@ -17,6 +17,7 @@ impl PublicDataClient {
             PublicDataSource::CbioPortal => self.search_cbioportal(args).await,
             PublicDataSource::Gtex => self.search_gtex(args).await,
             PublicDataSource::NcbiDatasets => self.search_ncbi_datasets(args).await,
+            PublicDataSource::BioSample => self.search_biosample(args).await,
             source => self.search_ena(source, args).await,
         }
     }
@@ -30,19 +31,22 @@ impl PublicDataClient {
         let ena_args = args.clone();
         let gtex_args = args.clone();
         let ncbi_datasets_args = args.clone();
-        let (geo, ena, gtex, ncbi_datasets) = tokio::join!(
+        let biosample_args = args.clone();
+        let (geo, ena, gtex, ncbi_datasets, biosample) = tokio::join!(
             self.search_geo(geo_args),
             self.search_ena(PublicDataSource::EnaStudy, ena_args),
             self.search_gtex(gtex_args),
-            self.search_ncbi_datasets(ncbi_datasets_args)
+            self.search_ncbi_datasets(ncbi_datasets_args),
+            self.search_biosample(biosample_args)
         );
 
         let mut results = Vec::new();
         let mut total = 0u64;
         let mut saw_total = false;
-        let mut notes = vec!["Combined GEO + ENA + GTEx + NCBI Datasets data search".to_string()];
+        let mut notes =
+            vec!["Combined GEO + ENA + GTEx + NCBI Datasets + BioSample data search".to_string()];
 
-        for response in [geo, ena, gtex, ncbi_datasets] {
+        for response in [geo, ena, gtex, ncbi_datasets, biosample] {
             match response {
                 Ok(response) => {
                     if let Some(count) = response.total {
@@ -80,6 +84,7 @@ impl PublicDataClient {
             PublicDataSource::CbioPortal => self.fetch_cbioportal(identifier).await,
             PublicDataSource::Gtex => self.fetch_gtex(identifier).await,
             PublicDataSource::NcbiDatasets => self.fetch_ncbi_datasets(identifier).await,
+            PublicDataSource::BioSample => self.fetch_biosample(identifier).await,
             source => self.fetch_ena(source, identifier).await,
         }
     }

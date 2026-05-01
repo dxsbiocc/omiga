@@ -55,6 +55,7 @@ pub enum PublicDataSource {
     CbioPortal,
     Gtex,
     NcbiDatasets,
+    BioSample,
 }
 
 impl PublicDataSource {
@@ -75,6 +76,8 @@ impl PublicDataSource {
             "gtex" | "genotype_tissue_expression" | "tissue_expression" => Some(Self::Gtex),
             "ncbi_datasets" | "ncbi_dataset" | "ncbi_genome" | "ncbi_genomes" | "ncbi_assembly"
             | "ncbi_assemblies" | "genome_datasets" | "genome_dataset" => Some(Self::NcbiDatasets),
+            "biosample" | "biosamples" | "bio_sample" | "ncbi_biosample" | "ncbi_biosamples"
+            | "ncbi_sample" | "ncbi_samples" | "sample_metadata" => Some(Self::BioSample),
             _ => None,
         }
     }
@@ -92,6 +95,7 @@ impl PublicDataSource {
             Self::CbioPortal => "cbioportal",
             Self::Gtex => "gtex",
             Self::NcbiDatasets => "ncbi_datasets",
+            Self::BioSample => "biosample",
         }
     }
 
@@ -108,6 +112,7 @@ impl PublicDataSource {
             Self::CbioPortal => "cBioPortal cancer genomics studies",
             Self::Gtex => "GTEx tissue expression",
             Self::NcbiDatasets => "NCBI Datasets genome assemblies",
+            Self::BioSample => "NCBI BioSample metadata",
         }
     }
 
@@ -123,7 +128,7 @@ impl PublicDataSource {
             | Self::EnaSequence => ENA_FAVICON,
             Self::CbioPortal => CBIOPORTAL_FAVICON,
             Self::Gtex => GTEX_FAVICON,
-            Self::NcbiDatasets => NCBI_FAVICON,
+            Self::NcbiDatasets | Self::BioSample => NCBI_FAVICON,
         }
     }
 
@@ -137,7 +142,7 @@ impl PublicDataSource {
             Self::EnaAnalysis => Some("analysis"),
             Self::EnaAssembly => Some("assembly"),
             Self::EnaSequence => Some("sequence"),
-            Self::CbioPortal | Self::Gtex | Self::NcbiDatasets => None,
+            Self::CbioPortal | Self::Gtex | Self::NcbiDatasets | Self::BioSample => None,
         }
     }
 }

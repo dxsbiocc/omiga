@@ -183,5 +183,9 @@ mod tests {
             infer_dataset_source("ERR123", None).unwrap(),
             crate::domain::search::data::PublicDataSource::EnaRun
         );
+        assert_eq!(
+            infer_dataset_source("SAMN15960293", None).unwrap(),
+            crate::domain::search::data::PublicDataSource::BioSample
+        );
     }
 }
