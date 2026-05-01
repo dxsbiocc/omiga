@@ -20,9 +20,9 @@ Use `query` when the user wants database-native lookup/query semantics rather th
 - `category="dataset"` (`data` alias) supports built-in dataset sources: `geo`, `ena`, `ena_run`, `ena_experiment`, `ena_sample`, `ena_analysis`, `ena_assembly`, `ena_sequence`, `cbioportal`, `gtex`, `ncbi_datasets`.
 - `category="knowledge", source="ncbi_gene"` searches/fetches NCBI Gene via official NCBI E-utilities (`db=gene`).
 - `category="knowledge", source="uniprot"` searches/fetches UniProtKB protein entries through the public UniProt REST API.
-- `operation="search"` searches records by keyword or database query string. `operation="fetch"`/`"get"` retrieves one record by accession, URL, or search result.
+- `operation="search"` searches records by keyword or database query string. `operation="fetch"`/`"get"` retrieves one record by accession, URL, or search result. `operation="download_summary"` previews NCBI Datasets genome package size/files without downloading.
 - `source="auto"` chooses a source from `subcategory` for search or from the identifier for fetch. Dataset subcategories: `expression` → GEO, `sequencing` → ENA run, `genomics` → ENA assembly, `sample_metadata` → ENA sample, `multi_omics` → cBioPortal.
-- `params` may carry database-specific filters; GTEx accepts `endpoint` (`gene`, `median_expression`, `tissues`, `top_expressed`), `datasetId`, `gencodeId`, and `tissueSiteDetailId`; NCBI Datasets accepts `mode` (`accession`, `taxon`, `bioproject`, `biosample`, `wgs`, `assembly_name`), `reference_only`, `assembly_source`, `assembly_level`, and `search_text`; NCBI Gene accepts `organism`, `taxon_id`, `ret_start`, and `sort`; UniProt accepts `organism`, `taxon_id`, and `reviewed`.
+- `params` may carry database-specific filters; GTEx accepts `endpoint` (`gene`, `median_expression`, `tissues`, `top_expressed`), `datasetId`, `gencodeId`, and `tissueSiteDetailId`; NCBI Datasets accepts `mode` (`accession`, `taxon`, `bioproject`, `biosample`, `wgs`, `assembly_name`), `reference_only`, `assembly_source`, `assembly_level`, `search_text`, and for `download_summary` `include`/`include_annotation_type` plus `chromosomes`; NCBI Gene accepts `organism`, `taxon_id`, `ret_start`, and `sort`; UniProt accepts `organism`, `taxon_id`, and `reviewed`.
 - `search`/`fetch` remain compatibility wrappers for discovery/detail flows; new structured dataset/database integrations should be added here one source at a time."#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,7 +90,7 @@ pub fn schema() -> ToolSchema {
                 },
                 "operation": {
                     "type": "string",
-                    "description": "Operation to run: search/query for record search; fetch/get/detail for one accession or URL. Defaults from supplied fields."
+                    "description": "Operation to run: search/query for record search; fetch/get/detail for one accession or URL; download_summary for an NCBI Datasets genome package preview. Defaults from supplied fields."
                 },
                 "subcategory": {
                     "type": "string",
@@ -114,7 +114,7 @@ pub fn schema() -> ToolSchema {
                 },
                 "params": {
                     "type": "object",
-                    "description": "Database-specific structured parameters. Dataset sources accept query/q, id/accession/url, source, operation, subcategory, and max_results/limit. GTEx accepts endpoint/mode, datasetId, gencodeId, tissueSiteDetailId, and filterMtGene. NCBI Datasets accepts mode, reference_only, assembly_source, assembly_level, search_text, tax_exact_match, and page_token. NCBI Gene accepts organism, taxon_id/taxid, ret_start/retstart, and sort. UniProt accepts organism, taxon_id/taxid, and reviewed."
+                    "description": "Database-specific structured parameters. Dataset sources accept query/q, id/accession/url, source, operation, subcategory, and max_results/limit. GTEx accepts endpoint/mode, datasetId, gencodeId, tissueSiteDetailId, and filterMtGene. NCBI Datasets accepts mode, reference_only, assembly_source, assembly_level, search_text, tax_exact_match, page_token, and for download_summary include/include_annotation_type plus chromosomes. NCBI Gene accepts organism, taxon_id/taxid, ret_start/retstart, and sort. UniProt accepts organism, taxon_id/taxid, and reviewed."
                 },
                 "max_results": {
                     "type": "integer",

@@ -97,6 +97,33 @@ pub(super) async fn query_dataset(
             annotate_query_json(&mut json, "fetch", "dataset");
             Ok(json_stream(json))
         }
+        "download_summary" | "download_summary_preview" | "download_preview" => {
+            let identifier = identifier_text(args).ok_or_else(|| ToolError::InvalidArguments {
+                message:
+                    "query(category=dataset, source=ncbi_datasets, operation=download_summary) requires `id`, `url`, result, or params.id"
+                        .to_string(),
+            })?;
+            let source_kind = if source == "auto" {
+                infer_dataset_source(&identifier, subcategory.as_deref())?
+            } else {
+                resolve_dataset_source(&source)?
+            };
+            ensure_dataset_source_enabled(ctx, source_kind)?;
+            if source_kind != crate::domain::search::data::PublicDataSource::NcbiDatasets {
+                return Err(ToolError::InvalidArguments {
+                    message: format!(
+                        "download_summary is only supported for dataset source `ncbi_datasets`, not `{}`.",
+                        source_kind.as_str()
+                    ),
+                });
+            }
+            let mut json = tokio::select! {
+                _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+                r = client.ncbi_datasets_download_summary(&identifier, args.params.as_ref()) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
+            };
+            annotate_query_json(&mut json, "download_summary", "dataset");
+            Ok(json_stream(json))
+        }
         other => Err(ToolError::InvalidArguments {
             message: format!("Unsupported dataset query operation: {other}"),
         }),

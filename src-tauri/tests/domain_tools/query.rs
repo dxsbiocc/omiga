@@ -273,6 +273,58 @@ async fn query_tool_executes_ncbi_datasets_against_mock_api() {
 }
 
 #[tokio::test]
+async fn query_tool_executes_ncbi_datasets_download_summary_against_mock_api() {
+    let mut enabled = HashMap::new();
+    enabled.insert("dataset".to_string(), vec!["ncbi_datasets".to_string()]);
+    let keys = WebSearchApiKeys {
+        enabled_sources_by_category: Some(enabled),
+        ..WebSearchApiKeys::default()
+    };
+    let ctx = ToolContext::new(std::env::temp_dir())
+        .with_web_search_api_keys(keys)
+        .with_web_use_proxy(false)
+        .with_data_api_base_urls(DataApiBaseUrls {
+            ncbi_datasets: "mock://ncbi_datasets".to_string(),
+            ..DataApiBaseUrls::default()
+        });
+
+    let args = QueryArgs {
+        category: "dataset".to_string(),
+        source: Some("ncbi_datasets".to_string()),
+        operation: Some("download_summary".to_string()),
+        subcategory: Some("genomics".to_string()),
+        query: None,
+        id: Some("GCF_000001405.40".to_string()),
+        url: None,
+        result: None,
+        params: Some(serde_json::json!({
+            "include": ["genome", "gff3"]
+        })),
+        max_results: None,
+    };
+    let json = execute_query_json(&ctx, args).await;
+
+    assert_eq!(json["operation"], "download_summary");
+    assert_eq!(json["source"], "ncbi_datasets");
+    assert_eq!(json["record_count"], 1);
+    assert_eq!(
+        json["requested"]["include_annotation_type"][0],
+        "GENOME_FASTA"
+    );
+    assert_eq!(
+        json["requested"]["include_annotation_type"][1],
+        "GENOME_GFF"
+    );
+    assert_eq!(
+        json["dehydrated"]["cli_download_command_line"],
+        "datasets download genome accession GCF_000001405.40 --include gff3,genome --dehydrated"
+    );
+    assert!(json["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("Available files")));
+}
+
+#[tokio::test]
 async fn query_tool_rejects_gtex_when_disabled() {
     let ctx = ToolContext::new(std::env::temp_dir()).with_web_use_proxy(false);
     let args = QueryArgs {

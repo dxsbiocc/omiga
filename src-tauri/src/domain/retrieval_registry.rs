@@ -1506,6 +1506,18 @@ const NCBI_DATASETS_PARAMS: &[RetrievalParameterDefinition] = &[
         "返回 genome assembly report 上限。",
         false,
     ),
+    param(
+        "include",
+        RetrievalParameterType::String,
+        "download_summary 包含文件类型，例如 genome,gff3,protein,sequence_report。",
+        false,
+    ),
+    param(
+        "chromosomes",
+        RetrievalParameterType::String,
+        "download_summary 只预览指定 chromosomes，可用逗号分隔。",
+        false,
+    ),
 ];
 
 const GTEX_PARAMS: &[RetrievalParameterDefinition] = &[

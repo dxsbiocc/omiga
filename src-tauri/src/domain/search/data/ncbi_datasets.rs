@@ -6,9 +6,7 @@
 
 use super::common::*;
 use super::PublicDataClient;
-#[cfg(debug_assertions)]
-use serde_json::json;
-use serde_json::{Map as JsonMap, Value as Json};
+use serde_json::{json, Map as JsonMap, Value as Json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GenomeLookupMode {
@@ -129,6 +127,33 @@ impl PublicDataClient {
             .into_iter()
             .next()
             .ok_or_else(|| format!("NCBI Datasets returned no genome report for `{accession}`"))
+    }
+
+    pub(crate) async fn ncbi_datasets_download_summary(
+        &self,
+        identifier: &str,
+        params: Option<&Json>,
+    ) -> Result<Json, String> {
+        let accession = normalize_ncbi_datasets_accession(identifier).ok_or_else(|| {
+            format!(
+                "NCBI Datasets download_summary requires a genome assembly accession (GCA_/GCF_), got `{identifier}`"
+            )
+        })?;
+        let query_params = ncbi_datasets_download_summary_params(params);
+        let json = self
+            .get_ncbi_datasets_json(
+                &format!(
+                    "genome/accession/{}/download_summary",
+                    encode_path_segment(&accession)
+                ),
+                &query_params,
+            )
+            .await?;
+        Ok(ncbi_datasets_download_summary_to_json(
+            &accession,
+            &json,
+            &query_params,
+        ))
     }
 
     async fn get_ncbi_datasets_json(
@@ -502,6 +527,170 @@ fn ncbi_datasets_query_params(args: &DataSearchArgs) -> Vec<(String, String)> {
     params
 }
 
+fn ncbi_datasets_download_summary_params(params: Option<&Json>) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for value in param_string_list(
+        params,
+        &[
+            "include_annotation_type",
+            "includeAnnotationType",
+            "include",
+            "files",
+        ],
+    ) {
+        out.push((
+            "include_annotation_type".to_string(),
+            normalize_annotation_type(&value),
+        ));
+    }
+    push_repeated_param_alias(
+        &mut out,
+        params,
+        "chromosomes",
+        &["chromosomes", "chromosome"],
+    );
+    out
+}
+
+fn ncbi_datasets_download_summary_to_json(
+    accession: &str,
+    summary: &Json,
+    query_params: &[(String, String)],
+) -> Json {
+    let record_url = ncbi_datasets_record_url(accession);
+    let available_files = available_file_rows(summary);
+    let include_annotation_type = query_params
+        .iter()
+        .filter(|(key, _)| key == "include_annotation_type")
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    let chromosomes = query_params
+        .iter()
+        .filter(|(key, _)| key == "chromosomes")
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    json!({
+        "category": "data",
+        "source": PublicDataSource::NcbiDatasets.as_str(),
+        "effective_source": PublicDataSource::NcbiDatasets.as_str(),
+        "operation": "download_summary",
+        "id": accession,
+        "accession": accession,
+        "title": format!("NCBI Datasets download summary for {accession}"),
+        "name": format!("NCBI Datasets download summary for {accession}"),
+        "link": record_url,
+        "url": record_url,
+        "displayed_link": displayed_link_for_url(&record_url),
+        "favicon": PublicDataSource::NcbiDatasets.favicon(),
+        "record_count": summary.get("record_count").and_then(json_u64_from_string_or_number),
+        "resource_updated_on": json_path_string(summary, &["resource_updated_on"]),
+        "hydrated": summary.get("hydrated").cloned().unwrap_or(Json::Null),
+        "dehydrated": summary.get("dehydrated").cloned().unwrap_or(Json::Null),
+        "available_files": available_files,
+        "requested": {
+            "include_annotation_type": include_annotation_type,
+            "chromosomes": chromosomes,
+        },
+        "download_summary_url": ncbi_datasets_download_summary_url(accession),
+        "content": download_summary_content(accession, summary),
+        "metadata": {
+            "source_label": PublicDataSource::NcbiDatasets.label(),
+            "api": "NCBI Datasets v2 REST API",
+            "api_key": "Uses the same optional My NCBI API key as E-utilities when configured.",
+            "does_not_download": true,
+            "source_specific": summary,
+        }
+    })
+}
+
+fn available_file_rows(summary: &Json) -> Vec<Json> {
+    let Some(files) = summary.get("available_files").and_then(Json::as_object) else {
+        return Vec::new();
+    };
+    let mut rows = files
+        .iter()
+        .map(|(name, value)| {
+            json!({
+                "name": name,
+                "file_count": value.get("file_count").and_then(json_u64_from_string_or_number),
+                "size_mb": value.get("size_mb").and_then(Json::as_f64),
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| {
+        a.get("name")
+            .and_then(Json::as_str)
+            .cmp(&b.get("name").and_then(Json::as_str))
+    });
+    rows
+}
+
+fn download_summary_content(accession: &str, summary: &Json) -> String {
+    let mut out = Vec::new();
+    out.push(format!("NCBI Datasets download summary for {accession}"));
+    if let Some(count) = summary
+        .get("record_count")
+        .and_then(json_u64_from_string_or_number)
+    {
+        out.push(format!("Record count: {count}"));
+    }
+    if let Some(updated) = json_path_string(summary, &["resource_updated_on"]) {
+        out.push(format!("Resource updated: {updated}"));
+    }
+    if let Some(size) = json_path_string(summary, &["hydrated", "estimated_file_size_mb"]) {
+        out.push(format!("Hydrated estimate: {size} MB"));
+    }
+    if let Some(command) = json_path_string(summary, &["hydrated", "cli_download_command_line"]) {
+        out.push(format!("Hydrated CLI: {command}"));
+    }
+    if let Some(size) = json_path_string(summary, &["dehydrated", "estimated_file_size_mb"]) {
+        out.push(format!("Dehydrated estimate: {size} MB"));
+    }
+    if let Some(command) = json_path_string(summary, &["dehydrated", "cli_download_command_line"]) {
+        out.push(format!("Dehydrated CLI: {command}"));
+    }
+    let files = available_file_rows(summary);
+    if !files.is_empty() {
+        out.push("Available files:".to_string());
+        for file in files {
+            let name = file.get("name").and_then(Json::as_str).unwrap_or("unknown");
+            let count = file
+                .get("file_count")
+                .and_then(Json::as_u64)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            let size = file
+                .get("size_mb")
+                .and_then(Json::as_f64)
+                .map(|v| format!("{v:.2} MB"))
+                .unwrap_or_else(|| "? MB".to_string());
+            out.push(format!("- {name}: {count} files, {size}"));
+        }
+    }
+    out.join("\n")
+}
+
+fn normalize_annotation_type(value: &str) -> String {
+    let normalized = normalize_param_id(value);
+    let mapped = match normalized.as_str() {
+        "genome" | "genome_fasta" | "fasta" | "all_genomic_fasta" => "GENOME_FASTA",
+        "gff" | "gff3" | "genome_gff" => "GENOME_GFF",
+        "gbff" | "genbank" | "genome_gbff" => "GENOME_GBFF",
+        "gtf" | "genome_gtf" => "GENOME_GTF",
+        "rna" | "rna_fasta" => "RNA_FASTA",
+        "protein" | "proteins" | "prot" | "prot_fasta" | "protein_fasta" => "PROT_FASTA",
+        "cds" | "cds_fasta" => "CDS_FASTA",
+        "sequence_report" | "seq_report" => "SEQUENCE_REPORT",
+        other => {
+            if other.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return other.to_ascii_uppercase();
+            }
+            return value.trim().to_string();
+        }
+    };
+    mapped.to_string()
+}
+
 fn push_param_alias(
     out: &mut Vec<(String, String)>,
     params: Option<&Json>,
@@ -654,6 +843,28 @@ fn ncbi_datasets_download_url(accession: &str) -> String {
 
 #[cfg(debug_assertions)]
 fn mock_ncbi_datasets_json(endpoint: &str) -> Option<Json> {
+    if endpoint.contains("GCF_000001405.40") && endpoint.ends_with("/download_summary") {
+        return Some(json!({
+            "record_count": 1,
+            "resource_updated_on": "2026-05-01T05:15:00Z",
+            "hydrated": {
+                "estimated_file_size_mb": 1002,
+                "url": "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/accession/GCF_000001405.40/download?include_annotation_type=GENOME_FASTA&include_annotation_type=GENOME_GFF&hydrated=FULLY_HYDRATED",
+                "cli_download_command_line": "datasets download genome accession GCF_000001405.40 --include gff3,genome"
+            },
+            "dehydrated": {
+                "estimated_file_size_mb": 1,
+                "url": "https://api.ncbi.nlm.nih.gov/datasets/v2/genome/accession/GCF_000001405.40/download?include_annotation_type=GENOME_FASTA&include_annotation_type=GENOME_GFF&hydrated=DATA_REPORT_ONLY",
+                "cli_download_command_line": "datasets download genome accession GCF_000001405.40 --include gff3,genome --dehydrated",
+                "cli_rehydrate_command_line": "datasets rehydrate --help"
+            },
+            "available_files": {
+                "all_genomic_fasta": {"file_count": 1, "size_mb": 927.82837},
+                "genome_gff": {"file_count": 1, "size_mb": 74.56825},
+                "sequence_report": {"file_count": 1, "size_mb": 0.07672691}
+            }
+        }));
+    }
     if endpoint.contains("GCF_000001405.40") || endpoint.contains("/taxon/9606/") {
         return Some(json!({
             "reports": [{
