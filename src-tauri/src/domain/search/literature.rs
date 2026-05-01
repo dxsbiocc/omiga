@@ -5,12 +5,10 @@
 //! record and one SerpAPI-style JSON serializer. The first batch focuses on
 //! public metadata APIs that do not need paid credentials.
 
-use crate::domain::tools::ToolContext;
 use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json::{json, Map as JsonMap, Value as Json};
-use std::time::Duration;
 
 const DEFAULT_MAX_RESULTS: u32 = 10;
 const MAX_RESULTS_CAP: u32 = 25;
@@ -22,8 +20,11 @@ const MEDRXIV_API_URL: &str = "https://api.medrxiv.org/details/medrxiv";
 const PREPRINT_SEARCH_WINDOW_DAYS: i64 = 365;
 const PREPRINT_MAX_SCAN_PAGES: u32 = 5;
 
+mod client;
 mod output;
+mod routing;
 
+pub use client::PublicLiteratureClient;
 pub use output::{paper_to_detail_json, search_response_to_json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,80 +110,7 @@ pub struct LiteratureSearchResponse {
     pub notes: Vec<String>,
 }
 
-#[derive(Clone)]
-pub struct PublicLiteratureClient {
-    http: reqwest::Client,
-    mailto: String,
-}
-
 impl PublicLiteratureClient {
-    pub fn from_tool_context(ctx: &ToolContext) -> Result<Self, String> {
-        let mut builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(ctx.timeout_secs.clamp(5, 45)))
-            .user_agent(format!(
-                "Omiga-LiteratureSearch/{} (mailto:{})",
-                env!("CARGO_PKG_VERSION"),
-                clean_optional(ctx.web_search_api_keys.pubmed_email.as_deref())
-                    .unwrap_or("omiga@example.invalid")
-            ));
-        if !ctx.web_use_proxy {
-            builder = builder.no_proxy();
-        }
-        let http = builder
-            .build()
-            .map_err(|e| format!("build literature HTTP client: {e}"))?;
-        Ok(Self {
-            http,
-            mailto: clean_optional(ctx.web_search_api_keys.pubmed_email.as_deref())
-                .unwrap_or("omiga@example.invalid")
-                .to_string(),
-        })
-    }
-
-    #[cfg(test)]
-    pub fn for_tests() -> Self {
-        Self {
-            http: reqwest::Client::new(),
-            mailto: "omiga@example.invalid".to_string(),
-        }
-    }
-
-    pub async fn search(
-        &self,
-        source: PublicLiteratureSource,
-        args: LiteratureSearchArgs,
-    ) -> Result<LiteratureSearchResponse, String> {
-        if args.query.trim().len() < 2 {
-            return Err("literature search query must contain at least 2 characters".to_string());
-        }
-        match source {
-            PublicLiteratureSource::Arxiv => self.search_arxiv(args).await,
-            PublicLiteratureSource::Crossref => self.search_crossref(args).await,
-            PublicLiteratureSource::OpenAlex => self.search_openalex(args).await,
-            PublicLiteratureSource::Biorxiv => self.search_preprint(source, args).await,
-            PublicLiteratureSource::Medrxiv => self.search_preprint(source, args).await,
-        }
-    }
-
-    pub async fn fetch(
-        &self,
-        source: PublicLiteratureSource,
-        identifier: &str,
-    ) -> Result<LiteraturePaper, String> {
-        let identifier = identifier.trim();
-        if identifier.is_empty() {
-            return Err(format!("{} fetch requires a non-empty id", source.as_str()));
-        }
-        match source {
-            PublicLiteratureSource::Arxiv => self.fetch_arxiv(identifier).await,
-            PublicLiteratureSource::Crossref => self.fetch_crossref(identifier).await,
-            PublicLiteratureSource::OpenAlex => self.fetch_openalex(identifier).await,
-            PublicLiteratureSource::Biorxiv | PublicLiteratureSource::Medrxiv => {
-                self.fetch_preprint(source, identifier).await
-            }
-        }
-    }
-
     async fn search_arxiv(
         &self,
         args: LiteratureSearchArgs,
