@@ -2387,10 +2387,19 @@ pub async fn send_message(
     if skills_exist {
         prompt_parts.push(skills_system_section);
     }
-    if let Some(plugins_system_section) = crate::domain::plugins::format_plugins_system_section(
-        &crate::domain::plugins::plugin_load_outcome(),
-    ) {
+    let plugin_load_outcome = crate::domain::plugins::plugin_load_outcome();
+    if let Some(plugins_system_section) =
+        crate::domain::plugins::format_plugins_system_section(&plugin_load_outcome)
+    {
         prompt_parts.push(plugins_system_section);
+    }
+    if let Some(selected_plugins_system_section) =
+        crate::domain::plugins::format_selected_plugins_system_section(
+            &plugin_load_outcome,
+            &request.selected_plugin_ids,
+        )
+    {
+        prompt_parts.push(selected_plugins_system_section);
     }
     // Memory navigation guide — always injected to override the model's default
     // "I have no cross-session memory" belief and tell it where to look.

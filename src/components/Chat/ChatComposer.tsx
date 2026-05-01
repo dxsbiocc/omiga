@@ -59,6 +59,7 @@ import {
   ArrowUpward,
   DeleteOutline,
   HourglassEmpty,
+  Extension,
 } from "@mui/icons-material";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -85,11 +86,16 @@ import {
 import {
   useUiStore,
   useChatComposerStore,
+  usePluginStore,
   type PermissionMode,
   type SandboxBackend,
   type LocalVenvType,
 } from "../../state";
 import { normalizeAgentDisplayName } from "../../state/agentStore";
+import {
+  flattenMarketplacePlugins,
+  type PluginSummary,
+} from "../../state/pluginStore";
 import {
   parseResearchCommand,
   WORKFLOW_SLASH_COMMANDS,
@@ -290,10 +296,40 @@ type AvailableSkillRow = {
   source: "claudeUser" | "omigaUser" | "omigaProject" | "omigaPlugin";
   tags: string[];
 };
+type AvailablePluginRow = {
+  id: string;
+  label: string;
+  description: string;
+  capabilities: string[];
+};
 type SlashPickerOption =
   | { kind: "command"; command: WorkflowSlashCommandDefinition }
   | { kind: "agent"; agent: AvailableAgentRow }
   | { kind: "skill"; skill: AvailableSkillRow };
+type ComposerMentionPickerRow =
+  | { kind: "plugin"; plugin: AvailablePluginRow }
+  | { kind: "file"; row: ComposerMentionRow };
+
+function pluginDisplayLabel(plugin: PluginSummary): string {
+  return (
+    plugin.interface?.displayName?.trim() ||
+    plugin.interface?.shortDescription?.trim() ||
+    plugin.name
+  );
+}
+
+function pluginDescription(plugin: PluginSummary): string {
+  return (
+    plugin.interface?.shortDescription?.trim() ||
+    plugin.interface?.longDescription?.trim() ||
+    `${plugin.name}@${plugin.marketplaceName}`
+  );
+}
+
+function pluginCapabilities(plugin: PluginSummary): string[] {
+  const caps = plugin.interface?.capabilities ?? [];
+  return caps.map((cap) => cap.trim()).filter(Boolean).slice(0, 4);
+}
 
 function normalizeFsPath(p: string): string {
   return p.replace(/\\/g, "/");
@@ -635,6 +671,7 @@ export const ChatComposer = memo(function ChatComposer({
   const commandTone = theme.palette.success.main;
   const skillTone = theme.palette.secondary.main;
   const fileTone = theme.palette.info.main;
+  const pluginTone = theme.palette.warning.main;
   const agentTone = accent;
   const paper = theme.palette.background.paper;
   const def = theme.palette.background.default;
@@ -695,6 +732,9 @@ export const ChatComposer = memo(function ChatComposer({
     composerAttachedPaths,
     addComposerAttachedPath,
     popComposerAttachedPath,
+    composerSelectedPluginIds,
+    addComposerSelectedPluginId,
+    popComposerSelectedPluginId,
     useWorktree,
     setUseWorktree,
     environment,
@@ -709,6 +749,8 @@ export const ChatComposer = memo(function ChatComposer({
     selectedBranchByRoot,
     setBranchForRoot,
   } = useChatComposerStore();
+  const pluginMarketplaces = usePluginStore((s) => s.marketplaces);
+  const loadPlugins = usePluginStore((s) => s.loadPlugins);
 
   const permissionAccent = permissionModeAccent(theme, permissionMode);
 
@@ -961,6 +1003,11 @@ export const ChatComposer = memo(function ChatComposer({
   }, [workspacePath]);
 
   useEffect(() => {
+    if (!workspacePath || needsWorkspacePath) return;
+    void loadPlugins(workspacePath);
+  }, [loadPlugins, needsWorkspacePath, workspacePath]);
+
+  useEffect(() => {
     if (!workspacePath || needsWorkspacePath) {
       setGitInfo(null);
       return;
@@ -1091,6 +1138,55 @@ export const ChatComposer = memo(function ChatComposer({
       return !q || name.includes(q) || desc.includes(q) || tags.includes(q);
     });
   }, [availableSkills, skillParse]);
+
+  const availablePlugins = useMemo<AvailablePluginRow[]>(() => {
+    return flattenMarketplacePlugins(pluginMarketplaces)
+      .filter((plugin) => plugin.installed && plugin.enabled)
+      .map((plugin) => ({
+        id: plugin.id,
+        label: pluginDisplayLabel(plugin),
+        description: pluginDescription(plugin),
+        capabilities: pluginCapabilities(plugin),
+      }));
+  }, [pluginMarketplaces]);
+
+  const selectedPluginRows = useMemo(() => {
+    const byId = new Map(availablePlugins.map((plugin) => [plugin.id, plugin]));
+    return composerSelectedPluginIds.map(
+      (id) =>
+        byId.get(id) ?? {
+          id,
+          label: id,
+          description: "已选择的插件",
+          capabilities: [],
+        },
+    );
+  }, [availablePlugins, composerSelectedPluginIds]);
+
+  const filteredPluginMentions = useMemo(() => {
+    if (!fileParse.active || fileParse.directory) return [];
+    const q = fileParse.filter.toLowerCase().trim();
+    return availablePlugins
+      .filter((plugin) => !composerSelectedPluginIds.includes(plugin.id))
+      .filter((plugin) => {
+        const haystack = [
+          plugin.id,
+          plugin.label,
+          plugin.description,
+          ...plugin.capabilities,
+        ]
+          .join(" ")
+          .toLowerCase();
+        return !q || haystack.includes(q);
+      })
+      .slice(0, 20);
+  }, [
+    availablePlugins,
+    composerSelectedPluginIds,
+    fileParse.active,
+    fileParse.directory,
+    fileParse.filter,
+  ]);
 
   const filteredSlashOptions = useMemo<SlashPickerOption[]>(
     () =>
@@ -1289,12 +1385,27 @@ export const ChatComposer = memo(function ChatComposer({
     return filterComposerMentionRows(fileGlobMatches, fileParse.filter);
   }, [fileParse, fileGlobMatches]);
 
+  const filteredMentionRows = useMemo<ComposerMentionPickerRow[]>(
+    () => [
+      ...filteredPluginMentions.map((plugin) => ({
+        kind: "plugin" as const,
+        plugin,
+      })),
+      ...filteredFilePaths.map((row) => ({ kind: "file" as const, row })),
+    ],
+    [filteredFilePaths, filteredPluginMentions],
+  );
+
   const fileFilterKey = useMemo(
     () =>
-      filteredFilePaths
-        .map((m) => `${m.is_file ? "f" : "d"}:${m.path}`)
+      filteredMentionRows
+        .map((m) =>
+          m.kind === "plugin"
+            ? `p:${m.plugin.id}`
+            : `${m.row.is_file ? "f" : "d"}:${m.row.path}`,
+        )
         .join("\u0001"),
-    [filteredFilePaths],
+    [filteredMentionRows],
   );
 
   useEffect(() => {
@@ -1323,7 +1434,7 @@ export const ChatComposer = memo(function ChatComposer({
   ]);
 
   useEffect(() => {
-    if (!fileParse.active || filteredFilePaths.length === 0) return;
+    if (!fileParse.active || filteredMentionRows.length === 0) return;
     const el = fileListRef.current?.querySelector(
       `[data-file-index="${fileHighlightIndex}"]`,
     );
@@ -1331,7 +1442,7 @@ export const ChatComposer = memo(function ChatComposer({
   }, [
     fileHighlightIndex,
     fileParse.active,
-    filteredFilePaths.length,
+    filteredMentionRows.length,
     fileFilterKey,
   ]);
 
@@ -1377,6 +1488,17 @@ export const ChatComposer = memo(function ChatComposer({
       queueMicrotask(() => focusEditableEnd());
     },
     [addComposerAttachedPath, focusEditableEnd, setInputValue],
+  );
+
+  const pickPluginMention = useCallback(
+    (pluginId: string) => {
+      const safe = pluginId.trim();
+      if (!safe) return;
+      addComposerSelectedPluginId(safe);
+      setInputValue("");
+      queueMicrotask(() => focusEditableEnd());
+    },
+    [addComposerSelectedPluginId, focusEditableEnd, setInputValue],
   );
 
   const enterFileDirectory = useCallback(
@@ -1469,6 +1591,11 @@ export const ChatComposer = memo(function ChatComposer({
           popComposerAttachedPath();
           return;
         }
+        if (composerSelectedPluginIds.length > 0) {
+          e.preventDefault();
+          popComposerSelectedPluginId();
+          return;
+        }
         if (composerAgentType !== "auto") {
           e.preventDefault();
           setComposerAgentType("auto");
@@ -1516,14 +1643,18 @@ export const ChatComposer = memo(function ChatComposer({
           e.preventDefault();
           return;
         }
-        if (filteredFilePaths.length > 0 && !fileGlobLoading) {
+        if (filteredMentionRows.length > 0 && !fileGlobLoading) {
+          const highlightedMentionRow =
+            filteredMentionRows[fileHighlightIndexRef.current] ??
+            filteredMentionRows[0];
           const highlightedFileRow =
-            filteredFilePaths[fileHighlightIndexRef.current] ??
-            filteredFilePaths[0];
+            highlightedMentionRow?.kind === "file"
+              ? highlightedMentionRow.row
+              : null;
           if (e.key === "ArrowDown") {
             e.preventDefault();
             setFileHighlightIndex((i) => {
-              const next = (i + 1) % filteredFilePaths.length;
+              const next = (i + 1) % filteredMentionRows.length;
               fileHighlightIndexRef.current = next;
               return next;
             });
@@ -1533,7 +1664,7 @@ export const ChatComposer = memo(function ChatComposer({
             e.preventDefault();
             setFileHighlightIndex((i) => {
               const next =
-                (i - 1 + filteredFilePaths.length) % filteredFilePaths.length;
+                (i - 1 + filteredMentionRows.length) % filteredMentionRows.length;
               fileHighlightIndexRef.current = next;
               return next;
             });
@@ -1551,7 +1682,9 @@ export const ChatComposer = memo(function ChatComposer({
           }
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            if (
+            if (highlightedMentionRow?.kind === "plugin") {
+              pickPluginMention(highlightedMentionRow.plugin.id);
+            } else if (
               highlightedFileRow?.is_file === false &&
               !e.metaKey &&
               !e.ctrlKey
@@ -1564,7 +1697,9 @@ export const ChatComposer = memo(function ChatComposer({
           }
           if (e.key === "Tab" && !e.shiftKey) {
             e.preventDefault();
-            if (highlightedFileRow?.is_file === false) {
+            if (highlightedMentionRow?.kind === "plugin") {
+              pickPluginMention(highlightedMentionRow.plugin.id);
+            } else if (highlightedFileRow?.is_file === false) {
               enterFileDirectory(highlightedFileRow.path);
             } else if (highlightedFileRow) {
               pickFilePath(highlightedFileRow.path);
@@ -1634,8 +1769,9 @@ export const ChatComposer = memo(function ChatComposer({
       selectedSkillCommandName,
       composerAgentType,
       composerAttachedPaths,
+      composerSelectedPluginIds,
       filteredSlashOptions,
-      filteredFilePaths,
+      filteredMentionRows,
       fileGlobLoading,
       input,
       setInputValue,
@@ -1645,9 +1781,11 @@ export const ChatComposer = memo(function ChatComposer({
       pickWorkflowCommand,
       pickSkillCommand,
       pickFilePath,
+      pickPluginMention,
       enterFileDirectory,
       goUpFileDirectory,
       popComposerAttachedPath,
+      popComposerSelectedPluginId,
       setComposerAgentType,
     ],
   );
@@ -1666,7 +1804,7 @@ export const ChatComposer = memo(function ChatComposer({
       ? "请先选择工作目录后再发送消息…"
       : followUpTaskId
         ? "追加说明将进入该后台 Agent 的下一轮工具循环…"
-        : "输入 / 选择工作流命令或 Agent；输入 $ 选择 Skill；输入 @ 从当前工作目录选择…";
+        : "输入 / 选择工作流命令或 Agent；输入 $ 选择 Skill；输入 @ 选择插件或工作区文件…";
 
   /** 允许排队时：连接中 / 流式中均可继续输入；否则与旧行为一致（等待响应或生成时禁用）。 */
   const inputDisabled =
@@ -1705,6 +1843,7 @@ export const ChatComposer = memo(function ChatComposer({
     Boolean(highlightedSlashCommand) ||
     Boolean(highlightedSkillCommand) ||
     showComposerAgentChip ||
+    composerSelectedPluginIds.length > 0 ||
     composerAttachedPaths.length > 0;
 
   const showBgRouting =
@@ -2308,6 +2447,44 @@ export const ChatComposer = memo(function ChatComposer({
               </Box>
             </Tooltip>
           ) : null}
+          {selectedPluginRows.length > 0 ? (
+            <Box
+              sx={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                alignContent: "center",
+                alignSelf: "center",
+                gap: 0.25,
+                maxWidth: { xs: "100%", sm: 420 },
+                minHeight: "var(--composer-chip-h)",
+              }}
+            >
+              {selectedPluginRows.map((plugin) => (
+                <Tooltip
+                  key={plugin.id}
+                  title={`${plugin.label} · ${plugin.id}`}
+                  placement="top"
+                >
+                  <Chip
+                    className="composer-plugin-chip"
+                    size="small"
+                    variant="outlined"
+                    icon={<Extension sx={{ fontSize: 16 }} />}
+                    label={`@${plugin.label}`}
+                    sx={{
+                      ...semanticChipSurface(pluginTone),
+                      flexShrink: 0,
+                      height: "var(--composer-chip-h)",
+                      maxHeight: "var(--composer-chip-h)",
+                      maxWidth: 220,
+                      fontWeight: 700,
+                    }}
+                  />
+                </Tooltip>
+              ))}
+            </Box>
+          ) : null}
           {composerAttachedPaths.length > 0 ? (
             <Box
               sx={{
@@ -2359,7 +2536,7 @@ export const ChatComposer = memo(function ChatComposer({
             aria-expanded={
               (showSlashPopover && filteredSlashOptions.length > 0) ||
               (showFilePopover &&
-                (fileGlobLoading || filteredFilePaths.length > 0))
+                (fileGlobLoading || filteredMentionRows.length > 0))
             }
             data-placeholder={!hasInlineComposerChips ? placeholder : ""}
             data-empty={input === "" ? "true" : undefined}
@@ -2668,7 +2845,7 @@ export const ChatComposer = memo(function ChatComposer({
                     minWidth: 0,
                   }}
                 >
-                  工作区文件
+                  {fileParse.directory ? "工作区文件" : "插件与工作区文件"}
                 </Typography>
                 {fileParse.directory ? (
                   <Button
@@ -2697,7 +2874,7 @@ export const ChatComposer = memo(function ChatComposer({
                   lineHeight: 1.35,
                 }}
               >
-                当前 {filePickerDirectoryLabel} · Enter 进入文件夹 · 选择文件会注入精确路径
+                当前 {filePickerDirectoryLabel} · Enter 选择插件/文件夹 · 选择文件会注入精确路径
               </Typography>
             </Box>
             <List
@@ -2750,7 +2927,7 @@ export const ChatComposer = memo(function ChatComposer({
                     }}
                   />
                 </ListItemButton>
-              ) : filteredFilePaths.length === 0 ? (
+              ) : filteredMentionRows.length === 0 ? (
                 <ListItemButton disabled sx={{ py: 1.5, px: 1 }}>
                   <ListItemText
                     primary="当前目录下无匹配项"
@@ -2764,7 +2941,74 @@ export const ChatComposer = memo(function ChatComposer({
                   />
                 </ListItemButton>
               ) : (
-                filteredFilePaths.map((row, i) => (
+                filteredMentionRows.map((item, i) =>
+                  item.kind === "plugin" ? (
+                    <ListItemButton
+                      key={`p:${item.plugin.id}`}
+                      data-file-index={i}
+                      selected={i === fileHighlightIndex}
+                      alignItems="center"
+                      onClick={() => pickPluginMention(item.plugin.id)}
+                    >
+                      <ListItemIcon
+                        sx={{
+                          minWidth: 34,
+                          mr: 0.25,
+                          py: 0,
+                          alignSelf: "center",
+                          color: pluginTone,
+                        }}
+                      >
+                        <Extension sx={{ fontSize: 22 }} />
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={item.plugin.label}
+                        secondary={
+                          item.plugin.capabilities.length > 0
+                            ? `${item.plugin.id} · ${item.plugin.capabilities.join(" · ")}`
+                            : item.plugin.description
+                        }
+                        sx={{ m: 0 }}
+                        primaryTypographyProps={{
+                          sx: {
+                            fontSize: 12,
+                            fontWeight: 700,
+                            color: pluginTone,
+                            lineHeight: 1.35,
+                          },
+                        }}
+                        secondaryTypographyProps={{
+                          sx: {
+                            fontSize: 11,
+                            color: pen.textPath,
+                            mt: 0.1,
+                            lineHeight: 1.25,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          },
+                        }}
+                      />
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        sx={{
+                          minWidth: 0,
+                          ml: 0.75,
+                          px: 0.75,
+                          py: 0,
+                          fontSize: 11,
+                          lineHeight: 1.6,
+                          flexShrink: 0,
+                        }}
+                      >
+                        选择
+                      </Button>
+                    </ListItemButton>
+                  ) : (
+                  (() => {
+                    const row = item.row;
+                    return (
                   <ListItemButton
                     key={`${row.is_file ? "f" : "d"}:${row.path}`}
                     data-file-index={i}
@@ -2851,7 +3095,10 @@ export const ChatComposer = memo(function ChatComposer({
                       </Stack>
                     )}
                   </ListItemButton>
-                ))
+                    );
+                  })()
+                  ),
+                )
               )}
             </List>
           </Popover>

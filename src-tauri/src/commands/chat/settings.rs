@@ -882,6 +882,9 @@ pub struct SendMessageRequest {
     /// Specialist agent id from [`list_available_agents`] (e.g. Explore, Plan). Omit or `general-purpose` for default.
     #[serde(default, rename = "composerAgentType")]
     pub composer_agent_type: Option<String>,
+    /// Explicit Omiga plugin IDs selected for this turn by the composer `@` picker.
+    #[serde(default, rename = "selectedPluginIds")]
+    pub selected_plugin_ids: Vec<String>,
     /// `ask` | `auto` | `bypass` — user-facing permission stance for this turn.
     #[serde(default, rename = "permissionMode")]
     pub permission_mode: Option<String>,

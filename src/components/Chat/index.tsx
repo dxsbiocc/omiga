@@ -34,6 +34,7 @@ import {
   FolderOpen,
   Send as SendIcon,
   Check as CheckIcon,
+  KeyboardArrowDownRounded,
   Summarize as SummarizeIcon,
   Edit as EditIcon,
   Groups as GroupsIcon,
@@ -91,6 +92,11 @@ import {
   messageRenderItemKey,
   shouldAnimateMessageItem,
 } from "./renderItemUtils";
+import {
+  AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
+  isNearScrollBottom,
+  shouldShowJumpToLatestButton,
+} from "./chatScrollState";
 import { selectLiveReActFoldTraceText } from "./liveFoldTrace";
 import {
   applyToolResultMessage,
@@ -237,6 +243,8 @@ interface Message {
   composerAgentType?: string;
   /** 发送时附加的工作区相对路径（@ 选择） */
   composerAttachedPaths?: string[];
+  /** 发送时显式选择的插件 ID（@ 插件选择） */
+  composerSelectedPluginIds?: string[];
   /** From DB: full assistant tool_calls — rebuild trace if tool rows are incomplete */
   toolCallsList?: Array<{ id: string; name: string; arguments: string }>;
   /** Assistant text streamed before a tool in this round (shown inside tool block, not in final summary). */
@@ -292,6 +300,7 @@ interface QueuedMainSend {
   id: string;
   body: string;
   composerAttachedPaths: string[];
+  composerSelectedPluginIds: string[];
   composerAgentType: string;
   permissionMode: PermissionMode;
   /** 发送入队时的运行环境（与 composer 一致） */
@@ -373,6 +382,7 @@ function chatMessageToStore(m: Message): StoreMessage {
     content: m.content,
     composerAgentType: m.composerAgentType,
     composerAttachedPaths: m.composerAttachedPaths,
+    composerSelectedPluginIds: m.composerSelectedPluginIds,
     initialTodos: m.initialTodos,
     followUpSuggestions: m.followUpSuggestions,
     turnSummary: m.turnSummary,
@@ -1448,6 +1458,7 @@ const MessageRowRenderItem = memo(function MessageRowRenderItem({
             timestamp={message.timestamp}
             composerAgentType={message.composerAgentType}
             attachedPaths={userAttachPaths}
+            selectedPluginIds={message.composerSelectedPluginIds ?? []}
             isEditing={isEditingUser}
             editDraft={editDraft}
             chat={chat}
@@ -1506,9 +1517,6 @@ const MessageRowRenderItem = memo(function MessageRowRenderItem({
     </Box>
   );
 });
-
-/** How close to the bottom (px) before auto-scroll kicks in */
-const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 100;
 
 function LazyMarkdownBlockFallback({ label = "正在加载内容…" }: { label?: string }) {
   return (
@@ -1935,6 +1943,7 @@ function convertStoreMessages(storeMessages: StoreMessage[], sessionId: string):
     content: msg.content ?? "",
     composerAgentType: msg.composerAgentType,
     composerAttachedPaths: msg.composerAttachedPaths,
+    composerSelectedPluginIds: msg.composerSelectedPluginIds,
     followUpSuggestions: msg.followUpSuggestions,
     turnSummary: msg.turnSummary,
     tokenUsage: msg.tokenUsage,
@@ -2080,10 +2089,12 @@ export function Chat({ sessionId }: ChatProps) {
     void queueRevision;
     return queuedMainSendQueueRef.current.map((item) => {
       const pathLine = formatComposerPathPreview(item.composerAttachedPaths);
+      const pluginLine = item.composerSelectedPluginIds
+        .map((id) => `@${id}`)
+        .join(" ");
+      const prefix = [pluginLine, pathLine].filter(Boolean).join(" ");
       const merged =
-        pathLine && item.body
-          ? `${pathLine}\n\n${item.body}`
-          : pathLine || item.body;
+        prefix && item.body ? `${prefix}\n\n${item.body}` : prefix || item.body;
       const previewText =
         merged.length > 200 ? `${merged.slice(0, 200)}…` : merged;
       return { id: item.id, previewText, fullText: merged };
@@ -2131,6 +2142,10 @@ export function Chat({ sessionId }: ChatProps) {
         st.clearComposerAttachedPaths();
         for (const p of item.composerAttachedPaths) {
           st.addComposerAttachedPath(p);
+        }
+        st.clearComposerSelectedPluginIds();
+        for (const id of item.composerSelectedPluginIds) {
+          st.addComposerSelectedPluginId(id);
         }
         st.setComposerAgentType(item.composerAgentType);
         st.setPermissionMode(item.permissionMode);
@@ -2940,6 +2955,31 @@ export function Chat({ sessionId }: ChatProps) {
   // Auto-scroll: only when user is already near the bottom, throttled by RAF
   const shouldAutoScrollRef = useRef(true);
   const scrollRafRef = useRef<number | null>(null);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+
+  const updateJumpToLatestVisibility = useCallback(() => {
+    const el = messagesScrollRef.current;
+    if (!el) {
+      setShowJumpToLatest(false);
+      return true;
+    }
+    const metrics = {
+      scrollTop: el.scrollTop,
+      clientHeight: el.clientHeight,
+      scrollHeight: el.scrollHeight,
+    };
+    const nearBottom = isNearScrollBottom(
+      metrics,
+      AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
+    );
+    shouldAutoScrollRef.current = nearBottom;
+    const shouldShow = shouldShowJumpToLatestButton(
+      metrics,
+      AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
+    );
+    setShowJumpToLatest((prev) => (prev === shouldShow ? prev : shouldShow));
+    return nearBottom;
+  }, []);
 
   // Scroll-to-top pagination + auto-scroll bottom detection
   useEffect(() => {
@@ -2949,13 +2989,21 @@ export function Chat({ sessionId }: ChatProps) {
       if (el.scrollTop < 120 && hasMoreMessages && !isLoadingMoreMessages) {
         void loadMoreMessages();
       }
-      const isNearBottom =
-        el.scrollTop + el.clientHeight >= el.scrollHeight - AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
-      shouldAutoScrollRef.current = isNearBottom;
+      updateJumpToLatestVisibility();
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
-  }, [hasMoreMessages, isLoadingMoreMessages, loadMoreMessages]);
+  }, [
+    hasMoreMessages,
+    isLoadingMoreMessages,
+    loadMoreMessages,
+    updateJumpToLatestVisibility,
+  ]);
+
+  useEffect(() => {
+    shouldAutoScrollRef.current = true;
+    setShowJumpToLatest(false);
+  }, [sessionId]);
 
   const messageRenderItems = useMemo(
     () => groupMessagesForRender(messages),
@@ -3072,9 +3120,23 @@ export function Chat({ sessionId }: ChatProps) {
     if (scrollRafRef.current !== null) return;
     scrollRafRef.current = requestAnimationFrame(() => {
       scrollRafRef.current = null;
-      if (!shouldAutoScrollRef.current) return;
+      if (!shouldAutoScrollRef.current) {
+        updateJumpToLatestVisibility();
+        return;
+      }
       messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+      setShowJumpToLatest(false);
+      requestAnimationFrame(updateJumpToLatestVisibility);
     });
+  }, [updateJumpToLatestVisibility]);
+
+  useEffect(() => {
+    return () => {
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -3096,9 +3158,20 @@ export function Chat({ sessionId }: ChatProps) {
     if (scheduleCompleteSession === sessionId) {
       setScheduleCompleteSession(null);
       shouldAutoScrollRef.current = true;
+      setShowJumpToLatest(false);
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
   }, [scheduleCompleteSession, sessionId, setScheduleCompleteSession]);
+
+  const handleJumpToLatest = useCallback(() => {
+    shouldAutoScrollRef.current = true;
+    setShowJumpToLatest(false);
+    messagesEndRef.current?.scrollIntoView({
+      behavior: "auto",
+      block: "end",
+    });
+    requestAnimationFrame(updateJumpToLatestVisibility);
+  }, [updateJumpToLatestVisibility]);
 
   // Subscribe to the synthesis stream before the first chunk arrives so the
   // leader's reply streams inline instead of requiring a page refresh.
@@ -4543,6 +4616,7 @@ export function Chat({ sessionId }: ChatProps) {
       composerAgentType: storeAgent,
       permissionMode: storePerm,
       composerAttachedPaths: storePaths,
+      composerSelectedPluginIds: storePluginIds,
       environment: storeEnv,
       sshServer: storeSsh,
       sandboxBackend: storeSb,
@@ -4564,6 +4638,9 @@ export function Chat({ sessionId }: ChatProps) {
     const composerAttachedPaths = flushPayload
       ? [...flushPayload.composerAttachedPaths]
       : storePaths;
+    const composerSelectedPluginIds = flushPayload
+      ? [...flushPayload.composerSelectedPluginIds]
+      : storePluginIds;
 
     /** Prefer ref payload after queue flush — `getValue` reads the latest composer state. */
     const trimmed = flushPayload ? flushPayload.body.trim() : (composerRef.current?.getValue() ?? "").trim();
@@ -4603,6 +4680,7 @@ export function Chat({ sessionId }: ChatProps) {
       );
       composerRef.current?.setValue("");
       useChatComposerStore.getState().clearComposerAttachedPaths();
+      useChatComposerStore.getState().clearComposerSelectedPluginIds();
       try {
         const response = await invoke<{
           message_id: string;
@@ -4622,6 +4700,7 @@ export function Chat({ sessionId }: ChatProps) {
             sandboxBackend: useChatComposerStore.getState().sandboxBackend,
             localVenvType: useChatComposerStore.getState().localVenvType,
             localVenvName: useChatComposerStore.getState().localVenvName,
+            selectedPluginIds: composerSelectedPluginIds,
           },
         });
         if (response.input_kind === "background_followup_queued") {
@@ -4661,6 +4740,7 @@ export function Chat({ sessionId }: ChatProps) {
             : `q-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
         body: trimmed,
         composerAttachedPaths: [...composerAttachedPaths],
+        composerSelectedPluginIds: [...composerSelectedPluginIds],
         composerAgentType,
         permissionMode,
         environment,
@@ -4670,6 +4750,7 @@ export function Chat({ sessionId }: ChatProps) {
       bumpQueueUi();
       composerRef.current?.setValue("");
       useChatComposerStore.getState().clearComposerAttachedPaths();
+      useChatComposerStore.getState().clearComposerSelectedPluginIds();
       return;
     }
 
@@ -4718,6 +4799,10 @@ export function Chat({ sessionId }: ChatProps) {
         trimmed;
       const bubbleAttachedPaths =
         composerAttachedPaths.length > 0 ? [...composerAttachedPaths] : undefined;
+      const bubbleSelectedPluginIds =
+        composerSelectedPluginIds.length > 0
+          ? [...composerSelectedPluginIds]
+          : undefined;
       const userMessage: Message = {
         id: `user-${Date.now()}`,
         role: "user",
@@ -4725,6 +4810,7 @@ export function Chat({ sessionId }: ChatProps) {
         timestamp: Date.now(),
         composerAgentType: undefined,
         composerAttachedPaths: bubbleAttachedPaths,
+        composerSelectedPluginIds: bubbleSelectedPluginIds,
       };
 
       setMessages((prev) => [...prev, userMessage]);
@@ -4733,12 +4819,14 @@ export function Chat({ sessionId }: ChatProps) {
         content: messageContent,
         composerAgentType: undefined,
         composerAttachedPaths: bubbleAttachedPaths,
+        composerSelectedPluginIds: bubbleSelectedPluginIds,
         id: userMessage.id,
         timestamp: userMessage.timestamp,
       });
 
       composerRef.current?.setValue("");
       useChatComposerStore.getState().clearComposerAttachedPaths();
+      useChatComposerStore.getState().clearComposerSelectedPluginIds();
 
       const requestSessionId = sessionId;
       try {
@@ -4911,6 +4999,10 @@ export function Chat({ sessionId }: ChatProps) {
         : undefined;
     const bubbleAttachedPaths =
       composerAttachedPaths.length > 0 ? [...composerAttachedPaths] : undefined;
+    const bubbleSelectedPluginIds =
+      composerSelectedPluginIds.length > 0
+        ? [...composerSelectedPluginIds]
+        : undefined;
 
     const userMessage: Message = {
       id: `user-${Date.now()}`,
@@ -4919,6 +5011,7 @@ export function Chat({ sessionId }: ChatProps) {
       timestamp: Date.now(),
       composerAgentType: bubbleComposerAgent,
       composerAttachedPaths: bubbleAttachedPaths,
+      composerSelectedPluginIds: bubbleSelectedPluginIds,
     };
 
     // 存储用户消息以便后续更新 schedulerPlan
@@ -4933,12 +5026,14 @@ export function Chat({ sessionId }: ChatProps) {
       content: messageContent,
       composerAgentType: bubbleComposerAgent,
       composerAttachedPaths: bubbleAttachedPaths,
+      composerSelectedPluginIds: bubbleSelectedPluginIds,
       id: userMessage.id,
       timestamp: userMessage.timestamp,
     });
 
     composerRef.current?.setValue("");
     useChatComposerStore.getState().clearComposerAttachedPaths();
+    useChatComposerStore.getState().clearComposerSelectedPluginIds();
 
     const requestSessionId = sessionId;
     try {
@@ -4981,6 +5076,7 @@ export function Chat({ sessionId }: ChatProps) {
           localVenvType,
           localVenvName,
           activeProviderEntryName,
+          selectedPluginIds: composerSelectedPluginIds,
         },
       });
 
@@ -5163,8 +5259,12 @@ export function Chat({ sessionId }: ChatProps) {
         message.composerAttachedPaths ?? [],
       );
       const pathLine = formatComposerPathPreview(paths);
+      const pluginLine = (message.composerSelectedPluginIds ?? [])
+        .map((id) => `@${id}`)
+        .join(" ");
+      const prefix = [pluginLine, pathLine].filter(Boolean).join(" ");
       await navigator.clipboard.writeText(
-        pathLine && body ? `${pathLine}\n\n${body}` : pathLine || body,
+        prefix && body ? `${prefix}\n\n${body}` : prefix || body,
       );
       setCopySuccessToast(true);
     } catch (e) {
@@ -5300,6 +5400,7 @@ export function Chat({ sessionId }: ChatProps) {
             localVenvType: useChatComposerStore.getState().localVenvType,
             localVenvName: useChatComposerStore.getState().localVenvName,
             activeProviderEntryName,
+            selectedPluginIds: message.composerSelectedPluginIds ?? [],
             ...(isPersistedMessageIdForRetry(message.id)
               ? { retryFromUserMessageId: message.id }
               : {}),
@@ -5548,6 +5649,10 @@ export function Chat({ sessionId }: ChatProps) {
       st.clearComposerAttachedPaths();
       for (const p of next.composerAttachedPaths) {
         st.addComposerAttachedPath(p);
+      }
+      st.clearComposerSelectedPluginIds();
+      for (const id of next.composerSelectedPluginIds) {
+        st.addComposerSelectedPluginId(id);
       }
       st.setComposerAgentType(next.composerAgentType);
       st.setPermissionMode(next.permissionMode);
@@ -6847,8 +6952,88 @@ export function Chat({ sessionId }: ChatProps) {
               borderTop: 1,
               borderColor: "divider",
               bgcolor: "background.paper",
+              position: "relative",
             }}
           >
+            <Fade in={showJumpToLatest} unmountOnExit>
+              <Box
+                sx={{
+                  position: "absolute",
+                  left: "50%",
+                  top: -54,
+                  transform: "translateX(-50%)",
+                  zIndex: 2,
+                }}
+              >
+                <Tooltip title="跳转到最新消息">
+                  <IconButton
+                    type="button"
+                    aria-label="跳转到最新消息"
+                    onClick={handleJumpToLatest}
+                    sx={{
+                      width: 44,
+                      height: 44,
+                      p: 0,
+                      borderRadius: "50%",
+                      border: 0,
+                      bgcolor: "transparent",
+                      color: "text.secondary",
+                      overflow: "visible",
+                      transition:
+                        "color 180ms ease, transform 180ms ease",
+                      "&::before": {
+                        content: '""',
+                        position: "absolute",
+                        inset: 6,
+                        borderRadius: "50%",
+                        border: `1px solid ${alpha(theme.palette.text.primary, 0.2)}`,
+                        bgcolor: alpha(theme.palette.background.paper, 0.96),
+                        boxShadow: `0 10px 26px ${alpha(
+                          theme.palette.common.black,
+                          theme.palette.mode === "dark" ? 0.36 : 0.16,
+                        )}`,
+                        backdropFilter: "blur(10px)",
+                        transition:
+                          "background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease",
+                      },
+                      "@media (prefers-reduced-motion: reduce)": {
+                        transition: "none",
+                        "&::before": {
+                          transition: "none",
+                        },
+                      },
+                      "&:hover": {
+                        color: "text.primary",
+                        transform: "translateY(-1px)",
+                        "&::before": {
+                          bgcolor: theme.palette.background.paper,
+                          borderColor: alpha(theme.palette.primary.main, 0.42),
+                          boxShadow: `0 12px 30px ${alpha(
+                            theme.palette.common.black,
+                            theme.palette.mode === "dark" ? 0.42 : 0.2,
+                          )}`,
+                        },
+                      },
+                      "&:active": {
+                        transform: "translateY(1px)",
+                        "&::before": {
+                          boxShadow: `0 6px 18px ${alpha(
+                            theme.palette.common.black,
+                            theme.palette.mode === "dark" ? 0.32 : 0.14,
+                          )}`,
+                        },
+                      },
+                      "& svg": {
+                        position: "relative",
+                        zIndex: 1,
+                      },
+                    }}
+                  >
+                    <KeyboardArrowDownRounded sx={{ fontSize: 28 }} />
+                  </IconButton>
+                </Tooltip>
+              </Box>
+            </Fade>
             <Collapse in={needsWorkspacePath}>
               <Alert
                 severity="info"

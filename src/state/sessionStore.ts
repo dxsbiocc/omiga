@@ -183,6 +183,8 @@ export interface Message {
   composerAgentType?: string;
   /** @ 选择的相对路径，仅本地会话快照 */
   composerAttachedPaths?: string[];
+  /** @ 选择的 Omiga 插件 ID，仅本地会话快照 */
+  composerSelectedPluginIds?: string[];
   /** 调度系统生成的任务执行计划 */
   schedulerPlan?: SchedulerPlan;
   /** Plan mode 初始 todos（用于任务区计划步骤展示，仅本地会话快照） */
@@ -320,6 +322,8 @@ interface SendMessageRequest {
   localVenvName?: string;
   /** Specialist agent id from list_available_agents (e.g. Explore, Plan) */
   composerAgentType?: string;
+  /** Explicit Omiga plugin IDs selected for this turn */
+  selectedPluginIds?: string[];
   /** `ask` | `auto` | `bypass` — user-facing permission stance for this turn */
   permissionMode?: string;
   /** DB user row id — truncate after this row and reuse instead of inserting a duplicate user message */

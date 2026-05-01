@@ -94,6 +94,8 @@ interface ChatComposerState {
   composerAgentType: string;
   /** `@` 选择器选中的工作区相对路径（仅内存，不持久化） */
   composerAttachedPaths: string[];
+  /** `@` 选择器选中的 Omiga 插件 ID（仅本轮内存态，不持久化） */
+  composerSelectedPluginIds: string[];
   useWorktree: boolean;
   /** 执行环境：本地、SSH、沙箱 */
   environment: ExecutionEnvironment;
@@ -115,6 +117,10 @@ interface ChatComposerState {
   removeComposerAttachedPath: (relativePath: string) => void;
   popComposerAttachedPath: () => void;
   clearComposerAttachedPaths: () => void;
+  addComposerSelectedPluginId: (pluginId: string) => void;
+  removeComposerSelectedPluginId: (pluginId: string) => void;
+  popComposerSelectedPluginId: () => void;
+  clearComposerSelectedPluginIds: () => void;
   setUseWorktree: (v: boolean) => void;
   setEnvironment: (e: ExecutionEnvironment) => void;
   setSshServer: (name: string | null) => void;
@@ -135,6 +141,7 @@ function defaults() {
     permissionMode: "auto" as PermissionMode,
     composerAgentType: "auto",
     composerAttachedPaths: [] as string[],
+    composerSelectedPluginIds: [] as string[],
     useWorktree: false,
     environment: "local" as ExecutionEnvironment,
     sshServer: null as string | null,
@@ -153,6 +160,10 @@ async function saveSessionConfig(
     removeComposerAttachedPath: unknown;
     popComposerAttachedPath: unknown;
     clearComposerAttachedPaths: unknown;
+    addComposerSelectedPluginId: unknown;
+    removeComposerSelectedPluginId: unknown;
+    popComposerSelectedPluginId: unknown;
+    clearComposerSelectedPluginIds: unknown;
     setUseWorktree: unknown;
     setEnvironment: unknown;
     setSshServer: unknown;
@@ -164,6 +175,7 @@ async function saveSessionConfig(
     activeSessionId: unknown;
     selectedBranchByRoot: unknown;
     composerAttachedPaths: unknown;
+    composerSelectedPluginIds: unknown;
   }>,
 ) {
   try {
@@ -220,6 +232,25 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
       composerAttachedPaths: s.composerAttachedPaths.slice(0, -1),
     })),
   clearComposerAttachedPaths: () => set({ composerAttachedPaths: [] }),
+  addComposerSelectedPluginId: (pluginId) =>
+    set((s) => {
+      const t = pluginId.trim();
+      if (!t || s.composerSelectedPluginIds.includes(t)) return s;
+      return {
+        composerSelectedPluginIds: [...s.composerSelectedPluginIds, t],
+      };
+    }),
+  removeComposerSelectedPluginId: (pluginId) =>
+    set((s) => ({
+      composerSelectedPluginIds: s.composerSelectedPluginIds.filter(
+        (id) => id !== pluginId,
+      ),
+    })),
+  popComposerSelectedPluginId: () =>
+    set((s) => ({
+      composerSelectedPluginIds: s.composerSelectedPluginIds.slice(0, -1),
+    })),
+  clearComposerSelectedPluginIds: () => set({ composerSelectedPluginIds: [] }),
   setUseWorktree: (useWorktree) => {
     set({ useWorktree });
     const { activeSessionId } = get();
@@ -262,12 +293,18 @@ export const useChatComposerStore = create<ChatComposerState>((set, get) => ({
       localVenvType: normalized.local_venv_type as LocalVenvType,
       localVenvName: normalized.local_venv_name,
       useWorktree: normalized.use_worktree,
-      // Keep composerAttachedPaths empty on switch
+      // Keep one-turn picker selections empty on switch
       composerAttachedPaths: [],
+      composerSelectedPluginIds: [],
     });
   },
 
   resetToDefaults: () => {
-    set({ ...defaults(), activeSessionId: null, composerAttachedPaths: [] });
+    set({
+      ...defaults(),
+      activeSessionId: null,
+      composerAttachedPaths: [],
+      composerSelectedPluginIds: [],
+    });
   },
 }));

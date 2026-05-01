@@ -354,6 +354,45 @@ fn backtick_list(values: &[String]) -> String {
         .join(", ")
 }
 
+fn plugin_capability_parts(plugin: &PluginCapabilitySummary) -> Vec<String> {
+    let mut capabilities = Vec::new();
+    if plugin.has_skills {
+        capabilities.push("skills".to_string());
+    }
+    if !plugin.mcp_servers.is_empty() {
+        capabilities.push(format!(
+            "MCP servers: {}",
+            backtick_list(&plugin.mcp_servers)
+        ));
+    }
+    if !plugin.apps.is_empty() {
+        capabilities.push(format!(
+            "app connector refs: {} (metadata only unless matching app tools are explicitly available)",
+            backtick_list(&plugin.apps)
+        ));
+    }
+    capabilities
+}
+
+fn format_plugin_capability_line(plugin: &PluginCapabilitySummary) -> String {
+    let name = prompt_inline_text(&plugin.display_name, 96);
+    let description = plugin
+        .description
+        .as_deref()
+        .map(|description| prompt_inline_text(description, 180))
+        .filter(|description| !description.is_empty());
+    let description = description
+        .map(|description| format!(": {description}"))
+        .unwrap_or_default();
+    let capabilities = plugin_capability_parts(plugin);
+    let capability_suffix = if capabilities.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", capabilities.join("; "))
+    };
+    format!("- `{name}`{description}{capability_suffix}")
+}
+
 pub fn format_plugins_system_section(outcome: &PluginLoadOutcome) -> Option<String> {
     let plugins = outcome.capability_summaries();
     if plugins.is_empty() {
@@ -368,38 +407,7 @@ pub fn format_plugins_system_section(outcome: &PluginLoadOutcome) -> Option<Stri
     ];
 
     for plugin in plugins {
-        let name = prompt_inline_text(&plugin.display_name, 96);
-        let description = plugin
-            .description
-            .as_deref()
-            .map(|description| prompt_inline_text(description, 180))
-            .filter(|description| !description.is_empty());
-        let mut capabilities = Vec::new();
-        if plugin.has_skills {
-            capabilities.push("skills".to_string());
-        }
-        if !plugin.mcp_servers.is_empty() {
-            capabilities.push(format!(
-                "MCP servers: {}",
-                backtick_list(&plugin.mcp_servers)
-            ));
-        }
-        if !plugin.apps.is_empty() {
-            capabilities.push(format!(
-                "app connector refs: {} (metadata only unless matching app tools are explicitly available)",
-                backtick_list(&plugin.apps)
-            ));
-        }
-
-        let description = description
-            .map(|description| format!(": {description}"))
-            .unwrap_or_default();
-        let capability_suffix = if capabilities.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", capabilities.join("; "))
-        };
-        lines.push(format!("- `{name}`{description}{capability_suffix}"));
+        lines.push(format_plugin_capability_line(plugin));
     }
 
     lines.push(String::new());
@@ -411,6 +419,49 @@ pub fn format_plugins_system_section(outcome: &PluginLoadOutcome) -> Option<Stri
          - Do not assume VS Code extension UI/runtime behavior from an Omiga plugin."
             .to_string(),
     );
+
+    Some(lines.join("\n"))
+}
+
+pub fn format_selected_plugins_system_section(
+    outcome: &PluginLoadOutcome,
+    selected_plugin_ids: &[String],
+) -> Option<String> {
+    let mut selected = Vec::new();
+    let mut seen = HashSet::new();
+    for id in selected_plugin_ids {
+        let id = id.trim();
+        if id.is_empty() || !seen.insert(id.to_string()) {
+            continue;
+        }
+        selected.push(id.to_string());
+    }
+    if selected.is_empty() {
+        return None;
+    }
+
+    let summaries = outcome
+        .capability_summaries()
+        .iter()
+        .map(|plugin| (plugin.id.as_str(), plugin))
+        .collect::<HashMap<_, _>>();
+
+    let mut lines = vec![
+        "## Explicitly selected plugins for this turn".to_string(),
+        "The user selected the following Omiga plugins with the composer @ picker. Prefer their capabilities for this turn when relevant; if a selected plugin is unavailable, explain that briefly and continue with the best fallback.".to_string(),
+        String::new(),
+    ];
+
+    for id in selected {
+        if let Some(plugin) = summaries.get(id.as_str()) {
+            lines.push(format_plugin_capability_line(plugin));
+        } else {
+            lines.push(format!(
+                "- `{}` is not currently active or installed; do not invent capabilities for it.",
+                prompt_inline_text(&id, 96)
+            ));
+        }
+    }
 
     Some(lines.join("\n"))
 }
@@ -1563,6 +1614,43 @@ mod tests {
         assert!(section.contains("MCP servers: `sample`"));
         assert!(section.contains("app connector refs: `calendar`"));
         assert!(section.contains("Do not assume VS Code extension UI/runtime behavior"));
+    }
+
+    #[test]
+    fn selected_plugins_system_section_prioritizes_explicit_plugin_mentions() {
+        let mut mcp_servers = HashMap::new();
+        mcp_servers.insert(
+            "sample".to_string(),
+            McpServerConfig::Url("https://sample.example/mcp".to_string()),
+        );
+        let outcome = PluginLoadOutcome::from_plugins(vec![LoadedPlugin {
+            id: "sample@market".to_string(),
+            manifest_name: Some("sample".to_string()),
+            display_name: Some("Sample Plugin".to_string()),
+            description: Some("sample capability plugin".to_string()),
+            root: PathBuf::from("/tmp/sample"),
+            enabled: true,
+            skill_roots: vec![PathBuf::from("/tmp/sample/skills")],
+            mcp_servers,
+            apps: vec![],
+            error: None,
+        }]);
+
+        let section = format_selected_plugins_system_section(
+            &outcome,
+            &[
+                "sample@market".to_string(),
+                "sample@market".to_string(),
+                "missing@market".to_string(),
+            ],
+        )
+        .expect("selected plugin section");
+
+        assert!(section.contains("## Explicitly selected plugins for this turn"));
+        assert_eq!(section.matches("Sample Plugin").count(), 1);
+        assert!(section.contains("Prefer their capabilities"));
+        assert!(section.contains("missing@market"));
+        assert!(section.contains("do not invent capabilities"));
     }
 
     #[test]

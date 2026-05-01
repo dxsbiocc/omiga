@@ -14,6 +14,7 @@ import {
   SmartToy,
   InsertDriveFile as InsertDriveFileIcon,
   Route as RouteIcon,
+  Extension as ExtensionIcon,
   Replay as ReplayIcon,
   Edit as EditIcon,
   ContentCopy as ContentCopyIcon,
@@ -45,6 +46,7 @@ interface UserMessageBubbleProps {
   timestamp?: number;
   composerAgentType?: string;
   attachedPaths: string[];
+  selectedPluginIds?: string[];
   isEditing: boolean;
   editDraft: string;
   chat: ChatTokenSet;
@@ -89,6 +91,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
   timestamp,
   composerAgentType,
   attachedPaths,
+  selectedPluginIds = [],
   isEditing,
   editDraft,
   chat,
@@ -109,6 +112,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
   const isDark = theme.palette.mode === "dark";
   const commandTone = theme.palette.success.main;
   const fileTone = theme.palette.info.main;
+  const pluginTone = theme.palette.warning.main;
   const agentTone = chat.accent;
 
   const semanticChipSx = (tone: string) => ({
@@ -201,7 +205,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
         >
           {isEditing ? (
             <>
-              {composerAgentType || attachedPaths.length > 0 ? (
+              {composerAgentType || attachedPaths.length > 0 || selectedPluginIds.length > 0 ? (
                 <Box
                   sx={{
                     display: "flex",
@@ -223,6 +227,18 @@ export const UserMessageBubble = memo(function UserMessageBubble({
                       sx={semanticChipSx(agentTone)}
                     />
                   ) : null}
+                  {selectedPluginIds.map((pluginId) => (
+                    <Tooltip key={pluginId} title={pluginId} placement="top">
+                      <Chip
+                        className="user-msg-plugin-chip"
+                        size="small"
+                        variant="outlined"
+                        icon={<ExtensionIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
+                        label={`@${pluginId}`}
+                        sx={semanticChipSx(pluginTone)}
+                      />
+                    </Tooltip>
+                  ))}
                   {attachedPaths.map((p) => (
                     <Tooltip key={p} title={p} placement="top">
                       <Chip
@@ -307,7 +323,11 @@ export const UserMessageBubble = memo(function UserMessageBubble({
                 </Button>
               </Stack>
             </>
-          ) : inlineText || inlineCommand || composerAgentType || attachedPaths.length > 0 ? (
+          ) : inlineText ||
+            inlineCommand ||
+            composerAgentType ||
+            selectedPluginIds.length > 0 ||
+            attachedPaths.length > 0 ? (
             <Typography
               component="div"
               className="user-msg-inline-flow"
@@ -369,6 +389,29 @@ export const UserMessageBubble = memo(function UserMessageBubble({
                   />
                 </Box>
               ) : null}
+              {selectedPluginIds.map((pluginId) => (
+                <Tooltip key={pluginId} title={pluginId} placement="top">
+                  <Box
+                    component="span"
+                    className="user-msg-inline-chip"
+                    sx={{
+                      display: "inline-flex",
+                      verticalAlign: "middle",
+                      mr: 0.5,
+                      mb: 0.2,
+                    }}
+                  >
+                    <Chip
+                      className="user-msg-plugin-chip"
+                      size="small"
+                      variant="outlined"
+                      icon={<ExtensionIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
+                      label={`@${pluginId}`}
+                      sx={semanticChipSx(pluginTone)}
+                    />
+                  </Box>
+                </Tooltip>
+              ))}
               {attachedPaths.map((p) => (
                 <Tooltip key={p} title={p} placement="top">
                   <Box
