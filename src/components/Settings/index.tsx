@@ -1253,6 +1253,13 @@ export function Settings({
       ),
     [retrievalRegistry],
   );
+  const knowledgeDatabaseSummary = useMemo(() => {
+    const labels = knowledgeDatabaseOptions
+      .filter((item) => item.available)
+      .map((item) => item.label);
+    if (labels.length === 0) return "暂无可用结构化数据库。";
+    return `可选开启：${labels.join("、")}。`;
+  }, [knowledgeDatabaseOptions]);
   const literatureSourceOptions = useMemo(
     () =>
       sourceOptionsForCategory(retrievalRegistry, "literature", [], "search"),
@@ -3175,7 +3182,7 @@ export function Settings({
                               color="text.secondary"
                               sx={{ display: "block", mb: 1 }}
                             >
-                              可选开启：NCBI Gene、Ensembl、UniProt。
+                              {knowledgeDatabaseSummary}
                             </Typography>
                             <Stack spacing={0.75}>
                               {knowledgeDatabaseOptions.map((item) => {

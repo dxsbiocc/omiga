@@ -1299,6 +1299,8 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
 #[cfg(test)]
 mod tool_enum_tests {
     use super::*;
+    use crate::domain::retrieval_registry::{self, RetrievalCapability};
+    use std::collections::HashSet;
 
     #[test]
     fn from_json_str_notebook_edit_and_sleep() {
@@ -1340,5 +1342,52 @@ mod tool_enum_tests {
 
         let t = Tool::from_json_str("grep", r#"{"pattern":"x"}"#).unwrap();
         assert!(matches!(t, Tool::Grep(_)));
+    }
+
+    #[test]
+    fn query_settings_allowlists_cover_available_builtin_query_sources() {
+        let dataset_allowed: HashSet<_> = QUERY_DATASET_SOURCE_IDS.iter().copied().collect();
+        let knowledge_allowed: HashSet<_> = QUERY_KNOWLEDGE_SOURCE_IDS.iter().copied().collect();
+
+        for source in retrieval_registry::registry().sources {
+            if !source.can_execute() || !source.supports(RetrievalCapability::Query) {
+                continue;
+            }
+            match source.category {
+                "dataset" => assert!(
+                    dataset_allowed.contains(source.id),
+                    "dataset query source `{}` is executable in registry but missing from QUERY_DATASET_SOURCE_IDS",
+                    source.id
+                ),
+                "knowledge" => assert!(
+                    knowledge_allowed.contains(source.id),
+                    "knowledge query source `{}` is executable in registry but missing from QUERY_KNOWLEDGE_SOURCE_IDS",
+                    source.id
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn query_settings_allowlists_do_not_expose_unregistered_sources() {
+        for id in QUERY_DATASET_SOURCE_IDS {
+            let source = retrieval_registry::find_source("dataset", id).unwrap_or_else(|| {
+                panic!("dataset query allowlist source `{id}` is not registered")
+            });
+            assert!(
+                source.can_execute() && source.supports(RetrievalCapability::Query),
+                "dataset query allowlist source `{id}` is not executable/query-capable"
+            );
+        }
+        for id in QUERY_KNOWLEDGE_SOURCE_IDS {
+            let source = retrieval_registry::find_source("knowledge", id).unwrap_or_else(|| {
+                panic!("knowledge query allowlist source `{id}` is not registered")
+            });
+            assert!(
+                source.can_execute() && source.supports(RetrievalCapability::Query),
+                "knowledge query allowlist source `{id}` is not executable/query-capable"
+            );
+        }
     }
 }

@@ -6,6 +6,8 @@ use super::QueryArgs;
 use crate::domain::retrieval_registry::{self, RetrievalCapability};
 use crate::domain::tools::{ToolContext, ToolError};
 
+const BUILTIN_KNOWLEDGE_QUERY_SOURCES: &[&str] = &["ncbi_gene", "ensembl", "uniprot"];
+
 pub(super) async fn query_knowledge(
     ctx: &ToolContext,
     args: &QueryArgs,
@@ -42,7 +44,8 @@ fn canonical_knowledge_source(source: &str) -> Result<String, ToolError> {
     let Some(def) = retrieval_registry::find_source("knowledge", source) else {
         return Err(ToolError::InvalidArguments {
             message: format!(
-                "Unsupported knowledge query source: {source}. Supported available query sources: ncbi_gene, ensembl, uniprot."
+                "Unsupported knowledge query source: {source}. Supported available query sources: {}.",
+                BUILTIN_KNOWLEDGE_QUERY_SOURCES.join(", ")
             ),
         });
     };
@@ -264,5 +267,26 @@ mod tests {
                 other => panic!("query-capable source in unsupported category: {other}"),
             }
         }
+    }
+
+    #[test]
+    fn builtin_knowledge_query_sources_match_registry() {
+        let expected: std::collections::HashSet<_> =
+            BUILTIN_KNOWLEDGE_QUERY_SOURCES.iter().copied().collect();
+        let registered: std::collections::HashSet<_> = retrieval_registry::registry()
+            .sources
+            .into_iter()
+            .filter(|source| {
+                source.category == "knowledge"
+                    && source.can_execute()
+                    && source.supports(RetrievalCapability::Query)
+            })
+            .map(|source| source.id)
+            .collect();
+
+        assert_eq!(
+            registered, expected,
+            "update query/knowledge.rs routing when changing available built-in knowledge query sources"
+        );
     }
 }

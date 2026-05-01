@@ -1736,6 +1736,98 @@ mod tests {
     }
 
     #[test]
+    fn source_aliases_are_unambiguous_within_each_category() {
+        let mut seen: HashMap<(String, String), &'static str> = HashMap::new();
+        for source in registry().sources {
+            let source_key = (source.category.to_string(), normalize_id(source.id));
+            assert!(
+                seen.insert(source_key, source.id).is_none(),
+                "duplicate source id `{}` in category `{}`",
+                source.id,
+                source.category
+            );
+            for alias in source.aliases {
+                let key = (source.category.to_string(), normalize_id(alias));
+                let previous = seen.insert(key, source.id);
+                assert!(
+                    previous.is_none() || previous == Some(source.id),
+                    "source alias `{alias}` in category `{}` is ambiguous between `{}` and `{}`",
+                    source.category,
+                    previous.unwrap(),
+                    source.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_status_origin_and_flags_are_coherent() {
+        for source in registry().sources {
+            assert_eq!(
+                source.available,
+                source.can_execute(),
+                "source `{}` available flag must be derived from status",
+                source.id
+            );
+            if source.default_enabled {
+                assert!(
+                    source.can_execute(),
+                    "source `{}` cannot be default-enabled unless executable",
+                    source.id
+                );
+                assert_eq!(
+                    source.origin,
+                    RetrievalOrigin::Builtin,
+                    "source `{}` default-enabled sources must be built in",
+                    source.id
+                );
+            }
+            match source.status {
+                RetrievalSourceStatus::Extension => {
+                    assert_eq!(
+                        source.origin,
+                        RetrievalOrigin::Extension,
+                        "extension source `{}` must have Extension origin",
+                        source.id
+                    );
+                    assert!(
+                        !source.default_enabled,
+                        "extension source `{}` must not be default-enabled",
+                        source.id
+                    );
+                }
+                RetrievalSourceStatus::Planned => {
+                    assert!(
+                        !source.default_enabled && !source.available,
+                        "planned source `{}` must not be enabled/available",
+                        source.id
+                    );
+                }
+                RetrievalSourceStatus::RequiresApiKey => {
+                    assert!(
+                        source.requires_api_key,
+                        "source `{}` status RequiresApiKey must set requires_api_key",
+                        source.id
+                    );
+                    assert!(
+                        !source.required_credential_refs.is_empty(),
+                        "source `{}` requires an API key but has no credential refs",
+                        source.id
+                    );
+                }
+                RetrievalSourceStatus::OptIn => {
+                    assert!(
+                        source.requires_opt_in && !source.default_enabled,
+                        "opt-in source `{}` must require opt-in and stay default-off",
+                        source.id
+                    );
+                }
+                RetrievalSourceStatus::Available => {}
+            }
+        }
+    }
+
+    #[test]
     fn defaults_include_current_query_sources() {
         assert_eq!(
             default_subcategory_ids("dataset"),
