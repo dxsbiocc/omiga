@@ -42,6 +42,8 @@ pub fn collect_mcp_server_names(project_root: &Path) -> Vec<String> {
         }
     }
 
+    out.extend(crate::domain::plugins::enabled_plugin_mcp_servers().into_keys());
+
     let proj = project_root.join(".omiga").join("mcp.json");
     if let Some(raw) = read_if_exists(&proj) {
         out.extend(server_names_from_mcp_json(&raw));

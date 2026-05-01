@@ -38,9 +38,13 @@ pub(super) fn ena_accession_query_fields(
     accession_source: Option<PublicDataSource>,
 ) -> Vec<&'static str> {
     match (source, accession_source) {
-        (PublicDataSource::Geo | PublicDataSource::CbioPortal | PublicDataSource::Gtex, _) => {
-            vec!["accession"]
-        }
+        (
+            PublicDataSource::Geo
+            | PublicDataSource::CbioPortal
+            | PublicDataSource::Gtex
+            | PublicDataSource::NcbiDatasets,
+            _,
+        ) => vec!["accession"],
         (PublicDataSource::EnaStudy, _) => vec!["study_accession", "secondary_study_accession"],
         (PublicDataSource::EnaRun, Some(PublicDataSource::EnaStudy)) => {
             vec!["study_accession", "secondary_study_accession"]

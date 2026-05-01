@@ -22,6 +22,9 @@ pub(super) async fn dataset_auto_search(
     if enabled.iter().any(|source| source == "gtex") {
         sources.push(PublicDataSource::Gtex);
     }
+    if enabled.iter().any(|source| source == "ncbi_datasets") {
+        sources.push(PublicDataSource::NcbiDatasets);
+    }
     if sources.is_empty() {
         return Err(ToolError::InvalidArguments {
             message: "All dataset sources are disabled in Settings → Search. Enable at least one dataset source before using query(category=dataset).".to_string(),

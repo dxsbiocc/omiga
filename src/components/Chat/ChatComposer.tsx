@@ -287,7 +287,7 @@ type AvailableAgentRow = { agentType: string; description: string; background: b
 type AvailableSkillRow = {
   name: string;
   description: string;
-  source: "claudeUser" | "omigaUser" | "omigaProject";
+  source: "claudeUser" | "omigaUser" | "omigaProject" | "omigaPlugin";
   tags: string[];
 };
 type SlashPickerOption =

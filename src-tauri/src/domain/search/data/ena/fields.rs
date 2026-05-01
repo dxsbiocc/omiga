@@ -2,7 +2,10 @@ use crate::domain::search::data::common::PublicDataSource;
 
 pub(super) fn ena_fields(source: PublicDataSource) -> String {
     match source {
-        PublicDataSource::Geo | PublicDataSource::CbioPortal | PublicDataSource::Gtex => Vec::new(),
+        PublicDataSource::Geo
+        | PublicDataSource::CbioPortal
+        | PublicDataSource::Gtex
+        | PublicDataSource::NcbiDatasets => Vec::new(),
         PublicDataSource::EnaStudy => vec![
             "study_accession",
             "secondary_study_accession",
@@ -107,9 +110,10 @@ pub(super) fn ena_fields(source: PublicDataSource) -> String {
 
 pub(super) fn ena_simple_search_fields(source: PublicDataSource) -> &'static [&'static str] {
     match source {
-        PublicDataSource::Geo | PublicDataSource::CbioPortal | PublicDataSource::Gtex => {
-            &["description"]
-        }
+        PublicDataSource::Geo
+        | PublicDataSource::CbioPortal
+        | PublicDataSource::Gtex
+        | PublicDataSource::NcbiDatasets => &["description"],
         PublicDataSource::EnaStudy => &["study_title", "description"],
         PublicDataSource::EnaRun => &["description", "scientific_name", "study_title"],
         PublicDataSource::EnaExperiment => &["experiment_title", "description", "scientific_name"],
@@ -133,9 +137,10 @@ pub(super) fn ena_simple_search_fields(source: PublicDataSource) -> &'static [&'
 
 pub(super) fn ena_accession_fields(source: PublicDataSource) -> &'static [&'static str] {
     match source {
-        PublicDataSource::Geo | PublicDataSource::CbioPortal | PublicDataSource::Gtex => {
-            &["accession"]
-        }
+        PublicDataSource::Geo
+        | PublicDataSource::CbioPortal
+        | PublicDataSource::Gtex
+        | PublicDataSource::NcbiDatasets => &["accession"],
         PublicDataSource::EnaStudy => {
             &["study_accession", "secondary_study_accession", "accession"]
         }
@@ -168,7 +173,10 @@ pub(super) fn ena_display_accession_fields(source: PublicDataSource) -> &'static
 
 pub(super) fn ena_title_fields(source: PublicDataSource) -> &'static [&'static str] {
     match source {
-        PublicDataSource::Geo | PublicDataSource::CbioPortal | PublicDataSource::Gtex => &["title"],
+        PublicDataSource::Geo
+        | PublicDataSource::CbioPortal
+        | PublicDataSource::Gtex
+        | PublicDataSource::NcbiDatasets => &["title"],
         PublicDataSource::EnaStudy => &["study_title", "title", "description"],
         PublicDataSource::EnaRun => &["run_alias", "description", "run_accession"],
         PublicDataSource::EnaExperiment => &["experiment_title", "experiment_alias", "description"],
@@ -192,9 +200,10 @@ pub(super) fn ena_title_fields(source: PublicDataSource) -> &'static [&'static s
 
 pub(super) fn ena_summary_fields(source: PublicDataSource) -> &'static [&'static str] {
     match source {
-        PublicDataSource::Geo | PublicDataSource::CbioPortal | PublicDataSource::Gtex => {
-            &["summary"]
-        }
+        PublicDataSource::Geo
+        | PublicDataSource::CbioPortal
+        | PublicDataSource::Gtex
+        | PublicDataSource::NcbiDatasets => &["summary"],
         PublicDataSource::EnaStudy => &["study_description", "description"],
         PublicDataSource::EnaRun => &[
             "description",

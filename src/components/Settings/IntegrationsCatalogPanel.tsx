@@ -45,12 +45,13 @@ type McpServerCatalogEntry = {
   tools: McpToolCatalogEntry[];
 };
 
-type SkillSource = "claudeUser" | "omigaUser" | "omigaProject";
+type SkillSource = "claudeUser" | "omigaUser" | "omigaProject" | "omigaPlugin";
 
 const SKILL_SOURCE_LABEL: Record<SkillSource, string> = {
   claudeUser: "Claude ~/.claude",
   omigaUser: "用户 ~/.omiga",
   omigaProject: "项目 .omiga",
+  omigaPlugin: "插件",
 };
 
 type SkillCatalogEntry = {
@@ -78,7 +79,7 @@ function resolveProjectPath(raw: string): string {
 }
 
 function isSkillSource(s: string): s is SkillSource {
-  return s === "claudeUser" || s === "omigaUser" || s === "omigaProject";
+  return s === "claudeUser" || s === "omigaUser" || s === "omigaProject" || s === "omigaPlugin";
 }
 
 type SkillFilterTab = "all" | "user" | "project";
@@ -94,7 +95,7 @@ function skillMatchesFilter(
   const src = normalizeSkillSource(sk);
   if (tab === "all") return true;
   if (tab === "user") return src === "claudeUser" || src === "omigaUser";
-  return src === "omigaProject";
+  return src === "omigaProject" || src === "omigaPlugin";
 }
 
 function mcpInitialLetter(name: string): string {

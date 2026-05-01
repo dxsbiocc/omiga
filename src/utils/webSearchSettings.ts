@@ -15,6 +15,7 @@ const QUERY_DATASET_SOURCE_IDS = [
   "ena",
   "cbioportal",
   "gtex",
+  "ncbi_datasets",
   "arrayexpress",
   "biosample",
 ] as const;
@@ -39,7 +40,7 @@ const CATEGORY_SOURCE_IDS: Record<string, readonly string[]> = {
     "medrxiv",
     "semantic_scholar",
   ],
-  dataset: ["geo", "ena", "cbioportal", "gtex"],
+  dataset: ["geo", "ena", "cbioportal", "gtex", "ncbi_datasets"],
   knowledge: [
     "project_wiki",
     "session_memory",

@@ -638,7 +638,8 @@ pub struct WebSearchApiKeys {
     pub semantic_scholar_api_key: Option<String>,
     /// WeChat public-account search via Sogou is opt-in because it depends on a fragile public endpoint.
     pub wechat_search_enabled: bool,
-    /// Optional NCBI E-utilities API key for PubMed.
+    /// Optional My NCBI API key. The same key is used for E-utilities and
+    /// NCBI Datasets v2 when configured.
     pub pubmed_api_key: Option<String>,
     /// NCBI contact email. Defaults to a local virtual mailbox when unset.
     pub pubmed_email: Option<String>,
@@ -678,6 +679,7 @@ pub const QUERY_DATASET_SOURCE_IDS: &[&str] = &[
     "ena",
     "cbioportal",
     "gtex",
+    "ncbi_datasets",
     "arrayexpress",
     "biosample",
 ];

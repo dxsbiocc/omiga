@@ -277,6 +277,8 @@ pub enum SkillSource {
     OmigaUser,
     /// `<project>/.omiga/skills` (project-level).
     OmigaProject,
+    /// Skill provided by an enabled Omiga-native plugin.
+    OmigaPlugin,
 }
 
 /// One discovered skill (directory name = fallback id).
@@ -606,12 +608,17 @@ fn user_skills_dir_omiga() -> Option<PathBuf> {
 ///
 /// Merge order (later overrides earlier):
 /// 1. `~/.omiga/skills` — user-level.
-/// 2. `<project>/.omiga/skills` — project-level.
+/// 2. Enabled Omiga-native plugin skill roots.
+/// 3. `<project>/.omiga/skills` — project-level.
 pub async fn load_skills_for_project(project_root: &Path) -> Vec<SkillEntry> {
     let mut map: HashMap<String, SkillEntry> = HashMap::new();
 
     if let Some(omiga_user) = user_skills_dir_omiga() {
         collect_skills_dir(&omiga_user, &mut map, SkillSource::OmigaUser).await;
+    }
+
+    for plugin_skills in crate::domain::plugins::enabled_plugin_skill_roots() {
+        collect_skills_dir(&plugin_skills, &mut map, SkillSource::OmigaPlugin).await;
     }
 
     let omiga = project_root.join(".omiga").join("skills");
@@ -649,6 +656,7 @@ fn skill_base_dirs(project_root: &Path) -> Vec<PathBuf> {
     if let Some(p) = user_skills_dir_omiga() {
         dirs.push(p);
     }
+    dirs.extend(crate::domain::plugins::enabled_plugin_skill_roots());
     dirs.push(project_root.join(".omiga").join("skills"));
     dirs
 }

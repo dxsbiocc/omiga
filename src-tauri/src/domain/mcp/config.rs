@@ -73,7 +73,7 @@ fn parse_server_entry(v: &Json) -> Option<McpServerConfig> {
     Some(McpServerConfig::Stdio { command, args, env })
 }
 
-fn servers_from_mcp_json(raw: &str) -> HashMap<String, McpServerConfig> {
+pub(crate) fn servers_from_mcp_json(raw: &str) -> HashMap<String, McpServerConfig> {
     let Ok(v) = serde_json::from_str::<Json>(raw) else {
         return HashMap::new();
     };
@@ -101,6 +101,10 @@ pub fn merged_mcp_servers(project_root: &Path) -> HashMap<String, McpServerConfi
             merged.extend(servers_from_mcp_json(&raw));
         }
     }
+
+    // Enabled Omiga plugins contribute MCP servers after user config and before
+    // project config, so a project can still override a plugin-provided server.
+    merged.extend(crate::domain::plugins::enabled_plugin_mcp_servers());
 
     let proj = project_root.join(".omiga").join("mcp.json");
     if let Some(raw) = read_if_exists(&proj) {

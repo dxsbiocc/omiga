@@ -65,6 +65,9 @@ pub(super) fn resolve_data_source(args: &FetchArgs, requested_source: &str) -> S
         if crate::domain::search::data::looks_like_gtex_identifier(&value) {
             return "gtex".to_string();
         }
+        if crate::domain::search::data::looks_like_ncbi_datasets_accession(&value) {
+            return "ncbi_datasets".to_string();
+        }
     }
     if let Some(url) = resolve_url(args) {
         let lower = url.to_ascii_lowercase();
@@ -76,6 +79,11 @@ pub(super) fn resolve_data_source(args: &FetchArgs, requested_source: &str) -> S
         }
         if lower.contains("gtexportal.org") {
             return "gtex".to_string();
+        }
+        if lower.contains("ncbi.nlm.nih.gov/datasets/genome")
+            || lower.contains("api.ncbi.nlm.nih.gov/datasets/v2/genome")
+        {
+            return "ncbi_datasets".to_string();
         }
     }
     if let Some(source) =
@@ -99,6 +107,8 @@ fn resolve_data_identifier(args: &FetchArgs) -> Option<String> {
                     "ena_accession",
                     "gencodeId",
                     "gencode_id",
+                    "current_accession",
+                    "paired_accession",
                 ],
             )
         })

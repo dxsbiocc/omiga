@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Box,
   Typography,
@@ -297,23 +297,55 @@ export function SessionList({ onSelectSession }: SessionListProps) {
     setUserMenuAnchorEl(event.currentTarget);
   };
 
-  const clearLanguageSubmenuLeaveTimer = () => {
+  const clearLanguageSubmenuLeaveTimer = useCallback(() => {
     if (languageSubmenuLeaveTimerRef.current) {
       clearTimeout(languageSubmenuLeaveTimerRef.current);
       languageSubmenuLeaveTimerRef.current = null;
     }
-  };
+  }, []);
 
-  const handleUserMenuClose = () => {
+  const handleUserMenuClose = useCallback(() => {
     clearLanguageSubmenuLeaveTimer();
     setLanguageSubmenuAnchor(null);
     setUserMenuAnchorEl(null);
-  };
+  }, [clearLanguageSubmenuLeaveTimer]);
 
-  const closeLanguageSubmenuNow = () => {
+  const closeLanguageSubmenuNow = useCallback(() => {
     clearLanguageSubmenuLeaveTimer();
     setLanguageSubmenuAnchor(null);
-  };
+  }, [clearLanguageSubmenuLeaveTimer]);
+
+  useEffect(() => {
+    if (!userMenuAnchorEl && languageSubmenuAnchor) {
+      closeLanguageSubmenuNow();
+    }
+  }, [closeLanguageSubmenuNow, languageSubmenuAnchor, userMenuAnchorEl]);
+
+  useEffect(() => {
+    if (!userMenuAnchorEl && !languageSubmenuAnchor) return;
+
+    const closeMenus = () => handleUserMenuClose();
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (
+        target?.closest(
+          '[data-omiga-floating-menu="user"], [data-omiga-floating-menu="language"]',
+        )
+      ) {
+        return;
+      }
+      closeMenus();
+    };
+
+    window.addEventListener("openSettings", closeMenus);
+    window.addEventListener("blur", closeMenus);
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => {
+      window.removeEventListener("openSettings", closeMenus);
+      window.removeEventListener("blur", closeMenus);
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+    };
+  }, [handleUserMenuClose, languageSubmenuAnchor, userMenuAnchorEl]);
 
   const handleOpenSettings = (tab?: string) => {
     handleUserMenuClose();
@@ -733,6 +765,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
         disableAutoFocusItem
         PaperProps={{
           sx: { width: 240, borderRadius: 2 },
+          "data-omiga-floating-menu": "user",
         }}
       >
         <MenuItem
@@ -836,8 +869,8 @@ export function SessionList({ onSelectSession }: SessionListProps) {
 
       <Menu
         anchorEl={languageSubmenuAnchor}
-        open={Boolean(languageSubmenuAnchor)}
-        onClose={() => setLanguageSubmenuAnchor(null)}
+        open={Boolean(userMenuAnchorEl && languageSubmenuAnchor)}
+        onClose={closeLanguageSubmenuNow}
         anchorOrigin={{ vertical: "top", horizontal: "right" }}
         transformOrigin={{ vertical: "top", horizontal: "left" }}
         sx={{ pointerEvents: "none" }}
@@ -847,6 +880,7 @@ export function SessionList({ onSelectSession }: SessionListProps) {
             borderRadius: 2,
             minWidth: 160,
           },
+          "data-omiga-floating-menu": "language",
         }}
         MenuListProps={{
           onMouseEnter: clearLanguageSubmenuLeaveTimer,

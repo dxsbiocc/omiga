@@ -1,0 +1,20 @@
+{
+  "name": "notebook-helper",
+  "version": "1.0.0",
+  "description": "Notebook-focused workflow prompts for creating, repairing, and explaining Jupyter notebooks inside Omiga.",
+  "skills": "./skills",
+  "interface": {
+    "displayName": "Notebook Helper",
+    "shortDescription": "Create and repair notebooks",
+    "longDescription": "Adds an Omiga-native skill that helps initialize empty notebooks, repair malformed ipynb JSON, and explain notebook execution plans.",
+    "developerName": "Omiga",
+    "category": "Notebook",
+    "capabilities": ["Notebook", "Repair", "Workflow"],
+    "brandColor": "#7C9A6D",
+    "defaultPrompt": [
+      "Initialize this empty notebook with a Python starter cell.",
+      "Repair this ipynb and explain what changed.",
+      "Turn this analysis plan into notebook cells."
+    ]
+  }
+}

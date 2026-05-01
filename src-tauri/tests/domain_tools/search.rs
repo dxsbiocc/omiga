@@ -37,6 +37,7 @@ fn search_from_json_accepts_data_sources() {
         "ena_sequence",
         "cbioportal",
         "gtex",
+        "ncbi_datasets",
     ] {
         let j = format!(r#"{{"category":"data","source":"{source}","query":"single cell"}}"#);
         assert!(Tool::from_json_str("search", &j).is_ok(), "{source}");

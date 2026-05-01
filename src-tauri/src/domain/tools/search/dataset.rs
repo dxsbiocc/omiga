@@ -19,6 +19,9 @@ pub(super) async fn dataset_auto_search(
     if enabled.iter().any(|source| source == "gtex") {
         sources.push(crate::domain::search::data::PublicDataSource::Gtex);
     }
+    if enabled.iter().any(|source| source == "ncbi_datasets") {
+        sources.push(crate::domain::search::data::PublicDataSource::NcbiDatasets);
+    }
     if sources.is_empty() {
         return Ok(crate::domain::search::data::DataSearchResponse {
             query: data_args.query.trim().to_string(),

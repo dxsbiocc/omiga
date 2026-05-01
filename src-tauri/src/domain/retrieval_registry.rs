@@ -772,6 +772,37 @@ fn sources() -> Vec<RetrievalSourceDefinition> {
             Some("https://gtexportal.org/api/v2/redoc"),
         ),
         source(
+            "ncbi_datasets",
+            "dataset",
+            "NCBI Datasets",
+            "Genome assemblies via official Datasets v2 REST API。",
+            &[
+                "ncbi_dataset",
+                "ncbi_genome",
+                "ncbi_genomes",
+                "ncbi_assembly",
+                "ncbi_assemblies",
+                "genome_dataset",
+                "genome_datasets",
+            ],
+            &["genomics"],
+            &[Search, Fetch, Query],
+            Available,
+            Builtin,
+            false,
+            false,
+            false,
+            &[],
+            &["pubmed_api_key"],
+            45,
+            Merge,
+            NCBI_DATASETS_PARAMS,
+            Low,
+            &["官方 NCBI Datasets v2 REST API；只返回元数据与下载链接，不自动下载 genome package。"],
+            Some("https://www.ncbi.nlm.nih.gov/datasets/genomes/"),
+            Some("https://www.ncbi.nlm.nih.gov/datasets/docs/v2/api/rest-api/"),
+        ),
+        source(
             "arrayexpress",
             "dataset",
             "ArrayExpress",
@@ -1432,6 +1463,51 @@ const UNIPROT_PARAMS: &[RetrievalParameterDefinition] = &[
     ),
 ];
 
+const NCBI_DATASETS_PARAMS: &[RetrievalParameterDefinition] = &[
+    param(
+        "query",
+        RetrievalParameterType::String,
+        "Taxon/organism、GCA_/GCF_ assembly accession、BioProject、BioSample 或 assembly name。",
+        true,
+    ),
+    param(
+        "mode",
+        RetrievalParameterType::String,
+        "accession、taxon、bioproject、biosample、wgs 或 assembly_name；未设置时自动推断。",
+        false,
+    ),
+    param(
+        "reference_only",
+        RetrievalParameterType::Boolean,
+        "仅返回 reference genome assemblies。",
+        false,
+    ),
+    param(
+        "assembly_source",
+        RetrievalParameterType::String,
+        "refseq、genbank 或 all。",
+        false,
+    ),
+    param(
+        "assembly_level",
+        RetrievalParameterType::String,
+        "complete_genome、chromosome、scaffold 或 contig；可用逗号分隔。",
+        false,
+    ),
+    param(
+        "search_text",
+        RetrievalParameterType::String,
+        "按 submitter、assembly name、strain 或 organism name 缩小结果。",
+        false,
+    ),
+    param(
+        "max_results",
+        RetrievalParameterType::Integer,
+        "返回 genome assembly report 上限。",
+        false,
+    ),
+];
+
 const GTEX_PARAMS: &[RetrievalParameterDefinition] = &[
     param(
         "query",
@@ -1519,6 +1595,10 @@ mod tests {
         assert_eq!(
             canonical_source_id("literature", "s2"),
             Some("semantic_scholar")
+        );
+        assert_eq!(
+            canonical_source_id("dataset", "ncbi_genome"),
+            Some("ncbi_datasets")
         );
     }
 

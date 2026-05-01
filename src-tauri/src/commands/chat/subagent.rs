@@ -215,6 +215,11 @@ pub(super) async fn run_skill_forked(request: ForkedSkillRequest<'_>) -> Result<
             &loaded,
         ));
     }
+    if let Some(plugins_system_section) = crate::domain::plugins::format_plugins_system_section(
+        &crate::domain::plugins::plugin_load_outcome(),
+    ) {
+        prompt_parts.push(plugins_system_section);
+    }
     sub_cfg.system_prompt = Some(prompt_parts.join("\n\n"));
 
     let client = create_client(sub_cfg).map_err(|e| e.to_string())?;
@@ -591,6 +596,13 @@ pub(super) async fn run_subagent_session_foreground_inner(
             effective_root,
             &loaded,
         ));
+    }
+    if !agent_def.omit_claude_md() {
+        if let Some(plugins_system_section) = crate::domain::plugins::format_plugins_system_section(
+            &crate::domain::plugins::plugin_load_outcome(),
+        ) {
+            prompt_parts.push(plugins_system_section);
+        }
     }
     sub_cfg.system_prompt = Some(prompt_parts.join("\n\n"));
     let client = create_client(sub_cfg).map_err(|e| e.to_string())?;

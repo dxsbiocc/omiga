@@ -51,7 +51,7 @@ import { ThemeAppearancePanel } from "./ThemeAppearancePanel";
 import { ProviderManager } from "./ProviderManager";
 import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 import { RuntimeConstraintsPanel } from "./RuntimeConstraintsPanel";
-import { VscodeExtensionsPanel } from "./VscodeExtensionsPanel";
+import { PluginsPanel } from "./PluginsPanel";
 import {
   DEFAULT_WEB_SEARCH_METHODS,
   moveItemToIndex,
@@ -568,6 +568,14 @@ const DATASET_SOURCE_OPTIONS: QuerySourceOption[] = [
     id: "gtex",
     label: "GTEx",
     helper: "Tissue expression / GTEx Portal API",
+    defaultEnabled: false,
+    available: true,
+    badge: "无需 API",
+  },
+  {
+    id: "ncbi_datasets",
+    label: "NCBI Datasets",
+    helper: "Genome assemblies / Datasets v2 API",
     defaultEnabled: false,
     available: true,
     badge: "无需 API",
@@ -2743,7 +2751,7 @@ export function Settings({
                                 PubMed / NCBI
                               </Typography>
                               <Typography variant="caption" color="text.secondary">
-                                官方 E-utilities；API key 可选，email/tool 有默认值。
+                                官方 E-utilities / Datasets v2；API key 可选。
                               </Typography>
                             </Box>
                           </AccordionSummary>
@@ -2755,7 +2763,7 @@ export function Settings({
                               value={pubmedApiKey}
                               onChange={(e) => setPubmedApiKey(e.target.value)}
                               disabled={isLoading}
-                              helperText="可选；不填写也可使用官方 E-utilities。超过默认速率时建议配置 NCBI API key。"
+                              helperText="可选；同一个 My NCBI API key 同时用于 E-utilities 和 Datasets v2 提高速率。"
                               InputProps={{
                                 endAdornment: (
                                   <InputAdornment position="end">
@@ -3358,7 +3366,7 @@ export function Settings({
             )}
 
             {activeTab === 4 && (
-              <VscodeExtensionsPanel />
+              <PluginsPanel projectPath={projectPath} />
             )}
 
             {activeTab === 5 && (

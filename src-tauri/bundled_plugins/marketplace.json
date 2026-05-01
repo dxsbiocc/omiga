@@ -1,0 +1,20 @@
+{
+  "name": "omiga-curated",
+  "interface": {
+    "displayName": "Omiga Recommended"
+  },
+  "plugins": [
+    {
+      "name": "notebook-helper",
+      "source": {
+        "source": "local",
+        "path": "./plugins/notebook-helper"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Notebook"
+    }
+  ]
+}

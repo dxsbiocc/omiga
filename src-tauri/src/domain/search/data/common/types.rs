@@ -8,6 +8,7 @@ const ENA_PORTAL_SEARCH_URL: &str = "https://www.ebi.ac.uk/ena/portal/api/search
 const ENA_BROWSER_XML_BASE_URL: &str = "https://www.ebi.ac.uk/ena/browser/api/xml";
 const CBIOPORTAL_API_BASE_URL: &str = "https://www.cbioportal.org/api";
 const GTEX_API_BASE_URL: &str = "https://gtexportal.org/api/v2";
+const NCBI_DATASETS_API_BASE_URL: &str = "https://api.ncbi.nlm.nih.gov/datasets/v2";
 const DEFAULT_MAX_RESULTS: u32 = 10;
 pub(in crate::domain::search::data) const MAX_RESULTS_CAP: u32 = 25;
 const DEFAULT_EMAIL: &str = "omiga@example.invalid";
@@ -16,6 +17,7 @@ const GEO_FAVICON: &str = "https://www.ncbi.nlm.nih.gov/favicon.ico";
 const ENA_FAVICON: &str = "https://www.ebi.ac.uk/favicon.ico";
 const CBIOPORTAL_FAVICON: &str = "https://www.cbioportal.org/favicon.ico";
 const GTEX_FAVICON: &str = "https://gtexportal.org/favicon.ico";
+const NCBI_FAVICON: &str = "https://www.ncbi.nlm.nih.gov/favicon.ico";
 
 #[derive(Clone, Debug)]
 pub struct DataApiBaseUrls {
@@ -24,6 +26,7 @@ pub struct DataApiBaseUrls {
     pub ena_browser_xml: String,
     pub cbioportal: String,
     pub gtex: String,
+    pub ncbi_datasets: String,
 }
 
 impl Default for DataApiBaseUrls {
@@ -34,6 +37,7 @@ impl Default for DataApiBaseUrls {
             ena_browser_xml: ENA_BROWSER_XML_BASE_URL.to_string(),
             cbioportal: CBIOPORTAL_API_BASE_URL.to_string(),
             gtex: GTEX_API_BASE_URL.to_string(),
+            ncbi_datasets: NCBI_DATASETS_API_BASE_URL.to_string(),
         }
     }
 }
@@ -50,6 +54,7 @@ pub enum PublicDataSource {
     EnaSequence,
     CbioPortal,
     Gtex,
+    NcbiDatasets,
 }
 
 impl PublicDataSource {
@@ -68,6 +73,8 @@ impl PublicDataSource {
             "cbioportal" | "cbio_portal" | "cbio" | "cancer_genomics" | "multi_omics"
             | "multiomics" | "projects" | "tcga" => Some(Self::CbioPortal),
             "gtex" | "genotype_tissue_expression" | "tissue_expression" => Some(Self::Gtex),
+            "ncbi_datasets" | "ncbi_dataset" | "ncbi_genome" | "ncbi_genomes" | "ncbi_assembly"
+            | "ncbi_assemblies" | "genome_datasets" | "genome_dataset" => Some(Self::NcbiDatasets),
             _ => None,
         }
     }
@@ -84,6 +91,7 @@ impl PublicDataSource {
             Self::EnaSequence => "ena_sequence",
             Self::CbioPortal => "cbioportal",
             Self::Gtex => "gtex",
+            Self::NcbiDatasets => "ncbi_datasets",
         }
     }
 
@@ -99,6 +107,7 @@ impl PublicDataSource {
             Self::EnaSequence => "ENA nucleotide sequences",
             Self::CbioPortal => "cBioPortal cancer genomics studies",
             Self::Gtex => "GTEx tissue expression",
+            Self::NcbiDatasets => "NCBI Datasets genome assemblies",
         }
     }
 
@@ -114,6 +123,7 @@ impl PublicDataSource {
             | Self::EnaSequence => ENA_FAVICON,
             Self::CbioPortal => CBIOPORTAL_FAVICON,
             Self::Gtex => GTEX_FAVICON,
+            Self::NcbiDatasets => NCBI_FAVICON,
         }
     }
 
@@ -127,7 +137,7 @@ impl PublicDataSource {
             Self::EnaAnalysis => Some("analysis"),
             Self::EnaAssembly => Some("assembly"),
             Self::EnaSequence => Some("sequence"),
-            Self::CbioPortal | Self::Gtex => None,
+            Self::CbioPortal | Self::Gtex | Self::NcbiDatasets => None,
         }
     }
 }

@@ -19,6 +19,7 @@ pub mod local_envs;
 pub mod memory;
 pub mod notebook;
 pub mod permissions;
+pub mod plugins;
 pub mod ralph;
 pub mod sandbox_fs;
 pub mod search;

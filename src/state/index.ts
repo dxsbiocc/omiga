@@ -71,3 +71,4 @@ export {
   type PermissionRule,
 } from "./permissionStore";
 export { useExtensionStore } from "./extensionStore";
+export { usePluginStore } from "./pluginStore";

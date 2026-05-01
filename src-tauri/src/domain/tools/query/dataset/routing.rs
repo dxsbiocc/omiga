@@ -108,6 +108,16 @@ pub(super) fn infer_dataset_source(
     {
         return Ok(PublicDataSource::Gtex);
     }
+    if crate::domain::search::data::looks_like_ncbi_datasets_accession(identifier)
+        || identifier
+            .to_ascii_lowercase()
+            .contains("ncbi.nlm.nih.gov/datasets/genome")
+        || identifier
+            .to_ascii_lowercase()
+            .contains("api.ncbi.nlm.nih.gov/datasets/v2/genome")
+    {
+        return Ok(PublicDataSource::NcbiDatasets);
+    }
     if let Some(source) = dataset_source_for_subcategory(subcategory)? {
         return Ok(source);
     }

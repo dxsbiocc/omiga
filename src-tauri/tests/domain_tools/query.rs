@@ -79,6 +79,27 @@ fn query_from_json_accepts_gtex_source() {
 }
 
 #[test]
+fn query_from_json_accepts_ncbi_datasets_source() {
+    let j = r#"{
+        "category": "dataset",
+        "operation": "search",
+        "source": "ncbi_datasets",
+        "query": "9606",
+        "params": {
+            "mode": "taxon",
+            "reference_only": true,
+            "assembly_level": ["chromosome", "complete_genome"]
+        },
+        "max_results": 2
+    }"#;
+
+    assert!(matches!(
+        Tool::from_json_str("query", j),
+        Ok(Tool::Query(_))
+    ));
+}
+
+#[test]
 fn query_from_json_accepts_params_aliases() {
     let j = r#"{
         "category": "dataset",
@@ -202,6 +223,52 @@ async fn query_tool_executes_gtex_against_mock_api() {
     assert_eq!(
         json["results"][0]["metadata"]["source_label"],
         "GTEx tissue expression"
+    );
+}
+
+#[tokio::test]
+async fn query_tool_executes_ncbi_datasets_against_mock_api() {
+    let mut enabled = HashMap::new();
+    enabled.insert("dataset".to_string(), vec!["ncbi_datasets".to_string()]);
+    let keys = WebSearchApiKeys {
+        enabled_sources_by_category: Some(enabled),
+        ..WebSearchApiKeys::default()
+    };
+    let ctx = ToolContext::new(std::env::temp_dir())
+        .with_web_search_api_keys(keys)
+        .with_web_use_proxy(false)
+        .with_data_api_base_urls(DataApiBaseUrls {
+            ncbi_datasets: "mock://ncbi_datasets".to_string(),
+            ..DataApiBaseUrls::default()
+        });
+
+    let args = QueryArgs {
+        category: "dataset".to_string(),
+        source: Some("ncbi_datasets".to_string()),
+        operation: Some("search".to_string()),
+        subcategory: Some("genomics".to_string()),
+        query: Some("9606".to_string()),
+        id: None,
+        url: None,
+        result: None,
+        params: Some(serde_json::json!({
+            "mode": "taxon",
+            "reference_only": true
+        })),
+        max_results: Some(1),
+    };
+    let json = execute_query_json(&ctx, args).await;
+
+    assert_eq!(json["source"], "ncbi_datasets");
+    assert_eq!(json["results"][0]["accession"], "GCF_000001405.40");
+    assert_eq!(
+        json["results"][0]["metadata"]["source_label"],
+        "NCBI Datasets genome assemblies"
+    );
+    assert!(
+        json["results"][0]["metadata"]["source_specific"]["download_package_url"]
+            .as_str()
+            .is_some_and(|url| url.contains("DATA_REPORT_ONLY"))
     );
 }
 

@@ -4,7 +4,8 @@
 //! official ENA Portal API for indexed record searches and the Browser API XML
 //! endpoint as a detail fallback. cBioPortal uses the public REST API for
 //! cancer genomics study discovery/detail. GTEx uses the public GTEx Portal API
-//! v2 for gene/tissue/expression metadata.
+//! v2 for gene/tissue/expression metadata. NCBI Datasets uses the official v2
+//! REST API for genome assembly metadata and metadata-only package links.
 
 mod cbioportal;
 mod client;
@@ -12,6 +13,7 @@ mod common;
 mod ena;
 mod geo;
 mod gtex;
+mod ncbi_datasets;
 mod routing;
 
 pub use client::PublicDataClient;
@@ -22,6 +24,7 @@ pub use common::{
 pub use ena::{inferred_ena_source_key, looks_like_ena_accession};
 pub use geo::looks_like_geo_accession;
 pub use gtex::looks_like_gtex_identifier;
+pub use ncbi_datasets::looks_like_ncbi_datasets_accession;
 
 #[cfg(test)]
 mod tests {
@@ -83,6 +86,10 @@ mod tests {
         );
         assert!(looks_like_gtex_identifier(
             "https://gtexportal.org/home/gene/ENSG00000132693.12"
+        ));
+        assert!(looks_like_ncbi_datasets_accession("GCF_000001405.40"));
+        assert!(looks_like_ncbi_datasets_accession(
+            "https://www.ncbi.nlm.nih.gov/datasets/genome/GCA_000001405.29/"
         ));
     }
 }
