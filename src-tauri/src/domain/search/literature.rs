@@ -20,11 +20,13 @@ const MEDRXIV_API_URL: &str = "https://api.medrxiv.org/details/medrxiv";
 const PREPRINT_SEARCH_WINDOW_DAYS: i64 = 365;
 const PREPRINT_MAX_SCAN_PAGES: u32 = 5;
 
+mod arxiv;
 mod client;
 mod operations;
 mod output;
 mod routing;
 
+pub use arxiv::parse_arxiv_atom;
 pub use client::PublicLiteratureClient;
 pub use output::{paper_to_detail_json, search_response_to_json};
 
@@ -109,94 +111,6 @@ pub struct LiteratureSearchResponse {
     pub total: Option<u64>,
     pub results: Vec<LiteraturePaper>,
     pub notes: Vec<String>,
-}
-
-pub fn parse_arxiv_atom(xml: &str) -> Vec<LiteraturePaper> {
-    lazy_static! {
-        static ref RE_ENTRY: Regex = Regex::new(r#"(?is)<entry\b[^>]*>(.*?)</entry>"#).unwrap();
-        static ref RE_AUTHOR: Regex = Regex::new(r#"(?is)<author\b[^>]*>(.*?)</author>"#).unwrap();
-        static ref RE_LINK: Regex = Regex::new(r#"(?is)<link\b([^>]*)/?>"#).unwrap();
-        static ref RE_CATEGORY: Regex = Regex::new(r#"(?is)<category\b([^>]*)/?>"#).unwrap();
-    }
-
-    let mut out = Vec::new();
-    for entry in RE_ENTRY.captures_iter(xml) {
-        let block = entry.get(1).map(|m| m.as_str()).unwrap_or_default();
-        let title = first_xml_tag(block, "title").unwrap_or_default();
-        let title = clean_xml_text(&title);
-        if title.is_empty() {
-            continue;
-        }
-        let url = clean_xml_text(&first_xml_tag(block, "id").unwrap_or_default());
-        let id = arxiv_id_from_url(&url).unwrap_or_else(|| url.clone());
-        let abstract_text = clean_xml_text(&first_xml_tag(block, "summary").unwrap_or_default());
-        let published_date = normalize_date_string(&clean_xml_text(
-            &first_xml_tag(block, "published").unwrap_or_default(),
-        ));
-        let updated_date = normalize_date_string(&clean_xml_text(
-            &first_xml_tag(block, "updated").unwrap_or_default(),
-        ));
-        let doi = first_xml_tag(block, "doi")
-            .map(|s| normalize_doi(&clean_xml_text(&s)))
-            .filter(|s| !s.is_empty());
-        let authors = RE_AUTHOR
-            .captures_iter(block)
-            .filter_map(|cap| first_xml_tag(cap.get(1)?.as_str(), "name"))
-            .map(|s| clean_xml_text(&s))
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>();
-        let mut pdf_url = None;
-        for link in RE_LINK.captures_iter(block) {
-            let attrs = link.get(1).map(|m| m.as_str()).unwrap_or_default();
-            let href = attr_value(attrs, "href").unwrap_or_default();
-            let title_attr = attr_value(attrs, "title").unwrap_or_default();
-            let type_attr = attr_value(attrs, "type").unwrap_or_default();
-            if title_attr.eq_ignore_ascii_case("pdf")
-                || type_attr.to_ascii_lowercase().contains("pdf")
-                || href.contains("/pdf/")
-            {
-                pdf_url = Some(href);
-                break;
-            }
-        }
-        let categories = RE_CATEGORY
-            .captures_iter(block)
-            .filter_map(|cap| attr_value(cap.get(1)?.as_str(), "term"))
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>();
-        let mut extra = JsonMap::new();
-        if let Some(comment) = first_xml_tag(block, "comment").map(|s| clean_xml_text(&s)) {
-            if !comment.is_empty() {
-                extra.insert("comment".to_string(), json!(comment));
-            }
-        }
-        if let Some(journal_ref) = first_xml_tag(block, "journal_ref").map(|s| clean_xml_text(&s)) {
-            if !journal_ref.is_empty() {
-                extra.insert("journal_ref".to_string(), json!(journal_ref));
-            }
-        }
-        out.push(LiteraturePaper {
-            id,
-            source: PublicLiteratureSource::Arxiv,
-            title,
-            authors,
-            abstract_text: if abstract_text.is_empty() {
-                None
-            } else {
-                Some(abstract_text)
-            },
-            url,
-            pdf_url,
-            doi,
-            published_date,
-            updated_date,
-            venue: None,
-            categories,
-            citation_count: None,
-            extra,
-        });
-    }
-    out
 }
 
 pub fn parse_crossref_json(root: &Json) -> Vec<LiteraturePaper> {
@@ -515,7 +429,7 @@ pub fn parse_preprint_json(
         .collect()
 }
 
-fn first_xml_tag(block: &str, tag: &str) -> Option<String> {
+pub(super) fn first_xml_tag(block: &str, tag: &str) -> Option<String> {
     let pattern = format!(
         r#"(?is)<(?:[A-Za-z0-9_-]+:)?{}\b[^>]*>(.*?)</(?:[A-Za-z0-9_-]+:)?{}>"#,
         regex::escape(tag),
@@ -528,7 +442,7 @@ fn first_xml_tag(block: &str, tag: &str) -> Option<String> {
         .map(|m| m.as_str().to_string())
 }
 
-fn attr_value(attrs: &str, name: &str) -> Option<String> {
+pub(super) fn attr_value(attrs: &str, name: &str) -> Option<String> {
     let pattern = format!(r#"(?is)\b{}\s*=\s*["']([^"']*)["']"#, regex::escape(name));
     Regex::new(&pattern)
         .ok()?
@@ -646,7 +560,7 @@ fn normalized_query_terms(query: &str) -> Vec<String> {
         .collect()
 }
 
-fn clean_xml_text(value: &str) -> String {
+pub(super) fn clean_xml_text(value: &str) -> String {
     clean_html_text(value)
 }
 
@@ -672,7 +586,7 @@ fn decode_html_entities(value: &str) -> String {
         .replace("&nbsp;", " ")
 }
 
-fn normalize_doi(value: &str) -> String {
+pub(super) fn normalize_doi(value: &str) -> String {
     let trimmed = value.trim();
     let lower = trimmed.to_ascii_lowercase();
     for prefix in ["https://doi.org/", "http://doi.org/", "doi:"] {
@@ -754,7 +668,7 @@ fn encode_path_segment(value: &str) -> String {
     out
 }
 
-fn normalize_date_string(value: &str) -> Option<String> {
+pub(super) fn normalize_date_string(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() {
         return None;
@@ -768,7 +682,7 @@ fn normalize_date_string(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-fn arxiv_id_from_url(url: &str) -> Option<String> {
+pub(super) fn arxiv_id_from_url(url: &str) -> Option<String> {
     let trimmed = url.trim().trim_end_matches('/');
     trimmed
         .rsplit('/')
