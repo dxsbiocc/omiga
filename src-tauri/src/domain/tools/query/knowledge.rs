@@ -1,17 +1,18 @@
 use super::common::{
-    annotate_query_json, ensure_registry_source_can_query, identifier_text, json_stream,
-    normalized_operation, param_bool, param_string, param_u32, query_text, requested_source,
+    annotate_query_json, ensure_registry_source_can_query, identifier_text, normalized_operation,
+    param_bool, param_string, param_u32, query_text, requested_source,
 };
 use super::QueryArgs;
 use crate::domain::retrieval_registry::{self, RetrievalCapability};
 use crate::domain::tools::{ToolContext, ToolError};
+use serde_json::Value as JsonValue;
 
 const BUILTIN_KNOWLEDGE_QUERY_SOURCES: &[&str] = &["ncbi_gene", "ensembl", "uniprot"];
 
-pub(super) async fn query_knowledge(
+pub(super) async fn query_knowledge_json(
     ctx: &ToolContext,
     args: &QueryArgs,
-) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+) -> Result<JsonValue, ToolError> {
     let requested = requested_source(args);
     let source = canonical_knowledge_source(&requested)?;
     if !ctx
@@ -26,9 +27,9 @@ pub(super) async fn query_knowledge(
     }
 
     match source.as_str() {
-        "ncbi_gene" => query_ncbi_gene(ctx, args).await,
-        "ensembl" => query_ensembl(ctx, args).await,
-        "uniprot" => query_uniprot(ctx, args).await,
+        "ncbi_gene" => query_ncbi_gene_json(ctx, args).await,
+        "ensembl" => query_ensembl_json(ctx, args).await,
+        "uniprot" => query_uniprot_json(ctx, args).await,
         _ => Err(ToolError::InvalidArguments {
             message: format!("Unsupported knowledge query source: {source}"),
         }),
@@ -58,10 +59,7 @@ fn canonical_knowledge_source(source: &str) -> Result<String, ToolError> {
     Ok(def.id.to_string())
 }
 
-async fn query_ensembl(
-    ctx: &ToolContext,
-    args: &QueryArgs,
-) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+async fn query_ensembl_json(ctx: &ToolContext, args: &QueryArgs) -> Result<JsonValue, ToolError> {
     let operation = normalized_operation(args);
     let client = crate::domain::search::ensembl::EnsemblClient::from_tool_context(ctx)
         .map_err(|message| ToolError::ExecutionFailed { message })?;
@@ -87,7 +85,7 @@ async fn query_ensembl(
             };
             let mut json = crate::domain::search::ensembl::search_response_to_json(&response);
             annotate_query_json(&mut json, "search", "knowledge");
-            Ok(json_stream(json))
+            Ok(json)
         }
         "fetch" | "get" | "detail" => {
             let identifier = identifier_text(args).ok_or_else(|| ToolError::InvalidArguments {
@@ -102,7 +100,7 @@ async fn query_ensembl(
             };
             let mut json = crate::domain::search::ensembl::detail_to_json(&record);
             annotate_query_json(&mut json, "fetch", "knowledge");
-            Ok(json_stream(json))
+            Ok(json)
         }
         other => Err(ToolError::InvalidArguments {
             message: format!("Unsupported Ensembl query operation: {other}"),
@@ -110,10 +108,7 @@ async fn query_ensembl(
     }
 }
 
-async fn query_ncbi_gene(
-    ctx: &ToolContext,
-    args: &QueryArgs,
-) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+async fn query_ncbi_gene_json(ctx: &ToolContext, args: &QueryArgs) -> Result<JsonValue, ToolError> {
     let operation = normalized_operation(args);
     let client = crate::domain::search::ncbi_gene::NcbiGeneClient::from_tool_context(ctx)
         .map_err(|message| ToolError::ExecutionFailed { message })?;
@@ -141,7 +136,7 @@ async fn query_ncbi_gene(
             };
             let mut json = crate::domain::search::ncbi_gene::search_response_to_json(&response);
             annotate_query_json(&mut json, "search", "knowledge");
-            Ok(json_stream(json))
+            Ok(json)
         }
         "fetch" | "get" | "detail" => {
             let identifier = identifier_text(args).ok_or_else(|| ToolError::InvalidArguments {
@@ -155,7 +150,7 @@ async fn query_ncbi_gene(
             };
             let mut json = crate::domain::search::ncbi_gene::detail_to_json(&record);
             annotate_query_json(&mut json, "fetch", "knowledge");
-            Ok(json_stream(json))
+            Ok(json)
         }
         other => Err(ToolError::InvalidArguments {
             message: format!("Unsupported NCBI Gene query operation: {other}"),
@@ -163,10 +158,7 @@ async fn query_ncbi_gene(
     }
 }
 
-async fn query_uniprot(
-    ctx: &ToolContext,
-    args: &QueryArgs,
-) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+async fn query_uniprot_json(ctx: &ToolContext, args: &QueryArgs) -> Result<JsonValue, ToolError> {
     let operation = normalized_operation(args);
     let client = crate::domain::search::uniprot::UniProtClient::from_tool_context(ctx)
         .map_err(|message| ToolError::ExecutionFailed { message })?;
@@ -193,7 +185,7 @@ async fn query_uniprot(
             };
             let mut json = crate::domain::search::uniprot::search_response_to_json(&response);
             annotate_query_json(&mut json, "search", "knowledge");
-            Ok(json_stream(json))
+            Ok(json)
         }
         "fetch" | "get" | "detail" => {
             let identifier = identifier_text(args).ok_or_else(|| ToolError::InvalidArguments {
@@ -207,7 +199,7 @@ async fn query_uniprot(
             };
             let mut json = crate::domain::search::uniprot::detail_to_json(&record);
             annotate_query_json(&mut json, "fetch", "knowledge");
-            Ok(json_stream(json))
+            Ok(json)
         }
         other => Err(ToolError::InvalidArguments {
             message: format!("Unsupported UniProt query operation: {other}"),

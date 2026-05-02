@@ -1,6 +1,6 @@
 use super::common::{
-    annotate_query_json, identifier_text, json_stream, normalized_operation,
-    normalized_subcategory, param_string, param_u32, query_text, requested_source,
+    annotate_query_json, identifier_text, normalized_operation, normalized_subcategory,
+    param_string, param_u32, query_text, requested_source,
 };
 use super::QueryArgs;
 use crate::domain::tools::{ToolContext, ToolError};
@@ -13,10 +13,10 @@ use routing::{
     infer_dataset_source, resolve_dataset_source,
 };
 
-pub(super) async fn query_dataset(
+pub(super) async fn query_dataset_json(
     ctx: &ToolContext,
     args: &QueryArgs,
-) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+) -> Result<serde_json::Value, ToolError> {
     let source = requested_source(args);
     let operation = normalized_operation(args);
     let param_subcategory = param_string(
@@ -75,7 +75,7 @@ pub(super) async fn query_dataset(
             };
             let mut json = crate::domain::search::data::search_response_to_json(&response);
             annotate_query_json(&mut json, "search", "dataset");
-            Ok(json_stream(json))
+            Ok(json)
         }
         "fetch" | "get" | "detail" => {
             let identifier = identifier_text(args).ok_or_else(|| ToolError::InvalidArguments {
@@ -95,7 +95,7 @@ pub(super) async fn query_dataset(
             };
             let mut json = crate::domain::search::data::detail_to_json(&record);
             annotate_query_json(&mut json, "fetch", "dataset");
-            Ok(json_stream(json))
+            Ok(json)
         }
         "download_summary" | "download_summary_preview" | "download_preview" => {
             let identifier = identifier_text(args).ok_or_else(|| ToolError::InvalidArguments {
@@ -122,7 +122,7 @@ pub(super) async fn query_dataset(
                 r = client.ncbi_datasets_download_summary(&identifier, args.params.as_ref()) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
             };
             annotate_query_json(&mut json, "download_summary", "dataset");
-            Ok(json_stream(json))
+            Ok(json)
         }
         other => Err(ToolError::InvalidArguments {
             message: format!("Unsupported dataset query operation: {other}"),
@@ -150,8 +150,8 @@ mod tests {
             max_results: None,
         };
         assert_eq!(
-            super::super::common::normalized_category(&args.category),
-            "data"
+            crate::domain::retrieval::normalize::normalized_category(&args.category),
+            "dataset"
         );
         assert_eq!(normalized_operation(&args), "search");
         assert_eq!(

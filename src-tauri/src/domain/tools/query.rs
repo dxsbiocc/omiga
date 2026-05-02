@@ -61,17 +61,22 @@ impl super::ToolImpl for QueryTool {
         ctx: &ToolContext,
         args: Self::Args,
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
-        let category = common::normalized_category(&args.category);
-        match category.as_str() {
-            "data" => dataset::query_dataset(ctx, &args).await,
-            "knowledge" => knowledge::query_knowledge(ctx, &args).await,
-            other => Err(ToolError::InvalidArguments {
-                message: format!(
-                    "Unsupported query category: {other}. Supported categories: dataset/data, knowledge."
-                ),
-            }),
-        }
+        crate::domain::retrieval::tool_bridge::execute_query(ctx, args).await
     }
+}
+
+pub(crate) async fn execute_builtin_dataset_query_json(
+    ctx: &ToolContext,
+    args: &QueryArgs,
+) -> Result<JsonValue, ToolError> {
+    dataset::query_dataset_json(ctx, args).await
+}
+
+pub(crate) async fn execute_builtin_knowledge_query_json(
+    ctx: &ToolContext,
+    args: &QueryArgs,
+) -> Result<JsonValue, ToolError> {
+    knowledge::query_knowledge_json(ctx, args).await
 }
 
 pub fn schema() -> ToolSchema {

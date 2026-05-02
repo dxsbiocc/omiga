@@ -59,87 +59,97 @@ impl super::ToolImpl for FetchTool {
         ctx: &ToolContext,
         args: Self::Args,
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
-        let category = common::normalized_category(&args.category);
-        let source = common::normalized_source(args.source.as_deref());
-        match category.as_str() {
-            "web" => web::fetch_web(ctx, &args, &source).await,
-            "literature" => match literature::resolve_literature_source(&args, &source).as_str() {
-                "pubmed" => literature::fetch_pubmed(ctx, &args).await,
-                "semantic_scholar" | "semanticscholar" => {
-                    if !ctx.web_search_api_keys.semantic_scholar_enabled {
-                        return Ok(common::json_stream(common::structured_error_json(
-                            "source_disabled",
-                            "literature",
-                            &source,
-                            "literature.semantic_scholar is disabled. Enable it and configure an API key in Settings → Search.",
-                        )));
-                    }
-                    literature::fetch_semantic_scholar(ctx, &args).await
-                }
-                public_source
-                    if crate::domain::search::literature::PublicLiteratureSource::parse(
-                        public_source,
-                    )
-                    .is_some() =>
-                {
-                    literature::fetch_public_literature(ctx, &args, public_source).await
-                }
-                other => Err(ToolError::InvalidArguments {
-                    message: format!("Unsupported literature fetch source: {other}"),
-                }),
-            },
-            "data" => {
-                let data_source = data::resolve_data_source(&args, &source);
-                match data_source.as_str() {
-                    data_source
-                        if crate::domain::search::data::PublicDataSource::parse(data_source)
-                            .is_some() =>
-                    {
-                        if !ctx
-                            .web_search_api_keys
-                            .is_query_dataset_source_enabled(data_source)
-                        {
-                            return Ok(common::json_stream(common::structured_error_json(
-                                "source_disabled",
-                                "data",
-                                data_source,
-                                format!(
-                                    "data.{data_source} is disabled. Enable it in Settings → Search."
-                                ),
-                            )));
-                        }
-                        data::fetch_public_data(ctx, &args, data_source).await
-                    }
-                    other => Err(ToolError::InvalidArguments {
-                        message: format!("Unsupported data fetch source: {other}"),
-                    }),
-                }
+        crate::domain::retrieval::tool_bridge::execute_fetch(ctx, args).await
+    }
+}
+
+pub(crate) async fn execute_builtin_web_fetch_json(
+    ctx: &ToolContext,
+    args: &FetchArgs,
+    requested_source: &str,
+) -> Result<JsonValue, ToolError> {
+    web::fetch_web_json(ctx, args, requested_source).await
+}
+
+pub(crate) async fn execute_builtin_social_fetch_json(
+    ctx: &ToolContext,
+    args: &FetchArgs,
+    requested_source: &str,
+) -> Result<JsonValue, ToolError> {
+    match requested_source {
+        "auto" | "wechat" => {
+            if !ctx.web_search_api_keys.wechat_search_enabled {
+                return Ok(common::structured_error_json(
+                    "source_disabled",
+                    "social",
+                    requested_source,
+                    "social.wechat is disabled. Enable WeChat public-account search in Settings → Search.",
+                ));
             }
-            "knowledge" => Err(ToolError::InvalidArguments {
-                message:
-                    "fetch(category=knowledge) is not supported; use query(category=knowledge, operation=fetch) for structured knowledge records or recall(query=...) for local knowledge."
-                        .to_string(),
-            }),
-            "social" => match source.as_str() {
-                "auto" | "wechat" => {
-                    if !ctx.web_search_api_keys.wechat_search_enabled {
-                        return Ok(common::json_stream(common::structured_error_json(
-                            "source_disabled",
-                            "social",
-                            &source,
-                            "social.wechat is disabled. Enable WeChat public-account search in Settings → Search.",
-                        )));
-                    }
-                    web::fetch_web(ctx, &args, &source).await
-                }
-                other => Err(ToolError::InvalidArguments {
-                    message: format!("Unsupported social fetch source: {other}"),
-                }),
-            },
-            other => Err(ToolError::InvalidArguments {
-                message: format!("Unsupported fetch category: {other}"),
-            }),
+            execute_builtin_web_fetch_json(ctx, args, requested_source).await
         }
+        other => Err(ToolError::InvalidArguments {
+            message: format!("Unsupported social fetch source: {other}"),
+        }),
+    }
+}
+
+pub(crate) async fn execute_builtin_data_fetch_json(
+    ctx: &ToolContext,
+    args: &FetchArgs,
+) -> Result<JsonValue, ToolError> {
+    let source = common::normalized_source(args.source.as_deref());
+    let data_source = data::resolve_data_source(args, &source);
+    match data_source.as_str() {
+        data_source
+            if crate::domain::search::data::PublicDataSource::parse(data_source).is_some() =>
+        {
+            if !ctx
+                .web_search_api_keys
+                .is_query_dataset_source_enabled(data_source)
+            {
+                return Ok(common::structured_error_json(
+                    "source_disabled",
+                    "data",
+                    data_source,
+                    format!("data.{data_source} is disabled. Enable it in Settings → Search."),
+                ));
+            }
+            data::fetch_public_data_json(ctx, args, data_source).await
+        }
+        other => Err(ToolError::InvalidArguments {
+            message: format!("Unsupported data fetch source: {other}"),
+        }),
+    }
+}
+
+pub(crate) async fn execute_builtin_literature_fetch_json(
+    ctx: &ToolContext,
+    args: &FetchArgs,
+    requested_source: &str,
+) -> Result<JsonValue, ToolError> {
+    match literature::resolve_literature_source(args, requested_source).as_str() {
+        "pubmed" => literature::fetch_pubmed_json(ctx, args).await,
+        "semantic_scholar" | "semanticscholar" => {
+            if !ctx.web_search_api_keys.semantic_scholar_enabled {
+                return Ok(common::structured_error_json(
+                    "source_disabled",
+                    "literature",
+                    requested_source,
+                    "literature.semantic_scholar is disabled. Enable it and configure an API key in Settings → Search.",
+                ));
+            }
+            literature::fetch_semantic_scholar_json(ctx, args).await
+        }
+        public_source
+            if crate::domain::search::literature::PublicLiteratureSource::parse(public_source)
+                .is_some() =>
+        {
+            literature::fetch_public_literature_json(ctx, args, public_source).await
+        }
+        other => Err(ToolError::InvalidArguments {
+            message: format!("Unsupported literature fetch source: {other}"),
+        }),
     }
 }
 

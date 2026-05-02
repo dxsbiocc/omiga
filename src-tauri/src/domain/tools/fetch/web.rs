@@ -1,11 +1,9 @@
-use super::common::{
-    displayed_link_for_url, favicon_for_url, json_stream, resolve_url, title_from_result,
-};
+use super::common::{displayed_link_for_url, favicon_for_url, resolve_url, title_from_result};
 use super::FetchArgs;
 use crate::domain::tools::{ToolContext, ToolError};
 use lazy_static::lazy_static;
 use regex::Regex;
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
@@ -44,11 +42,11 @@ fn clean_inline_base64_images(text: &str) -> String {
         .to_string()
 }
 
-pub(super) async fn fetch_web(
+pub(super) async fn fetch_web_json(
     ctx: &ToolContext,
     args: &FetchArgs,
     requested_source: &str,
-) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+) -> Result<JsonValue, ToolError> {
     let start = Instant::now();
     let url = resolve_url(args).ok_or_else(|| ToolError::InvalidArguments {
         message: "fetch(category=web) requires `url` or a search `result` with `url`/`link`"
@@ -199,7 +197,7 @@ pub(super) async fn fetch_web(
             "bytes_decoded_text": text.len(),
         }
     });
-    Ok(json_stream(value))
+    Ok(value)
 }
 
 fn sniff_likely_html(bytes: &[u8]) -> bool {

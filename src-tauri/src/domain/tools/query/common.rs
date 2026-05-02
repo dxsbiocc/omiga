@@ -1,9 +1,7 @@
 use super::QueryArgs;
 use crate::domain::retrieval_registry::{self, RetrievalCapability, RetrievalSourceStatus};
 use crate::domain::tools::ToolError;
-use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
 use serde_json::{json, Value as JsonValue};
-use std::pin::Pin;
 
 pub(super) fn requested_source(args: &QueryArgs) -> String {
     let param_source = param_string(args, &["source"]);
@@ -58,13 +56,6 @@ pub(super) fn ensure_registry_source_can_query(
         });
     }
     Ok(())
-}
-
-pub(super) fn normalized_category(value: &str) -> String {
-    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-        "dataset" | "datasets" => "data".to_string(),
-        other => other.to_string(),
-    }
 }
 
 pub(super) fn normalized_source(value: Option<&str>) -> String {
@@ -186,27 +177,6 @@ fn clean_nonempty(value: &str) -> Option<String> {
 
 fn clean_string(value: String) -> Option<String> {
     clean_nonempty(&value)
-}
-
-pub(super) fn json_stream(value: JsonValue) -> crate::infrastructure::streaming::StreamOutputBox {
-    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-    QueryOutput { text }.into_stream()
-}
-
-#[derive(Debug, Clone)]
-struct QueryOutput {
-    text: String,
-}
-
-impl StreamOutput for QueryOutput {
-    fn into_stream(self) -> Pin<Box<dyn futures::Stream<Item = StreamOutputItem> + Send>> {
-        use futures::stream;
-        Box::pin(stream::iter(vec![
-            StreamOutputItem::Start,
-            StreamOutputItem::Content(self.text),
-            StreamOutputItem::Complete,
-        ]))
-    }
 }
 
 #[cfg(test)]

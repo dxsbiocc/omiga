@@ -1,15 +1,5 @@
 use super::FetchArgs;
-use crate::infrastructure::streaming::{StreamOutput, StreamOutputItem};
 use serde_json::{json, Value as JsonValue};
-use std::pin::Pin;
-
-pub(super) fn normalized_category(value: &str) -> String {
-    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-        "dataset" | "datasets" => "data".to_string(),
-        "knowledge_base" | "kb" | "memory" => "knowledge".to_string(),
-        other => other.to_string(),
-    }
-}
 
 pub(super) fn normalized_source(value: Option<&str>) -> String {
     value
@@ -111,28 +101,6 @@ pub(super) fn structured_error_json(
         "source": source,
         "message": message.into(),
     })
-}
-
-pub(super) fn json_stream(value: JsonValue) -> crate::infrastructure::streaming::StreamOutputBox {
-    let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-    FetchOutput { text }.into_stream()
-}
-
-#[derive(Debug, Clone)]
-struct FetchOutput {
-    text: String,
-}
-
-impl StreamOutput for FetchOutput {
-    fn into_stream(self) -> Pin<Box<dyn futures::Stream<Item = StreamOutputItem> + Send>> {
-        use futures::stream;
-        let items = vec![
-            StreamOutputItem::Start,
-            StreamOutputItem::Content(self.text),
-            StreamOutputItem::Complete,
-        ];
-        Box::pin(stream::iter(items))
-    }
 }
 
 #[cfg(test)]

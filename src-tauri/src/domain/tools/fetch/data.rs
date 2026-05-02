@@ -1,15 +1,15 @@
 use super::common::{
-    clean_nonempty, json_stream, metadata_string_from_result, normalized_source,
-    normalized_subcategory, resolve_url, string_from_result,
+    clean_nonempty, metadata_string_from_result, normalized_source, normalized_subcategory,
+    resolve_url, string_from_result,
 };
 use super::FetchArgs;
 use crate::domain::tools::{ToolContext, ToolError};
 
-pub(super) async fn fetch_public_data(
+pub(super) async fn fetch_public_data_json(
     ctx: &ToolContext,
     args: &FetchArgs,
     source: &str,
-) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
+) -> Result<serde_json::Value, ToolError> {
     let source = crate::domain::search::data::PublicDataSource::parse(source).ok_or_else(|| {
         ToolError::InvalidArguments {
             message: format!("Unsupported public data source: {source}"),
@@ -27,9 +27,7 @@ pub(super) async fn fetch_public_data(
         _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
         r = client.fetch(source, &identifier) => r.map_err(|message| ToolError::ExecutionFailed { message })?,
     };
-    Ok(json_stream(crate::domain::search::data::detail_to_json(
-        &record,
-    )))
+    Ok(crate::domain::search::data::detail_to_json(&record))
 }
 
 fn data_source_for_subcategory(subcategory: Option<&str>) -> Option<&'static str> {

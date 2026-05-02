@@ -4,9 +4,9 @@ mod pubmed;
 mod semantic_scholar;
 
 pub(super) use identifiers::resolve_literature_source;
-pub(super) use public_sources::fetch_public_literature;
-pub(super) use pubmed::fetch_pubmed;
-pub(super) use semantic_scholar::fetch_semantic_scholar;
+pub(super) use public_sources::fetch_public_literature_json;
+pub(super) use pubmed::fetch_pubmed_json;
+pub(super) use semantic_scholar::fetch_semantic_scholar_json;
 
 #[cfg(test)]
 mod tests {

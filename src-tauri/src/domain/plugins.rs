@@ -4,6 +4,9 @@
 //! references, and UI metadata. It intentionally does not execute VS Code extension code.
 
 use crate::domain::mcp::config::{servers_from_mcp_json, McpServerConfig};
+use crate::domain::retrieval::plugin::manifest::{
+    load_plugin_retrieval_manifest, PluginRetrievalManifest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
@@ -52,6 +55,7 @@ pub struct PluginManifest {
     pub skills: Option<PathBuf>,
     pub mcp_servers: Option<PathBuf>,
     pub apps: Option<PathBuf>,
+    pub retrieval: Option<PluginRetrievalManifest>,
     pub interface: Option<PluginInterface>,
 }
 
@@ -70,6 +74,8 @@ struct RawPluginManifest {
     mcp_servers: Option<String>,
     #[serde(default)]
     apps: Option<String>,
+    #[serde(default)]
+    retrieval: Option<JsonValue>,
     #[serde(default)]
     interface: Option<RawPluginInterface>,
 }
@@ -270,6 +276,7 @@ pub struct LoadedPlugin {
     pub skill_roots: Vec<PathBuf>,
     pub mcp_servers: HashMap<String, McpServerConfig>,
     pub apps: Vec<String>,
+    pub retrieval: Option<PluginRetrievalManifest>,
     pub error: Option<String>,
 }
 
@@ -339,6 +346,27 @@ impl PluginLoadOutcome {
         }
         apps
     }
+
+    pub fn effective_retrieval_plugins(&self) -> Vec<PluginRetrievalRegistration> {
+        self.plugins
+            .iter()
+            .filter(|plugin| plugin.is_active())
+            .filter_map(|plugin| {
+                Some(PluginRetrievalRegistration {
+                    plugin_id: plugin.id.clone(),
+                    plugin_root: plugin.root.clone(),
+                    retrieval: plugin.retrieval.clone()?,
+                })
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginRetrievalRegistration {
+    pub plugin_id: String,
+    pub plugin_root: PathBuf,
+    pub retrieval: PluginRetrievalManifest,
 }
 
 fn prompt_inline_text(raw: &str, max_chars: usize) -> String {
@@ -715,6 +743,19 @@ pub fn load_plugin_manifest(plugin_root: &Path) -> Option<PluginManifest> {
             .collect(),
     });
 
+    let retrieval = parsed.retrieval.and_then(|value| {
+        match load_plugin_retrieval_manifest(plugin_root, value) {
+            Ok(manifest) => Some(manifest),
+            Err(err) => {
+                tracing::warn!(
+                    plugin = %plugin_root.display(),
+                    "ignoring invalid retrieval plugin manifest: {err}"
+                );
+                None
+            }
+        }
+    });
+
     Some(PluginManifest {
         name,
         version: parsed.version,
@@ -726,6 +767,7 @@ pub fn load_plugin_manifest(plugin_root: &Path) -> Option<PluginManifest> {
             "mcpServers",
         ),
         apps: resolve_optional_path(plugin_root, parsed.apps.as_deref(), "apps"),
+        retrieval,
         interface,
     })
 }
@@ -890,6 +932,7 @@ fn load_configured_plugin(
         skill_roots: Vec::new(),
         mcp_servers: HashMap::new(),
         apps: Vec::new(),
+        retrieval: None,
         error: None,
     };
 
@@ -927,6 +970,7 @@ fn load_configured_plugin(
     loaded.skill_roots = plugin_skill_roots_for_manifest(&loaded.root, &manifest);
     loaded.mcp_servers = plugin_mcp_servers(&loaded.root, &manifest);
     loaded.apps = plugin_app_ids(&loaded.root, &manifest);
+    loaded.retrieval = manifest.retrieval.clone();
     loaded
 }
 
@@ -1293,6 +1337,10 @@ pub fn enabled_plugin_mcp_servers() -> HashMap<String, McpServerConfig> {
     plugin_load_outcome().effective_mcp_servers()
 }
 
+pub fn enabled_plugin_retrieval_plugins() -> Vec<PluginRetrievalRegistration> {
+    plugin_load_outcome().effective_retrieval_plugins()
+}
+
 pub fn enabled_plugin_apps() -> Vec<String> {
     plugin_load_outcome().effective_apps()
 }
@@ -1603,6 +1651,7 @@ mod tests {
             skill_roots: vec![PathBuf::from("/tmp/sample/skills")],
             mcp_servers,
             apps: vec!["calendar".to_string()],
+            retrieval: None,
             error: None,
         }]);
 
@@ -1633,6 +1682,7 @@ mod tests {
             skill_roots: vec![PathBuf::from("/tmp/sample/skills")],
             mcp_servers,
             apps: vec![],
+            retrieval: None,
             error: None,
         }]);
 
