@@ -2026,6 +2026,14 @@ mod tests {
                 "dataset.arrayexpress".to_string(),
                 "dataset.biosample".to_string(),
                 "dataset.cbioportal".to_string(),
+                "dataset.ena".to_string(),
+                "dataset.ena_analysis".to_string(),
+                "dataset.ena_assembly".to_string(),
+                "dataset.ena_experiment".to_string(),
+                "dataset.ena_run".to_string(),
+                "dataset.ena_sample".to_string(),
+                "dataset.ena_sequence".to_string(),
+                "dataset.geo".to_string(),
                 "dataset.gtex".to_string(),
                 "dataset.ncbi_datasets".to_string()
             ]
@@ -2046,59 +2054,34 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            routes,
+            routes.iter().map(|(_, id, _, _)| *id).collect::<Vec<_>>(),
             vec![
-                (
-                    "dataset",
-                    "biosample",
-                    true,
-                    vec![
-                        "search".to_string(),
-                        "query".to_string(),
-                        "fetch".to_string()
-                    ],
-                ),
-                (
-                    "dataset",
-                    "arrayexpress",
-                    true,
-                    vec![
-                        "search".to_string(),
-                        "query".to_string(),
-                        "fetch".to_string()
-                    ],
-                ),
-                (
-                    "dataset",
-                    "ncbi_datasets",
-                    true,
-                    vec![
-                        "search".to_string(),
-                        "query".to_string(),
-                        "fetch".to_string()
-                    ],
-                ),
-                (
-                    "dataset",
-                    "gtex",
-                    true,
-                    vec![
-                        "search".to_string(),
-                        "query".to_string(),
-                        "fetch".to_string()
-                    ],
-                ),
-                (
-                    "dataset",
-                    "cbioportal",
-                    true,
-                    vec![
-                        "search".to_string(),
-                        "query".to_string(),
-                        "fetch".to_string()
-                    ],
-                ),
+                "geo",
+                "ena",
+                "ena_run",
+                "ena_experiment",
+                "ena_sample",
+                "ena_analysis",
+                "ena_assembly",
+                "ena_sequence",
+                "biosample",
+                "arrayexpress",
+                "ncbi_datasets",
+                "gtex",
+                "cbioportal",
             ]
         );
+        assert!(routes
+            .iter()
+            .all(|(category, _, replaces_builtin, capabilities)| {
+                *category == "dataset"
+                    && *replaces_builtin
+                    && capabilities
+                        == &vec![
+                            "search".to_string(),
+                            "query".to_string(),
+                            "fetch".to_string(),
+                        ]
+            }));
     }
 }

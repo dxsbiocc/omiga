@@ -15,6 +15,279 @@
     },
     "sources": [
       {
+        "id": "geo",
+        "category": "dataset",
+        "label": "NCBI GEO",
+        "description": "Gene Expression Omnibus dataset metadata via NCBI GEO DataSets E-utilities.",
+        "aliases": [
+          "gds",
+          "ncbi_geo",
+          "ncbi_gds",
+          "gene_expression_omnibus"
+        ],
+        "subcategories": [
+          "expression",
+          "sample_metadata"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [
+          "pubmed_api_key",
+          "pubmed_email",
+          "pubmed_tool_name"
+        ],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public NCBI GEO DataSets APIs; optional NCBI credentials are projected only when configured."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "retmax",
+            "type": "number",
+            "description": "Maximum GEO records to request from ESearch."
+          }
+        ]
+      },
+      {
+        "id": "ena",
+        "category": "dataset",
+        "label": "ENA read studies",
+        "description": "European Nucleotide Archive read-study records via the ENA Portal API.",
+        "aliases": [
+          "ena_study",
+          "study",
+          "read_study",
+          "european_nucleotide_archive"
+        ],
+        "subcategories": [
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA records to request."
+          }
+        ]
+      },
+      {
+        "id": "ena_run",
+        "category": "dataset",
+        "label": "ENA raw read runs",
+        "description": "European Nucleotide Archive raw read runs with FASTQ/SRA file metadata.",
+        "aliases": [
+          "run",
+          "read_run"
+        ],
+        "subcategories": [
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA run records to request."
+          }
+        ]
+      },
+      {
+        "id": "ena_experiment",
+        "category": "dataset",
+        "label": "ENA read experiments",
+        "description": "European Nucleotide Archive experiment records.",
+        "aliases": [
+          "experiment",
+          "read_experiment"
+        ],
+        "subcategories": [
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA experiment records to request."
+          }
+        ]
+      },
+      {
+        "id": "ena_sample",
+        "category": "dataset",
+        "label": "ENA samples",
+        "description": "European Nucleotide Archive sample metadata records.",
+        "aliases": [
+          "sample",
+          "read_sample"
+        ],
+        "subcategories": [
+          "sample_metadata",
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA sample records to request."
+          }
+        ]
+      },
+      {
+        "id": "ena_analysis",
+        "category": "dataset",
+        "label": "ENA analyses",
+        "description": "European Nucleotide Archive analysis records and generated/submitted file metadata.",
+        "aliases": [
+          "analysis"
+        ],
+        "subcategories": [
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA analysis records to request."
+          }
+        ]
+      },
+      {
+        "id": "ena_assembly",
+        "category": "dataset",
+        "label": "ENA assemblies",
+        "description": "European Nucleotide Archive assembly records.",
+        "aliases": [
+          "assembly"
+        ],
+        "subcategories": [
+          "genome",
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA assembly records to request."
+          }
+        ]
+      },
+      {
+        "id": "ena_sequence",
+        "category": "dataset",
+        "label": "ENA nucleotide sequences",
+        "description": "European Nucleotide Archive sequence records.",
+        "aliases": [
+          "sequence"
+        ],
+        "subcategories": [
+          "sequence",
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA sequence records to request."
+          }
+        ]
+      },
+      {
         "id": "biosample",
         "category": "dataset",
         "label": "NCBI BioSample",
@@ -25,8 +298,14 @@
           "ncbi_biosample",
           "sample_metadata"
         ],
-        "subcategories": ["sample_metadata"],
-        "capabilities": ["search", "query", "fetch"],
+        "subcategories": [
+          "sample_metadata"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
         "requiredCredentialRefs": [],
         "optionalCredentialRefs": [
           "pubmed_api_key",
@@ -59,8 +338,14 @@
           "biostudies_arrayexpress",
           "functional_genomics"
         ],
-        "subcategories": ["expression"],
-        "capabilities": ["search", "query", "fetch"],
+        "subcategories": [
+          "expression"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
         "requiredCredentialRefs": [],
         "optionalCredentialRefs": [],
         "riskLevel": "low",
@@ -89,8 +374,14 @@
           "ncbi_assembly",
           "genome_datasets"
         ],
-        "subcategories": ["genome"],
-        "capabilities": ["search", "query", "fetch"],
+        "subcategories": [
+          "genome"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
         "requiredCredentialRefs": [],
         "optionalCredentialRefs": [
           "pubmed_api_key"
@@ -123,8 +414,14 @@
           "genotype_tissue_expression",
           "tissue_expression"
         ],
-        "subcategories": ["expression"],
-        "capabilities": ["search", "query", "fetch"],
+        "subcategories": [
+          "expression"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
         "requiredCredentialRefs": [],
         "optionalCredentialRefs": [],
         "riskLevel": "low",
@@ -157,8 +454,14 @@
           "cancer_genomics",
           "tcga"
         ],
-        "subcategories": ["cancer_genomics"],
-        "capabilities": ["search", "query", "fetch"],
+        "subcategories": [
+          "cancer_genomics"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
         "requiredCredentialRefs": [],
         "optionalCredentialRefs": [],
         "riskLevel": "low",
@@ -179,8 +482,8 @@
   },
   "interface": {
     "displayName": "Public Dataset Sources",
-    "shortDescription": "BioSample, ArrayExpress, NCBI Datasets, GTEx, and cBioPortal as local retrieval plugins",
-    "longDescription": "Moves public dataset data-source execution for BioSample, ArrayExpress, NCBI Datasets, GTEx, and cBioPortal behind Omiga's local search/query/fetch subprocess route protocol.",
+    "shortDescription": "GEO, ENA, BioSample, ArrayExpress, NCBI Datasets, GTEx, and cBioPortal as local retrieval plugins",
+    "longDescription": "Moves public dataset data-source execution for GEO, ENA, BioSample, ArrayExpress, NCBI Datasets, GTEx, and cBioPortal behind Omiga's local search/query/fetch subprocess route protocol.",
     "developerName": "Omiga",
     "category": "Retrieval",
     "capabilities": [
@@ -193,9 +496,9 @@
     ],
     "brandColor": "#3B82F6",
     "defaultPrompt": [
-      "Search BioSample for liver single-cell RNA-seq samples.",
+      "Search GEO or ENA for liver single-cell RNA-seq samples.",
       "Fetch BioSample SAMN04271175 through the dataset plugin.",
-      "Search NCBI Datasets or GTEx through the public dataset plugin."
+      "Search NCBI Datasets, GTEx, or cBioPortal through the public dataset plugin."
     ]
   }
 }

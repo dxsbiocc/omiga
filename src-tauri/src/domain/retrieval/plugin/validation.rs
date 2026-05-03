@@ -546,22 +546,28 @@ mod tests {
             Some("public-dataset-sources")
         );
         let retrieval = report.retrieval.as_ref().expect("retrieval summary");
-        assert_eq!(retrieval.source_count, 5);
+        assert_eq!(retrieval.source_count, 13);
         let routes = retrieval
             .sources
             .iter()
             .map(|source| format!("{}.{}", source.category, source.source_id))
             .collect::<Vec<_>>();
-        assert_eq!(
-            routes,
-            vec![
-                "dataset.biosample",
-                "dataset.arrayexpress",
-                "dataset.ncbi_datasets",
-                "dataset.gtex",
-                "dataset.cbioportal"
-            ]
-        );
+        let expected_routes = vec![
+            "dataset.geo",
+            "dataset.ena",
+            "dataset.ena_run",
+            "dataset.ena_experiment",
+            "dataset.ena_sample",
+            "dataset.ena_analysis",
+            "dataset.ena_assembly",
+            "dataset.ena_sequence",
+            "dataset.biosample",
+            "dataset.arrayexpress",
+            "dataset.ncbi_datasets",
+            "dataset.gtex",
+            "dataset.cbioportal",
+        ];
+        assert_eq!(routes, expected_routes);
         let smoke = report
             .smoke_results
             .iter()
@@ -572,26 +578,13 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            smoke,
-            vec![
-                "dataset.biosample:search",
-                "dataset.biosample:query",
-                "dataset.biosample:fetch",
-                "dataset.arrayexpress:search",
-                "dataset.arrayexpress:query",
-                "dataset.arrayexpress:fetch",
-                "dataset.ncbi_datasets:search",
-                "dataset.ncbi_datasets:query",
-                "dataset.ncbi_datasets:fetch",
-                "dataset.gtex:search",
-                "dataset.gtex:query",
-                "dataset.gtex:fetch",
-                "dataset.cbioportal:search",
-                "dataset.cbioportal:query",
-                "dataset.cbioportal:fetch",
-            ]
-        );
+        let expected_smoke = expected_routes
+            .iter()
+            .flat_map(|route| {
+                ["search", "query", "fetch"].map(|operation| format!("{route}:{operation}"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(smoke, expected_smoke);
         assert!(report
             .smoke_results
             .iter()

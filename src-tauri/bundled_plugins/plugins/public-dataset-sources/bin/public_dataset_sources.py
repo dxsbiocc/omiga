@@ -13,6 +13,14 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 PROTOCOL_VERSION = 1
 SOURCES = [
+    {"category": "dataset", "id": "geo", "capabilities": ["search", "query", "fetch"]},
+    {"category": "dataset", "id": "ena", "capabilities": ["search", "query", "fetch"]},
+    {"category": "dataset", "id": "ena_run", "capabilities": ["search", "query", "fetch"]},
+    {"category": "dataset", "id": "ena_experiment", "capabilities": ["search", "query", "fetch"]},
+    {"category": "dataset", "id": "ena_sample", "capabilities": ["search", "query", "fetch"]},
+    {"category": "dataset", "id": "ena_analysis", "capabilities": ["search", "query", "fetch"]},
+    {"category": "dataset", "id": "ena_assembly", "capabilities": ["search", "query", "fetch"]},
+    {"category": "dataset", "id": "ena_sequence", "capabilities": ["search", "query", "fetch"]},
     {"category": "dataset", "id": "biosample", "capabilities": ["search", "query", "fetch"]},
     {"category": "dataset", "id": "arrayexpress", "capabilities": ["search", "query", "fetch"]},
     {"category": "dataset", "id": "ncbi_datasets", "capabilities": ["search", "query", "fetch"]},
@@ -24,9 +32,19 @@ NCBI_DATASETS = "https://api.ncbi.nlm.nih.gov/datasets/v2"
 BIOSTUDIES = "https://www.ebi.ac.uk/biostudies/api/v1"
 GTEX = "https://gtexportal.org/api/v2"
 CBIOPORTAL = "https://www.cbioportal.org/api"
+ENA_PORTAL = "https://www.ebi.ac.uk/ena/portal/api/search"
+ENA_BROWSER_XML = "https://www.ebi.ac.uk/ena/browser/api/xml"
 USER_AGENT = "Omiga public-dataset-sources retrieval plugin/0.1"
 
 VALIDATION_ACCESSIONS = {
+    "geo": "GSE000001",
+    "ena": "PRJEB000001",
+    "ena_run": "ERR000001",
+    "ena_experiment": "ERX000001",
+    "ena_sample": "ERS000001",
+    "ena_analysis": "ERZ000001",
+    "ena_assembly": "GCA_000001405.29",
+    "ena_sequence": "AB000001",
     "biosample": "SAMN00000001",
     "arrayexpress": "E-MTAB-0000",
     "ncbi_datasets": "GCF_000001405.40",
@@ -94,6 +112,10 @@ def identifier_text(request: Dict[str, Any]) -> str:
             r"(SAM[NEDAG]?\d+)",
             r"/biosample/(\d+)",
             r"(E-[A-Z]+-\d+)",
+            r"[?&]acc=([^&#]+)",
+            r"(G(?:SE|SM|PL|DS)\d+)",
+            r"/ena/browser/view/([^/?#]+)",
+            r"\b((?:PRJ|ERP|SRP|DRP|ERX|SRX|DRX|ERR|SRR|DRR|ERS|SRS|DRS|ERZ|SRZ|DRZ)[A-Z]*\d+)\b",
             r"(GC[AF]_\d+(?:\.\d+)?)",
             r"[?&](?:id|studyId|study_id)=([^&#]+)",
             r"/gene/([^/?#]+)",
@@ -181,6 +203,250 @@ def validation_result(message_id: str, request: Dict[str, Any]) -> Dict[str, Any
     else:
         response["items"] = [plugin_item(source, operation)]
     return {"id": message_id, "type": "result", "response": response}
+
+
+def normalize_geo_accession(value: str) -> str:
+    match = re.search(r"\bG(?:SE|SM|PL|DS)\d+\b", value or "", re.IGNORECASE)
+    if match:
+        return match.group(0).upper()
+    match = re.search(r"\b\d+\b", value or "")
+    return match.group(0) if match else value.strip()
+
+
+def geo_esearch(request: Dict[str, Any], term: str) -> List[str]:
+    encoded = urllib.parse.urlencode({
+        "db": "gds",
+        "term": term,
+        "retmode": "json",
+        "retmax": str(max_results(request)),
+    })
+    data = urlopen_json(with_ncbi_credentials(f"{NCBI_EUTILS}/esearch.fcgi?{encoded}", request))
+    ids = data.get("esearchresult", {}).get("idlist", [])
+    return [str(value) for value in ids]
+
+
+def geo_esummary(request: Dict[str, Any], ids: Iterable[str]) -> List[Dict[str, Any]]:
+    ids = [str(value) for value in ids if str(value).strip()]
+    if not ids:
+        return []
+    encoded = urllib.parse.urlencode({"db": "gds", "id": ",".join(ids), "retmode": "json"})
+    data = urlopen_json(with_ncbi_credentials(f"{NCBI_EUTILS}/esummary.fcgi?{encoded}", request))
+    result = data.get("result", {}) if isinstance(data, dict) else {}
+    items = []
+    for uid in result.get("uids", ids):
+        record = result.get(str(uid), {}) if isinstance(result, dict) else {}
+        items.append(geo_item(record, str(uid)))
+    return items
+
+
+def geo_item(record: Dict[str, Any], fallback_id: str = "") -> Dict[str, Any]:
+    accession = str(record.get("accession") or record.get("gds") or fallback_id)
+    if accession.isdigit():
+        accession = f"GDS{accession}"
+    title = str(record.get("title") or record.get("summary") or accession)
+    summary = str(record.get("summary") or record.get("taxon") or title)
+    url = f"https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={urllib.parse.quote(accession)}"
+    return {
+        "id": fallback_id or accession,
+        "accession": accession,
+        "title": title,
+        "url": url,
+        "snippet": summary[:500],
+        "content": json.dumps(record, ensure_ascii=False, indent=2)[:20000],
+        "metadata": {"source": "geo", "uid": fallback_id, "entry_type": record.get("entrytype"), "taxon": record.get("taxon")},
+        "raw": record,
+    }
+
+
+def handle_geo(message_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
+    operation = request.get("operation", "search")
+    if operation in ("search", "query"):
+        term = query_text(request)
+        if not term:
+            return error(message_id, "missing_query", "GEO search/query requires query text")
+        items = geo_esummary(request, geo_esearch(request, term))
+        response = base_response(request, "geo", operation, items=items, total=len(items))
+        return {"id": message_id, "type": "result", "response": response}
+    if operation == "fetch":
+        identifier = normalize_geo_accession(identifier_text(request))
+        if not identifier:
+            return error(message_id, "missing_identifier", "GEO fetch requires accession, URL, or prior result")
+        ids = [identifier] if identifier.isdigit() else geo_esearch(request, identifier)[:1]
+        items = geo_esummary(request, ids)
+        if not items:
+            return error(message_id, "not_found", f"GEO record not found: {identifier}")
+        response = base_response(request, "geo", operation, items=[], detail=items[0], total=1)
+        return {"id": message_id, "type": "result", "response": response}
+    return error(message_id, "unsupported_operation", f"GEO does not support operation {operation}")
+
+
+ENA_RESULT_BY_SOURCE = {
+    "ena": "read_study",
+    "ena_run": "read_run",
+    "ena_experiment": "read_experiment",
+    "ena_sample": "sample",
+    "ena_analysis": "analysis",
+    "ena_assembly": "assembly",
+    "ena_sequence": "sequence",
+}
+
+ENA_FIELDS_BY_SOURCE = {
+    "ena": "study_accession,secondary_study_accession,study_title,description,study_alias,center_name,tax_id,scientific_name,first_public,last_updated",
+    "ena_run": "run_accession,experiment_accession,sample_accession,study_accession,secondary_study_accession,scientific_name,instrument_platform,instrument_model,library_strategy,library_source,first_public,last_updated,fastq_ftp,submitted_ftp,sra_ftp",
+    "ena_experiment": "experiment_accession,study_accession,sample_accession,experiment_title,experiment_alias,scientific_name,instrument_platform,instrument_model,library_strategy,library_source,first_public,last_updated",
+    "ena_sample": "sample_accession,secondary_sample_accession,sample_alias,scientific_name,tax_id,description,country,collection_date,host,host_tax_id,first_public,last_updated",
+    "ena_analysis": "analysis_accession,study_accession,sample_accession,analysis_title,analysis_description,analysis_alias,analysis_type,assembly_type,description,scientific_name,first_public,last_updated,submitted_ftp,generated_ftp",
+    "ena_assembly": "assembly_accession,scientific_name,tax_id,assembly_name,assembly_title,assembly_level,description,last_updated",
+    "ena_sequence": "accession,description,scientific_name,tax_id,specimen_voucher,bio_material,first_public,last_updated",
+}
+
+ENA_SIMPLE_FIELDS = {
+    "ena": ("study_title", "description"),
+    "ena_run": ("description", "scientific_name", "study_title"),
+    "ena_experiment": ("experiment_title", "description", "scientific_name"),
+    "ena_sample": ("description", "scientific_name", "sample_alias"),
+    "ena_analysis": ("analysis_title", "analysis_description", "description", "analysis_type", "scientific_name"),
+    "ena_assembly": ("assembly_name", "assembly_title", "description", "scientific_name"),
+    "ena_sequence": ("description", "scientific_name"),
+}
+
+ENA_ACCESSION_FIELDS = {
+    "ena": ("study_accession", "secondary_study_accession", "accession"),
+    "ena_run": ("run_accession", "accession"),
+    "ena_experiment": ("experiment_accession", "accession"),
+    "ena_sample": ("sample_accession", "secondary_sample_accession", "accession"),
+    "ena_analysis": ("analysis_accession", "accession"),
+    "ena_assembly": ("assembly_accession", "accession"),
+    "ena_sequence": ("accession",),
+}
+
+
+def normalize_ena_accession(value: str) -> str:
+    value = (value or "").strip().rstrip("/")
+    if not value:
+        return ""
+    if "ebi.ac.uk/ena/browser/view/" in value:
+        return urllib.parse.unquote(value.rsplit("/view/", 1)[-1].split("?", 1)[0].split("#", 1)[0])
+    match = re.search(r"\b((?:PRJ|ERP|SRP|DRP|ERX|SRX|DRX|ERR|SRR|DRR|ERS|SRS|DRS|ERZ|SRZ|DRZ)[A-Z]*\d+|GC[AF]_\d+(?:\.\d+)?|[A-Z]{1,4}\d{5,}(?:\.\d+)?)\b", value, re.IGNORECASE)
+    return match.group(1).upper() if match else value
+
+
+def ena_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def ena_query(source: str, term: str, accession: bool = False) -> str:
+    escaped = ena_escape(term)
+    if accession:
+        fields = ENA_ACCESSION_FIELDS.get(source, ("accession",))
+        return " OR ".join(f'{field}="{escaped}"' for field in fields)
+    lower = term.lower()
+    if "=" in term or " and " in lower or " or " in lower or "tax_" in lower or "country" in lower:
+        return term
+    fields = ENA_SIMPLE_FIELDS.get(source, ("description",))
+    return " OR ".join(f'{field}="*{escaped}*"' for field in fields)
+
+
+def ena_search_json(source: str, query: str, request: Dict[str, Any], limit: Optional[int] = None) -> Any:
+    params = {
+        "result": ENA_RESULT_BY_SOURCE[source],
+        "query": query,
+        "fields": ENA_FIELDS_BY_SOURCE[source],
+        "format": "json",
+        "limit": str(limit or max_results(request)),
+    }
+    return urlopen_json(f"{ENA_PORTAL}?{urllib.parse.urlencode(params)}")
+
+
+def split_ena_files(value: Any) -> List[str]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    files = []
+    for item in value.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        if item.startswith(("ftp://", "http://", "https://")):
+            files.append(item)
+        elif item.startswith("ftp."):
+            files.append(f"ftp://{item}")
+        else:
+            files.append(item)
+    return files
+
+
+def ena_item(source: str, record: Dict[str, Any], fallback_id: str = "") -> Dict[str, Any]:
+    accession = first_string(record, *ENA_ACCESSION_FIELDS.get(source, ("accession",))) or fallback_id
+    title = first_string(
+        record,
+        "study_title",
+        "experiment_title",
+        "sample_alias",
+        "analysis_title",
+        "assembly_name",
+        "assembly_title",
+        "description",
+        "accession",
+    ) or accession
+    summary = first_string(record, "description", "analysis_description", "library_strategy", "scientific_name", "assembly_level")
+    files: List[str] = []
+    for key in ("fastq_ftp", "submitted_ftp", "sra_ftp", "generated_ftp"):
+        files.extend(split_ena_files(record.get(key)))
+    return {
+        "id": accession,
+        "accession": accession,
+        "title": title,
+        "url": f"https://www.ebi.ac.uk/ena/browser/view/{urllib.parse.quote(accession)}",
+        "snippet": summary[:500],
+        "content": json.dumps(record, ensure_ascii=False, indent=2)[:20000],
+        "metadata": {
+            "source": source,
+            "organism": first_string(record, "scientific_name"),
+            "platform": first_string(record, "instrument_platform", "instrument_model"),
+            "files": files,
+        },
+        "raw": record,
+    }
+
+
+def ena_xml_fallback(source: str, accession: str) -> Optional[Dict[str, Any]]:
+    req = urllib.request.Request(f"{ENA_BROWSER_XML}/{urllib.parse.quote(accession)}", headers={"User-Agent": USER_AGENT, "Accept": "application/xml,text/xml,*/*"})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as response:
+            xml = response.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    title_match = re.search(r"<(?:STUDY_TITLE|TITLE|DESCRIPTION)>(.*?)</(?:STUDY_TITLE|TITLE|DESCRIPTION)>", xml, re.DOTALL | re.IGNORECASE)
+    summary_match = re.search(r"<(?:STUDY_ABSTRACT|DESCRIPTION)>(.*?)</(?:STUDY_ABSTRACT|DESCRIPTION)>", xml, re.DOTALL | re.IGNORECASE)
+    title = re.sub(r"<[^>]+>", " ", title_match.group(1)).strip() if title_match else accession
+    summary = re.sub(r"<[^>]+>", " ", summary_match.group(1)).strip() if summary_match else ""
+    return ena_item(source, {"accession": accession, "description": summary, "title": title, "xml": xml[:20000]}, accession)
+
+
+def handle_ena(message_id: str, request: Dict[str, Any], source: str) -> Dict[str, Any]:
+    operation = request.get("operation", "search")
+    if operation in ("search", "query"):
+        term = query_text(request)
+        if not term:
+            return error(message_id, "missing_query", f"{source} search/query requires query text")
+        data = ena_search_json(source, ena_query(source, term), request)
+        items = [ena_item(source, item) for item in data_items(data) if isinstance(item, dict)]
+        response = base_response(request, source, operation, items=items, total=len(items))
+        return {"id": message_id, "type": "result", "response": response}
+    if operation == "fetch":
+        accession = normalize_ena_accession(identifier_text(request))
+        if not accession:
+            return error(message_id, "missing_identifier", f"{source} fetch requires an ENA accession or URL")
+        data = ena_search_json(source, ena_query(source, accession, accession=True), request, 1)
+        items = [ena_item(source, item, accession) for item in data_items(data) if isinstance(item, dict)]
+        if not items:
+            fallback = ena_xml_fallback(source, accession)
+            items = [fallback] if fallback else []
+        if not items:
+            return error(message_id, "not_found", f"ENA record not found: {accession}")
+        response = base_response(request, source, operation, items=[], detail=items[0], total=1)
+        return {"id": message_id, "type": "result", "response": response}
+    return error(message_id, "unsupported_operation", f"{source} does not support operation {operation}")
 
 
 def normalize_biosample_id(value: str) -> str:
@@ -693,6 +959,10 @@ def handle_execute(message: Dict[str, Any]) -> Dict[str, Any]:
     if is_validation(request):
         return validation_result(message_id, request)
     try:
+        if source == "geo":
+            return handle_geo(message_id, request)
+        if source in ENA_RESULT_BY_SOURCE:
+            return handle_ena(message_id, request, source)
         if source == "biosample":
             return handle_biosample(message_id, request)
         if source == "arrayexpress":
