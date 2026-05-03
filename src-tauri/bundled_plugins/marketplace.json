@@ -17,10 +17,10 @@
       "category": "Notebook"
     },
     {
-      "name": "public-dataset-sources",
+      "name": "retrieval-dataset-geo",
       "source": {
         "source": "local",
-        "path": "./plugins/public-dataset-sources"
+        "path": "./plugins/retrieval-dataset-geo"
       },
       "policy": {
         "installation": "AVAILABLE",
@@ -29,10 +29,10 @@
       "category": "Retrieval"
     },
     {
-      "name": "public-literature-sources",
+      "name": "retrieval-dataset-ena",
       "source": {
         "source": "local",
-        "path": "./plugins/public-literature-sources"
+        "path": "./plugins/retrieval-dataset-ena"
       },
       "policy": {
         "installation": "AVAILABLE",
@@ -41,10 +41,118 @@
       "category": "Retrieval"
     },
     {
-      "name": "public-knowledge-sources",
+      "name": "retrieval-dataset-biosample",
       "source": {
         "source": "local",
-        "path": "./plugins/public-knowledge-sources"
+        "path": "./plugins/retrieval-dataset-biosample"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-dataset-arrayexpress",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retrieval-dataset-arrayexpress"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-dataset-ncbi-datasets",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retrieval-dataset-ncbi-datasets"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-dataset-gtex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retrieval-dataset-gtex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-dataset-cbioportal",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retrieval-dataset-cbioportal"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-literature-pubmed",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retrieval-literature-pubmed"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-literature-semantic-scholar",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retrieval-literature-semantic-scholar"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-knowledge-ncbi-gene",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retrieval-knowledge-ncbi-gene"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-knowledge-ensembl",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retrieval-knowledge-ensembl"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-knowledge-uniprot",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retrieval-knowledge-uniprot"
       },
       "policy": {
         "installation": "AVAILABLE",

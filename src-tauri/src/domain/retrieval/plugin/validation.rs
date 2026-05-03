@@ -473,18 +473,47 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/retrieval-plugins/basic")
     }
 
-    fn bundled_public_dataset_sources_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("bundled_plugins/plugins/public-dataset-sources")
+    fn bundled_retrieval_plugin_root(plugin_name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("bundled_plugins/plugins")
+            .join(plugin_name)
     }
 
-    fn bundled_public_literature_sources_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("bundled_plugins/plugins/public-literature-sources")
-    }
-
-    fn bundled_public_knowledge_sources_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("bundled_plugins/plugins/public-knowledge-sources")
+    fn bundled_retrieval_plugin_cases() -> Vec<(&'static str, Vec<&'static str>)> {
+        vec![
+            ("retrieval-dataset-geo", vec!["dataset.geo"]),
+            (
+                "retrieval-dataset-ena",
+                vec![
+                    "dataset.ena",
+                    "dataset.ena_run",
+                    "dataset.ena_experiment",
+                    "dataset.ena_sample",
+                    "dataset.ena_analysis",
+                    "dataset.ena_assembly",
+                    "dataset.ena_sequence",
+                ],
+            ),
+            ("retrieval-dataset-biosample", vec!["dataset.biosample"]),
+            (
+                "retrieval-dataset-arrayexpress",
+                vec!["dataset.arrayexpress"],
+            ),
+            (
+                "retrieval-dataset-ncbi-datasets",
+                vec!["dataset.ncbi_datasets"],
+            ),
+            ("retrieval-dataset-gtex", vec!["dataset.gtex"]),
+            ("retrieval-dataset-cbioportal", vec!["dataset.cbioportal"]),
+            ("retrieval-literature-pubmed", vec!["literature.pubmed"]),
+            (
+                "retrieval-literature-semantic-scholar",
+                vec!["literature.semantic_scholar"],
+            ),
+            ("retrieval-knowledge-ncbi-gene", vec!["knowledge.ncbi_gene"]),
+            ("retrieval-knowledge-ensembl", vec!["knowledge.ensembl"]),
+            ("retrieval-knowledge-uniprot", vec!["knowledge.uniprot"]),
+        ]
     }
 
     #[tokio::test]
@@ -546,146 +575,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validates_bundled_public_dataset_sources_with_offline_smoke() {
-        let report =
-            validate_retrieval_plugin_root(&bundled_public_dataset_sources_root(), true).await;
+    async fn validates_bundled_individual_retrieval_source_plugins_with_offline_smoke() {
+        for (plugin_name, expected_routes) in bundled_retrieval_plugin_cases() {
+            let report =
+                validate_retrieval_plugin_root(&bundled_retrieval_plugin_root(plugin_name), true)
+                    .await;
 
-        assert!(report.valid, "report: {report:?}");
-        assert_eq!(
-            report.plugin_name.as_deref(),
-            Some("public-dataset-sources")
-        );
-        let retrieval = report.retrieval.as_ref().expect("retrieval summary");
-        assert_eq!(retrieval.source_count, 13);
-        let routes = retrieval
-            .sources
-            .iter()
-            .map(|source| format!("{}.{}", source.category, source.source_id))
-            .collect::<Vec<_>>();
-        let expected_routes = vec![
-            "dataset.geo",
-            "dataset.ena",
-            "dataset.ena_run",
-            "dataset.ena_experiment",
-            "dataset.ena_sample",
-            "dataset.ena_analysis",
-            "dataset.ena_assembly",
-            "dataset.ena_sequence",
-            "dataset.biosample",
-            "dataset.arrayexpress",
-            "dataset.ncbi_datasets",
-            "dataset.gtex",
-            "dataset.cbioportal",
-        ];
-        assert_eq!(routes, expected_routes);
-        let smoke = report
-            .smoke_results
-            .iter()
-            .map(|result| {
-                format!(
-                    "{}.{}:{}",
-                    result.category, result.source_id, result.operation
-                )
-            })
-            .collect::<Vec<_>>();
-        let expected_smoke = expected_routes
-            .iter()
-            .flat_map(|route| {
-                ["search", "query", "fetch"].map(|operation| format!("{route}:{operation}"))
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(smoke, expected_smoke);
-        assert!(report
-            .smoke_results
-            .iter()
-            .all(|result| matches!(result.status, PluginValidationCheckStatus::Passed)));
-    }
-
-    #[tokio::test]
-    async fn validates_bundled_public_literature_sources_with_offline_smoke() {
-        let report =
-            validate_retrieval_plugin_root(&bundled_public_literature_sources_root(), true).await;
-
-        assert!(report.valid, "report: {report:?}");
-        assert_eq!(
-            report.plugin_name.as_deref(),
-            Some("public-literature-sources")
-        );
-        let retrieval = report.retrieval.as_ref().expect("retrieval summary");
-        assert_eq!(retrieval.source_count, 2);
-        let routes = retrieval
-            .sources
-            .iter()
-            .map(|source| format!("{}.{}", source.category, source.source_id))
-            .collect::<Vec<_>>();
-        let expected_routes = vec!["literature.pubmed", "literature.semantic_scholar"];
-        assert_eq!(routes, expected_routes);
-        let smoke = report
-            .smoke_results
-            .iter()
-            .map(|result| {
-                format!(
-                    "{}.{}:{}",
-                    result.category, result.source_id, result.operation
-                )
-            })
-            .collect::<Vec<_>>();
-        let expected_smoke = expected_routes
-            .iter()
-            .flat_map(|route| {
-                ["search", "query", "fetch"].map(|operation| format!("{route}:{operation}"))
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(smoke, expected_smoke);
-        assert!(report
-            .smoke_results
-            .iter()
-            .all(|result| matches!(result.status, PluginValidationCheckStatus::Passed)));
-    }
-
-    #[tokio::test]
-    async fn validates_bundled_public_knowledge_sources_with_offline_smoke() {
-        let report =
-            validate_retrieval_plugin_root(&bundled_public_knowledge_sources_root(), true).await;
-
-        assert!(report.valid, "report: {report:?}");
-        assert_eq!(
-            report.plugin_name.as_deref(),
-            Some("public-knowledge-sources")
-        );
-        let retrieval = report.retrieval.as_ref().expect("retrieval summary");
-        assert_eq!(retrieval.source_count, 3);
-        let routes = retrieval
-            .sources
-            .iter()
-            .map(|source| format!("{}.{}", source.category, source.source_id))
-            .collect::<Vec<_>>();
-        let expected_routes = vec![
-            "knowledge.ncbi_gene",
-            "knowledge.ensembl",
-            "knowledge.uniprot",
-        ];
-        assert_eq!(routes, expected_routes);
-        let smoke = report
-            .smoke_results
-            .iter()
-            .map(|result| {
-                format!(
-                    "{}.{}:{}",
-                    result.category, result.source_id, result.operation
-                )
-            })
-            .collect::<Vec<_>>();
-        let expected_smoke = expected_routes
-            .iter()
-            .flat_map(|route| {
-                ["search", "query", "fetch"].map(|operation| format!("{route}:{operation}"))
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(smoke, expected_smoke);
-        assert!(report
-            .smoke_results
-            .iter()
-            .all(|result| matches!(result.status, PluginValidationCheckStatus::Passed)));
+            assert!(report.valid, "{plugin_name} report: {report:?}");
+            assert_eq!(report.plugin_name.as_deref(), Some(plugin_name));
+            let retrieval = report.retrieval.as_ref().expect("retrieval summary");
+            assert_eq!(retrieval.source_count, expected_routes.len());
+            let routes = retrieval
+                .sources
+                .iter()
+                .map(|source| format!("{}.{}", source.category, source.source_id))
+                .collect::<Vec<_>>();
+            assert_eq!(routes, expected_routes);
+            let smoke = report
+                .smoke_results
+                .iter()
+                .map(|result| {
+                    format!(
+                        "{}.{}:{}",
+                        result.category, result.source_id, result.operation
+                    )
+                })
+                .collect::<Vec<_>>();
+            let expected_smoke = expected_routes
+                .iter()
+                .flat_map(|route| {
+                    ["search", "query", "fetch"].map(|operation| format!("{route}:{operation}"))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(smoke, expected_smoke);
+            assert!(report
+                .smoke_results
+                .iter()
+                .all(|result| matches!(result.status, PluginValidationCheckStatus::Passed)));
+        }
     }
 }

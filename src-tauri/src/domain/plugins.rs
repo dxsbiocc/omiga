@@ -1787,10 +1787,10 @@ mod tests {
     #[test]
     fn retrieval_only_plugins_are_visible_in_system_section() {
         let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("bundled_plugins/plugins/public-dataset-sources");
-        let manifest = load_plugin_manifest(&plugin_root).expect("public dataset plugin manifest");
+            .join("bundled_plugins/plugins/retrieval-dataset-biosample");
+        let manifest = load_plugin_manifest(&plugin_root).expect("biosample plugin manifest");
         let outcome = PluginLoadOutcome::from_plugins(vec![LoadedPlugin {
-            id: "public-dataset-sources@omiga-curated".to_string(),
+            id: "retrieval-dataset-biosample@omiga-curated".to_string(),
             manifest_name: Some(manifest.name.clone()),
             display_name: manifest
                 .interface
@@ -1808,10 +1808,10 @@ mod tests {
 
         let section = format_plugins_system_section(&outcome).expect("plugins section");
 
-        assert!(section.contains("Public Dataset Sources"));
+        assert!(section.contains("BioSample Retrieval Source"));
         assert!(section.contains("retrieval routes"));
         assert!(section.contains("`dataset.biosample`"));
-        assert!(section.contains("`dataset.arrayexpress`"));
+        assert!(!section.contains("`dataset.arrayexpress`"));
     }
 
     #[test]
@@ -1983,194 +1983,152 @@ mod tests {
     }
 
     #[test]
-    fn bundled_marketplace_exposes_public_dataset_retrieval_plugin() {
+    fn bundled_marketplace_exposes_individual_retrieval_source_plugins() {
         let marketplace = read_marketplace(&dev_builtin_marketplace_path()).unwrap();
-        let entry = marketplace
-            .plugins
-            .iter()
-            .find(|entry| entry.name == "public-dataset-sources")
-            .expect("public dataset plugin entry");
-        assert_eq!(entry.category.as_deref(), Some("Retrieval"));
-        assert_eq!(entry.policy.authentication, PluginAuthPolicy::OnUse);
+        for removed in [
+            "public-dataset-sources",
+            "public-literature-sources",
+            "public-knowledge-sources",
+        ] {
+            assert!(
+                !marketplace
+                    .plugins
+                    .iter()
+                    .any(|entry| entry.name == removed),
+                "grouped retrieval plugin `{removed}` should not be marketplace-visible"
+            );
+        }
 
-        let source_path =
-            resolve_marketplace_source_path(&dev_builtin_marketplace_path(), &entry.source)
-                .unwrap();
-        let summary = plugin_summary_from_marketplace_entry(
-            &dev_builtin_marketplace_path(),
-            &marketplace.name,
-            entry,
-            &PluginConfigFile::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            summary
-                .interface
-                .as_ref()
-                .and_then(|interface| interface.display_name.as_deref()),
-            Some("Public Dataset Sources")
-        );
-        assert_eq!(
-            summary
-                .retrieval
-                .as_ref()
-                .map(|retrieval| {
-                    retrieval
-                        .sources
-                        .iter()
-                        .map(|source| format!("{}.{}", source.category, source.id))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
-            vec![
-                "dataset.arrayexpress".to_string(),
-                "dataset.biosample".to_string(),
-                "dataset.cbioportal".to_string(),
-                "dataset.ena".to_string(),
-                "dataset.ena_analysis".to_string(),
-                "dataset.ena_assembly".to_string(),
-                "dataset.ena_experiment".to_string(),
-                "dataset.ena_run".to_string(),
-                "dataset.ena_sample".to_string(),
-                "dataset.ena_sequence".to_string(),
-                "dataset.geo".to_string(),
-                "dataset.gtex".to_string(),
-                "dataset.ncbi_datasets".to_string()
-            ]
-        );
+        let cases = [
+            (
+                "retrieval-dataset-geo",
+                "GEO Retrieval Source",
+                vec!["dataset.geo"],
+            ),
+            (
+                "retrieval-dataset-ena",
+                "ENA Retrieval Source",
+                vec![
+                    "dataset.ena",
+                    "dataset.ena_analysis",
+                    "dataset.ena_assembly",
+                    "dataset.ena_experiment",
+                    "dataset.ena_run",
+                    "dataset.ena_sample",
+                    "dataset.ena_sequence",
+                ],
+            ),
+            (
+                "retrieval-dataset-biosample",
+                "BioSample Retrieval Source",
+                vec!["dataset.biosample"],
+            ),
+            (
+                "retrieval-dataset-arrayexpress",
+                "ArrayExpress Retrieval Source",
+                vec!["dataset.arrayexpress"],
+            ),
+            (
+                "retrieval-dataset-ncbi-datasets",
+                "NCBI Datasets Retrieval Source",
+                vec!["dataset.ncbi_datasets"],
+            ),
+            (
+                "retrieval-dataset-gtex",
+                "GTEx Retrieval Source",
+                vec!["dataset.gtex"],
+            ),
+            (
+                "retrieval-dataset-cbioportal",
+                "cBioPortal Retrieval Source",
+                vec!["dataset.cbioportal"],
+            ),
+            (
+                "retrieval-literature-pubmed",
+                "PubMed Retrieval Source",
+                vec!["literature.pubmed"],
+            ),
+            (
+                "retrieval-literature-semantic-scholar",
+                "Semantic Scholar Retrieval Source",
+                vec!["literature.semantic_scholar"],
+            ),
+            (
+                "retrieval-knowledge-ncbi-gene",
+                "NCBI Gene Retrieval Source",
+                vec!["knowledge.ncbi_gene"],
+            ),
+            (
+                "retrieval-knowledge-ensembl",
+                "Ensembl Retrieval Source",
+                vec!["knowledge.ensembl"],
+            ),
+            (
+                "retrieval-knowledge-uniprot",
+                "UniProt Retrieval Source",
+                vec!["knowledge.uniprot"],
+            ),
+        ];
 
-        let manifest = load_plugin_manifest(&source_path).unwrap();
-        let retrieval = manifest.retrieval.expect("retrieval manifest");
-        let routes = retrieval
-            .sources
-            .iter()
-            .map(|source| {
-                (
-                    source.category.as_str(),
-                    source.id.as_str(),
-                    source.replaces_builtin,
-                    source.capabilities.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            routes.iter().map(|(_, id, _, _)| *id).collect::<Vec<_>>(),
-            vec![
-                "geo",
-                "ena",
-                "ena_run",
-                "ena_experiment",
-                "ena_sample",
-                "ena_analysis",
-                "ena_assembly",
-                "ena_sequence",
-                "biosample",
-                "arrayexpress",
-                "ncbi_datasets",
-                "gtex",
-                "cbioportal",
-            ]
-        );
-        assert!(routes
-            .iter()
-            .all(|(category, _, replaces_builtin, capabilities)| {
-                *category == "dataset"
-                    && *replaces_builtin
-                    && capabilities
-                        == &vec![
-                            "search".to_string(),
-                            "query".to_string(),
-                            "fetch".to_string(),
-                        ]
-            }));
-    }
+        for (plugin_name, display_name, expected_routes) in cases {
+            let entry = marketplace
+                .plugins
+                .iter()
+                .find(|entry| entry.name == plugin_name)
+                .unwrap_or_else(|| panic!("{plugin_name} marketplace entry"));
+            assert_eq!(entry.category.as_deref(), Some("Retrieval"));
+            assert_eq!(entry.policy.authentication, PluginAuthPolicy::OnUse);
 
-    #[test]
-    fn bundled_marketplace_exposes_public_literature_retrieval_plugin() {
-        let marketplace = read_marketplace(&dev_builtin_marketplace_path()).unwrap();
-        let entry = marketplace
-            .plugins
-            .iter()
-            .find(|entry| entry.name == "public-literature-sources")
-            .expect("public literature plugin entry");
-        assert_eq!(entry.category.as_deref(), Some("Retrieval"));
-        assert_eq!(entry.policy.authentication, PluginAuthPolicy::OnUse);
+            let source_path =
+                resolve_marketplace_source_path(&dev_builtin_marketplace_path(), &entry.source)
+                    .unwrap();
+            let summary = plugin_summary_from_marketplace_entry(
+                &dev_builtin_marketplace_path(),
+                &marketplace.name,
+                entry,
+                &PluginConfigFile::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                summary
+                    .interface
+                    .as_ref()
+                    .and_then(|interface| interface.display_name.as_deref()),
+                Some(display_name)
+            );
+            assert_eq!(
+                summary
+                    .retrieval
+                    .as_ref()
+                    .map(|retrieval| {
+                        retrieval
+                            .sources
+                            .iter()
+                            .map(|source| format!("{}.{}", source.category, source.id))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                expected_routes
+                    .iter()
+                    .map(|route| (*route).to_string())
+                    .collect::<Vec<_>>()
+            );
 
-        let summary = plugin_summary_from_marketplace_entry(
-            &dev_builtin_marketplace_path(),
-            &marketplace.name,
-            entry,
-            &PluginConfigFile::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            summary
-                .interface
-                .as_ref()
-                .and_then(|interface| interface.display_name.as_deref()),
-            Some("Public Literature Sources")
-        );
-        assert_eq!(
-            summary
-                .retrieval
-                .as_ref()
-                .map(|retrieval| {
-                    retrieval
-                        .sources
-                        .iter()
-                        .map(|source| format!("{}.{}", source.category, source.id))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
-            vec![
-                "literature.pubmed".to_string(),
-                "literature.semantic_scholar".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn bundled_marketplace_exposes_public_knowledge_retrieval_plugin() {
-        let marketplace = read_marketplace(&dev_builtin_marketplace_path()).unwrap();
-        let entry = marketplace
-            .plugins
-            .iter()
-            .find(|entry| entry.name == "public-knowledge-sources")
-            .expect("public knowledge plugin entry");
-        assert_eq!(entry.category.as_deref(), Some("Retrieval"));
-        assert_eq!(entry.policy.authentication, PluginAuthPolicy::OnUse);
-
-        let summary = plugin_summary_from_marketplace_entry(
-            &dev_builtin_marketplace_path(),
-            &marketplace.name,
-            entry,
-            &PluginConfigFile::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            summary
-                .interface
-                .as_ref()
-                .and_then(|interface| interface.display_name.as_deref()),
-            Some("Public Knowledge Sources")
-        );
-        assert_eq!(
-            summary
-                .retrieval
-                .as_ref()
-                .map(|retrieval| {
-                    retrieval
-                        .sources
-                        .iter()
-                        .map(|source| format!("{}.{}", source.category, source.id))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
-            vec![
-                "knowledge.ensembl".to_string(),
-                "knowledge.ncbi_gene".to_string(),
-                "knowledge.uniprot".to_string()
-            ]
-        );
+            let manifest = load_plugin_manifest(&source_path).unwrap();
+            let retrieval = manifest.retrieval.expect("retrieval manifest");
+            assert!(
+                retrieval
+                    .sources
+                    .iter()
+                    .all(|source| source.replaces_builtin
+                        && source.capabilities
+                            == vec![
+                                "search".to_string(),
+                                "query".to_string(),
+                                "fetch".to_string(),
+                            ]),
+                "{plugin_name} should replace builtins and support search/query/fetch"
+            );
+        }
     }
 }

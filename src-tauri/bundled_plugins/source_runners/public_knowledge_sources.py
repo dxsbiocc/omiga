@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -17,6 +18,26 @@ SOURCES = [
     {"category": "knowledge", "id": "ensembl", "capabilities": ["search", "query", "fetch"]},
     {"category": "knowledge", "id": "uniprot", "capabilities": ["search", "query", "fetch"]},
 ]
+PLUGIN_NAME = os.environ.get("OMIGA_RETRIEVAL_PLUGIN_NAME", "public-knowledge-source")
+
+
+def configured_source_ids() -> Optional[set[str]]:
+    raw = os.environ.get("OMIGA_RETRIEVAL_SOURCE_IDS", "")
+    values = {value.strip().lower().replace("-", "_") for value in raw.split(",") if value.strip()}
+    return values or None
+
+
+def configured_sources() -> List[Dict[str, Any]]:
+    allowed = configured_source_ids()
+    if allowed is None:
+        return SOURCES
+    return [source for source in SOURCES if source.get("id") in allowed]
+
+
+def source_is_allowed(source: str) -> bool:
+    allowed = configured_source_ids()
+    return allowed is None or source in allowed
+
 NCBI_EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 ENSEMBL = "https://rest.ensembl.org"
 UNIPROT = "https://rest.uniprot.org"
@@ -193,8 +214,8 @@ def base_response(
         "effectiveSource": source,
         "items": items or [],
         "total": total,
-        "notes": notes or ["public-knowledge-sources plugin"],
-        "raw": raw or {"plugin": "public-knowledge-sources"},
+        "notes": notes or [f"{PLUGIN_NAME} plugin"],
+        "raw": raw or {"plugin": PLUGIN_NAME},
     }
     if detail is not None:
         response["detail"] = detail
@@ -653,6 +674,8 @@ def handle_execute(message: Dict[str, Any]) -> Dict[str, Any]:
     message_id = str(message.get("id", "execute"))
     request = message.get("request") if isinstance(message.get("request"), dict) else {}
     source = str(request.get("source", "")).strip().lower().replace("-", "_")
+    if not source_is_allowed(source):
+        return error(message_id, "unknown_source", f"source is not served by this plugin: {source}")
     if is_validation(request):
         return validation_result(message_id, request)
     try:
@@ -679,7 +702,7 @@ def main() -> int:
         message_type = message.get("type")
         message_id = str(message.get("id", message_type or "unknown"))
         if message_type == "initialize":
-            write({"id": message_id, "type": "initialized", "protocolVersion": PROTOCOL_VERSION, "sources": SOURCES})
+            write({"id": message_id, "type": "initialized", "protocolVersion": PROTOCOL_VERSION, "sources": configured_sources()})
         elif message_type == "execute":
             write(handle_execute(message))
         elif message_type == "shutdown":

@@ -533,25 +533,50 @@ mod tests {
         )
     }
 
-    fn bundled_public_dataset_registration() -> PluginRetrievalRegistration {
-        bundled_registration(
-            "public-dataset-sources@omiga-curated",
-            "public-dataset-sources",
-        )
+    fn bundled_source_plugin_cases() -> Vec<(&'static str, &'static str, &'static str)> {
+        vec![
+            ("dataset", "geo", "retrieval-dataset-geo"),
+            ("dataset", "ena", "retrieval-dataset-ena"),
+            ("dataset", "ena_run", "retrieval-dataset-ena"),
+            ("dataset", "ena_experiment", "retrieval-dataset-ena"),
+            ("dataset", "ena_sample", "retrieval-dataset-ena"),
+            ("dataset", "ena_analysis", "retrieval-dataset-ena"),
+            ("dataset", "ena_assembly", "retrieval-dataset-ena"),
+            ("dataset", "ena_sequence", "retrieval-dataset-ena"),
+            ("dataset", "biosample", "retrieval-dataset-biosample"),
+            ("dataset", "arrayexpress", "retrieval-dataset-arrayexpress"),
+            (
+                "dataset",
+                "ncbi_datasets",
+                "retrieval-dataset-ncbi-datasets",
+            ),
+            ("dataset", "gtex", "retrieval-dataset-gtex"),
+            ("dataset", "cbioportal", "retrieval-dataset-cbioportal"),
+            ("literature", "pubmed", "retrieval-literature-pubmed"),
+            (
+                "literature",
+                "semantic_scholar",
+                "retrieval-literature-semantic-scholar",
+            ),
+            ("knowledge", "ncbi_gene", "retrieval-knowledge-ncbi-gene"),
+            ("knowledge", "ensembl", "retrieval-knowledge-ensembl"),
+            ("knowledge", "uniprot", "retrieval-knowledge-uniprot"),
+        ]
     }
 
-    fn bundled_public_literature_registration() -> PluginRetrievalRegistration {
-        bundled_registration(
-            "public-literature-sources@omiga-curated",
-            "public-literature-sources",
-        )
-    }
-
-    fn bundled_public_knowledge_registration() -> PluginRetrievalRegistration {
-        bundled_registration(
-            "public-knowledge-sources@omiga-curated",
-            "public-knowledge-sources",
-        )
+    fn bundled_source_plugin_registrations() -> Vec<PluginRetrievalRegistration> {
+        let mut plugin_dirs = bundled_source_plugin_cases()
+            .into_iter()
+            .map(|(_, _, plugin_dir)| plugin_dir)
+            .collect::<Vec<_>>();
+        plugin_dirs.sort_unstable();
+        plugin_dirs.dedup();
+        plugin_dirs
+            .into_iter()
+            .map(|plugin_dir| {
+                bundled_registration(&format!("{plugin_dir}@omiga-curated"), plugin_dir)
+            })
+            .collect()
     }
 
     fn bundled_registration(plugin_id: &str, plugin_dir: &str) -> PluginRetrievalRegistration {
@@ -658,112 +683,29 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
-    async fn provider_executes_bundled_replacement_dataset_sources_when_enabled() {
+    async fn provider_executes_individual_bundled_replacement_source_plugins_when_enabled() {
         let provider = PluginRetrievalProvider::new_with_lifecycle_state(
-            vec![bundled_public_dataset_registration()],
+            bundled_source_plugin_registrations(),
             PluginLifecycleState::default(),
         );
-        for source in [
-            "geo",
-            "ena",
-            "ena_run",
-            "ena_experiment",
-            "ena_sample",
-            "ena_analysis",
-            "ena_assembly",
-            "ena_sequence",
-            "biosample",
-            "arrayexpress",
-            "ncbi_datasets",
-            "gtex",
-            "cbioportal",
-        ] {
-            let ctx = ToolContext::new("/tmp").with_web_search_api_keys(keys_with_enabled(source));
-            let mut request = request_for_operation(
-                source,
-                RetrievalTool::Search,
-                RetrievalOperation::Search,
-                "validation",
-            );
-            request.params = Some(json!({"omigaValidation": true}));
-
-            let response = provider.execute(&ctx, request).await.unwrap();
-            let response = response_from_output(response);
-
-            assert_eq!(response.provider, RetrievalProviderKind::Plugin);
-            assert_eq!(
-                response.plugin.as_deref(),
-                Some("public-dataset-sources@omiga-curated")
-            );
-            assert_eq!(response.source, source);
-            assert_eq!(response.effective_source, source);
-            assert_eq!(response.items[0].metadata["validation"], json!(true));
-        }
-    }
-
-    #[tokio::test]
-    async fn provider_executes_bundled_replacement_literature_sources_when_enabled() {
-        let provider = PluginRetrievalProvider::new_with_lifecycle_state(
-            vec![bundled_public_literature_registration()],
-            PluginLifecycleState::default(),
-        );
-        for source in ["pubmed", "semantic_scholar"] {
-            let ctx = ToolContext::new("/tmp")
-                .with_web_search_api_keys(keys_with_enabled_in("literature", source));
-            let mut request = request_for_category_operation(
-                "literature",
-                source,
-                RetrievalTool::Search,
-                RetrievalOperation::Search,
-                "validation",
-            );
-            request.params = Some(json!({"omigaValidation": true}));
-
-            let response = provider.execute(&ctx, request).await.unwrap();
-            let response = response_from_output(response);
-
-            assert_eq!(response.provider, RetrievalProviderKind::Plugin);
-            assert_eq!(
-                response.plugin.as_deref(),
-                Some("public-literature-sources@omiga-curated")
-            );
-            assert_eq!(response.source, source);
-            assert_eq!(response.effective_source, source);
-            assert_eq!(response.items[0].metadata["validation"], json!(true));
-        }
-    }
-
-    #[tokio::test]
-    async fn provider_executes_bundled_replacement_knowledge_sources_when_enabled() {
-        let provider = PluginRetrievalProvider::new_with_lifecycle_state(
-            vec![bundled_public_knowledge_registration()],
-            PluginLifecycleState::default(),
-        );
-        for source in ["ncbi_gene", "ensembl", "uniprot"] {
+        for (category, source, plugin_dir) in bundled_source_plugin_cases() {
             for (tool, operation) in [
                 (RetrievalTool::Search, RetrievalOperation::Search),
                 (RetrievalTool::Query, RetrievalOperation::Query),
                 (RetrievalTool::Fetch, RetrievalOperation::Fetch),
             ] {
                 let ctx = ToolContext::new("/tmp")
-                    .with_web_search_api_keys(keys_with_enabled_in("knowledge", source));
-                let mut request = request_for_category_operation(
-                    "knowledge",
-                    source,
-                    tool,
-                    operation,
-                    "validation",
-                );
+                    .with_web_search_api_keys(keys_with_enabled_in(category, source));
+                let mut request =
+                    request_for_category_operation(category, source, tool, operation, "validation");
                 request.params = Some(json!({"omigaValidation": true}));
 
                 let response = provider.execute(&ctx, request).await.unwrap();
                 let response = response_from_output(response);
 
                 assert_eq!(response.provider, RetrievalProviderKind::Plugin);
-                assert_eq!(
-                    response.plugin.as_deref(),
-                    Some("public-knowledge-sources@omiga-curated")
-                );
+                let expected_plugin = format!("{plugin_dir}@omiga-curated");
+                assert_eq!(response.plugin.as_deref(), Some(expected_plugin.as_str()));
                 assert_eq!(response.source, source);
                 assert_eq!(response.effective_source, source);
                 if operation == RetrievalOperation::Fetch {
