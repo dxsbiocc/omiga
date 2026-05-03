@@ -6,3 +6,4 @@ pub mod ipc;
 pub mod lifecycle;
 pub mod manifest;
 pub mod process;
+pub mod validation;

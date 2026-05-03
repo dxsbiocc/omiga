@@ -4,6 +4,9 @@ use crate::app_state::OmigaAppState;
 use crate::commands::CommandResult;
 use crate::domain::plugins::{self, PluginDetail, PluginInstallResult, PluginMarketplaceEntry};
 use crate::domain::retrieval::plugin::lifecycle::PluginLifecycleRouteStatus;
+use crate::domain::retrieval::plugin::validation::{
+    validate_retrieval_plugin_root, PluginRetrievalValidationReport,
+};
 use crate::domain::retrieval::providers::plugin::{
     clear_global_plugin_process_pool, global_plugin_process_pool_statuses,
     PluginProcessPoolRouteStatus,
@@ -137,4 +140,14 @@ pub async fn list_omiga_plugin_process_pool_statuses(
 pub async fn clear_omiga_plugin_process_pool(project_root: Option<String>) -> CommandResult<usize> {
     let _root = resolve_optional_project_root(project_root);
     Ok(clear_global_plugin_process_pool().await)
+}
+
+#[tauri::command]
+pub async fn validate_omiga_retrieval_plugin(
+    plugin_root: String,
+    smoke: Option<bool>,
+    project_root: Option<String>,
+) -> CommandResult<PluginRetrievalValidationReport> {
+    let _root = resolve_optional_project_root(project_root);
+    Ok(validate_retrieval_plugin_root(Path::new(plugin_root.trim()), smoke.unwrap_or(false)).await)
 }

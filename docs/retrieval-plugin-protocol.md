@@ -248,3 +248,18 @@ Respond and exit promptly:
 8. Prefer structured `error` responses for provider errors and reserve crashes for truly unrecoverable bugs.
 9. Test repeated `search`/`query`/`fetch` calls and overlapping calls; the host will only reuse idle processes.
 10. Check Settings → Plugins for route health, available plugins, and process-pool diagnostics while developing.
+
+## Local validation command
+
+The desktop backend exposes a local validation command for developer tools and future UI hooks:
+
+```ts
+await invoke("validate_omiga_retrieval_plugin", {
+  pluginRoot: "/absolute/path/to/plugin",
+  smoke: true,
+});
+```
+
+The report includes manifest checks, a retrieval source summary, the protocol doc path, and optional smoke results. When `smoke` is `true`, Omiga starts the plugin without installing it and runs credential-free `search`, `query`, and `fetch` smoke requests for sources that declare those capabilities. Sources with required credentials are skipped for smoke execution instead of projecting secrets.
+
+Validation is local and read-only from Omiga's perspective, but it **does execute the plugin runtime command** when `smoke` is enabled. Only smoke-test plugin roots you trust.

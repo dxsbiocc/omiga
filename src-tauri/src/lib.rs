@@ -239,6 +239,7 @@ pub fn run() {
             commands::plugins::list_omiga_plugin_retrieval_statuses,
             commands::plugins::list_omiga_plugin_process_pool_statuses,
             commands::plugins::clear_omiga_plugin_process_pool,
+            commands::plugins::validate_omiga_retrieval_plugin,
             commands::extensions::vscode_extensions_dir,
             commands::extensions::install_vscode_extension,
             commands::extensions::list_recommended_vscode_extensions,
