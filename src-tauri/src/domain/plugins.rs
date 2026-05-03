@@ -2084,4 +2084,48 @@ mod tests {
                         ]
             }));
     }
+
+    #[test]
+    fn bundled_marketplace_exposes_public_literature_retrieval_plugin() {
+        let marketplace = read_marketplace(&dev_builtin_marketplace_path()).unwrap();
+        let entry = marketplace
+            .plugins
+            .iter()
+            .find(|entry| entry.name == "public-literature-sources")
+            .expect("public literature plugin entry");
+        assert_eq!(entry.category.as_deref(), Some("Retrieval"));
+        assert_eq!(entry.policy.authentication, PluginAuthPolicy::OnUse);
+
+        let summary = plugin_summary_from_marketplace_entry(
+            &dev_builtin_marketplace_path(),
+            &marketplace.name,
+            entry,
+            &PluginConfigFile::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            summary
+                .interface
+                .as_ref()
+                .and_then(|interface| interface.display_name.as_deref()),
+            Some("Public Literature Sources")
+        );
+        assert_eq!(
+            summary
+                .retrieval
+                .as_ref()
+                .map(|retrieval| {
+                    retrieval
+                        .sources
+                        .iter()
+                        .map(|source| format!("{}.{}", source.category, source.id))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            vec![
+                "literature.pubmed".to_string(),
+                "literature.semantic_scholar".to_string()
+            ]
+        );
+    }
 }

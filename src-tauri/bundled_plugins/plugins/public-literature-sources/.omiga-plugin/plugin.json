@@ -1,0 +1,70 @@
+{
+  "name": "public-literature-sources",
+  "version": "0.1.0",
+  "description": "Local subprocess retrieval plugin for public biomedical literature sources.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./bin/public_literature_sources.py",
+      "args": [],
+      "cwd": ".",
+      "idleTtlMs": 60000,
+      "requestTimeoutMs": 30000,
+      "cancelGraceMs": 750,
+      "concurrency": 1
+    },
+    "sources": [
+      {
+        "id": "pubmed",
+        "category": "literature",
+        "label": "PubMed",
+        "description": "Biomedical article metadata via NCBI E-utilities PubMed APIs.",
+        "aliases": ["pmid", "ncbi_pubmed"],
+        "subcategories": ["biomedical_literature"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": ["pubmed_api_key", "pubmed_email", "pubmed_tool_name"],
+        "riskLevel": "low",
+        "riskNotes": ["Read-only public NCBI E-utilities APIs; optional NCBI credentials are projected only when configured."],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {"name": "retmax", "type": "number", "description": "Maximum PubMed records to request from ESearch."}
+        ]
+      },
+      {
+        "id": "semantic_scholar",
+        "category": "literature",
+        "label": "Semantic Scholar",
+        "description": "Paper search and detail metadata via the Semantic Scholar Graph API.",
+        "aliases": ["semanticscholar", "s2", "semantic_scholar_graph"],
+        "subcategories": ["scholarly_literature"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": ["semantic_scholar_api_key"],
+        "riskLevel": "low",
+        "riskNotes": ["Read-only Semantic Scholar Graph API; optional API key is projected as x-api-key only when configured."],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {"name": "limit", "type": "number", "description": "Maximum Semantic Scholar papers to request."},
+          {"name": "fields", "type": "string", "description": "Optional comma-separated Semantic Scholar fields override."}
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "Public Literature Sources",
+    "shortDescription": "PubMed and Semantic Scholar as local retrieval plugins",
+    "longDescription": "Moves public literature source execution for PubMed and Semantic Scholar behind Omiga's local search/query/fetch subprocess route protocol.",
+    "developerName": "Omiga",
+    "category": "Retrieval",
+    "capabilities": ["Literature", "Retrieval", "Local Subprocess", "Search", "Query", "Fetch"],
+    "brandColor": "#8B5CF6",
+    "defaultPrompt": [
+      "Search PubMed for TP53 cancer reviews through the literature plugin.",
+      "Fetch a PubMed PMID through the literature plugin.",
+      "Search Semantic Scholar for CRISPR single-cell papers."
+    ]
+  }
+}

@@ -432,11 +432,21 @@ mod tests {
         operation: RetrievalOperation,
         marker: &str,
     ) -> RetrievalRequest {
+        request_for_category_operation("dataset", source, tool, operation, marker)
+    }
+
+    fn request_for_category_operation(
+        category: &str,
+        source: &str,
+        tool: RetrievalTool,
+        operation: RetrievalOperation,
+        marker: &str,
+    ) -> RetrievalRequest {
         RetrievalRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
             tool,
             operation,
-            category: "dataset".to_string(),
+            category: category.to_string(),
             source: source.to_string(),
             subcategory: None,
             query: matches!(
@@ -465,8 +475,12 @@ mod tests {
     }
 
     fn keys_with_enabled(source: &str) -> WebSearchApiKeys {
+        keys_with_enabled_in("dataset", source)
+    }
+
+    fn keys_with_enabled_in(category: &str, source: &str) -> WebSearchApiKeys {
         let mut map = HashMap::new();
-        map.insert("dataset".to_string(), vec![normalize_id(source)]);
+        map.insert(category.to_string(), vec![normalize_id(source)]);
         WebSearchApiKeys {
             enabled_sources_by_category: Some(map),
             pubmed_email: Some("dev@example.test".to_string()),
@@ -520,8 +534,23 @@ mod tests {
     }
 
     fn bundled_public_dataset_registration() -> PluginRetrievalRegistration {
+        bundled_registration(
+            "public-dataset-sources@omiga-curated",
+            "public-dataset-sources",
+        )
+    }
+
+    fn bundled_public_literature_registration() -> PluginRetrievalRegistration {
+        bundled_registration(
+            "public-literature-sources@omiga-curated",
+            "public-literature-sources",
+        )
+    }
+
+    fn bundled_registration(plugin_id: &str, plugin_dir: &str) -> PluginRetrievalRegistration {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("bundled_plugins/plugins/public-dataset-sources");
+            .join("bundled_plugins/plugins")
+            .join(plugin_dir);
         let plugin_json: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(root.join(".omiga-plugin/plugin.json")).unwrap(),
         )
@@ -535,7 +564,7 @@ mod tests {
         )
         .unwrap();
         PluginRetrievalRegistration {
-            plugin_id: "public-dataset-sources@omiga-curated".to_string(),
+            plugin_id: plugin_id.to_string(),
             plugin_root: root,
             retrieval: manifest,
         }
@@ -658,6 +687,38 @@ for line in sys.stdin:
             assert_eq!(
                 response.plugin.as_deref(),
                 Some("public-dataset-sources@omiga-curated")
+            );
+            assert_eq!(response.source, source);
+            assert_eq!(response.effective_source, source);
+            assert_eq!(response.items[0].metadata["validation"], json!(true));
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_executes_bundled_replacement_literature_sources_when_enabled() {
+        let provider = PluginRetrievalProvider::new_with_lifecycle_state(
+            vec![bundled_public_literature_registration()],
+            PluginLifecycleState::default(),
+        );
+        for source in ["pubmed", "semantic_scholar"] {
+            let ctx = ToolContext::new("/tmp")
+                .with_web_search_api_keys(keys_with_enabled_in("literature", source));
+            let mut request = request_for_category_operation(
+                "literature",
+                source,
+                RetrievalTool::Search,
+                RetrievalOperation::Search,
+                "validation",
+            );
+            request.params = Some(json!({"omigaValidation": true}));
+
+            let response = provider.execute(&ctx, request).await.unwrap();
+            let response = response_from_output(response);
+
+            assert_eq!(response.provider, RetrievalProviderKind::Plugin);
+            assert_eq!(
+                response.plugin.as_deref(),
+                Some("public-literature-sources@omiga-curated")
             );
             assert_eq!(response.source, source);
             assert_eq!(response.effective_source, source);
