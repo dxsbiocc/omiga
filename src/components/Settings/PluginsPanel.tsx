@@ -122,10 +122,6 @@ function processPoolStatusLabel(status: PluginProcessPoolRouteStatus): string {
   return `${capabilityLabel(status.category)}:${status.sourceId} · idle ${formatDuration(status.remainingMs)}`;
 }
 
-function declaredRetrievalRouteLabel(source: PluginRetrievalSourceSummary): string {
-  return `${capabilityLabel(source.category)}: ${source.label || source.id}`;
-}
-
 function declaredRetrievalRouteTitle(source: PluginRetrievalSourceSummary): string {
   const route = `${source.category}.${source.id}`;
   const capabilities = source.capabilities.map(capabilityLabel).join(", ");
@@ -135,6 +131,70 @@ function declaredRetrievalRouteTitle(source: PluginRetrievalSourceSummary): stri
   return `${route}\nCapabilities: ${capabilities || "None"}${subcategories}${
     source.description ? `\n${source.description}` : ""
   }`;
+}
+
+function isRetrievalPlugin(plugin: PluginSummary): boolean {
+  return Boolean(plugin.retrieval?.sources.length);
+}
+
+function primaryRetrievalCategory(plugin: PluginSummary): string {
+  return plugin.retrieval?.sources[0]?.category || "other";
+}
+
+function retrievalCategoryLabel(category: string): string {
+  switch (category) {
+    case "dataset":
+      return "Dataset sources";
+    case "literature":
+      return "Literature sources";
+    case "knowledge":
+      return "Knowledge sources";
+    default:
+      return `${capabilityLabel(category)} sources`;
+  }
+}
+
+function retrievalRouteSummary(plugin: PluginSummary): string | null {
+  const sources = plugin.retrieval?.sources ?? [];
+  if (sources.length === 0) return null;
+  const first = sources[0];
+  const labels = sources.map((source) => source.label || source.id);
+  if (sources.length === 1) {
+    return `${capabilityLabel(first.category)} route ${first.category}.${first.id}: ${labels[0]}`;
+  }
+  return `${sources.length} ${capabilityLabel(first.category)} routes in one data-source family: ${labels
+    .slice(0, 3)
+    .join(", ")}${labels.length > 3 ? `, +${labels.length - 3} more` : ""}`;
+}
+
+function retrievalUsageExample(plugin: PluginSummary): string | null {
+  const source = plugin.retrieval?.sources[0];
+  if (!source) return null;
+  const example = plugin.interface?.defaultPrompt?.[0] || `Search ${source.label || source.id}.`;
+  return `Use Search / Query / Fetch with source=${source.id}, or type # and choose ${displayName(plugin)} for one turn. Example: “${example}”`;
+}
+
+function groupRetrievalPlugins(plugins: PluginSummary[]) {
+  const order = ["dataset", "literature", "knowledge"];
+  const grouped = new Map<string, PluginSummary[]>();
+  for (const plugin of plugins.filter(isRetrievalPlugin)) {
+    const category = primaryRetrievalCategory(plugin);
+    grouped.set(category, [...(grouped.get(category) ?? []), plugin]);
+  }
+  return Array.from(grouped.entries())
+    .sort(([left], [right]) => {
+      const leftIndex = order.indexOf(left);
+      const rightIndex = order.indexOf(right);
+      if (leftIndex !== -1 || rightIndex !== -1) {
+        return (leftIndex === -1 ? Number.MAX_SAFE_INTEGER : leftIndex) -
+          (rightIndex === -1 ? Number.MAX_SAFE_INTEGER : rightIndex);
+      }
+      return left.localeCompare(right);
+    })
+    .map(([category, groupPlugins]) => ({
+      category,
+      plugins: groupPlugins.sort((left, right) => displayName(left).localeCompare(displayName(right))),
+    }));
 }
 
 function PluginCard({
@@ -165,6 +225,8 @@ function PluginCard({
   const chips = capabilityChips(plugin);
   const declaredRetrievalSources = plugin.retrieval?.sources ?? [];
   const installable = plugin.installPolicy !== "NOT_AVAILABLE";
+  const routeSummary = retrievalRouteSummary(plugin);
+  const usageExample = retrievalUsageExample(plugin);
   const theme = useTheme();
   const isActive = plugin.installed && plugin.enabled;
   const tone = isActive ? theme.palette.primary.main : theme.palette.text.secondary;
@@ -234,7 +296,7 @@ function PluginCard({
             </Typography>
             {plugin.installed && plugin.enabled ? (
               <Typography variant="caption" color="primary" display="block" sx={{ mt: 0.35, fontWeight: 600 }}>
-                Type @plugin: in chat to target this plugin for one turn.
+                Enabled for chat. Type # and choose this plugin when you want to force it for one turn.
               </Typography>
             ) : null}
           </Box>
@@ -286,40 +348,66 @@ function PluginCard({
         )}
 
         {declaredRetrievalSources.length > 0 && (
-          <Stack spacing={0.65}>
-            <Typography variant="caption" color="text.secondary" fontWeight={700}>
-              Declared data-source routes
-            </Typography>
-            {declaredRetrievalSources.map((source) => (
-              <Stack
-                key={`${source.category}:${source.id}`}
-                direction="row"
-                gap={0.75}
-                flexWrap="wrap"
-                alignItems="center"
-              >
-                <Chip
-                  size="small"
-                  color={source.replacesBuiltin ? "warning" : "default"}
-                  variant="outlined"
-                  label={declaredRetrievalRouteLabel(source)}
-                  title={declaredRetrievalRouteTitle(source)}
-                />
+          <Paper
+            variant="outlined"
+            sx={{
+              p: 1.25,
+              borderRadius: 2,
+              bgcolor: alpha(theme.palette.warning.main, theme.palette.mode === "dark" ? 0.12 : 0.06),
+              borderColor: alpha(theme.palette.warning.main, theme.palette.mode === "dark" ? 0.34 : 0.22),
+            }}
+          >
+            <Stack spacing={0.85}>
+              <Stack direction="row" gap={0.75} flexWrap="wrap" alignItems="center">
+                <Chip size="small" color="warning" variant="outlined" label="Local data-source route" />
                 <Chip
                   size="small"
                   variant="outlined"
-                  label={
-                    source.capabilities.length > 0
-                      ? source.capabilities.map(capabilityLabel).join(" / ")
-                      : "No operations"
-                  }
+                  label={`${declaredRetrievalSources.length} route${
+                    declaredRetrievalSources.length === 1 ? "" : "s"
+                  }`}
                 />
-                {source.replacesBuiltin && (
-                  <Chip size="small" color="warning" variant="outlined" label="Replaces built-in" />
+                {declaredRetrievalSources.every((source) => source.replacesBuiltin) && (
+                  <Chip size="small" color="warning" variant="outlined" label="Overrides built-in source" />
                 )}
               </Stack>
-            ))}
-          </Stack>
+              {routeSummary && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                  {routeSummary}
+                </Typography>
+              )}
+              {usageExample && (
+                <Typography variant="caption" color="text.primary" sx={{ display: "block", fontWeight: 600 }}>
+                  {usageExample}
+                </Typography>
+              )}
+              <Box
+                component={declaredRetrievalSources.length > 3 ? "details" : "div"}
+                sx={{
+                  "& summary": {
+                    cursor: "pointer",
+                    color: "text.secondary",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    mb: 0.75,
+                  },
+                }}
+              >
+                {declaredRetrievalSources.length > 3 && <Box component="summary">Show route IDs</Box>}
+                <Stack direction="row" gap={0.75} flexWrap="wrap">
+                  {declaredRetrievalSources.map((source) => (
+                    <Chip
+                      key={`${source.category}:${source.id}`}
+                      size="small"
+                      variant="outlined"
+                      label={`${source.category}.${source.id}`}
+                      title={declaredRetrievalRouteTitle(source)}
+                    />
+                  ))}
+                </Stack>
+              </Box>
+            </Stack>
+          </Paper>
         )}
 
         {retrievalStatuses.length > 0 && (
@@ -372,7 +460,7 @@ function PluginCard({
         {plugin.interface?.defaultPrompt?.length ? (
           <Stack spacing={0.5}>
             <Typography variant="caption" color="text.secondary" fontWeight={700}>
-              Starter prompts
+              Try after install + enable
             </Typography>
             {plugin.interface.defaultPrompt.map((prompt) => (
               <Typography key={prompt} variant="caption" color="text.secondary">
@@ -425,7 +513,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     () => allPlugins.filter((plugin) => plugin.installed),
     [allPlugins],
   );
-  const activePlugins = useMemo(
+  const enabledPlugins = useMemo(
     () => installedPlugins.filter((plugin) => plugin.enabled),
     [installedPlugins],
   );
@@ -603,7 +691,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           </Stack>
           <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
             {[
-              ["Available", activePlugins.length],
+              ["Enabled", enabledPlugins.length],
               ["Installed", installedPlugins.length],
               ["Installable", availablePlugins.length],
               ["Retrieval routes", retrievalStatuses.length],
@@ -633,28 +721,79 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         </Alert>
       )}
 
-      <Alert severity="info" sx={{ borderRadius: 2 }}>
-        <Stack
-          direction={{ xs: "column", md: "row" }}
-          spacing={1.25}
-          alignItems={{ xs: "flex-start", md: "center" }}
-        >
-          <Typography variant="body2" sx={{ flex: 1 }}>
-            Install and enable a plugin, then type <strong>@plugin:</strong> in the chat composer to target a plugin,
-            or <strong>@</strong> to browse plugins and workspace files together. Retrieval plugins use the local
-            subprocess protocol documented at <strong>{RETRIEVAL_PLUGIN_PROTOCOL_DOC_PATH}</strong>.
+      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2.5 }}>
+        <Stack spacing={1.5}>
+          <Stack direction={{ xs: "column", md: "row" }} spacing={1.25} alignItems={{ xs: "stretch", md: "center" }}>
+            <Box sx={{ flex: 1, minWidth: 0 }}>
+              <Typography variant="subtitle2" fontWeight={800}>
+                How to use retrieval plugins
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.35 }}>
+                Install only the data source you need. Once enabled, ordinary Search / Query / Fetch calls for
+                that source route through a local child process instead of the built-in implementation.
+              </Typography>
+            </Box>
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<ArticleRounded />}
+              onClick={handleCopyProtocolDocPath}
+              sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", md: "center" } }}
+            >
+              Copy protocol path
+            </Button>
+          </Stack>
+          <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
+            {[
+              ["1", "Install a source", "Pick GEO, PubMed, UniProt, etc. Each source is a separate plugin."],
+              ["2", "Enable its route", "Enabled plugins replace only their declared source route, not every data source."],
+              ["3", "Use it in chat", "Ask normally, or type # and choose the plugin for a one-turn override. @ still browses files."],
+            ].map(([step, title, body]) => (
+              <Paper
+                key={step}
+                variant="outlined"
+                sx={{
+                  flex: 1,
+                  p: 1.25,
+                  borderRadius: 2,
+                  bgcolor: alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.1 : 0.04),
+                }}
+              >
+                <Stack direction="row" spacing={1} alignItems="flex-start">
+                  <Box
+                    sx={{
+                      width: 24,
+                      height: 24,
+                      borderRadius: "50%",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      bgcolor: "primary.main",
+                      color: "primary.contrastText",
+                      fontSize: 12,
+                      fontWeight: 800,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {step}
+                  </Box>
+                  <Box>
+                    <Typography variant="caption" fontWeight={800} color="text.primary">
+                      {title}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.25 }}>
+                      {body}
+                    </Typography>
+                  </Box>
+                </Stack>
+              </Paper>
+            ))}
+          </Stack>
+          <Typography variant="caption" color="text.secondary">
+            Protocol reference: <strong>{RETRIEVAL_PLUGIN_PROTOCOL_DOC_PATH}</strong>
           </Typography>
-          <Button
-            size="small"
-            variant="outlined"
-            startIcon={<ArticleRounded />}
-            onClick={handleCopyProtocolDocPath}
-            sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", md: "center" } }}
-          >
-            Copy protocol path
-          </Button>
         </Stack>
-      </Alert>
+      </Paper>
 
       <Accordion disableGutters elevation={0} sx={accordionSx}>
         <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={{ px: 2, minHeight: 56, "& .MuiAccordionSummary-content": { my: 1.25 } }}>
@@ -726,21 +865,21 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
       <Accordion defaultExpanded disableGutters elevation={0} sx={accordionSx}>
         <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={{ px: 2, minHeight: 56, "& .MuiAccordionSummary-content": { my: 1.25 } }}>
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-            <Typography variant="subtitle2" fontWeight={700}>Available Omiga plugins</Typography>
-            <Chip size="small" variant="outlined" label={`${activePlugins.length} available`} />
+            <Typography variant="subtitle2" fontWeight={700}>Enabled plugins</Typography>
+            <Chip size="small" variant="outlined" label={`${enabledPlugins.length} enabled`} />
           </Stack>
         </AccordionSummary>
         <AccordionDetails sx={{ px: 2, pt: 0, pb: 2 }}>
-          <Box sx={pluginListSx} role="region" aria-label="Available Omiga plugins list">
-            {activePlugins.length === 0 ? (
+          <Box sx={pluginListSx} role="region" aria-label="Enabled Omiga plugins list">
+            {enabledPlugins.length === 0 ? (
               <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, textAlign: "center" }}>
                 <ExtensionRounded sx={{ color: "text.secondary", mb: 1 }} />
                 <Typography variant="body2" color="text.secondary">
-                  No plugins are currently available to the app. Install and enable a plugin to make its capabilities usable in chat.
+                  No plugins are enabled yet. Install a data-source plugin, then enable it to make its routes usable in chat.
                 </Typography>
               </Paper>
             ) : (
-              activePlugins.map((plugin) => (
+              enabledPlugins.map((plugin) => (
                 <PluginCard
                   key={plugin.id}
                   plugin={plugin}
@@ -762,12 +901,12 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
       <Accordion defaultExpanded disableGutters elevation={0} sx={accordionSx}>
         <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={{ px: 2, minHeight: 56, "& .MuiAccordionSummary-content": { my: 1.25 } }}>
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-            <Typography variant="subtitle2" fontWeight={700}>Recommended plugins</Typography>
+            <Typography variant="subtitle2" fontWeight={700}>Installable plugins by data source</Typography>
             <Chip size="small" variant="outlined" label={`${availablePlugins.length} installable`} />
           </Stack>
         </AccordionSummary>
         <AccordionDetails sx={{ px: 2, pt: 0, pb: 2 }}>
-          <Box sx={pluginListSx} role="region" aria-label="Recommended Omiga plugins list">
+          <Box sx={pluginListSx} role="region" aria-label="Installable Omiga plugins list">
             {marketplaces.length === 0 || allPlugins.length === 0 ? (
               <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, textAlign: "center" }}>
                 <ExtensionRounded sx={{ color: "text.secondary", mb: 1 }} />
@@ -783,26 +922,79 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                 </Typography>
               </Paper>
             ) : (
-              availableMarketplaces.map(({ marketplace, plugins }) => (
-                <Stack key={marketplace.path} spacing={1.25}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>
-                    {marketplaceLabel(marketplace)}
-                  </Typography>
-                  {plugins.map((plugin) => (
-                    <PluginCard
-                      key={plugin.id}
-                      plugin={plugin}
-                      retrievalStatuses={retrievalStatusesByPlugin.get(plugin.id)}
-                      processPoolStatuses={processPoolStatusesByPlugin.get(plugin.id)}
-                      busy={isMutating}
-                      onInstall={(p) => void handleInstall(p)}
-                      onUninstall={(p) => void handleUninstall(p)}
-                      onToggle={(p, enabled) => void handleToggle(p, enabled)}
-                      onCopyDiagnostics={handleCopyDiagnostics}
-                    />
-                  ))}
-                </Stack>
-              ))
+              availableMarketplaces.map(({ marketplace, plugins }) => {
+                const retrievalGroups = groupRetrievalPlugins(plugins);
+                const otherPlugins = plugins.filter((plugin) => !isRetrievalPlugin(plugin));
+                return (
+                  <Stack key={marketplace.path} spacing={1.5}>
+                    <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                      <Typography variant="caption" color="text.secondary" fontWeight={800}>
+                        {marketplaceLabel(marketplace)}
+                      </Typography>
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        label={`${plugins.filter(isRetrievalPlugin).length} data-source plugins`}
+                      />
+                      {otherPlugins.length > 0 && (
+                        <Chip size="small" variant="outlined" label={`${otherPlugins.length} general tools`} />
+                      )}
+                    </Stack>
+
+                    {retrievalGroups.map(({ category, plugins: groupPlugins }) => (
+                      <Stack key={category} spacing={1}>
+                        <Stack direction="row" spacing={1} alignItems="baseline" flexWrap="wrap">
+                          <Typography variant="subtitle2" fontWeight={800}>
+                            {retrievalCategoryLabel(category)}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Install one source at a time; each plugin owns only its listed route.
+                          </Typography>
+                        </Stack>
+                        {groupPlugins.map((plugin) => (
+                          <PluginCard
+                            key={plugin.id}
+                            plugin={plugin}
+                            retrievalStatuses={retrievalStatusesByPlugin.get(plugin.id)}
+                            processPoolStatuses={processPoolStatusesByPlugin.get(plugin.id)}
+                            busy={isMutating}
+                            onInstall={(p) => void handleInstall(p)}
+                            onUninstall={(p) => void handleUninstall(p)}
+                            onToggle={(p, enabled) => void handleToggle(p, enabled)}
+                            onCopyDiagnostics={handleCopyDiagnostics}
+                          />
+                        ))}
+                      </Stack>
+                    ))}
+
+                    {otherPlugins.length > 0 && (
+                      <Stack spacing={1}>
+                        <Stack direction="row" spacing={1} alignItems="baseline" flexWrap="wrap">
+                          <Typography variant="subtitle2" fontWeight={800}>
+                            General plugins
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Non-retrieval capabilities such as notebook helpers or workflow tools.
+                          </Typography>
+                        </Stack>
+                        {otherPlugins.map((plugin) => (
+                          <PluginCard
+                            key={plugin.id}
+                            plugin={plugin}
+                            retrievalStatuses={retrievalStatusesByPlugin.get(plugin.id)}
+                            processPoolStatuses={processPoolStatusesByPlugin.get(plugin.id)}
+                            busy={isMutating}
+                            onInstall={(p) => void handleInstall(p)}
+                            onUninstall={(p) => void handleUninstall(p)}
+                            onToggle={(p, enabled) => void handleToggle(p, enabled)}
+                            onCopyDiagnostics={handleCopyDiagnostics}
+                          />
+                        ))}
+                      </Stack>
+                    )}
+                  </Stack>
+                );
+              })
             )}
           </Box>
         </AccordionDetails>
