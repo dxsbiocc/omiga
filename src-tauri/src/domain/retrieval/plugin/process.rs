@@ -2,6 +2,7 @@ use super::ipc::{
     operation_from_plugin, ExecuteRequestEnvelope, InitializeRequest, IpcResponseEnvelope,
     PluginExecuteRequest, ShutdownRequest,
 };
+use super::lifecycle::PluginLifecyclePolicy;
 use super::manifest::{PluginRetrievalManifest, PluginRetrievalSource, SUPPORTED_PROTOCOL_VERSION};
 use crate::domain::retrieval::types::{
     RetrievalError, RetrievalProviderKind, RetrievalRequest, RetrievalResponse,
@@ -12,14 +13,20 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio_util::sync::CancellationToken;
 
 const MAX_RESPONSE_LINE_BYTES: usize = 5 * 1024 * 1024;
-const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60_000;
-const DEFAULT_INITIALIZATION_TIMEOUT_MS: u64 = 15_000;
+
+#[cfg(test)]
+fn plugin_process_start_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 pub struct PluginProcess {
     plugin_id: String,
     manifest: PluginRetrievalManifest,
+    lifecycle: PluginLifecyclePolicy,
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -30,7 +37,22 @@ impl PluginProcess {
         plugin_id: impl Into<String>,
         manifest: PluginRetrievalManifest,
     ) -> Result<Self, RetrievalError> {
+        let cancel = CancellationToken::new();
+        Self::start_with_cancel(plugin_id, manifest, &cancel).await
+    }
+
+    pub async fn start_with_cancel(
+        plugin_id: impl Into<String>,
+        manifest: PluginRetrievalManifest,
+        cancel: &CancellationToken,
+    ) -> Result<Self, RetrievalError> {
+        if cancel.is_cancelled() {
+            return Err(RetrievalError::Cancelled);
+        }
+        #[cfg(test)]
+        let _start_guard = plugin_process_start_lock().lock().await;
         let plugin_id = plugin_id.into();
+        let lifecycle = PluginLifecyclePolicy::from_runtime(&manifest.runtime);
         let mut command = Command::new(&manifest.runtime.command);
         command
             .args(&manifest.runtime.args)
@@ -43,6 +65,10 @@ impl PluginProcess {
             plugin: Some(plugin_id.clone()),
             message: format!("spawn plugin process: {err}"),
         })?;
+        if cancel.is_cancelled() {
+            let _ = child.kill().await;
+            return Err(RetrievalError::Cancelled);
+        }
         if let Some(stderr) = child.stderr.take() {
             tokio::spawn(drain_stderr(stderr));
         }
@@ -60,11 +86,12 @@ impl PluginProcess {
         let mut process = Self {
             plugin_id,
             manifest,
+            lifecycle,
             child,
             stdin,
             stdout: BufReader::new(stdout),
         };
-        process.initialize().await?;
+        process.initialize_with_cancel(cancel).await?;
         Ok(process)
     }
 
@@ -73,23 +100,26 @@ impl PluginProcess {
         request: &RetrievalRequest,
         credentials: HashMap<String, String>,
     ) -> Result<RetrievalResponse, RetrievalError> {
+        let cancel = CancellationToken::new();
+        self.execute_with_cancel(request, credentials, &cancel)
+            .await
+    }
+
+    pub async fn execute_with_cancel(
+        &mut self,
+        request: &RetrievalRequest,
+        credentials: HashMap<String, String>,
+        cancel: &CancellationToken,
+    ) -> Result<RetrievalResponse, RetrievalError> {
         let id = request.request_id.clone();
         let envelope = ExecuteRequestEnvelope {
             id: id.clone(),
             message_type: "execute".to_string(),
             request: PluginExecuteRequest::from_retrieval_request(request, credentials),
         };
-        let timeout = self.request_timeout();
-        let response = match tokio::time::timeout(timeout, self.send_and_read(&id, &envelope)).await
-        {
-            Ok(result) => result?,
-            Err(_) => {
-                let _ = self.child.kill().await;
-                return Err(RetrievalError::Timeout {
-                    seconds: timeout.as_secs().max(1),
-                });
-            }
-        };
+        let response = self
+            .send_and_read_bounded(&id, &envelope, self.lifecycle.request_timeout, cancel)
+            .await?;
         self.execution_response(request, response)
     }
 
@@ -100,11 +130,11 @@ impl PluginProcess {
             message_type: "shutdown".to_string(),
         };
         let _ = tokio::time::timeout(
-            Duration::from_millis(500),
+            self.lifecycle.cancel_grace,
             self.send_and_read(&id, &envelope),
         )
         .await;
-        if tokio::time::timeout(Duration::from_millis(200), self.child.wait())
+        if tokio::time::timeout(self.lifecycle.kill_grace, self.child.wait())
             .await
             .is_err()
         {
@@ -112,7 +142,10 @@ impl PluginProcess {
         }
     }
 
-    async fn initialize(&mut self) -> Result<(), RetrievalError> {
+    async fn initialize_with_cancel(
+        &mut self,
+        cancel: &CancellationToken,
+    ) -> Result<(), RetrievalError> {
         let id = "initialize".to_string();
         let envelope = InitializeRequest {
             id: id.clone(),
@@ -120,17 +153,14 @@ impl PluginProcess {
             protocol_version: SUPPORTED_PROTOCOL_VERSION,
             plugin_id: self.plugin_id.clone(),
         };
-        let timeout = self.initialization_timeout();
-        let response = match tokio::time::timeout(timeout, self.send_and_read(&id, &envelope)).await
-        {
-            Ok(result) => result?,
-            Err(_) => {
-                let _ = self.child.kill().await;
-                return Err(RetrievalError::Timeout {
-                    seconds: timeout.as_secs().max(1),
-                });
-            }
-        };
+        let response = self
+            .send_and_read_bounded(
+                &id,
+                &envelope,
+                self.lifecycle.initialization_timeout,
+                cancel,
+            )
+            .await?;
         if response.message_type != "initialized" {
             return Err(RetrievalError::Protocol {
                 plugin: Some(self.plugin_id.clone()),
@@ -180,6 +210,31 @@ impl PluginProcess {
     ) -> Result<IpcResponseEnvelope, RetrievalError> {
         self.send_json(message).await?;
         self.read_response(id).await
+    }
+
+    async fn send_and_read_bounded<T: Serialize + ?Sized>(
+        &mut self,
+        id: &str,
+        message: &T,
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<IpcResponseEnvelope, RetrievalError> {
+        let result = tokio::select! {
+            result = tokio::time::timeout(timeout, self.send_and_read(id, message)) => result,
+            _ = cancel.cancelled() => {
+                self.shutdown().await;
+                return Err(RetrievalError::Cancelled);
+            }
+        };
+        match result {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = self.child.kill().await;
+                Err(RetrievalError::Timeout {
+                    seconds: timeout.as_secs().max(1),
+                })
+            }
+        }
     }
 
     async fn send_json<T: Serialize + ?Sized>(
@@ -315,20 +370,11 @@ impl PluginProcess {
             }),
         }
     }
+}
 
-    fn request_timeout(&self) -> Duration {
-        Duration::from_millis(
-            self.manifest
-                .runtime
-                .request_timeout_ms
-                .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS)
-                .max(1),
-        )
-    }
-
-    fn initialization_timeout(&self) -> Duration {
-        self.request_timeout()
-            .max(Duration::from_millis(DEFAULT_INITIALIZATION_TIMEOUT_MS))
+impl Drop for PluginProcess {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
     }
 }
 
@@ -411,6 +457,7 @@ mod tests {
                 "runtime": {
                     "command": "./mock_plugin.py",
                     "requestTimeoutMs": timeout_ms,
+                    "cancelGraceMs": 10,
                     "concurrency": 1
                 },
                 "sources": [{
@@ -566,5 +613,24 @@ for line in sys.stdin:
             .unwrap_err();
 
         assert!(matches!(err, RetrievalError::Timeout { .. }));
+    }
+
+    #[tokio::test]
+    async fn process_cancellation_shuts_down_child_and_returns_cancelled() {
+        let (_dir, manifest) = write_mock_plugin(MOCK_PLUGIN, 5_000);
+        let mut process = PluginProcess::start("mock-plugin", manifest).await.unwrap();
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            trigger.cancel();
+        });
+
+        let err = process
+            .execute_with_cancel(&request("sleep"), HashMap::new(), &cancel)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, RetrievalError::Cancelled));
     }
 }

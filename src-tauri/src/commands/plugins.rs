@@ -3,6 +3,11 @@
 use crate::app_state::OmigaAppState;
 use crate::commands::CommandResult;
 use crate::domain::plugins::{self, PluginDetail, PluginInstallResult, PluginMarketplaceEntry};
+use crate::domain::retrieval::plugin::lifecycle::PluginLifecycleRouteStatus;
+use crate::domain::retrieval::providers::plugin::{
+    clear_global_plugin_process_pool, global_plugin_process_pool_statuses,
+    PluginProcessPoolRouteStatus,
+};
 use crate::errors::AppError;
 use std::path::{Path, PathBuf};
 use tauri::{Manager, State};
@@ -27,6 +32,7 @@ async fn invalidate_plugin_dependent_caches(app_state: &OmigaAppState) {
         guard.clear();
     }
     app_state.chat.mcp_tool_cache.lock().await.clear();
+    clear_global_plugin_process_pool().await;
 
     let project_roots: Vec<PathBuf> = app_state
         .chat
@@ -91,6 +97,7 @@ pub async fn uninstall_omiga_plugin(
     project_root: Option<String>,
 ) -> CommandResult<()> {
     let _root = resolve_optional_project_root(project_root);
+    clear_global_plugin_process_pool().await;
     plugins::uninstall_plugin(&plugin_id).map_err(plugin_error)?;
     invalidate_plugin_dependent_caches(&app_state).await;
     Ok(())
@@ -104,7 +111,30 @@ pub async fn set_omiga_plugin_enabled(
     project_root: Option<String>,
 ) -> CommandResult<()> {
     let _root = resolve_optional_project_root(project_root);
+    clear_global_plugin_process_pool().await;
     plugins::set_plugin_enabled(&plugin_id, enabled).map_err(plugin_error)?;
     invalidate_plugin_dependent_caches(&app_state).await;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn list_omiga_plugin_retrieval_statuses(
+    project_root: Option<String>,
+) -> CommandResult<Vec<PluginLifecycleRouteStatus>> {
+    let _root = resolve_optional_project_root(project_root);
+    Ok(plugins::enabled_plugin_retrieval_statuses())
+}
+
+#[tauri::command]
+pub async fn list_omiga_plugin_process_pool_statuses(
+    project_root: Option<String>,
+) -> CommandResult<Vec<PluginProcessPoolRouteStatus>> {
+    let _root = resolve_optional_project_root(project_root);
+    Ok(global_plugin_process_pool_statuses().await)
+}
+
+#[tauri::command]
+pub async fn clear_omiga_plugin_process_pool(project_root: Option<String>) -> CommandResult<usize> {
+    let _root = resolve_optional_project_root(project_root);
+    Ok(clear_global_plugin_process_pool().await)
 }

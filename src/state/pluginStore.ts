@@ -49,12 +49,40 @@ export interface PluginInstallResult {
   authPolicy: PluginAuthPolicy;
 }
 
+export type PluginRetrievalLifecycleState = "healthy" | "degraded" | "quarantined";
+
+export interface PluginRetrievalRouteStatus {
+  pluginId: string;
+  category: string;
+  sourceId: string;
+  route: string;
+  state: PluginRetrievalLifecycleState;
+  quarantined: boolean;
+  consecutiveFailures: number;
+  remainingMs: number;
+  lastError?: string | null;
+}
+
+export interface PluginProcessPoolRouteStatus {
+  pluginId: string;
+  category: string;
+  sourceId: string;
+  route: string;
+  pluginRoot: string;
+  remainingMs: number;
+}
+
 interface PluginState {
   marketplaces: PluginMarketplaceEntry[];
+  retrievalStatuses: PluginRetrievalRouteStatus[];
+  processPoolStatuses: PluginProcessPoolRouteStatus[];
   isLoading: boolean;
   isMutating: boolean;
   error: string | null;
   loadPlugins: (projectRoot?: string) => Promise<void>;
+  loadRetrievalStatuses: (projectRoot?: string) => Promise<void>;
+  loadProcessPoolStatuses: (projectRoot?: string) => Promise<void>;
+  clearProcessPool: (projectRoot?: string) => Promise<number>;
   installPlugin: (plugin: PluginSummary, projectRoot?: string) => Promise<PluginInstallResult>;
   uninstallPlugin: (pluginId: string, projectRoot?: string) => Promise<void>;
   setPluginEnabled: (pluginId: string, enabled: boolean, projectRoot?: string) => Promise<void>;
@@ -77,6 +105,8 @@ export function flattenMarketplacePlugins(
 
 export const usePluginStore = create<PluginState>((set, get) => ({
   marketplaces: [],
+  retrievalStatuses: [],
+  processPoolStatuses: [],
   isLoading: false,
   isMutating: false,
   error: null,
@@ -84,13 +114,62 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   loadPlugins: async (projectRoot?: string) => {
     set({ isLoading: true, error: null });
     try {
-      const marketplaces = await invoke<PluginMarketplaceEntry[]>(
-        "list_omiga_plugin_marketplaces",
-        { projectRoot },
-      );
-      set({ marketplaces, isLoading: false });
+      const [marketplaces, retrievalStatuses, processPoolStatuses] = await Promise.all([
+        invoke<PluginMarketplaceEntry[]>("list_omiga_plugin_marketplaces", {
+          projectRoot,
+        }),
+        invoke<PluginRetrievalRouteStatus[]>(
+          "list_omiga_plugin_retrieval_statuses",
+          { projectRoot },
+        ),
+        invoke<PluginProcessPoolRouteStatus[]>(
+          "list_omiga_plugin_process_pool_statuses",
+          { projectRoot },
+        ),
+      ]);
+      set({ marketplaces, retrievalStatuses, processPoolStatuses, isLoading: false });
     } catch (e) {
       set({ isLoading: false, error: extractErrorMessage(e) });
+    }
+  },
+
+  loadRetrievalStatuses: async (projectRoot?: string) => {
+    try {
+      const retrievalStatuses = await invoke<PluginRetrievalRouteStatus[]>(
+        "list_omiga_plugin_retrieval_statuses",
+        { projectRoot },
+      );
+      set({ retrievalStatuses });
+    } catch (e) {
+      set({ error: extractErrorMessage(e) });
+    }
+  },
+
+  loadProcessPoolStatuses: async (projectRoot?: string) => {
+    try {
+      const processPoolStatuses = await invoke<PluginProcessPoolRouteStatus[]>(
+        "list_omiga_plugin_process_pool_statuses",
+        { projectRoot },
+      );
+      set({ processPoolStatuses });
+    } catch (e) {
+      set({ error: extractErrorMessage(e) });
+    }
+  },
+
+  clearProcessPool: async (projectRoot?: string) => {
+    set({ isMutating: true, error: null });
+    try {
+      const cleared = await invoke<number>("clear_omiga_plugin_process_pool", {
+        projectRoot,
+      });
+      await get().loadProcessPoolStatuses(projectRoot);
+      set({ isMutating: false });
+      return cleared;
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
+      throw new Error(error);
     }
   },
 

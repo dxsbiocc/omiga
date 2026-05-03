@@ -4,6 +4,9 @@
 //! references, and UI metadata. It intentionally does not execute VS Code extension code.
 
 use crate::domain::mcp::config::{servers_from_mcp_json, McpServerConfig};
+use crate::domain::retrieval::plugin::lifecycle::{
+    PluginLifecycleKey, PluginLifecycleRouteStatus, PluginLifecycleState,
+};
 use crate::domain::retrieval::plugin::manifest::{
     load_plugin_retrieval_manifest, PluginRetrievalManifest,
 };
@@ -13,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use tokio::time::Instant;
 
 pub const OMIGA_PLUGIN_MANIFEST_PATH: &str = ".omiga-plugin/plugin.json";
 pub const CODEX_PLUGIN_MANIFEST_PATH: &str = ".codex-plugin/plugin.json";
@@ -1339,6 +1343,33 @@ pub fn enabled_plugin_mcp_servers() -> HashMap<String, McpServerConfig> {
 
 pub fn enabled_plugin_retrieval_plugins() -> Vec<PluginRetrievalRegistration> {
     plugin_load_outcome().effective_retrieval_plugins()
+}
+
+pub fn enabled_plugin_retrieval_statuses() -> Vec<PluginLifecycleRouteStatus> {
+    plugin_retrieval_statuses_for_registrations(
+        &enabled_plugin_retrieval_plugins(),
+        &PluginLifecycleState::global(),
+        Instant::now(),
+    )
+}
+
+fn plugin_retrieval_statuses_for_registrations(
+    registrations: &[PluginRetrievalRegistration],
+    lifecycle: &PluginLifecycleState,
+    now: Instant,
+) -> Vec<PluginLifecycleRouteStatus> {
+    lifecycle.route_statuses(
+        registrations.iter().flat_map(|registration| {
+            registration.retrieval.sources.iter().map(|source| {
+                PluginLifecycleKey::new(
+                    registration.plugin_id.clone(),
+                    source.category.clone(),
+                    source.id.clone(),
+                )
+            })
+        }),
+        now,
+    )
 }
 
 pub fn enabled_plugin_apps() -> Vec<String> {

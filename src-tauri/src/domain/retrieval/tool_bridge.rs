@@ -72,6 +72,7 @@ async fn execute_with_registrations(
         Ok(RetrievalProviderOutput::Response(response)) => {
             Ok(json_stream(render(&request, &response)))
         }
+        Err(RetrievalError::Cancelled) => Err(ToolError::Cancelled),
         Err(error) if explicit_plugin_source => {
             Ok(json_stream(output::structured_error_json(&request, &error)))
         }
