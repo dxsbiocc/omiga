@@ -32,6 +32,7 @@ import {
   type PluginMarketplaceEntry,
   type PluginRetrievalLifecycleState,
   type PluginRetrievalRouteStatus,
+  type PluginRetrievalSourceSummary,
   type PluginSummary,
   usePluginStore,
 } from "../../state/pluginStore";
@@ -121,6 +122,21 @@ function processPoolStatusLabel(status: PluginProcessPoolRouteStatus): string {
   return `${capabilityLabel(status.category)}:${status.sourceId} · idle ${formatDuration(status.remainingMs)}`;
 }
 
+function declaredRetrievalRouteLabel(source: PluginRetrievalSourceSummary): string {
+  return `${capabilityLabel(source.category)}: ${source.label || source.id}`;
+}
+
+function declaredRetrievalRouteTitle(source: PluginRetrievalSourceSummary): string {
+  const route = `${source.category}.${source.id}`;
+  const capabilities = source.capabilities.map(capabilityLabel).join(", ");
+  const subcategories = source.subcategories.length
+    ? `\nSubcategories: ${source.subcategories.join(", ")}`
+    : "";
+  return `${route}\nCapabilities: ${capabilities || "None"}${subcategories}${
+    source.description ? `\n${source.description}` : ""
+  }`;
+}
+
 function PluginCard({
   plugin,
   retrievalStatuses = [],
@@ -147,6 +163,7 @@ function PluginCard({
   ) => void;
 }) {
   const chips = capabilityChips(plugin);
+  const declaredRetrievalSources = plugin.retrieval?.sources ?? [];
   const installable = plugin.installPolicy !== "NOT_AVAILABLE";
   const theme = useTheme();
   const isActive = plugin.installed && plugin.enabled;
@@ -208,6 +225,9 @@ function PluginCard({
               {plugin.authPolicy === "ON_INSTALL" && (
                 <Chip size="small" label="Auth on install" variant="outlined" />
               )}
+              {plugin.authPolicy === "ON_USE" && (
+                <Chip size="small" label="Auth on use" variant="outlined" />
+              )}
             </Stack>
             <Typography variant="caption" color="text.secondary" display="block" noWrap title={plugin.id}>
               {plugin.id}
@@ -261,6 +281,43 @@ function PluginCard({
           <Stack direction="row" gap={0.75} flexWrap="wrap">
             {chips.map((chip) => (
               <Chip key={chip} size="small" variant="outlined" label={capabilityLabel(chip)} />
+            ))}
+          </Stack>
+        )}
+
+        {declaredRetrievalSources.length > 0 && (
+          <Stack spacing={0.65}>
+            <Typography variant="caption" color="text.secondary" fontWeight={700}>
+              Declared data-source routes
+            </Typography>
+            {declaredRetrievalSources.map((source) => (
+              <Stack
+                key={`${source.category}:${source.id}`}
+                direction="row"
+                gap={0.75}
+                flexWrap="wrap"
+                alignItems="center"
+              >
+                <Chip
+                  size="small"
+                  color={source.replacesBuiltin ? "warning" : "default"}
+                  variant="outlined"
+                  label={declaredRetrievalRouteLabel(source)}
+                  title={declaredRetrievalRouteTitle(source)}
+                />
+                <Chip
+                  size="small"
+                  variant="outlined"
+                  label={
+                    source.capabilities.length > 0
+                      ? source.capabilities.map(capabilityLabel).join(" / ")
+                      : "No operations"
+                  }
+                />
+                {source.replacesBuiltin && (
+                  <Chip size="small" color="warning" variant="outlined" label="Replaces built-in" />
+                )}
+              </Stack>
             ))}
           </Stack>
         )}

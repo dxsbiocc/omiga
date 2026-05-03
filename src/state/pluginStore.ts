@@ -22,6 +22,24 @@ export interface PluginInterface {
   screenshots: string[];
 }
 
+export interface PluginRetrievalSourceSummary {
+  id: string;
+  category: string;
+  label: string;
+  description: string;
+  subcategories: string[];
+  capabilities: string[];
+  requiredCredentialRefs: string[];
+  optionalCredentialRefs: string[];
+  defaultEnabled: boolean;
+  replacesBuiltin: boolean;
+}
+
+export interface PluginRetrievalSummary {
+  protocolVersion: number;
+  sources: PluginRetrievalSourceSummary[];
+}
+
 export interface PluginSummary {
   id: string;
   name: string;
@@ -34,6 +52,7 @@ export interface PluginSummary {
   installPolicy: PluginInstallPolicy;
   authPolicy: PluginAuthPolicy;
   interface?: PluginInterface | null;
+  retrieval?: PluginRetrievalSummary | null;
 }
 
 export interface PluginMarketplaceEntry {
@@ -85,6 +104,7 @@ export interface PluginDiagnosticsPayload {
     installedPath?: string | null;
     installed: boolean;
     enabled: boolean;
+    retrieval?: PluginRetrievalSummary | null;
   };
   retrievalRoutes: PluginRetrievalRouteStatus[];
   pooledProcesses: PluginProcessPoolRouteStatus[];
@@ -137,6 +157,7 @@ export function buildPluginDiagnostics(
       installedPath: plugin.installedPath,
       installed: plugin.installed,
       enabled: plugin.enabled,
+      retrieval: plugin.retrieval,
     },
     retrievalRoutes,
     pooledProcesses,

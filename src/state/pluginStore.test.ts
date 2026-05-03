@@ -108,4 +108,41 @@ describe("buildPluginDiagnostics", () => {
     expect(JSON.stringify(diagnostics)).not.toContain("secret");
     expect(diagnostics.notes.join(" ")).toContain("No credential values");
   });
+
+  it("includes declared retrieval source summaries without process internals", () => {
+    const diagnostics = JSON.parse(
+      buildPluginDiagnostics(
+        plugin({
+          id: "public-dataset-sources@omiga-curated",
+          name: "public-dataset-sources",
+          retrieval: {
+            protocolVersion: 1,
+            sources: [
+              {
+                id: "biosample",
+                category: "dataset",
+                label: "NCBI BioSample",
+                description: "Sample metadata",
+                subcategories: ["sample_metadata"],
+                capabilities: ["search", "query", "fetch"],
+                requiredCredentialRefs: [],
+                optionalCredentialRefs: ["pubmed_email"],
+                defaultEnabled: false,
+                replacesBuiltin: true,
+              },
+            ],
+          },
+        }),
+      ),
+    );
+
+    expect(diagnostics.plugin.retrieval.sources[0]).toMatchObject({
+      id: "biosample",
+      category: "dataset",
+      label: "NCBI BioSample",
+      replacesBuiltin: true,
+    });
+    expect(JSON.stringify(diagnostics)).not.toContain("runtime");
+    expect(JSON.stringify(diagnostics)).not.toContain("command");
+  });
 });

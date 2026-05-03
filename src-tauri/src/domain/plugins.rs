@@ -231,6 +231,29 @@ pub struct PluginSummary {
     pub install_policy: PluginInstallPolicy,
     pub auth_policy: PluginAuthPolicy,
     pub interface: Option<PluginInterface>,
+    pub retrieval: Option<PluginRetrievalSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRetrievalSummary {
+    pub protocol_version: u32,
+    pub sources: Vec<PluginRetrievalSourceSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRetrievalSourceSummary {
+    pub id: String,
+    pub category: String,
+    pub label: String,
+    pub description: String,
+    pub subcategories: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub required_credential_refs: Vec<String>,
+    pub optional_credential_refs: Vec<String>,
+    pub default_enabled: bool,
+    pub replaces_builtin: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -267,6 +290,7 @@ pub struct PluginCapabilitySummary {
     pub has_skills: bool,
     pub mcp_servers: Vec<String>,
     pub apps: Vec<String>,
+    pub retrieval_routes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -401,6 +425,12 @@ fn plugin_capability_parts(plugin: &PluginCapabilitySummary) -> Vec<String> {
         capabilities.push(format!(
             "app connector refs: {} (metadata only unless matching app tools are explicitly available)",
             backtick_list(&plugin.apps)
+        ));
+    }
+    if !plugin.retrieval_routes.is_empty() {
+        capabilities.push(format!(
+            "retrieval routes: {}",
+            backtick_list(&plugin.retrieval_routes)
         ));
     }
     capabilities
@@ -888,6 +918,51 @@ fn prompt_safe_description(description: Option<&str>) -> Option<String> {
     }
 }
 
+fn plugin_retrieval_route_names(retrieval: Option<&PluginRetrievalManifest>) -> Vec<String> {
+    let mut routes = retrieval
+        .into_iter()
+        .flat_map(|retrieval| {
+            retrieval
+                .sources
+                .iter()
+                .map(|source| format!("{}.{}", source.category, source.id))
+        })
+        .collect::<Vec<_>>();
+    routes.sort();
+    routes
+}
+
+fn plugin_retrieval_summary(
+    retrieval: Option<&PluginRetrievalManifest>,
+) -> Option<PluginRetrievalSummary> {
+    let retrieval = retrieval?;
+    let mut sources = retrieval
+        .sources
+        .iter()
+        .map(|source| PluginRetrievalSourceSummary {
+            id: source.id.clone(),
+            category: source.category.clone(),
+            label: source.label.clone(),
+            description: source.description.clone(),
+            subcategories: source.subcategories.clone(),
+            capabilities: source.capabilities.clone(),
+            required_credential_refs: source.required_credential_refs.clone(),
+            optional_credential_refs: source.optional_credential_refs.clone(),
+            default_enabled: source.default_enabled,
+            replaces_builtin: source.replaces_builtin,
+        })
+        .collect::<Vec<_>>();
+    sources.sort_by(|left, right| {
+        left.category
+            .cmp(&right.category)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Some(PluginRetrievalSummary {
+        protocol_version: retrieval.protocol_version,
+        sources,
+    })
+}
+
 fn plugin_capability_summary_from_loaded(plugin: &LoadedPlugin) -> Option<PluginCapabilitySummary> {
     if !plugin.is_active() {
         return None;
@@ -895,6 +970,7 @@ fn plugin_capability_summary_from_loaded(plugin: &LoadedPlugin) -> Option<Plugin
 
     let mut mcp_servers = plugin.mcp_servers.keys().cloned().collect::<Vec<_>>();
     mcp_servers.sort();
+    let retrieval_routes = plugin_retrieval_route_names(plugin.retrieval.as_ref());
     let summary = PluginCapabilitySummary {
         id: plugin.id.clone(),
         display_name: plugin
@@ -906,10 +982,14 @@ fn plugin_capability_summary_from_loaded(plugin: &LoadedPlugin) -> Option<Plugin
         has_skills: !plugin.skill_roots.is_empty(),
         mcp_servers,
         apps: plugin.apps.clone(),
+        retrieval_routes,
     };
 
-    (summary.has_skills || !summary.mcp_servers.is_empty() || !summary.apps.is_empty())
-        .then_some(summary)
+    (summary.has_skills
+        || !summary.mcp_servers.is_empty()
+        || !summary.apps.is_empty()
+        || !summary.retrieval_routes.is_empty())
+    .then_some(summary)
 }
 
 fn load_configured_plugin(
@@ -1019,6 +1099,9 @@ fn plugin_summary_from_marketplace_entry(
 ) -> Result<PluginSummary, String> {
     let source_path = resolve_marketplace_source_path(marketplace_path, &entry.source)?;
     let manifest = load_plugin_manifest(&source_path);
+    let retrieval = manifest
+        .as_ref()
+        .and_then(|manifest| plugin_retrieval_summary(manifest.retrieval.as_ref()));
     let interface = manifest
         .as_ref()
         .and_then(|manifest| manifest.interface.clone())
@@ -1043,6 +1126,7 @@ fn plugin_summary_from_marketplace_entry(
         install_policy: entry.policy.installation.clone(),
         auth_policy: entry.policy.authentication.clone(),
         interface,
+        retrieval,
     })
 }
 
@@ -1053,6 +1137,9 @@ fn plugin_summary_from_installed_root(
     cache_root: &Path,
 ) -> PluginSummary {
     let manifest = load_plugin_manifest(plugin_root);
+    let retrieval = manifest
+        .as_ref()
+        .and_then(|manifest| plugin_retrieval_summary(manifest.retrieval.as_ref()));
     let key = plugin_id.key();
     PluginSummary {
         id: key.clone(),
@@ -1069,6 +1156,7 @@ fn plugin_summary_from_installed_root(
         install_policy: PluginInstallPolicy::Available,
         auth_policy: PluginAuthPolicy::OnUse,
         interface: manifest.and_then(|manifest| manifest.interface),
+        retrieval,
     }
 }
 
@@ -1697,6 +1785,36 @@ mod tests {
     }
 
     #[test]
+    fn retrieval_only_plugins_are_visible_in_system_section() {
+        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("bundled_plugins/plugins/public-dataset-sources");
+        let manifest = load_plugin_manifest(&plugin_root).expect("public dataset plugin manifest");
+        let outcome = PluginLoadOutcome::from_plugins(vec![LoadedPlugin {
+            id: "public-dataset-sources@omiga-curated".to_string(),
+            manifest_name: Some(manifest.name.clone()),
+            display_name: manifest
+                .interface
+                .as_ref()
+                .and_then(|interface| interface.display_name.clone()),
+            description: manifest.description.clone(),
+            root: plugin_root,
+            enabled: true,
+            skill_roots: vec![],
+            mcp_servers: HashMap::new(),
+            apps: vec![],
+            retrieval: manifest.retrieval.clone(),
+            error: None,
+        }]);
+
+        let section = format_plugins_system_section(&outcome).expect("plugins section");
+
+        assert!(section.contains("Public Dataset Sources"));
+        assert!(section.contains("retrieval routes"));
+        assert!(section.contains("`dataset.biosample`"));
+        assert!(section.contains("`dataset.arrayexpress`"));
+    }
+
+    #[test]
     fn selected_plugins_system_section_prioritizes_explicit_plugin_mentions() {
         let mut mcp_servers = HashMap::new();
         mcp_servers.insert(
@@ -1878,6 +1996,38 @@ mod tests {
         let source_path =
             resolve_marketplace_source_path(&dev_builtin_marketplace_path(), &entry.source)
                 .unwrap();
+        let summary = plugin_summary_from_marketplace_entry(
+            &dev_builtin_marketplace_path(),
+            &marketplace.name,
+            entry,
+            &PluginConfigFile::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            summary
+                .interface
+                .as_ref()
+                .and_then(|interface| interface.display_name.as_deref()),
+            Some("Public Dataset Sources")
+        );
+        assert_eq!(
+            summary
+                .retrieval
+                .as_ref()
+                .map(|retrieval| {
+                    retrieval
+                        .sources
+                        .iter()
+                        .map(|source| format!("{}.{}", source.category, source.id))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            vec![
+                "dataset.arrayexpress".to_string(),
+                "dataset.biosample".to_string()
+            ]
+        );
+
         let manifest = load_plugin_manifest(&source_path).unwrap();
         let retrieval = manifest.retrieval.expect("retrieval manifest");
         let routes = retrieval
