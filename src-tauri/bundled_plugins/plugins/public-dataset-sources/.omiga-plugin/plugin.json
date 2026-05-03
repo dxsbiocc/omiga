@@ -1,0 +1,103 @@
+{
+  "name": "public-dataset-sources",
+  "version": "0.1.0",
+  "description": "Local subprocess retrieval plugin for public biomedical dataset sources.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./bin/public_dataset_sources.py",
+      "args": [],
+      "cwd": ".",
+      "idleTtlMs": 60000,
+      "requestTimeoutMs": 30000,
+      "cancelGraceMs": 750,
+      "concurrency": 1
+    },
+    "sources": [
+      {
+        "id": "biosample",
+        "category": "dataset",
+        "label": "NCBI BioSample",
+        "description": "Sample metadata via NCBI E-utilities and Datasets BioSample report APIs.",
+        "aliases": [
+          "bio_sample",
+          "biosamples",
+          "ncbi_biosample",
+          "sample_metadata"
+        ],
+        "subcategories": ["sample_metadata"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [
+          "pubmed_api_key",
+          "pubmed_email",
+          "pubmed_tool_name"
+        ],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public NCBI APIs; optional NCBI credentials are projected only when configured."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "retmax",
+            "type": "number",
+            "description": "Maximum BioSample records to request from ESearch."
+          }
+        ]
+      },
+      {
+        "id": "arrayexpress",
+        "category": "dataset",
+        "label": "ArrayExpress",
+        "description": "Functional genomics studies via EMBL-EBI BioStudies ArrayExpress collection.",
+        "aliases": [
+          "array_express",
+          "ae",
+          "ebi_arrayexpress",
+          "biostudies_arrayexpress",
+          "functional_genomics"
+        ],
+        "subcategories": ["expression"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI BioStudies APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ArrayExpress/BioStudies records to request."
+          }
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "Public Dataset Sources",
+    "shortDescription": "BioSample and ArrayExpress as local retrieval plugins",
+    "longDescription": "Moves public dataset data-source execution for BioSample and ArrayExpress behind Omiga's local search/query/fetch subprocess route protocol.",
+    "developerName": "Omiga",
+    "category": "Retrieval",
+    "capabilities": [
+      "Dataset",
+      "Retrieval",
+      "Local Subprocess",
+      "Search",
+      "Query",
+      "Fetch"
+    ],
+    "brandColor": "#3B82F6",
+    "defaultPrompt": [
+      "Search BioSample for liver single-cell RNA-seq samples.",
+      "Fetch BioSample SAMN04271175 through the dataset plugin.",
+      "Search ArrayExpress for E-MTAB single-cell studies."
+    ]
+  }
+}

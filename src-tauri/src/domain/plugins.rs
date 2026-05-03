@@ -1863,4 +1863,59 @@ mod tests {
 
         assert!(summaries.is_empty());
     }
+
+    #[test]
+    fn bundled_marketplace_exposes_public_dataset_retrieval_plugin() {
+        let marketplace = read_marketplace(&dev_builtin_marketplace_path()).unwrap();
+        let entry = marketplace
+            .plugins
+            .iter()
+            .find(|entry| entry.name == "public-dataset-sources")
+            .expect("public dataset plugin entry");
+        assert_eq!(entry.category.as_deref(), Some("Retrieval"));
+        assert_eq!(entry.policy.authentication, PluginAuthPolicy::OnUse);
+
+        let source_path =
+            resolve_marketplace_source_path(&dev_builtin_marketplace_path(), &entry.source)
+                .unwrap();
+        let manifest = load_plugin_manifest(&source_path).unwrap();
+        let retrieval = manifest.retrieval.expect("retrieval manifest");
+        let routes = retrieval
+            .sources
+            .iter()
+            .map(|source| {
+                (
+                    source.category.as_str(),
+                    source.id.as_str(),
+                    source.replaces_builtin,
+                    source.capabilities.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            routes,
+            vec![
+                (
+                    "dataset",
+                    "biosample",
+                    true,
+                    vec![
+                        "search".to_string(),
+                        "query".to_string(),
+                        "fetch".to_string()
+                    ],
+                ),
+                (
+                    "dataset",
+                    "arrayexpress",
+                    true,
+                    vec![
+                        "search".to_string(),
+                        "query".to_string(),
+                        "fetch".to_string()
+                    ],
+                ),
+            ]
+        );
+    }
 }

@@ -473,6 +473,10 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/retrieval-plugins/basic")
     }
 
+    fn bundled_public_dataset_sources_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("bundled_plugins/plugins/public-dataset-sources")
+    }
+
     #[tokio::test]
     async fn validates_documented_fixture_without_smoke() {
         let report = validate_retrieval_plugin_root(&fixture_root(), false).await;
@@ -529,5 +533,50 @@ mod tests {
             .iter()
             .any(|check| check.code == "manifest_found"
                 && matches!(check.status, PluginValidationCheckStatus::Failed)));
+    }
+
+    #[tokio::test]
+    async fn validates_bundled_public_dataset_sources_with_offline_smoke() {
+        let report =
+            validate_retrieval_plugin_root(&bundled_public_dataset_sources_root(), true).await;
+
+        assert!(report.valid, "report: {report:?}");
+        assert_eq!(
+            report.plugin_name.as_deref(),
+            Some("public-dataset-sources")
+        );
+        let retrieval = report.retrieval.as_ref().expect("retrieval summary");
+        assert_eq!(retrieval.source_count, 2);
+        let routes = retrieval
+            .sources
+            .iter()
+            .map(|source| format!("{}.{}", source.category, source.source_id))
+            .collect::<Vec<_>>();
+        assert_eq!(routes, vec!["dataset.biosample", "dataset.arrayexpress"]);
+        let smoke = report
+            .smoke_results
+            .iter()
+            .map(|result| {
+                format!(
+                    "{}.{}:{}",
+                    result.category, result.source_id, result.operation
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            smoke,
+            vec![
+                "dataset.biosample:search",
+                "dataset.biosample:query",
+                "dataset.biosample:fetch",
+                "dataset.arrayexpress:search",
+                "dataset.arrayexpress:query",
+                "dataset.arrayexpress:fetch",
+            ]
+        );
+        assert!(report
+            .smoke_results
+            .iter()
+            .all(|result| matches!(result.status, PluginValidationCheckStatus::Passed)));
     }
 }
