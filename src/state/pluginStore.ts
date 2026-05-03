@@ -72,6 +72,25 @@ export interface PluginProcessPoolRouteStatus {
   remainingMs: number;
 }
 
+export const RETRIEVAL_PLUGIN_PROTOCOL_DOC_PATH =
+  "docs/retrieval-plugin-protocol.md";
+
+export interface PluginDiagnosticsPayload {
+  protocolDocPath: string;
+  plugin: {
+    id: string;
+    name: string;
+    marketplaceName: string;
+    sourcePath: string;
+    installedPath?: string | null;
+    installed: boolean;
+    enabled: boolean;
+  };
+  retrievalRoutes: PluginRetrievalRouteStatus[];
+  pooledProcesses: PluginProcessPoolRouteStatus[];
+  notes: string[];
+}
+
 interface PluginState {
   marketplaces: PluginMarketplaceEntry[];
   retrievalStatuses: PluginRetrievalRouteStatus[];
@@ -101,6 +120,34 @@ export function flattenMarketplacePlugins(
     }
   }
   return plugins;
+}
+
+export function buildPluginDiagnostics(
+  plugin: PluginSummary,
+  retrievalRoutes: PluginRetrievalRouteStatus[] = [],
+  pooledProcesses: PluginProcessPoolRouteStatus[] = [],
+): string {
+  const payload: PluginDiagnosticsPayload = {
+    protocolDocPath: RETRIEVAL_PLUGIN_PROTOCOL_DOC_PATH,
+    plugin: {
+      id: plugin.id,
+      name: plugin.name,
+      marketplaceName: plugin.marketplaceName,
+      sourcePath: plugin.sourcePath,
+      installedPath: plugin.installedPath,
+      installed: plugin.installed,
+      enabled: plugin.enabled,
+    },
+    retrievalRoutes,
+    pooledProcesses,
+    notes: [
+      "Retrieval plugins run as local JSONL child processes.",
+      "No credential values are included in this diagnostics payload.",
+      "See protocolDocPath for the search/query/fetch route contract.",
+    ],
+  };
+
+  return JSON.stringify(payload, null, 2);
 }
 
 export const usePluginStore = create<PluginState>((set, get) => ({

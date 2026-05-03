@@ -16,13 +16,17 @@ import {
 } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
 import {
+  ArticleRounded,
   CloudDownloadRounded,
+  ContentCopyRounded,
   DeleteOutlineRounded,
   ExtensionRounded,
   ExpandMoreRounded,
   RefreshRounded,
 } from "@mui/icons-material";
 import {
+  RETRIEVAL_PLUGIN_PROTOCOL_DOC_PATH,
+  buildPluginDiagnostics,
   flattenMarketplacePlugins,
   type PluginProcessPoolRouteStatus,
   type PluginMarketplaceEntry,
@@ -120,19 +124,27 @@ function processPoolStatusLabel(status: PluginProcessPoolRouteStatus): string {
 function PluginCard({
   plugin,
   retrievalStatuses = [],
+  processPoolStatuses = [],
   installedView,
   busy,
   onInstall,
   onUninstall,
   onToggle,
+  onCopyDiagnostics,
 }: {
   plugin: PluginSummary;
   retrievalStatuses?: PluginRetrievalRouteStatus[];
+  processPoolStatuses?: PluginProcessPoolRouteStatus[];
   installedView?: boolean;
   busy: boolean;
   onInstall: (plugin: PluginSummary) => void;
   onUninstall: (plugin: PluginSummary) => void;
   onToggle: (plugin: PluginSummary, enabled: boolean) => void;
+  onCopyDiagnostics: (
+    plugin: PluginSummary,
+    retrievalStatuses: PluginRetrievalRouteStatus[],
+    processPoolStatuses: PluginProcessPoolRouteStatus[],
+  ) => void;
 }) {
   const chips = capabilityChips(plugin);
   const installable = plugin.installPolicy !== "NOT_AVAILABLE";
@@ -270,6 +282,33 @@ function PluginCard({
                 />
               ))}
             </Stack>
+          </Stack>
+        )}
+
+        {(retrievalStatuses.length > 0 || processPoolStatuses.length > 0) && (
+          <Stack direction="row" gap={0.75} flexWrap="wrap">
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<ContentCopyRounded />}
+              disabled={busy}
+              onClick={() =>
+                onCopyDiagnostics(plugin, retrievalStatuses, processPoolStatuses)
+              }
+              sx={{ textTransform: "none", borderRadius: 1.5 }}
+            >
+              Copy route diagnostics
+            </Button>
+            {processPoolStatuses.length > 0 && (
+              <Chip
+                size="small"
+                color="info"
+                variant="outlined"
+                label={`${processPoolStatuses.length} pooled process${
+                  processPoolStatuses.length === 1 ? "" : "es"
+                }`}
+              />
+            )}
           </Stack>
         )}
 
@@ -414,6 +453,38 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     }
   };
 
+  const copyToClipboard = async (text: string, successMessage: string) => {
+    setMessage(null);
+    try {
+      await navigator.clipboard.writeText(text);
+      setMessage(successMessage);
+    } catch {
+      setMessage("Clipboard copy failed. Select the text manually and copy it.");
+    }
+  };
+
+  const handleCopyProtocolDocPath = () => {
+    void copyToClipboard(
+      RETRIEVAL_PLUGIN_PROTOCOL_DOC_PATH,
+      "Copied retrieval plugin protocol doc path",
+    );
+  };
+
+  const handleCopyDiagnostics = (
+    plugin: PluginSummary,
+    pluginRetrievalStatuses: PluginRetrievalRouteStatus[],
+    pluginProcessPoolStatuses: PluginProcessPoolRouteStatus[],
+  ) => {
+    void copyToClipboard(
+      buildPluginDiagnostics(
+        plugin,
+        pluginRetrievalStatuses,
+        pluginProcessPoolStatuses,
+      ),
+      `Copied route diagnostics for ${displayName(plugin)}`,
+    );
+  };
+
   return (
     <Stack spacing={2}>
       <Paper
@@ -506,8 +577,26 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
       )}
 
       <Alert severity="info" sx={{ borderRadius: 2 }}>
-        Install and enable a plugin, then type <strong>@plugin:</strong> in the chat composer to target a plugin,
-        or <strong>@</strong> to browse plugins and workspace files together.
+        <Stack
+          direction={{ xs: "column", md: "row" }}
+          spacing={1.25}
+          alignItems={{ xs: "flex-start", md: "center" }}
+        >
+          <Typography variant="body2" sx={{ flex: 1 }}>
+            Install and enable a plugin, then type <strong>@plugin:</strong> in the chat composer to target a plugin,
+            or <strong>@</strong> to browse plugins and workspace files together. Retrieval plugins use the local
+            subprocess protocol documented at <strong>{RETRIEVAL_PLUGIN_PROTOCOL_DOC_PATH}</strong>.
+          </Typography>
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<ArticleRounded />}
+            onClick={handleCopyProtocolDocPath}
+            sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", md: "center" } }}
+          >
+            Copy protocol path
+          </Button>
+        </Stack>
       </Alert>
 
       <Accordion disableGutters elevation={0} sx={accordionSx}>
@@ -599,11 +688,13 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                   key={plugin.id}
                   plugin={plugin}
                   retrievalStatuses={retrievalStatusesByPlugin.get(plugin.id)}
+                  processPoolStatuses={processPoolStatusesByPlugin.get(plugin.id)}
                   installedView
                   busy={isMutating}
                   onInstall={(p) => void handleInstall(p)}
                   onUninstall={(p) => void handleUninstall(p)}
                   onToggle={(p, enabled) => void handleToggle(p, enabled)}
+                  onCopyDiagnostics={handleCopyDiagnostics}
                 />
               ))
             )}
@@ -645,10 +736,12 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                       key={plugin.id}
                       plugin={plugin}
                       retrievalStatuses={retrievalStatusesByPlugin.get(plugin.id)}
+                      processPoolStatuses={processPoolStatusesByPlugin.get(plugin.id)}
                       busy={isMutating}
                       onInstall={(p) => void handleInstall(p)}
                       onUninstall={(p) => void handleUninstall(p)}
                       onToggle={(p, enabled) => void handleToggle(p, enabled)}
+                      onCopyDiagnostics={handleCopyDiagnostics}
                     />
                   ))}
                 </Stack>
@@ -680,11 +773,13 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                   key={plugin.id}
                   plugin={plugin}
                   retrievalStatuses={retrievalStatusesByPlugin.get(plugin.id)}
+                  processPoolStatuses={processPoolStatusesByPlugin.get(plugin.id)}
                   installedView
                   busy={isMutating}
                   onInstall={(p) => void handleInstall(p)}
                   onUninstall={(p) => void handleUninstall(p)}
                   onToggle={(p, enabled) => void handleToggle(p, enabled)}
+                  onCopyDiagnostics={handleCopyDiagnostics}
                 />
               ))
             )}
