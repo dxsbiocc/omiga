@@ -622,31 +622,47 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
-    async fn provider_executes_bundled_replacement_dataset_source_when_enabled() {
+    async fn provider_executes_bundled_replacement_dataset_sources_when_enabled() {
         let provider = PluginRetrievalProvider::new_with_lifecycle_state(
             vec![bundled_public_dataset_registration()],
             PluginLifecycleState::default(),
         );
-        let ctx = ToolContext::new("/tmp").with_web_search_api_keys(keys_with_enabled("biosample"));
-        let mut request = request_for_operation(
+        for source in [
+            "geo",
+            "ena",
+            "ena_run",
+            "ena_experiment",
+            "ena_sample",
+            "ena_analysis",
+            "ena_assembly",
+            "ena_sequence",
             "biosample",
-            RetrievalTool::Search,
-            RetrievalOperation::Search,
-            "validation",
-        );
-        request.params = Some(json!({"omigaValidation": true}));
+            "arrayexpress",
+            "ncbi_datasets",
+            "gtex",
+            "cbioportal",
+        ] {
+            let ctx = ToolContext::new("/tmp").with_web_search_api_keys(keys_with_enabled(source));
+            let mut request = request_for_operation(
+                source,
+                RetrievalTool::Search,
+                RetrievalOperation::Search,
+                "validation",
+            );
+            request.params = Some(json!({"omigaValidation": true}));
 
-        let response = provider.execute(&ctx, request).await.unwrap();
-        let response = response_from_output(response);
+            let response = provider.execute(&ctx, request).await.unwrap();
+            let response = response_from_output(response);
 
-        assert_eq!(response.provider, RetrievalProviderKind::Plugin);
-        assert_eq!(
-            response.plugin.as_deref(),
-            Some("public-dataset-sources@omiga-curated")
-        );
-        assert_eq!(response.source, "biosample");
-        assert_eq!(response.effective_source, "biosample");
-        assert_eq!(response.items[0].metadata["validation"], json!(true));
+            assert_eq!(response.provider, RetrievalProviderKind::Plugin);
+            assert_eq!(
+                response.plugin.as_deref(),
+                Some("public-dataset-sources@omiga-curated")
+            );
+            assert_eq!(response.source, source);
+            assert_eq!(response.effective_source, source);
+            assert_eq!(response.items[0].metadata["validation"], json!(true));
+        }
     }
 
     #[tokio::test]
