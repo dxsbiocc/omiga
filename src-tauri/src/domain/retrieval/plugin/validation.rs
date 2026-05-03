@@ -546,13 +546,22 @@ mod tests {
             Some("public-dataset-sources")
         );
         let retrieval = report.retrieval.as_ref().expect("retrieval summary");
-        assert_eq!(retrieval.source_count, 2);
+        assert_eq!(retrieval.source_count, 5);
         let routes = retrieval
             .sources
             .iter()
             .map(|source| format!("{}.{}", source.category, source.source_id))
             .collect::<Vec<_>>();
-        assert_eq!(routes, vec!["dataset.biosample", "dataset.arrayexpress"]);
+        assert_eq!(
+            routes,
+            vec![
+                "dataset.biosample",
+                "dataset.arrayexpress",
+                "dataset.ncbi_datasets",
+                "dataset.gtex",
+                "dataset.cbioportal"
+            ]
+        );
         let smoke = report
             .smoke_results
             .iter()
@@ -572,6 +581,15 @@ mod tests {
                 "dataset.arrayexpress:search",
                 "dataset.arrayexpress:query",
                 "dataset.arrayexpress:fetch",
+                "dataset.ncbi_datasets:search",
+                "dataset.ncbi_datasets:query",
+                "dataset.ncbi_datasets:fetch",
+                "dataset.gtex:search",
+                "dataset.gtex:query",
+                "dataset.gtex:fetch",
+                "dataset.cbioportal:search",
+                "dataset.cbioportal:query",
+                "dataset.cbioportal:fetch",
             ]
         );
         assert!(report

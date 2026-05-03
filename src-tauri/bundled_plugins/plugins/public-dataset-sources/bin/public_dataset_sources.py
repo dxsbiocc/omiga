@@ -15,11 +15,24 @@ PROTOCOL_VERSION = 1
 SOURCES = [
     {"category": "dataset", "id": "biosample", "capabilities": ["search", "query", "fetch"]},
     {"category": "dataset", "id": "arrayexpress", "capabilities": ["search", "query", "fetch"]},
+    {"category": "dataset", "id": "ncbi_datasets", "capabilities": ["search", "query", "fetch"]},
+    {"category": "dataset", "id": "gtex", "capabilities": ["search", "query", "fetch"]},
+    {"category": "dataset", "id": "cbioportal", "capabilities": ["search", "query", "fetch"]},
 ]
 NCBI_EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 NCBI_DATASETS = "https://api.ncbi.nlm.nih.gov/datasets/v2"
 BIOSTUDIES = "https://www.ebi.ac.uk/biostudies/api/v1"
+GTEX = "https://gtexportal.org/api/v2"
+CBIOPORTAL = "https://www.cbioportal.org/api"
 USER_AGENT = "Omiga public-dataset-sources retrieval plugin/0.1"
+
+VALIDATION_ACCESSIONS = {
+    "biosample": "SAMN00000001",
+    "arrayexpress": "E-MTAB-0000",
+    "ncbi_datasets": "GCF_000001405.40",
+    "gtex": "ENSG00000012048.21",
+    "cbioportal": "brca_tcga",
+}
 
 
 def write(message: Dict[str, Any]) -> None:
@@ -77,10 +90,17 @@ def identifier_text(request: Dict[str, Any]) -> str:
                     return value.strip()
     url = request.get("url")
     if isinstance(url, str):
-        for pattern in (r"(SAM[NEDAG]?\d+)", r"/biosample/(\d+)", r"(E-[A-Z]+-\d+)"):
+        for pattern in (
+            r"(SAM[NEDAG]?\d+)",
+            r"/biosample/(\d+)",
+            r"(E-[A-Z]+-\d+)",
+            r"(GC[AF]_\d+(?:\.\d+)?)",
+            r"[?&](?:id|studyId|study_id)=([^&#]+)",
+            r"/gene/([^/?#]+)",
+        ):
             match = re.search(pattern, url, re.IGNORECASE)
             if match:
-                return match.group(1)
+                return urllib.parse.unquote(match.group(1))
     return ""
 
 
@@ -91,8 +111,11 @@ def credentials(request: Dict[str, Any]) -> Dict[str, str]:
     return {str(k): str(v) for k, v in value.items() if str(v).strip()}
 
 
-def urlopen_json(url: str, timeout: int = 25) -> Any:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+def urlopen_json(url: str, timeout: int = 25, headers: Optional[Dict[str, str]] = None) -> Any:
+    request_headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    if headers:
+        request_headers.update(headers)
+    req = urllib.request.Request(url, headers=request_headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
             raw = response.read().decode("utf-8", errors="replace")
@@ -118,8 +141,15 @@ def with_ncbi_credentials(url: str, request: Dict[str, Any]) -> str:
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, encoded, parts.fragment))
 
 
+def ncbi_header_credentials(request: Dict[str, Any]) -> Dict[str, str]:
+    creds = credentials(request)
+    if creds.get("pubmed_api_key"):
+        return {"api-key": creds["pubmed_api_key"]}
+    return {}
+
+
 def plugin_item(source: str, operation: str, index: int = 1) -> Dict[str, Any]:
-    accession = "SAMN00000001" if source == "biosample" else "E-MTAB-0000"
+    accession = VALIDATION_ACCESSIONS.get(source, f"{source}-validation")
     return {
         "id": accession,
         "accession": accession,
@@ -312,6 +342,325 @@ def handle_arrayexpress(message_id: str, request: Dict[str, Any]) -> Dict[str, A
     return error(message_id, "unsupported_operation", f"ArrayExpress does not support operation {operation}")
 
 
+def first_string(record: Dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if value is not None and not isinstance(value, (dict, list)):
+            text = str(value).strip()
+            if text:
+                return text
+    return ""
+
+
+def nested_string(record: Dict[str, Any], *path: str) -> str:
+    value: Any = record
+    for key in path:
+        if not isinstance(value, dict):
+            return ""
+        value = value.get(key)
+    if isinstance(value, str):
+        return value.strip()
+    return "" if value is None else str(value).strip()
+
+
+def data_items(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        for key in ("data", "reports", "items", "results", "hits", "studies"):
+            items = value.get(key)
+            if isinstance(items, list):
+                return items
+    return []
+
+
+def normalize_ncbi_assembly_accession(value: str) -> str:
+    match = re.search(r"\bGC[AF]_\d+(?:\.\d+)?\b", value or "", re.IGNORECASE)
+    return match.group(0).upper() if match else ""
+
+
+def ncbi_datasets_mode(request: Dict[str, Any], term: str) -> str:
+    params = request_params(request)
+    raw = params.get("mode") or params.get("endpoint") or params.get("lookup") or params.get("by") or params.get("type")
+    normalized = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "accessions": "accession",
+        "assembly_accession": "accession",
+        "assembly_accessions": "accession",
+        "taxonomy": "taxon",
+        "organism": "taxon",
+        "taxid": "taxon",
+        "tax_id": "taxon",
+        "bio_project": "bioproject",
+        "bioprojects": "bioproject",
+        "project": "bioproject",
+        "bio_sample": "biosample",
+        "biosample_id": "biosample",
+        "sample": "biosample",
+        "wgs_accession": "wgs",
+        "assembly_names": "assembly_name",
+        "name": "assembly_name",
+    }
+    if normalized in {"accession", "taxon", "bioproject", "biosample", "wgs", "assembly_name"}:
+        return normalized
+    if normalized in aliases:
+        return aliases[normalized]
+    upper = term.upper()
+    if normalize_ncbi_assembly_accession(term):
+        return "accession"
+    if upper.startswith(("PRJN", "PRJE", "PRJD")):
+        return "bioproject"
+    if upper.startswith(("SAMN", "SAMEA", "SAMD")):
+        return "biosample"
+    return "taxon"
+
+
+def ncbi_datasets_endpoint(mode: str, lookup: str) -> str:
+    encoded = urllib.parse.quote(lookup, safe="")
+    if mode == "accession":
+        return f"genome/accession/{encoded}/dataset_report"
+    if mode == "bioproject":
+        return f"genome/bioproject/{encoded}/dataset_report"
+    if mode == "biosample":
+        return f"genome/biosample/{encoded}/dataset_report"
+    if mode == "wgs":
+        return f"genome/wgs/{encoded}/dataset_report"
+    if mode == "assembly_name":
+        return f"genome/assembly_name/{encoded}/dataset_report"
+    return f"genome/taxon/{encoded}/dataset_report"
+
+
+def ncbi_datasets_json(endpoint: str, request: Dict[str, Any], params: Optional[Dict[str, Any]] = None) -> Any:
+    query = dict(params or {})
+    if "page_size" not in query:
+        query["page_size"] = str(max_results(request))
+    encoded = urllib.parse.urlencode(query, doseq=True)
+    url = f"{NCBI_DATASETS}/{endpoint.lstrip('/')}"
+    if encoded:
+        url = f"{url}?{encoded}"
+    return urlopen_json(url, headers=ncbi_header_credentials(request))
+
+
+def ncbi_datasets_item(record: Dict[str, Any]) -> Dict[str, Any]:
+    accession = first_string(record, "accession", "current_accession")
+    organism = nested_string(record, "organism", "organism_name")
+    assembly_name = nested_string(record, "assembly_info", "assembly_name")
+    assembly_level = nested_string(record, "assembly_info", "assembly_level")
+    description = nested_string(record, "assembly_info", "description")
+    title = " ".join(part for part in (organism, assembly_name) if part).strip() or accession
+    summary_parts = [part for part in (description, f"Level: {assembly_level}" if assembly_level else "") if part]
+    return {
+        "id": accession,
+        "accession": accession,
+        "title": title,
+        "url": f"https://www.ncbi.nlm.nih.gov/datasets/genome/{urllib.parse.quote(accession)}/",
+        "snippet": " | ".join(summary_parts)[:500],
+        "content": json.dumps(record, ensure_ascii=False, indent=2)[:20000],
+        "metadata": {
+            "source": "ncbi_datasets",
+            "organism": organism,
+            "assembly_name": assembly_name,
+            "assembly_level": assembly_level,
+            "download_summary_url": f"{NCBI_DATASETS}/genome/accession/{urllib.parse.quote(accession)}/download_summary" if accession else None,
+        },
+        "raw": record,
+    }
+
+
+def handle_ncbi_datasets(message_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
+    operation = request.get("operation", "search")
+    if operation in ("search", "query"):
+        term = query_text(request)
+        if not term:
+            return error(message_id, "missing_query", "NCBI Datasets search/query requires query text")
+        mode = ncbi_datasets_mode(request, term)
+        lookup = normalize_ncbi_assembly_accession(term) if mode == "accession" else term
+        if not lookup:
+            return error(message_id, "missing_identifier", "NCBI Datasets accession lookup requires a GCA_/GCF_ accession")
+        data = ncbi_datasets_json(ncbi_datasets_endpoint(mode, lookup), request)
+        items = [ncbi_datasets_item(item) for item in data_items(data) if isinstance(item, dict)]
+        total = data.get("total_count") if isinstance(data, dict) else len(items)
+        response = base_response(request, "ncbi_datasets", operation, items=items, total=total if isinstance(total, int) else len(items))
+        return {"id": message_id, "type": "result", "response": response}
+    if operation == "fetch":
+        accession = normalize_ncbi_assembly_accession(identifier_text(request))
+        if not accession:
+            return error(message_id, "missing_identifier", "NCBI Datasets fetch requires a GCA_/GCF_ accession")
+        data = ncbi_datasets_json(ncbi_datasets_endpoint("accession", accession), request, {"page_size": "1"})
+        items = [ncbi_datasets_item(item) for item in data_items(data) if isinstance(item, dict)]
+        if not items:
+            return error(message_id, "not_found", f"NCBI Datasets genome report not found: {accession}")
+        response = base_response(request, "ncbi_datasets", operation, items=[], detail=items[0], total=1)
+        return {"id": message_id, "type": "result", "response": response}
+    if operation == "download_summary":
+        accession = normalize_ncbi_assembly_accession(identifier_text(request) or query_text(request))
+        if not accession:
+            return error(message_id, "missing_identifier", "NCBI Datasets download_summary requires a GCA_/GCF_ accession")
+        data = ncbi_datasets_json(f"genome/accession/{urllib.parse.quote(accession)}/download_summary", request, {})
+        detail = {
+            "id": accession,
+            "accession": accession,
+            "title": f"NCBI Datasets download summary for {accession}",
+            "url": f"https://www.ncbi.nlm.nih.gov/datasets/genome/{urllib.parse.quote(accession)}/",
+            "snippet": f"Record count: {data.get('record_count')}" if isinstance(data, dict) else "",
+            "content": json.dumps(data, ensure_ascii=False, indent=2)[:20000],
+            "metadata": {"source": "ncbi_datasets", "operation": "download_summary"},
+            "raw": data,
+        }
+        response = base_response(request, "ncbi_datasets", operation, items=[], detail=detail, total=1)
+        return {"id": message_id, "type": "result", "response": response}
+    return error(message_id, "unsupported_operation", f"NCBI Datasets does not support operation {operation}")
+
+
+def normalize_gtex_identifier(value: str) -> str:
+    value = (value or "").strip().rstrip("/")
+    if not value:
+        return ""
+    match = re.search(r"(ENS[A-Z]*G\d+(?:\.\d+)?)", value, re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    if "gtexportal.org" in value and "/gene/" in value:
+        return urllib.parse.unquote(value.rsplit("/gene/", 1)[-1].split("?", 1)[0].split("#", 1)[0])
+    return value
+
+
+def gtex_json(endpoint: str, params: Dict[str, Any]) -> Any:
+    url = f"{GTEX}/{endpoint.lstrip('/')}?{urllib.parse.urlencode(params, doseq=True)}"
+    return urlopen_json(url)
+
+
+def gtex_gene_items(request: Dict[str, Any], gene_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    params = request_params(request)
+    data = gtex_json(
+        "reference/gene",
+        {
+            "geneId": normalize_gtex_identifier(gene_id),
+            "gencodeVersion": params.get("gencodeVersion") or params.get("gencode_version") or "v26",
+            "genomeBuild": params.get("genomeBuild") or params.get("genome_build") or "GRCh38/hg38",
+            "page": params.get("page") or 0,
+            "itemsPerPage": limit or max_results(request),
+        },
+    )
+    return [gtex_item(item) for item in data_items(data) if isinstance(item, dict)]
+
+
+def gtex_item(record: Dict[str, Any]) -> Dict[str, Any]:
+    gencode_id = first_string(record, "gencodeId", "gencode_id", "geneId", "gene_id")
+    symbol = first_string(record, "geneSymbol", "gene_symbol") or gencode_id
+    description = first_string(record, "description", "geneDescription")
+    title = f"{symbol} ({gencode_id})" if symbol and symbol != gencode_id else gencode_id
+    chromosome = first_string(record, "chromosome")
+    return {
+        "id": gencode_id,
+        "accession": gencode_id,
+        "title": title,
+        "url": f"https://gtexportal.org/home/gene/{urllib.parse.quote(gencode_id)}",
+        "snippet": " | ".join(part for part in (chromosome, description) if part)[:500],
+        "content": json.dumps(record, ensure_ascii=False, indent=2)[:20000],
+        "metadata": {"source": "gtex", "gene_symbol": symbol, "chromosome": chromosome},
+        "raw": record,
+    }
+
+
+def handle_gtex(message_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
+    operation = request.get("operation", "search")
+    if operation in ("search", "query"):
+        term = query_text(request)
+        if not term:
+            return error(message_id, "missing_query", "GTEx search/query requires a gene symbol or GENCODE ID")
+        items = gtex_gene_items(request, term)
+        response = base_response(request, "gtex", operation, items=items, total=len(items))
+        return {"id": message_id, "type": "result", "response": response}
+    if operation == "fetch":
+        identifier = normalize_gtex_identifier(identifier_text(request))
+        if not identifier:
+            return error(message_id, "missing_identifier", "GTEx fetch requires a gene symbol, GENCODE ID, or GTEx gene URL")
+        items = gtex_gene_items(request, identifier, 1)
+        if not items:
+            return error(message_id, "not_found", f"GTEx gene not found: {identifier}")
+        response = base_response(request, "gtex", operation, items=[], detail=items[0], total=1)
+        return {"id": message_id, "type": "result", "response": response}
+    return error(message_id, "unsupported_operation", f"GTEx does not support operation {operation}")
+
+
+def normalize_cbioportal_study_id(value: str) -> str:
+    value = (value or "").strip().rstrip("/")
+    if not value:
+        return ""
+    if "cbioportal" in value:
+        parsed = urllib.parse.urlparse(value)
+        query = urllib.parse.parse_qs(parsed.query)
+        for key in ("id", "studyId", "study_id"):
+            if query.get(key):
+                return query[key][0].strip()
+        path_id = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+        if path_id and path_id != "summary":
+            return urllib.parse.unquote(path_id)
+    return value
+
+
+def cbioportal_item(record: Dict[str, Any]) -> Dict[str, Any]:
+    study_id = first_string(record, "studyId", "study_id", "id")
+    title = first_string(record, "name", "studyName", "title") or study_id
+    description = first_string(record, "description", "shortDescription", "summary")
+    cancer_type = first_string(record, "cancerTypeId", "cancer_type_id") or nested_string(record, "cancerType", "name")
+    return {
+        "id": study_id,
+        "accession": study_id,
+        "title": title,
+        "url": f"https://www.cbioportal.org/study/summary?id={urllib.parse.quote(study_id)}",
+        "snippet": description[:500],
+        "content": json.dumps(record, ensure_ascii=False, indent=2)[:20000],
+        "metadata": {
+            "source": "cbioportal",
+            "cancer_type": cancer_type,
+            "sample_count": record.get("allSampleCount") or record.get("sampleCount"),
+            "pmid": record.get("pmid") or record.get("PMID"),
+        },
+        "raw": record,
+    }
+
+
+def cbioportal_json(path: str, params: Dict[str, Any]) -> Any:
+    url = f"{CBIOPORTAL}/{path.lstrip('/')}"
+    if params:
+        url = f"{url}?{urllib.parse.urlencode(params)}"
+    return urlopen_json(url)
+
+
+def handle_cbioportal(message_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
+    operation = request.get("operation", "search")
+    if operation in ("search", "query"):
+        term = query_text(request)
+        if not term:
+            return error(message_id, "missing_query", "cBioPortal search/query requires query text")
+        data = cbioportal_json(
+            "studies",
+            {
+                "projection": "SUMMARY",
+                "keyword": term,
+                "pageNumber": 0,
+                "pageSize": max_results(request),
+            },
+        )
+        items = [cbioportal_item(item) for item in data_items(data) if isinstance(item, dict)]
+        response = base_response(request, "cbioportal", operation, items=items, total=len(items))
+        return {"id": message_id, "type": "result", "response": response}
+    if operation == "fetch":
+        study_id = normalize_cbioportal_study_id(identifier_text(request))
+        if not study_id:
+            return error(message_id, "missing_identifier", "cBioPortal fetch requires a study id or URL")
+        data = cbioportal_json(f"studies/{urllib.parse.quote(study_id)}", {"projection": "DETAILED"})
+        if not isinstance(data, dict):
+            return error(message_id, "not_found", f"cBioPortal study not found: {study_id}")
+        detail = cbioportal_item(data)
+        response = base_response(request, "cbioportal", operation, items=[], detail=detail, total=1)
+        return {"id": message_id, "type": "result", "response": response}
+    return error(message_id, "unsupported_operation", f"cBioPortal does not support operation {operation}")
+
+
 def base_response(
     request: Dict[str, Any],
     source: str,
@@ -348,6 +697,12 @@ def handle_execute(message: Dict[str, Any]) -> Dict[str, Any]:
             return handle_biosample(message_id, request)
         if source == "arrayexpress":
             return handle_arrayexpress(message_id, request)
+        if source == "ncbi_datasets":
+            return handle_ncbi_datasets(message_id, request)
+        if source == "gtex":
+            return handle_gtex(message_id, request)
+        if source == "cbioportal":
+            return handle_cbioportal(message_id, request)
         return error(message_id, "unknown_source", f"unknown dataset source: {source}")
     except Exception as exc:  # Keep provider failures structured for host quarantine/backoff.
         return error(message_id, "provider_error", str(exc))

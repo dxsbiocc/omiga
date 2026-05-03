@@ -2024,7 +2024,10 @@ mod tests {
                 .unwrap_or_default(),
             vec![
                 "dataset.arrayexpress".to_string(),
-                "dataset.biosample".to_string()
+                "dataset.biosample".to_string(),
+                "dataset.cbioportal".to_string(),
+                "dataset.gtex".to_string(),
+                "dataset.ncbi_datasets".to_string()
             ]
         );
 
@@ -2058,6 +2061,36 @@ mod tests {
                 (
                     "dataset",
                     "arrayexpress",
+                    true,
+                    vec![
+                        "search".to_string(),
+                        "query".to_string(),
+                        "fetch".to_string()
+                    ],
+                ),
+                (
+                    "dataset",
+                    "ncbi_datasets",
+                    true,
+                    vec![
+                        "search".to_string(),
+                        "query".to_string(),
+                        "fetch".to_string()
+                    ],
+                ),
+                (
+                    "dataset",
+                    "gtex",
+                    true,
+                    vec![
+                        "search".to_string(),
+                        "query".to_string(),
+                        "fetch".to_string()
+                    ],
+                ),
+                (
+                    "dataset",
+                    "cbioportal",
                     true,
                     vec![
                         "search".to_string(),

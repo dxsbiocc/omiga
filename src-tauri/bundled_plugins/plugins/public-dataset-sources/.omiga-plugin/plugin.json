@@ -76,13 +76,111 @@
             "description": "Maximum ArrayExpress/BioStudies records to request."
           }
         ]
+      },
+      {
+        "id": "ncbi_datasets",
+        "category": "dataset",
+        "label": "NCBI Datasets",
+        "description": "Genome assembly reports and download summaries via NCBI Datasets v2.",
+        "aliases": [
+          "ncbi_dataset",
+          "ncbi_genome",
+          "ncbi_genomes",
+          "ncbi_assembly",
+          "genome_datasets"
+        ],
+        "subcategories": ["genome"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [
+          "pubmed_api_key"
+        ],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only NCBI Datasets API; optional My NCBI API key is projected as an API header only when configured."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "mode",
+            "type": "string",
+            "description": "Lookup mode: accession, taxon, bioproject, biosample, wgs, or assembly_name."
+          },
+          {
+            "name": "page_size",
+            "type": "number",
+            "description": "Maximum genome assembly reports to request."
+          }
+        ]
+      },
+      {
+        "id": "gtex",
+        "category": "dataset",
+        "label": "GTEx",
+        "description": "Human gene and tissue-expression metadata via GTEx Portal API v2.",
+        "aliases": [
+          "genotype_tissue_expression",
+          "tissue_expression"
+        ],
+        "subcategories": ["expression"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only GTEx Portal API."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "gencodeVersion",
+            "type": "string",
+            "description": "GTEx GENCODE version, default v26."
+          },
+          {
+            "name": "genomeBuild",
+            "type": "string",
+            "description": "GTEx genome build, default GRCh38/hg38."
+          }
+        ]
+      },
+      {
+        "id": "cbioportal",
+        "category": "dataset",
+        "label": "cBioPortal",
+        "description": "Cancer genomics study metadata via the cBioPortal REST API.",
+        "aliases": [
+          "cbio_portal",
+          "cbio",
+          "cancer_genomics",
+          "tcga"
+        ],
+        "subcategories": ["cancer_genomics"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public cBioPortal study API."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "pageSize",
+            "type": "number",
+            "description": "Maximum studies to request from cBioPortal."
+          }
+        ]
       }
     ]
   },
   "interface": {
     "displayName": "Public Dataset Sources",
-    "shortDescription": "BioSample and ArrayExpress as local retrieval plugins",
-    "longDescription": "Moves public dataset data-source execution for BioSample and ArrayExpress behind Omiga's local search/query/fetch subprocess route protocol.",
+    "shortDescription": "BioSample, ArrayExpress, NCBI Datasets, GTEx, and cBioPortal as local retrieval plugins",
+    "longDescription": "Moves public dataset data-source execution for BioSample, ArrayExpress, NCBI Datasets, GTEx, and cBioPortal behind Omiga's local search/query/fetch subprocess route protocol.",
     "developerName": "Omiga",
     "category": "Retrieval",
     "capabilities": [
@@ -97,7 +195,7 @@
     "defaultPrompt": [
       "Search BioSample for liver single-cell RNA-seq samples.",
       "Fetch BioSample SAMN04271175 through the dataset plugin.",
-      "Search ArrayExpress for E-MTAB single-cell studies."
+      "Search NCBI Datasets or GTEx through the public dataset plugin."
     ]
   }
 }
