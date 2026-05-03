@@ -38,6 +38,7 @@ import {
   Chip,
   Popover,
   List,
+  ListSubheader,
   ListItemButton,
   CircularProgress,
   alpha,
@@ -97,6 +98,7 @@ import {
   type PluginSummary,
 } from "../../state/pluginStore";
 import {
+  parseGoalCommand,
   parseResearchCommand,
   WORKFLOW_SLASH_COMMANDS,
   type SlashCommandId,
@@ -572,6 +574,10 @@ export const ChatComposer = memo(function ChatComposer({
       const research = parseResearchCommand(trimmed);
       if (research) {
         return { commandId: "research", body: research.body };
+      }
+      const goal = parseGoalCommand(trimmed);
+      if (goal) {
+        return { commandId: "goal", body: goal.body };
       }
       const workflow = WORKFLOW_SLASH_COMMANDS.find((command) => {
         const label = command.label;
@@ -1164,7 +1170,7 @@ export const ChatComposer = memo(function ChatComposer({
   }, [availablePlugins, composerSelectedPluginIds]);
 
   const filteredPluginMentions = useMemo(() => {
-    if (!fileParse.active || fileParse.directory) return [];
+    if (!fileParse.active || fileParse.kind === "file" || fileParse.directory) return [];
     const q = fileParse.filter.toLowerCase().trim();
     return availablePlugins
       .filter((plugin) => !composerSelectedPluginIds.includes(plugin.id))
@@ -1186,6 +1192,7 @@ export const ChatComposer = memo(function ChatComposer({
     fileParse.active,
     fileParse.directory,
     fileParse.filter,
+    fileParse.kind,
   ]);
 
   const filteredSlashOptions = useMemo<SlashPickerOption[]>(
@@ -1291,22 +1298,31 @@ export const ChatComposer = memo(function ChatComposer({
   }, [slashFilterKey]);
 
   useEffect(() => {
-    if (!fileParse.active || needsWorkspacePath || !workspacePath.trim()) {
+    if (
+      !fileParse.active ||
+      fileParse.kind === "plugin" ||
+      needsWorkspacePath ||
+      !workspacePath.trim()
+    ) {
       setFileGlobMatches([]);
+      setFileGlobLoading(false);
       return;
     }
     const useSsh = environment === "ssh" && Boolean(sshServer?.trim());
     const useSandbox = environment === "sandbox" && Boolean(sandboxBackend?.trim());
     if (environment === "ssh" && !useSsh) {
       setFileGlobMatches([]);
+      setFileGlobLoading(false);
       return;
     }
     if (environment === "sandbox" && (!useSandbox || !sessionId)) {
       setFileGlobMatches([]);
+      setFileGlobLoading(false);
       return;
     }
     if (environment === "local" && !sessionId) {
       setFileGlobMatches([]);
+      setFileGlobLoading(false);
       return;
     }
     let cancelled = false;
@@ -1371,6 +1387,7 @@ export const ChatComposer = memo(function ChatComposer({
     };
   }, [
     fileParse.active,
+    fileParse.kind,
     needsWorkspacePath,
     workspacePath,
     fileParse.directory,
@@ -1381,7 +1398,7 @@ export const ChatComposer = memo(function ChatComposer({
   ]);
 
   const filteredFilePaths = useMemo(() => {
-    if (!fileParse.active) return [];
+    if (!fileParse.active || fileParse.kind === "plugin") return [];
     return filterComposerMentionRows(fileGlobMatches, fileParse.filter);
   }, [fileParse, fileGlobMatches]);
 
@@ -1505,18 +1522,26 @@ export const ChatComposer = memo(function ChatComposer({
     (relPath: string) => {
       const safe = normalizeComposerMentionPath(relPath);
       if (!safe) return;
-      setInputValue(`@${safe}/`);
+      const prefix = fileParse.prefix === "file" ? "@file:" : "@";
+      setInputValue(`${prefix}${safe}/`);
       queueMicrotask(() => focusEditableEnd());
     },
-    [focusEditableEnd, setInputValue],
+    [fileParse.prefix, focusEditableEnd, setInputValue],
   );
 
   const goUpFileDirectory = useCallback(() => {
     if (!fileParse.active) return;
     const parent = parentComposerMentionDirectory(fileParse.directory);
-    setInputValue(parent ? `@${parent}/` : "@");
+    const prefix = fileParse.prefix === "file" ? "@file:" : "@";
+    setInputValue(parent ? `${prefix}${parent}/` : prefix);
     queueMicrotask(() => focusEditableEnd());
-  }, [fileParse.active, fileParse.directory, focusEditableEnd, setInputValue]);
+  }, [
+    fileParse.active,
+    fileParse.directory,
+    fileParse.prefix,
+    focusEditableEnd,
+    setInputValue,
+  ]);
 
   const mergedEditableRef = useCallback(
     (el: HTMLSpanElement | null) => {
@@ -1804,7 +1829,7 @@ export const ChatComposer = memo(function ChatComposer({
       ? "请先选择工作目录后再发送消息…"
       : followUpTaskId
         ? "追加说明将进入该后台 Agent 的下一轮工具循环…"
-        : "输入 / 选择工作流命令或 Agent；输入 $ 选择 Skill；输入 @ 选择插件或工作区文件…";
+        : "输入 / 选择工作流命令或 Agent；输入 $ 选择 Skill；输入 @ 选择插件或文件，@plugin: 只选插件，@file: 只选文件…";
 
   /** 允许排队时：连接中 / 流式中均可继续输入；否则与旧行为一致（等待响应或生成时禁用）。 */
   const inputDisabled =
@@ -1826,8 +1851,38 @@ export const ChatComposer = memo(function ChatComposer({
     !needsWorkspacePath &&
     Boolean(workspacePath.trim());
 
+  const fileMentionPrefixLabel =
+    fileParse.prefix === "plugin"
+      ? "@plugin:"
+      : fileParse.prefix === "file"
+        ? "@file:"
+        : "@";
   const filePickerDirectoryLabel =
-    fileParse.active && fileParse.directory ? `@${fileParse.directory}/` : "@/";
+    fileParse.active && fileParse.directory
+      ? `${fileMentionPrefixLabel}${fileParse.directory}/`
+      : fileParse.prefix === "plugin"
+        ? "@plugin:"
+        : fileParse.prefix === "file"
+          ? "@file:/"
+          : "@/";
+  const filePickerTitle =
+    fileParse.kind === "plugin"
+      ? "Omiga 插件"
+      : fileParse.kind === "file" || fileParse.directory
+        ? "工作区文件"
+        : "插件与工作区文件";
+  const filePickerHelpText =
+    fileParse.kind === "plugin"
+      ? "当前 @plugin: · Enter 选择插件 · Esc 取消"
+      : fileParse.kind === "file"
+        ? `当前 ${filePickerDirectoryLabel} · Enter 进入文件夹 · 选择文件会注入精确路径`
+        : `当前 ${filePickerDirectoryLabel} · Enter 选择插件/文件夹 · 选择文件会注入精确路径`;
+  const filePickerEmptyPrimary =
+    fileParse.kind === "plugin"
+      ? "没有匹配插件"
+      : fileParse.kind === "file"
+        ? "当前目录下无匹配文件"
+        : "当前没有匹配项";
 
   const isBackgroundAgent = useMemo(
     () => availableAgents.find((a) => a.agentType === composerAgentType)?.background ?? false,
@@ -2845,9 +2900,9 @@ export const ChatComposer = memo(function ChatComposer({
                     minWidth: 0,
                   }}
                 >
-                  {fileParse.directory ? "工作区文件" : "插件与工作区文件"}
+                  {filePickerTitle}
                 </Typography>
-                {fileParse.directory ? (
+                {fileParse.kind !== "plugin" && fileParse.directory ? (
                   <Button
                     size="small"
                     variant="text"
@@ -2874,7 +2929,7 @@ export const ChatComposer = memo(function ChatComposer({
                   lineHeight: 1.35,
                 }}
               >
-                当前 {filePickerDirectoryLabel} · Enter 选择插件/文件夹 · 选择文件会注入精确路径
+                {filePickerHelpText}
               </Typography>
             </Box>
             <List
@@ -2907,6 +2962,24 @@ export const ChatComposer = memo(function ChatComposer({
                 },
               }}
             >
+              {!fileGlobLoading && filteredPluginMentions.length > 0 ? (
+                <ListSubheader
+                  disableSticky
+                  sx={{
+                    lineHeight: 1,
+                    py: 0.75,
+                    px: 1,
+                    bgcolor: "transparent",
+                    color: pen.textHeader,
+                    fontSize: 10,
+                    fontWeight: 800,
+                    letterSpacing: "0.05em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  {fileParse.kind === "plugin" ? "Matching plugins" : "Omiga plugins"}
+                </ListSubheader>
+              ) : null}
               {fileGlobLoading ? (
                 <ListItemButton
                   disabled
@@ -2930,7 +3003,7 @@ export const ChatComposer = memo(function ChatComposer({
               ) : filteredMentionRows.length === 0 ? (
                 <ListItemButton disabled sx={{ py: 1.5, px: 1 }}>
                   <ListItemText
-                    primary="当前目录下无匹配项"
+                    primary={filePickerEmptyPrimary}
                     secondary={`${filePickerDirectoryLabel} · 继续输入或按 Esc 取消`}
                     primaryTypographyProps={{
                       sx: { fontWeight: 600, color: pen.textFilename },
@@ -2949,6 +3022,19 @@ export const ChatComposer = memo(function ChatComposer({
                       selected={i === fileHighlightIndex}
                       alignItems="center"
                       onClick={() => pickPluginMention(item.plugin.id)}
+                      sx={{
+                        mx: 0.5,
+                        my: 0.25,
+                        minHeight: 48,
+                        border: `1px solid ${alpha(pluginTone, isDark ? 0.28 : 0.18)}`,
+                        bgcolor: alpha(pluginTone, isDark ? 0.13 : 0.07),
+                        "&.Mui-selected": {
+                          bgcolor: alpha(pluginTone, isDark ? 0.22 : 0.12),
+                        },
+                        "&.Mui-selected:hover": {
+                          bgcolor: alpha(pluginTone, isDark ? 0.26 : 0.16),
+                        },
+                      }}
                     >
                       <ListItemIcon
                         sx={{
@@ -2962,7 +3048,37 @@ export const ChatComposer = memo(function ChatComposer({
                         <Extension sx={{ fontSize: 22 }} />
                       </ListItemIcon>
                       <ListItemText
-                        primary={item.plugin.label}
+                        primary={
+                          <Stack direction="row" alignItems="center" spacing={0.75} sx={{ minWidth: 0 }}>
+                            <Typography
+                              component="span"
+                              sx={{
+                                minWidth: 0,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                fontSize: 12,
+                                fontWeight: 800,
+                                color: pluginTone,
+                              }}
+                            >
+                              {item.plugin.label}
+                            </Typography>
+                            <Chip
+                              size="small"
+                              variant="outlined"
+                              label="Plugin"
+                              sx={{
+                                height: 18,
+                                fontSize: 10,
+                                fontWeight: 700,
+                                color: pluginTone,
+                                borderColor: alpha(pluginTone, 0.35),
+                                "& .MuiChip-label": { px: 0.5 },
+                              }}
+                            />
+                          </Stack>
+                        }
                         secondary={
                           item.plugin.capabilities.length > 0
                             ? `${item.plugin.id} · ${item.plugin.capabilities.join(" · ")}`
@@ -2970,12 +3086,8 @@ export const ChatComposer = memo(function ChatComposer({
                         }
                         sx={{ m: 0 }}
                         primaryTypographyProps={{
-                          sx: {
-                            fontSize: 12,
-                            fontWeight: 700,
-                            color: pluginTone,
-                            lineHeight: 1.35,
-                          },
+                          component: "div",
+                          sx: { lineHeight: 1.35 },
                         }}
                         secondaryTypographyProps={{
                           sx: {

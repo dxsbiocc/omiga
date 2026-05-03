@@ -216,13 +216,27 @@ pub async fn save_global_settings_to_config(
     web_use_proxy: Option<bool>,
     web_search_engine: Option<String>,
     web_search_methods: Option<Vec<String>>,
+    goal_second_opinion_provider_entry: Option<String>,
 ) -> CommandResult<()> {
     let mut config_file = get_config_file(&state)
         .await
         .as_deref()
         .cloned()
         .unwrap_or_default();
-    let mut global = config_file.settings.unwrap_or_default();
+    let normalized_goal_second_opinion_provider_entry =
+        goal_second_opinion_provider_entry.map(|entry| match entry.trim() {
+            "" => None,
+            value => Some(value.to_string()),
+        });
+    if let Some(Some(entry)) = normalized_goal_second_opinion_provider_entry.as_ref() {
+        config_file.named_llm_config(entry).map_err(|reason| {
+            OmigaError::Config(format!(
+                "Global /goal second-opinion provider entry `{entry}` is invalid: {reason}"
+            ))
+        })?;
+    }
+
+    let mut global = config_file.settings.take().unwrap_or_default();
     if let Some(t) = timeout {
         global.timeout = Some(t);
     }
@@ -235,6 +249,9 @@ pub async fn save_global_settings_to_config(
     if let Some(methods) = web_search_methods {
         global.web_search_methods =
             Some(crate::llm::config::normalize_web_search_methods(&methods));
+    }
+    if let Some(entry) = normalized_goal_second_opinion_provider_entry {
+        global.goal_second_opinion_provider_entry = entry;
     }
     config_file.settings = Some(global);
 
@@ -284,6 +301,7 @@ pub async fn get_global_settings(
         web_use_proxy: settings.web_use_proxy,
         web_search_engine: settings.web_search_engine,
         web_search_methods: settings.web_search_methods,
+        goal_second_opinion_provider_entry: settings.goal_second_opinion_provider_entry,
     })
 }
 
@@ -298,6 +316,7 @@ pub struct GlobalSettingsResponse {
     pub web_use_proxy: Option<bool>,
     pub web_search_engine: Option<String>,
     pub web_search_methods: Option<Vec<String>>,
+    pub goal_second_opinion_provider_entry: Option<String>,
 }
 
 /// Get current LLM configuration

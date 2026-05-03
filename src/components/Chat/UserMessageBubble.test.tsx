@@ -78,6 +78,15 @@ describe("UserMessageBubble", () => {
     expect(html).toContain("user-msg-command-chip");
   });
 
+  it("renders /goal as a workflow command chip", () => {
+    const command = splitUserMessageInlineCommand(
+      "/goal 解析 QS 核心基因并形成机制假设",
+    );
+
+    expect(command?.command.label).toBe("/goal");
+    expect(command?.body).toBe("解析 QS 核心基因并形成机制假设");
+  });
+
   it("server-renders edit controls while editing", () => {
     const html = renderBubble({ isEditing: true, editDraft: "draft body" });
 

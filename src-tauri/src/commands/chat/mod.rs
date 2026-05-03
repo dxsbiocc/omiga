@@ -994,9 +994,11 @@ pub(crate) use self::subagent::{spawn_background_agent, BackgroundAgentRequest};
 mod tool_exec;
 use self::tool_exec::{execute_tool_calls, ToolExecutionRequest};
 pub mod research;
+pub mod research_goal;
 pub use self::research::{
     AgentRoleInfoDto, AvailableAgentInfo, ResearchCommandRequest, ResearchCommandResponse,
 };
+pub use self::research_goal::{ResearchGoalCommandRequest, ResearchGoalCommandResponse};
 
 /// Normalize composer `sandboxBackend` from the UI (`modal` | `daytona` | `docker` | `singularity`).
 /// Note: `ssh` is no longer a sandbox backend - it's now a separate execution environment.

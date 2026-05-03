@@ -1,5 +1,5 @@
 export interface WorkflowSlashCommandDefinition {
-  id: "plan" | "schedule" | "team" | "autopilot" | "research";
+  id: "plan" | "schedule" | "team" | "autopilot" | "research" | "goal";
   label: string;
   description: string;
 }
@@ -30,11 +30,16 @@ export const WORKFLOW_SLASH_COMMANDS: WorkflowSlashCommandDefinition[] = [
     label: "/research",
     description: "调用分层 Research System。支持 init / list-agents / plan / run / review-traces。",
   },
+  {
+    id: "goal",
+    label: "/goal",
+    description: "设定科研长期目标，并通过分析→解读→再分析循环推进到完成。",
+  },
 ];
 
 export type WorkflowCommandId = Exclude<
   WorkflowSlashCommandDefinition["id"],
-  "research"
+  "research" | "goal"
 >;
 export type SlashCommandId = WorkflowSlashCommandDefinition["id"];
 
@@ -68,6 +73,21 @@ export function parseResearchCommand(
   if (!match) return null;
   return {
     command: "research",
+    body: (match[1] ?? "").trim(),
+  };
+}
+
+export interface ParsedGoalCommand {
+  command: "goal";
+  body: string;
+}
+
+export function parseGoalCommand(input: string): ParsedGoalCommand | null {
+  const trimmed = input.trim();
+  const match = trimmed.match(/^\/goal(?:\s+(.*))?$/iu);
+  if (!match) return null;
+  return {
+    command: "goal",
     body: (match[1] ?? "").trim(),
   };
 }

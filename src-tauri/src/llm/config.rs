@@ -360,20 +360,46 @@ pub struct GlobalSettings {
     /// Ordered enabled methods for `search(category="web")`, e.g. ["tavily", "google", "ddg"].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search_methods: Option<Vec<String>>,
+
+    /// Named provider entry used for `/goal` completion second-opinion audits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_second_opinion_provider_entry: Option<String>,
 }
 
 impl LlmConfigFile {
     /// Convert file config to runtime LlmConfig
     pub fn to_llm_config(&self) -> Option<LlmConfig> {
-        let default_name = self.default_provider.clone()?;
-        let providers = self.providers.clone()?;
-        let provider_config = providers.get(&default_name)?;
+        let default_name = self.default_provider.as_deref()?;
+        self.to_named_llm_config(default_name)
+    }
+
+    /// Convert a named provider entry to runtime LlmConfig.
+    pub fn to_named_llm_config(&self, provider_name: &str) -> Option<LlmConfig> {
+        self.named_llm_config(provider_name).ok()
+    }
+
+    /// Convert a named provider entry to runtime LlmConfig with validation details.
+    pub fn named_llm_config(&self, provider_name: &str) -> Result<LlmConfig, String> {
+        let provider_name = provider_name.trim();
+        if provider_name.is_empty() {
+            return Err("Provider entry name is empty".to_string());
+        }
+        let providers = self
+            .providers
+            .as_ref()
+            .ok_or_else(|| "No providers configured".to_string())?;
+        let provider_config = providers
+            .get(provider_name)
+            .ok_or_else(|| format!("Provider entry `{provider_name}` was not found"))?;
 
         if !provider_config.enabled {
-            return None;
+            return Err(format!("Provider entry `{provider_name}` is disabled"));
         }
 
-        let provider: LlmProvider = provider_config.provider_type.parse().ok()?;
+        let provider: LlmProvider = provider_config
+            .provider_type
+            .parse()
+            .map_err(|err| format!("Provider entry `{provider_name}` has invalid type: {err}"))?;
 
         // Get API key - support env var reference like ${ANTHROPIC_API_KEY}
         let api_key = provider_config
@@ -382,8 +408,10 @@ impl LlmConfigFile {
             .map(|key| expand_env_vars(key))
             .unwrap_or_default();
 
-        if api_key.is_empty() {
-            return None;
+        if api_key.trim().is_empty() {
+            return Err(format!(
+                "Provider entry `{provider_name}` has no usable API key"
+            ));
         }
 
         let mut config = LlmConfig::new(provider, api_key);
@@ -461,7 +489,7 @@ impl LlmConfigFile {
             }
         }
 
-        Some(config)
+        Ok(config)
     }
 
     /// Create example config for a provider
@@ -540,6 +568,7 @@ impl LlmConfigFile {
                 web_use_proxy: Some(true),
                 web_search_engine: Some("ddg".to_string()),
                 web_search_methods: Some(default_web_search_methods()),
+                goal_second_opinion_provider_entry: None,
             }),
             execution_envs: None,
             terminal: None,
@@ -606,6 +635,7 @@ impl LlmConfigFile {
                 web_use_proxy: Some(true),
                 web_search_engine: Some("ddg".to_string()),
                 web_search_methods: Some(default_web_search_methods()),
+                goal_second_opinion_provider_entry: None,
             }),
             execution_envs: None,
             terminal: None,
@@ -1164,6 +1194,91 @@ mod tests {
         assert_eq!(config.provider, LlmProvider::Deepseek);
         assert_eq!(config.api_key, "sk-test");
         assert_eq!(config.model, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn converts_named_provider_entry_without_changing_default_provider() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "primary".to_string(),
+            ProviderConfig {
+                provider_type: "openai".to_string(),
+                api_key: Some("sk-primary".to_string()),
+                model: Some("gpt-primary".to_string()),
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        providers.insert(
+            "goal-second-opinion".to_string(),
+            ProviderConfig {
+                provider_type: "deepseek".to_string(),
+                api_key: Some("sk-second".to_string()),
+                model: Some("deepseek-v4-flash".to_string()),
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        let config_file = LlmConfigFile {
+            default_provider: Some("primary".to_string()),
+            providers: Some(providers),
+            ..Default::default()
+        };
+
+        let primary = config_file.to_llm_config().expect("primary runtime config");
+        let second = config_file
+            .to_named_llm_config("goal-second-opinion")
+            .expect("named second-opinion runtime config");
+        let validated = config_file
+            .named_llm_config(" goal-second-opinion ")
+            .expect("validated named second-opinion runtime config");
+
+        assert_eq!(primary.provider, LlmProvider::OpenAi);
+        assert_eq!(primary.model, "gpt-primary");
+        assert_eq!(second.provider, LlmProvider::Deepseek);
+        assert_eq!(second.api_key, "sk-second");
+        assert_eq!(second.model, "deepseek-v4-flash");
+        assert_eq!(validated.provider, LlmProvider::Deepseek);
+    }
+
+    #[test]
+    fn named_provider_validation_rejects_unusable_entries() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "disabled".to_string(),
+            ProviderConfig {
+                provider_type: "openai".to_string(),
+                api_key: Some("sk-disabled".to_string()),
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        providers.insert(
+            "missing-key".to_string(),
+            ProviderConfig {
+                provider_type: "deepseek".to_string(),
+                api_key: Some("".to_string()),
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        let config_file = LlmConfigFile {
+            providers: Some(providers),
+            ..Default::default()
+        };
+
+        assert!(config_file
+            .named_llm_config("missing")
+            .expect_err("missing entry should fail")
+            .contains("not found"));
+        assert!(config_file
+            .named_llm_config("disabled")
+            .expect_err("disabled entry should fail")
+            .contains("disabled"));
+        assert!(config_file
+            .named_llm_config("missing-key")
+            .expect_err("missing key entry should fail")
+            .contains("API key"));
     }
 
     #[test]

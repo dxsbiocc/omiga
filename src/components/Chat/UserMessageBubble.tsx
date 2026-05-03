@@ -69,7 +69,7 @@ export function splitUserMessageInlineCommand(
   displayText: string,
 ): UserMessageInlineCommand | null {
   const match = displayText.match(
-    /^\/(plan|schedule|team|autopilot|research)(?:\s+([\s\S]*))?$/iu,
+    /^\/(plan|schedule|team|autopilot|research|goal)(?:\s+([\s\S]*))?$/iu,
   );
   if (!match) return null;
   const command = WORKFLOW_SLASH_COMMANDS.find(

@@ -116,6 +116,22 @@ import {
 import { BackgroundAgentTranscriptDrawer } from "./BackgroundAgentTranscriptDrawer";
 import { SessionSwitchSkeleton } from "./SessionSwitchSkeleton";
 import { AgentSessionStatus } from "./AgentSessionStatus";
+import {
+  ResearchGoalStatusPill,
+  buildResearchGoalAutoRunCommand,
+  researchGoalAutoRunElapsedBudgetReached,
+  researchGoalShouldWaitForComposerDraft,
+  researchGoalCanAutoRun,
+  type ResearchGoal,
+  type ResearchGoalCycle,
+} from "./ResearchGoalStatusPill";
+import {
+  ResearchGoalCriteriaDialog,
+  type ResearchGoalProviderEntryOption,
+  type ResearchGoalProviderTestResult,
+  type ResearchGoalSettingsDraft,
+} from "./ResearchGoalCriteriaDialog";
+import { ResearchGoalAuditDetailsDialog } from "./ResearchGoalAuditDetailsDialog";
 import { SshDirectoryTreeDialog } from "./SshDirectoryTreeDialog";
 import { ReviewerVerdictList } from "../ReviewerVerdictList";
 import { buildPendingExecutionFeedback } from "../../utils/pendingExecutionFeedback";
@@ -128,6 +144,7 @@ import {
   type ReviewerVerdictChip,
 } from "../../utils/reviewerVerdict";
 import {
+  parseGoalCommand,
   parseSkillCommand,
   parseResearchCommand,
   parseWorkflowCommand,
@@ -367,7 +384,34 @@ type ResearchCommandResponse = {
   userMessageId: string;
   assistantMessageId: string;
   assistantContent: string;
+  goal?: ResearchGoal | null;
+  cycle?: ResearchGoalCycle | null;
 };
+
+type ResearchGoalStatusResponse = {
+  goal: ResearchGoal | null;
+};
+
+type SuggestResearchGoalCriteriaResponse = {
+  criteria: string[];
+};
+
+function researchGoalErrorMessage(error: unknown, fallback: string): string {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    const err = error as Record<string, unknown>;
+    if (
+      err.type === "Chat" &&
+      err.details &&
+      typeof err.details === "object"
+    ) {
+      const details = err.details as Record<string, unknown>;
+      if (typeof details.message === "string") return details.message;
+    }
+    if (typeof err.message === "string") return err.message;
+  }
+  return fallback;
+}
 
 /** Shown as a user line + sent to the model to continue after the user cancelled a stream. */
 const RESUME_AFTER_CANCEL_PROMPT =
@@ -2016,6 +2060,21 @@ export function Chat({ sessionId }: ChatProps) {
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundAgentTask[]>(
     [],
   );
+  /** Persisted `/goal` state for the current chat session, shown above the composer. */
+  const [activeResearchGoal, setActiveResearchGoal] =
+    useState<ResearchGoal | null>(null);
+  const goalAutoRunEnabled = activeResearchGoal?.autoRunPolicy?.enabled ?? false;
+  const [goalCriteriaDialogOpen, setGoalCriteriaDialogOpen] = useState(false);
+  const [goalAuditDialogOpen, setGoalAuditDialogOpen] = useState(false);
+  const [goalCriteriaSaving, setGoalCriteriaSaving] = useState(false);
+  const [goalCriteriaError, setGoalCriteriaError] = useState<string | null>(
+    null,
+  );
+  const [goalProviderEntryOptions, setGoalProviderEntryOptions] = useState<
+    ResearchGoalProviderEntryOption[]
+  >([]);
+  const [goalProviderEntryOptionsLoading, setGoalProviderEntryOptionsLoading] =
+    useState(false);
   /** When set, `send_message` uses `inputTarget: bg:<id>` (main transcript unchanged). */
   const [followUpTaskId, setFollowUpTaskId] = useState<string | null>(null);
   /** 就地编辑用户气泡：id + 草稿全文（与 `message.content` 同形） */
@@ -2078,6 +2137,8 @@ export function Chat({ sessionId }: ChatProps) {
   const handleSendRef = useRef<() => Promise<void>>(async () => {});
   const retryUserMessageRef = useRef<(message: Message) => Promise<void>>(async () => {});
   const flushQueuedMainSendIfAnyRef = useRef<() => void>(() => {});
+  const goalAutoRunLastKeyRef = useRef<string | null>(null);
+  const goalAutoRunTimerRef = useRef<number | null>(null);
   /**
    * Set immediately before `handleSend` when draining the main-session FIFO queue.
    * - Avoids stale React `input` in the `handleSend` closure right after `flushSync`.
@@ -2165,6 +2226,16 @@ export function Chat({ sessionId }: ChatProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLElement>(null);
+  const prepareResearchGoalCommand = useCallback((command: string) => {
+    composerRef.current?.setValue(command);
+    queueMicrotask(() => inputRef.current?.focus());
+  }, []);
+  const clearGoalAutoRunTimer = useCallback(() => {
+    if (goalAutoRunTimerRef.current !== null) {
+      window.clearTimeout(goalAutoRunTimerRef.current);
+      goalAutoRunTimerRef.current = null;
+    }
+  }, []);
   /** Populated by `follow_up_suggestions` stream frame; consumed when attaching the final assistant row */
   const pendingFollowUpSuggestionsRef = useRef<Array<{
     label: string;
@@ -2245,6 +2316,40 @@ export function Chat({ sessionId }: ChatProps) {
     }
   }, [isMainReplyBusy]);
 
+  const runResearchGoalCommandWhenIdle = useCallback(
+    (command: string): boolean => {
+      if (!sessionId || isMainReplyBusy()) return false;
+      const st = useChatComposerStore.getState();
+      if (
+        researchGoalShouldWaitForComposerDraft(
+          composerRef.current?.getValue() ?? "",
+          st.composerAttachedPaths,
+          st.composerSelectedPluginIds,
+        )
+      ) {
+        return false;
+      }
+      mainQueueFlushPayloadRef.current = {
+        id:
+          typeof crypto !== "undefined" &&
+          typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `goal-auto-${Date.now()}`,
+        body: command,
+        composerAttachedPaths: [],
+        composerSelectedPluginIds: [],
+        composerAgentType: "general-purpose",
+        permissionMode: st.permissionMode,
+        environment: st.environment,
+        sshServer: st.sshServer,
+        sandboxBackend: st.sandboxBackend,
+      };
+      void handleSendRef.current();
+      return true;
+    },
+    [isMainReplyBusy, sessionId],
+  );
+
   useEffect(() => {
     if (!isConnecting) {
       setPendingAssistantHint(null);
@@ -2265,6 +2370,7 @@ export function Chat({ sessionId }: ChatProps) {
 
   useEffect(() => {
     return () => {
+      clearGoalAutoRunTimer();
       clearCancelFallbackTimer();
       if (textFlushRafRef.current !== null) {
         cancelAnimationFrame(textFlushRafRef.current);
@@ -2279,7 +2385,7 @@ export function Chat({ sessionId }: ChatProps) {
         scrollRafRef.current = null;
       }
     };
-  }, [clearCancelFallbackTimer]);
+  }, [clearCancelFallbackTimer, clearGoalAutoRunTimer]);
 
   const {
     storeMessages,
@@ -2296,9 +2402,185 @@ export function Chat({ sessionId }: ChatProps) {
     activeProviderEntryName,
   } = useSessionStore();
 
+  const researchGoalProjectPath =
+    currentSession?.workingDirectory ?? currentSession?.projectPath ?? ".";
+
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setActiveResearchGoal(null);
+      setGoalCriteriaDialogOpen(false);
+      setGoalAuditDialogOpen(false);
+      return;
+    }
+
+    const requestSessionId = sessionId;
+    let cancelled = false;
+
+    void invoke<ResearchGoalStatusResponse>("get_research_goal_status", {
+      request: {
+        sessionId: requestSessionId,
+        projectPath: researchGoalProjectPath,
+      },
+    })
+      .then((response) => {
+        if (!cancelled && sessionIdRef.current === requestSessionId) {
+          setActiveResearchGoal(response.goal ?? null);
+        }
+      })
+      .catch((error) => {
+        console.warn("[Chat] Failed to load /goal status:", error);
+        if (!cancelled && sessionIdRef.current === requestSessionId) {
+          setActiveResearchGoal(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, researchGoalProjectPath]);
+
+  useEffect(() => {
+    goalAutoRunLastKeyRef.current = null;
+    clearGoalAutoRunTimer();
+  }, [clearGoalAutoRunTimer, sessionId]);
+
+  const loadResearchGoalProviderEntryOptions = useCallback(async () => {
+    setGoalProviderEntryOptionsLoading(true);
+    try {
+      const entries =
+        await invoke<ResearchGoalProviderEntryOption[]>("list_provider_configs");
+      setGoalProviderEntryOptions((entries || []).filter((entry) => entry.enabled));
+    } catch (error) {
+      console.warn("[Chat] Failed to load provider entries for /goal:", error);
+      setGoalProviderEntryOptions([]);
+    } finally {
+      setGoalProviderEntryOptionsLoading(false);
+    }
+  }, []);
+
+  const handleOpenResearchGoalCriteria = useCallback(() => {
+    setGoalCriteriaError(null);
+    setGoalCriteriaDialogOpen(true);
+    void loadResearchGoalProviderEntryOptions();
+  }, [loadResearchGoalProviderEntryOptions]);
+
+  const handleOpenResearchGoalAuditDetails = useCallback(() => {
+    setGoalAuditDialogOpen(true);
+  }, []);
+
+  const updateResearchGoalAutoRunPolicy = useCallback(
+    async (goal: ResearchGoal, enabled: boolean) => {
+      if (!sessionId) return;
+      const policy = goal.autoRunPolicy;
+      const response = await invoke<ResearchGoalStatusResponse>(
+        "update_research_goal_settings",
+        {
+          request: {
+            sessionId,
+            projectPath: researchGoalProjectPath,
+            autoRunPolicy: {
+              enabled,
+              cyclesPerRun: policy?.cyclesPerRun ?? 10,
+              idleDelayMs: policy?.idleDelayMs ?? 650,
+              maxElapsedMinutes: policy?.maxElapsedMinutes ?? null,
+              maxTokens: policy?.maxTokens ?? null,
+            },
+          },
+        },
+      );
+      setActiveResearchGoal(response.goal ?? null);
+    },
+    [researchGoalProjectPath, sessionId],
+  );
+
+  const handleToggleResearchGoalAutoRun = useCallback(() => {
+    const goal = activeResearchGoal;
+    if (!goal) return;
+    const nextEnabled = !(goal.autoRunPolicy?.enabled ?? false);
+    if (nextEnabled && !researchGoalCanAutoRun(goal)) return;
+    goalAutoRunLastKeyRef.current = null;
+    void updateResearchGoalAutoRunPolicy(goal, nextEnabled).catch((error) => {
+      console.warn("[Chat] Failed to update /goal auto-run policy:", error);
+      setGoalCriteriaError(
+        researchGoalErrorMessage(error, "更新自动续跑策略失败"),
+      );
+    });
+  }, [activeResearchGoal, updateResearchGoalAutoRunPolicy]);
+
+  const handleCloseResearchGoalCriteria = useCallback(() => {
+    if (goalCriteriaSaving) return;
+    setGoalCriteriaError(null);
+    setGoalCriteriaDialogOpen(false);
+  }, [goalCriteriaSaving]);
+
+  const handleSaveResearchGoalCriteria = useCallback(
+    async (settings: ResearchGoalSettingsDraft) => {
+      if (!sessionId || !activeResearchGoal) return;
+      setGoalCriteriaSaving(true);
+      setGoalCriteriaError(null);
+      try {
+        const response = await invoke<ResearchGoalStatusResponse>(
+          "update_research_goal_settings",
+          {
+            request: {
+              sessionId,
+              projectPath: researchGoalProjectPath,
+              criteria: settings.criteria,
+              maxCycles: settings.maxCycles,
+              secondOpinionProviderEntry:
+                settings.secondOpinionProviderEntry.trim(),
+              autoRunPolicy: settings.autoRunPolicy,
+            },
+          },
+        );
+        setActiveResearchGoal(response.goal ?? null);
+        setGoalCriteriaDialogOpen(false);
+      } catch (error: unknown) {
+        setGoalCriteriaError(
+          researchGoalErrorMessage(error, "保存科研目标设置失败"),
+        );
+      } finally {
+        setGoalCriteriaSaving(false);
+      }
+    },
+    [activeResearchGoal, researchGoalProjectPath, sessionId],
+  );
+
+  const handleSuggestResearchGoalCriteria = useCallback(async () => {
+    if (!sessionId || !activeResearchGoal) return [];
+    try {
+      const response = await invoke<SuggestResearchGoalCriteriaResponse>(
+        "suggest_research_goal_criteria",
+        {
+          request: {
+            sessionId,
+            projectPath: researchGoalProjectPath,
+          },
+        },
+      );
+      return response.criteria;
+    } catch (error: unknown) {
+      throw new Error(researchGoalErrorMessage(error, "LLM 成功标准生成失败"));
+    }
+  }, [activeResearchGoal, researchGoalProjectPath, sessionId]);
+
+  const handleTestResearchGoalSecondOpinionProvider = useCallback(
+    async (providerEntry: string): Promise<ResearchGoalProviderTestResult> => {
+      return invoke<ResearchGoalProviderTestResult>(
+        "test_research_goal_second_opinion_provider",
+        {
+          request: {
+            providerEntry,
+          },
+        },
+      );
+    },
+    [],
+  );
 
   const commitMessagesSnapshot = useCallback(
     (next: Message[]) => {
@@ -2886,6 +3168,80 @@ export function Chat({ sessionId }: ChatProps) {
     isUnsetWorkspacePath(
       currentSession.workingDirectory ?? currentSession.projectPath,
     );
+
+  useEffect(() => {
+    clearGoalAutoRunTimer();
+    if (!goalAutoRunEnabled) return;
+
+    const goal = activeResearchGoal;
+    if (!goal) {
+      goalAutoRunLastKeyRef.current = null;
+      return;
+    }
+    if (
+      researchGoalAutoRunElapsedBudgetReached(goal) ||
+      !researchGoalCanAutoRun(goal)
+    ) {
+      goalAutoRunLastKeyRef.current = null;
+      void updateResearchGoalAutoRunPolicy(goal, false).catch((error) => {
+        console.warn("[Chat] Failed to disable /goal auto-run policy:", error);
+      });
+      return;
+    }
+    if (
+      needsWorkspacePath ||
+      followUpTaskId ||
+      isConnecting ||
+      isStreaming ||
+      activityIsStreaming ||
+      waitingFirstChunk ||
+      isMainReplyBusy() ||
+      queuedMainSendQueueRef.current.length > 0
+    ) {
+      return;
+    }
+
+    const command = buildResearchGoalAutoRunCommand(goal);
+    const key = `${sessionId}:${goal.goalId}:${goal.currentCycle}:${goal.maxCycles}:${goal.autoRunPolicy?.cyclesPerRun ?? 10}:${command}`;
+    if (goalAutoRunLastKeyRef.current === key) return;
+
+    goalAutoRunTimerRef.current = window.setTimeout(() => {
+      goalAutoRunTimerRef.current = null;
+      if (
+        researchGoalAutoRunElapsedBudgetReached(goal) ||
+        isMainReplyBusy() ||
+        queuedMainSendQueueRef.current.length > 0 ||
+        sessionIdRef.current !== sessionId
+      ) {
+        if (researchGoalAutoRunElapsedBudgetReached(goal)) {
+          void updateResearchGoalAutoRunPolicy(goal, false).catch((error) => {
+            console.warn("[Chat] Failed to disable /goal auto-run policy:", error);
+          });
+        }
+        return;
+      }
+      if (runResearchGoalCommandWhenIdle(command)) {
+        goalAutoRunLastKeyRef.current = key;
+      }
+    }, goal.autoRunPolicy?.idleDelayMs ?? 650);
+
+    return clearGoalAutoRunTimer;
+  }, [
+    activeResearchGoal,
+    activityIsStreaming,
+    clearGoalAutoRunTimer,
+    followUpTaskId,
+    goalAutoRunEnabled,
+    isConnecting,
+    isMainReplyBusy,
+    isStreaming,
+    needsWorkspacePath,
+    queueRevision,
+    runResearchGoalCommandWhenIdle,
+    sessionId,
+    updateResearchGoalAutoRunPolicy,
+    waitingFirstChunk,
+  ]);
 
   const handlePickProjectFolder = async () => {
     if (!sessionId) return;
@@ -4645,6 +5001,7 @@ export function Chat({ sessionId }: ChatProps) {
     /** Prefer ref payload after queue flush — `getValue` reads the latest composer state. */
     const trimmed = flushPayload ? flushPayload.body.trim() : (composerRef.current?.getValue() ?? "").trim();
     const researchParsed = parseResearchCommand(trimmed);
+    const goalParsed = parseGoalCommand(trimmed);
     const skillParsed = parseSkillCommand(trimmed);
 
     if (!trimmed && composerAttachedPaths.length === 0) {
@@ -4652,7 +5009,7 @@ export function Chat({ sessionId }: ChatProps) {
       return;
     }
     /** Composer is still in bare `/…` or `@…` picker mode — do not send as message */
-    if (trimmed && /^\/[^\s]*$/u.test(trimmed) && !researchParsed) {
+    if (trimmed && /^\/[^\s]*$/u.test(trimmed) && !researchParsed && !goalParsed) {
       if (flushPayload) restoreFlushToQueue(flushPayload);
       return;
     }
@@ -4754,14 +5111,31 @@ export function Chat({ sessionId }: ChatProps) {
       return;
     }
 
-    if (researchParsed) {
+    if (researchParsed || goalParsed) {
+      const specialCommand = researchParsed
+        ? {
+            id: "research" as const,
+            body: researchParsed.body,
+            label: "Research System",
+            invokeName: "run_research_command",
+            helpSummary: "显示 Research System 帮助",
+            errorPrefix: "Failed to execute /research",
+          }
+        : {
+            id: "goal" as const,
+            body: goalParsed?.body ?? "",
+            label: "Research Goal",
+            invokeName: "run_research_goal_command",
+            helpSummary: "显示科研目标状态",
+            errorPrefix: "Failed to execute /goal",
+          };
       const operationId =
         typeof crypto !== "undefined" &&
         typeof crypto.randomUUID === "function"
           ? crypto.randomUUID()
-          : `research-${Date.now()}`;
+          : `${specialCommand.id}-${Date.now()}`;
       const pendingFeedback = buildPendingExecutionFeedback({
-        workflowCommand: "research",
+        workflowCommand: specialCommand.id,
         composerAgentType,
       });
 
@@ -4782,9 +5156,9 @@ export function Chat({ sessionId }: ChatProps) {
       useActivityStore.getState().clearActiveTodos();
       useActivityStore.getState().onOperationStart(
         operationId,
-        "Research System",
+        specialCommand.label,
         {
-          summary: researchParsed.body || "显示 Research System 帮助",
+          summary: specialCommand.body || specialCommand.helpSummary,
         },
       );
 
@@ -4794,8 +5168,8 @@ export function Chat({ sessionId }: ChatProps) {
         trimmed,
       );
       const workflowTitleSeed =
-        researchParsed.body ||
-        trimmed.replace(/^\/research\s*/iu, "").trim() ||
+        specialCommand.body ||
+        trimmed.replace(new RegExp(`^/${specialCommand.id}\\s*`, "iu"), "").trim() ||
         trimmed;
       const bubbleAttachedPaths =
         composerAttachedPaths.length > 0 ? [...composerAttachedPaths] : undefined;
@@ -4840,7 +5214,7 @@ export function Chat({ sessionId }: ChatProps) {
         }
 
         const response = await invoke<ResearchCommandResponse>(
-          "run_research_command",
+          specialCommand.invokeName,
           {
             request: {
               sessionId: sessionId,
@@ -4849,13 +5223,16 @@ export function Chat({ sessionId }: ChatProps) {
                 currentSession?.projectPath ??
                 ".",
               content: messageContent,
-              body: researchParsed.body,
+              body: specialCommand.body,
             },
           },
         );
 
         if (sessionIdRef.current !== requestSessionId) {
           return;
+        }
+        if (specialCommand.id === "goal") {
+          setActiveResearchGoal(response.goal ?? null);
         }
 
         const persistedUserMessage = {
@@ -4882,9 +5259,9 @@ export function Chat({ sessionId }: ChatProps) {
         replaceStoreMessagesSnapshot(nextMessages.map(chatMessageToStore));
         useActivityStore.getState().onOperationDone(
           operationId,
-          "Research System",
+          specialCommand.label,
           {
-            summary: `/research ${researchParsed.body || "help"}`,
+            summary: `/${specialCommand.id} ${specialCommand.body || "help"}`,
             output: response.assistantContent,
           },
         );
@@ -4894,7 +5271,7 @@ export function Chat({ sessionId }: ChatProps) {
         if (sessionIdRef.current !== requestSessionId) {
           return;
         }
-        console.error("Failed to execute /research command:", error);
+        console.error(`${specialCommand.errorPrefix} command:`, error);
 
         let errorMessage = "Unknown error";
         if (typeof error === "string") {
@@ -4920,7 +5297,7 @@ export function Chat({ sessionId }: ChatProps) {
         const errorMsg: Message = {
           id: `error-${Date.now()}`,
           role: "assistant",
-          content: `Failed to execute /research: ${errorMessage}`,
+          content: `${specialCommand.errorPrefix}: ${errorMessage}`,
           timestamp: Date.now(),
         };
         setMessages((prev) => [...prev, errorMsg]);
@@ -4931,9 +5308,9 @@ export function Chat({ sessionId }: ChatProps) {
         );
         useActivityStore.getState().onOperationDone(
           operationId,
-          "Research System",
+          specialCommand.label,
           {
-            summary: `/research ${researchParsed.body || "help"}`,
+            summary: `/${specialCommand.id} ${specialCommand.body || "help"}`,
             output: errorMessage,
             failed: true,
           },
@@ -5309,9 +5686,14 @@ export function Chat({ sessionId }: ChatProps) {
       );
       const rawRetryBody = retryContentParts.body;
       const researchRetry = parseResearchCommand(rawRetryBody);
+      const goalRetry = parseGoalCommand(rawRetryBody);
       const composeAgent = message.composerAgentType ?? "general-purpose";
-      if (researchRetry) {
-        setBgToast("`/research` 暂不支持通过“重试”按钮重放，请重新发送命令。");
+      if (researchRetry || goalRetry) {
+        setBgToast(
+          researchRetry
+            ? "`/research` 暂不支持通过“重试”按钮重放，请重新发送命令。"
+            : "`/goal` 暂不支持通过“重试”按钮重放，请重新发送命令。",
+        );
         retrySendInFlightRef.current = false;
         return;
       }
@@ -7076,6 +7458,15 @@ export function Chat({ sessionId }: ChatProps) {
                 mx: "auto",
               }}
             >
+              <ResearchGoalStatusPill
+                goal={activeResearchGoal}
+                onPrepareCommand={prepareResearchGoalCommand}
+                onEditCriteria={handleOpenResearchGoalCriteria}
+                onOpenAuditDetails={handleOpenResearchGoalAuditDetails}
+                autoRunEnabled={goalAutoRunEnabled}
+                onToggleAutoRun={handleToggleResearchGoalAutoRun}
+                autoRunDisabled={needsWorkspacePath || Boolean(followUpTaskId)}
+              />
               <ChatComposer
                 sessionId={sessionId}
                 workspacePath={
@@ -7132,6 +7523,25 @@ export function Chat({ sessionId }: ChatProps) {
           ).trim() || undefined
         }
         onConfirm={handleSshWorkspaceConfirm}
+      />
+
+      <ResearchGoalCriteriaDialog
+        open={goalCriteriaDialogOpen}
+        goal={activeResearchGoal}
+        saving={goalCriteriaSaving}
+        error={goalCriteriaError}
+        providerEntryOptions={goalProviderEntryOptions}
+        providerEntryOptionsLoading={goalProviderEntryOptionsLoading}
+        onClose={handleCloseResearchGoalCriteria}
+        onSave={handleSaveResearchGoalCriteria}
+        onSuggestCriteria={handleSuggestResearchGoalCriteria}
+        onTestSecondOpinionProvider={handleTestResearchGoalSecondOpinionProvider}
+      />
+
+      <ResearchGoalAuditDetailsDialog
+        open={goalAuditDialogOpen}
+        goal={activeResearchGoal}
+        onClose={() => setGoalAuditDialogOpen(false)}
       />
 
       <Dialog

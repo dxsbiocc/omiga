@@ -18,26 +18,61 @@ describe("composerPathMentions", () => {
   it("parses nested @ file picker queries into directory and basename filter", () => {
     expect(parseComposerFileMentionInput("@")).toEqual({
       active: true,
+      kind: "mixed",
+      prefix: "",
       query: "",
       directory: "",
       filter: "",
     });
     expect(parseComposerFileMentionInput("@src/components/Cha")).toEqual({
       active: true,
+      kind: "mixed",
+      prefix: "",
       query: "src/components/Cha",
       directory: "src/components",
       filter: "Cha",
     });
     expect(parseComposerFileMentionInput("@src//components/")).toEqual({
       active: true,
+      kind: "mixed",
+      prefix: "",
       query: "src/components/",
       directory: "src/components",
       filter: "",
     });
     expect(parseComposerFileMentionInput("look @src")).toEqual({
       active: false,
+      kind: "mixed",
+      prefix: "",
       query: "",
       directory: "",
+      filter: "",
+    });
+  });
+
+  it("parses explicit @plugin: and @file: namespaces", () => {
+    expect(parseComposerFileMentionInput("@plugin:notebook")).toEqual({
+      active: true,
+      kind: "plugin",
+      prefix: "plugin",
+      query: "notebook",
+      directory: "",
+      filter: "notebook",
+    });
+    expect(parseComposerFileMentionInput("@plugin:owner/notebook")).toEqual({
+      active: true,
+      kind: "plugin",
+      prefix: "plugin",
+      query: "owner/notebook",
+      directory: "",
+      filter: "owner/notebook",
+    });
+    expect(parseComposerFileMentionInput("@file:src/components/")).toEqual({
+      active: true,
+      kind: "file",
+      prefix: "file",
+      query: "src/components/",
+      directory: "src/components",
       filter: "",
     });
   });

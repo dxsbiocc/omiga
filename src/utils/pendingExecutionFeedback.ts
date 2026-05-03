@@ -56,5 +56,12 @@ export function buildPendingExecutionFeedback(
     };
   }
 
+  if (workflowCommand === "goal") {
+    return {
+      connectLabel: "科研目标推进中",
+      assistantHint: "正在围绕长期科研目标执行分析、解读与完成审计…",
+    };
+  }
+
   return DEFAULT_FEEDBACK;
 }

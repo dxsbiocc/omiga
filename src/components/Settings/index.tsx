@@ -25,6 +25,7 @@ import {
   FormControlLabel,
   Switch,
   alpha,
+  Autocomplete,
 } from "@mui/material";
 import {
   Visibility,
@@ -1089,6 +1090,14 @@ interface LlmConfig {
   baseUrl?: string;
 }
 
+type ProviderEntryOption = {
+  name: string;
+  providerType: string;
+  model: string;
+  enabled: boolean;
+  isDefault: boolean;
+};
+
 export function Settings({
   open,
   onClose,
@@ -1143,6 +1152,14 @@ export function Settings({
     useState(true);
   /** LLM 请求超时（秒）——长对话 / 复杂任务需要更大值 */
   const [requestTimeoutSecs, setRequestTimeoutSecs] = useState(600);
+  /** /goal 完成判定二审使用的独立 provider entry；空值表示复用当前模型 */
+  const [
+    goalSecondOpinionProviderEntry,
+    setGoalSecondOpinionProviderEntry,
+  ] = useState("");
+  const [providerEntryOptions, setProviderEntryOptions] = useState<
+    ProviderEntryOption[]
+  >([]);
   /** 网页访问是否使用系统/环境代理；默认开启 */
   const [webUseProxy, setWebUseProxy] = useState(true);
   /** 内置 search(category="web") 的默认公共搜索引擎（兼容旧配置字段） */
@@ -1624,10 +1641,14 @@ export function Settings({
           webUseProxy?: boolean;
           webSearchEngine?: string;
           webSearchMethods?: string[];
+          goalSecondOpinionProviderEntry?: string | null;
         }>("get_global_settings", {});
         if (gs.timeout != null && gs.timeout > 0) {
           setRequestTimeoutSecs(gs.timeout);
         }
+        setGoalSecondOpinionProviderEntry(
+          (gs.goalSecondOpinionProviderEntry ?? "").trim(),
+        );
         if (typeof gs.webUseProxy === "boolean") {
           setWebUseProxy(gs.webUseProxy);
         }
@@ -1639,6 +1660,14 @@ export function Settings({
         }
       } catch {
         /* ignore */
+      }
+
+      try {
+        const entries =
+          await invoke<ProviderEntryOption[]>("list_provider_configs");
+        setProviderEntryOptions((entries || []).filter((entry) => entry.enabled));
+      } catch {
+        setProviderEntryOptions([]);
       }
     } catch (error) {
       console.log("No saved config found");
@@ -1724,11 +1753,13 @@ export function Settings({
 
       await invoke("save_global_settings_to_config", {
         timeout: Math.max(30, requestTimeoutSecs),
+        goalSecondOpinionProviderEntry:
+          goalSecondOpinionProviderEntry.trim(),
       });
 
       setMessage({
         type: "success",
-        text: "Advanced settings saved (request timeout, post-turn summary & follow-up suggestions)",
+        text: "Advanced settings saved (request timeout, post-turn calls, and /goal second opinion)",
       });
     } catch (error) {
       console.error("Failed to save advanced settings:", error);
@@ -2086,6 +2117,45 @@ export function Settings({
                   disabled={isLoading}
                   helperText="流式响应的总超时。长对话、代码生成、测序/数据分析等复杂任务建议设为 1800–3600 秒。"
                   inputProps={{ min: 30, step: 60 }}
+                  sx={{ mb: 3 }}
+                />
+
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "block", mb: 1, fontWeight: 600 }}
+                >
+                  /goal 科研目标完成判定
+                </Typography>
+                <Autocomplete<ProviderEntryOption, false, false, true>
+                  freeSolo
+                  options={providerEntryOptions}
+                  value={goalSecondOpinionProviderEntry}
+                  inputValue={goalSecondOpinionProviderEntry}
+                  onInputChange={(_, value) =>
+                    setGoalSecondOpinionProviderEntry(value)
+                  }
+                  onChange={(_, value) => {
+                    setGoalSecondOpinionProviderEntry(
+                      typeof value === "string" ? value : value?.name ?? "",
+                    );
+                  }}
+                  getOptionLabel={(option) =>
+                    typeof option === "string" ? option : option.name
+                  }
+                  isOptionEqualToValue={(option, value) =>
+                    option.name ===
+                    (typeof value === "string" ? value : value.name)
+                  }
+                  disabled={isLoading}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="二审 Provider Entry（可选）"
+                      placeholder="留空则复用当前模型"
+                      helperText="选择 Model 页里已保存的 provider entry，让 /goal complete 前由独立 LLM 做严格二审；留空时仍会二审，但复用当前模型。"
+                    />
+                  )}
                   sx={{ mb: 3 }}
                 />
 

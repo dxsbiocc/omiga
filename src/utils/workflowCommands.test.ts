@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  parseGoalCommand,
   parseSkillCommand,
   parseResearchCommand,
   parseWorkflowCommand,
+  WORKFLOW_SLASH_COMMANDS,
 } from "./workflowCommands";
 
 describe("parseWorkflowCommand", () => {
@@ -50,6 +52,17 @@ describe("parseWorkflowCommand", () => {
     });
     expect(parseWorkflowCommand("/research run hello")).toBeNull();
     expect(parseResearchCommand("/orchestrate run hello")).toBeNull();
+  });
+
+  it("parses /goal commands separately from regular workflow rewriting", () => {
+    expect(parseGoalCommand("/goal 解析 QS 核心基因")).toEqual({
+      command: "goal",
+      body: "解析 QS 核心基因",
+    });
+    expect(parseGoalCommand("/goal")).toEqual({ command: "goal", body: "" });
+    expect(parseWorkflowCommand("/goal run")).toBeNull();
+    expect(parseResearchCommand("/goal run")).toBeNull();
+    expect(WORKFLOW_SLASH_COMMANDS.some((command) => command.id === "goal")).toBe(true);
   });
 });
 

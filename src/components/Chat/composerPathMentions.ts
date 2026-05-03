@@ -1,5 +1,7 @@
 const INACTIVE_FILE_MENTION = {
   active: false as const,
+  kind: "mixed" as const,
+  prefix: "" as const,
   query: "",
   directory: "",
   filter: "",
@@ -7,6 +9,10 @@ const INACTIVE_FILE_MENTION = {
 
 export interface ComposerFileMentionParse {
   active: boolean;
+  /** Mention namespace. Bare `@` stays mixed; explicit prefixes use `@file:` / `@plugin:`. */
+  kind: "mixed" | "file" | "plugin";
+  /** The normalized explicit prefix without `@`/`:`, empty for bare `@`. */
+  prefix: "" | "file" | "plugin";
   /** Workspace-relative query after `@`, normalized to `/` separators. */
   query: string;
   /** Workspace-relative directory currently being listed. Empty means workspace root. */
@@ -40,11 +46,37 @@ export function parseComposerFileMentionInput(
   input: string,
 ): ComposerFileMentionParse {
   if (!/^@[^\s]*$/.test(input)) return INACTIVE_FILE_MENTION;
-  const query = normalizeComposerMentionQuery(input.slice(1));
+  const raw = input.slice(1);
+  const lower = raw.toLowerCase();
+  let kind: ComposerFileMentionParse["kind"] = "mixed";
+  let prefix: ComposerFileMentionParse["prefix"] = "";
+  let rawQuery = raw;
+  if (lower.startsWith("plugin:")) {
+    kind = "plugin";
+    prefix = "plugin";
+    rawQuery = raw.slice("plugin:".length);
+  } else if (lower.startsWith("file:")) {
+    kind = "file";
+    prefix = "file";
+    rawQuery = raw.slice("file:".length);
+  }
+  const query = normalizeComposerMentionQuery(rawQuery);
+  if (kind === "plugin") {
+    return {
+      active: true,
+      kind,
+      prefix,
+      query,
+      directory: "",
+      filter: query,
+    };
+  }
   const slashIndex = query.lastIndexOf("/");
   if (slashIndex < 0) {
     return {
       active: true,
+      kind,
+      prefix,
       query,
       directory: "",
       filter: query,
@@ -52,6 +84,8 @@ export function parseComposerFileMentionInput(
   }
   return {
     active: true,
+    kind,
+    prefix,
     query,
     directory: normalizeComposerMentionPath(query.slice(0, slashIndex)),
     filter: query.slice(slashIndex + 1),
