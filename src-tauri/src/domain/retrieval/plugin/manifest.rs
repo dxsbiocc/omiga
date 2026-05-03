@@ -328,6 +328,10 @@ mod tests {
         dir
     }
 
+    fn documented_basic_fixture_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/retrieval-plugins/basic")
+    }
+
     #[test]
     fn parses_valid_retrieval_manifest() {
         let dir = plugin_root();
@@ -372,6 +376,46 @@ mod tests {
         assert_eq!(
             manifest.sources[0].required_credential_refs,
             vec!["pubmed_api_key".to_string()]
+        );
+    }
+
+    #[test]
+    fn parses_documented_basic_retrieval_fixture_manifest() {
+        let root = documented_basic_fixture_root();
+        let plugin_json: JsonValue = serde_json::from_str(
+            &fs::read_to_string(root.join(".omiga-plugin/plugin.json")).unwrap(),
+        )
+        .unwrap();
+        let retrieval = plugin_json
+            .get("retrieval")
+            .cloned()
+            .expect("fixture has retrieval manifest");
+        let manifest = load_plugin_retrieval_manifest(&root, retrieval).unwrap();
+
+        assert_eq!(manifest.protocol_version, SUPPORTED_PROTOCOL_VERSION);
+        assert_eq!(
+            manifest.runtime.command,
+            root.join("bin/basic_retrieval_plugin.py")
+        );
+        assert_eq!(manifest.runtime.concurrency, 1);
+        assert_eq!(manifest.runtime.idle_ttl_ms, Some(30_000));
+        assert_eq!(manifest.runtime.request_timeout_ms, Some(5_000));
+        assert_eq!(manifest.runtime.cancel_grace_ms, Some(500));
+        assert_eq!(manifest.sources.len(), 1);
+        assert_eq!(manifest.sources[0].category, "dataset");
+        assert_eq!(manifest.sources[0].id, "example_dataset");
+        assert_eq!(
+            manifest.sources[0].capabilities,
+            vec![
+                "search".to_string(),
+                "query".to_string(),
+                "fetch".to_string()
+            ]
+        );
+        assert!(!manifest.sources[0].default_enabled);
+        assert_eq!(
+            manifest.sources[0].optional_credential_refs,
+            vec!["pubmed_email".to_string()]
         );
     }
 

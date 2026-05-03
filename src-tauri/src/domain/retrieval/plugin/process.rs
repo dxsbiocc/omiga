@@ -490,6 +490,52 @@ mod tests {
         }
     }
 
+    fn documented_basic_fixture_manifest() -> (std::path::PathBuf, PluginRetrievalManifest) {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/retrieval-plugins/basic");
+        let plugin_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(root.join(".omiga-plugin/plugin.json")).unwrap(),
+        )
+        .unwrap();
+        let manifest = load_plugin_retrieval_manifest(
+            &root,
+            plugin_json
+                .get("retrieval")
+                .cloned()
+                .expect("fixture has retrieval manifest"),
+        )
+        .unwrap();
+        (root, manifest)
+    }
+
+    fn fixture_request(operation: RetrievalOperation, marker: &str) -> RetrievalRequest {
+        RetrievalRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            tool: match operation {
+                RetrievalOperation::Fetch => RetrievalTool::Fetch,
+                RetrievalOperation::Query => RetrievalTool::Query,
+                _ => RetrievalTool::Search,
+            },
+            operation,
+            category: "dataset".to_string(),
+            source: "example_dataset".to_string(),
+            subcategory: None,
+            query: matches!(
+                operation,
+                RetrievalOperation::Search | RetrievalOperation::Query
+            )
+            .then(|| marker.to_string()),
+            id: matches!(operation, RetrievalOperation::Fetch).then(|| "example-1".to_string()),
+            url: None,
+            result: None,
+            params: Some(json!({"organism": "human"})),
+            max_results: Some(5),
+            prompt: matches!(operation, RetrievalOperation::Fetch)
+                .then(|| format!("fetch fixture detail for {marker}")),
+            web: None,
+        }
+    }
+
     const MOCK_PLUGIN: &str = r#"#!/usr/bin/env python3
 import json
 import sys
@@ -572,6 +618,62 @@ for line in sys.stdin:
             response.items[0].metadata["credential_keys"],
             json!(["pubmed_email"])
         );
+        process.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn documented_basic_fixture_executes_search_query_and_fetch_protocol() {
+        let (_root, manifest) = documented_basic_fixture_manifest();
+        #[cfg(unix)]
+        make_executable(&manifest.runtime.command);
+        let mut process = PluginProcess::start("retrieval-protocol-example", manifest)
+            .await
+            .unwrap();
+        let credentials =
+            HashMap::from([("pubmed_email".to_string(), "dev@example.test".to_string())]);
+
+        let search = process
+            .execute(
+                &fixture_request(RetrievalOperation::Search, "BRCA1"),
+                credentials.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(search.operation, RetrievalOperation::Search);
+        assert_eq!(search.effective_source, "example_dataset");
+        assert_eq!(search.items.len(), 1);
+        assert_eq!(
+            search.items[0].metadata["credentialRefs"],
+            json!(["pubmed_email"])
+        );
+
+        let query = process
+            .execute(
+                &fixture_request(RetrievalOperation::Query, "sample metadata"),
+                credentials.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(query.operation, RetrievalOperation::Query);
+        assert_eq!(query.items.len(), 2);
+        assert_eq!(query.total, Some(2));
+
+        let fetch = process
+            .execute(
+                &fixture_request(RetrievalOperation::Fetch, "example-1"),
+                credentials,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fetch.operation, RetrievalOperation::Fetch);
+        assert!(fetch.items.is_empty());
+        let detail = fetch.detail.expect("fetch response has detail");
+        assert_eq!(detail.id.as_deref(), Some("example-1"));
+        assert_eq!(
+            detail.metadata["fixture"],
+            json!("retrieval-protocol-example")
+        );
+
         process.shutdown().await;
     }
 
