@@ -519,6 +519,28 @@ mod tests {
         )
     }
 
+    fn bundled_public_dataset_registration() -> PluginRetrievalRegistration {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("bundled_plugins/plugins/public-dataset-sources");
+        let plugin_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(root.join(".omiga-plugin/plugin.json")).unwrap(),
+        )
+        .unwrap();
+        let manifest = load_plugin_retrieval_manifest(
+            &root,
+            plugin_json
+                .get("retrieval")
+                .cloned()
+                .expect("retrieval manifest"),
+        )
+        .unwrap();
+        PluginRetrievalRegistration {
+            plugin_id: "public-dataset-sources@omiga-curated".to_string(),
+            plugin_root: root,
+            retrieval: manifest,
+        }
+    }
+
     const MOCK_PLUGIN: &str = r#"#!/usr/bin/env python3
 import json
 import os
@@ -597,6 +619,34 @@ for line in sys.stdin:
             response.items[0].metadata["credential_keys"],
             json!(["pubmed_email"])
         );
+    }
+
+    #[tokio::test]
+    async fn provider_executes_bundled_replacement_dataset_source_when_enabled() {
+        let provider = PluginRetrievalProvider::new_with_lifecycle_state(
+            vec![bundled_public_dataset_registration()],
+            PluginLifecycleState::default(),
+        );
+        let ctx = ToolContext::new("/tmp").with_web_search_api_keys(keys_with_enabled("biosample"));
+        let mut request = request_for_operation(
+            "biosample",
+            RetrievalTool::Search,
+            RetrievalOperation::Search,
+            "validation",
+        );
+        request.params = Some(json!({"omigaValidation": true}));
+
+        let response = provider.execute(&ctx, request).await.unwrap();
+        let response = response_from_output(response);
+
+        assert_eq!(response.provider, RetrievalProviderKind::Plugin);
+        assert_eq!(
+            response.plugin.as_deref(),
+            Some("public-dataset-sources@omiga-curated")
+        );
+        assert_eq!(response.source, "biosample");
+        assert_eq!(response.effective_source, "biosample");
+        assert_eq!(response.items[0].metadata["validation"], json!(true));
     }
 
     #[tokio::test]
