@@ -39,6 +39,18 @@
         "authentication": "ON_USE"
       },
       "category": "Retrieval"
+    },
+    {
+      "name": "public-knowledge-sources",
+      "source": {
+        "source": "local",
+        "path": "./plugins/public-knowledge-sources"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
     }
   ]
 }
