@@ -417,6 +417,7 @@ function researchGoalErrorMessage(error: unknown, fallback: string): string {
 const RESUME_AFTER_CANCEL_PROMPT =
   "请从上一轮中断处继续完成回复，衔接已有内容，不要重复已完整输出的段落。";
 const CANCEL_STREAM_LOCAL_FALLBACK_MS = 1500;
+const JUMP_TO_LATEST_CLICK_ANIMATION_MS = 360;
 
 /** Persist full transcript (including tool rows) to the session store. */
 function chatMessageToStore(m: Message): StoreMessage {
@@ -3312,6 +3313,23 @@ export function Chat({ sessionId }: ChatProps) {
   const shouldAutoScrollRef = useRef(true);
   const scrollRafRef = useRef<number | null>(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const jumpToLatestAnimationTimerRef = useRef<number | null>(null);
+  const jumpToLatestClickAnimatingRef = useRef(false);
+  const [isJumpToLatestClickAnimating, setIsJumpToLatestClickAnimating] =
+    useState(false);
+
+  const clearJumpToLatestTimers = useCallback(() => {
+    if (jumpToLatestAnimationTimerRef.current !== null) {
+      window.clearTimeout(jumpToLatestAnimationTimerRef.current);
+      jumpToLatestAnimationTimerRef.current = null;
+    }
+  }, []);
+
+  const resetJumpToLatestClickAnimation = useCallback(() => {
+    clearJumpToLatestTimers();
+    jumpToLatestClickAnimatingRef.current = false;
+    setIsJumpToLatestClickAnimating(false);
+  }, [clearJumpToLatestTimers]);
 
   const updateJumpToLatestVisibility = useCallback(() => {
     const el = messagesScrollRef.current;
@@ -3334,6 +3352,9 @@ export function Chat({ sessionId }: ChatProps) {
       AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
       messages.length > 0 || currentResponse.trim().length > 0,
     );
+    if (jumpToLatestClickAnimatingRef.current && !shouldShow) {
+      return nearBottom;
+    }
     setShowJumpToLatest((prev) => (prev === shouldShow ? prev : shouldShow));
     return nearBottom;
   }, [currentResponse, messages.length]);
@@ -3358,9 +3379,10 @@ export function Chat({ sessionId }: ChatProps) {
   ]);
 
   useEffect(() => {
+    resetJumpToLatestClickAnimation();
     shouldAutoScrollRef.current = true;
     setShowJumpToLatest(false);
-  }, [sessionId]);
+  }, [resetJumpToLatestClickAnimation, sessionId]);
 
   const messageRenderItems = useMemo(
     () => groupMessagesForRender(messages),
@@ -3489,12 +3511,13 @@ export function Chat({ sessionId }: ChatProps) {
 
   useEffect(() => {
     return () => {
+      clearJumpToLatestTimers();
       if (scrollRafRef.current !== null) {
         cancelAnimationFrame(scrollRafRef.current);
         scrollRafRef.current = null;
       }
     };
-  }, []);
+  }, [clearJumpToLatestTimers]);
 
   useEffect(() => {
     scheduleScrollToBottom();
@@ -3521,14 +3544,46 @@ export function Chat({ sessionId }: ChatProps) {
   }, [scheduleCompleteSession, sessionId, setScheduleCompleteSession]);
 
   const handleJumpToLatest = useCallback(() => {
+    const scrollToLatest = () => {
+      messagesEndRef.current?.scrollIntoView({
+        behavior: "auto",
+        block: "end",
+      });
+    };
+
+    const finishJumpToLatestClick = () => {
+      jumpToLatestAnimationTimerRef.current = null;
+      jumpToLatestClickAnimatingRef.current = false;
+      flushSync(() => {
+        setIsJumpToLatestClickAnimating(false);
+        setShowJumpToLatest(false);
+      });
+      scrollToLatest();
+      requestAnimationFrame(updateJumpToLatestVisibility);
+    };
+
     shouldAutoScrollRef.current = true;
-    setShowJumpToLatest(false);
-    messagesEndRef.current?.scrollIntoView({
-      behavior: "auto",
-      block: "end",
+    clearJumpToLatestTimers();
+    flushSync(() => {
+      setShowJumpToLatest(true);
+      setIsJumpToLatestClickAnimating(false);
     });
-    requestAnimationFrame(updateJumpToLatestVisibility);
-  }, [updateJumpToLatestVisibility]);
+
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      finishJumpToLatestClick();
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      jumpToLatestClickAnimatingRef.current = true;
+      setIsJumpToLatestClickAnimating(true);
+    });
+
+    jumpToLatestAnimationTimerRef.current = window.setTimeout(
+      finishJumpToLatestClick,
+      JUMP_TO_LATEST_CLICK_ANIMATION_MS,
+    );
+  }, [clearJumpToLatestTimers, updateJumpToLatestVisibility]);
 
   // Subscribe to the synthesis stream before the first chunk arrives so the
   // leader's reply streams inline instead of requiring a page refresh.
@@ -7342,7 +7397,11 @@ export function Chat({ sessionId }: ChatProps) {
               position: "relative",
             }}
           >
-            <Fade in={showJumpToLatest} unmountOnExit>
+            <Fade
+              in={showJumpToLatest}
+              timeout={{ enter: 180, exit: 0 }}
+              unmountOnExit
+            >
               <Box
                 sx={{
                   position: "absolute",
@@ -7364,10 +7423,113 @@ export function Chat({ sessionId }: ChatProps) {
                       borderRadius: "50%",
                       border: 0,
                       bgcolor: "transparent",
-                      color: "text.secondary",
+                      color: "primary.main",
                       overflow: "visible",
+                      animation: isJumpToLatestClickAnimating
+                        ? `${JUMP_TO_LATEST_CLICK_ANIMATION_MS}ms jumpToLatestBubbleButton cubic-bezier(0.2, 0, 0, 1) both`
+                        : "none",
                       transition:
                         "color 180ms ease, transform 180ms ease",
+                      "@keyframes jumpToLatestBubbleButton": {
+                        "0%": {
+                          transform: "translateY(0) scale(1)",
+                        },
+                        "32%": {
+                          transform: "translateY(3px) scale(0.94)",
+                        },
+                        "64%": {
+                          transform: "translateY(-1px) scale(1.03)",
+                        },
+                        "100%": {
+                          transform: "translateY(0) scale(0.98)",
+                        },
+                      },
+                      "@keyframes jumpToLatestBubbleShell": {
+                        "0%": {
+                          opacity: 1,
+                          transform: "scale(1)",
+                        },
+                        "36%": {
+                          opacity: 0.95,
+                          transform: "scale(0.88)",
+                          borderColor: alpha(theme.palette.primary.main, 0.58),
+                          backgroundColor: alpha(theme.palette.primary.main, 0.14),
+                        },
+                        "72%": {
+                          opacity: 0.46,
+                          transform: "scale(1.38)",
+                          borderColor: alpha(theme.palette.primary.main, 0.36),
+                          backgroundColor: alpha(theme.palette.primary.main, 0.04),
+                        },
+                        "100%": {
+                          opacity: 0,
+                          transform: "scale(1.76)",
+                          borderColor: alpha(theme.palette.primary.main, 0),
+                          backgroundColor: alpha(theme.palette.primary.main, 0),
+                        },
+                      },
+                      "@keyframes jumpToLatestBubbleShards": {
+                        "0%": {
+                          opacity: 0,
+                          transform: "scale(0.38)",
+                          boxShadow: [
+                            `0 0 0 0 ${alpha(theme.palette.primary.main, 0.9)}`,
+                            `0 0 0 0 ${alpha(theme.palette.primary.main, 0.72)}`,
+                            `0 0 0 0 ${alpha(theme.palette.primary.light, 0.78)}`,
+                            `0 0 0 0 ${alpha(theme.palette.primary.main, 0.68)}`,
+                            `0 0 0 0 ${alpha(theme.palette.primary.light, 0.7)}`,
+                            `0 0 0 0 ${alpha(theme.palette.primary.main, 0.6)}`,
+                            `0 0 0 0 ${alpha(theme.palette.primary.light, 0.72)}`,
+                            `0 0 0 0 ${alpha(theme.palette.primary.main, 0.66)}`,
+                          ].join(", "),
+                        },
+                        "22%": {
+                          opacity: 1,
+                          transform: "scale(0.76)",
+                          boxShadow: [
+                            `0 -8px 0 0 ${alpha(theme.palette.primary.main, 0.9)}`,
+                            `7px -5px 0 0 ${alpha(theme.palette.primary.main, 0.72)}`,
+                            `8px 3px 0 0 ${alpha(theme.palette.primary.light, 0.78)}`,
+                            `3px 8px 0 0 ${alpha(theme.palette.primary.main, 0.68)}`,
+                            `-5px 7px 0 0 ${alpha(theme.palette.primary.light, 0.7)}`,
+                            `-9px 1px 0 0 ${alpha(theme.palette.primary.main, 0.6)}`,
+                            `-6px -6px 0 0 ${alpha(theme.palette.primary.light, 0.72)}`,
+                            `2px -10px 0 0 ${alpha(theme.palette.primary.main, 0.66)}`,
+                          ].join(", "),
+                        },
+                        "100%": {
+                          opacity: 0,
+                          transform: "scale(1.08)",
+                          boxShadow: [
+                            `0 -23px 0 -1px ${alpha(theme.palette.primary.main, 0)}`,
+                            `18px -15px 0 -1px ${alpha(theme.palette.primary.main, 0)}`,
+                            `22px 7px 0 -1px ${alpha(theme.palette.primary.light, 0)}`,
+                            `7px 24px 0 -1px ${alpha(theme.palette.primary.main, 0)}`,
+                            `-15px 20px 0 -1px ${alpha(theme.palette.primary.light, 0)}`,
+                            `-24px 4px 0 -1px ${alpha(theme.palette.primary.main, 0)}`,
+                            `-18px -17px 0 -1px ${alpha(theme.palette.primary.light, 0)}`,
+                            `5px -27px 0 -1px ${alpha(theme.palette.primary.main, 0)}`,
+                          ].join(", "),
+                        },
+                      },
+                      "@keyframes jumpToLatestIconBubblePop": {
+                        "0%": {
+                          transform: "translateY(0) scale(1)",
+                          opacity: 1,
+                        },
+                        "34%": {
+                          transform: "translateY(3px) scale(0.86)",
+                          opacity: 0.9,
+                        },
+                        "70%": {
+                          transform: "translateY(-1px) scale(0.98)",
+                          opacity: 0.48,
+                        },
+                        "100%": {
+                          transform: "translateY(1px) scale(0.68)",
+                          opacity: 0,
+                        },
+                      },
                       "&::before": {
                         content: '""',
                         position: "absolute",
@@ -7380,17 +7542,46 @@ export function Chat({ sessionId }: ChatProps) {
                           theme.palette.mode === "dark" ? 0.36 : 0.16,
                         )}`,
                         backdropFilter: "blur(10px)",
+                        transform: "scale(1)",
+                        animation: isJumpToLatestClickAnimating
+                          ? `${JUMP_TO_LATEST_CLICK_ANIMATION_MS}ms jumpToLatestBubbleShell cubic-bezier(0.2, 0, 0, 1) both`
+                          : "none",
                         transition:
-                          "background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease",
+                          "background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease",
+                      },
+                      "&::after": {
+                        content: '""',
+                        position: "absolute",
+                        left: "calc(50% - 2px)",
+                        top: "calc(50% - 2px)",
+                        width: 4,
+                        height: 4,
+                        borderRadius: "50%",
+                        bgcolor: "primary.main",
+                        opacity: 0,
+                        pointerEvents: "none",
+                        transform: "scale(0.38)",
+                        zIndex: 2,
+                        animation: isJumpToLatestClickAnimating
+                          ? `${JUMP_TO_LATEST_CLICK_ANIMATION_MS}ms jumpToLatestBubbleShards cubic-bezier(0.16, 1, 0.3, 1) both`
+                          : "none",
                       },
                       "@media (prefers-reduced-motion: reduce)": {
                         transition: "none",
+                        animation: "none",
                         "&::before": {
                           transition: "none",
+                          animation: "none",
+                        },
+                        "&::after": {
+                          animation: "none",
+                        },
+                        "& svg": {
+                          animation: "none",
                         },
                       },
                       "&:hover": {
-                        color: "text.primary",
+                        color: "primary.main",
                         transform: "translateY(-1px)",
                         "&::before": {
                           bgcolor: theme.palette.background.paper,
@@ -7413,6 +7604,10 @@ export function Chat({ sessionId }: ChatProps) {
                       "& svg": {
                         position: "relative",
                         zIndex: 1,
+                        color: "primary.main",
+                        animation: isJumpToLatestClickAnimating
+                          ? `${JUMP_TO_LATEST_CLICK_ANIMATION_MS}ms jumpToLatestIconBubblePop cubic-bezier(0.2, 0, 0, 1) both`
+                          : "none",
                       },
                     }}
                   >

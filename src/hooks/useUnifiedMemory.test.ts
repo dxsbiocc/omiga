@@ -8,7 +8,12 @@
  */
 
 import { describe, it, expect } from "vitest";
-import type { LongTermEntryDto, SourceEntryDto, MemoryTab } from "./useUnifiedMemory";
+import {
+  normalizeSourceEntry,
+  type LongTermEntryDto,
+  type SourceEntryDto,
+  type MemoryTab,
+} from "./useUnifiedMemory";
 
 // ── Helper builders ───────────────────────────────────────────────────────────
 
@@ -132,6 +137,21 @@ describe("SourceEntryDto", () => {
     const entry = makeSourceEntry();
     expect(Array.isArray(entry.sessions)).toBe(true);
     expect(Array.isArray(entry.query_context)).toBe(true);
+  });
+
+  it("normalizes legacy entries that omit source history arrays", () => {
+    const entry = normalizeSourceEntry({
+      path: "/tmp/long_term/sources/legacy.json",
+      url: "https://example.com/legacy",
+      canonical_url: "https://example.com/legacy",
+      domain: "example.com",
+      accessed_at: "2025-01-01T00:00:00Z",
+      last_used_at: "2025-01-02T00:00:00Z",
+      use_count: 1,
+    });
+
+    expect(entry.sessions).toEqual([]);
+    expect(entry.query_context).toEqual([]);
   });
 
   it("allows null optional fields", () => {

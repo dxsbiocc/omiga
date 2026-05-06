@@ -1761,76 +1761,81 @@ function SourcesTab({ memory, theme, glassSurface, alpha, setToast }: SourcesTab
       )}
 
       {/* Source list */}
-      {filtered.map(entry => (
-        <Paper
-          key={entry.canonical_url}
-          elevation={0}
-          sx={{ p: 1.75, ...glassSurface, "&:hover": { bgcolor: alpha(theme.palette.primary.main, 0.03) } }}
-        >
-          <Stack spacing={0.5}>
-            <Stack direction="row" alignItems="flex-start" justifyContent="space-between" spacing={1}>
-              <Stack spacing={0.25} flex={1} minWidth={0}>
-                <Typography variant="subtitle2" fontWeight={600} noWrap title={entry.url}>
-                  {entry.title ?? entry.domain}
-                </Typography>
-                <Typography
-                  variant="caption"
-                  color="primary.main"
-                  sx={{ wordBreak: "break-all", cursor: "pointer" }}
-                  onClick={() => { try { window.open(entry.url, "_blank"); } catch {} }}
-                  title={entry.url}
-                >
-                  {entry.url.length > 80 ? entry.url.slice(0, 80) + "…" : entry.url}
-                </Typography>
-              </Stack>
-              <Tooltip title="删除来源记录">
-                <span>
-                  <Button
-                    size="small"
-                    color="error"
-                    sx={{ minWidth: 0, px: 0.75 }}
-                    onClick={() => handleDelete(entry.path, entry.url)}
+      {filtered.map(entry => {
+        const sessions = entry.sessions ?? [];
+        const queryContext = entry.query_context ?? [];
+
+        return (
+          <Paper
+            key={entry.canonical_url}
+            elevation={0}
+            sx={{ p: 1.75, ...glassSurface, "&:hover": { bgcolor: alpha(theme.palette.primary.main, 0.03) } }}
+          >
+            <Stack spacing={0.5}>
+              <Stack direction="row" alignItems="flex-start" justifyContent="space-between" spacing={1}>
+                <Stack spacing={0.25} flex={1} minWidth={0}>
+                  <Typography variant="subtitle2" fontWeight={600} noWrap title={entry.url}>
+                    {entry.title ?? entry.domain}
+                  </Typography>
+                  <Typography
+                    variant="caption"
+                    color="primary.main"
+                    sx={{ wordBreak: "break-all", cursor: "pointer" }}
+                    onClick={() => { try { window.open(entry.url, "_blank"); } catch {} }}
+                    title={entry.url}
                   >
-                    <DeleteIcon fontSize="small" />
-                  </Button>
-                </span>
-              </Tooltip>
-            </Stack>
+                    {entry.url.length > 80 ? entry.url.slice(0, 80) + "…" : entry.url}
+                  </Typography>
+                </Stack>
+                <Tooltip title="删除来源记录">
+                  <span>
+                    <Button
+                      size="small"
+                      color="error"
+                      sx={{ minWidth: 0, px: 0.75 }}
+                      onClick={() => handleDelete(entry.path, entry.url)}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </Button>
+                  </span>
+                </Tooltip>
+              </Stack>
 
-            {entry.gist && (
-              <Typography variant="caption" color="text.secondary" sx={{ fontStyle: "italic" }}>
-                {entry.gist}
-              </Typography>
-            )}
-
-            <Stack direction="row" spacing={1} flexWrap="wrap" gap={0.5} mt={0.25}>
-              <Chip size="small" label={entry.domain} sx={{ fontSize: 10, height: 18 }} />
-              <Chip size="small" label={`访问 ${entry.use_count} 次`} sx={{ fontSize: 10, height: 18 }} />
-              {entry.sessions.length > 0 && (
-                <Chip size="small" label={`${entry.sessions.length} 个会话`} sx={{ fontSize: 10, height: 18 }} />
+              {entry.gist && (
+                <Typography variant="caption" color="text.secondary" sx={{ fontStyle: "italic" }}>
+                  {entry.gist}
+                </Typography>
               )}
-              <Chip
-                size="small"
-                label={`最近使用 ${new Date(entry.last_used_at).toLocaleDateString("zh-CN")}`}
-                sx={{ fontSize: 10, height: 18 }}
-              />
-              {entry.expires_at && (
+
+              <Stack direction="row" spacing={1} flexWrap="wrap" gap={0.5} mt={0.25}>
+                <Chip size="small" label={entry.domain} sx={{ fontSize: 10, height: 18 }} />
+                <Chip size="small" label={`访问 ${entry.use_count} 次`} sx={{ fontSize: 10, height: 18 }} />
+                {sessions.length > 0 && (
+                  <Chip size="small" label={`${sessions.length} 个会话`} sx={{ fontSize: 10, height: 18 }} />
+                )}
                 <Chip
                   size="small"
-                  label={`过期 ${new Date(entry.expires_at).toLocaleDateString("zh-CN")}`}
-                  sx={{ fontSize: 10, height: 18, color: "text.disabled" }}
+                  label={`最近使用 ${new Date(entry.last_used_at).toLocaleDateString("zh-CN")}`}
+                  sx={{ fontSize: 10, height: 18 }}
                 />
+                {entry.expires_at && (
+                  <Chip
+                    size="small"
+                    label={`过期 ${new Date(entry.expires_at).toLocaleDateString("zh-CN")}`}
+                    sx={{ fontSize: 10, height: 18, color: "text.disabled" }}
+                  />
+                )}
+              </Stack>
+
+              {queryContext.length > 0 && (
+                <Typography variant="caption" color="text.disabled">
+                  关联查询：{queryContext.slice(0, 3).join(" · ")}
+                </Typography>
               )}
             </Stack>
-
-            {entry.query_context.length > 0 && (
-              <Typography variant="caption" color="text.disabled">
-                关联查询：{entry.query_context.slice(0, 3).join(" · ")}
-              </Typography>
-            )}
-          </Stack>
-        </Paper>
-      ))}
+          </Paper>
+        );
+      })}
     </Stack>
   );
 }

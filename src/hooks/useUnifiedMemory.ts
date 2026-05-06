@@ -99,6 +99,42 @@ export interface SourceEntryDto {
   expires_at: string | null;
 }
 
+type RawSourceEntryDto = Partial<Record<keyof SourceEntryDto, unknown>>;
+
+function optionalString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+export function normalizeSourceEntry(entry: RawSourceEntryDto): SourceEntryDto {
+  const url = stringValue(entry.url);
+  const accessedAt = stringValue(entry.accessed_at);
+
+  return {
+    path: stringValue(entry.path),
+    url,
+    canonical_url: stringValue(entry.canonical_url) || url,
+    title: optionalString(entry.title),
+    domain: stringValue(entry.domain),
+    gist: optionalString(entry.gist),
+    accessed_at: accessedAt,
+    last_used_at: stringValue(entry.last_used_at) || accessedAt,
+    use_count: typeof entry.use_count === "number" ? entry.use_count : 0,
+    sessions: stringArray(entry.sessions),
+    query_context: stringArray(entry.query_context),
+    expires_at: optionalString(entry.expires_at),
+  };
+}
+
 export interface UnifiedMemoryStatus {
   exists: boolean;
   version: string;
@@ -452,8 +488,8 @@ export function useUnifiedMemory(projectPath: string) {
   const loadSourceEntries = useCallback(async () => {
     setSourcesLoading(true);
     try {
-      const entries = await invoke<SourceEntryDto[]>("memory_list_sources", { projectPath });
-      setSourceEntries(entries);
+      const entries = await invoke<RawSourceEntryDto[]>("memory_list_sources", { projectPath });
+      setSourceEntries(entries.map(normalizeSourceEntry));
     } catch (e) {
       console.error("[useUnifiedMemory] loadSourceEntries:", e);
     } finally {
