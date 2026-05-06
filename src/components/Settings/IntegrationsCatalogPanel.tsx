@@ -51,6 +51,7 @@ type McpServerConfigCatalogEntry = {
   command: string | null;
   args: string[];
   env: Record<string, string>;
+  headers: Record<string, string>;
   url: string | null;
   cwd: string | null;
 };
@@ -100,6 +101,7 @@ type McpServerFormState = {
   command: string;
   argsText: string;
   envText: string;
+  headersText: string;
   url: string;
   cwd: string;
 };
@@ -110,6 +112,7 @@ type ProjectMcpServerInput = {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  headers?: Record<string, string>;
   url?: string;
   cwd?: string;
 };
@@ -126,6 +129,7 @@ function emptyMcpServerForm(): McpServerFormState {
     command: "",
     argsText: "",
     envText: "",
+    headersText: "",
     url: "",
     cwd: "",
   };
@@ -137,12 +141,16 @@ function mcpServerFormFromCatalogEntry(
   const envText = Object.entries(srv.config.env ?? {})
     .map(([key, value]) => `${key}=${value}`)
     .join("\n");
+  const headersText = Object.entries(srv.config.headers ?? {})
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
   return {
     name: srv.configKey,
     kind: srv.config.kind === "http" ? "http" : "stdio",
     command: srv.config.command ?? "",
     argsText: (srv.config.args ?? []).join("\n"),
     envText,
+    headersText,
     url: srv.config.url ?? "",
     cwd: srv.config.cwd ?? "",
   };
@@ -155,21 +163,21 @@ function splitMultilineValues(raw: string): string[] {
     .filter(Boolean);
 }
 
-function parseEnvLines(raw: string): Record<string, string> {
-  const env: Record<string, string> = {};
+function parseKeyValueLines(raw: string, label: string): Record<string, string> {
+  const values: Record<string, string> = {};
   for (const line of splitMultilineValues(raw)) {
     const idx = line.indexOf("=");
     if (idx <= 0) {
-      throw new Error(`环境变量必须使用 KEY=value 格式：${line}`);
+      throw new Error(`${label}必须使用 KEY=value 格式：${line}`);
     }
     const key = line.slice(0, idx).trim();
     const value = line.slice(idx + 1);
     if (!key) {
-      throw new Error("环境变量名称不能为空。");
+      throw new Error(`${label}名称不能为空。`);
     }
-    env[key] = value;
+    values[key] = value;
   }
-  return env;
+  return values;
 }
 
 function buildProjectMcpServerInput(
@@ -185,7 +193,12 @@ function buildProjectMcpServerInput(
     if (!/^https?:\/\//i.test(url)) {
       throw new Error("HTTP MCP 地址必须以 http:// 或 https:// 开头。");
     }
-    return { name, kind: "http", url };
+    return {
+      name,
+      kind: "http",
+      url,
+      headers: parseKeyValueLines(form.headersText, "请求头"),
+    };
   }
 
   const command = form.command.trim();
@@ -198,7 +211,7 @@ function buildProjectMcpServerInput(
     kind: "stdio",
     command,
     args: splitMultilineValues(form.argsText),
-    env: parseEnvLines(form.envText),
+    env: parseKeyValueLines(form.envText, "环境变量"),
     cwd: cwd || undefined,
   };
 }
@@ -313,8 +326,8 @@ function mcpErrorAdvice(srv: McpServerCatalogEntry): McpErrorAdvice | null {
         isPaperclip
           ? "先在浏览器或 Paperclip CLI 中完成 Paperclip 登录。"
           : "检查该 MCP 服务文档，确认是否需要 token、header 或 OAuth。",
+        "如果服务提供 Bearer token 或 API key，可编辑该服务并填写 Authorization=Bearer ${ENV_NAME} 或 X-API-Key=...。",
         "确认 MCP 地址是 Streamable HTTP 的 /mcp 端点，而不是普通网页地址。",
-        "如果服务要求自定义 header，后续需要在 Omiga 的 MCP 配置中补充认证字段支持。",
       ],
     };
   }
@@ -1475,18 +1488,33 @@ export function IntegrationsCatalogPanel({
                 />
               </>
             ) : (
-              <TextField
-                label="HTTP 地址"
-                placeholder="https://example.com/mcp"
-                value={mcpForm.url}
-                onChange={(e) =>
-                  setMcpForm((f) => ({ ...f, url: e.target.value }))
-                }
-                disabled={addingMcp}
-                fullWidth
-                required
-                helperText="支持 Streamable HTTP MCP 端点。"
-              />
+              <>
+                <TextField
+                  label="HTTP 地址"
+                  placeholder="https://example.com/mcp"
+                  value={mcpForm.url}
+                  onChange={(e) =>
+                    setMcpForm((f) => ({ ...f, url: e.target.value }))
+                  }
+                  disabled={addingMcp}
+                  fullWidth
+                  required
+                  helperText="支持 Streamable HTTP MCP 端点。"
+                />
+                <TextField
+                  label="认证请求头"
+                  placeholder={"每行一个 KEY=value，例如：\nAuthorization=Bearer ${PAPERCLIP_TOKEN}\nX-API-Key=..."}
+                  value={mcpForm.headersText}
+                  onChange={(e) =>
+                    setMcpForm((f) => ({ ...f, headersText: e.target.value }))
+                  }
+                  disabled={addingMcp}
+                  fullWidth
+                  multiline
+                  minRows={3}
+                  helperText="可选；支持在值中使用 ${ENV_NAME}，运行时从环境变量读取，避免把 token 明文写入配置。"
+                />
+              </>
             )}
           </Stack>
         </DialogContent>
