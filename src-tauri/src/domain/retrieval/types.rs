@@ -237,37 +237,148 @@ pub enum RetrievalError {
 
 impl RetrievalError {
     pub fn structured_json(&self, category: &str, source: &str) -> JsonValue {
+        let category = public_category(category);
+        let route = format!("{category}.{source}");
         match self {
             Self::SourceDisabled { message, .. } => json!({
                 "error": "source_disabled",
-                "category": public_category(category),
+                "category": category,
                 "source": source,
-                "message": message,
+                "route": route,
+                "message": format!("{route} is available as a local retrieval plugin route, but it is disabled."),
+                "details": message,
+                "next_action": "Enable this plugin in Settings → Plugins, then retry the same search/query/fetch call.",
+                "diagnostics_hint": "Open Settings → Plugins → Details to inspect the route and copy diagnostics if it still fails.",
+                "recoverable": true,
                 "results": [],
             }),
             Self::MissingCredentials { refs, .. } => json!({
                 "error": "missing_credentials",
-                "category": public_category(category),
+                "category": category,
                 "source": source,
-                "message": format!("Missing credentials: {}", refs.join(", ")),
+                "route": route,
+                "message": format!("Missing credentials for {route}: {}", refs.join(", ")),
+                "next_action": "Configure the required credential references for this plugin route, then retry.",
+                "diagnostics_hint": "Use Settings → Plugins → Details to see the route and copy diagnostics without exposing credential values.",
+                "recoverable": true,
                 "missing_credentials": refs,
                 "results": [],
             }),
             Self::Timeout { seconds } => json!({
-                "error": "retrieval_timeout",
-                "category": public_category(category),
+                "error": "retrieval_plugin_timeout",
+                "category": category,
                 "source": source,
-                "message": format!("Retrieval timed out after {seconds}s"),
+                "route": route,
+                "message": format!("Local retrieval plugin route {route} timed out after {seconds}s."),
+                "next_action": "Retry once; if it repeats, reduce the request size or inspect the plugin process in Settings → Plugins.",
+                "diagnostics_hint": "Timed-out plugin child processes are discarded instead of returned to the pool. Copy route diagnostics from the plugin Details dialog.",
+                "recoverable": true,
                 "results": [],
             }),
-            other => json!({
-                "error": "retrieval_error",
-                "category": public_category(category),
+            Self::ProviderUnavailable { message } => {
+                let lower = message.to_ascii_lowercase();
+                let (error, next_action, recoverable) = if lower.contains("quarantined") {
+                    (
+                        "retrieval_plugin_quarantined",
+                        "Wait for the quarantine window to expire, then retry. If it repeats, inspect the plugin Details diagnostics.",
+                        true,
+                    )
+                } else {
+                    (
+                        "retrieval_plugin_unavailable",
+                        "Confirm the plugin is installed and enabled in Settings → Plugins, then refresh plugins.",
+                        true,
+                    )
+                };
+                json!({
+                    "error": error,
+                    "category": category,
+                    "source": source,
+                    "route": route,
+                    "message": message,
+                    "next_action": next_action,
+                    "diagnostics_hint": "Open Settings → Plugins → Details and copy route diagnostics for troubleshooting.",
+                    "recoverable": recoverable,
+                    "results": [],
+                })
+            }
+            Self::Protocol { plugin, message } => {
+                let (error, next_action) = classify_plugin_protocol_error(message);
+                json!({
+                    "error": error,
+                    "category": category,
+                    "source": source,
+                    "route": route,
+                    "plugin": plugin,
+                    "message": message,
+                    "next_action": next_action,
+                    "diagnostics_hint": "Validate the plugin against docs/retrieval-plugin-protocol.md and copy route diagnostics from Settings → Plugins → Details.",
+                    "recoverable": false,
+                    "results": [],
+                })
+            }
+            Self::ExecutionFailed { message } => json!({
+                "error": "retrieval_plugin_failed",
+                "category": category,
                 "source": source,
-                "message": other.to_string(),
+                "route": route,
+                "message": message,
+                "next_action": "Retry once. If the error repeats, inspect the plugin Details diagnostics or disable the plugin route.",
+                "diagnostics_hint": "The child process failed the request and was discarded; copy route diagnostics from Settings → Plugins → Details.",
+                "recoverable": true,
+                "results": [],
+            }),
+            Self::InvalidRequest { message } => json!({
+                "error": "invalid_retrieval_request",
+                "category": category,
+                "source": source,
+                "route": route,
+                "message": message,
+                "next_action": "Check the search/query/fetch arguments: category, source, operation, id/url/query, and max_results.",
+                "recoverable": true,
+                "results": [],
+            }),
+            Self::Cancelled => json!({
+                "error": "retrieval_cancelled",
+                "category": category,
+                "source": source,
+                "route": route,
+                "message": "Retrieval was cancelled.",
+                "next_action": "Retry if you still need this result.",
+                "recoverable": true,
                 "results": [],
             }),
         }
+    }
+}
+
+fn classify_plugin_protocol_error(message: &str) -> (&'static str, &'static str) {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("exited before response") {
+        (
+            "retrieval_plugin_process_exited",
+            "Restart or reinstall the plugin; if it repeats, inspect the plugin logs/diagnostics and validate its executable.",
+        )
+    } else if lower.contains("spawn plugin process") {
+        (
+            "retrieval_plugin_process_start_failed",
+            "Check that the plugin executable exists, is executable, and that its manifest runtime command is valid.",
+        )
+    } else if lower.contains("parse plugin response json")
+        || lower.contains("expected result/error response")
+        || lower.contains("unsupported plugin response")
+        || lower.contains("did not match request")
+        || lower.contains("initialized with unsupported protocol version")
+    {
+        (
+            "retrieval_plugin_protocol_error",
+            "Validate that the plugin speaks the local JSONL retrieval protocol documented in docs/retrieval-plugin-protocol.md.",
+        )
+    } else {
+        (
+            "retrieval_plugin_protocol_error",
+            "Inspect the plugin manifest/runtime and validate it against docs/retrieval-plugin-protocol.md.",
+        )
     }
 }
 
@@ -306,4 +417,74 @@ pub fn public_category(category: &str) -> &str {
 
 fn empty_object() -> JsonValue {
     json!({})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_source_disabled_error_points_to_plugins_settings() {
+        let value = RetrievalError::SourceDisabled {
+            category: "dataset".to_string(),
+            source_id: "geo".to_string(),
+            message: "dataset.geo is disabled. Enable it in Settings → Search.".to_string(),
+        }
+        .structured_json("dataset", "geo");
+
+        assert_eq!(value["error"], json!("source_disabled"));
+        assert_eq!(value["category"], json!("data"));
+        assert_eq!(value["route"], json!("data.geo"));
+        assert_eq!(value["recoverable"], json!(true));
+        assert!(value["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("Settings → Plugins"));
+        assert_eq!(value["results"], json!([]));
+    }
+
+    #[test]
+    fn structured_timeout_error_is_actionable() {
+        let value = RetrievalError::Timeout { seconds: 7 }.structured_json("dataset", "geo");
+
+        assert_eq!(value["error"], json!("retrieval_plugin_timeout"));
+        assert_eq!(value["route"], json!("data.geo"));
+        assert!(value["message"].as_str().unwrap().contains("7s"));
+        assert!(value["diagnostics_hint"]
+            .as_str()
+            .unwrap()
+            .contains("Timed-out plugin child processes are discarded"));
+    }
+
+    #[test]
+    fn structured_protocol_error_distinguishes_process_exit() {
+        let value = RetrievalError::Protocol {
+            plugin: Some("mock-plugin".to_string()),
+            message: "plugin exited before response".to_string(),
+        }
+        .structured_json("dataset", "geo");
+
+        assert_eq!(value["error"], json!("retrieval_plugin_process_exited"));
+        assert_eq!(value["plugin"], json!("mock-plugin"));
+        assert_eq!(value["recoverable"], json!(false));
+        assert!(value["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("Restart or reinstall"));
+    }
+
+    #[test]
+    fn structured_quarantine_error_has_retry_guidance() {
+        let value = RetrievalError::ProviderUnavailable {
+            message: "retrieval plugin route dataset.geo via mock is quarantined for 30s after 3 consecutive failures. Last error: upstream failed".to_string(),
+        }
+        .structured_json("dataset", "geo");
+
+        assert_eq!(value["error"], json!("retrieval_plugin_quarantined"));
+        assert_eq!(value["recoverable"], json!(true));
+        assert!(value["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("quarantine window"));
+    }
 }

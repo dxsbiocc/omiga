@@ -42,5 +42,18 @@ describe("chatScrollState", () => {
       }),
     ).toBe(false);
   });
-});
 
+  it("does not show the jump button for empty transcript chrome overflow", () => {
+    expect(
+      shouldShowJumpToLatestButton(
+        {
+          scrollTop: 0,
+          clientHeight: 600,
+          scrollHeight: 720,
+        },
+        undefined,
+        false,
+      ),
+    ).toBe(false);
+  });
+});

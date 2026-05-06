@@ -8,6 +8,7 @@
 pub mod agent;
 pub mod ask_user_question;
 pub mod bash;
+pub mod connector;
 pub mod enter_plan_mode;
 pub mod env_store;
 pub mod exit_plan_mode;
@@ -69,6 +70,7 @@ pub enum ToolKind {
     Fetch,
     Query,
     Search,
+    Connector,
     TodoWrite,
     NotebookEdit,
     Visualization,
@@ -118,6 +120,7 @@ impl fmt::Display for ToolKind {
             ToolKind::Fetch => write!(f, "fetch"),
             ToolKind::Query => write!(f, "query"),
             ToolKind::Search => write!(f, "search"),
+            ToolKind::Connector => write!(f, "connector"),
             ToolKind::TodoWrite => write!(f, "todo_write"),
             ToolKind::NotebookEdit => write!(f, "notebook_edit"),
             ToolKind::Visualization => write!(f, "visualization"),
@@ -157,6 +160,7 @@ pub enum Tool {
     Fetch(fetch::FetchArgs),
     Query(query::QueryArgs),
     Search(search::SearchArgs),
+    Connector(connector::ConnectorArgs),
     TodoWrite(todo_write::TodoWriteArgs),
     NotebookEdit(notebook_edit::NotebookEditArgs),
     Visualization(visualization::VisualizationArgs),
@@ -197,6 +201,7 @@ impl Tool {
             Tool::Fetch(_) => ToolKind::Fetch,
             Tool::Query(_) => ToolKind::Query,
             Tool::Search(_) => ToolKind::Search,
+            Tool::Connector(_) => ToolKind::Connector,
             Tool::TodoWrite(_) => ToolKind::TodoWrite,
             Tool::NotebookEdit(_) => ToolKind::NotebookEdit,
             Tool::Visualization(_) => ToolKind::Visualization,
@@ -234,6 +239,7 @@ impl Tool {
             Tool::Fetch(_) => "fetch",
             Tool::Query(_) => "query",
             Tool::Search(_) => "search",
+            Tool::Connector(_) => "connector",
             Tool::TodoWrite(_) => "TodoWrite",
             Tool::NotebookEdit(_) => "NotebookEdit",
             Tool::Visualization(_) => "Visualization",
@@ -271,6 +277,7 @@ impl Tool {
             Tool::Fetch(_) => fetch::DESCRIPTION,
             Tool::Query(_) => query::DESCRIPTION,
             Tool::Search(_) => search::DESCRIPTION,
+            Tool::Connector(_) => connector::DESCRIPTION,
             Tool::TodoWrite(_) => todo_write::DESCRIPTION,
             Tool::NotebookEdit(_) => notebook_edit::DESCRIPTION,
             Tool::Visualization(_) => visualization::DESCRIPTION,
@@ -311,6 +318,7 @@ impl Tool {
             Tool::Fetch(args) => fetch::FetchTool::execute(ctx, args).await?,
             Tool::Query(args) => query::QueryTool::execute(ctx, args).await?,
             Tool::Search(args) => search::SearchTool::execute(ctx, args).await?,
+            Tool::Connector(args) => connector::ConnectorTool::execute(ctx, args).await?,
             Tool::TodoWrite(args) => todo_write::TodoWriteTool::execute(ctx, args).await?,
             Tool::NotebookEdit(args) => notebook_edit::NotebookEditTool::execute(ctx, args).await?,
             Tool::Visualization(args) => {
@@ -441,6 +449,12 @@ impl Tool {
                     message: format!("Invalid search arguments: {}", e),
                 })?;
                 Ok(Tool::Search(args))
+            }
+            ToolKind::Connector => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid connector arguments: {}", e),
+                })?;
+                Ok(Tool::Connector(args))
             }
             ToolKind::TodoWrite => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
@@ -579,7 +593,10 @@ impl Tool {
 
     /// Parse tool from tool name string and JSON arguments
     pub fn from_json_str(tool_name: &str, json: &str) -> Result<Self, ToolError> {
-        let kind = match tool_name {
+        let normalized_tool_name = normalize_legacy_retrieval_tool_name(tool_name);
+        let normalized_json =
+            normalize_legacy_retrieval_tool_arguments(tool_name, &normalized_tool_name, json);
+        let kind = match normalized_tool_name.as_str() {
             "bash" => ToolKind::Bash,
             "file_edit" => ToolKind::FileEdit,
             "file_read" => ToolKind::FileRead,
@@ -589,6 +606,7 @@ impl Tool {
             "fetch" => ToolKind::Fetch,
             "query" => ToolKind::Query,
             "search" => ToolKind::Search,
+            "connector" | "Connector" => ToolKind::Connector,
             "todo_write" => ToolKind::TodoWrite,
             "notebook_edit" => ToolKind::NotebookEdit,
             "visualization" => ToolKind::Visualization,
@@ -617,7 +635,7 @@ impl Tool {
                 })
             }
         };
-        Self::from_json(kind, json)
+        Self::from_json(kind, &normalized_json)
     }
 }
 
@@ -1216,6 +1234,7 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         fetch::schema(),
         query::schema(),
         search::schema(),
+        connector::schema(),
         todo_write::schema(),
         visualization::schema(),
         sleep::schema(),
@@ -1246,6 +1265,183 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         v.push(skill_invoke::schema());
     }
     v
+}
+
+fn tool_schema_model_order(name: &str) -> (u8, u8) {
+    match name {
+        // Retrieval is the preferred model-facing path for information access.
+        // Keep these before `bash` so models see the safer, typed tools first.
+        "recall" => (0, 0),
+        "search" => (0, 1),
+        "query" => (0, 2),
+        "fetch" => (0, 3),
+        "tool_search" | "ToolSearch" => (0, 4),
+
+        // Read-only repo/file discovery tools.
+        "file_read" => (1, 0),
+        "ripgrep" | "grep" => (1, 1),
+        "glob" => (1, 2),
+        "connector" => (1, 3),
+        "list_mcp_resources" => (1, 4),
+        "read_mcp_resource" => (1, 5),
+
+        // Mutating tools.
+        "file_edit" => (2, 0),
+        "file_write" => (2, 1),
+        "notebook_edit" => (2, 2),
+        "todo_write" => (2, 3),
+
+        // Orchestration and app-specific tools.
+        "agent" | "Agent" => (3, 0),
+        "task_create" | "TaskCreate" => (3, 1),
+        "task_get" | "TaskGet" => (3, 2),
+        "task_list" | "TaskList" => (3, 3),
+        "task_update" | "TaskUpdate" => (3, 4),
+        "task_output" | "TaskOutput" => (3, 5),
+        "task_stop" | "TaskStop" => (3, 6),
+        "sleep" => (3, 7),
+        "ask_user_question" | "AskUserQuestion" => (3, 8),
+        "skill_manage" | "skill_config" | "list_skills" | "skill_view" | "Skill" => (3, 9),
+        "workflow" | "Workflow" => (3, 10),
+        "visualization" => (3, 11),
+        "enter_plan_mode" | "EnterPlanMode" => (3, 12),
+        "exit_plan_mode" | "ExitPlanMode" => (3, 13),
+
+        // Shell is intentionally late: use it for terminal operations only
+        // after dedicated tools are not appropriate.
+        "bash" => (9, 0),
+
+        _ => (8, 0),
+    }
+}
+
+pub fn sort_tool_schemas_for_model(schemas: &mut [ToolSchema]) {
+    schemas.sort_by(|a, b| {
+        tool_schema_model_order(&a.name)
+            .cmp(&tool_schema_model_order(&b.name))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+}
+
+fn is_legacy_pubmed_search_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "mcp__pubmed__pubmed_search_articles"
+            | "mcp__pubmed__pubmed_search"
+            | "mcp__pubmed__search_articles"
+            | "pubmed.pubmed_search_articles"
+            | "pubmed.pubmed_search"
+            | "pubmed_search_articles"
+            | "pubmed_search"
+    )
+}
+
+fn is_legacy_pubmed_fetch_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "mcp__pubmed__pubmed_fetch_article"
+            | "mcp__pubmed__pubmed_fetch_articles"
+            | "mcp__pubmed__pubmed_get_article"
+            | "mcp__pubmed__fetch_article"
+            | "pubmed.pubmed_fetch_article"
+            | "pubmed.pubmed_fetch_articles"
+            | "pubmed.pubmed_get_article"
+            | "pubmed_fetch_article"
+            | "pubmed_fetch_articles"
+            | "pubmed_get_article"
+    )
+}
+
+pub fn normalize_legacy_retrieval_tool_name(tool_name: &str) -> String {
+    let lower = tool_name.to_ascii_lowercase();
+    match lower.as_str() {
+        "web_search" | "websearch" => "search".to_string(),
+        "web_fetch" | "webfetch" => "fetch".to_string(),
+        _ if is_legacy_pubmed_search_tool(tool_name) => "search".to_string(),
+        _ if is_legacy_pubmed_fetch_tool(tool_name) => "fetch".to_string(),
+        _ => tool_name.to_string(),
+    }
+}
+
+fn json_string_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter().find_map(|key| {
+        object.get(*key).and_then(|value| match value {
+            serde_json::Value::String(s) => {
+                let trimmed = s.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+    })
+}
+
+pub fn normalize_legacy_retrieval_tool_arguments(
+    original_tool_name: &str,
+    normalized_tool_name: &str,
+    arguments: &str,
+) -> String {
+    if !matches!(normalized_tool_name, "search" | "fetch") {
+        return arguments.to_string();
+    }
+
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return arguments.to_string();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return arguments.to_string();
+    };
+
+    let is_pubmed_search = is_legacy_pubmed_search_tool(original_tool_name);
+    let is_pubmed_fetch = is_legacy_pubmed_fetch_tool(original_tool_name);
+
+    if is_pubmed_search || is_pubmed_fetch {
+        object
+            .entry("category".to_string())
+            .or_insert_with(|| serde_json::json!("literature"));
+        object
+            .entry("source".to_string())
+            .or_insert_with(|| serde_json::json!("pubmed"));
+
+        if normalized_tool_name == "search" && !object.contains_key("query") {
+            if let Some(query) = json_string_field(object, &["search_query", "q", "term", "title"])
+            {
+                object.insert("query".to_string(), serde_json::json!(query));
+            }
+        }
+        if normalized_tool_name == "search" && !object.contains_key("max_results") {
+            if let Some(value) = object
+                .get("retmax")
+                .or_else(|| object.get("limit"))
+                .or_else(|| object.get("maxResults"))
+                .cloned()
+            {
+                object.insert("max_results".to_string(), value);
+            }
+        }
+        if normalized_tool_name == "fetch" && !object.contains_key("id") {
+            if let Some(id) = json_string_field(
+                object,
+                &["pmid", "pubmed_id", "article_id", "accession", "uid"],
+            ) {
+                object.insert("id".to_string(), serde_json::json!(id));
+            }
+        }
+    } else {
+        object
+            .entry("category".to_string())
+            .or_insert_with(|| serde_json::json!("web"));
+        if normalized_tool_name == "search" && !object.contains_key("query") {
+            if let Some(query) = json_string_field(object, &["search_query", "q"]) {
+                object.insert("query".to_string(), serde_json::json!(query));
+            }
+        }
+    }
+
+    serde_json::to_string(&value).unwrap_or_else(|_| arguments.to_string())
 }
 
 /// JSON schema for a tool (for LLM function calling)
@@ -1287,6 +1483,7 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
             | "fetch"
             | "query"
             | "search"
+            | "connector"
             | "ToolSearch"
             | "tool_search"
             | "visualization"
@@ -1342,6 +1539,94 @@ mod tool_enum_tests {
 
         let t = Tool::from_json_str("grep", r#"{"pattern":"x"}"#).unwrap();
         assert!(matches!(t, Tool::Grep(_)));
+    }
+
+    #[test]
+    fn legacy_web_aliases_route_to_unified_tools() {
+        let t = Tool::from_json_str("web_search", r#"{"query":"TP53 lung cancer"}"#).unwrap();
+        match t {
+            Tool::Search(args) => {
+                assert_eq!(args.category, "web");
+                assert_eq!(args.query, "TP53 lung cancer");
+            }
+            other => panic!("expected Search, got {:?}", other.kind()),
+        }
+
+        let t = Tool::from_json_str("web_fetch", r#"{"url":"https://example.com"}"#).unwrap();
+        match t {
+            Tool::Fetch(args) => {
+                assert_eq!(args.category, "web");
+                assert_eq!(args.url.as_deref(), Some("https://example.com"));
+            }
+            other => panic!("expected Fetch, got {:?}", other.kind()),
+        }
+    }
+
+    #[test]
+    fn legacy_pubmed_mcp_aliases_route_to_unified_retrieval_tools() {
+        let t = Tool::from_json_str(
+            "mcp__pubmed__pubmed_search_articles",
+            r#"{"term":"BRCA2","retmax":3}"#,
+        )
+        .unwrap();
+        match t {
+            Tool::Search(args) => {
+                assert_eq!(args.category, "literature");
+                assert_eq!(args.source.as_deref(), Some("pubmed"));
+                assert_eq!(args.query, "BRCA2");
+                assert_eq!(args.max_results, Some(3));
+            }
+            other => panic!("expected Search, got {:?}", other.kind()),
+        }
+
+        let t =
+            Tool::from_json_str("pubmed.pubmed_fetch_article", r#"{"pmid":"12345678"}"#).unwrap();
+        match t {
+            Tool::Fetch(args) => {
+                assert_eq!(args.category, "literature");
+                assert_eq!(args.source.as_deref(), Some("pubmed"));
+                assert_eq!(args.id.as_deref(), Some("12345678"));
+            }
+            other => panic!("expected Fetch, got {:?}", other.kind()),
+        }
+    }
+
+    #[test]
+    fn model_tool_schema_order_prioritizes_retrieval_before_bash() {
+        let mut schemas = all_tool_schemas(true);
+        sort_tool_schemas_for_model(&mut schemas);
+        let position = |name: &str| {
+            schemas
+                .iter()
+                .position(|schema| schema.name == name)
+                .unwrap_or_else(|| panic!("{name} schema should exist"))
+        };
+
+        let bash = position("bash");
+        assert!(position("search") < bash);
+        assert!(position("query") < bash);
+        assert!(position("fetch") < bash);
+        assert!(position("recall") < bash);
+    }
+
+    #[test]
+    fn tool_schema_catalog_exposes_unified_retrieval_tools_only() {
+        let names: HashSet<_> = all_tool_schemas(true)
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect();
+
+        assert!(names.contains("search"));
+        assert!(names.contains("query"));
+        assert!(names.contains("fetch"));
+        assert!(
+            !names.contains("web_search"),
+            "legacy web_search must remain an execution compatibility alias, not a model-visible schema"
+        );
+        assert!(
+            !names.contains("web_fetch"),
+            "legacy web_fetch must remain an execution compatibility alias, not a model-visible schema"
+        );
     }
 
     #[test]

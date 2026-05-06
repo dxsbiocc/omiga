@@ -58,6 +58,10 @@ fn message_record_to_api(rec: MessageRecord) -> Message {
     }
 }
 
+fn clean_session_search_snippet(snippet: String) -> String {
+    snippet.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// List all sessions
 #[tauri::command]
 pub async fn list_sessions(state: State<'_, OmigaAppState>) -> CommandResult<Vec<SessionSummary>> {
@@ -76,6 +80,37 @@ pub async fn list_sessions(state: State<'_, OmigaAppState>) -> CommandResult<Vec
             project_path: s.project_path,
             message_count: s.message_count as usize,
             updated_at: s.updated_at,
+        })
+        .collect())
+}
+
+/// Search sessions by title, project path, or message body.
+#[tauri::command]
+pub async fn search_sessions(
+    state: State<'_, OmigaAppState>,
+    query: String,
+    limit: Option<i64>,
+) -> CommandResult<Vec<SessionSearchSummary>> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let repo = &*state.repo;
+    let sessions = repo
+        .search_sessions(q, limit.unwrap_or(50))
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to search sessions: {}", e)))?;
+
+    Ok(sessions
+        .into_iter()
+        .map(|s| SessionSearchSummary {
+            id: s.id,
+            name: s.name,
+            project_path: s.project_path,
+            message_count: s.message_count as usize,
+            updated_at: s.updated_at,
+            match_snippet: s.match_snippet.map(clean_session_search_snippet),
         })
         .collect())
 }
@@ -1007,13 +1042,18 @@ pub async fn prewarm_session(
     //    when stdio servers start cold.  We spawn and forget; send_message will reuse the
     //    warm cache if it completes in time, or re-discover if not.
     {
+        let current_mcp_config_signature =
+            crate::domain::mcp::merged_mcp_servers_signature(&project_root);
         let hit = state
             .chat
             .mcp_tool_cache
             .lock()
             .await
             .get(&project_root)
-            .filter(|c| c.cached_at.elapsed() < MCP_TOOL_CACHE_TTL)
+            .filter(|c| {
+                c.cached_at.elapsed() < MCP_TOOL_CACHE_TTL
+                    && c.config_signature == current_mcp_config_signature
+            })
             .is_some();
 
         if !hit {
@@ -1021,6 +1061,7 @@ pub async fn prewarm_session(
             let root = project_root.clone();
             tokio::spawn(async move {
                 let mcp_timeout = std::time::Duration::from_secs(10);
+                let config_signature = crate::domain::mcp::merged_mcp_servers_signature(&root);
                 let schemas =
                     crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(&root, mcp_timeout)
                         .await;
@@ -1029,6 +1070,7 @@ pub async fn prewarm_session(
                     McpToolCache {
                         schemas,
                         cached_at: std::time::Instant::now(),
+                        config_signature,
                     },
                 );
             });
@@ -1047,6 +1089,17 @@ pub struct SessionSummary {
     pub project_path: String,
     pub message_count: usize,
     pub updated_at: String,
+}
+
+/// Session search summary (for search modal)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionSearchSummary {
+    pub id: String,
+    pub name: String,
+    pub project_path: String,
+    pub message_count: usize,
+    pub updated_at: String,
+    pub match_snippet: Option<String>,
 }
 
 /// A chat message

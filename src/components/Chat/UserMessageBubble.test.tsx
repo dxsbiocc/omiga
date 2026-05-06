@@ -58,6 +58,13 @@ describe("UserMessageBubble", () => {
     expect(html).toContain("aria-label=\"复制\"");
   });
 
+  it("renders selected plugin chips with # to avoid @ file conflicts", () => {
+    const html = renderBubble({ selectedPluginIds: ["sample@market"] });
+
+    expect(html).toContain("#sample@market");
+    expect(html).toContain("user-msg-plugin-chip");
+  });
+
   it("splits workflow slash commands so command chips flow inline with body text", () => {
     const command = splitUserMessageInlineCommand(
       "/plan 提取文件中与 QS 核心相关的分组、基因",

@@ -26,7 +26,10 @@ use crate::domain::permissions::{
 };
 use crate::domain::session::{AgentTask, TodoItem};
 use crate::domain::skills;
-use crate::domain::tools::{Tool, ToolContext, WebSearchApiKeys};
+use crate::domain::tools::{
+    normalize_legacy_retrieval_tool_arguments, normalize_legacy_retrieval_tool_name, Tool,
+    ToolContext, WebSearchApiKeys,
+};
 use crate::infrastructure::streaming::StreamOutputItem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -37,6 +40,25 @@ const PARALLEL_TOOL_TIMEOUT_SECS: u64 = 45;
 
 fn parallel_tool_timeout_message(tool_name: &str) -> String {
     format!("Tool `{tool_name}` timed out after {PARALLEL_TOOL_TIMEOUT_SECS}s")
+}
+
+fn normalize_legacy_web_tool_name(tool_name: &str) -> String {
+    normalize_legacy_retrieval_tool_name(tool_name)
+}
+
+fn normalize_legacy_web_tool_arguments(
+    original_tool_name: &str,
+    normalized_tool_name: &str,
+    arguments: &str,
+) -> String {
+    normalize_legacy_retrieval_tool_arguments(original_tool_name, normalized_tool_name, arguments)
+}
+
+fn normalize_runtime_tool_call(tool_name: &str, arguments: &str) -> (String, String) {
+    let normalized_name = normalize_legacy_web_tool_name(tool_name);
+    let normalized_arguments =
+        normalize_legacy_web_tool_arguments(tool_name, &normalized_name, arguments);
+    (normalized_name, normalized_arguments)
 }
 
 fn working_memory_query_text(
@@ -193,6 +215,14 @@ pub(super) async fn execute_tool_calls(
     // (tool_use_id, output, is_error)
     let mut results = Vec::new();
     let deny_entries = load_merged_permission_deny_rule_entries(project_root);
+    let normalized_tool_calls = tool_calls
+        .iter()
+        .map(|(tool_use_id, tool_name, arguments)| {
+            let (tool_name, arguments) = normalize_runtime_tool_call(tool_name, arguments);
+            (tool_use_id.clone(), tool_name, arguments)
+        })
+        .collect::<Vec<_>>();
+    let tool_calls = normalized_tool_calls.as_slice();
 
     // Pre-compute permission + subagent-filter results for every call (fast, sequential).
     // Calls that pass become futures; blocked calls become immediate error results.
@@ -1880,6 +1910,21 @@ mod tests {
             parallel_tool_timeout_message("search"),
             "Tool `search` timed out after 45s"
         );
+    }
+
+    #[test]
+    fn runtime_normalizes_legacy_pubmed_mcp_to_unified_search() {
+        let (name, args) = normalize_runtime_tool_call(
+            "mcp__pubmed__pubmed_search_articles",
+            r#"{"term":"lung cancer","retmax":4}"#,
+        );
+
+        assert_eq!(name, "search");
+        let value: serde_json::Value = serde_json::from_str(&args).unwrap();
+        assert_eq!(value["category"], "literature");
+        assert_eq!(value["source"], "pubmed");
+        assert_eq!(value["query"], "lung cancer");
+        assert_eq!(value["max_results"], 4);
     }
 
     #[test]

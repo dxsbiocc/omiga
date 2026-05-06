@@ -11,8 +11,13 @@ fn default_max_results() -> Option<u32> {
     Some(5)
 }
 
+fn default_category() -> String {
+    "web".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchArgs {
+    #[serde(default = "default_category")]
     pub category: String,
     #[serde(default)]
     pub source: Option<String>,

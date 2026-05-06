@@ -18,7 +18,7 @@ describe("composerPathMentions", () => {
   it("parses nested @ file picker queries into directory and basename filter", () => {
     expect(parseComposerFileMentionInput("@")).toEqual({
       active: true,
-      kind: "mixed",
+      kind: "file",
       prefix: "",
       query: "",
       directory: "",
@@ -26,7 +26,7 @@ describe("composerPathMentions", () => {
     });
     expect(parseComposerFileMentionInput("@src/components/Cha")).toEqual({
       active: true,
-      kind: "mixed",
+      kind: "file",
       prefix: "",
       query: "src/components/Cha",
       directory: "src/components",
@@ -34,7 +34,7 @@ describe("composerPathMentions", () => {
     });
     expect(parseComposerFileMentionInput("@src//components/")).toEqual({
       active: true,
-      kind: "mixed",
+      kind: "file",
       prefix: "",
       query: "src/components/",
       directory: "src/components",
@@ -50,8 +50,8 @@ describe("composerPathMentions", () => {
     });
   });
 
-  it("parses explicit @plugin: and @file: namespaces", () => {
-    expect(parseComposerFileMentionInput("@plugin:notebook")).toEqual({
+  it("parses # plugin mentions and explicit @file: namespaces", () => {
+    expect(parseComposerFileMentionInput("#notebook")).toEqual({
       active: true,
       kind: "plugin",
       prefix: "plugin",
@@ -59,13 +59,13 @@ describe("composerPathMentions", () => {
       directory: "",
       filter: "notebook",
     });
-    expect(parseComposerFileMentionInput("@plugin:owner/notebook")).toEqual({
+    expect(parseComposerFileMentionInput("#public-dataset-sources@omiga-curated")).toEqual({
       active: true,
       kind: "plugin",
       prefix: "plugin",
-      query: "owner/notebook",
+      query: "public-dataset-sources@omiga-curated",
       directory: "",
-      filter: "owner/notebook",
+      filter: "public-dataset-sources@omiga-curated",
     });
     expect(parseComposerFileMentionInput("@file:src/components/")).toEqual({
       active: true,
@@ -74,6 +74,11 @@ describe("composerPathMentions", () => {
       query: "src/components/",
       directory: "src/components",
       filter: "",
+    });
+    expect(parseComposerFileMentionInput("@plugin:notebook")).toMatchObject({
+      active: true,
+      kind: "file",
+      query: "plugin:notebook",
     });
   });
 

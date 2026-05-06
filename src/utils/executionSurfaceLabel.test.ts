@@ -35,4 +35,31 @@ describe("getExecutionSurfaceView", () => {
       kind: "finished",
     });
   });
+
+  it("does not keep showing the previous tool hint after the tool row completed", () => {
+    expect(
+      getExecutionSurfaceView(
+        [
+          { id: "connect", title: "等待响应", status: "done" },
+          { id: "think", title: "推理中", status: "done" },
+          {
+            id: "tool-fetch-1",
+            title: "fetch",
+            status: "done",
+            toolName: "fetch",
+          },
+        ],
+        {
+          isConnecting: false,
+          isStreaming: true,
+          waitingFirstChunk: false,
+          toolHintFallback: "fetch",
+        },
+      ),
+    ).toMatchObject({
+      label: "解析输出",
+      kind: "generating",
+      toolName: null,
+    });
+  });
 });

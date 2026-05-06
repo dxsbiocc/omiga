@@ -23,6 +23,7 @@ pub const CODEX_PLUGIN_MANIFEST_PATH: &str = ".codex-plugin/plugin.json";
 const MARKETPLACE_FILE_NAME: &str = "marketplace.json";
 const USER_PLUGINS_CONFIG_FILE: &str = "plugins/config.json";
 const PLUGINS_CACHE_DIR: &str = "plugins/cache";
+const SOURCE_RUNNERS_DIR: &str = "source_runners";
 const DEFAULT_PLUGIN_VERSION: &str = "local";
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -476,6 +477,7 @@ pub fn format_plugins_system_section(outcome: &PluginLoadOutcome) -> Option<Stri
     lines.push("### How to use plugins".to_string());
     lines.push(
         "- Plugins are not invoked directly; use their underlying skills, MCP tools, or explicitly available app tools.\n\
+         - Retrieval plugin routes are local Search / Query / Fetch routes, not MCP tool names. If a plugin lists `retrieval routes: category.source`, call `search`, `query`, or `fetch` with that category/source.\n\
          - If the user explicitly names a plugin, prefer capabilities associated with that plugin for that turn.\n\
          - If a plugin contributes skills, those skills also appear in the Skills list and should be loaded with `skill_view` / `skill` before use.\n\
          - Do not assume VS Code extension UI/runtime behavior from an Omiga plugin."
@@ -510,7 +512,7 @@ pub fn format_selected_plugins_system_section(
 
     let mut lines = vec![
         "## Explicitly selected plugins for this turn".to_string(),
-        "The user selected the following Omiga plugins with the composer @ picker. Prefer their capabilities for this turn when relevant; if a selected plugin is unavailable, explain that briefly and continue with the best fallback.".to_string(),
+        "The user selected the following Omiga plugins with the composer # picker. Prefer their capabilities for this turn when relevant; if a selected plugin is unavailable, explain that briefly and continue with the best fallback.".to_string(),
         String::new(),
     ];
 
@@ -1059,6 +1061,7 @@ fn load_configured_plugin(
 }
 
 fn load_plugins_from_config(config: &PluginConfigFile, cache_root: &Path) -> PluginLoadOutcome {
+    repair_configured_builtin_source_runner_assets(config, cache_root);
     let mut configured = config.plugins.iter().collect::<Vec<_>>();
     configured.sort_by(|(left, _), (right, _)| left.cmp(right));
     let plugins = configured
@@ -1226,6 +1229,7 @@ pub fn list_plugin_marketplaces(
     resource_dir: Option<&Path>,
 ) -> Vec<PluginMarketplaceEntry> {
     let config = read_config();
+    let cache_root = plugin_cache_root();
     let mut out = Vec::new();
     let mut listed_ids = HashSet::new();
     for path in marketplace_paths(project_root, resource_dir) {
@@ -1236,6 +1240,15 @@ pub fn list_plugin_marketplaces(
                 continue;
             }
         };
+        if let Err(err) =
+            copy_marketplace_source_runner_assets(&path, &marketplace.name, &cache_root)
+        {
+            tracing::warn!(
+                path = %path.display(),
+                marketplace = %marketplace.name,
+                "failed to copy plugin source runner assets: {err}"
+            );
+        }
         let mut plugins = Vec::new();
         for entry in &marketplace.plugins {
             match plugin_summary_from_marketplace_entry(&path, &marketplace.name, entry, &config) {
@@ -1260,7 +1273,6 @@ pub fn list_plugin_marketplaces(
             plugins,
         });
     }
-    let cache_root = plugin_cache_root();
     let installed_plugins = unlisted_installed_plugin_summaries(&config, &listed_ids, &cache_root);
     if !installed_plugins.is_empty() {
         out.push(PluginMarketplaceEntry {
@@ -1516,6 +1528,44 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn copy_marketplace_source_runner_assets(
+    marketplace_path: &Path,
+    marketplace_name: &str,
+    cache_root: &Path,
+) -> Result<bool, String> {
+    let source = marketplace_root_dir(marketplace_path).join(SOURCE_RUNNERS_DIR);
+    if !source.is_dir() {
+        return Ok(false);
+    }
+    let target = cache_root.join(marketplace_name).join(SOURCE_RUNNERS_DIR);
+    copy_dir_recursive(&source, &target)?;
+    Ok(true)
+}
+
+fn repair_configured_builtin_source_runner_assets(config: &PluginConfigFile, cache_root: &Path) {
+    let marketplace_path = dev_builtin_marketplace_path();
+    let Ok(marketplace) = read_marketplace(&marketplace_path) else {
+        return;
+    };
+    let has_configured_plugin = config.plugins.keys().any(|key| {
+        PluginId::parse(key)
+            .map(|plugin_id| plugin_id.marketplace == marketplace.name)
+            .unwrap_or(false)
+    });
+    if !has_configured_plugin {
+        return;
+    }
+    if let Err(err) =
+        copy_marketplace_source_runner_assets(&marketplace_path, &marketplace.name, cache_root)
+    {
+        tracing::warn!(
+            marketplace = %marketplace.name,
+            path = %marketplace_path.display(),
+            "failed to repair plugin source runner assets: {err}"
+        );
+    }
+}
+
 fn remove_path_if_exists(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
@@ -1580,6 +1630,11 @@ pub fn install_plugin(
     }
     let plugin_id = PluginId::new(&entry.name, &marketplace.name)?;
     let version = sanitize_version(manifest.version.as_deref());
+    copy_marketplace_source_runner_assets(
+        marketplace_path,
+        &marketplace.name,
+        &plugin_cache_root(),
+    )?;
     let installed_path =
         replace_plugin_root_atomically(&source_path, &plugin_base_root(&plugin_id), &version)?;
     set_plugin_enabled(&plugin_id.key(), true)?;
@@ -1712,6 +1767,44 @@ mod tests {
     }
 
     #[test]
+    fn marketplace_source_runners_are_copied_to_cache_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let marketplace_root = tmp.path().join("marketplace");
+        let source_runners = marketplace_root.join(SOURCE_RUNNERS_DIR);
+        fs::create_dir_all(&source_runners).unwrap();
+        fs::write(
+            source_runners.join("public_knowledge_sources.py"),
+            "print('runner')\n",
+        )
+        .unwrap();
+        fs::write(
+            marketplace_root.join(MARKETPLACE_FILE_NAME),
+            r#"{"name":"omiga-curated","plugins":[]}"#,
+        )
+        .unwrap();
+        let cache_root = tmp.path().join("cache");
+
+        let copied = copy_marketplace_source_runner_assets(
+            &marketplace_root.join(MARKETPLACE_FILE_NAME),
+            "omiga-curated",
+            &cache_root,
+        )
+        .unwrap();
+
+        assert!(copied);
+        assert_eq!(
+            fs::read_to_string(
+                cache_root
+                    .join("omiga-curated")
+                    .join(SOURCE_RUNNERS_DIR)
+                    .join("public_knowledge_sources.py")
+            )
+            .unwrap(),
+            "print('runner')\n"
+        );
+    }
+
+    #[test]
     fn plugin_load_outcome_collects_effective_capabilities() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cache_root = tmp.path().join("cache");
@@ -1739,7 +1832,7 @@ mod tests {
             vec![plugin_root.join("skills")]
         );
         match outcome.effective_mcp_servers().get("sample") {
-            Some(McpServerConfig::Url(url)) => assert_eq!(url, "https://sample.example/mcp"),
+            Some(McpServerConfig::Url { url, .. }) => assert_eq!(url, "https://sample.example/mcp"),
             other => panic!("expected sample URL MCP server, got {other:?}"),
         }
         assert_eq!(outcome.effective_apps(), vec!["calendar".to_string()]);
@@ -1758,7 +1851,7 @@ mod tests {
         let mut mcp_servers = HashMap::new();
         mcp_servers.insert(
             "sample".to_string(),
-            McpServerConfig::Url("https://sample.example/mcp".to_string()),
+            McpServerConfig::Url { url: "https://sample.example/mcp".to_string(), headers: HashMap::new() },
         );
         let outcome = PluginLoadOutcome::from_plugins(vec![LoadedPlugin {
             id: "sample@market".to_string(),
@@ -1819,7 +1912,7 @@ mod tests {
         let mut mcp_servers = HashMap::new();
         mcp_servers.insert(
             "sample".to_string(),
-            McpServerConfig::Url("https://sample.example/mcp".to_string()),
+            McpServerConfig::Url { url: "https://sample.example/mcp".to_string(), headers: HashMap::new() },
         );
         let outcome = PluginLoadOutcome::from_plugins(vec![LoadedPlugin {
             id: "sample@market".to_string(),
@@ -1847,6 +1940,7 @@ mod tests {
 
         assert!(section.contains("## Explicitly selected plugins for this turn"));
         assert_eq!(section.matches("Sample Plugin").count(), 1);
+        assert!(section.contains("composer # picker"));
         assert!(section.contains("Prefer their capabilities"));
         assert!(section.contains("missing@market"));
         assert!(section.contains("do not invent capabilities"));
@@ -1887,7 +1981,7 @@ mod tests {
         let servers = load_plugins_from_config(&config, &cache_root).effective_mcp_servers();
 
         match servers.get("sample") {
-            Some(McpServerConfig::Url(url)) => {
+            Some(McpServerConfig::Url { url, .. }) => {
                 assert_eq!(url, "https://zeta.example/mcp")
             }
             other => panic!("expected zeta to win duplicate MCP key, got {other:?}"),

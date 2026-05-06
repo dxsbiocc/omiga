@@ -29,7 +29,10 @@ use crate::domain::runtime_constraints::{
 use crate::domain::session::SessionCodec;
 use crate::domain::session::{Session, ToolCall};
 use crate::domain::skills;
-use crate::domain::tools::{all_tool_schemas, ToolContext, ToolSchema};
+use crate::domain::tools::{
+    all_tool_schemas, normalize_legacy_retrieval_tool_arguments,
+    normalize_legacy_retrieval_tool_name, sort_tool_schemas_for_model, ToolContext, ToolSchema,
+};
 use crate::errors::{ChatError, OmigaError};
 use crate::infrastructure::streaming::StreamOutputItem;
 use crate::llm::{
@@ -328,11 +331,14 @@ fn api_messages_to_llm(messages: &[crate::api::Message]) -> Vec<LlmMessage> {
                 .iter()
                 .map(|block| match block {
                     ContentBlock::Text { text } => LlmContent::Text { text: text.clone() },
-                    ContentBlock::ToolUse { id, name, input } => LlmContent::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        arguments: input.clone(),
-                    },
+                    ContentBlock::ToolUse { id, name, input } => {
+                        let (name, arguments) = normalize_llm_tool_history_for_model(name, input);
+                        LlmContent::ToolUse {
+                            id: id.clone(),
+                            name,
+                            arguments,
+                        }
+                    }
                     ContentBlock::ToolResult {
                         tool_use_id,
                         content,
@@ -1259,6 +1265,18 @@ async fn append_preflight_stage_failed_event(
         },
     )
     .await;
+}
+
+fn normalize_llm_tool_history_for_model(
+    name: &str,
+    input: &serde_json::Value,
+) -> (String, serde_json::Value) {
+    let normalized_name = normalize_legacy_retrieval_tool_name(name);
+    let serialized_input = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+    let normalized_input =
+        normalize_legacy_retrieval_tool_arguments(name, &normalized_name, &serialized_input);
+    let value = serde_json::from_str(&normalized_input).unwrap_or_else(|_| input.clone());
+    (normalized_name, value)
 }
 
 /// Send a message to Claude and get a streaming response
@@ -2403,6 +2421,12 @@ pub async fn send_message(
     {
         prompt_parts.push(selected_plugins_system_section);
     }
+    let connector_catalog = crate::domain::connectors::list_connector_catalog();
+    if let Some(connectors_system_section) =
+        crate::domain::connectors::format_connectors_system_section(&connector_catalog)
+    {
+        prompt_parts.push(connectors_system_section);
+    }
     // Memory navigation guide — always injected to override the model's default
     // "I have no cross-session memory" belief and tell it where to look.
     let nav = memory_nav.trim().to_string();
@@ -2876,9 +2900,11 @@ pub async fn send_message(
                 "built-in tool schemas after permissions.deny filter"
             );
         }
-        built.sort_by(|a, b| a.name.cmp(&b.name));
+        sort_tool_schemas_for_model(&mut built);
         let base_names: HashSet<String> = built.iter().map(|t| t.name.clone()).collect();
         let mcp_stage_started_at = std::time::Instant::now();
+        let current_mcp_config_signature =
+            crate::domain::mcp::merged_mcp_servers_signature(&project_root);
         let (mcp_tools, mcp_cache_status) = {
             let cached = app_state
                 .chat
@@ -2890,22 +2916,25 @@ pub async fn send_message(
                     (
                         e.schemas.clone(),
                         e.cached_at.elapsed() < MCP_TOOL_CACHE_TTL,
+                        e.config_signature == current_mcp_config_signature,
                     )
                 });
             match cached {
-                Some((schemas, true)) => {
+                Some((schemas, true, true)) => {
                     tracing::debug!(target: "omiga::mcp", "MCP tool schemas served from cache");
                     (schemas, "fresh")
                 }
-                Some((schemas, false)) => {
+                Some((schemas, true, false)) => {
                     tracing::info!(
                         target: "omiga::mcp",
                         cached = schemas.len(),
-                        "MCP tool cache stale; using stale schemas and refreshing in background"
+                        "MCP tool cache config signature changed; ignoring stale schemas and refreshing in background"
                     );
                     let mcp_tool_cache = app_state.chat.mcp_tool_cache.clone();
                     let root = project_root.clone();
                     tokio::spawn(async move {
+                        let config_signature =
+                            crate::domain::mcp::merged_mcp_servers_signature(&root);
                         let schemas = crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(
                             &root,
                             std::time::Duration::from_secs(10),
@@ -2916,10 +2945,65 @@ pub async fn send_message(
                             McpToolCache {
                                 schemas,
                                 cached_at: std::time::Instant::now(),
+                                config_signature,
                             },
                         );
                     });
-                    (schemas, "stale")
+                    (vec![], "config-changed")
+                }
+                Some((schemas, false, true)) => {
+                    tracing::info!(
+                        target: "omiga::mcp",
+                        cached = schemas.len(),
+                        "MCP tool cache stale; withholding stale schemas and refreshing in background"
+                    );
+                    let mcp_tool_cache = app_state.chat.mcp_tool_cache.clone();
+                    let root = project_root.clone();
+                    tokio::spawn(async move {
+                        let config_signature =
+                            crate::domain::mcp::merged_mcp_servers_signature(&root);
+                        let schemas = crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(
+                            &root,
+                            std::time::Duration::from_secs(10),
+                        )
+                        .await;
+                        mcp_tool_cache.lock().await.insert(
+                            root,
+                            McpToolCache {
+                                schemas,
+                                cached_at: std::time::Instant::now(),
+                                config_signature,
+                            },
+                        );
+                    });
+                    (vec![], "stale-refreshing")
+                }
+                Some((schemas, false, false)) => {
+                    tracing::info!(
+                        target: "omiga::mcp",
+                        cached = schemas.len(),
+                        "MCP tool cache stale and config signature changed; ignoring schemas and refreshing in background"
+                    );
+                    let mcp_tool_cache = app_state.chat.mcp_tool_cache.clone();
+                    let root = project_root.clone();
+                    tokio::spawn(async move {
+                        let config_signature =
+                            crate::domain::mcp::merged_mcp_servers_signature(&root);
+                        let schemas = crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(
+                            &root,
+                            std::time::Duration::from_secs(10),
+                        )
+                        .await;
+                        mcp_tool_cache.lock().await.insert(
+                            root,
+                            McpToolCache {
+                                schemas,
+                                cached_at: std::time::Instant::now(),
+                                config_signature,
+                            },
+                        );
+                    });
+                    (vec![], "config-changed")
                 }
                 None => {
                     tracing::info!(
@@ -2929,6 +3013,8 @@ pub async fn send_message(
                     let mcp_tool_cache = app_state.chat.mcp_tool_cache.clone();
                     let root = project_root.clone();
                     tokio::spawn(async move {
+                        let config_signature =
+                            crate::domain::mcp::merged_mcp_servers_signature(&root);
                         let schemas = crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(
                             &root,
                             std::time::Duration::from_secs(10),
@@ -2939,6 +3025,7 @@ pub async fn send_message(
                             McpToolCache {
                                 schemas,
                                 cached_at: std::time::Instant::now(),
+                                config_signature,
                             },
                         );
                     });
@@ -2962,7 +3049,19 @@ pub async fn send_message(
             .await;
         }
         let n_mcp_before = mcp_tools.len();
-        let mcp_after_deny = filter_tool_schemas_by_deny_rule_entries(mcp_tools, &deny_entries);
+        let mcp_current = crate::domain::mcp::tool_pool::filter_mcp_tool_schemas_for_current_config(
+            &project_root,
+            mcp_tools,
+        );
+        if mcp_current.len() < n_mcp_before {
+            tracing::info!(
+                target: "omiga::mcp",
+                before = n_mcp_before,
+                after = mcp_current.len(),
+                "filtered MCP tool schemas that no longer belong to the effective MCP config"
+            );
+        }
+        let mcp_after_deny = filter_tool_schemas_by_deny_rule_entries(mcp_current, &deny_entries);
         let n_mcp_after = mcp_after_deny.len();
         if n_mcp_after < n_mcp_before {
             tracing::debug!(
@@ -3023,11 +3122,14 @@ pub async fn send_message(
                 .iter()
                 .map(|block| match block {
                     ContentBlock::Text { text } => LlmContent::Text { text: text.clone() },
-                    ContentBlock::ToolUse { id, name, input } => LlmContent::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        arguments: input.clone(),
-                    },
+                    ContentBlock::ToolUse { id, name, input } => {
+                        let (name, arguments) = normalize_llm_tool_history_for_model(name, input);
+                        LlmContent::ToolUse {
+                            id: id.clone(),
+                            name,
+                            arguments,
+                        }
+                    }
                     ContentBlock::ToolResult {
                         tool_use_id,
                         content,
@@ -4026,14 +4128,17 @@ pub async fn send_message(
                                 removed_messages.len()
                             )),
                         );
-                        match crate::domain::memory::working_memory::prepare_for_auto_compact(
-                            &repo_clone,
-                            &session_id_clone,
-                            &removed_messages,
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(3),
+                            crate::domain::memory::working_memory::prepare_for_auto_compact(
+                                &repo_clone,
+                                &session_id_clone,
+                                &removed_messages,
+                            ),
                         )
                         .await
                         {
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 tracing::warn!(
                                     target: "omiga::working_memory",
                                     "tool-loop pre-compact summary failed: {}",
@@ -4048,7 +4153,7 @@ pub async fn send_message(
                                     Some(e.to_string()),
                                 );
                             }
-                            Ok(compact_state) => {
+                            Ok(Ok(compact_state)) => {
                                 emit_activity_operation(
                                     &app_clone,
                                     &session_id_clone,
@@ -4058,15 +4163,13 @@ pub async fn send_message(
                                     Some("已提炼即将被压缩的上下文".to_string()),
                                 );
                                 // Compression is a semantic trigger for session summary.
-                                let project_root_for_compact = {
-                                    let sessions_guard = sessions_clone.read().await;
-                                    sessions_guard
-                                        .get(&session_id_clone)
-                                        .map(|r| {
-                                            resolve_session_project_root(&r.session.project_path)
-                                        })
-                                        .unwrap_or_else(|| std::path::PathBuf::from("."))
-                                };
+                                //
+                                // Important: this block already holds the sessions write lock.
+                                // Do not re-acquire `sessions_clone.read()` here; tokio RwLock is
+                                // not re-entrant and that self-read deadlocks the tool loop right
+                                // after the UI shows “压缩前摘要” as the last successful step.
+                                let project_root_for_compact =
+                                    resolve_session_project_root(&runtime.session.project_path);
                                 if let Ok(cfg) = crate::domain::memory::load_resolved_config(
                                     &project_root_for_compact,
                                 )
@@ -4082,23 +4185,49 @@ pub async fn send_message(
                                     .await;
                                 }
                             }
+                            Err(_) => {
+                                tracing::warn!(
+                                    target: "omiga::working_memory",
+                                    "tool-loop pre-compact summary timed out; continuing without blocking chat"
+                                );
+                                emit_activity_operation(
+                                    &app_clone,
+                                    &session_id_clone,
+                                    &op_id,
+                                    "压缩前摘要",
+                                    "error",
+                                    Some("prepare_for_auto_compact timed out".to_string()),
+                                );
+                            }
                         }
                     }
-                    if let Err(e) = crate::domain::auto_compact::compact_session_and_persist(
-                        repo,
-                        &session_id_clone,
-                        &mut runtime.session,
-                        &llm_config_for_spawn,
-                        !tools.is_empty(),
-                        "",
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        crate::domain::auto_compact::compact_session_and_persist(
+                            repo,
+                            &session_id_clone,
+                            &mut runtime.session,
+                            &llm_config_for_spawn,
+                            !tools.is_empty(),
+                            "",
+                        ),
                     )
                     .await
                     {
-                        tracing::warn!(
-                            target: "omiga::auto_compact",
-                            "tool-loop auto-compact failed: {}",
-                            e
-                        );
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                target: "omiga::auto_compact",
+                                "tool-loop auto-compact failed: {}",
+                                e
+                            );
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                target: "omiga::auto_compact",
+                                "tool-loop auto-compact timed out; continuing with current transcript"
+                            );
+                        }
                     }
                 }
             }
@@ -4895,3 +5024,55 @@ mod settings;
 pub use settings::*;
 mod provider;
 pub use provider::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_loop_precompact_does_not_reacquire_sessions_lock() {
+        let source = include_str!("mod.rs");
+        let start = source
+            .find("Shrink history before the next model call")
+            .expect("tool-loop compaction block marker should exist");
+        let end = source[start..]
+            .find("let updated_messages =")
+            .map(|offset| start + offset)
+            .expect("post-compaction updated_messages marker should exist");
+        let block = &source[start..end];
+
+        assert!(
+            !block.contains("sessions_clone.read().await"),
+            "tool-loop compaction already holds sessions_clone.write(); \
+            reading the same RwLock inside this block deadlocks after 压缩前摘要"
+        );
+    }
+
+    #[test]
+    fn stale_mcp_cache_is_not_served_to_model() {
+        let source = include_str!("mod.rs");
+        let forbidden_phrase = ["MCP tool cache stale; using", " stale schemas"].concat();
+        assert!(
+            source.contains("MCP tool cache stale; withholding stale schemas"),
+            "stale MCP cache entries should trigger refresh without exposing removed tools"
+        );
+        assert!(
+            !source.contains(&forbidden_phrase),
+            "stale MCP cache entries must not be sent to the model"
+        );
+    }
+
+    #[test]
+    fn legacy_mcp_tool_history_is_normalized_before_model_context() {
+        let (name, input) = normalize_llm_tool_history_for_model(
+            "mcp__pubmed__pubmed_search_articles",
+            &serde_json::json!({"term":"TP53","retmax":2}),
+        );
+
+        assert_eq!(name, "search");
+        assert_eq!(input["category"], "literature");
+        assert_eq!(input["source"], "pubmed");
+        assert_eq!(input["query"], "TP53");
+        assert_eq!(input["max_results"], 2);
+    }
+}

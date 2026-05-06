@@ -105,4 +105,45 @@ describe("ToolCallCard", () => {
     expect(html).toBe("");
     expect(html).not.toContain("No command or output yet.");
   });
+
+  it("renders structured retrieval error hints before raw JSON output", () => {
+    const html = renderToStaticMarkup(
+      <ToolCallCard
+        foldId="rf-1"
+        messageId="tool-5"
+        content=""
+        timestamp={1000}
+        toolCall={{
+          name: "search",
+          status: "completed",
+          input: JSON.stringify({ category: "data", source: "geo", query: "brca" }),
+          output: JSON.stringify({
+            error: "source_disabled",
+            message: "data.geo is available as a local retrieval plugin route, but it is disabled.",
+            route: "data.geo",
+            next_action:
+              "Enable this plugin in Settings → Plugins, then retry the same search/query/fetch call.",
+            diagnostics_hint:
+              "Open Settings → Plugins → Details to inspect the route.",
+            recoverable: true,
+            results: [],
+          }),
+          completedAt: 1200,
+        }}
+        previousAssistantHasText
+        nestedOpen
+        showAskUserPanel={false}
+        chat={chat}
+        components={{}}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Needs action");
+    expect(html).toContain("source_disabled");
+    expect(html).toContain("Route: data.geo");
+    expect(html).toContain("Settings → Plugins");
+    expect(html).toContain("Diagnostics:");
+    expect(html).toContain("Raw output");
+  });
 });

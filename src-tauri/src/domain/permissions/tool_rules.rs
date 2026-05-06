@@ -48,6 +48,7 @@ pub fn canonical_permission_tool_name(name: &str) -> String {
         "glob" | "Glob" => "glob".to_string(),
         "fetch" | "Fetch" | "web_fetch" | "WebFetch" | "webFetch" => "fetch".to_string(),
         "query" | "Query" => "query".to_string(),
+        "connector" | "Connector" => "connector".to_string(),
         "search" | "Search" | "web_search" | "WebSearch" | "webSearch" => "search".to_string(),
         "todo_write" | "TodoWrite" => "todo_write".to_string(),
         "notebook_edit" | "NotebookEdit" => "notebook_edit".to_string(),

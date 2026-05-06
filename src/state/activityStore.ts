@@ -266,18 +266,26 @@ export const useActivityStore = create<ActivityState>((set) => ({
     }),
 
   onToolResultDone: (toolUseId, detail) =>
-    set((s) => ({
-      executionSteps: markStepDone(s.executionSteps, `tool-${toolUseId}`).map(
+    set((s) => {
+      const targetStepId = `tool-${toolUseId}`;
+      const executionSteps = markStepDone(s.executionSteps, targetStepId).map(
         (st) => {
-          if (st.id !== `tool-${toolUseId}`) return st;
+          if (st.id !== targetStepId) return st;
           return {
             ...st,
             ...(detail?.output !== undefined ? { toolOutput: detail.output } : {}),
             ...(detail?.failed !== undefined ? { failed: detail.failed } : {}),
           };
         },
-      ),
-    })),
+      );
+      const hasRunningTool = executionSteps.some(
+        (step) => step.id.startsWith("tool-") && step.status === "running",
+      );
+      return {
+        executionSteps,
+        ...(hasRunningTool ? {} : { currentToolHint: null }),
+      };
+    }),
 
   onOperationStart: (operationId, title, detail) =>
     set((s) => {

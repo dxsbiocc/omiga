@@ -234,7 +234,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
                         size="small"
                         variant="outlined"
                         icon={<ExtensionIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
-                        label={`@${pluginId}`}
+                        label={`#${pluginId}`}
                         sx={semanticChipSx(pluginTone)}
                       />
                     </Tooltip>
@@ -406,7 +406,7 @@ export const UserMessageBubble = memo(function UserMessageBubble({
                       size="small"
                       variant="outlined"
                       icon={<ExtensionIcon sx={{ fontSize: 14, opacity: 0.9 }} />}
-                      label={`@${pluginId}`}
+                      label={`#${pluginId}`}
                       sx={semanticChipSx(pluginTone)}
                     />
                   </Box>

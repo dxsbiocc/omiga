@@ -6,6 +6,7 @@ import {
   firstRunningToolName,
   formatToolDuration,
   getNestedToolPanelOpen,
+  parseStructuredToolErrorHint,
   summarizeReactFold,
   summarizeToolGroup,
   ToolFoldHeader,
@@ -70,6 +71,32 @@ describe("ToolFoldSummary helpers", () => {
     expect(getNestedToolPanelOpen("a", { name: "bash", status: "running" }, { a: false })).toBe(false);
     expect(formatToolDuration(1000, 1450)).toBe("450ms");
     expect(formatToolDuration(1000, 2600)).toBe("1.6s");
+  });
+
+  it("extracts actionable hints from structured tool error JSON", () => {
+    expect(parseStructuredToolErrorHint("not-json")).toBeNull();
+    expect(parseStructuredToolErrorHint(JSON.stringify({ error: "plain" }))).toBeNull();
+
+    const hint = parseStructuredToolErrorHint(
+      JSON.stringify({
+        error: "source_disabled",
+        message: "data.geo is disabled",
+        route: "data.geo",
+        next_action: "Enable this plugin in Settings → Plugins.",
+        diagnostics_hint: "Open plugin details.",
+        recoverable: true,
+      }),
+    );
+
+    expect(hint).toEqual({
+      error: "source_disabled",
+      message: "data.geo is disabled",
+      details: null,
+      route: "data.geo",
+      nextAction: "Enable this plugin in Settings → Plugins.",
+      diagnosticsHint: "Open plugin details.",
+      recoverable: true,
+    });
   });
 });
 

@@ -290,9 +290,9 @@ pub async fn permission_deny(
 
     // 构建 context 用于拒绝
     let context = PermissionContext {
-        session_id: request.session_id,
-        tool_name: request.tool_name,
-        arguments: request.arguments,
+        session_id: request.session_id.clone(),
+        tool_name: request.tool_name.clone(),
+        arguments: request.arguments.clone(),
         file_paths: None,
         timestamp: chrono::Utc::now(),
         project_root: None,
@@ -302,6 +302,20 @@ pub async fn permission_deny(
         .deny_request(&context, &request.reason)
         .await
         .map_err(crate::errors::AppError::Unknown)?;
+
+    if let Err(err) = crate::domain::connectors::append_connector_permission_denial_audit_event(
+        &context.tool_name,
+        &context.arguments,
+        Some(&context.session_id),
+        None,
+        &request.reason,
+    ) {
+        tracing::warn!(
+            target: "omiga::connectors",
+            error = %err,
+            "failed to append connector permission-denial audit event"
+        );
+    }
 
     if let Some(rid) = request.request_id.as_ref() {
         let mut map = app_state.chat.permission_tool_waiters.lock().await;

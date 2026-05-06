@@ -20,8 +20,9 @@ export function isNearScrollBottom(
 export function shouldShowJumpToLatestButton(
   metrics: ScrollMetrics,
   thresholdPx = AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
+  hasVisibleTranscriptContent = true,
 ): boolean {
+  if (!hasVisibleTranscriptContent) return false;
   const hasScrollableHistory = metrics.scrollHeight > metrics.clientHeight;
   return hasScrollableHistory && !isNearScrollBottom(metrics, thresholdPx);
 }
-

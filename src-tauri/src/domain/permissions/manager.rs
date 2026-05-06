@@ -3,6 +3,7 @@
 use super::patterns::DangerousPatternDB;
 use super::tool_rules::canonical_permission_tool_name;
 use super::types::*;
+use crate::domain::connectors;
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -59,7 +60,7 @@ impl PermissionManager {
 
     /// 核心权限检查方法
     pub async fn check_permission(&self, context: &PermissionContext) -> PermissionDecision {
-        let tool_key = Self::approval_cache_key(&context.tool_name);
+        let tool_key = Self::approval_cache_key_for_context(context);
 
         // 0. 检查本会话是否已主动拒绝此工具（按工具名，不区分参数）
         {
@@ -165,7 +166,7 @@ impl PermissionManager {
         // 校验模式合法性（前端不能传 Bypass）
         mode.validate_user_mode()?;
 
-        let tool_key = Self::approval_cache_key(&context.tool_name);
+        let tool_key = Self::approval_cache_key_for_context(context);
 
         // 批准时移除本会话内对该工具的拒绝记录（用户改变了主意）
         {
@@ -216,7 +217,7 @@ impl PermissionManager {
         context: &PermissionContext,
         reason: &str,
     ) -> Result<(), String> {
-        let tool_key = Self::approval_cache_key(&context.tool_name);
+        let tool_key = Self::approval_cache_key_for_context(context);
 
         {
             let mut denials = self.session_denials.write().await;
@@ -470,6 +471,19 @@ impl PermissionManager {
         }
     }
 
+    fn approval_cache_key_for_context(context: &PermissionContext) -> String {
+        let base = Self::approval_cache_key(&context.tool_name);
+        if base != "connector" {
+            return base;
+        }
+        let Some((connector_id, operation)) =
+            connectors::connector_permission_identity_from_args(&context.arguments)
+        else {
+            return base;
+        };
+        format!("connector:{connector_id}:{operation}")
+    }
+
     /// 使用 SHA-256 计算工具+参数哈希（仅单元测试校验 canonical 行为；批准缓存按工具名）
     #[cfg(test)]
     fn compute_tool_hash(tool_name: &str, arguments: &serde_json::Value) -> String {
@@ -595,7 +609,7 @@ impl PermissionManager {
             return self.default_decision(context, risk).await;
         }
 
-        let tool_key = Self::approval_cache_key(&context.tool_name);
+        let tool_key = Self::approval_cache_key_for_context(context);
 
         match rule.mode {
             PermissionMode::AskEveryTime => {
@@ -839,6 +853,35 @@ impl PermissionManager {
         detected_risks.extend(tool_risk.detected_risks);
         categories.extend(tool_risk.categories);
 
+        // 1b. Connector 写操作具有外部服务副作用；只有模型显式声明
+        // confirm_write=true 时才进入统一 UI 审批。未声明确认的写操作会先由
+        // connector 工具自身拦截并记录为 blocked，避免无意义地弹审批框。
+        if Self::approval_cache_key(&context.tool_name) == "connector"
+            && connectors::connector_permission_write_confirmed(&context.arguments)
+            && connectors::connector_permission_write_operation_from_args(&context.arguments)
+                .is_some()
+        {
+            let (connector_id, operation) =
+                connectors::connector_permission_identity_from_args(&context.arguments)
+                    .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
+            detected_risks.push(DetectedRisk {
+                category: RiskCategory::Network,
+                severity: RiskLevel::Critical,
+                description: format!("Connector 写操作将修改外部服务: {connector_id}/{operation}"),
+                mitigation: Some(
+                    "请确认目标、内容和账号无误；批准后仍会写入 connector 审计日志。".to_string(),
+                ),
+            });
+            detected_risks.push(DetectedRisk {
+                category: RiskCategory::Privacy,
+                severity: RiskLevel::Medium,
+                description: "外部服务可能接收当前对话生成的内容".to_string(),
+                mitigation: Some("避免发送 secret、token、未确认的私有信息。".to_string()),
+            });
+            categories.push(RiskCategory::Network);
+            categories.push(RiskCategory::Privacy);
+        }
+
         // 2. 参数级别风险（bash/shell 危险命令检测）
         if context.tool_name == "bash" || context.tool_name == "shell" {
             if let Some(cmd) = context.arguments.get("command").and_then(|v| v.as_str()) {
@@ -1071,7 +1114,7 @@ impl PermissionManager {
                 recommendations: vec![],
                 detected_risks: vec![],
             },
-            "fetch" | "query" | "search" => RiskAssessment {
+            "connector" | "fetch" | "query" | "search" => RiskAssessment {
                 level: RiskLevel::Low,
                 categories: vec![RiskCategory::Network],
                 description: "网络请求".to_string(),
@@ -1178,6 +1221,103 @@ mod tests {
         assert!(
             matches!(dec, PermissionDecision::RequireApproval(_)),
             "rm -rf / should require approval"
+        );
+    }
+
+    #[tokio::test]
+    async fn connector_confirmed_write_requires_ui_approval() {
+        let mgr = PermissionManager::new();
+        let args = serde_json::json!({
+            "connector": "slack",
+            "operation": "post_message",
+            "channel": "C123",
+            "text": "Ship it",
+            "confirm_write": true
+        });
+
+        let dec = mgr.check_tool("s_connector", "connector", &args).await;
+        let req = match dec {
+            PermissionDecision::RequireApproval(req) => req,
+            other => panic!("expected connector write approval, got {other:?}"),
+        };
+        assert_eq!(req.risk.level, RiskLevel::Critical);
+        assert!(req
+            .risk
+            .detected_risks
+            .iter()
+            .any(|risk| risk.description.contains("slack/post_message")));
+
+        mgr.approve_request("s_connector", PermissionMode::AskEveryTime, &req.context)
+            .await
+            .unwrap();
+
+        let allowed_once = mgr.check_tool("s_connector", "connector", &args).await;
+        assert!(matches!(allowed_once, PermissionDecision::Allow));
+
+        let requires_again = mgr.check_tool("s_connector", "connector", &args).await;
+        assert!(matches!(
+            requires_again,
+            PermissionDecision::RequireApproval(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn connector_write_approval_is_scoped_to_connector_operation() {
+        let mgr = PermissionManager::new();
+        let slack_post = serde_json::json!({
+            "connector": "slack",
+            "operation": "post_message",
+            "channel": "C123",
+            "text": "Ship it",
+            "confirmWrite": true
+        });
+        let req = match mgr
+            .check_tool("s_connector_scope", "Connector", &slack_post)
+            .await
+        {
+            PermissionDecision::RequireApproval(req) => req,
+            other => panic!("expected slack write approval, got {other:?}"),
+        };
+        mgr.approve_request("s_connector_scope", PermissionMode::Session, &req.context)
+            .await
+            .unwrap();
+        assert!(matches!(
+            mgr.check_tool("s_connector_scope", "connector", &slack_post)
+                .await,
+            PermissionDecision::Allow
+        ));
+
+        let linear_write = serde_json::json!({
+            "connector": "linear",
+            "operation": "update_issue_status",
+            "id": "ENG-1",
+            "confirm_write": true
+        });
+        assert!(matches!(
+            mgr.check_tool("s_connector_scope", "connector", &linear_write)
+                .await,
+            PermissionDecision::RequireApproval(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_connector_write_reaches_tool_level_guard_without_ui_prompt() {
+        let mgr = PermissionManager::new();
+        let dec = mgr
+            .check_tool(
+                "s_connector_unconfirmed",
+                "connector",
+                &serde_json::json!({
+                    "connector": "slack",
+                    "operation": "post_message",
+                    "channel": "C123",
+                    "text": "Ship it"
+                }),
+            )
+            .await;
+        assert!(
+            matches!(dec, PermissionDecision::Allow),
+            "missing confirm_write should be blocked by connector tool guard, not a UI prompt"
         );
     }
 

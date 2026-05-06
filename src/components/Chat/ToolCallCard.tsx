@@ -17,11 +17,13 @@ import {
   SmartToy,
   Terminal as TerminalIcon,
   TravelExplore as TravelExploreIcon,
+  WarningAmber,
 } from "@mui/icons-material";
 import type { getChatTokens } from "./chatTokens";
 import { CollapsibleThoughtTrace } from "./AssistantTraceItem";
 import {
   formatToolDuration,
+  parseStructuredToolErrorHint,
   toolCallPanelTitle,
   toolDisplayOutputText,
   type ToolCallLike,
@@ -99,6 +101,7 @@ export const ToolCallCard = memo(function ToolCallCard({
     { role: "tool", content, toolCall },
     toolCall,
   );
+  const structuredError = parseStructuredToolErrorHint(displayOutput);
   const hasInput = Boolean(toolCall.input && toolCall.input.trim());
   const hasOutput = Boolean(displayOutput);
   const isBash =
@@ -220,6 +223,15 @@ export const ToolCallCard = memo(function ToolCallCard({
               sx={{ height: 22, fontSize: 11, flexShrink: 0 }}
             />
           )}
+          {toolCall.status !== "error" && structuredError && (
+            <Chip
+              size="small"
+              label={structuredError.recoverable === false ? "Blocked" : "Needs action"}
+              color={structuredError.recoverable === false ? "error" : "warning"}
+              variant="outlined"
+              sx={{ height: 22, fontSize: 11, flexShrink: 0 }}
+            />
+          )}
           {toolDurationLabel && (
             <Typography
               sx={{
@@ -301,6 +313,101 @@ export const ToolCallCard = memo(function ToolCallCard({
                 )}
                 {hasOutput && (
                   <Box>
+                    {structuredError && (
+                      <Box
+                        sx={{
+                          mb: 1,
+                          borderRadius: "8px",
+                          border: `1px solid ${alpha(
+                            structuredError.recoverable === false
+                              ? "#d32f2f"
+                              : "#ed6c02",
+                            0.32,
+                          )}`,
+                          bgcolor: alpha(
+                            structuredError.recoverable === false
+                              ? "#d32f2f"
+                              : "#ed6c02",
+                            0.07,
+                          ),
+                          p: 1,
+                        }}
+                      >
+                        <Stack direction="column" spacing={0.65}>
+                          <Stack
+                            direction="row"
+                            alignItems="center"
+                            spacing={0.75}
+                            sx={{ minWidth: 0 }}
+                          >
+                            <WarningAmber
+                              sx={{
+                                fontSize: 15,
+                                color:
+                                  structuredError.recoverable === false
+                                    ? "error.main"
+                                    : "warning.main",
+                                flexShrink: 0,
+                              }}
+                            />
+                            <Typography
+                              sx={{
+                                fontSize: 11,
+                                fontWeight: 700,
+                                color: chat.textPrimary,
+                                flex: 1,
+                                minWidth: 0,
+                              }}
+                            >
+                              {structuredError.message ?? structuredError.error}
+                            </Typography>
+                            <Chip
+                              size="small"
+                              label={structuredError.error}
+                              variant="outlined"
+                              sx={{ height: 20, fontSize: 10, flexShrink: 0 }}
+                            />
+                          </Stack>
+
+                          {structuredError.route && (
+                            <Typography
+                              sx={{
+                                fontSize: 10,
+                                color: chat.textMuted,
+                                overflowWrap: "anywhere",
+                              }}
+                            >
+                              Route: {structuredError.route}
+                            </Typography>
+                          )}
+
+                          {structuredError.nextAction && (
+                            <Typography
+                              sx={{
+                                fontSize: 10,
+                                color: chat.textPrimary,
+                                overflowWrap: "anywhere",
+                              }}
+                            >
+                              Next step: {structuredError.nextAction}
+                            </Typography>
+                          )}
+
+                          {structuredError.diagnosticsHint && (
+                            <Typography
+                              sx={{
+                                fontSize: 10,
+                                color: chat.textMuted,
+                                overflowWrap: "anywhere",
+                              }}
+                            >
+                              Diagnostics: {structuredError.diagnosticsHint}
+                            </Typography>
+                          )}
+                        </Stack>
+                      </Box>
+                    )}
+
                     <Typography
                       sx={{
                         fontSize: 10,
@@ -309,7 +416,7 @@ export const ToolCallCard = memo(function ToolCallCard({
                         fontWeight: 400,
                       }}
                     >
-                      Output
+                      {structuredError ? "Raw output" : "Output"}
                     </Typography>
                     <Box
                       sx={{

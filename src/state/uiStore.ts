@@ -13,7 +13,7 @@ function clamp(n: number, min: number, max: number): number {
 }
 
 export interface UiState {
-  /** Settings sidebar index — see `Settings/index.tsx` SETTINGS_SECTIONS (0–12) */
+  /** Settings sidebar index — see `Settings/index.tsx` SETTINGS_SECTIONS (0–14) */
   settingsTabIndex: number;
   setSettingsTabIndex: (index: number) => void;
   /** When sidebar tab is Execution (9): inner tab 0 Modal / 1 Daytona / 2 SSH */

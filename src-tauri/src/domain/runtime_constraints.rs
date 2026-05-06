@@ -140,6 +140,7 @@ impl RuntimeConstraintState {
                     | "grep"
                     | "ripgrep"
                     | "file_read"
+                    | "connector"
                     | "fetch"
                     | "query"
                     | "search"

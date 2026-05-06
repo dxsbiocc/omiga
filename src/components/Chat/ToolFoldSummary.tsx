@@ -25,6 +25,16 @@ export interface ToolSummaryMessage {
 
 type ChatTokens = ReturnType<typeof getChatTokens>;
 
+export interface StructuredToolErrorHint {
+  error: string;
+  message: string | null;
+  details: string | null;
+  route: string | null;
+  nextAction: string | null;
+  diagnosticsHint: string | null;
+  recoverable: boolean | null;
+}
+
 /** Pencil collapseRow summary: "Ran 2 commands, viewed a file". */
 export function summarizeToolGroup(
   messages: readonly ToolSummaryMessage[],
@@ -129,6 +139,53 @@ export function toolDisplayOutputText(
   if (/^`[^`]+`$/i.test(c)) return "";
   if (/^`[^`]+`\s+(completed|failed)$/i.test(c)) return "";
   return c;
+}
+
+function stringField(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function booleanField(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+/** Parse structured tool error JSON emitted by backend tools into actionable UI hints. */
+export function parseStructuredToolErrorHint(
+  output: string | undefined,
+): StructuredToolErrorHint | null {
+  if (!output?.trim()) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const obj = parsed as Record<string, unknown>;
+  const error = stringField(obj.error);
+  if (!error) return null;
+
+  const message = stringField(obj.message);
+  const nextAction = stringField(obj.next_action) ?? stringField(obj.nextAction);
+  const diagnosticsHint =
+    stringField(obj.diagnostics_hint) ?? stringField(obj.diagnosticsHint);
+  const route = stringField(obj.route);
+  const details = stringField(obj.details);
+  const recoverable = booleanField(obj.recoverable);
+
+  if (!message && !nextAction && !diagnosticsHint && !route && !details) {
+    return null;
+  }
+
+  return {
+    error,
+    message,
+    details,
+    route,
+    nextAction,
+    diagnosticsHint,
+    recoverable,
+  };
 }
 
 /** Stable key for nested expand state inside a react_fold. */

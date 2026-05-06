@@ -23,7 +23,9 @@ use crate::domain::runtime_constraints::{
 use crate::domain::session::SessionCodec;
 use crate::domain::session::{AgentTask, Message, TodoItem};
 use crate::domain::skills;
-use crate::domain::tools::{all_tool_schemas, ToolContext, ToolSchema, WebSearchApiKeys};
+use crate::domain::tools::{
+    all_tool_schemas, sort_tool_schemas_for_model, ToolContext, ToolSchema, WebSearchApiKeys,
+};
 use crate::llm::{create_client, LlmConfig, LlmProvider};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -120,12 +122,16 @@ pub(super) async fn build_subagent_tool_schemas(
     let built =
         filter_tool_schemas_by_deny_rule_entries(all_tool_schemas(include_skill), &deny_entries);
     let mut built = filter_tool_schemas_for_subagent(built, subagent_opts);
-    built.sort_by(|a, b| a.name.cmp(&b.name));
+    sort_tool_schemas_for_model(&mut built);
     let base_names: HashSet<String> = built.iter().map(|t| t.name.clone()).collect();
     let mcp_timeout = std::time::Duration::from_secs(45);
     let mcp_tools =
         crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(project_root, mcp_timeout).await;
-    let mcp_after_deny = filter_tool_schemas_by_deny_rule_entries(mcp_tools, &deny_entries);
+    let mcp_current = crate::domain::mcp::tool_pool::filter_mcp_tool_schemas_for_current_config(
+        project_root,
+        mcp_tools,
+    );
+    let mcp_after_deny = filter_tool_schemas_by_deny_rule_entries(mcp_current, &deny_entries);
     let mcp_filtered: Vec<_> = mcp_after_deny
         .into_iter()
         .filter(|t| !base_names.contains(&t.name))
@@ -219,6 +225,12 @@ pub(super) async fn run_skill_forked(request: ForkedSkillRequest<'_>) -> Result<
         &crate::domain::plugins::plugin_load_outcome(),
     ) {
         prompt_parts.push(plugins_system_section);
+    }
+    let connector_catalog = crate::domain::connectors::list_connector_catalog();
+    if let Some(connectors_system_section) =
+        crate::domain::connectors::format_connectors_system_section(&connector_catalog)
+    {
+        prompt_parts.push(connectors_system_section);
     }
     sub_cfg.system_prompt = Some(prompt_parts.join("\n\n"));
 
@@ -602,6 +614,12 @@ pub(super) async fn run_subagent_session_foreground_inner(
             &crate::domain::plugins::plugin_load_outcome(),
         ) {
             prompt_parts.push(plugins_system_section);
+        }
+        let connector_catalog = crate::domain::connectors::list_connector_catalog();
+        if let Some(connectors_system_section) =
+            crate::domain::connectors::format_connectors_system_section(&connector_catalog)
+        {
+            prompt_parts.push(connectors_system_section);
         }
     }
     sub_cfg.system_prompt = Some(prompt_parts.join("\n\n"));
@@ -1497,7 +1515,7 @@ async fn run_subagent_session_internal(
 
 /// Returns true for tools that are safe to execute concurrently:
 /// - pure I/O (network fetch, file read, search) with no shared mutable state.
-/// - MCP tools (PubMed, bioRxiv, Tavily, …) are the primary parallelism target.
+/// - read-only MCP tools are parallelizable when they are explicitly configured.
 pub(super) fn is_parallelizable_tool(tool_name: &str) -> bool {
     // MCP tools are parallelizable only when they're clearly read-only.
     // Write-capable MCP tools (e.g. mcp__claude_ai_Gmail__send, mcp__pencil__batch_design)

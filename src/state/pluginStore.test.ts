@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   RETRIEVAL_PLUGIN_PROTOCOL_DOC_PATH,
   buildPluginDiagnostics,
+  buildRetrievalRuntimeDiagnostics,
   flattenMarketplacePlugins,
   type PluginMarketplaceEntry,
   type PluginProcessPoolRouteStatus,
@@ -144,5 +145,96 @@ describe("buildPluginDiagnostics", () => {
     });
     expect(JSON.stringify(diagnostics)).not.toContain("runtime");
     expect(JSON.stringify(diagnostics)).not.toContain("command");
+  });
+});
+
+describe("buildRetrievalRuntimeDiagnostics", () => {
+  it("builds a global route health payload without credential values", () => {
+    const route: PluginRetrievalRouteStatus = {
+      pluginId: "retrieval-dataset-geo@omiga-curated",
+      category: "dataset",
+      sourceId: "geo",
+      route: "dataset.geo via retrieval-dataset-geo@omiga-curated",
+      state: "quarantined",
+      quarantined: true,
+      consecutiveFailures: 3,
+      remainingMs: 45_000,
+      lastError: "plugin error upstream_failed: forced fixture error",
+    };
+    const pooled: PluginProcessPoolRouteStatus = {
+      pluginId: "retrieval-dataset-geo@omiga-curated",
+      category: "dataset",
+      sourceId: "geo",
+      route: "dataset.geo via retrieval-dataset-geo@omiga-curated",
+      pluginRoot: "/plugins/retrieval-dataset-geo",
+      remainingMs: 30_000,
+    };
+
+    const diagnostics = JSON.parse(
+      buildRetrievalRuntimeDiagnostics(
+        [
+          plugin({
+            id: "retrieval-dataset-geo@omiga-curated",
+            name: "retrieval-dataset-geo",
+            marketplaceName: "omiga-curated",
+            sourcePath: "/marketplace/retrieval-dataset-geo",
+            installedPath: "/plugins/retrieval-dataset-geo",
+            installed: true,
+            enabled: true,
+            retrieval: {
+              protocolVersion: 1,
+              sources: [
+                {
+                  id: "geo",
+                  category: "dataset",
+                  label: "NCBI GEO",
+                  description: "NCBI GEO datasets",
+                  subcategories: [],
+                  capabilities: ["search", "query", "fetch"],
+                  requiredCredentialRefs: [],
+                  optionalCredentialRefs: ["secret_token"],
+                  defaultEnabled: true,
+                  replacesBuiltin: true,
+                },
+              ],
+            },
+          }),
+          plugin({ id: "notebook-helper@omiga-curated" }),
+        ],
+        [route],
+        [pooled],
+      ),
+    );
+
+    expect(diagnostics.protocolDocPath).toBe(
+      RETRIEVAL_PLUGIN_PROTOCOL_DOC_PATH,
+    );
+    expect(diagnostics.summary).toMatchObject({
+      pluginCount: 1,
+      routeCount: 1,
+      quarantinedRouteCount: 1,
+      pooledProcessCount: 1,
+      unknownPluginCount: 0,
+    });
+    expect(diagnostics.plugins).toHaveLength(1);
+    expect(diagnostics.unknownPluginIds).toEqual([]);
+    expect(diagnostics.plugins[0]).toMatchObject({
+      id: "retrieval-dataset-geo@omiga-curated",
+      installed: true,
+      enabled: true,
+      declaredRouteCount: 1,
+    });
+    expect(diagnostics.retrievalRoutes).toEqual([route]);
+    expect(diagnostics.pooledProcesses).toEqual([pooled]);
+    expect(JSON.stringify(diagnostics)).not.toContain("secret_token");
+    expect(diagnostics.notes.join(" ")).toContain("No credential values");
+
+    const staleDiagnostics = JSON.parse(
+      buildRetrievalRuntimeDiagnostics([], [route], []),
+    );
+    expect(staleDiagnostics.summary.unknownPluginCount).toBe(1);
+    expect(staleDiagnostics.unknownPluginIds).toEqual([
+      "retrieval-dataset-geo@omiga-curated",
+    ]);
   });
 });

@@ -16,6 +16,17 @@ use sqlx::{
 use std::path::Path;
 use std::time::Duration;
 
+const MESSAGE_FTS_SCHEMA_KEY: &str = "messages_fts_schema_version";
+const MESSAGE_FTS_SCHEMA_VERSION: &str = "1";
+const MESSAGE_FTS_MATCH_LIMIT: i64 = 500;
+const MESSAGE_TRIGRAM_FTS_SCHEMA_KEY: &str = "messages_trigram_fts_schema_version";
+const MESSAGE_TRIGRAM_FTS_SCHEMA_VERSION: &str = "1";
+const SESSION_FTS_SCHEMA_KEY: &str = "sessions_fts_schema_version";
+const SESSION_FTS_SCHEMA_VERSION: &str = "1";
+const SESSION_FTS_MATCH_LIMIT: i64 = 500;
+const SESSION_TRIGRAM_FTS_SCHEMA_KEY: &str = "sessions_trigram_fts_schema_version";
+const SESSION_TRIGRAM_FTS_SCHEMA_VERSION: &str = "1";
+
 /// Initialize the database.
 ///
 /// Connection-level pragmas applied to **every** connection in the pool:
@@ -443,7 +454,472 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    if let Err(err) = ensure_messages_fts(pool).await {
+        tracing::warn!(
+            target: "omiga::persistence",
+            error = %err,
+            "FTS5 message index unavailable; session search will use scan fallback"
+        );
+    }
+    if let Err(err) = ensure_messages_trigram_fts(pool).await {
+        tracing::warn!(
+            target: "omiga::persistence",
+            error = %err,
+            "FTS5 trigram message index unavailable; literal session search will use scan fallback"
+        );
+    }
+    if let Err(err) = ensure_sessions_fts(pool).await {
+        tracing::warn!(
+            target: "omiga::persistence",
+            error = %err,
+            "FTS5 session metadata index unavailable; session search will use scan fallback"
+        );
+    }
+    if let Err(err) = ensure_sessions_trigram_fts(pool).await {
+        tracing::warn!(
+            target: "omiga::persistence",
+            error = %err,
+            "FTS5 trigram session metadata index unavailable; literal session search will use scan fallback"
+        );
+    }
+
     Ok(())
+}
+
+async fn ensure_messages_fts(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let existed = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'messages_fts'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?
+        > 0;
+
+    sqlx::query(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
+        USING fts5(
+            content,
+            content='messages',
+            content_rowid='rowid',
+            tokenize='unicode61'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS messages_fts_ai
+        AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, content)
+            VALUES (new.rowid, new.content);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS messages_fts_ad
+        AFTER DELETE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, content)
+            VALUES ('delete', old.rowid, old.content);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS messages_fts_au
+        AFTER UPDATE OF content ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, content)
+            VALUES ('delete', old.rowid, old.content);
+            INSERT INTO messages_fts(rowid, content)
+            VALUES (new.rowid, new.content);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let current_version =
+        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
+            .bind(MESSAGE_FTS_SCHEMA_KEY)
+            .fetch_optional(pool)
+            .await?;
+
+    if !existed || current_version.as_deref() != Some(MESSAGE_FTS_SCHEMA_VERSION) {
+        sqlx::query("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+            .execute(pool)
+            .await?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(MESSAGE_FTS_SCHEMA_KEY)
+        .bind(MESSAGE_FTS_SCHEMA_VERSION)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn ensure_messages_trigram_fts(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let existed = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'messages_trigram_fts'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?
+        > 0;
+
+    sqlx::query(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_trigram_fts
+        USING fts5(
+            content,
+            content='messages',
+            content_rowid='rowid',
+            tokenize='trigram'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS messages_trigram_fts_ai
+        AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_trigram_fts(rowid, content)
+            VALUES (new.rowid, new.content);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS messages_trigram_fts_ad
+        AFTER DELETE ON messages BEGIN
+            INSERT INTO messages_trigram_fts(messages_trigram_fts, rowid, content)
+            VALUES ('delete', old.rowid, old.content);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS messages_trigram_fts_au
+        AFTER UPDATE OF content ON messages BEGIN
+            INSERT INTO messages_trigram_fts(messages_trigram_fts, rowid, content)
+            VALUES ('delete', old.rowid, old.content);
+            INSERT INTO messages_trigram_fts(rowid, content)
+            VALUES (new.rowid, new.content);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let current_version =
+        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
+            .bind(MESSAGE_TRIGRAM_FTS_SCHEMA_KEY)
+            .fetch_optional(pool)
+            .await?;
+
+    if !existed || current_version.as_deref() != Some(MESSAGE_TRIGRAM_FTS_SCHEMA_VERSION) {
+        sqlx::query("INSERT INTO messages_trigram_fts(messages_trigram_fts) VALUES ('rebuild')")
+            .execute(pool)
+            .await?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(MESSAGE_TRIGRAM_FTS_SCHEMA_KEY)
+        .bind(MESSAGE_TRIGRAM_FTS_SCHEMA_VERSION)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn ensure_sessions_fts(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let existed = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'sessions_fts'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?
+        > 0;
+
+    sqlx::query(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts
+        USING fts5(
+            name,
+            project_path,
+            content='sessions',
+            content_rowid='rowid',
+            tokenize='unicode61'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS sessions_fts_ai
+        AFTER INSERT ON sessions BEGIN
+            INSERT INTO sessions_fts(rowid, name, project_path)
+            VALUES (new.rowid, new.name, new.project_path);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS sessions_fts_ad
+        AFTER DELETE ON sessions BEGIN
+            INSERT INTO sessions_fts(sessions_fts, rowid, name, project_path)
+            VALUES ('delete', old.rowid, old.name, old.project_path);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS sessions_fts_au
+        AFTER UPDATE OF name, project_path ON sessions BEGIN
+            INSERT INTO sessions_fts(sessions_fts, rowid, name, project_path)
+            VALUES ('delete', old.rowid, old.name, old.project_path);
+            INSERT INTO sessions_fts(rowid, name, project_path)
+            VALUES (new.rowid, new.name, new.project_path);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let current_version =
+        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
+            .bind(SESSION_FTS_SCHEMA_KEY)
+            .fetch_optional(pool)
+            .await?;
+
+    if !existed || current_version.as_deref() != Some(SESSION_FTS_SCHEMA_VERSION) {
+        sqlx::query("INSERT INTO sessions_fts(sessions_fts) VALUES ('rebuild')")
+            .execute(pool)
+            .await?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(SESSION_FTS_SCHEMA_KEY)
+        .bind(SESSION_FTS_SCHEMA_VERSION)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn ensure_sessions_trigram_fts(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let existed = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'sessions_trigram_fts'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?
+        > 0;
+
+    sqlx::query(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS sessions_trigram_fts
+        USING fts5(
+            name,
+            project_path,
+            content='sessions',
+            content_rowid='rowid',
+            tokenize='trigram'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS sessions_trigram_fts_ai
+        AFTER INSERT ON sessions BEGIN
+            INSERT INTO sessions_trigram_fts(rowid, name, project_path)
+            VALUES (new.rowid, new.name, new.project_path);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS sessions_trigram_fts_ad
+        AFTER DELETE ON sessions BEGIN
+            INSERT INTO sessions_trigram_fts(sessions_trigram_fts, rowid, name, project_path)
+            VALUES ('delete', old.rowid, old.name, old.project_path);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS sessions_trigram_fts_au
+        AFTER UPDATE OF name, project_path ON sessions BEGIN
+            INSERT INTO sessions_trigram_fts(sessions_trigram_fts, rowid, name, project_path)
+            VALUES ('delete', old.rowid, old.name, old.project_path);
+            INSERT INTO sessions_trigram_fts(rowid, name, project_path)
+            VALUES (new.rowid, new.name, new.project_path);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let current_version =
+        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
+            .bind(SESSION_TRIGRAM_FTS_SCHEMA_KEY)
+            .fetch_optional(pool)
+            .await?;
+
+    if !existed || current_version.as_deref() != Some(SESSION_TRIGRAM_FTS_SCHEMA_VERSION) {
+        sqlx::query("INSERT INTO sessions_trigram_fts(sessions_trigram_fts) VALUES ('rebuild')")
+            .execute(pool)
+            .await?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(SESSION_TRIGRAM_FTS_SCHEMA_KEY)
+        .bind(SESSION_TRIGRAM_FTS_SCHEMA_VERSION)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+fn fts5_query_for_session_search(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .take(12)
+        .map(|term| {
+            let term = term.chars().take(48).collect::<String>();
+            format!("{term}*")
+        })
+        .collect();
+
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" "))
+    }
+}
+
+fn fts5_trigram_query_for_session_search(query: &str) -> Option<String> {
+    let q = query.trim();
+    if q.chars().count() < 3 {
+        return None;
+    }
+
+    let escaped = q.replace('"', "\"\"");
+    Some(format!("\"{escaped}\""))
+}
+
+fn query_requires_literal_scan(query: &str) -> bool {
+    query
+        .chars()
+        .any(|ch| !ch.is_ascii() || (!ch.is_alphanumeric() && !ch.is_whitespace()))
+}
+
+fn merge_session_search_results(
+    target: &mut Vec<SessionSearchResult>,
+    rows: Vec<SessionSearchResult>,
+) {
+    for row in rows {
+        if let Some(existing) = target.iter_mut().find(|item| item.id == row.id) {
+            if existing.match_snippet.is_none() {
+                existing.match_snippet = row.match_snippet;
+            }
+        } else {
+            target.push(row);
+        }
+    }
+}
+
+fn sort_and_limit_session_search_results(rows: &mut Vec<SessionSearchResult>, limit: i64) {
+    rows.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    rows.truncate(limit as usize);
 }
 
 async fn ensure_column_exists(
@@ -558,6 +1034,278 @@ impl SessionRepository {
         .await?;
 
         Ok(sessions)
+    }
+
+    /// Search sessions by title, project path, or message body.
+    pub async fn search_sessions(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchResult>, sqlx::Error> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let limit = limit.clamp(1, 100);
+
+        let mut fts_results = Vec::new();
+        let mut fts_failed = false;
+
+        if !query_requires_literal_scan(q) {
+            if let Some(fts_query) = fts5_query_for_session_search(q) {
+                match self.search_sessions_fts(&fts_query, limit).await {
+                    Ok(rows) => merge_session_search_results(&mut fts_results, rows),
+                    Err(err) => {
+                        fts_failed = true;
+                        tracing::debug!(
+                            target: "omiga::persistence",
+                            error = %err,
+                            "FTS5 session search failed; falling back to literal scan"
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(trigram_query) = fts5_trigram_query_for_session_search(q) {
+            match self
+                .search_sessions_trigram_fts(q, &trigram_query, limit)
+                .await
+            {
+                Ok(rows) => merge_session_search_results(&mut fts_results, rows),
+                Err(err) => {
+                    fts_failed = true;
+                    tracing::debug!(
+                        target: "omiga::persistence",
+                        error = %err,
+                        "FTS5 trigram session search failed; falling back to literal scan"
+                    );
+                }
+            }
+        }
+
+        if !fts_results.is_empty() {
+            sort_and_limit_session_search_results(&mut fts_results, limit);
+            return Ok(fts_results);
+        }
+
+        if fts_failed {
+            tracing::debug!(
+                target: "omiga::persistence",
+                "FTS session search produced no usable results after an error; falling back to literal scan"
+            );
+        }
+        self.search_sessions_scan(q, limit).await
+    }
+
+    async fn search_sessions_fts(
+        &self,
+        fts_query: &str,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchResult>, sqlx::Error> {
+        sqlx::query_as::<_, SessionSearchResult>(
+            r#"
+            WITH
+            message_hits AS (
+                SELECT
+                    m.session_id AS id,
+                    snippet(messages_fts, 0, '', '', '…', 32) AS match_snippet,
+                    0 AS source_order
+                FROM messages_fts
+                JOIN messages m ON m.rowid = messages_fts.rowid
+                WHERE messages_fts MATCH ?
+                ORDER BY bm25(messages_fts), m.created_at ASC, m.id ASC
+                LIMIT ?
+            ),
+            session_hits AS (
+                SELECT
+                    s.id AS id,
+                    NULL AS match_snippet,
+                    1 AS source_order
+                FROM sessions_fts
+                JOIN sessions s ON s.rowid = sessions_fts.rowid
+                WHERE sessions_fts MATCH ?
+                ORDER BY bm25(sessions_fts), s.updated_at DESC
+                LIMIT ?
+            ),
+            hits AS (
+                SELECT id, match_snippet, source_order FROM message_hits
+                UNION ALL
+                SELECT id, match_snippet, source_order FROM session_hits
+            ),
+            picked AS (
+                SELECT
+                    h.id,
+                    (
+                        SELECT h2.match_snippet
+                        FROM hits h2
+                        WHERE h2.id = h.id
+                          AND h2.match_snippet IS NOT NULL
+                        ORDER BY h2.source_order
+                        LIMIT 1
+                    ) AS match_snippet
+                FROM hits h
+                GROUP BY h.id
+            )
+            SELECT
+                s.id,
+                s.name,
+                s.project_path,
+                s.created_at,
+                s.updated_at,
+                (SELECT COUNT(*) FROM messages WHERE session_id = s.id) as message_count,
+                picked.match_snippet
+            FROM picked
+            JOIN sessions s ON s.id = picked.id
+            ORDER BY s.updated_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(fts_query)
+        .bind(MESSAGE_FTS_MATCH_LIMIT)
+        .bind(fts_query)
+        .bind(SESSION_FTS_MATCH_LIMIT)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    async fn search_sessions_trigram_fts(
+        &self,
+        query: &str,
+        trigram_query: &str,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchResult>, sqlx::Error> {
+        let q = query.trim().to_lowercase();
+        sqlx::query_as::<_, SessionSearchResult>(
+            r#"
+            WITH
+            message_hits AS (
+                SELECT
+                    m.session_id AS id,
+                    snippet(messages_trigram_fts, 0, '', '', '…', 32) AS match_snippet,
+                    0 AS source_order
+                FROM messages_trigram_fts
+                JOIN messages m ON m.rowid = messages_trigram_fts.rowid
+                WHERE messages_trigram_fts MATCH ?
+                  AND instr(lower(COALESCE(m.content, '')), ?) > 0
+                ORDER BY bm25(messages_trigram_fts), m.created_at ASC, m.id ASC
+                LIMIT ?
+            ),
+            session_hits AS (
+                SELECT
+                    s.id AS id,
+                    NULL AS match_snippet,
+                    1 AS source_order
+                FROM sessions_trigram_fts
+                JOIN sessions s ON s.rowid = sessions_trigram_fts.rowid
+                WHERE sessions_trigram_fts MATCH ?
+                  AND (
+                    instr(lower(s.name), ?) > 0
+                    OR instr(lower(s.project_path), ?) > 0
+                  )
+                ORDER BY bm25(sessions_trigram_fts), s.updated_at DESC
+                LIMIT ?
+            ),
+            hits AS (
+                SELECT id, match_snippet, source_order FROM message_hits
+                UNION ALL
+                SELECT id, match_snippet, source_order FROM session_hits
+            ),
+            picked AS (
+                SELECT
+                    h.id,
+                    (
+                        SELECT h2.match_snippet
+                        FROM hits h2
+                        WHERE h2.id = h.id
+                          AND h2.match_snippet IS NOT NULL
+                        ORDER BY h2.source_order
+                        LIMIT 1
+                    ) AS match_snippet
+                FROM hits h
+                GROUP BY h.id
+            )
+            SELECT
+                s.id,
+                s.name,
+                s.project_path,
+                s.created_at,
+                s.updated_at,
+                (SELECT COUNT(*) FROM messages WHERE session_id = s.id) as message_count,
+                picked.match_snippet
+            FROM picked
+            JOIN sessions s ON s.id = picked.id
+            ORDER BY s.updated_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(trigram_query)
+        .bind(&q)
+        .bind(MESSAGE_FTS_MATCH_LIMIT)
+        .bind(trigram_query)
+        .bind(&q)
+        .bind(&q)
+        .bind(SESSION_FTS_MATCH_LIMIT)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    async fn search_sessions_scan(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchResult>, sqlx::Error> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        sqlx::query_as::<_, SessionSearchResult>(
+            r#"
+            SELECT
+                s.id,
+                s.name,
+                s.project_path,
+                s.created_at,
+                s.updated_at,
+                (SELECT COUNT(*) FROM messages WHERE session_id = s.id) as message_count,
+                (
+                    SELECT
+                        CASE
+                            WHEN instr(lower(COALESCE(m.content, '')), ?) > 80
+                            THEN '…' || substr(m.content, instr(lower(COALESCE(m.content, '')), ?) - 80, 240)
+                            ELSE substr(m.content, 1, 240)
+                        END
+                    FROM messages m
+                    WHERE m.session_id = s.id
+                      AND instr(lower(COALESCE(m.content, '')), ?) > 0
+                    ORDER BY m.created_at ASC, m.id ASC
+                    LIMIT 1
+                ) as match_snippet
+            FROM sessions s
+            WHERE instr(lower(s.name), ?) > 0
+               OR instr(lower(s.project_path), ?) > 0
+               OR EXISTS (
+                    SELECT 1
+                    FROM messages m
+                    WHERE m.session_id = s.id
+                      AND instr(lower(COALESCE(m.content, '')), ?) > 0
+               )
+            ORDER BY s.updated_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(&q)
+        .bind(&q)
+        .bind(&q)
+        .bind(&q)
+        .bind(&q)
+        .bind(&q)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
     }
 
     /// Get session metadata only (no messages) — used by the paginated `load_session` path.
@@ -1642,6 +2390,18 @@ pub struct SessionWithCount {
     pub message_count: i64,
 }
 
+/// Session search result with an optional message-body snippet.
+#[derive(Debug, sqlx::FromRow)]
+pub struct SessionSearchResult {
+    pub id: String,
+    pub name: String,
+    pub project_path: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub message_count: i64,
+    pub match_snippet: Option<String>,
+}
+
 /// Message database record
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct MessageRecord {
@@ -1906,5 +2666,303 @@ mod tests {
             .find(|msg| msg.id == "assistant-plain")
             .expect("plain assistant row");
         assert!(plain.reasoning_content.is_none());
+    }
+
+    #[tokio::test]
+    async fn search_sessions_matches_message_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        repo.create_session("session-1", "Unrelated title", "/tmp/project-a")
+            .await
+            .expect("create session 1");
+        repo.create_session("session-2", "QSDB title", "/tmp/project-b")
+            .await
+            .expect("create session 2");
+
+        repo.save_message(NewMessageRecord {
+            id: "message-1",
+            session_id: "session-1",
+            role: "user",
+            content: "Please extract QS core gene sequence from the uploaded FASTA.",
+            tool_calls: None,
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: None,
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
+        .await
+        .expect("save matching message");
+
+        repo.save_message(NewMessageRecord {
+            id: "message-2",
+            session_id: "session-2",
+            role: "user",
+            content: "No special body text here.",
+            tool_calls: None,
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: None,
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
+        .await
+        .expect("save nonmatching message");
+
+        let body_rows = repo
+            .search_sessions("core gene", 10)
+            .await
+            .expect("search body content");
+        assert_eq!(body_rows.len(), 1);
+        assert_eq!(body_rows[0].id, "session-1");
+        assert!(body_rows[0]
+            .match_snippet
+            .as_deref()
+            .expect("body match snippet")
+            .contains("core gene"));
+
+        let title_rows = repo
+            .search_sessions("qsdb", 10)
+            .await
+            .expect("search title");
+        assert_eq!(title_rows.len(), 1);
+        assert_eq!(title_rows[0].id, "session-2");
+    }
+
+    #[tokio::test]
+    async fn message_fts_index_tracks_message_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool.clone());
+
+        repo.create_session("session-1", "FTS", "/tmp/project")
+            .await
+            .expect("create session");
+        repo.save_message(NewMessageRecord {
+            id: "message-1",
+            session_id: "session-1",
+            role: "user",
+            content: "alpha omega marker",
+            tool_calls: None,
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: None,
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
+        .await
+        .expect("save message");
+
+        let omega_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?")
+                .bind("omega*")
+                .fetch_one(&pool)
+                .await
+                .expect("query inserted fts row");
+        assert_eq!(omega_count, 1);
+
+        repo.update_message_content("message-1", "beta marker")
+            .await
+            .expect("update message content");
+
+        let old_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?")
+                .bind("omega*")
+                .fetch_one(&pool)
+                .await
+                .expect("query removed fts row");
+        let beta_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?")
+                .bind("beta*")
+                .fetch_one(&pool)
+                .await
+                .expect("query updated fts row");
+        assert_eq!(old_count, 0);
+        assert_eq!(beta_count, 1);
+
+        repo.clear_messages("session-1")
+            .await
+            .expect("delete messages");
+        let deleted_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?")
+                .bind("beta*")
+                .fetch_one(&pool)
+                .await
+                .expect("query deleted fts row");
+        assert_eq!(deleted_count, 0);
+    }
+
+    #[tokio::test]
+    async fn session_fts_index_tracks_metadata_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool.clone());
+
+        repo.create_session("session-1", "Alpha Signal", "/tmp/project")
+            .await
+            .expect("create session");
+
+        let alpha_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions_fts WHERE sessions_fts MATCH ?")
+                .bind("alpha*")
+                .fetch_one(&pool)
+                .await
+                .expect("query inserted session fts row");
+        assert_eq!(alpha_count, 1);
+
+        repo.rename_session("session-1", "Beta Signal")
+            .await
+            .expect("rename session");
+
+        let old_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions_fts WHERE sessions_fts MATCH ?")
+                .bind("alpha*")
+                .fetch_one(&pool)
+                .await
+                .expect("query removed session fts row");
+        let beta_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions_fts WHERE sessions_fts MATCH ?")
+                .bind("beta*")
+                .fetch_one(&pool)
+                .await
+                .expect("query renamed session fts row");
+        assert_eq!(old_count, 0);
+        assert_eq!(beta_count, 1);
+
+        repo.update_session_project_path("session-1", "/tmp/gamma-project")
+            .await
+            .expect("update project path");
+
+        let search_rows = repo
+            .search_sessions("gamma", 10)
+            .await
+            .expect("search project path through fts");
+        assert_eq!(search_rows.len(), 1);
+        assert_eq!(search_rows[0].id, "session-1");
+
+        repo.delete_session("session-1")
+            .await
+            .expect("delete session");
+        let deleted_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions_fts WHERE sessions_fts MATCH ?")
+                .bind("beta*")
+                .fetch_one(&pool)
+                .await
+                .expect("query deleted session fts row");
+        assert_eq!(deleted_count, 0);
+    }
+
+    #[tokio::test]
+    async fn trigram_fts_accelerates_literal_session_search() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool.clone());
+
+        let has_trigram: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name IN ('messages_trigram_fts', 'sessions_trigram_fts')
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check trigram fts tables");
+
+        // Older SQLite builds may not provide the FTS5 trigram tokenizer. Runtime code
+        // intentionally falls back to scan in that case, so keep this test portable.
+        if has_trigram < 2 {
+            return;
+        }
+
+        repo.create_session("session-1", "English title", "/tmp/project")
+            .await
+            .expect("create session 1");
+        repo.create_session("session-2", "Path title", "/Users/dengxsh/Downloads/Work")
+            .await
+            .expect("create session 2");
+
+        repo.save_message(NewMessageRecord {
+            id: "message-1",
+            session_id: "session-1",
+            role: "user",
+            content: "实现聊天记录搜索功能，展示 session 内容片段。",
+            tool_calls: None,
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: None,
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
+        .await
+        .expect("save chinese message");
+
+        let message_trigram_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages_trigram_fts WHERE messages_trigram_fts MATCH ?",
+        )
+        .bind("\"聊天记录\"")
+        .fetch_one(&pool)
+        .await
+        .expect("query message trigram fts");
+        assert_eq!(message_trigram_count, 1);
+
+        let body_rows = repo
+            .search_sessions("聊天记录", 10)
+            .await
+            .expect("search chinese message through trigram fts");
+        assert_eq!(body_rows.len(), 1);
+        assert_eq!(body_rows[0].id, "session-1");
+
+        let session_trigram_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sessions_trigram_fts WHERE sessions_trigram_fts MATCH ?",
+        )
+        .bind("\"Downloads/Work\"")
+        .fetch_one(&pool)
+        .await
+        .expect("query session trigram fts");
+        assert_eq!(session_trigram_count, 1);
+
+        let path_rows = repo
+            .search_sessions("Downloads/Work", 10)
+            .await
+            .expect("search path through trigram fts");
+        assert_eq!(path_rows.len(), 1);
+        assert_eq!(path_rows[0].id, "session-2");
+    }
+
+    #[tokio::test]
+    async fn session_search_preserves_substring_semantics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        repo.create_session("session-1", "GitHub Connector", "/tmp/project")
+            .await
+            .expect("create session 1");
+        repo.create_session("session-2", "OpenAI Tools", "/tmp/project")
+            .await
+            .expect("create session 2");
+
+        let hub_rows = repo
+            .search_sessions("Hub", 10)
+            .await
+            .expect("search ascii substring");
+        assert_eq!(hub_rows.len(), 1);
+        assert_eq!(hub_rows[0].id, "session-1");
+
+        let short_rows = repo
+            .search_sessions("AI", 10)
+            .await
+            .expect("search short ascii substring");
+        assert_eq!(short_rows.len(), 1);
+        assert_eq!(short_rows[0].id, "session-2");
     }
 }

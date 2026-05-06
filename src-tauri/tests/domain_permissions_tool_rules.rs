@@ -84,6 +84,7 @@ fn matching_deny_entry_finds_source() {
 fn canonical_maps_tool_enum_display_names() {
     assert_eq!(canonical_permission_tool_name("FileRead"), "file_read");
     assert_eq!(canonical_permission_tool_name("Query"), "query");
+    assert_eq!(canonical_permission_tool_name("Connector"), "connector");
     assert_eq!(
         canonical_permission_tool_name("ListMcpResources"),
         "list_mcp_resources"

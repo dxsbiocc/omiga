@@ -30,8 +30,13 @@ pub const DESCRIPTION: &str = r#"Fetch one document/detail from a typed data sou
 - `social.wechat` is disabled by default; when enabled it fetches the article URL with the safe web fetcher.
 - Results are returned as formatted JSON with `title`, `link`, `url`, `favicon`, `content`, and `metadata`."#;
 
+fn default_category() -> String {
+    "web".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FetchArgs {
+    #[serde(default = "default_category")]
     pub category: String,
     #[serde(default)]
     pub source: Option<String>,

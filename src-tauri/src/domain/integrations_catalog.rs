@@ -2,6 +2,7 @@
 
 use crate::domain::skills::SkillSource;
 use serde::Serialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -12,10 +13,23 @@ pub struct McpToolCatalogEntry {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpServerConfigCatalogEntry {
+    pub kind: String,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub headers: HashMap<String, String>,
+    pub url: Option<String>,
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpServerCatalogEntry {
     pub config_key: String,
     pub normalized_key: String,
     pub enabled: bool,
+    pub config: McpServerConfigCatalogEntry,
     /// When tool discovery failed (timeout, handshake error, etc.); UI can show error state.
     pub list_tools_error: Option<String>,
     pub tools: Vec<McpToolCatalogEntry>,

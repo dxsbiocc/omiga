@@ -53,6 +53,7 @@ import { ProviderManager } from "./ProviderManager";
 import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 import { RuntimeConstraintsPanel } from "./RuntimeConstraintsPanel";
 import { PluginsPanel } from "./PluginsPanel";
+import { ConnectorsPanel } from "./ConnectorsPanel";
 import {
   DEFAULT_WEB_SEARCH_METHODS,
   moveItemToIndex,
@@ -68,7 +69,7 @@ import { AgentRolesPanel } from "../AgentRoles/AgentRolesPanel";
 interface SettingsProps {
   open: boolean;
   onClose: () => void;
-  /** See `openSettingsTabMap.ts`: 0–13 */
+  /** See `openSettingsTabMap.ts`: 0–14 */
   initialTab?: number;
   /** When `initialTab` is Execution (9): inner tab 0 Modal / 1 Daytona / 2 SSH */
   initialExecutionSubTab?: number;
@@ -100,6 +101,7 @@ const SETTINGS_SECTIONS: {
     header: "Integrations",
     items: [
       { index: 4, label: "Plugins" },
+      { index: 14, label: "Connectors" },
       { index: 5, label: "MCP" },
       { index: 6, label: "Skills" },
       { index: 9, label: "Execution" },
@@ -119,7 +121,7 @@ const SETTINGS_SECTIONS: {
 ];
 
 const SETTINGS_NAV_FLAT = SETTINGS_SECTIONS.flatMap((s) => s.items);
-const SETTINGS_TAB_MAX = 13;
+const SETTINGS_TAB_MAX = 14;
 
 function clampSettingsTab(i: number): number {
   return Math.min(
@@ -3446,35 +3448,30 @@ export function Settings({
               <PluginsPanel projectPath={projectPath} />
             )}
 
+            {activeTab === 14 && (
+              <ConnectorsPanel projectPath={projectPath} />
+            )}
+
             {activeTab === 5 && (
               <Box>
-                <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>
-                  Omiga 仅从以下位置合并 MCP（同名以后者为准）：应用内置{" "}
-                  <Typography component="span" fontWeight={600}>
-                    bundled_mcp.json
-                  </Typography>
-                  {" → "}用户{" "}
-                  <Typography component="span" fontWeight={600}>
-                    ~/.omiga/mcp.json
-                  </Typography>
-                  {" → "}当前项目{" "}
-                  <Typography component="span" fontWeight={600}>
-                    .omiga/mcp.json
-                  </Typography>
-                  。不再读取 ~/.claude.json、~/.cursor 或项目 .mcp.json。
-                </Alert>
-                <Typography variant="body2" color="text.secondary">
-                  下方可将外部 JSON（如 Claude Code 导出）合并到当前项目的{" "}
-                  <Typography component="span" fontWeight={600}>
-                    .omiga/mcp.json
-                  </Typography>
-                  ；保存后新对话即可加载 MCP。
-                </Typography>
-                <ClaudeCodeImportPanel projectPath={projectPath} mode="mcp" />
                 <IntegrationsCatalogPanel
                   projectPath={projectPath}
                   mode="mcp"
                 />
+                <Box sx={{ mt: 3 }}>
+                  <Typography variant="subtitle1" fontWeight={650}>
+                    导入已有 MCP JSON
+                  </Typography>
+                  <Typography
+                    variant="body2"
+                    color="text.secondary"
+                    sx={{ mt: 0.5 }}
+                  >
+                    如果已经有符合 mcpServers 格式的 JSON 文件，可以合并到当前项目
+                    .omiga/mcp.json。
+                  </Typography>
+                  <ClaudeCodeImportPanel projectPath={projectPath} mode="mcp" />
+                </Box>
               </Box>
             )}
 

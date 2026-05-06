@@ -28,6 +28,7 @@ pub const PERMISSION_DENY_CACHE_TTL: Duration = Duration::from_secs(30);
 pub struct McpToolCache {
     pub schemas: Vec<ToolSchema>,
     pub cached_at: Instant,
+    pub config_signature: String,
 }
 
 /// TTL for MCP tool schema cache. MCP server tool lists rarely change during a session.
@@ -135,6 +136,7 @@ pub struct RoundCancellationState {
 #[derive(Debug)]
 pub struct PendingToolCall {
     pub id: String,
+    pub original_name: String,
     pub name: String,
     pub arguments: Vec<String>,
 }

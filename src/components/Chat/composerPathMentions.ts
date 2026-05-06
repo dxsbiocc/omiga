@@ -9,11 +9,11 @@ const INACTIVE_FILE_MENTION = {
 
 export interface ComposerFileMentionParse {
   active: boolean;
-  /** Mention namespace. Bare `@` stays mixed; explicit prefixes use `@file:` / `@plugin:`. */
+  /** Mention namespace. `@` is for workspace files, `#` is for Omiga plugins. */
   kind: "mixed" | "file" | "plugin";
-  /** The normalized explicit prefix without `@`/`:`, empty for bare `@`. */
+  /** The normalized explicit prefix without trigger/`:`, empty for bare `@`. */
   prefix: "" | "file" | "plugin";
-  /** Workspace-relative query after `@`, normalized to `/` separators. */
+  /** Query after the trigger, normalized to `/` separators for file paths. */
   query: string;
   /** Workspace-relative directory currently being listed. Empty means workspace root. */
   directory: string;
@@ -45,32 +45,31 @@ export function normalizeComposerMentionPath(path: string): string {
 export function parseComposerFileMentionInput(
   input: string,
 ): ComposerFileMentionParse {
-  if (!/^@[^\s]*$/.test(input)) return INACTIVE_FILE_MENTION;
-  const raw = input.slice(1);
-  const lower = raw.toLowerCase();
-  let kind: ComposerFileMentionParse["kind"] = "mixed";
-  let prefix: ComposerFileMentionParse["prefix"] = "";
-  let rawQuery = raw;
-  if (lower.startsWith("plugin:")) {
-    kind = "plugin";
-    prefix = "plugin";
-    rawQuery = raw.slice("plugin:".length);
-  } else if (lower.startsWith("file:")) {
-    kind = "file";
-    prefix = "file";
-    rawQuery = raw.slice("file:".length);
-  }
-  const query = normalizeComposerMentionQuery(rawQuery);
-  if (kind === "plugin") {
+  if (/^#[^\s]*$/.test(input)) {
+    const raw = input.slice(1);
+    const query = normalizeComposerMentionQuery(raw);
     return {
       active: true,
-      kind,
-      prefix,
+      kind: "plugin",
+      prefix: "plugin",
       query,
       directory: "",
       filter: query,
     };
   }
+
+  if (!/^@[^\s]*$/.test(input)) return INACTIVE_FILE_MENTION;
+  const raw = input.slice(1);
+  const lower = raw.toLowerCase();
+  let kind: ComposerFileMentionParse["kind"] = "file";
+  let prefix: ComposerFileMentionParse["prefix"] = "";
+  let rawQuery = raw;
+  if (lower.startsWith("file:")) {
+    kind = "file";
+    prefix = "file";
+    rawQuery = raw.slice("file:".length);
+  }
+  const query = normalizeComposerMentionQuery(rawQuery);
   const slashIndex = query.lastIndexOf("/");
   if (slashIndex < 0) {
     return {

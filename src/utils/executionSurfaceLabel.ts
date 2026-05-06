@@ -68,6 +68,24 @@ export type ExecutionSurfaceKind =
   | "generating"
   | "tool";
 
+function normalizedToolName(value: string | undefined | null): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function isCompletedToolHint(
+  steps: ExecutionStep[],
+  toolHintFallback: string | null,
+): boolean {
+  const hint = normalizedToolName(toolHintFallback);
+  if (!hint) return false;
+  return steps.some((step) => {
+    if (!step.id.startsWith("tool-") || step.status !== "done") return false;
+    const toolName = normalizedToolName(step.toolName);
+    const title = normalizedToolName(step.title);
+    return toolName === hint || (!toolName && title === hint);
+  });
+}
+
 export function getExecutionSurfaceView(
   steps: ExecutionStep[],
   ctx: ExecutionSurfaceContext,
@@ -112,7 +130,11 @@ export function getExecutionSurfaceView(
   if (ctx.isStreaming && ctx.waitingFirstChunk) {
     return { label: "推理中", kind: "thinking", toolName: null };
   }
-  if (ctx.isStreaming && ctx.toolHintFallback) {
+  if (
+    ctx.isStreaming &&
+    ctx.toolHintFallback &&
+    !isCompletedToolHint(steps, ctx.toolHintFallback)
+  ) {
     const tn = ctx.toolHintFallback.trim();
     return {
       label: formatToolDisplayName(tn),

@@ -112,22 +112,44 @@ mod tests {
     }
 
     fn executable_registration() -> (tempfile::TempDir, PluginRetrievalRegistration) {
+        script_registration(
+            "mock",
+            "mock_source",
+            "mock_plugin.py",
+            MOCK_PLUGIN,
+            true,
+            5_000,
+        )
+    }
+
+    fn script_registration(
+        plugin_id: &str,
+        source_id: &str,
+        script_name: &str,
+        script_body: &str,
+        executable: bool,
+        request_timeout_ms: u64,
+    ) -> (tempfile::TempDir, PluginRetrievalRegistration) {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("mock_plugin.py");
-        fs::write(&script, MOCK_PLUGIN).unwrap();
-        #[cfg(unix)]
-        make_executable(&script);
+        let script = dir.path().join(script_name);
+        fs::write(&script, script_body).unwrap();
+        fs::File::open(&script).unwrap().sync_all().unwrap();
+        if executable {
+            #[cfg(unix)]
+            make_executable(&script);
+        }
         let manifest = load_plugin_retrieval_manifest(
             dir.path(),
             json!({
                 "protocolVersion": 1,
                 "runtime": {
-                    "command": "./mock_plugin.py",
-                    "requestTimeoutMs": 5_000,
+                    "command": format!("./{script_name}"),
+                    "requestTimeoutMs": request_timeout_ms,
+                    "cancelGraceMs": 10,
                     "concurrency": 1
                 },
                 "sources": [{
-                    "id": "mock_source",
+                    "id": source_id,
                     "category": "dataset",
                     "capabilities": ["search", "fetch", "query"]
                 }]
@@ -137,7 +159,7 @@ mod tests {
         (
             dir,
             PluginRetrievalRegistration {
-                plugin_id: "mock".to_string(),
+                plugin_id: plugin_id.to_string(),
                 plugin_root: manifest.runtime.cwd.clone(),
                 retrieval: manifest,
             },
@@ -145,8 +167,12 @@ mod tests {
     }
 
     fn enabled_ctx() -> ToolContext {
+        enabled_ctx_for("mock_source")
+    }
+
+    fn enabled_ctx_for(source_id: &str) -> ToolContext {
         let mut enabled = HashMap::new();
-        enabled.insert("dataset".to_string(), vec!["mock_source".to_string()]);
+        enabled.insert("dataset".to_string(), vec![source_id.to_string()]);
         ToolContext::new("/tmp").with_web_search_api_keys(WebSearchApiKeys {
             enabled_sources_by_category: Some(enabled),
             ..WebSearchApiKeys::default()
@@ -293,6 +319,59 @@ for line in sys.stdin:
         break
 "#;
 
+    const INVALID_INIT_PLUGIN: &str = r#"#!/usr/bin/env python3
+import sys
+
+for line in sys.stdin:
+    print("not-json", flush=True)
+    break
+"#;
+
+    const SLOW_EXECUTE_PLUGIN: &str = r#"#!/usr/bin/env python3
+import json
+import sys
+import time
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("type") == "initialize":
+        print(json.dumps({
+            "id": msg["id"],
+            "type": "initialized",
+            "protocolVersion": 1,
+            "sources": [{"category":"dataset", "id":"slow_source", "capabilities":["search", "fetch", "query"]}]
+        }), flush=True)
+    elif msg.get("type") == "execute":
+        time.sleep(5)
+    elif msg.get("type") == "shutdown":
+        print(json.dumps({"id": msg["id"], "type": "shutdown"}), flush=True)
+        break
+"#;
+
+    const FAILING_EXECUTE_PLUGIN: &str = r#"#!/usr/bin/env python3
+import json
+import sys
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("type") == "initialize":
+        print(json.dumps({
+            "id": msg["id"],
+            "type": "initialized",
+            "protocolVersion": 1,
+            "sources": [{"category":"dataset", "id":"quarantine_source", "capabilities":["search", "fetch", "query"]}]
+        }), flush=True)
+    elif msg.get("type") == "execute":
+        print(json.dumps({
+            "id": msg["id"],
+            "type": "error",
+            "error": {"code": "upstream_failed", "message": "forced fixture error"}
+        }), flush=True)
+    elif msg.get("type") == "shutdown":
+        print(json.dumps({"id": msg["id"], "type": "shutdown"}), flush=True)
+        break
+"#;
+
     #[tokio::test]
     async fn bridge_executes_plugin_search_and_renders_search_json() {
         let (_dir, registration) = executable_registration();
@@ -406,6 +485,159 @@ for line in sys.stdin:
         let value: JsonValue = serde_json::from_str(&stream_text(stream).await).unwrap();
 
         assert_eq!(value["error"], json!("source_disabled"));
+        assert_eq!(value["route"], json!("data.mock_source"));
+        assert_eq!(value["recoverable"], json!(true));
+        assert!(value["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("Settings → Plugins"));
         assert_eq!(value["results"], json!([]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bridge_returns_structured_error_for_plugin_start_failure() {
+        let (_dir, registration) = script_registration(
+            "start-failure-plugin",
+            "start_failure_source",
+            "not_executable_plugin.py",
+            MOCK_PLUGIN,
+            false,
+            5_000,
+        );
+        let request = normalize::search_request(&search_args("start_failure_source")).unwrap();
+
+        let stream = execute_with_registrations(
+            &enabled_ctx_for("start_failure_source"),
+            request,
+            vec![registration],
+            output::search_json,
+        )
+        .await
+        .unwrap();
+        let value: JsonValue = serde_json::from_str(&stream_text(stream).await).unwrap();
+
+        assert_eq!(
+            value["error"],
+            json!("retrieval_plugin_process_start_failed")
+        );
+        assert_eq!(value["plugin"], json!("start-failure-plugin"));
+        assert_eq!(value["route"], json!("data.start_failure_source"));
+        assert_eq!(value["recoverable"], json!(false));
+        assert!(value["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("plugin executable"));
+    }
+
+    #[tokio::test]
+    async fn bridge_returns_structured_error_for_plugin_protocol_failure() {
+        let (_dir, registration) = script_registration(
+            "protocol-failure-plugin",
+            "protocol_failure_source",
+            "invalid_init_plugin.py",
+            INVALID_INIT_PLUGIN,
+            true,
+            5_000,
+        );
+        let request = normalize::search_request(&search_args("protocol_failure_source")).unwrap();
+
+        let stream = execute_with_registrations(
+            &enabled_ctx_for("protocol_failure_source"),
+            request,
+            vec![registration],
+            output::search_json,
+        )
+        .await
+        .unwrap();
+        let value: JsonValue = serde_json::from_str(&stream_text(stream).await).unwrap();
+
+        assert_eq!(value["error"], json!("retrieval_plugin_protocol_error"));
+        assert_eq!(value["plugin"], json!("protocol-failure-plugin"));
+        assert_eq!(value["route"], json!("data.protocol_failure_source"));
+        assert_eq!(value["recoverable"], json!(false));
+        assert!(value["diagnostics_hint"]
+            .as_str()
+            .unwrap()
+            .contains("retrieval-plugin-protocol.md"));
+    }
+
+    #[tokio::test]
+    async fn bridge_returns_structured_error_for_plugin_timeout() {
+        let (_dir, registration) = script_registration(
+            "timeout-plugin",
+            "slow_source",
+            "slow_plugin.py",
+            SLOW_EXECUTE_PLUGIN,
+            true,
+            20,
+        );
+        let request = normalize::search_request(&search_args("slow_source")).unwrap();
+
+        let stream = execute_with_registrations(
+            &enabled_ctx_for("slow_source"),
+            request,
+            vec![registration],
+            output::search_json,
+        )
+        .await
+        .unwrap();
+        let value: JsonValue = serde_json::from_str(&stream_text(stream).await).unwrap();
+
+        assert_eq!(value["error"], json!("retrieval_plugin_timeout"));
+        assert_eq!(value["route"], json!("data.slow_source"));
+        assert_eq!(value["recoverable"], json!(true));
+        assert!(value["diagnostics_hint"]
+            .as_str()
+            .unwrap()
+            .contains("child processes are discarded"));
+    }
+
+    #[tokio::test]
+    async fn bridge_returns_structured_error_for_quarantined_plugin_route() {
+        let (_dir, registration) = script_registration(
+            "quarantine-plugin",
+            "quarantine_source",
+            "failing_plugin.py",
+            FAILING_EXECUTE_PLUGIN,
+            true,
+            5_000,
+        );
+        let request = normalize::search_request(&search_args("quarantine_source")).unwrap();
+
+        for _ in 0..3 {
+            let stream = execute_with_registrations(
+                &enabled_ctx_for("quarantine_source"),
+                request.clone(),
+                vec![registration.clone()],
+                output::search_json,
+            )
+            .await
+            .unwrap();
+            let value: JsonValue = serde_json::from_str(&stream_text(stream).await).unwrap();
+            assert_eq!(value["error"], json!("retrieval_plugin_failed"));
+        }
+
+        let stream = execute_with_registrations(
+            &enabled_ctx_for("quarantine_source"),
+            request,
+            vec![registration],
+            output::search_json,
+        )
+        .await
+        .unwrap();
+        let value: JsonValue = serde_json::from_str(&stream_text(stream).await).unwrap();
+
+        assert_eq!(value["error"], json!("retrieval_plugin_quarantined"));
+        assert_eq!(value["route"], json!("data.quarantine_source"));
+        assert_eq!(value["recoverable"], json!(true));
+        assert!(value["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("quarantine window"));
+        assert!(value["message"]
+            .as_str()
+            .unwrap()
+            .contains("forced fixture error"));
     }
 }

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   Button,
   Typography,
@@ -29,8 +29,13 @@ import {
   type ToolPermissionMode,
   type RiskLevel,
 } from "../../state/permissionStore";
+import {
+  inferConnectorPermissionIntent,
+  type ConnectorPermissionIntent,
+  type PermissionArgs,
+} from "../../utils/connectorPermissionIntent";
 
-type AnyArgs = Record<string, unknown> | undefined;
+type AnyArgs = PermissionArgs;
 
 function firstString(v: unknown): string | null {
   if (typeof v === "string" && v.trim()) return v;
@@ -58,8 +63,25 @@ function getPrimaryPath(args: AnyArgs): string | null {
   return null;
 }
 
-function inferIntent(toolNameRaw: string, args: AnyArgs): { title: string; detail?: string } {
+export function inferIntent(
+  toolNameRaw: string,
+  args: AnyArgs,
+): { title: string; detail?: string; connector?: ConnectorPermissionIntent } {
   const toolName = (toolNameRaw || "").trim();
+  const connector = inferConnectorPermissionIntent(toolNameRaw, args);
+  if (connector) {
+    return {
+      title: connector.isWrite ? "外部服务写入确认" : "外部服务访问确认",
+      detail: [
+        connector.connectorLabel,
+        connector.operationLabel,
+        connector.target,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+      connector,
+    };
+  }
   const path = getPrimaryPath(args);
 
   // Built-in Omiga tools (Rust names)
@@ -243,6 +265,45 @@ const convertModeToBackend = (
   }
 };
 
+function truncateText(value: string, maxChars: number): string {
+  return value.length > maxChars ? `${value.slice(0, maxChars)}…` : value;
+}
+
+export function permissionPromptLabels(
+  connectorIntent: ConnectorPermissionIntent | undefined,
+  isCritical: boolean,
+  processing: boolean,
+): {
+  approveLabel: string;
+  allowOnceLabel: string;
+  sessionLabel: string;
+  timeWindowLabel: string;
+  connectorWarning?: string;
+} {
+  const isConnectorWrite = connectorIntent?.isWrite === true;
+  return {
+    approveLabel: processing
+      ? "处理中…"
+      : isConnectorWrite
+        ? "允许写入"
+        : connectorIntent
+          ? "允许访问"
+          : isCritical
+            ? "运行（高风险）"
+            : "运行",
+    allowOnceLabel: isConnectorWrite ? "仅允许这一次写入" : "仅这次允许",
+    sessionLabel: connectorIntent
+      ? "本次会话内允许同一连接器操作"
+      : "本次会话内允许",
+    timeWindowLabel: connectorIntent
+      ? "在选定时间窗口内允许同一连接器操作"
+      : "在选定时间窗口内允许",
+    connectorWarning: isConnectorWrite
+      ? `这会修改 ${connectorIntent.connectorLabel} 中的数据。请确认账号、目标对象和内容无误；批准或拒绝都会写入连接器审计记录。`
+      : undefined,
+  };
+}
+
 /** 内联在输入框上方，非弹窗 */
 export const PermissionPromptBar: React.FC = () => {
   const { pendingRequest, approveRequest, denyRequest, error, clearError } =
@@ -252,17 +313,35 @@ export const PermissionPromptBar: React.FC = () => {
   const [showDetails, setShowDetails] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [cmdExpanded, setCmdExpanded] = useState(false);
+  const intent = useMemo(
+    () =>
+      pendingRequest
+        ? inferIntent(
+            pendingRequest.tool_name,
+            pendingRequest.arguments as AnyArgs,
+          )
+        : null,
+    [pendingRequest],
+  );
 
-  if (!pendingRequest) return null;
+  const connectorIntent = intent?.connector;
+
+  useEffect(() => {
+    if (!pendingRequest) return;
+    if (connectorIntent?.isWrite) {
+      setModeValue("askEveryTime");
+      return;
+    }
+    setModeValue("session");
+  }, [connectorIntent?.isWrite, pendingRequest?.request_id]);
+
+  if (!pendingRequest || !intent) return null;
 
   const isDangerous =
     pendingRequest.risk_level === "high" ||
     pendingRequest.risk_level === "critical";
   const isCritical = pendingRequest.risk_level === "critical";
-  const intent = inferIntent(
-    pendingRequest.tool_name,
-    pendingRequest.arguments as AnyArgs,
-  );
+  const isConnectorWrite = connectorIntent?.isWrite === true;
 
   const handleApprove = async () => {
     setProcessing(true);
@@ -291,10 +370,13 @@ export const PermissionPromptBar: React.FC = () => {
 
   const detail = intent.detail ?? pendingRequest.tool_name;
   const DETAIL_TRUNCATE = 120;
-  const detailTruncated = detail.length > DETAIL_TRUNCATE
-    ? detail.slice(0, DETAIL_TRUNCATE) + "…"
-    : detail;
+  const detailTruncated = truncateText(detail, DETAIL_TRUNCATE);
   const hasLongDetail = detail.length > DETAIL_TRUNCATE;
+  const connectorTargetLabel = connectorIntent?.target ?? "未提供目标对象";
+  const connectorPreview = connectorIntent?.payloadPreview
+    ? truncateText(connectorIntent.payloadPreview, 180)
+    : null;
+  const labels = permissionPromptLabels(connectorIntent, isCritical, processing);
 
   return (
     <Box
@@ -325,8 +407,97 @@ export const PermissionPromptBar: React.FC = () => {
           />
         </Stack>
 
+        {connectorIntent && (
+          <Box
+            sx={{
+              border: 1,
+              borderColor: isConnectorWrite ? "error.main" : "divider",
+              borderRadius: 1.5,
+              bgcolor: (t) =>
+                isConnectorWrite
+                  ? t.palette.mode === "dark"
+                    ? "rgba(244,67,54,0.08)"
+                    : "rgba(244,67,54,0.05)"
+                  : "action.hover",
+              p: 1,
+            }}
+          >
+            <Stack spacing={0.75}>
+              <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+                <Chip
+                  size="small"
+                  label={`服务：${connectorIntent.connectorLabel}`}
+                  color={isConnectorWrite ? "error" : "default"}
+                  variant={isConnectorWrite ? "filled" : "outlined"}
+                />
+                <Chip
+                  size="small"
+                  label={`操作：${connectorIntent.operationLabel}`}
+                  variant="outlined"
+                />
+                <Chip
+                  size="small"
+                  label={isConnectorWrite ? "会修改外部数据" : "只读访问"}
+                  color={isConnectorWrite ? "error" : "info"}
+                  variant="outlined"
+                />
+              </Stack>
+
+              <Box>
+                <Typography variant="caption" color="text.secondary">
+                  目标对象
+                </Typography>
+                <Box
+                  component="code"
+                  sx={{
+                    display: "block",
+                    mt: 0.25,
+                    px: 1,
+                    py: 0.5,
+                    borderRadius: 1,
+                    bgcolor: "background.paper",
+                    fontSize: "0.78rem",
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-all",
+                  }}
+                >
+                  {connectorTargetLabel}
+                </Box>
+              </Box>
+
+              {connectorPreview && (
+                <Box>
+                  <Typography variant="caption" color="text.secondary">
+                    内容预览
+                  </Typography>
+                  <Box
+                    component="code"
+                    sx={{
+                      display: "block",
+                      mt: 0.25,
+                      px: 1,
+                      py: 0.5,
+                      borderRadius: 1,
+                      bgcolor: "background.paper",
+                      fontSize: "0.78rem",
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-all",
+                    }}
+                  >
+                    {connectorPreview}
+                  </Box>
+                </Box>
+              )}
+
+              <Typography variant="caption" color="text.secondary">
+                Connector：{connectorIntent.connectorId} / {connectorIntent.operation}
+              </Typography>
+            </Stack>
+          </Box>
+        )}
+
         {/* 具体操作内容：路径或命令，限制展示 */}
-        {detail && (
+        {!connectorIntent && detail && (
           <Box
             component="code"
             sx={{
@@ -355,13 +526,17 @@ export const PermissionPromptBar: React.FC = () => {
           </Alert>
         )}
 
-        {isDangerous && (
+        {isConnectorWrite ? (
+          <Alert severity="error" sx={{ py: 0.5 }}>
+            {labels.connectorWarning}
+          </Alert>
+        ) : isDangerous ? (
           <Alert severity={isCritical ? "error" : "warning"} sx={{ py: 0.5 }}>
             {isCritical
               ? "此操作可能导致数据丢失，请格外谨慎！"
               : "高风险操作，请确认您了解其后果。"}
           </Alert>
-        )}
+        ) : null}
 
         {pendingRequest.detected_risks.length > 0 && (
           <Accordion
@@ -409,17 +584,17 @@ export const PermissionPromptBar: React.FC = () => {
             <FormControlLabel
               value="askEveryTime"
               control={<Radio size="small" />}
-              label="仅这次允许"
+              label={labels.allowOnceLabel}
             />
             <FormControlLabel
               value="session"
               control={<Radio size="small" />}
-              label="本次会话内允许"
+              label={labels.sessionLabel}
             />
             <FormControlLabel
               value="timeWindow"
               control={<Radio size="small" />}
-              label="在选定时间窗口内允许"
+              label={labels.timeWindowLabel}
             />
             <FormControlLabel
               value="plan"
@@ -478,7 +653,7 @@ export const PermissionPromptBar: React.FC = () => {
               processing ? <CircularProgress size={14} color="inherit" /> : null
             }
           >
-            {processing ? "处理中…" : isCritical ? "运行（高风险）" : "运行"}
+            {labels.approveLabel}
           </Button>
         </Stack>
       </Stack>

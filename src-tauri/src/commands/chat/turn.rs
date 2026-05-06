@@ -1,6 +1,8 @@
 use crate::domain::chat_state::{PendingToolCall, SessionRuntimeState};
 use crate::domain::session::MessageTokenUsage;
-use crate::domain::tools::ToolSchema;
+use crate::domain::tools::{
+    normalize_legacy_retrieval_tool_arguments, normalize_legacy_retrieval_tool_name, ToolSchema,
+};
 use crate::errors::{ApiError, ChatError, OmigaError};
 use crate::infrastructure::streaming::StreamOutputItem;
 use crate::llm::{LlmClient, LlmMessage, LlmStreamChunk, TokenUsage};
@@ -58,7 +60,8 @@ pub(super) async fn finalize_pending_tool_by_id(
     let Some(tool) = tool else {
         return false;
     };
-    let args = tool.arguments.join("");
+    let args =
+        normalize_stream_tool_arguments(&tool.original_name, &tool.name, &tool.arguments.join(""));
     completed_tool_calls.push((tool.id.clone(), tool.name.clone(), args.clone()));
     let _ = app.emit(
         &format!("chat-stream-{}", message_id),
@@ -69,6 +72,18 @@ pub(super) async fn finalize_pending_tool_by_id(
         },
     );
     true
+}
+
+fn normalize_stream_tool_name(tool_name: &str) -> String {
+    normalize_legacy_retrieval_tool_name(tool_name)
+}
+
+fn normalize_stream_tool_arguments(
+    original_tool_name: &str,
+    normalized_tool_name: &str,
+    arguments: &str,
+) -> String {
+    normalize_legacy_retrieval_tool_arguments(original_tool_name, normalized_tool_name, arguments)
 }
 
 /// Merge per-request usage into a running total for one user turn (multi tool-round).
@@ -211,6 +226,8 @@ pub(super) async fn stream_llm_response_with_cancel(
                     );
                 }
                 LlmStreamChunk::ToolStart { id, name } => {
+                    let original_name = name.clone();
+                    let name = normalize_stream_tool_name(&name);
                     // Some streams start the next tool without BlockStop; finalize the previous one.
                     if let Some(prev_id) = current_tool_id.take() {
                         if prev_id != id {
@@ -229,6 +246,7 @@ pub(super) async fn stream_llm_response_with_cancel(
                         id.clone(),
                         PendingToolCall {
                             id: id.clone(),
+                            original_name,
                             name: name.clone(),
                             arguments: Vec::new(),
                         },
@@ -899,4 +917,49 @@ pub(super) async fn emit_post_turn_meta_then_complete(request: PostTurnCompletio
             }
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_normalizes_legacy_web_tool_names_and_arguments() {
+        assert_eq!(normalize_stream_tool_name("web_search"), "search");
+        assert_eq!(normalize_stream_tool_name("web_fetch"), "fetch");
+
+        let search_args =
+            normalize_stream_tool_arguments("web_search", "search", r#"{"q":"TP53"}"#);
+        let value: serde_json::Value = serde_json::from_str(&search_args).unwrap();
+        assert_eq!(value["category"], "web");
+        assert_eq!(value["query"], "TP53");
+
+        let fetch_args = normalize_stream_tool_arguments(
+            "web_fetch",
+            "fetch",
+            r#"{"url":"https://example.com"}"#,
+        );
+        let value: serde_json::Value = serde_json::from_str(&fetch_args).unwrap();
+        assert_eq!(value["category"], "web");
+        assert_eq!(value["url"], "https://example.com");
+    }
+
+    #[test]
+    fn stream_normalizes_legacy_pubmed_mcp_tool_to_unified_search() {
+        assert_eq!(
+            normalize_stream_tool_name("mcp__pubmed__pubmed_search_articles"),
+            "search"
+        );
+
+        let search_args = normalize_stream_tool_arguments(
+            "mcp__pubmed__pubmed_search_articles",
+            "search",
+            r#"{"term":"BRCA2","retmax":2}"#,
+        );
+        let value: serde_json::Value = serde_json::from_str(&search_args).unwrap();
+        assert_eq!(value["category"], "literature");
+        assert_eq!(value["source"], "pubmed");
+        assert_eq!(value["query"], "BRCA2");
+        assert_eq!(value["max_results"], 2);
+    }
 }

@@ -111,6 +111,34 @@ export interface PluginDiagnosticsPayload {
   notes: string[];
 }
 
+export interface RetrievalRuntimeDiagnosticsPayload {
+  protocolDocPath: string;
+  summary: {
+    pluginCount: number;
+    routeCount: number;
+    healthyRouteCount: number;
+    degradedRouteCount: number;
+    quarantinedRouteCount: number;
+    pooledProcessCount: number;
+    unknownPluginCount: number;
+  };
+  plugins: Array<{
+    id: string;
+    name: string;
+    displayName?: string | null;
+    marketplaceName: string;
+    sourcePath: string;
+    installedPath?: string | null;
+    installed: boolean;
+    enabled: boolean;
+    declaredRouteCount: number;
+  }>;
+  unknownPluginIds: string[];
+  retrievalRoutes: PluginRetrievalRouteStatus[];
+  pooledProcesses: PluginProcessPoolRouteStatus[];
+  notes: string[];
+}
+
 interface PluginState {
   marketplaces: PluginMarketplaceEntry[];
   retrievalStatuses: PluginRetrievalRouteStatus[];
@@ -165,6 +193,71 @@ export function buildPluginDiagnostics(
       "Retrieval plugins run as local JSONL child processes.",
       "No credential values are included in this diagnostics payload.",
       "See protocolDocPath for the search/query/fetch route contract.",
+    ],
+  };
+
+  return JSON.stringify(payload, null, 2);
+}
+
+export function buildRetrievalRuntimeDiagnostics(
+  plugins: PluginSummary[],
+  retrievalRoutes: PluginRetrievalRouteStatus[] = [],
+  pooledProcesses: PluginProcessPoolRouteStatus[] = [],
+): string {
+  const retrievalPluginIds = new Set(
+    plugins
+      .filter((plugin) => Boolean(plugin.retrieval?.sources.length))
+      .map((plugin) => plugin.id),
+  );
+  for (const route of retrievalRoutes) retrievalPluginIds.add(route.pluginId);
+  for (const process of pooledProcesses) retrievalPluginIds.add(process.pluginId);
+
+  const healthyRouteCount = retrievalRoutes.filter(
+    (route) => route.state === "healthy",
+  ).length;
+  const degradedRouteCount = retrievalRoutes.filter(
+    (route) => route.state === "degraded",
+  ).length;
+  const quarantinedRouteCount = retrievalRoutes.filter(
+    (route) => route.state === "quarantined" || route.quarantined,
+  ).length;
+  const knownPluginIds = new Set(plugins.map((plugin) => plugin.id));
+  const unknownPluginIds = Array.from(retrievalPluginIds)
+    .filter((pluginId) => !knownPluginIds.has(pluginId))
+    .sort((left, right) => left.localeCompare(right));
+  const diagnosticPlugins = plugins
+    .filter((plugin) => retrievalPluginIds.has(plugin.id))
+    .map((plugin) => ({
+      id: plugin.id,
+      name: plugin.name,
+      displayName: plugin.interface?.displayName,
+      marketplaceName: plugin.marketplaceName,
+      sourcePath: plugin.sourcePath,
+      installedPath: plugin.installedPath,
+      installed: plugin.installed,
+      enabled: plugin.enabled,
+      declaredRouteCount: plugin.retrieval?.sources.length ?? 0,
+    }));
+
+  const payload: RetrievalRuntimeDiagnosticsPayload = {
+    protocolDocPath: RETRIEVAL_PLUGIN_PROTOCOL_DOC_PATH,
+    summary: {
+      pluginCount: diagnosticPlugins.length,
+      routeCount: retrievalRoutes.length,
+      healthyRouteCount,
+      degradedRouteCount,
+      quarantinedRouteCount,
+      pooledProcessCount: pooledProcesses.length,
+      unknownPluginCount: unknownPluginIds.length,
+    },
+    plugins: diagnosticPlugins,
+    unknownPluginIds,
+    retrievalRoutes,
+    pooledProcesses,
+    notes: [
+      "Retrieval runtime diagnostics include route health, quarantine windows, and warm child processes.",
+      "No credential values are included in this diagnostics payload.",
+      "See protocolDocPath for the local search/query/fetch plugin route contract.",
     ],
   };
 

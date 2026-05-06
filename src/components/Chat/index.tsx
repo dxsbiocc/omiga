@@ -2151,7 +2151,7 @@ export function Chat({ sessionId }: ChatProps) {
     return queuedMainSendQueueRef.current.map((item) => {
       const pathLine = formatComposerPathPreview(item.composerAttachedPaths);
       const pluginLine = item.composerSelectedPluginIds
-        .map((id) => `@${id}`)
+        .map((id) => `#${id}`)
         .join(" ");
       const prefix = [pluginLine, pathLine].filter(Boolean).join(" ");
       const merged =
@@ -3332,10 +3332,11 @@ export function Chat({ sessionId }: ChatProps) {
     const shouldShow = shouldShowJumpToLatestButton(
       metrics,
       AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
+      messages.length > 0 || currentResponse.trim().length > 0,
     );
     setShowJumpToLatest((prev) => (prev === shouldShow ? prev : shouldShow));
     return nearBottom;
-  }, []);
+  }, [currentResponse, messages.length]);
 
   // Scroll-to-top pagination + auto-scroll bottom detection
   useEffect(() => {
@@ -5008,7 +5009,7 @@ export function Chat({ sessionId }: ChatProps) {
       if (flushPayload) restoreFlushToQueue(flushPayload);
       return;
     }
-    /** Composer is still in bare `/…` or `@…` picker mode — do not send as message */
+    /** Composer is still in bare `/…`, `$…`, `@…`, or `#…` picker mode — do not send as message */
     if (trimmed && /^\/[^\s]*$/u.test(trimmed) && !researchParsed && !goalParsed) {
       if (flushPayload) restoreFlushToQueue(flushPayload);
       return;
@@ -5018,6 +5019,10 @@ export function Chat({ sessionId }: ChatProps) {
       return;
     }
     if (trimmed && /^@[^\s]*$/u.test(trimmed)) {
+      if (flushPayload) restoreFlushToQueue(flushPayload);
+      return;
+    }
+    if (trimmed && /^#[^\s]*$/u.test(trimmed)) {
       if (flushPayload) restoreFlushToQueue(flushPayload);
       return;
     }
@@ -5637,7 +5642,7 @@ export function Chat({ sessionId }: ChatProps) {
       );
       const pathLine = formatComposerPathPreview(paths);
       const pluginLine = (message.composerSelectedPluginIds ?? [])
-        .map((id) => `@${id}`)
+        .map((id) => `#${id}`)
         .join(" ");
       const prefix = [pluginLine, pathLine].filter(Boolean).join(" ");
       await navigator.clipboard.writeText(

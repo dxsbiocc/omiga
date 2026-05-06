@@ -3,11 +3,12 @@
 use crate::app_state::OmigaAppState;
 use crate::commands::CommandResult;
 use crate::domain::integrations_catalog::{
-    IntegrationsCatalog, McpServerCatalogEntry, McpToolCatalogEntry, SkillCatalogEntry,
+    IntegrationsCatalog, McpServerCatalogEntry, McpServerConfigCatalogEntry, McpToolCatalogEntry,
+    SkillCatalogEntry,
 };
 use crate::domain::integrations_config::{self, IntegrationsConfig};
 use crate::domain::mcp::client::list_tools_for_server;
-use crate::domain::mcp::config::merged_mcp_servers;
+use crate::domain::mcp::config::{merged_mcp_servers, McpServerConfig};
 use crate::domain::mcp::names::{build_mcp_tool_name, normalize_name_for_mcp};
 use crate::domain::skills::{self, SkillSource};
 use serde::Serialize;
@@ -34,6 +35,34 @@ pub(crate) fn resolve_project_root(project_root: &str) -> CommandResult<PathBuf>
 /// Short timeout used only for the settings catalog UI — avoids blocking on dead/auth-required servers.
 /// Chat sessions use their own (longer) timeout from `mcp_tool_pool`.
 const CATALOG_TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(8);
+
+fn catalog_config_from_mcp_config(config: &McpServerConfig) -> McpServerConfigCatalogEntry {
+    match config {
+        McpServerConfig::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => McpServerConfigCatalogEntry {
+            kind: "stdio".to_string(),
+            command: Some(command.clone()),
+            args: args.clone(),
+            env: env.clone(),
+            headers: Default::default(),
+            url: None,
+            cwd: cwd.clone(),
+        },
+        McpServerConfig::Url { url, headers } => McpServerConfigCatalogEntry {
+            kind: "http".to_string(),
+            command: None,
+            args: Vec::new(),
+            env: Default::default(),
+            headers: headers.clone(),
+            url: Some(url.clone()),
+            cwd: None,
+        },
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +109,7 @@ pub(crate) async fn build_integrations_catalog(
     let merged = merged_mcp_servers(&root);
     let mut server_keys: Vec<String> = merged.keys().cloned().collect();
     server_keys.sort();
+    let merged_arc = std::sync::Arc::new(merged);
 
     // Query all servers in parallel with a short per-server timeout.
     let root_arc = std::sync::Arc::new(root.clone());
@@ -89,9 +119,22 @@ pub(crate) async fn build_integrations_catalog(
         .map(|key| {
             let root_c = root_arc.clone();
             let cfg_c = cfg_arc.clone();
+            let merged_c = merged_arc.clone();
             tokio::spawn(async move {
                 let normalized_key = normalize_name_for_mcp(&key);
                 let enabled = !integrations_config::is_mcp_config_server_disabled(&cfg_c, &key);
+                let config = merged_c
+                    .get(&key)
+                    .map(catalog_config_from_mcp_config)
+                    .unwrap_or_else(|| McpServerConfigCatalogEntry {
+                        kind: "stdio".to_string(),
+                        command: None,
+                        args: Vec::new(),
+                        env: Default::default(),
+                        headers: Default::default(),
+                        url: None,
+                        cwd: None,
+                    });
                 let tools_res =
                     list_tools_for_server(&root_c, &key, CATALOG_TOOL_LIST_TIMEOUT).await;
                 let (list_tools_error, tools) = match tools_res {
@@ -118,6 +161,7 @@ pub(crate) async fn build_integrations_catalog(
                     config_key: key,
                     normalized_key,
                     enabled,
+                    config,
                     list_tools_error,
                     tools,
                 }
@@ -132,8 +176,22 @@ pub(crate) async fn build_integrations_catalog(
             Err(e) => tracing::warn!("catalog task panicked: {e}"),
         }
     }
-    // Re-sort by config_key after parallel collection.
-    mcp_servers.sort_by(|a, b| a.config_key.cmp(&b.config_key));
+    // Re-sort by config_key after parallel collection. Keep the bundled Paperclip
+    // literature MCP first so users see the default research source before
+    // project/local additions.
+    mcp_servers.sort_by(|a, b| {
+        let a_rank = if a.config_key.eq_ignore_ascii_case("paperclip") {
+            0
+        } else {
+            1
+        };
+        let b_rank = if b.config_key.eq_ignore_ascii_case("paperclip") {
+            0
+        } else {
+            1
+        };
+        a_rank.cmp(&b_rank).then(a.config_key.cmp(&b.config_key))
+    });
 
     let skill_list = skills::load_skills_for_project(&root).await;
     let skills_out: Vec<SkillCatalogEntry> = skill_list

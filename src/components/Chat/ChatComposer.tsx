@@ -1096,7 +1096,7 @@ export const ChatComposer = memo(function ChatComposer({
     return { active: true as const, query: t.slice(1) };
   }, [input, selectedSkillCommandName, selectedSlashCommandId]);
 
-  /** `@`：工作区相对路径选择（支持 `@dir/child` 逐级选择） */
+  /** `@`：工作区相对路径选择；`#`：Omiga 插件选择。 */
   const fileParse = useMemo(() => {
     return parseComposerFileMentionInput(input);
   }, [input]);
@@ -1170,7 +1170,7 @@ export const ChatComposer = memo(function ChatComposer({
   }, [availablePlugins, composerSelectedPluginIds]);
 
   const filteredPluginMentions = useMemo(() => {
-    if (!fileParse.active || fileParse.kind === "file" || fileParse.directory) return [];
+    if (!fileParse.active || fileParse.kind !== "plugin") return [];
     const q = fileParse.filter.toLowerCase().trim();
     return availablePlugins
       .filter((plugin) => !composerSelectedPluginIds.includes(plugin.id))
@@ -1829,7 +1829,7 @@ export const ChatComposer = memo(function ChatComposer({
       ? "请先选择工作目录后再发送消息…"
       : followUpTaskId
         ? "追加说明将进入该后台 Agent 的下一轮工具循环…"
-        : "输入 / 选择工作流命令或 Agent；输入 $ 选择 Skill；输入 @ 选择插件或文件，@plugin: 只选插件，@file: 只选文件…";
+        : "输入 / 选择工作流命令或 Agent；输入 $ 选择 Skill；输入 # 选择插件；输入 @ 选择文件…";
 
   /** 允许排队时：连接中 / 流式中均可继续输入；否则与旧行为一致（等待响应或生成时禁用）。 */
   const inputDisabled =
@@ -1853,30 +1853,26 @@ export const ChatComposer = memo(function ChatComposer({
 
   const fileMentionPrefixLabel =
     fileParse.prefix === "plugin"
-      ? "@plugin:"
+      ? "#"
       : fileParse.prefix === "file"
         ? "@file:"
         : "@";
   const filePickerDirectoryLabel =
     fileParse.active && fileParse.directory
       ? `${fileMentionPrefixLabel}${fileParse.directory}/`
-      : fileParse.prefix === "plugin"
-        ? "@plugin:"
+    : fileParse.prefix === "plugin"
+        ? "#"
         : fileParse.prefix === "file"
           ? "@file:/"
           : "@/";
   const filePickerTitle =
     fileParse.kind === "plugin"
       ? "Omiga 插件"
-      : fileParse.kind === "file" || fileParse.directory
-        ? "工作区文件"
-        : "插件与工作区文件";
+      : "工作区文件";
   const filePickerHelpText =
     fileParse.kind === "plugin"
-      ? "当前 @plugin: · Enter 选择插件 · Esc 取消"
-      : fileParse.kind === "file"
-        ? `当前 ${filePickerDirectoryLabel} · Enter 进入文件夹 · 选择文件会注入精确路径`
-        : `当前 ${filePickerDirectoryLabel} · Enter 选择插件/文件夹 · 选择文件会注入精确路径`;
+      ? "当前 # · Enter 选择插件 · Esc 取消"
+      : `当前 ${filePickerDirectoryLabel} · Enter 进入文件夹 · 选择文件会注入精确路径`;
   const filePickerEmptyPrimary =
     fileParse.kind === "plugin"
       ? "没有匹配插件"
@@ -2526,7 +2522,7 @@ export const ChatComposer = memo(function ChatComposer({
                     size="small"
                     variant="outlined"
                     icon={<Extension sx={{ fontSize: 16 }} />}
-                    label={`@${plugin.label}`}
+                    label={`#${plugin.label}`}
                     sx={{
                       ...semanticChipSurface(pluginTone),
                       flexShrink: 0,
