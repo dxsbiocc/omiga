@@ -1,4 +1,10 @@
-import { type ChangeEvent, useEffect, useMemo, useState } from "react";
+import {
+  type ChangeEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Alert,
@@ -55,6 +61,7 @@ import {
   type CustomConnectorRequest,
   useConnectorStore,
 } from "../../state/connectorStore";
+import { extractErrorMessage } from "../../utils/errorMessage";
 
 interface CustomConnectorFormState {
   id: string;
@@ -96,6 +103,27 @@ const connectorCardGridSx = {
 
 type ConnectorStatusFilter = "all" | ConnectorConnectionStatus;
 type ConnectorSourceFilter = "all" | ConnectorDefinitionSource;
+type ConnectorNoticeSeverity = "success" | "info" | "warning" | "error";
+
+type ConnectorNotice = {
+  severity: ConnectorNoticeSeverity;
+  message: string;
+};
+
+type ConnectorAuthFlowStatus =
+  | "opening"
+  | "waiting"
+  | "checking"
+  | "setup_required"
+  | "error";
+
+type ConnectorAuthFlow = {
+  loginSessionId: string;
+  provider: string;
+  status: ConnectorAuthFlowStatus;
+  intervalSecs: number;
+  message: string;
+};
 
 function statusLabel(status: ConnectorConnectionStatus): string {
   switch (status) {
@@ -141,6 +169,9 @@ function authHint(connector: ConnectorInfo): string {
   }
   if (connector.definition.id === "slack") {
     return "Use Slack login/authorization; env bot tokens are advanced fallbacks";
+  }
+  if (connector.definition.id === "gmail") {
+    return "Use Gmail authorization in the browser; access tokens are advanced fallbacks";
   }
   if (auth === "none") return "No authentication required";
   if (auth === "externalMcp")
@@ -352,48 +383,6 @@ function connectorMatchesSearch(
   return haystack.includes(normalizedQuery);
 }
 
-function envSetupSnippet(connector: ConnectorInfo): string {
-  const lines = [
-    `# Omiga user-level connector: ${connector.definition.name}`,
-    "# Paste real secret values in your shell or secret manager; Omiga stores only env var names.",
-  ];
-  if (connector.definition.id === "github") {
-    lines.push(
-      "# Preferred local software login: install GitHub CLI, then run `gh auth login`.",
-      "# Omiga will reuse `gh auth token` automatically after you reconnect or refresh connectors.",
-    );
-  } else if (connector.definition.id === "notion") {
-    lines.push(
-      "# Preferred user flow: use the Notion login/authorization page opened from Omiga.",
-      "# Advanced developer fallback only: run Omiga with a self-owned Notion OAuth integration.",
-      "# Redirect URI for self-owned local OAuth: http://127.0.0.1:17654/connectors/notion/callback",
-      'export OMIGA_NOTION_OAUTH_CLIENT_ID="<notion-oauth-client-id>"',
-      'export OMIGA_NOTION_OAUTH_CLIENT_SECRET="<notion-oauth-client-secret>"',
-      "# Optional if 17654 is occupied: export OMIGA_NOTION_OAUTH_CALLBACK_PORT=\"17655\"",
-      "# Advanced fallback only: NOTION_TOKEN / NOTION_API_KEY",
-    );
-  } else if (connector.definition.id === "slack") {
-    lines.push(
-      "# Preferred user flow: use the Slack login/authorization page opened from Omiga.",
-      "# Advanced developer fallback only: run Omiga with a self-owned Slack OAuth app.",
-      "# Slack requires the self-owned registered redirect URL to be HTTPS.",
-      "# That HTTPS bridge must preserve code/state and redirect to the local callback:",
-      "#   http://127.0.0.1:17655/connectors/slack/callback",
-      'export OMIGA_SLACK_OAUTH_CLIENT_ID="<slack-client-id>"',
-      'export OMIGA_SLACK_OAUTH_CLIENT_SECRET="<slack-client-secret>"',
-      'export OMIGA_SLACK_OAUTH_REDIRECT_URI="https://your-domain.example/omiga/slack/callback"',
-      "# Optional: export OMIGA_SLACK_OAUTH_SCOPE=\"channels:read,channels:history,chat:write\"",
-      "# Optional if 17655 is occupied: export OMIGA_SLACK_OAUTH_LOCAL_CALLBACK_PORT=\"17656\"",
-      "# Advanced fallback only: SLACK_BOT_TOKEN",
-    );
-  }
-  for (const envVar of connector.definition.envVars) {
-    lines.push(
-      `export ${envVar}="<paste-${envVar.toLowerCase().replace(/_/g, "-")}>"`,
-    );
-  }
-  return `${lines.join("\n")}\n`;
-}
 
 function isConnectorAuthType(value: unknown): value is ConnectorAuthType {
   return (
@@ -957,12 +946,23 @@ function nativeToolCount(connector: ConnectorInfo): number {
     .length;
 }
 
+function connectorSupportsCredentialValidation(connector: ConnectorInfo): boolean {
+  return (
+    connector.definition.id === "qq_mail" ||
+    connector.definition.id === "netease_mail" ||
+    connector.definition.id === "imap_smtp_mail"
+  );
+}
+
 function connectorHasProductConnectionFlow(connector: ConnectorInfo): boolean {
-  return connectorSupportsLogin(connector);
+  return (
+    connectorSupportsLogin(connector) ||
+    connectorSupportsCredentialValidation(connector)
+  );
 }
 
 export function connectorIsProductIntegrated(connector: ConnectorInfo): boolean {
-  return connectorHasProductConnectionFlow(connector) && nativeToolCount(connector) > 0;
+  return connectorHasProductConnectionFlow(connector) && connector.definition.tools.length > 0;
 }
 
 function connectorRuntimeLabel(connector: ConnectorInfo): string {
@@ -972,6 +972,12 @@ function connectorRuntimeLabel(connector: ConnectorInfo): string {
   const nativeCount = nativeToolCount(connector);
   if (nativeCount > 0) {
     return `${nativeCount} 个原生可执行工具`;
+  }
+  if (connectorSupportsLogin(connector)) {
+    return "Omiga OAuth 登录";
+  }
+  if (connectorSupportsCredentialValidation(connector)) {
+    return "本机邮箱凭证校验";
   }
   if (connector.definition.tools.length > 0) {
     return "声明能力，等待 MCP/插件/native 执行器";
@@ -1017,6 +1023,18 @@ function connectorAuthLabel(connector: ConnectorInfo): string {
   }
   if (connector.definition.id === "slack") {
     return "Slack 浏览器登录 / 高级凭证";
+  }
+  if (connector.definition.id === "gmail") {
+    return "Gmail 浏览器登录 / 高级凭证";
+  }
+  if (connector.definition.id === "qq_mail") {
+    return "QQ 邮箱账号 / 授权码";
+  }
+  if (connector.definition.id === "netease_mail") {
+    return "网易邮箱账号 / 授权码";
+  }
+  if (connector.definition.id === "imap_smtp_mail") {
+    return "IMAP/SMTP 账号 / 应用密码";
   }
   switch (connector.definition.authType) {
     case "none":
@@ -1067,47 +1085,9 @@ function connectorSupportsLogin(connector: ConnectorInfo): boolean {
   return (
     connector.definition.id === "github" ||
     connector.definition.id === "notion" ||
-    connector.definition.id === "slack"
+    connector.definition.id === "slack" ||
+    connector.definition.id === "gmail"
   );
-}
-
-function connectorConnectionUrl(connector: ConnectorInfo): string | null {
-  return connectorSupportsLogin(connector)
-    ? (connectorHostedInstallUrl(connector) ??
-        connector.definition.installUrl ??
-        connector.definition.docsUrl ??
-        null)
-    : null;
-}
-
-function connectorSetupUrl(connector: ConnectorInfo): string | null {
-  return (
-    connectorHostedInstallUrl(connector) ??
-    connector.definition.installUrl ??
-    connector.definition.docsUrl ??
-    null
-  );
-}
-
-function connectorSetupFallbackLabel(connector: ConnectorInfo): string {
-  if (connector.definition.id === "slack") return "打开 Slack 登录授权页";
-  if (connector.definition.id === "notion") return "打开 Notion 登录授权页";
-  if (connector.definition.id === "github") return "打开 GitHub 登录授权页";
-  return `打开 ${connector.definition.name} 登录授权页`;
-}
-
-function connectorNameSlug(name: string): string {
-  const normalized = name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return normalized || "app";
-}
-
-function connectorHostedInstallUrl(connector: ConnectorInfo): string | null {
-  if (!connectorSupportsLogin(connector)) return null;
-  const slug = connectorNameSlug(connector.definition.name);
-  return `https://chatgpt.com/apps/${slug}/${connector.definition.id}`;
 }
 
 function connectorHasMissingProductOAuthConfig(
@@ -1134,6 +1114,13 @@ function connectorHasMissingProductOAuthConfig(
       normalized.includes("github oauth login requires")
     );
   }
+  if (connector.definition.id === "gmail") {
+    return (
+      normalized.includes("omiga_gmail_oauth") ||
+      normalized.includes("omiga_google_oauth") ||
+      normalized.includes("gmail browser login requires")
+    );
+  }
   return false;
 }
 
@@ -1142,9 +1129,9 @@ export function connectorLoginFailureMessage(
   errorMessage: string,
   openedHostedPage = false,
 ): string {
-  const action = openedHostedPage ? "已为你打开登录授权页；" : "";
+  const action = openedHostedPage ? "已尝试启动 Omiga 授权；" : "";
   if (connectorHasMissingProductOAuthConfig(connector, errorMessage)) {
-    return `${action}${connector.definition.name} 将通过 Codex/OpenAI 托管授权页完成登录，不需要你配置 Client ID 或 Client Secret。请在浏览器中完成账号登录和授权，回到 Omiga 后点击“检测连接”刷新状态。`;
+    return `${action}${connector.definition.name} 需要 Omiga 自有 OAuth 配置才能启动浏览器登录。请配置该服务的 OMIGA_*_OAUTH_CLIENT_ID / CLIENT_SECRET 和本机回调地址后重试；不会跳转到 OpenAI/Codex 托管授权页。`;
   }
   return errorMessage || `${connector.definition.name} 登录启动失败。`;
 }
@@ -1153,531 +1140,118 @@ function connectorConnectionCtaLabel(connector: ConnectorInfo): string {
   if (!connectorIsProductIntegrated(connector)) return "暂未接入";
   if (connector.accessible) return "已连接";
   if (connectorSupportsLogin(connector)) return `连接 ${connector.definition.name}`;
+  if (connectorSupportsCredentialValidation(connector)) return "检测配置";
   return "暂未接入";
 }
 
-function connectorLoginButtonLabel(connector: ConnectorInfo): string {
-  if (connector.definition.id === "github") return "使用 GitHub 登录连接";
-  if (connector.definition.id === "notion") return "使用 Notion 登录连接";
-  if (connector.definition.id === "slack") return "使用 Slack 登录连接";
-  return `连接 ${connector.definition.name}`;
+function connectorAuthFlowButtonLabel(flow: ConnectorAuthFlow): string {
+  if (flow.status === "opening") return "打开中…";
+  if (flow.status === "checking") return "检测中…";
+  if (flow.status === "setup_required") return "配置后重试";
+  if (flow.status === "error") return "重新连接";
+  return "等待授权";
 }
 
-function connectorLoginWaitingText(connector: ConnectorInfo): string {
-  if (connector.definition.id === "github") {
-    return "如果你已经安装 GitHub CLI，也可以在终端运行 gh auth login，Omiga 会复用该登录态。环境变量只作为高级/开发者备选。";
-  }
-  if (connector.definition.id === "notion") {
-    return "请在 Notion 登录授权页选择工作区并批准访问；Omiga 不要求普通用户配置 Client ID/Secret，环境变量只作为高级/开发者备选。";
-  }
-  if (connector.definition.id === "slack") {
-    return "请在 Slack 登录授权页选择工作区并批准安装；Omiga 不要求普通用户配置 Client ID/Secret，环境变量只作为高级/开发者备选。";
-  }
-  return "环境变量/API key 只作为高级/开发者备选，不是默认连接体验。";
-}
-
-function ConnectorInstallDialog({
-  connector,
-  open,
-  busy,
-  testing,
-  onClose,
-  onEnable,
-  onTest,
-  onStartLogin,
-  onPollLogin,
-}: {
-  connector: ConnectorInfo;
-  open: boolean;
-  busy: boolean;
-  testing: boolean;
-  onClose: () => void;
-  onEnable: (connector: ConnectorInfo, enabled: boolean) => void;
-  onTest: (connector: ConnectorInfo) => void;
-  onStartLogin: (connector: ConnectorInfo) => Promise<ConnectorLoginStartResult>;
-  onPollLogin: (sessionId: string) => Promise<ConnectorLoginPollResult>;
-}) {
-  const theme = useTheme();
-  const [loginStart, setLoginStart] = useState<ConnectorLoginStartResult | null>(
-    null,
-  );
-  const [loginMessage, setLoginMessage] = useState<string | null>(null);
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const [isStartingLogin, setIsStartingLogin] = useState(false);
-  const [isPollingLogin, setIsPollingLogin] = useState(false);
-  const installing = busy || testing || isStartingLogin || isPollingLogin;
-  const supportsLogin = connectorSupportsLogin(connector);
-  const isProductIntegrated = connectorIsProductIntegrated(connector);
-  const setupUrl = connectorSetupUrl(connector);
-  const hostedAppLogin = loginStart?.provider === "hosted_app";
-
-  useEffect(() => {
-    if (!open) {
-      setLoginStart(null);
-      setLoginMessage(null);
-      setLoginError(null);
-      setIsStartingLogin(false);
-      setIsPollingLogin(false);
-    }
-  }, [open, connector.definition.id]);
-
-  useEffect(() => {
-    if (!open || !loginStart || loginStart.provider === "hosted_app") {
-      return undefined;
-    }
-    let cancelled = false;
-    let timer: number | undefined;
-
-    const poll = async () => {
-      if (cancelled) return;
-      setIsPollingLogin(true);
-      try {
-        const result = await onPollLogin(loginStart.loginSessionId);
-        if (cancelled) return;
-        setLoginMessage(result.message);
-        if (result.status === "complete") {
-          setIsPollingLogin(false);
-          onClose();
-          return;
-        }
-        if (
-          result.status === "pending" ||
-          result.status === "slow_down"
-        ) {
-          timer = window.setTimeout(
-            poll,
-            Math.max(result.intervalSecs, 1) * 1000,
-          );
-          return;
-        }
-        setIsPollingLogin(false);
-        setLoginError(result.message);
-      } catch (error) {
-        if (cancelled) return;
-        setIsPollingLogin(false);
-        setLoginError(
-          error instanceof Error ? error.message : "Connector login failed.",
-        );
-      }
-    };
-
-    timer = window.setTimeout(
-      poll,
-      Math.max(loginStart.intervalSecs, 1) * 1000,
-    );
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [loginStart, onClose, onPollLogin, open]);
-
-  const handleInstall = async () => {
-    setLoginError(null);
-    setLoginMessage(null);
-    if (!isProductIntegrated) {
-      setLoginError(
-        `${connector.definition.name} 还没有接入真实登录和可执行工具，暂不可启用。`,
-      );
-      return;
-    }
-    if (!supportsLogin) {
-      onEnable(connector, true);
-      const targetUrl = connectorConnectionUrl(connector);
-      if (targetUrl) {
-        setLoginMessage(
-          `已打开 ${connector.definition.name} 的官方连接页面。完成授权/安装后回到 Omiga 点击“检测连接”。`,
-        );
-        void openUrl(targetUrl);
-        return;
-      }
-      setLoginError(
-        `${connector.definition.name} 还没有浏览器或本地软件连接方式。需要先实现该服务的 OAuth / MCP / native connector。`,
-      );
-      return;
-    }
-
-    setIsStartingLogin(true);
-    try {
-      const result = await onStartLogin(connector);
-      setLoginStart(result);
-      setLoginMessage(result.message);
-      if (result.provider !== "github_cli") {
-        void openUrl(result.verificationUriComplete ?? result.verificationUri);
-      }
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Connector login failed.";
-      const loginSetupUrl = connectorSetupUrl(connector);
-      const shouldOpenSetupPage =
-        Boolean(loginSetupUrl) &&
-        connectorHasMissingProductOAuthConfig(connector, errorMessage);
-      setLoginError(
-        connectorLoginFailureMessage(
-          connector,
-          errorMessage,
-          shouldOpenSetupPage,
-        ),
-      );
-      if (loginSetupUrl && shouldOpenSetupPage) {
-        void openUrl(loginSetupUrl).catch((openError) => {
-          setLoginError(
-            `${connectorLoginFailureMessage(connector, errorMessage, false)} 另外，打开登录授权页失败：${
-              openError instanceof Error ? openError.message : String(openError)
-            }`,
-          );
-        });
-      }
-    } finally {
-      setIsStartingLogin(false);
-    }
-  };
-
+function connectorAuthFlowIsBusy(flow?: ConnectorAuthFlow): boolean {
   return (
-    <Dialog
-      open={open}
-      onClose={installing ? undefined : onClose}
-      fullWidth
-      maxWidth="sm"
-      PaperProps={{
-        sx: {
-          position: "relative",
-          display: "flex",
-          flexDirection: "column",
-          borderRadius: 4,
-          overflow: "hidden",
-          maxHeight: { xs: "calc(100dvh - 32px)", sm: "min(92dvh, 780px)" },
-          boxShadow: `0 24px 80px ${alpha(theme.palette.common.black, theme.palette.mode === "dark" ? 0.58 : 0.18)}`,
-        },
-      }}
-    >
-      <IconButton
-        aria-label="关闭连接窗口"
-        disabled={installing}
-        onClick={onClose}
-        sx={{
-          position: "absolute",
-          right: 18,
-          top: 18,
-          width: 40,
-          height: 40,
-          borderRadius: 1.5,
-          border: 1,
-          borderColor: "divider",
-          bgcolor: "background.paper",
-          zIndex: 2,
-        }}
-      >
-        <CloseRounded />
-      </IconButton>
-
-      <DialogContent
-        sx={{
-          p: 0,
-          overflowY: "auto",
-          scrollbarGutter: "stable",
-        }}
-      >
-        <Box
-          sx={{
-            px: { xs: 3, sm: 4.5 },
-            pt: { xs: 4, sm: 4.5 },
-            pb: { xs: 2.5, sm: 3 },
-          }}
-        >
-          <Stack spacing={{ xs: 2.5, sm: 3 }} alignItems="center">
-          <Stack direction="row" spacing={2} alignItems="center">
-            <Box
-              sx={{
-                width: { xs: 60, sm: 68 },
-                height: { xs: 60, sm: 68 },
-                borderRadius: 2.5,
-                display: "grid",
-                placeItems: "center",
-                bgcolor: "grey.950",
-                color: "common.white",
-                fontWeight: 900,
-                fontSize: 18,
-                boxShadow: `0 14px 34px ${alpha(theme.palette.common.black, 0.2)}`,
-              }}
-            >
-              O
-            </Box>
-            <Typography
-              aria-hidden="true"
-              color="text.disabled"
-              sx={{ letterSpacing: 4, fontWeight: 900, fontSize: 26 }}
-            >
-              •••
-            </Typography>
-            <Box
-              sx={{
-                width: { xs: 60, sm: 68 },
-                height: { xs: 60, sm: 68 },
-                borderRadius: 2.5,
-                display: "grid",
-                placeItems: "center",
-                border: 1,
-                borderColor: "divider",
-                bgcolor: "background.paper",
-                color: "text.primary",
-                fontWeight: 900,
-                fontSize: 18,
-              }}
-            >
-              {connectorInitials(connector)}
-            </Box>
-          </Stack>
-
-          <Stack spacing={0.5} alignItems="center" textAlign="center">
-            <Typography variant="h5" fontWeight={900}>
-              连接 {connector.definition.name}
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              {connectorDeveloperLabel(connector)}
-            </Typography>
-          </Stack>
-
-          <Paper
-            variant="outlined"
-            sx={{
-              width: "100%",
-              borderRadius: 3,
-              overflow: "hidden",
-              bgcolor: alpha(theme.palette.background.paper, 0.86),
-            }}
-          >
-            {[
-              {
-                title: "参考记忆和对话",
-                body: `允许 Omiga 在使用 ${connector.definition.name} 时参考当前对话上下文，以生成更相关的工具调用。`,
-                action: (
-                  <Switch
-                    size="small"
-                    disabled
-                    checked={false}
-                    inputProps={{ "aria-label": "参考记忆和对话" }}
-                  />
-                ),
-              },
-              {
-                title: "始终遵守权限",
-                body: "Omiga 只会使用你明确配置的连接器凭证；你可以随时停用或断开连接。",
-              },
-              {
-                title: "一切由你掌控",
-                body: supportsLogin
-                  ? `${connector.definition.name} 授权通过官方浏览器/本机软件完成；connectors/config.json 只保存账号标签和连接状态，密钥保存在系统安全存储或提供方本地登录态中。`
-                  : "Omiga 不会要求你把 token 粘到界面里。优先跳转到官方页面或软件完成授权；高级凭证只应由外部 secret manager/环境提供。",
-              },
-              {
-                title: "连接器可能会引入风险",
-                body: "第三方服务可能返回不可信内容；执行写操作前仍需要明确确认。",
-              },
-            ].map((item, index, items) => (
-              <Stack
-                key={item.title}
-                direction="row"
-                spacing={2}
-                alignItems="center"
-                sx={{
-                  px: 2.25,
-                  py: 1.45,
-                  borderBottom: index === items.length - 1 ? 0 : 1,
-                  borderColor: "divider",
-                }}
-              >
-                <Box sx={{ minWidth: 0, flex: 1 }}>
-                  <Typography variant="subtitle2" fontWeight={900}>
-                    {item.title}
-                  </Typography>
-                  <Typography
-                    variant="body2"
-                    color="text.secondary"
-                    sx={{ mt: 0.25 }}
-                  >
-                    {item.body}
-                  </Typography>
-                </Box>
-                {item.action}
-              </Stack>
-            ))}
-          </Paper>
-
-          {loginStart && (
-            <Alert severity="info" sx={{ width: "100%", borderRadius: 2 }}>
-              <Stack spacing={1}>
-                <Typography variant="body2" fontWeight={800}>
-                  {loginStart.provider === "github_cli"
-                    ? "已启动 GitHub CLI 登录"
-                    : loginStart.provider === "hosted_app"
-                      ? "已打开 Codex/OpenAI 托管授权页"
-                    : loginStart.provider === "notion_oauth"
-                      ? "已打开 Notion 官方授权页"
-                      : loginStart.provider === "slack_oauth"
-                        ? "已打开 Slack 官方授权页"
-                      : `在 GitHub 打开授权页并输入代码：${loginStart.userCode}`}
-                </Typography>
-                <Typography variant="body2">
-                  {loginMessage ?? loginStart.message}
-                </Typography>
-                {loginStart.provider === "github_cli" ? (
-                  <Typography variant="caption" color="text.secondary">
-                    如果没有弹出终端，请手动运行 gh auth login，然后回到 Omiga 等待检测。
-                  </Typography>
-                ) : loginStart.provider === "hosted_app" ? (
-                  <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      onClick={() => void openUrl(loginStart.verificationUri)}
-                    >
-                      重新打开 {loginStart.connectorName} 登录授权页
-                    </Button>
-                    <Button
-                      size="small"
-                      variant="text"
-                      disabled={testing || busy}
-                      startIcon={
-                        testing ? (
-                          <CircularProgress size={14} color="inherit" />
-                        ) : (
-                          <RefreshRounded />
-                        )
-                      }
-                      onClick={() => onTest(connector)}
-                    >
-                      检测连接
-                    </Button>
-                    <Typography
-                      variant="caption"
-                      color="text.secondary"
-                      sx={{ alignSelf: "center" }}
-                    >
-                      授权完成后回到 Omiga 点击“检测连接”刷新；普通用户不需要配置
-                      Client ID/Secret。
-                    </Typography>
-                  </Stack>
-                ) : loginStart.provider === "notion_oauth" ||
-                  loginStart.provider === "slack_oauth" ? (
-                  <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      onClick={() => void openUrl(loginStart.verificationUri)}
-                    >
-                      重新打开 {loginStart.connectorName} 授权页
-                    </Button>
-                    <Typography
-                      variant="caption"
-                      color="text.secondary"
-                      sx={{ alignSelf: "center" }}
-                    >
-                      授权完成后浏览器会回跳本机，Omiga 自动检测完成。
-                    </Typography>
-                  </Stack>
-                ) : (
-                  <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      onClick={() => void openUrl(loginStart.verificationUri)}
-                    >
-                      打开 GitHub 授权页
-                    </Button>
-                    <Button
-                      size="small"
-                      variant="text"
-                      startIcon={<ContentCopyRounded />}
-                      onClick={() =>
-                        void navigator.clipboard.writeText(loginStart.userCode)
-                      }
-                    >
-                      复制代码
-                    </Button>
-                  </Stack>
-                )}
-              </Stack>
-            </Alert>
-          )}
-
-          {loginError && (
-            <Alert severity="warning" sx={{ width: "100%", borderRadius: 2 }}>
-              <Stack spacing={1}>
-                <Typography variant="body2">{loginError}</Typography>
-                <Typography variant="caption" color="text.secondary">
-                  {supportsLogin
-                    ? connectorLoginWaitingText(connector)
-                    : "环境变量/API key 只作为高级/开发者备选，不是默认连接体验。"}
-                </Typography>
-                {setupUrl && (
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    startIcon={<OpenInNewRounded />}
-                    onClick={() => void openUrl(setupUrl)}
-                    sx={{ alignSelf: "flex-start", borderRadius: 999 }}
-                  >
-                    {connectorSetupFallbackLabel(connector)}
-                  </Button>
-                )}
-              </Stack>
-            </Alert>
-          )}
-
-          {loginMessage && !loginStart && !loginError && (
-            <Alert severity="info" sx={{ width: "100%", borderRadius: 2 }}>
-              {loginMessage}
-            </Alert>
-          )}
-
-          </Stack>
-        </Box>
-      </DialogContent>
-      <DialogActions
-        sx={{
-          px: { xs: 3, sm: 4.5 },
-          py: { xs: 2, sm: 2.5 },
-          borderTop: 1,
-          borderColor: "divider",
-          bgcolor: "background.paper",
-        }}
-      >
-        <Button
-          fullWidth
-          size="large"
-          variant="contained"
-          disabled={installing || (Boolean(loginStart) && !hostedAppLogin) || !isProductIntegrated}
-          onClick={() => void handleInstall()}
-          startIcon={
-            installing ? <CircularProgress size={18} color="inherit" /> : undefined
-          }
-          sx={{
-            borderRadius: 999,
-            minHeight: 56,
-            bgcolor: isProductIntegrated ? "text.primary" : "action.disabledBackground",
-            color: isProductIntegrated ? "background.paper" : "text.disabled",
-            fontWeight: 900,
-            fontSize: 16,
-            "&:hover": {
-              bgcolor: isProductIntegrated
-                ? "text.secondary"
-                : "action.disabledBackground",
-            },
-          }}
-        >
-          {installing
-            ? `正在连接 ${connector.definition.name}`
-            : !isProductIntegrated
-              ? `暂未接入 ${connector.definition.name}`
-              : hostedAppLogin
-                ? `重新打开 ${connector.definition.name} 登录授权页`
-              : supportsLogin
-                ? connectorLoginButtonLabel(connector)
-                : `等待接入 ${connector.definition.name}`}
-        </Button>
-      </DialogActions>
-    </Dialog>
+    flow?.status === "opening" ||
+    flow?.status === "waiting" ||
+    flow?.status === "checking"
   );
+}
+
+function connectorAuthFlowNeedsAttention(flow?: ConnectorAuthFlow): boolean {
+  return flow?.status === "setup_required" || flow?.status === "error";
+}
+
+function connectorAuthFlowTitle(
+  connector: ConnectorInfo,
+  flow?: ConnectorAuthFlow,
+): string {
+  if (flow?.status === "opening") return "正在打开授权页";
+  if (flow?.status === "checking") return "正在检测授权";
+  if (flow?.status === "waiting") return "等待授权完成";
+  if (flow?.status === "setup_required") return "需要配置 OAuth";
+  if (flow?.status === "error") return "授权未完成";
+  if (connector.accessible) return "连接已可用";
+  if (connectorSupportsLogin(connector)) return "需要授权";
+  if (connectorSupportsCredentialValidation(connector)) return "等待邮箱配置";
+  return "等待真实接入";
+}
+
+function connectorAuthFlowChipColor(
+  flow: ConnectorAuthFlow,
+): "info" | "warning" | "error" {
+  if (flow.status === "setup_required") return "warning";
+  if (flow.status === "error") return "error";
+  return "info";
+}
+
+function connectorOAuthSetupHints(connector: ConnectorInfo): string[] {
+  switch (connector.definition.id) {
+    case "gmail":
+      return [
+        "OMIGA_GMAIL_OAUTH_CLIENT_ID",
+        "OMIGA_GMAIL_OAUTH_CLIENT_SECRET",
+        "Redirect: http://127.0.0.1:17656/connectors/gmail/callback",
+      ];
+    case "notion":
+      return [
+        "OMIGA_NOTION_OAUTH_CLIENT_ID",
+        "OMIGA_NOTION_OAUTH_CLIENT_SECRET",
+        "Redirect: http://127.0.0.1:17654/connectors/notion/callback",
+      ];
+    case "slack":
+      return [
+        "OMIGA_SLACK_OAUTH_CLIENT_ID",
+        "OMIGA_SLACK_OAUTH_CLIENT_SECRET",
+        "OMIGA_SLACK_OAUTH_REDIRECT_URI",
+      ];
+    case "github":
+      return ["OMIGA_GITHUB_OAUTH_CLIENT_ID 或本机 GitHub CLI 登录"];
+    default:
+      return [];
+  }
+}
+
+function connectorAuthFlowMessage(
+  connector: ConnectorInfo,
+  flow?: ConnectorAuthFlow,
+): string {
+  if (!flow) {
+    if (connector.accessible) return "已连接，可以在对话中使用该连接器。";
+    if (connectorSupportsLogin(connector)) return "点击连接后会在默认浏览器打开授权页。";
+    if (connectorSupportsCredentialValidation(connector)) {
+      return "配置邮箱账号和授权码后点击“检测连接”，Omiga 会使用本机校验逻辑确认配置。";
+    }
+    return "暂未接入真实登录或工具执行方式。";
+  }
+  return flow.message;
+}
+
+function connectorStartMessage(connectorName: string): string {
+  return `正在打开 ${connectorName} 授权页…`;
+}
+
+function connectorWaitingMessage(
+  connector: ConnectorInfo,
+  result: ConnectorLoginStartResult,
+): string {
+  if (result.provider === "github_cli") {
+    return "已启动 GitHub CLI 登录。完成后 Omiga 会自动检测。";
+  }
+  if (result.provider === "github" && result.userCode) {
+    return `已打开 GitHub 授权页，输入代码 ${result.userCode} 后会自动检测。`;
+  }
+  return `已打开 ${connector.definition.name} 授权页，完成后会自动检测。`;
+}
+
+function connectorPollWaitingMessage(
+  connector: ConnectorInfo,
+  result: ConnectorLoginPollResult,
+): string {
+  if (result.status === "slow_down") return "服务要求放慢检测频率，稍后继续自动检测。";
+  return `等待 ${connector.definition.name} 浏览器授权完成…`;
 }
 
 function ConnectorDetailsDialog({
@@ -1687,15 +1261,13 @@ function ConnectorDetailsDialog({
   testing,
   testResult,
   auditEvents,
+  authFlow,
   onClose,
-  onEnable,
   onDisconnect,
   onTest,
+  onStartAuth,
   onEdit,
   onDelete,
-  onCopyEnv,
-  onStartLogin,
-  onPollLogin,
 }: {
   connector: ConnectorInfo | null;
   open: boolean;
@@ -1703,24 +1275,15 @@ function ConnectorDetailsDialog({
   testing: boolean;
   testResult?: ConnectorConnectionTestResult;
   auditEvents: ConnectorAuditEvent[];
+  authFlow?: ConnectorAuthFlow;
   onClose: () => void;
-  onEnable: (connector: ConnectorInfo, enabled: boolean) => void;
   onDisconnect: (connector: ConnectorInfo) => void;
   onTest: (connector: ConnectorInfo) => void;
+  onStartAuth: (connector: ConnectorInfo) => void;
   onEdit: (connector: ConnectorInfo) => void;
   onDelete: (connector: ConnectorInfo) => void;
-  onCopyEnv: (connector: ConnectorInfo) => void;
-  onStartLogin: (
-    connector: ConnectorInfo,
-  ) => Promise<ConnectorLoginStartResult>;
-  onPollLogin: (sessionId: string) => Promise<ConnectorLoginPollResult>;
 }) {
   const theme = useTheme();
-  const [installDialogOpen, setInstallDialogOpen] = useState(false);
-
-  useEffect(() => {
-    if (!open) setInstallDialogOpen(false);
-  }, [open, connector?.definition.id]);
 
   if (!connector) return null;
 
@@ -1737,7 +1300,6 @@ function ConnectorDetailsDialog({
     )
     .slice(0, 3);
   const healthDetail = connectionHealthDetail(connector.connectionHealth);
-  const connectionUrl = connectorConnectionUrl(connector);
   const infoRows = [
     ["类别", `${sourceLabel(connector)}, ${categoryLabel(connector.definition.category)}`],
     ["功能", connectorCapabilitiesLabel(connector)],
@@ -1747,17 +1309,34 @@ function ConnectorDetailsDialog({
     ["状态", connectorStatusText(connector)],
     ["存储", "用户级，密钥不写入配置文件"],
   ];
+  const authFlowBusy = connectorAuthFlowIsBusy(authFlow);
+  const authFlowNeedsAttention = connectorAuthFlowNeedsAttention(authFlow);
+  const setupHints =
+    authFlow?.status === "setup_required"
+      ? connectorOAuthSetupHints(connector)
+      : [];
   const primaryActionLabel = connectorConnectionCtaLabel(connector);
+  const canStartLogin = connectorSupportsLogin(connector);
+  const canValidateCredentials = connectorSupportsCredentialValidation(connector);
   const primaryActionDisabled =
     busy ||
     testing ||
+    authFlowBusy ||
     !isProductIntegrated ||
     connector.accessible ||
     metadataOnly ||
-    (!connectorSupportsLogin(connector) && !connectionUrl);
+    (!canStartLogin && !canValidateCredentials);
+  const handlePrimaryAction = () => {
+    if (canStartLogin) {
+      onStartAuth(connector);
+      return;
+    }
+    if (canValidateCredentials) {
+      onTest(connector);
+    }
+  };
 
   return (
-    <>
       <Dialog
         open={open}
         onClose={onClose}
@@ -1823,9 +1402,9 @@ function ConnectorDetailsDialog({
                 <Button
                   variant="contained"
                   disabled={primaryActionDisabled}
-                  onClick={() => setInstallDialogOpen(true)}
+                  onClick={handlePrimaryAction}
                   startIcon={
-                    busy || testing ? (
+                    busy || testing || authFlowBusy ? (
                       <CircularProgress size={16} color="inherit" />
                     ) : undefined
                   }
@@ -1846,7 +1425,11 @@ function ConnectorDetailsDialog({
                     },
                   }}
                 >
-                  {busy || testing ? "正在连接" : primaryActionLabel}
+                  {authFlow
+                    ? connectorAuthFlowButtonLabel(authFlow)
+                    : busy || testing
+                      ? "正在连接"
+                      : primaryActionLabel}
                 </Button>
                 <IconButton aria-label="关闭连接器详情" onClick={onClose}>
                   <CloseRounded />
@@ -2276,12 +1859,16 @@ function ConnectorDetailsDialog({
                           useFlexGap
                         >
                           <Typography variant="subtitle1" fontWeight={900}>
-                            {connector.accessible
-                              ? "连接已可用"
-                              : connectorSupportsLogin(connector)
-                                ? "需要登录授权"
-                                : "等待真实接入"}
+                            {connectorAuthFlowTitle(connector, authFlow)}
                           </Typography>
+                          {authFlow && (
+                            <Chip
+                              size="small"
+                              color={connectorAuthFlowChipColor(authFlow)}
+                              variant="outlined"
+                              label={connectorAuthFlowButtonLabel(authFlow)}
+                            />
+                          )}
                           {(connector.connectionHealth?.totalChecks ?? 0) > 0 && (
                             <Chip
                               size="small"
@@ -2310,14 +1897,55 @@ function ConnectorDetailsDialog({
                           )}
                         </Stack>
                         <Typography variant="body2" color="text.secondary">
-                          {connector.accessible
-                            ? "Omiga 可以使用该连接器调用已声明的工具能力。"
-                            : connectorSupportsLogin(connector)
-                              ? connector.definition.id === "github"
-                                ? "点击“连接 GitHub”通过浏览器授权；也可先在终端运行 gh auth login，Omiga 会自动复用 GitHub CLI 登录态，或使用环境变量作为备用凭证。"
-                                : "点击连接按钮打开登录授权页；普通用户不需要配置 Client ID/Secret，授权完成后回到 Omiga 检测连接状态。"
-                              : "该连接器还没有浏览器、软件或 native/MCP 接入方式，不能仅靠手动标记变成可用。"}
+                          {connectorAuthFlowMessage(connector, authFlow)}
                         </Typography>
+                        {authFlowNeedsAttention && (
+                          <Alert
+                            severity={
+                              authFlow?.status === "setup_required"
+                                ? "warning"
+                                : "error"
+                            }
+                            variant="outlined"
+                            sx={{
+                              mt: 0.5,
+                              borderRadius: 2,
+                              "& .MuiAlert-message": { width: "100%" },
+                            }}
+                          >
+                            <Stack spacing={0.75}>
+                              <Typography variant="body2" fontWeight={800}>
+                                {authFlow?.status === "setup_required"
+                                  ? "未生成授权 URL，无法打开浏览器登录。"
+                                  : "登录流程已停止，可重试连接。"}
+                              </Typography>
+                              {setupHints.length > 0 && (
+                                <Stack
+                                  direction="row"
+                                  spacing={0.75}
+                                  flexWrap="wrap"
+                                  useFlexGap
+                                >
+                                  {setupHints.map((hint) => (
+                                    <Chip
+                                      key={hint}
+                                      size="small"
+                                      variant="outlined"
+                                      label={hint}
+                                      sx={{
+                                        fontFamily:
+                                          hint.includes("OMIGA_") ||
+                                          hint.startsWith("Redirect:")
+                                            ? "monospace"
+                                            : undefined,
+                                      }}
+                                    />
+                                  ))}
+                                </Stack>
+                              )}
+                            </Stack>
+                          </Alert>
+                        )}
                         {connector.connectedAt && (
                           <Typography variant="caption" color="text.secondary">
                             连接于 {formatCheckedAt(connector.connectedAt)}
@@ -2336,14 +1964,42 @@ function ConnectorDetailsDialog({
                           <Button
                             size="small"
                             variant="contained"
-                            startIcon={<LinkRounded />}
-                            disabled={busy || testing || metadataOnly}
-                            onClick={() => setInstallDialogOpen(true)}
+                            startIcon={
+                              authFlowBusy ? (
+                                <CircularProgress size={14} color="inherit" />
+                              ) : (
+                                <LinkRounded />
+                              )
+                            }
+                            disabled={busy || testing || metadataOnly || authFlowBusy}
+                            onClick={() => onStartAuth(connector)}
                             sx={{ borderRadius: 999, fontWeight: 800 }}
                           >
-                            连接 {connector.definition.name}
+                            {authFlow
+                              ? connectorAuthFlowButtonLabel(authFlow)
+                              : `连接 ${connector.definition.name}`}
                           </Button>
                         )}
+                        {!connector.accessible &&
+                          !connectorSupportsLogin(connector) &&
+                          connectorSupportsCredentialValidation(connector) && (
+                            <Button
+                              size="small"
+                              variant="contained"
+                              startIcon={
+                                testing ? (
+                                  <CircularProgress size={14} color="inherit" />
+                                ) : (
+                                  <TroubleshootRounded />
+                                )
+                              }
+                              disabled={busy || testing || metadataOnly}
+                              onClick={() => onTest(connector)}
+                              sx={{ borderRadius: 999, fontWeight: 800 }}
+                            >
+                              检测配置
+                            </Button>
+                          )}
                         <Button
                           size="small"
                           variant="outlined"
@@ -2360,23 +2016,6 @@ function ConnectorDetailsDialog({
                         >
                           检测连接
                         </Button>
-                        {connector.definition.envVars.length > 0 && (
-                          <Button
-                            size="small"
-                            variant="text"
-                            startIcon={<ContentCopyRounded />}
-                            onClick={() => onCopyEnv(connector)}
-                            sx={{ borderRadius: 999 }}
-                          >
-                            {connector.definition.id === "github"
-                              ? "复制 gh/env 设置"
-                              : connector.definition.id === "notion"
-                                ? "复制 OAuth/env 设置"
-                                : connector.definition.id === "slack"
-                                  ? "复制 OAuth/env 设置"
-                              : "高级凭证"}
-                          </Button>
-                        )}
                       </Stack>
                     </Stack>
                   </Box>
@@ -2533,19 +2172,6 @@ function ConnectorDetailsDialog({
           </Box>
         </DialogContent>
       </Dialog>
-
-      <ConnectorInstallDialog
-        connector={connector}
-        open={installDialogOpen}
-        busy={busy}
-        testing={testing}
-        onClose={() => setInstallDialogOpen(false)}
-        onEnable={onEnable}
-        onTest={onTest}
-        onStartLogin={onStartLogin}
-        onPollLogin={onPollLogin}
-      />
-    </>
   );
 }
 
@@ -2584,7 +2210,10 @@ export function ConnectorsPanel({
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [importText, setImportText] = useState("");
   const [replaceExistingImport, setReplaceExistingImport] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<ConnectorNotice | null>(null);
+  const [connectorAuthFlows, setConnectorAuthFlows] = useState<
+    Record<string, ConnectorAuthFlow>
+  >({});
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] =
     useState<ConnectorStatusFilter>("all");
@@ -2721,22 +2350,17 @@ export function ConnectorsPanel({
     void deleteCustomConnector(connector.definition.id);
   };
 
-  const handleCopyEnvSetup = (connector: ConnectorInfo) => {
-    void navigator.clipboard.writeText(envSetupSnippet(connector)).then(() => {
-      setNotice(`Copied advanced credential setup for ${connector.definition.name}.`);
-    });
-  };
-
   const handleExportCustomConnectors = () => {
     void exportCustomConnectors().then((payload) => {
       void navigator.clipboard
         .writeText(JSON.stringify(payload, null, 2))
         .then(() =>
-          setNotice(
-            `Copied ${payload.connectors.length} custom connector${
+          setNotice({
+            severity: "success",
+            message: `Copied ${payload.connectors.length} custom connector${
               payload.connectors.length === 1 ? "" : "s"
             } to clipboard.`,
-          ),
+          }),
         );
     });
   };
@@ -2768,26 +2392,214 @@ export function ConnectorsPanel({
       return;
     }
     void importCustomConnectors(connectors, replaceExistingImport).then(() => {
-      setNotice(
-        `Imported ${connectors.length} custom connector${connectors.length === 1 ? "" : "s"}.`,
-      );
+      setNotice({
+        severity: "success",
+        message: `Imported ${connectors.length} custom connector${connectors.length === 1 ? "" : "s"}.`,
+      });
       closeImportCustomConnectors();
     });
   };
 
+  const startConnectorAuth = useCallback(
+    async (connector: ConnectorInfo) => {
+      const connectorId = connector.definition.id;
+      setNotice(null);
+      setConnectorAuthFlows((prev) => ({
+        ...prev,
+        [connectorId]: {
+          loginSessionId: "",
+          provider: "",
+          status: "opening",
+          intervalSecs: 2,
+          message: connectorStartMessage(connector.definition.name),
+        },
+      }));
+
+      try {
+        if (!connector.enabled) {
+          await setConnectorEnabled(connectorId, true);
+        }
+        const result = await startConnectorLogin(connectorId);
+        setConnectorAuthFlows((prev) => ({
+          ...prev,
+          [connectorId]: {
+            loginSessionId: result.loginSessionId,
+            provider: result.provider,
+            status: "waiting",
+            intervalSecs: Math.max(1, result.intervalSecs || 2),
+            message: connectorWaitingMessage(connector, result),
+          },
+        }));
+
+        const authUrl = result.verificationUriComplete ?? result.verificationUri;
+        if (result.provider !== "github_cli" && authUrl) {
+          await openUrl(authUrl);
+        }
+      } catch (error) {
+        const errorMessage = extractErrorMessage(error);
+        const message = connectorLoginFailureMessage(connector, errorMessage, false);
+        const status: ConnectorAuthFlowStatus =
+          connectorHasMissingProductOAuthConfig(connector, errorMessage)
+            ? "setup_required"
+            : "error";
+        setDetailConnectorId(connectorId);
+        setConnectorAuthFlows((prev) => ({
+          ...prev,
+          [connectorId]: {
+            loginSessionId: "",
+            provider: connector.definition.id,
+            status,
+            intervalSecs: 0,
+            message,
+          },
+        }));
+      }
+    },
+    [setConnectorEnabled, startConnectorLogin],
+  );
+
+  const pollConnectorAuthLogin = useCallback(
+    async (connectorId: string, flow: ConnectorAuthFlow) => {
+      if (!flow.loginSessionId) return;
+      const connector = connectorsById.get(connectorId);
+      if (!connector) return;
+      setConnectorAuthFlows((prev) => {
+        const current = prev[connectorId];
+        if (!current || current.loginSessionId !== flow.loginSessionId) return prev;
+        return {
+          ...prev,
+          [connectorId]: {
+            ...current,
+            status: "checking",
+            message: "正在检测授权状态…",
+          },
+        };
+      });
+
+      try {
+        const result = await pollConnectorLogin(flow.loginSessionId);
+        if (result.status === "pending" || result.status === "slow_down") {
+          setConnectorAuthFlows((prev) => {
+            const current = prev[connectorId];
+            if (!current || current.loginSessionId !== flow.loginSessionId) {
+              return prev;
+            }
+            return {
+              ...prev,
+              [connectorId]: {
+                ...current,
+                status: "waiting",
+                intervalSecs: Math.max(1, result.intervalSecs || current.intervalSecs),
+                message: connectorPollWaitingMessage(connector, result),
+              },
+            };
+          });
+          return;
+        }
+
+        if (result.status === "complete") {
+          setConnectorAuthFlows((prev) => {
+            const next = { ...prev };
+            delete next[connectorId];
+            return next;
+          });
+          return;
+        }
+        setConnectorAuthFlows((prev) => ({
+          ...prev,
+          [connectorId]: {
+            ...flow,
+            status: "error",
+            message: result.message || `${connector.definition.name} 授权失败。`,
+          },
+        }));
+      } catch (error) {
+        setConnectorAuthFlows((prev) => ({
+          ...prev,
+          [connectorId]: {
+            ...flow,
+            status: "error",
+            message: `检测 ${connector.definition.name} 授权状态失败：${extractErrorMessage(error)}`,
+          },
+        }));
+      }
+    },
+    [connectorsById, pollConnectorLogin],
+  );
+
+  useEffect(() => {
+    const timers = Object.entries(connectorAuthFlows)
+      .filter(([, flow]) => flow.status === "waiting")
+      .map(([connectorId, flow]) =>
+        window.setTimeout(
+          () => void pollConnectorAuthLogin(connectorId, flow),
+          Math.max(1, flow.intervalSecs || 2) * 1000,
+        ),
+      );
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [connectorAuthFlows, pollConnectorAuthLogin]);
+
+  useEffect(() => {
+    if (!catalog) return;
+    setConnectorAuthFlows((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const connector of catalog.connectors) {
+        if (connector.accessible && next[connector.definition.id]) {
+          delete next[connector.definition.id];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [catalog]);
+
+  const testConnectorAndUpdateFlow = useCallback(
+    (connector: ConnectorInfo) => {
+      const connectorId = connector.definition.id;
+      setConnectorAuthFlows((prev) => {
+        const current = prev[connectorId];
+        if (!current) return prev;
+        return {
+          ...prev,
+          [connectorId]: {
+            ...current,
+            status: "checking",
+            message: `正在检测 ${connector.definition.name} 连接…`,
+          },
+        };
+      });
+
+      void testConnectorConnection(connectorId, projectPath)
+        .catch((error) => {
+          setNotice({
+            severity: "error",
+            message: `检测 ${connector.definition.name} 连接失败：${extractErrorMessage(error)}`,
+          });
+        })
+        .finally(() => {
+          setConnectorAuthFlows((prev) => {
+            const current = prev[connectorId];
+            if (!current || current.status !== "checking") return prev;
+            return {
+              ...prev,
+              [connectorId]: {
+                ...current,
+                status: "waiting",
+                message: "等待浏览器授权完成…",
+              },
+            };
+          });
+        });
+    },
+    [projectPath, testConnectorConnection],
+  );
+
   return (
     <Box sx={{ mt: 2 }}>
       <Stack spacing={2}>
-        <Alert severity="info" sx={{ borderRadius: 2 }}>
-          Connectors are user-level account/service links shared across projects
-          on this machine. They model external access separately from Plugins
-          and MCP. Omiga stores enablement and account labels only; product
-          flows should connect through the provider's browser/software login.
-          Environment/API-key credentials are advanced fallbacks for local
-          development or external secret managers. A connector becomes
-          actionable only when matching MCP/native tools are available.
-        </Alert>
-
         <Stack direction="row" spacing={1} alignItems="center">
           <Typography variant="h6" fontWeight={700} sx={{ flex: 1 }}>
             Connectors
@@ -2944,21 +2756,9 @@ export function ConnectorsPanel({
           </CardContent>
         </Card>
 
-        {catalog?.notes?.length ? (
-          <Alert severity="success" sx={{ borderRadius: 2 }}>
-            <Stack spacing={0.5}>
-              {catalog.notes.map((note) => (
-                <Typography key={note} variant="body2">
-                  {note}
-                </Typography>
-              ))}
-            </Stack>
-          </Alert>
-        ) : null}
-
         {notice && (
-          <Alert severity="success" onClose={() => setNotice(null)}>
-            {notice}
+          <Alert severity={notice.severity} onClose={() => setNotice(null)}>
+            {notice.message}
           </Alert>
         )}
 
@@ -3017,19 +2817,17 @@ export function ConnectorsPanel({
           detailConnector ? connectorTestResult(detailConnector) : undefined
         }
         auditEvents={detailAuditEvents}
+        authFlow={
+          detailConnector
+            ? connectorAuthFlows[detailConnector.definition.id]
+            : undefined
+        }
         onClose={() => setDetailConnectorId(null)}
-        onEnable={(item, enabled) =>
-          void setConnectorEnabled(item.definition.id, enabled)
-        }
         onDisconnect={(item) => void disconnectConnector(item.definition.id)}
-        onTest={(item) =>
-          void testConnectorConnection(item.definition.id, projectPath)
-        }
+        onTest={testConnectorAndUpdateFlow}
+        onStartAuth={(item) => void startConnectorAuth(item)}
         onEdit={openEditCustomConnector}
         onDelete={handleDeleteCustomConnector}
-        onCopyEnv={handleCopyEnvSetup}
-        onStartLogin={(item) => startConnectorLogin(item.definition.id)}
-        onPollLogin={pollConnectorLogin}
       />
       <CustomConnectorDialog
         open={customDialogOpen}

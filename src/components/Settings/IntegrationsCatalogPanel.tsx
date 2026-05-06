@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Alert,
-  AlertTitle,
   Avatar,
   Box,
   Button,
@@ -61,6 +61,8 @@ type McpServerCatalogEntry = {
   normalizedKey: string;
   enabled: boolean;
   config: McpServerConfigCatalogEntry;
+  toolListChecked: boolean;
+  oauthAuthenticated: boolean;
   listToolsError: string | null;
   tools: McpToolCatalogEntry[];
 };
@@ -91,6 +93,8 @@ type IntegrationsCatalog = {
   skills: SkillCatalogEntry[];
 };
 
+const integrationsCatalogMemoryCache = new Map<string, IntegrationsCatalog>();
+
 type PanelMode = "mcp" | "skills" | "both";
 
 type McpProtocol = "stdio" | "http";
@@ -101,6 +105,7 @@ type McpServerFormState = {
   command: string;
   argsText: string;
   envText: string;
+  bearerEnvName: string;
   headersText: string;
   url: string;
   cwd: string;
@@ -122,6 +127,61 @@ type ImportMcpMergeResult = {
   serverCount: number;
 };
 
+type VerifyMcpServerResult = {
+  configKey: string;
+  normalizedKey: string;
+  ok: boolean;
+  toolListChecked: boolean;
+  oauthAuthenticated: boolean;
+  listToolsError: string | null;
+  tools: McpToolCatalogEntry[];
+};
+
+type StartMcpOAuthLoginResult = {
+  configKey: string;
+  normalizedKey: string;
+  loginSessionId: string;
+  authorizationUrl: string;
+  expiresIn: number;
+  intervalSecs: number;
+  expiresAt: string;
+  message: string;
+};
+
+type McpOAuthPollStatus =
+  | "pending"
+  | "complete"
+  | "expired"
+  | "denied"
+  | "error";
+
+type PollMcpOAuthLoginResult = {
+  configKey: string;
+  normalizedKey: string;
+  status: McpOAuthPollStatus;
+  message: string;
+  intervalSecs: number;
+  ok: boolean;
+  toolListChecked: boolean;
+  oauthAuthenticated: boolean;
+  listToolsError: string | null;
+  tools: McpToolCatalogEntry[];
+};
+
+type LogoutMcpOAuthServerResult = {
+  configKey: string;
+  normalizedKey: string;
+};
+
+type McpOAuthFlowStatus = "opening" | "waiting" | "exchanging" | "verifying";
+
+type McpOAuthFlow = {
+  loginSessionId: string;
+  status: McpOAuthFlowStatus;
+  intervalSecs: number;
+  message: string;
+};
+
 function emptyMcpServerForm(): McpServerFormState {
   return {
     name: "",
@@ -129,10 +189,21 @@ function emptyMcpServerForm(): McpServerFormState {
     command: "",
     argsText: "",
     envText: "",
+    bearerEnvName: "",
     headersText: "",
     url: "",
     cwd: "",
   };
+}
+
+function authorizationBearerEnvName(headers: Record<string, string>): string {
+  const authorization = Object.entries(headers).find(([key]) =>
+    key.toLowerCase() === "authorization",
+  )?.[1];
+  const match = authorization
+    ?.trim()
+    .match(/^Bearer\s+\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/i);
+  return match?.[1] ?? "";
 }
 
 function mcpServerFormFromCatalogEntry(
@@ -141,7 +212,11 @@ function mcpServerFormFromCatalogEntry(
   const envText = Object.entries(srv.config.env ?? {})
     .map(([key, value]) => `${key}=${value}`)
     .join("\n");
+  const bearerEnvName = authorizationBearerEnvName(srv.config.headers ?? {});
   const headersText = Object.entries(srv.config.headers ?? {})
+    .filter(
+      ([key]) => !(bearerEnvName && key.toLowerCase() === "authorization"),
+    )
     .map(([key, value]) => `${key}=${value}`)
     .join("\n");
   return {
@@ -150,6 +225,7 @@ function mcpServerFormFromCatalogEntry(
     command: srv.config.command ?? "",
     argsText: (srv.config.args ?? []).join("\n"),
     envText,
+    bearerEnvName,
     headersText,
     url: srv.config.url ?? "",
     cwd: srv.config.cwd ?? "",
@@ -193,11 +269,24 @@ function buildProjectMcpServerInput(
     if (!/^https?:\/\//i.test(url)) {
       throw new Error("HTTP MCP 地址必须以 http:// 或 https:// 开头。");
     }
+    const headers = parseKeyValueLines(form.headersText, "请求头");
+    const bearerEnvName = form.bearerEnvName.trim();
+    if (bearerEnvName) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(bearerEnvName)) {
+        throw new Error("Bearer 令牌环境变量必须是有效的环境变量名，例如 PAPERCLIP_TOKEN。");
+      }
+      if (
+        Object.keys(headers).some((key) => key.toLowerCase() === "authorization")
+      ) {
+        throw new Error("已填写 Bearer 令牌环境变量时，请不要在额外标头中重复 Authorization。");
+      }
+      headers.Authorization = "Bearer ${" + bearerEnvName + "}";
+    }
     return {
       name,
       kind: "http",
       url,
-      headers: parseKeyValueLines(form.headersText, "请求头"),
+      headers,
     };
   }
 
@@ -246,11 +335,41 @@ function mcpInitialLetter(name: string): string {
   return c ? c.toUpperCase() : "?";
 }
 
-function mcpRowSubtitle(srv: McpServerCatalogEntry): string {
+function mcpRowSubtitle(
+  srv: McpServerCatalogEntry,
+  options?: {
+    pendingVerification?: boolean;
+    verifying?: boolean;
+    authFlowStatus?: McpOAuthFlowStatus;
+  },
+): string {
   if (!srv.enabled) return "已禁用";
+  if (options?.verifying) return "验证中…";
+  if (options?.authFlowStatus === "opening") return "准备 OAuth 授权…";
+  if (options?.authFlowStatus === "waiting") return "待验证 · 请在浏览器完成授权";
+  if (options?.authFlowStatus === "exchanging") return "交换 token…";
+  if (options?.authFlowStatus === "verifying") return "验证工具列表…";
+  if (options?.pendingVerification) return "待验证 · 完成登录后点击验证";
   if (srv.listToolsError) return "连接失败 · 展开查看详情";
+  if (!srv.toolListChecked && srv.oauthAuthenticated) {
+    return "OAuth token 已保存 · 点击验证工具";
+  }
+  if (!srv.toolListChecked) return "未检测 · 点击验证或刷新";
   if (srv.tools.length === 0) return "未发现可用工具";
   return `${srv.tools.length} 个工具已启用`;
+}
+
+function mcpAuthRequired(srv: McpServerCatalogEntry): boolean {
+  const err = srv.listToolsError?.toLowerCase() ?? "";
+  return (
+    err.includes("auth required") ||
+    err.includes("401") ||
+    err.includes("403") ||
+    err.includes("unauthorized") ||
+    err.includes("forbidden") ||
+    err.includes("oauth") ||
+    err.includes("login")
+  );
 }
 
 type McpErrorAdvice = {
@@ -324,9 +443,9 @@ function mcpErrorAdvice(srv: McpServerCatalogEntry): McpErrorAdvice | null {
       detail: `当前端点：${endpoint ?? "未配置"}。网络可达但服务端拒绝握手时，通常需要先完成登录、OAuth 或配置访问令牌。`,
       actions: [
         isPaperclip
-          ? "先在浏览器或 Paperclip CLI 中完成 Paperclip 登录。"
-          : "检查该 MCP 服务文档，确认是否需要 token、header 或 OAuth。",
-        "如果服务提供 Bearer token 或 API key，可编辑该服务并填写 Authorization=Bearer ${ENV_NAME} 或 X-API-Key=...。",
+          ? "点击“连接”，由 Omiga 发起 MCP OAuth 授权并自动交换 token；不要只打开普通网页登录。"
+          : "点击“连接”尝试 MCP OAuth；如果服务不支持 OAuth discovery，再按服务文档配置 token 或 header。",
+        "如果服务提供 Bearer token，可编辑该服务并填写“Bearer 令牌环境变量”；API key 则放到额外请求头。",
         "确认 MCP 地址是 Streamable HTTP 的 /mcp 端点，而不是普通网页地址。",
       ],
     };
@@ -363,7 +482,9 @@ export function IntegrationsCatalogPanel({
   mode: PanelMode;
 }) {
   const root = resolveProjectPath(projectPath);
-  const [catalog, setCatalog] = useState<IntegrationsCatalog | null>(null);
+  const [catalog, setCatalog] = useState<IntegrationsCatalog | null>(
+    () => integrationsCatalogMemoryCache.get(root) ?? null,
+  );
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{
@@ -384,11 +505,54 @@ export function IntegrationsCatalogPanel({
   const [addingMcp, setAddingMcp] = useState(false);
   const [editingMcpName, setEditingMcpName] = useState<string | null>(null);
   const [deletingMcpKey, setDeletingMcpKey] = useState<string | null>(null);
+  const [verifyingMcpKey, setVerifyingMcpKey] = useState<string | null>(null);
+  const [loggingOutMcpKey, setLoggingOutMcpKey] = useState<string | null>(null);
+  const [pendingMcpVerification, setPendingMcpVerification] = useState<
+    Record<string, boolean>
+  >({});
+  const [mcpOAuthFlows, setMcpOAuthFlows] = useState<Record<string, McpOAuthFlow>>(
+    {},
+  );
   const isEditingMcp = editingMcpName !== null;
   const noWorkspace = projectPath.trim().length === 0;
+
+  const setCatalogSnapshot = useCallback(
+    (
+      nextValue:
+        | IntegrationsCatalog
+        | null
+        | ((
+            prev: IntegrationsCatalog | null,
+          ) => IntegrationsCatalog | null),
+    ) => {
+      setCatalog((prev) => {
+        const next =
+          typeof nextValue === "function" ? nextValue(prev) : nextValue;
+        if (next) {
+          integrationsCatalogMemoryCache.set(root, next);
+        } else {
+          integrationsCatalogMemoryCache.delete(root);
+        }
+        return next;
+      });
+    },
+    [root],
+  );
+
   const load = useCallback(
-    async (options?: { ignoreCache?: boolean; preserveMessage?: boolean }) => {
-      setLoading(true);
+    async (options?: {
+      ignoreCache?: boolean;
+      preserveMessage?: boolean;
+      probeTools?: boolean;
+      silent?: boolean;
+    }) => {
+      const cached = integrationsCatalogMemoryCache.get(root);
+      const showSpinner =
+        !options?.silent &&
+        (!cached || Boolean(options?.ignoreCache) || Boolean(options?.probeTools));
+      if (showSpinner) {
+        setLoading(true);
+      }
       if (!options?.preserveMessage) {
         setMessage(null);
       }
@@ -398,9 +562,17 @@ export function IntegrationsCatalogPanel({
           {
             projectRoot: root,
             ignoreCache: options?.ignoreCache ?? false,
+            probeTools: options?.probeTools ?? false,
           },
         );
-        setCatalog(c);
+        setCatalogSnapshot(c);
+        setPendingMcpVerification((prev) => {
+          const next = { ...prev };
+          for (const srv of c.mcpServers) {
+            delete next[srv.normalizedKey];
+          }
+          return next;
+        });
         setExpandedMcp((prev) => {
           const errored = c.mcpServers.filter(
             (srv) => srv.enabled && srv.listToolsError,
@@ -413,7 +585,9 @@ export function IntegrationsCatalogPanel({
           return next;
         });
       } catch (e) {
-        setCatalog(null);
+        if (!cached) {
+          setCatalogSnapshot(null);
+        }
         setMessage({
           kind: "error",
           text: extractErrorMessage(e),
@@ -422,12 +596,18 @@ export function IntegrationsCatalogPanel({
         setLoading(false);
       }
     },
-    [root],
+    [root, setCatalogSnapshot],
   );
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    const cached = integrationsCatalogMemoryCache.get(root);
+    if (cached) {
+      setCatalog(cached);
+    } else {
+      setCatalog(null);
+    }
+    void load({ silent: Boolean(cached), probeTools: false });
+  }, [load, root]);
 
   const persist = useCallback(
     async (next: IntegrationsCatalog) => {
@@ -449,7 +629,7 @@ export function IntegrationsCatalogPanel({
           kind: "success",
           text: "已保存到 .omiga/integrations.json，新对话将生效。",
         });
-        setCatalog(next);
+        setCatalogSnapshot(next);
       } catch (e) {
         setMessage({
           kind: "error",
@@ -459,11 +639,21 @@ export function IntegrationsCatalogPanel({
         setSaving(false);
       }
     },
-    [root],
+    [root, setCatalogSnapshot],
   );
 
   const setMcpEnabled = (normalizedKey: string, enabled: boolean) => {
     if (!catalog) return;
+    setPendingMcpVerification((prev) => {
+      const next = { ...prev };
+      delete next[normalizedKey];
+      return next;
+    });
+    setMcpOAuthFlows((prev) => {
+      const next = { ...prev };
+      delete next[normalizedKey];
+      return next;
+    });
     const mcpServers = catalog.mcpServers.map((s) =>
       s.normalizedKey === normalizedKey ? { ...s, enabled } : s,
     );
@@ -558,6 +748,301 @@ export function IntegrationsCatalogPanel({
     [load, noWorkspace, root],
   );
 
+  const verifyMcpServer = useCallback(
+    async (srv: McpServerCatalogEntry) => {
+      setVerifyingMcpKey(srv.normalizedKey);
+      setPendingMcpVerification((prev) => {
+        const next = { ...prev };
+        delete next[srv.normalizedKey];
+        return next;
+      });
+      setMcpOAuthFlows((prev) => {
+        const next = { ...prev };
+        delete next[srv.normalizedKey];
+        return next;
+      });
+      setMessage(null);
+      try {
+        const res = await invoke<VerifyMcpServerResult>("verify_mcp_server", {
+          projectRoot: root,
+          serverName: srv.configKey,
+        });
+        setCatalogSnapshot((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            mcpServers: prev.mcpServers.map((entry) =>
+              entry.normalizedKey === srv.normalizedKey
+                ? {
+                    ...entry,
+                    toolListChecked: res.toolListChecked ?? true,
+                    oauthAuthenticated:
+                      res.oauthAuthenticated ?? entry.oauthAuthenticated,
+                    listToolsError: res.ok
+                      ? null
+                      : res.listToolsError ?? "MCP 连接验证失败。",
+                    tools: res.tools,
+                  }
+                : entry,
+            ),
+          };
+        });
+        setExpandedMcp((prev) => ({
+          ...prev,
+          [srv.normalizedKey]: !res.ok || res.tools.length > 0,
+        }));
+        setMessage({
+          kind: res.ok ? "success" : "error",
+          text: res.ok
+            ? `「${srv.configKey}」验证通过，发现 ${res.tools.length} 个工具。`
+            : `「${srv.configKey}」验证失败：${res.listToolsError ?? "未知错误"}`,
+        });
+      } catch (e) {
+        setExpandedMcp((prev) => ({
+          ...prev,
+          [srv.normalizedKey]: true,
+        }));
+        setMessage({
+          kind: "error",
+          text: extractErrorMessage(e),
+        });
+      } finally {
+        setVerifyingMcpKey(null);
+      }
+    },
+    [root, setCatalogSnapshot],
+  );
+
+  const pollMcpOAuthLogin = useCallback(
+    async (normalizedKey: string, flow: McpOAuthFlow) => {
+      if (!flow.loginSessionId) return;
+      setMcpOAuthFlows((prev) => {
+        const current = prev[normalizedKey];
+        if (!current || current.loginSessionId !== flow.loginSessionId) return prev;
+        return {
+          ...prev,
+          [normalizedKey]: {
+            ...current,
+            status: "exchanging",
+            message: "正在交换 token…",
+          },
+        };
+      });
+
+      try {
+        const res = await invoke<PollMcpOAuthLoginResult>("poll_mcp_oauth_login", {
+          projectRoot: root,
+          loginSessionId: flow.loginSessionId,
+        });
+        const rowKey = res.normalizedKey || normalizedKey;
+
+        if (res.status === "pending") {
+          setMcpOAuthFlows((prev) => {
+            const current = prev[rowKey];
+            if (!current || current.loginSessionId !== flow.loginSessionId) return prev;
+            return {
+              ...prev,
+              [rowKey]: {
+                ...current,
+                status: "waiting",
+                intervalSecs: Math.max(1, res.intervalSecs || current.intervalSecs),
+                message: res.message,
+              },
+            };
+          });
+          return;
+        }
+
+        const terminalError =
+          res.status === "complete"
+            ? (res.listToolsError ?? null)
+            : res.message || "MCP OAuth 登录失败。";
+        setCatalogSnapshot((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            mcpServers: prev.mcpServers.map((entry) =>
+              entry.normalizedKey === rowKey
+                ? {
+                    ...entry,
+                    toolListChecked: res.toolListChecked ?? entry.toolListChecked,
+                    oauthAuthenticated:
+                      res.oauthAuthenticated ?? entry.oauthAuthenticated,
+                    listToolsError:
+                      res.status === "complete" && res.ok ? null : terminalError,
+                    tools: res.tools,
+                  }
+                : entry,
+            ),
+          };
+        });
+        setExpandedMcp((prev) => ({
+          ...prev,
+          [rowKey]: true,
+        }));
+        setPendingMcpVerification((prev) => {
+          const next = { ...prev };
+          delete next[rowKey];
+          return next;
+        });
+        setMcpOAuthFlows((prev) => {
+          const next = { ...prev };
+          delete next[rowKey];
+          return next;
+        });
+        const success = res.status === "complete" && res.ok;
+        setMessage({
+          kind: success ? "success" : "error",
+          text: success
+            ? `「${res.configKey}」授权完成，发现 ${res.tools.length} 个工具。`
+            : `「${res.configKey}」${res.status === "complete" ? "授权成功但验证失败" : "授权失败"}：${terminalError ?? res.message}`,
+        });
+      } catch (e) {
+        setMcpOAuthFlows((prev) => {
+          const next = { ...prev };
+          delete next[normalizedKey];
+          return next;
+        });
+        setPendingMcpVerification((prev) => {
+          const next = { ...prev };
+          delete next[normalizedKey];
+          return next;
+        });
+        setMessage({
+          kind: "error",
+          text: `MCP OAuth 状态检查失败：${extractErrorMessage(e)}`,
+        });
+      }
+    },
+    [root, setCatalogSnapshot],
+  );
+
+  useEffect(() => {
+    const timers = Object.entries(mcpOAuthFlows)
+      .filter(([, flow]) => flow.status === "waiting" || flow.status === "verifying")
+      .map(([normalizedKey, flow]) =>
+        window.setTimeout(
+          () => void pollMcpOAuthLogin(normalizedKey, flow),
+          Math.max(1, flow.intervalSecs || 2) * 1000,
+        ),
+      );
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [mcpOAuthFlows, pollMcpOAuthLogin]);
+
+  const startMcpOAuthLogin = useCallback(
+    async (srv: McpServerCatalogEntry) => {
+      setMessage(null);
+      setExpandedMcp((prev) => ({
+        ...prev,
+        [srv.normalizedKey]: true,
+      }));
+      setPendingMcpVerification((prev) => ({
+        ...prev,
+        [srv.normalizedKey]: true,
+      }));
+      setMcpOAuthFlows((prev) => ({
+        ...prev,
+        [srv.normalizedKey]: {
+          loginSessionId: "",
+          status: "opening",
+          intervalSecs: 2,
+          message: "正在准备 OAuth 授权…",
+        },
+      }));
+      try {
+        const res = await invoke<StartMcpOAuthLoginResult>(
+          "start_mcp_oauth_login",
+          {
+            projectRoot: root,
+            serverName: srv.configKey,
+          },
+        );
+        setMcpOAuthFlows((prev) => ({
+          ...prev,
+          [res.normalizedKey]: {
+            loginSessionId: res.loginSessionId,
+            status: "waiting",
+            intervalSecs: Math.max(1, res.intervalSecs || 2),
+            message: res.message,
+          },
+        }));
+        await openUrl(res.authorizationUrl);
+        setMessage({
+          kind: "success",
+          text: `已打开「${srv.configKey}」授权页。完成登录后 Omiga 会自动获取 token 并验证工具列表。`,
+        });
+      } catch (e) {
+        setPendingMcpVerification((prev) => {
+          const next = { ...prev };
+          delete next[srv.normalizedKey];
+          return next;
+        });
+        setMcpOAuthFlows((prev) => {
+          const next = { ...prev };
+          delete next[srv.normalizedKey];
+          return next;
+        });
+        setMessage({
+          kind: "error",
+          text: `启动 MCP OAuth 登录失败：${extractErrorMessage(e)}`,
+        });
+      }
+    },
+    [root],
+  );
+
+  const logoutMcpOAuthServer = useCallback(
+    async (srv: McpServerCatalogEntry) => {
+      setLoggingOutMcpKey(srv.normalizedKey);
+      setMessage(null);
+      try {
+        const res = await invoke<LogoutMcpOAuthServerResult>(
+          "logout_mcp_oauth_server",
+          {
+            projectRoot: root,
+            serverName: srv.configKey,
+          },
+        );
+        setCatalogSnapshot((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            mcpServers: prev.mcpServers.map((entry) =>
+              entry.normalizedKey === res.normalizedKey
+                ? {
+                    ...entry,
+                    oauthAuthenticated: false,
+                    toolListChecked: false,
+                    listToolsError: null,
+                    tools: [],
+                  }
+                : entry,
+            ),
+          };
+        });
+        setExpandedMcp((prev) => {
+          const next = { ...prev };
+          delete next[res.normalizedKey];
+          return next;
+        });
+        setMessage({
+          kind: "success",
+          text: `已退出「${res.configKey}」OAuth 登录，并清除本机安全存储中的 token。`,
+        });
+      } catch (e) {
+        setMessage({
+          kind: "error",
+          text: `退出 MCP OAuth 登录失败：${extractErrorMessage(e)}`,
+        });
+      } finally {
+        setLoggingOutMcpKey(null);
+      }
+    },
+    [root, setCatalogSnapshot],
+  );
+
   const uninstallOmigaSkillCopy = useCallback(
     async (sk: SkillCatalogEntry) => {
       if (!sk.canUninstallOmigaCopy || !sk.directoryName) return;
@@ -608,6 +1093,16 @@ export function IntegrationsCatalogPanel({
     0,
   );
   const mcpErrorCount = mcpServers.filter((srv) => srv.listToolsError).length;
+  const mcpAuthedCount = mcpServers.filter(
+    (srv) => srv.oauthAuthenticated,
+  ).length;
+  const mcpOAuthBusy = Object.keys(mcpOAuthFlows).length > 0;
+  const mcpPendingCount = mcpServers.filter(
+    (srv) =>
+      srv.enabled &&
+      (pendingMcpVerification[srv.normalizedKey] ||
+        Boolean(mcpOAuthFlows[srv.normalizedKey])),
+  ).length;
 
   return (
     <Box sx={{ mt: 2 }}>
@@ -653,8 +1148,18 @@ export function IntegrationsCatalogPanel({
                   <span>
                     <IconButton
                       size="small"
-                      disabled={loading || saving || addingMcp || deletingMcpKey !== null}
-                      onClick={() => void load({ ignoreCache: true })}
+                      disabled={
+                        loading ||
+                        saving ||
+                        addingMcp ||
+                        deletingMcpKey !== null ||
+                        verifyingMcpKey !== null ||
+                        loggingOutMcpKey !== null ||
+                        mcpOAuthBusy
+                      }
+                      onClick={() =>
+                        void load({ ignoreCache: true, probeTools: true })
+                      }
                       sx={(theme) => ({
                         border: `1px solid ${alpha(theme.palette.divider, 0.65)}`,
                         borderRadius: 2,
@@ -668,7 +1173,14 @@ export function IntegrationsCatalogPanel({
                   size="small"
                   variant="contained"
                   startIcon={<AddIcon />}
-                  disabled={noWorkspace || addingMcp || deletingMcpKey !== null}
+                  disabled={
+                    noWorkspace ||
+                    addingMcp ||
+                    deletingMcpKey !== null ||
+                    verifyingMcpKey !== null ||
+                    loggingOutMcpKey !== null ||
+                    mcpOAuthBusy
+                  }
                   onClick={openAddMcpDialog}
                 >
                   添加服务器
@@ -686,8 +1198,14 @@ export function IntegrationsCatalogPanel({
               <Chip size="small" label={`${mcpServers.length} 个服务`} />
               <Chip size="small" color="success" variant="outlined" label={`${enabledMcpCount} 个启用`} />
               <Chip size="small" color="primary" variant="outlined" label={`${mcpToolCount} 个工具`} />
+              {mcpAuthedCount > 0 && (
+                <Chip size="small" color="secondary" variant="outlined" label={`${mcpAuthedCount} 个 OAuth 已登录`} />
+              )}
               {mcpErrorCount > 0 && (
                 <Chip size="small" color="error" variant="outlined" label={`${mcpErrorCount} 个连接异常`} />
+              )}
+              {mcpPendingCount > 0 && (
+                <Chip size="small" color="warning" variant="outlined" label={`${mcpPendingCount} 个待验证`} />
               )}
             </Stack>
 
@@ -799,15 +1317,40 @@ export function IntegrationsCatalogPanel({
             >
               {mcpServers.map((srv, idx) => {
                 const expanded = expandedMcp[srv.normalizedKey] ?? false;
+                const oauthFlow = mcpOAuthFlows[srv.normalizedKey] ?? null;
                 const hasExpand =
                   (srv.tools.length > 0 || Boolean(srv.listToolsError)) &&
                   srv.enabled;
+                const isVerifying = verifyingMcpKey === srv.normalizedKey;
+                const isLoggingOut = loggingOutMcpKey === srv.normalizedKey;
+                const pendingVerification =
+                  srv.enabled &&
+                  (Boolean(pendingMcpVerification[srv.normalizedKey]) ||
+                    Boolean(oauthFlow));
                 const statusDot = (theme: Theme) => {
                   if (!srv.enabled) return theme.palette.action.disabled;
+                  if (isVerifying || pendingVerification) return theme.palette.warning.main;
                   if (srv.listToolsError) return theme.palette.error.main;
                   return theme.palette.success.main;
                 };
                 const advice = mcpErrorAdvice(srv);
+                const needsBrowserLogin =
+                  srv.enabled && mcpAuthRequired(srv) && !pendingVerification;
+                const showVerifyButton =
+                  srv.enabled &&
+                  !oauthFlow &&
+                  !needsBrowserLogin &&
+                  (!srv.toolListChecked ||
+                    pendingVerification ||
+                    Boolean(srv.listToolsError) ||
+                    srv.tools.length === 0);
+                const oauthButtonLabel = (() => {
+                  if (!oauthFlow) return "";
+                  if (oauthFlow.status === "opening") return "准备授权…";
+                  if (oauthFlow.status === "waiting") return "待验证";
+                  if (oauthFlow.status === "exchanging") return "交换 token…";
+                  return "验证工具…";
+                })();
                 return (
                   <Box key={srv.configKey}>
                     {idx > 0 && <Divider sx={{ opacity: 0.65 }} />}
@@ -855,16 +1398,34 @@ export function IntegrationsCatalogPanel({
                         />
                       </Box>
                       <Box sx={{ minWidth: 0, flex: 1 }}>
-                        <Typography
-                          fontWeight={750}
-                          fontSize={15}
-                          lineHeight={1.3}
-                          noWrap
-                          title={srv.configKey}
-                          sx={{ color: "text.primary" }}
+                        <Box
+                          sx={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 0.75,
+                            minWidth: 0,
+                          }}
                         >
-                          {srv.configKey}
-                        </Typography>
+                          <Typography
+                            fontWeight={750}
+                            fontSize={15}
+                            lineHeight={1.3}
+                            noWrap
+                            title={srv.configKey}
+                            sx={{ color: "text.primary", minWidth: 0 }}
+                          >
+                            {srv.configKey}
+                          </Typography>
+                          {srv.oauthAuthenticated && (
+                            <Chip
+                              size="small"
+                              label="OAuth 已保存"
+                              color="success"
+                              variant="outlined"
+                              sx={{ height: 20, fontSize: 11, flexShrink: 0 }}
+                            />
+                          )}
+                        </Box>
                         <Box
                           sx={{
                             display: "flex",
@@ -885,7 +1446,11 @@ export function IntegrationsCatalogPanel({
                             }}
                             title={srv.normalizedKey}
                           >
-                            {mcpRowSubtitle(srv)}
+                            {mcpRowSubtitle(srv, {
+                              pendingVerification,
+                              verifying: isVerifying,
+                              authFlowStatus: oauthFlow?.status,
+                            })}
                           </Typography>
                           {hasExpand && (
                             <IconButton
@@ -919,11 +1484,129 @@ export function IntegrationsCatalogPanel({
                           flexShrink: 0,
                         }}
                       >
+                        {srv.oauthAuthenticated && !oauthFlow && (
+                          <Button
+                            size="small"
+                            color="inherit"
+                            disabled={
+                              saving ||
+                              addingMcp ||
+                              deletingMcpKey !== null ||
+                              verifyingMcpKey !== null ||
+                              loggingOutMcpKey !== null ||
+                              mcpOAuthBusy
+                            }
+                            onClick={() => void logoutMcpOAuthServer(srv)}
+                            startIcon={
+                              isLoggingOut ? (
+                                <CircularProgress color="inherit" size={13} />
+                              ) : undefined
+                            }
+                            sx={{
+                              minWidth: 54,
+                              mr: 0.5,
+                              textTransform: "none",
+                            }}
+                          >
+                            {isLoggingOut ? "退出中…" : "退出"}
+                          </Button>
+                        )}
+                        {oauthFlow && (
+                          <Button
+                            size="small"
+                            variant="contained"
+                            color="primary"
+                            disabled
+                            startIcon={<CircularProgress color="inherit" size={14} />}
+                            sx={{
+                              minWidth: 96,
+                              mr: 0.5,
+                              textTransform: "none",
+                              "&.Mui-disabled": {
+                                color: "primary.contrastText",
+                                bgcolor: "primary.main",
+                                opacity: 0.72,
+                              },
+                            }}
+                          >
+                            {oauthButtonLabel}
+                          </Button>
+                        )}
+                        {needsBrowserLogin && (
+                          <Button
+                            size="small"
+                            variant="contained"
+                            color="primary"
+                            disabled={
+                              saving ||
+                              addingMcp ||
+                              deletingMcpKey !== null ||
+                              verifyingMcpKey !== null ||
+                              loggingOutMcpKey !== null ||
+                              mcpOAuthBusy
+                            }
+                            onClick={() => void startMcpOAuthLogin(srv)}
+                            sx={{
+                              minWidth: 72,
+                              mr: 0.5,
+                              textTransform: "none",
+                            }}
+                          >
+                            连接
+                          </Button>
+                        )}
+                        {showVerifyButton && (
+                          <Button
+                            size="small"
+                            variant={
+                              srv.listToolsError && !needsBrowserLogin
+                                ? "contained"
+                                : "outlined"
+                            }
+                            color={
+                              srv.listToolsError && !needsBrowserLogin
+                                ? "primary"
+                                : "inherit"
+                            }
+                            disabled={
+                              saving ||
+                              addingMcp ||
+                              deletingMcpKey !== null ||
+                              verifyingMcpKey !== null ||
+                              loggingOutMcpKey !== null ||
+                              mcpOAuthBusy
+                            }
+                            onClick={() => void verifyMcpServer(srv)}
+                            startIcon={
+                              isVerifying ? (
+                                <CircularProgress color="inherit" size={14} />
+                              ) : undefined
+                            }
+                            sx={{
+                              minWidth: 72,
+                              mr: 0.5,
+                              textTransform: "none",
+                            }}
+                          >
+                            {isVerifying
+                              ? "验证中…"
+                              : srv.listToolsError && !pendingVerification
+                                ? "连接"
+                                : "验证"}
+                          </Button>
+                        )}
                         <Tooltip title="编辑配置（保存为项目级覆盖）">
                           <span>
                             <IconButton
                               size="small"
-                              disabled={saving || addingMcp || deletingMcpKey !== null}
+                              disabled={
+                                saving ||
+                                addingMcp ||
+                                deletingMcpKey !== null ||
+                                verifyingMcpKey !== null ||
+                                loggingOutMcpKey !== null ||
+                                mcpOAuthBusy
+                              }
                               onClick={() => openEditMcpDialog(srv)}
                               aria-label={`编辑 MCP 服务 ${srv.configKey}`}
                             >
@@ -940,7 +1623,10 @@ export function IntegrationsCatalogPanel({
                                 noWorkspace ||
                                 saving ||
                                 addingMcp ||
-                                deletingMcpKey !== null
+                                deletingMcpKey !== null ||
+                                verifyingMcpKey !== null ||
+                                loggingOutMcpKey !== null ||
+                                mcpOAuthBusy
                               }
                               onClick={() => void deleteMcpServer(srv)}
                               aria-label={`移除 MCP 服务 ${srv.configKey}`}
@@ -958,7 +1644,13 @@ export function IntegrationsCatalogPanel({
                           size="small"
                           color="success"
                           checked={srv.enabled}
-                          disabled={saving || deletingMcpKey !== null}
+                          disabled={
+                            saving ||
+                            deletingMcpKey !== null ||
+                            verifyingMcpKey !== null ||
+                            loggingOutMcpKey !== null ||
+                            mcpOAuthBusy
+                          }
                           onChange={(_, v) => setMcpEnabled(srv.normalizedKey, v)}
                           inputProps={{
                             "aria-label": srv.enabled ? "禁用 MCP 服务" : "启用 MCP 服务",
@@ -980,40 +1672,92 @@ export function IntegrationsCatalogPanel({
                         {srv.listToolsError && (
                           <Stack spacing={1} sx={{ mb: srv.tools.length > 0 ? 1 : 0 }}>
                             {advice && (
-                              <Alert
-                                severity="warning"
-                                variant="outlined"
+                              <Box
                                 sx={(theme) => ({
+                                  display: "grid",
+                                  gridTemplateColumns: {
+                                    xs: "24px 1fr",
+                                    sm: needsBrowserLogin ? "24px 1fr auto" : "24px 1fr",
+                                  },
+                                  gap: 1.25,
+                                  alignItems: "flex-start",
+                                  px: 1.5,
+                                  py: 1.35,
                                   borderRadius: 2,
+                                  border: `1px solid ${alpha(theme.palette.warning.main, 0.38)}`,
                                   bgcolor: alpha(
                                     theme.palette.warning.main,
                                     theme.palette.mode === "dark" ? 0.08 : 0.04,
                                   ),
-                                  alignItems: "flex-start",
                                 })}
                               >
-                                <AlertTitle sx={{ fontSize: 13, fontWeight: 750, mb: 0.25 }}>
-                                  {advice.title}
-                                </AlertTitle>
-                                <Typography variant="caption" component="div" sx={{ lineHeight: 1.6 }}>
-                                  {advice.detail}
-                                </Typography>
-                                <Box component="ul" sx={{ m: 0.5, mb: 0, pl: 2.2 }}>
-                                  {advice.actions.map((action) => (
-                                    <Box
-                                      key={action}
-                                      component="li"
-                                      sx={(theme) => ({
-                                        color: theme.palette.text.secondary,
-                                        fontSize: 12,
-                                        lineHeight: 1.65,
-                                      })}
-                                    >
-                                      {action}
-                                    </Box>
-                                  ))}
+                                <Box
+                                  sx={(theme) => ({
+                                    width: 18,
+                                    height: 18,
+                                    mt: 0.15,
+                                    borderRadius: "50%",
+                                    color: "warning.main",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    border: `1px solid ${alpha(theme.palette.warning.main, 0.55)}`,
+                                    fontSize: 12,
+                                    fontWeight: 800,
+                                  })}
+                                >
+                                  !
                                 </Box>
-                              </Alert>
+                                <Box sx={{ minWidth: 0 }}>
+                                  <Typography
+                                    variant="caption"
+                                    component="div"
+                                    fontWeight={750}
+                                    sx={{ lineHeight: 1.45 }}
+                                  >
+                                    {advice.title}
+                                  </Typography>
+                                  <Typography
+                                    variant="caption"
+                                    component="div"
+                                    color="text.secondary"
+                                    sx={{ mt: 0.25, lineHeight: 1.6 }}
+                                  >
+                                    {advice.detail}
+                                  </Typography>
+                                  <Box component="ul" sx={{ m: 0.5, mb: 0, pl: 2.2 }}>
+                                    {advice.actions.map((action) => (
+                                      <Box
+                                        key={action}
+                                        component="li"
+                                        sx={(theme) => ({
+                                          color: theme.palette.text.secondary,
+                                          fontSize: 12,
+                                          lineHeight: 1.65,
+                                        })}
+                                      >
+                                        {action}
+                                      </Box>
+                                    ))}
+                                  </Box>
+                                </Box>
+                                {needsBrowserLogin && (
+                                  <Button
+                                    color="warning"
+                                    size="small"
+                                    variant="outlined"
+                                    disabled={mcpOAuthBusy || loggingOutMcpKey !== null}
+                                    onClick={() => void startMcpOAuthLogin(srv)}
+                                    sx={{
+                                      alignSelf: "flex-start",
+                                      whiteSpace: "nowrap",
+                                      gridColumn: { xs: "2 / 3", sm: "auto" },
+                                    }}
+                                  >
+                                    连接
+                                  </Button>
+                                )}
+                              </Box>
                             )}
                             <Box
                               sx={(theme) => ({
@@ -1502,8 +2246,22 @@ export function IntegrationsCatalogPanel({
                   helperText="支持 Streamable HTTP MCP 端点。"
                 />
                 <TextField
-                  label="认证请求头"
-                  placeholder={"每行一个 KEY=value，例如：\nAuthorization=Bearer ${PAPERCLIP_TOKEN}\nX-API-Key=..."}
+                  label="Bearer 令牌环境变量"
+                  placeholder="例如 PAPERCLIP_TOKEN"
+                  value={mcpForm.bearerEnvName}
+                  onChange={(e) =>
+                    setMcpForm((f) => ({
+                      ...f,
+                      bearerEnvName: e.target.value,
+                    }))
+                  }
+                  disabled={addingMcp}
+                  fullWidth
+                  helperText="可选；保存后写入 Authorization=Bearer ${ENV_NAME}，token 值只从运行环境读取，不明文写入配置。"
+                />
+                <TextField
+                  label="额外请求头"
+                  placeholder={"每行一个 KEY=value，例如：\nX-API-Key=${PAPERCLIP_API_KEY}\nX-Workspace=default"}
                   value={mcpForm.headersText}
                   onChange={(e) =>
                     setMcpForm((f) => ({ ...f, headersText: e.target.value }))
@@ -1512,7 +2270,7 @@ export function IntegrationsCatalogPanel({
                   fullWidth
                   multiline
                   minRows={3}
-                  helperText="可选；支持在值中使用 ${ENV_NAME}，运行时从环境变量读取，避免把 token 明文写入配置。"
+                  helperText="可选；同样支持 ${ENV_NAME}。如果上面已填写 Bearer 变量，这里不要再写 Authorization。"
                 />
               </>
             )}

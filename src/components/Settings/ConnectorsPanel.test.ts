@@ -83,6 +83,30 @@ describe("connector product integration state", () => {
     ).toBe(false);
   });
 
+  it("treats Gmail as integrated through Omiga browser OAuth", () => {
+    expect(
+      connectorIsProductIntegrated(
+        connector({
+          definition: {
+            id: "gmail",
+            name: "Gmail",
+            description: "Reference mailbox messages.",
+            category: "email",
+            authType: "oauth",
+            envVars: ["GMAIL_ACCESS_TOKEN"],
+            defaultEnabled: true,
+            tools: [
+              tool({
+                execution: "declared",
+                name: "search_messages",
+              }),
+            ],
+          },
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it("does not expose token-only native connectors as product-integrated UI", () => {
     expect(
       connectorIsProductIntegrated(
@@ -102,7 +126,7 @@ describe("connector product integration state", () => {
     ).toBe(false);
   });
 
-  it("falls back to hosted Slack authorization without surfacing developer config", () => {
+  it("reports missing Slack OAuth config without opening hosted authorization", () => {
     const message = connectorLoginFailureMessage(
       connector({
         definition: {
@@ -120,10 +144,10 @@ describe("connector product integration state", () => {
       true,
     );
 
-    expect(message).toContain("已为你打开登录授权页");
-    expect(message).toContain("Codex/OpenAI 托管授权页");
-    expect(message).toContain("不需要你配置 Client ID 或 Client Secret");
+    expect(message).toContain("需要 Omiga 自有 OAuth 配置");
+    expect(message).toContain("OMIGA_*_OAUTH_CLIENT_ID");
+    expect(message).toContain("不会跳转到 OpenAI/Codex 托管授权页");
     expect(message).not.toContain("SLACK_BOT_TOKEN");
-    expect(message).not.toContain("HTTPS callback bridge");
+    expect(message).not.toContain("chatgpt.com");
   });
 });

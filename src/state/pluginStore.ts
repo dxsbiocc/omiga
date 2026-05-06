@@ -91,6 +91,31 @@ export interface PluginProcessPoolRouteStatus {
   remainingMs: number;
 }
 
+export interface OperatorSummary {
+  id: string;
+  version: string;
+  name?: string | null;
+  description?: string | null;
+  sourcePlugin: string;
+  manifestPath: string;
+  enabledAliases: string[];
+  exposed: boolean;
+  unavailableReason?: string | null;
+}
+
+export interface OperatorCatalogResponse {
+  registryPath: string;
+  operators: OperatorSummary[];
+}
+
+export interface OperatorRegistryUpdate {
+  alias: string;
+  operatorId?: string | null;
+  sourcePlugin?: string | null;
+  version?: string | null;
+  enabled: boolean;
+}
+
 export const RETRIEVAL_PLUGIN_PROTOCOL_DOC_PATH =
   "docs/retrieval-plugin-protocol.md";
 
@@ -141,18 +166,22 @@ export interface RetrievalRuntimeDiagnosticsPayload {
 
 interface PluginState {
   marketplaces: PluginMarketplaceEntry[];
+  operators: OperatorSummary[];
+  operatorRegistryPath: string | null;
   retrievalStatuses: PluginRetrievalRouteStatus[];
   processPoolStatuses: PluginProcessPoolRouteStatus[];
   isLoading: boolean;
   isMutating: boolean;
   error: string | null;
   loadPlugins: (projectRoot?: string) => Promise<void>;
+  loadOperators: () => Promise<void>;
   loadRetrievalStatuses: (projectRoot?: string) => Promise<void>;
   loadProcessPoolStatuses: (projectRoot?: string) => Promise<void>;
   clearProcessPool: (projectRoot?: string) => Promise<number>;
   installPlugin: (plugin: PluginSummary, projectRoot?: string) => Promise<PluginInstallResult>;
   uninstallPlugin: (pluginId: string, projectRoot?: string) => Promise<void>;
   setPluginEnabled: (pluginId: string, enabled: boolean, projectRoot?: string) => Promise<void>;
+  setOperatorEnabled: (update: OperatorRegistryUpdate, projectRoot?: string) => Promise<void>;
 }
 
 export function flattenMarketplacePlugins(
@@ -266,6 +295,8 @@ export function buildRetrievalRuntimeDiagnostics(
 
 export const usePluginStore = create<PluginState>((set, get) => ({
   marketplaces: [],
+  operators: [],
+  operatorRegistryPath: null,
   retrievalStatuses: [],
   processPoolStatuses: [],
   isLoading: false,
@@ -275,7 +306,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   loadPlugins: async (projectRoot?: string) => {
     set({ isLoading: true, error: null });
     try {
-      const [marketplaces, retrievalStatuses, processPoolStatuses] = await Promise.all([
+      const [marketplaces, retrievalStatuses, processPoolStatuses, operatorCatalog] = await Promise.all([
         invoke<PluginMarketplaceEntry[]>("list_omiga_plugin_marketplaces", {
           projectRoot,
         }),
@@ -287,10 +318,30 @@ export const usePluginStore = create<PluginState>((set, get) => ({
           "list_omiga_plugin_process_pool_statuses",
           { projectRoot },
         ),
+        invoke<OperatorCatalogResponse>("list_omiga_operators"),
       ]);
-      set({ marketplaces, retrievalStatuses, processPoolStatuses, isLoading: false });
+      set({
+        marketplaces,
+        retrievalStatuses,
+        processPoolStatuses,
+        operators: operatorCatalog.operators,
+        operatorRegistryPath: operatorCatalog.registryPath,
+        isLoading: false,
+      });
     } catch (e) {
       set({ isLoading: false, error: extractErrorMessage(e) });
+    }
+  },
+
+  loadOperators: async () => {
+    try {
+      const operatorCatalog = await invoke<OperatorCatalogResponse>("list_omiga_operators");
+      set({
+        operators: operatorCatalog.operators,
+        operatorRegistryPath: operatorCatalog.registryPath,
+      });
+    } catch (e) {
+      set({ error: extractErrorMessage(e) });
     }
   },
 
@@ -369,6 +420,19 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     set({ isMutating: true, error: null });
     try {
       await invoke("set_omiga_plugin_enabled", { pluginId, enabled, projectRoot });
+      await get().loadPlugins(projectRoot);
+      set({ isMutating: false });
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
+      throw new Error(error);
+    }
+  },
+
+  setOperatorEnabled: async (update: OperatorRegistryUpdate, projectRoot?: string) => {
+    set({ isMutating: true, error: null });
+    try {
+      await invoke("set_omiga_operator_enabled", { update });
       await get().loadPlugins(projectRoot);
       set({ isMutating: false });
     } catch (e) {

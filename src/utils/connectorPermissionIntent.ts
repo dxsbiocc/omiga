@@ -71,7 +71,12 @@ const CONNECTOR_LABELS: Record<string, string> = {
   jira: "Jira",
   linear: "Linear",
   microsoft_teams: "Microsoft Teams",
+  gmail: "Gmail",
+  imap_smtp_mail: "Email",
+  netease_mail: "网易邮箱",
   notion: "Notion",
+  outlook: "Outlook",
+  qq_mail: "QQ 邮箱",
   sentry: "Sentry",
   slack: "Slack",
   trello: "Trello",
@@ -149,6 +154,38 @@ function canonicalConnectorOperation(
     if (operation === "issues") return "list_issues";
     if (operation === "get_issue" || operation === "issue") return "read_issue";
   }
+  if (
+    connectorId === "gmail" ||
+    connectorId === "outlook" ||
+    connectorId === "qq_mail" ||
+    connectorId === "netease_mail" ||
+    connectorId === "imap_smtp_mail"
+  ) {
+    if (
+      operation === "search" ||
+      operation === "messages" ||
+      operation === "list_messages" ||
+      operation === "mail" ||
+      operation === "emails"
+    ) {
+      return "search_messages";
+    }
+    if (
+      operation === "get_message" ||
+      operation === "message" ||
+      operation === "read_email" ||
+      operation === "email"
+    ) {
+      return "read_message";
+    }
+    if (
+      operation === "send" ||
+      operation === "send_email" ||
+      operation === "compose"
+    ) {
+      return "send_message";
+    }
+  }
   return operation;
 }
 
@@ -164,11 +201,14 @@ function connectorOperationLabel(operation: string): string {
     post_message: "发送消息",
     publish_changes: "发布变更",
     read_issue: "读取 Issue",
+    read_message: "读取邮件",
     read_page: "读取页面",
     read_pull_request: "读取 Pull Request",
     read_thread: "读取会话线程",
     resolve_issue: "解决事件/问题",
+    search_messages: "搜索邮件",
     search_pages: "搜索页面",
+    send_message: "发送邮件",
     transition_issue: "流转 Issue 状态",
     update_issue_status: "更新 Issue 状态",
     update_task: "更新任务",
@@ -268,11 +308,33 @@ function connectorTarget(
     }
     return channel;
   }
+  if (
+    connectorId === "gmail" ||
+    connectorId === "outlook" ||
+    connectorId === "qq_mail" ||
+    connectorId === "netease_mail" ||
+    connectorId === "imap_smtp_mail"
+  ) {
+    const messageId = connectorStringField(args, [
+      "id",
+      "message_id",
+      "messageId",
+      "thread_id",
+      "threadId",
+    ]);
+    if (messageId) return messageId;
+    const recipient = connectorStringField(args, ["to", "recipient", "email"]);
+    if (recipient) return recipient;
+    const query = connectorStringField(args, ["query", "search", "subject"]);
+    if (query) return `search:${query}`;
+    return connectorStringField(args, ["folder", "mailbox"]);
+  }
   return connectorStringField(args, ["id", "target", "channel", "repo", "key"]);
 }
 
 function connectorPayloadPreview(args: PermissionArgs): string | null {
   return connectorStringField(args, [
+    "subject",
     "text",
     "message",
     "body",

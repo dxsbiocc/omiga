@@ -10,9 +10,10 @@ use crate::domain::integrations_config::{self, IntegrationsConfig};
 use crate::domain::mcp::client::list_tools_for_server;
 use crate::domain::mcp::config::{merged_mcp_servers, McpServerConfig};
 use crate::domain::mcp::names::{build_mcp_tool_name, normalize_name_for_mcp};
+use crate::domain::mcp::oauth::{self, McpOAuthLoginPollStatus};
 use crate::domain::skills::{self, SkillSource};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::State;
 
@@ -73,6 +74,96 @@ pub struct AvailableSkillInfo {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerVerificationResult {
+    pub config_key: String,
+    pub normalized_key: String,
+    pub ok: bool,
+    pub tool_list_checked: bool,
+    pub oauth_authenticated: bool,
+    pub list_tools_error: Option<String>,
+    pub tools: Vec<McpToolCatalogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerOAuthLoginStartResult {
+    pub config_key: String,
+    pub normalized_key: String,
+    pub login_session_id: String,
+    pub authorization_url: String,
+    pub expires_in: u64,
+    pub interval_secs: u64,
+    pub expires_at: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerOAuthLoginPollResult {
+    pub config_key: String,
+    pub normalized_key: String,
+    pub status: McpOAuthLoginPollStatus,
+    pub message: String,
+    pub interval_secs: u64,
+    pub ok: bool,
+    pub tool_list_checked: bool,
+    pub oauth_authenticated: bool,
+    pub list_tools_error: Option<String>,
+    pub tools: Vec<McpToolCatalogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerOAuthLogoutResult {
+    pub config_key: String,
+    pub normalized_key: String,
+}
+
+fn mcp_tool_entries_for_server(
+    server_key: &str,
+    tools: Vec<rmcp::model::Tool>,
+) -> Vec<McpToolCatalogEntry> {
+    tools
+        .into_iter()
+        .map(|t| {
+            let wire = build_mcp_tool_name(server_key, t.name.as_ref());
+            let desc = t.description.as_deref().unwrap_or("MCP tool").to_string();
+            McpToolCatalogEntry {
+                wire_name: wire,
+                description: desc,
+            }
+        })
+        .collect()
+}
+
+fn config_has_explicit_authorization(config: &McpServerConfig) -> bool {
+    matches!(
+        config,
+        McpServerConfig::Url { headers, .. }
+            if headers
+                .keys()
+                .any(|key| key.eq_ignore_ascii_case("authorization"))
+    )
+}
+
+fn oauth_authenticated_for_config(config: &McpServerConfig) -> bool {
+    match config {
+        McpServerConfig::Url { url, .. } if !config_has_explicit_authorization(config) => {
+            oauth::has_stored_credentials_for_url(url)
+        }
+        _ => false,
+    }
+}
+
+fn oauth_authenticated_for_server(root: &Path, server_key: &str) -> bool {
+    merged_mcp_servers(root)
+        .get(server_key)
+        .map(oauth_authenticated_for_config)
+        .unwrap_or(false)
+}
+
 /// Lightweight skills-only catalog for the chat composer `$` picker.
 ///
 /// Unlike `get_integrations_catalog`, this does not query MCP servers, so opening the picker
@@ -103,6 +194,7 @@ pub async fn list_available_skills(
 pub(crate) async fn build_integrations_catalog(
     _app_state: &OmigaAppState,
     root: PathBuf,
+    probe_tools: bool,
 ) -> CommandResult<IntegrationsCatalog> {
     let cfg = integrations_config::load_integrations_config(&root);
 
@@ -135,33 +227,30 @@ pub(crate) async fn build_integrations_catalog(
                         url: None,
                         cwd: None,
                     });
-                let tools_res =
-                    list_tools_for_server(&root_c, &key, CATALOG_TOOL_LIST_TIMEOUT).await;
-                let (list_tools_error, tools) = match tools_res {
-                    Ok(list) => (
-                        None,
-                        list.into_iter()
-                            .map(|t| {
-                                let wire = build_mcp_tool_name(&key, t.name.as_ref());
-                                let desc =
-                                    t.description.as_deref().unwrap_or("MCP tool").to_string();
-                                McpToolCatalogEntry {
-                                    wire_name: wire,
-                                    description: desc,
-                                }
-                            })
-                            .collect(),
-                    ),
-                    Err(e) => {
-                        tracing::warn!("catalog tools/list failed for \"{key}\": {e}");
-                        (Some(e.to_string()), vec![])
+                let oauth_authenticated = merged_c
+                    .get(&key)
+                    .map(oauth_authenticated_for_config)
+                    .unwrap_or(false);
+                let (tool_list_checked, list_tools_error, tools) = if probe_tools {
+                    let tools_res =
+                        list_tools_for_server(&root_c, &key, CATALOG_TOOL_LIST_TIMEOUT).await;
+                    match tools_res {
+                        Ok(list) => (true, None, mcp_tool_entries_for_server(&key, list)),
+                        Err(e) => {
+                            tracing::warn!("catalog tools/list failed for \"{key}\": {e}");
+                            (true, Some(e.to_string()), vec![])
+                        }
                     }
+                } else {
+                    (false, None, Vec::new())
                 };
                 McpServerCatalogEntry {
                     config_key: key,
                     normalized_key,
                     enabled,
                     config,
+                    tool_list_checked,
+                    oauth_authenticated,
                     list_tools_error,
                     tools,
                 }
@@ -226,7 +315,9 @@ pub(crate) async fn build_integrations_catalog(
 }
 
 /// Discover configured MCP servers and skills, merge with `.omiga/integrations.json` toggles.
-/// MCP server tool-listing runs in parallel so a dead server does not block the rest.
+/// By default this does not probe remote `tools/list`; Settings can request an explicit probe when
+/// the user clicks refresh/verify. This keeps opening the MCP tab instant and avoids surfacing stale
+/// timeouts every time the page remounts.
 ///
 /// When `ignore_cache` is true, always rebuilds and replaces the cache entry.
 #[tauri::command]
@@ -234,9 +325,11 @@ pub async fn get_integrations_catalog(
     app_state: State<'_, OmigaAppState>,
     project_root: String,
     ignore_cache: Option<bool>,
+    probe_tools: Option<bool>,
 ) -> CommandResult<IntegrationsCatalog> {
     let root = resolve_project_root(&project_root)?;
     let ignore_cache = ignore_cache.unwrap_or(false);
+    let probe_tools = probe_tools.unwrap_or(false);
 
     if !ignore_cache {
         if let Ok(guard) = app_state.integrations_catalog_cache.lock() {
@@ -246,13 +339,179 @@ pub async fn get_integrations_catalog(
         }
     }
 
-    let catalog = build_integrations_catalog(&app_state, root.clone()).await?;
+    let catalog = build_integrations_catalog(&app_state, root.clone(), probe_tools).await?;
 
     if let Ok(mut guard) = app_state.integrations_catalog_cache.lock() {
         guard.insert(root, catalog.clone());
     }
 
     Ok(catalog)
+}
+
+/// Verify one MCP server by running `tools/list` with the effective merged config.
+///
+/// This command returns connection/auth failures as data instead of a command error so the Settings
+/// UI can update just the affected row and keep showing targeted remediation guidance.
+#[tauri::command]
+pub async fn verify_mcp_server(
+    project_root: String,
+    server_name: String,
+) -> CommandResult<McpServerVerificationResult> {
+    let root = resolve_project_root(&project_root)?;
+    let config_key = server_name.trim().to_string();
+    let normalized_key = normalize_name_for_mcp(&config_key);
+    let oauth_authenticated = oauth_authenticated_for_server(&root, &config_key);
+    match list_tools_for_server(&root, &config_key, CATALOG_TOOL_LIST_TIMEOUT).await {
+        Ok(list) => Ok(McpServerVerificationResult {
+            config_key: config_key.clone(),
+            normalized_key,
+            ok: true,
+            tool_list_checked: true,
+            oauth_authenticated,
+            list_tools_error: None,
+            tools: mcp_tool_entries_for_server(&config_key, list),
+        }),
+        Err(e) => Ok(McpServerVerificationResult {
+            config_key,
+            normalized_key,
+            ok: false,
+            tool_list_checked: true,
+            oauth_authenticated,
+            list_tools_error: Some(e.to_string()),
+            tools: Vec::new(),
+        }),
+    }
+}
+
+/// Start the MCP OAuth browser flow for one remote HTTP MCP server.
+#[tauri::command]
+pub async fn start_mcp_oauth_login(
+    project_root: String,
+    server_name: String,
+) -> CommandResult<McpServerOAuthLoginStartResult> {
+    let root = resolve_project_root(&project_root)?;
+    let config_key = server_name.trim().to_string();
+    let normalized_key = normalize_name_for_mcp(&config_key);
+    let started = crate::domain::mcp::oauth::start_mcp_oauth_login(&root, &config_key)
+        .await
+        .map_err(crate::errors::AppError::Config)?;
+    Ok(McpServerOAuthLoginStartResult {
+        config_key,
+        normalized_key,
+        login_session_id: started.login_session_id,
+        authorization_url: started.authorization_url,
+        expires_in: started.expires_in,
+        interval_secs: started.interval_secs,
+        expires_at: started.expires_at,
+        message: started.message,
+    })
+}
+
+/// Poll an active MCP OAuth browser flow.
+///
+/// Once OAuth completes, this command immediately reruns `tools/list` so the UI can transition from
+/// “exchanging token” to “N tools enabled” without requiring a second manual click.
+#[tauri::command]
+pub async fn poll_mcp_oauth_login(
+    app_state: State<'_, OmigaAppState>,
+    project_root: String,
+    login_session_id: String,
+) -> CommandResult<McpServerOAuthLoginPollResult> {
+    let root = resolve_project_root(&project_root)?;
+    let poll = crate::domain::mcp::oauth::poll_mcp_oauth_login(&login_session_id)
+        .await
+        .map_err(crate::errors::AppError::Config)?;
+    let config_key = poll.server_name.clone();
+    let normalized_key = normalize_name_for_mcp(&config_key);
+
+    let (ok, tool_list_checked, oauth_authenticated, list_tools_error, tools) =
+        if matches!(poll.status, McpOAuthLoginPollStatus::Complete) {
+            invalidate_integrations_catalog_cache(&app_state, &root);
+            if let Ok(mut cache) = app_state.chat.mcp_tool_cache.try_lock() {
+                cache.remove(&root);
+            }
+            app_state
+                .chat
+                .mcp_manager
+                .close_project_connections(&root)
+                .await;
+            let oauth_authenticated = oauth_authenticated_for_server(&root, &config_key);
+            match list_tools_for_server(&root, &config_key, CATALOG_TOOL_LIST_TIMEOUT).await {
+                Ok(list) => (
+                    true,
+                    true,
+                    oauth_authenticated,
+                    None,
+                    mcp_tool_entries_for_server(&config_key, list),
+                ),
+                Err(err) => (
+                    false,
+                    true,
+                    oauth_authenticated,
+                    Some(err.to_string()),
+                    Vec::new(),
+                ),
+            }
+        } else {
+            (
+                false,
+                false,
+                oauth_authenticated_for_server(&root, &config_key),
+                None,
+                Vec::new(),
+            )
+        };
+
+    Ok(McpServerOAuthLoginPollResult {
+        config_key,
+        normalized_key,
+        status: poll.status,
+        message: poll.message,
+        interval_secs: poll.interval_secs,
+        ok,
+        tool_list_checked,
+        oauth_authenticated,
+        list_tools_error,
+        tools,
+    })
+}
+
+/// Remove the stored OAuth credential for one remote HTTP MCP server.
+#[tauri::command]
+pub async fn logout_mcp_oauth_server(
+    app_state: State<'_, OmigaAppState>,
+    project_root: String,
+    server_name: String,
+) -> CommandResult<McpServerOAuthLogoutResult> {
+    let root = resolve_project_root(&project_root)?;
+    let config_key = server_name.trim().to_string();
+    let normalized_key = normalize_name_for_mcp(&config_key);
+    let cfg = merged_mcp_servers(&root)
+        .remove(&config_key)
+        .ok_or_else(|| {
+            crate::errors::AppError::Config(format!("MCP server `{config_key}` was not found"))
+        })?;
+    let McpServerConfig::Url { url, .. } = cfg else {
+        return Err(crate::errors::AppError::Config(format!(
+            "MCP server `{config_key}` is not a remote HTTP server."
+        )));
+    };
+
+    oauth::clear_stored_credentials_for_url(&url).map_err(crate::errors::AppError::Config)?;
+    invalidate_integrations_catalog_cache(&app_state, &root);
+    if let Ok(mut cache) = app_state.chat.mcp_tool_cache.try_lock() {
+        cache.remove(&root);
+    }
+    app_state
+        .chat
+        .mcp_manager
+        .close_project_connections(&root)
+        .await;
+
+    Ok(McpServerOAuthLogoutResult {
+        config_key,
+        normalized_key,
+    })
 }
 
 /// Invalidate cached catalog for this project root (call after integrations file or imports change).
@@ -310,7 +569,7 @@ pub async fn warm_integrations_catalog_cache(app_state: &OmigaAppState, project_
     {
         return;
     }
-    match build_integrations_catalog(app_state, root.clone()).await {
+    match build_integrations_catalog(app_state, root.clone(), false).await {
         Ok(catalog) => {
             if let Ok(mut g) = app_state.integrations_catalog_cache.lock() {
                 g.insert(root.clone(), catalog);

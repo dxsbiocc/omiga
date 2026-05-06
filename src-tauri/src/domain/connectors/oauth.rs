@@ -9,7 +9,7 @@ use super::http::{self, ConnectorHttpRequest};
 use super::secret_store;
 use super::{
     command_output_trimmed_with_timeout, connect_connector, github_api_base_url, github_cli_binary,
-    github_cli_token, ConnectorConnectRequest, ConnectorInfo,
+    github_cli_token, gmail_api_base_url, ConnectorConnectRequest, ConnectorInfo,
 };
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
@@ -30,6 +30,16 @@ const GITHUB_DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_
 const GITHUB_CLI_LOGIN_EXPIRES_IN: u64 = 10 * 60;
 const GITHUB_CLI_LOGIN_INTERVAL_SECS: u64 = 3;
 
+const GMAIL_OAUTH_TOKEN_SECRET: &str = "oauth_access_token";
+const GMAIL_OAUTH_REFRESH_TOKEN_SECRET: &str = "oauth_refresh_token";
+const GMAIL_OAUTH_PROVIDER: &str = "gmail_oauth";
+const GMAIL_BROWSER_LOGIN_EXPIRES_IN: u64 = 10 * 60;
+const GMAIL_BROWSER_LOGIN_INTERVAL_SECS: u64 = 2;
+const GMAIL_DEFAULT_CALLBACK_PORT: u16 = 17656;
+const GMAIL_DEFAULT_CALLBACK_PATH: &str = "/connectors/gmail/callback";
+const GMAIL_DEFAULT_SCOPES: &str =
+    "openid email https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send";
+
 const NOTION_OAUTH_TOKEN_SECRET: &str = "oauth_access_token";
 const NOTION_OAUTH_PROVIDER: &str = "notion_oauth";
 const NOTION_BROWSER_LOGIN_EXPIRES_IN: u64 = 10 * 60;
@@ -45,10 +55,6 @@ const SLACK_BROWSER_LOGIN_INTERVAL_SECS: u64 = 2;
 const SLACK_DEFAULT_LOCAL_CALLBACK_PORT: u16 = 17655;
 const SLACK_DEFAULT_LOCAL_CALLBACK_PATH: &str = "/connectors/slack/callback";
 const SLACK_DEFAULT_BOT_SCOPES: &str = "channels:read,channels:history,chat:write";
-
-const HOSTED_APP_PROVIDER: &str = "hosted_app";
-const HOSTED_APP_LOGIN_EXPIRES_IN: u64 = 15 * 60;
-const HOSTED_APP_LOGIN_INTERVAL_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -160,6 +166,24 @@ struct GitHubTokenResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct GoogleOAuthTokenResponse {
+    #[serde(default)]
+    access_token: Option<String>,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    token_type: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    expires_in: Option<u64>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    error_description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct NotionTokenResponse {
     #[serde(default)]
     access_token: Option<String>,
@@ -243,6 +267,47 @@ fn github_oauth_client_id() -> Result<String, String> {
 
 fn github_oauth_scope() -> Option<String> {
     first_non_empty_env(&["OMIGA_GITHUB_OAUTH_SCOPE"]).or_else(|| Some("read:user".to_string()))
+}
+
+fn google_authorize_url() -> String {
+    first_non_empty_env(&["OMIGA_GOOGLE_AUTHORIZE_URL", "OMIGA_GMAIL_AUTHORIZE_URL"])
+        .unwrap_or_else(|| "https://accounts.google.com/o/oauth2/v2/auth".to_string())
+}
+
+fn google_token_url() -> String {
+    first_non_empty_env(&["OMIGA_GOOGLE_TOKEN_URL", "OMIGA_GMAIL_TOKEN_URL"])
+        .unwrap_or_else(|| "https://oauth2.googleapis.com/token".to_string())
+}
+
+fn gmail_oauth_scope() -> String {
+    first_non_empty_env(&["OMIGA_GMAIL_OAUTH_SCOPE", "OMIGA_GOOGLE_OAUTH_SCOPE"])
+        .unwrap_or_else(|| GMAIL_DEFAULT_SCOPES.to_string())
+}
+
+fn gmail_oauth_client_id() -> Result<String, String> {
+    first_non_empty_env(&[
+        "OMIGA_GMAIL_OAUTH_CLIENT_ID",
+        "OMIGA_GOOGLE_OAUTH_CLIENT_ID",
+    ])
+    .ok_or_else(|| {
+        format!(
+            "Gmail browser login requires Omiga's own Google OAuth client config: OMIGA_GMAIL_OAUTH_CLIENT_ID and OMIGA_GMAIL_OAUTH_CLIENT_SECRET. Register the redirect URI as {}.",
+            default_gmail_redirect_uri()
+        )
+    })
+}
+
+fn gmail_oauth_client_secret() -> Result<String, String> {
+    first_non_empty_env(&[
+        "OMIGA_GMAIL_OAUTH_CLIENT_SECRET",
+        "OMIGA_GOOGLE_OAUTH_CLIENT_SECRET",
+    ])
+    .ok_or_else(|| {
+        format!(
+            "Gmail browser login requires OMIGA_GMAIL_OAUTH_CLIENT_SECRET for Omiga's Google OAuth app. Register the redirect URI as {}; GMAIL_ACCESS_TOKEN remains an advanced fallback only.",
+            default_gmail_redirect_uri()
+        )
+    })
 }
 
 fn notion_authorize_url() -> String {
@@ -337,6 +402,10 @@ fn form_body(params: &[(&str, String)]) -> String {
         .join("&")
 }
 
+fn default_gmail_redirect_uri() -> String {
+    format!("http://127.0.0.1:{GMAIL_DEFAULT_CALLBACK_PORT}{GMAIL_DEFAULT_CALLBACK_PATH}")
+}
+
 fn default_notion_redirect_uri() -> String {
     format!("http://127.0.0.1:{NOTION_DEFAULT_CALLBACK_PORT}{NOTION_DEFAULT_CALLBACK_PATH}")
 }
@@ -390,6 +459,38 @@ fn parse_local_redirect_uri(value: &str) -> Result<(String, u16, String), String
         return Err("OAuth local callback URI must include a callback path".to_string());
     }
     Ok((value.to_string(), port, path))
+}
+
+fn gmail_callback_port() -> Result<u16, String> {
+    let Some(port) = first_non_empty_env(&[
+        "OMIGA_GMAIL_OAUTH_CALLBACK_PORT",
+        "OMIGA_GOOGLE_OAUTH_CALLBACK_PORT",
+        "OMIGA_CONNECTOR_OAUTH_CALLBACK_PORT",
+    ]) else {
+        return Ok(GMAIL_DEFAULT_CALLBACK_PORT);
+    };
+    let parsed = port
+        .parse::<u16>()
+        .map_err(|err| format!("invalid Gmail OAuth callback port `{port}`: {err}"))?;
+    if parsed == 0 {
+        return Err(
+            "invalid Gmail OAuth callback port `0`: choose a fixed local port between 1 and 65535"
+                .to_string(),
+        );
+    }
+    Ok(parsed)
+}
+
+fn gmail_redirect_config() -> Result<(String, u16, String), String> {
+    if let Some(value) = first_non_empty_env(&[
+        "OMIGA_GMAIL_OAUTH_REDIRECT_URI",
+        "OMIGA_GOOGLE_OAUTH_REDIRECT_URI",
+    ]) {
+        return parse_local_redirect_uri(&value);
+    }
+    let port = gmail_callback_port()?;
+    let redirect_uri = format!("http://127.0.0.1:{port}{GMAIL_DEFAULT_CALLBACK_PATH}");
+    Ok((redirect_uri, port, GMAIL_DEFAULT_CALLBACK_PATH.to_string()))
 }
 
 fn notion_redirect_config() -> Result<(String, u16, String), String> {
@@ -449,6 +550,23 @@ fn slack_registered_redirect_uri() -> Result<String, String> {
     Ok(redirect_uri)
 }
 
+fn gmail_authorization_url(client_id: &str, redirect_uri: &str, state: &str) -> String {
+    let base = google_authorize_url();
+    let separator = if base.contains('?') { "&" } else { "?" };
+    format!(
+        "{base}{separator}{}",
+        form_body(&[
+            ("client_id", client_id.to_string()),
+            ("response_type", "code".to_string()),
+            ("redirect_uri", redirect_uri.to_string()),
+            ("scope", gmail_oauth_scope()),
+            ("access_type", "offline".to_string()),
+            ("prompt", "consent".to_string()),
+            ("state", state.to_string()),
+        ])
+    )
+}
+
 fn notion_authorization_url(client_id: &str, redirect_uri: &str, state: &str) -> String {
     let base = notion_authorize_url();
     let separator = if base.contains('?') { "&" } else { "?" };
@@ -479,81 +597,6 @@ fn slack_authorization_url(client_id: &str, redirect_uri: &str, state: &str) -> 
     format!("{base}{separator}{}", form_body(&params))
 }
 
-fn connector_name_slug(name: &str) -> String {
-    let mut slug = String::new();
-    let mut previous_dash = false;
-    for ch in name.chars().flat_map(char::to_lowercase) {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch);
-            previous_dash = false;
-        } else if !previous_dash && !slug.is_empty() {
-            slug.push('-');
-            previous_dash = true;
-        }
-    }
-    while slug.ends_with('-') {
-        slug.pop();
-    }
-    if slug.is_empty() {
-        "app".to_string()
-    } else {
-        slug
-    }
-}
-
-fn hosted_connector_install_url(connector_id: &str, connector_name: &str) -> String {
-    format!(
-        "https://chatgpt.com/apps/{}/{}",
-        connector_name_slug(connector_name),
-        connector_id
-    )
-}
-
-fn hosted_connector_message(connector_name: &str) -> String {
-    format!(
-        "{connector_name} 会通过 Codex/OpenAI 托管授权页完成登录，不需要你配置 Client ID 或 Client Secret。请在浏览器中完成账号登录和授权，回到 Omiga 后点击“检测连接”刷新状态。"
-    )
-}
-
-fn start_hosted_app_login(
-    connector_id: &str,
-    connector_name: &str,
-    _local_fallback_error: Option<String>,
-) -> Result<ConnectorLoginStartResult, String> {
-    let expires_at =
-        Utc::now() + Duration::seconds(HOSTED_APP_LOGIN_EXPIRES_IN.min(i64::MAX as u64) as i64);
-    let login_session_id = Uuid::new_v4().to_string();
-    let session = LoginSession {
-        connector_id: connector_id.to_string(),
-        provider: HOSTED_APP_PROVIDER.to_string(),
-        client_id: String::new(),
-        client_secret: None,
-        device_code: String::new(),
-        redirect_uri: Some(hosted_connector_install_url(connector_id, connector_name)),
-        state: None,
-        interval_secs: HOSTED_APP_LOGIN_INTERVAL_SECS,
-        expires_at,
-    };
-    sessions()
-        .lock()
-        .map_err(|_| "connector login session lock poisoned".to_string())?
-        .insert(login_session_id.clone(), session);
-
-    Ok(ConnectorLoginStartResult {
-        connector_id: connector_id.to_string(),
-        connector_name: connector_name.to_string(),
-        provider: HOSTED_APP_PROVIDER.to_string(),
-        login_session_id,
-        verification_uri: hosted_connector_install_url(connector_id, connector_name),
-        verification_uri_complete: None,
-        user_code: String::new(),
-        expires_in: HOSTED_APP_LOGIN_EXPIRES_IN,
-        interval_secs: HOSTED_APP_LOGIN_INTERVAL_SECS,
-        expires_at: expires_at.to_rfc3339(),
-        message: hosted_connector_message(connector_name),
-    })
-}
-
 pub(crate) fn github_oauth_token() -> Option<String> {
     secret_store::read_connector_secret("github", GITHUB_OAUTH_TOKEN_SECRET)
         .ok()
@@ -562,6 +605,17 @@ pub(crate) fn github_oauth_token() -> Option<String> {
 
 pub(crate) fn delete_github_oauth_token() -> Result<(), String> {
     secret_store::delete_connector_secret("github", GITHUB_OAUTH_TOKEN_SECRET)
+}
+
+pub(crate) fn gmail_oauth_token() -> Option<String> {
+    secret_store::read_connector_secret("gmail", GMAIL_OAUTH_TOKEN_SECRET)
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn delete_gmail_oauth_token() -> Result<(), String> {
+    secret_store::delete_connector_secret("gmail", GMAIL_OAUTH_TOKEN_SECRET)?;
+    secret_store::delete_connector_secret("gmail", GMAIL_OAUTH_REFRESH_TOKEN_SECRET)
 }
 
 pub(crate) fn notion_oauth_token() -> Option<String> {
@@ -589,12 +643,63 @@ pub async fn start_connector_login(
 ) -> Result<ConnectorLoginStartResult, String> {
     match connector_id.trim().to_ascii_lowercase().as_str() {
         "github" => start_github_login().await,
+        "gmail" => start_gmail_login().await,
         "notion" => start_notion_login().await,
         "slack" => start_slack_login().await,
         other => Err(format!(
             "Connector `{other}` does not have a first-class browser/software login flow yet. Add an OAuth/native/MCP provider before it can be connected from the product UI."
         )),
     }
+}
+
+async fn start_gmail_login() -> Result<ConnectorLoginStartResult, String> {
+    let client_id = gmail_oauth_client_id()?;
+    let client_secret = gmail_oauth_client_secret()?;
+    let (redirect_uri, callback_port, callback_path) = gmail_redirect_config()?;
+    let state = Uuid::new_v4().to_string();
+    let expires_at =
+        Utc::now() + Duration::seconds(GMAIL_BROWSER_LOGIN_EXPIRES_IN.min(i64::MAX as u64) as i64);
+
+    start_browser_callback_listener(
+        "Gmail",
+        callback_port,
+        callback_path.clone(),
+        state.clone(),
+        GMAIL_BROWSER_LOGIN_EXPIRES_IN,
+    )?;
+
+    let login_session_id = Uuid::new_v4().to_string();
+    let session = LoginSession {
+        connector_id: "gmail".to_string(),
+        provider: GMAIL_OAUTH_PROVIDER.to_string(),
+        client_id: client_id.clone(),
+        client_secret: Some(client_secret),
+        device_code: String::new(),
+        redirect_uri: Some(redirect_uri.clone()),
+        state: Some(state.clone()),
+        interval_secs: GMAIL_BROWSER_LOGIN_INTERVAL_SECS,
+        expires_at,
+    };
+    sessions()
+        .lock()
+        .map_err(|_| "connector login session lock poisoned".to_string())?
+        .insert(login_session_id.clone(), session);
+
+    Ok(ConnectorLoginStartResult {
+        connector_id: "gmail".to_string(),
+        connector_name: "Gmail".to_string(),
+        provider: GMAIL_OAUTH_PROVIDER.to_string(),
+        login_session_id,
+        verification_uri: gmail_authorization_url(&client_id, &redirect_uri, &state),
+        verification_uri_complete: None,
+        user_code: String::new(),
+        expires_in: GMAIL_BROWSER_LOGIN_EXPIRES_IN,
+        interval_secs: GMAIL_BROWSER_LOGIN_INTERVAL_SECS,
+        expires_at: expires_at.to_rfc3339(),
+        message: format!(
+            "A browser authorization page will open for Gmail. After approval, Google redirects to {redirect_uri}; Omiga stores the OAuth token in secure storage, not connectors/config.json."
+        ),
+    })
 }
 
 async fn start_github_login() -> Result<ConnectorLoginStartResult, String> {
@@ -679,14 +784,8 @@ async fn start_github_device_login(client_id: String) -> Result<ConnectorLoginSt
 }
 
 async fn start_notion_login() -> Result<ConnectorLoginStartResult, String> {
-    let client_id = match notion_oauth_client_id() {
-        Ok(client_id) => client_id,
-        Err(error) => return start_hosted_app_login("notion", "Notion", Some(error)),
-    };
-    let client_secret = match notion_oauth_client_secret() {
-        Ok(client_secret) => client_secret,
-        Err(error) => return start_hosted_app_login("notion", "Notion", Some(error)),
-    };
+    let client_id = notion_oauth_client_id()?;
+    let client_secret = notion_oauth_client_secret()?;
     let (redirect_uri, callback_port, callback_path) = notion_redirect_config()?;
     let state = Uuid::new_v4().to_string();
     let expires_at =
@@ -735,18 +834,9 @@ async fn start_notion_login() -> Result<ConnectorLoginStartResult, String> {
 }
 
 async fn start_slack_login() -> Result<ConnectorLoginStartResult, String> {
-    let client_id = match slack_oauth_client_id() {
-        Ok(client_id) => client_id,
-        Err(error) => return start_hosted_app_login("slack", "Slack", Some(error)),
-    };
-    let client_secret = match slack_oauth_client_secret() {
-        Ok(client_secret) => client_secret,
-        Err(error) => return start_hosted_app_login("slack", "Slack", Some(error)),
-    };
-    let registered_redirect_uri = match slack_registered_redirect_uri() {
-        Ok(redirect_uri) => redirect_uri,
-        Err(error) => return start_hosted_app_login("slack", "Slack", Some(error)),
-    };
+    let client_id = slack_oauth_client_id()?;
+    let client_secret = slack_oauth_client_secret()?;
+    let registered_redirect_uri = slack_registered_redirect_uri()?;
     let (local_callback_uri, callback_port, callback_path) = slack_local_callback_config()?;
     let state = Uuid::new_v4().to_string();
     let expires_at =
@@ -864,7 +954,9 @@ fn launch_github_cli_login() -> Result<(), String> {
 
 fn start_github_cli_login(oauth_error: String) -> Result<ConnectorLoginStartResult, String> {
     if !github_cli_available() {
-        return start_hosted_app_login("github", "GitHub", Some(oauth_error));
+        return Err(format!(
+            "{oauth_error} GitHub CLI is not available for local software login. Install GitHub CLI and run `gh auth login`, or configure OMIGA_GITHUB_OAUTH_CLIENT_ID for Omiga's own GitHub OAuth device flow."
+        ));
     }
 
     let already_logged_in = github_cli_token().is_some();
@@ -944,39 +1036,21 @@ pub async fn poll_connector_login(
     match session.provider.as_str() {
         "github" => poll_github_login(login_session_id, session).await,
         "github_cli" => poll_github_cli_login(login_session_id, session).await,
+        GMAIL_OAUTH_PROVIDER => poll_gmail_login(login_session_id, session).await,
         NOTION_OAUTH_PROVIDER => poll_notion_login(login_session_id, session).await,
         SLACK_OAUTH_PROVIDER => poll_slack_login(login_session_id, session).await,
-        HOSTED_APP_PROVIDER => poll_hosted_app_login(session).await,
         other => Err(format!("unsupported connector login provider `{other}`")),
     }
 }
 
 fn connector_login_expired_message(connector_id: &str) -> String {
     match connector_id {
+        "gmail" => "Gmail login expired. Start installation again to open a fresh authorization page.".to_string(),
         "notion" => "Notion browser login expired. Start installation again to open a fresh authorization page.".to_string(),
         "slack" => "Slack browser login expired. Start installation again to open a fresh authorization page.".to_string(),
         "github" => "GitHub login code expired. Start installation again to request a new code.".to_string(),
         _ => "Connector login expired. Start installation again.".to_string(),
     }
-}
-
-async fn poll_hosted_app_login(session: LoginSession) -> Result<ConnectorLoginPollResult, String> {
-    let connector_name = match session.connector_id.as_str() {
-        "github" => "GitHub",
-        "notion" => "Notion",
-        "slack" => "Slack",
-        _ => "Connector",
-    };
-    Ok(ConnectorLoginPollResult {
-        connector_id: session.connector_id,
-        provider: session.provider,
-        status: ConnectorLoginPollStatus::Pending,
-        message: format!(
-            "{connector_name} 授权正在 Codex/OpenAI 托管页面中进行。完成授权后回到 Omiga，点击“检测连接”刷新；如果仍未可用，需要 Codex apps bridge 或本地软件/安全存储凭证同步到 Omiga。"
-        ),
-        interval_secs: session.interval_secs,
-        connector: None,
-    })
 }
 
 async fn poll_github_cli_login(
@@ -1146,6 +1220,99 @@ async fn poll_github_login(
             interval_secs: session.interval_secs,
             connector: None,
         }),
+    }
+}
+
+async fn poll_gmail_login(
+    login_session_id: String,
+    session: LoginSession,
+) -> Result<ConnectorLoginPollResult, String> {
+    let expected_state = session
+        .state
+        .clone()
+        .ok_or_else(|| "Gmail OAuth session is missing CSRF state".to_string())?;
+    let callback = browser_callbacks()
+        .lock()
+        .map_err(|_| "connector OAuth callback lock poisoned".to_string())?
+        .remove(&expected_state);
+
+    let Some(callback) = callback else {
+        return Ok(ConnectorLoginPollResult {
+            connector_id: session.connector_id,
+            provider: session.provider,
+            status: ConnectorLoginPollStatus::Pending,
+            message:
+                "Waiting for Gmail browser authorization to finish. Approve the Google page opened from Omiga."
+                    .to_string(),
+            interval_secs: session.interval_secs,
+            connector: None,
+        });
+    };
+
+    match callback {
+        BrowserOAuthCallbackResult::Success(success) => {
+            if success.state != expected_state {
+                clear_login_session(&login_session_id)?;
+                return Ok(ConnectorLoginPollResult {
+                    connector_id: "gmail".to_string(),
+                    provider: GMAIL_OAUTH_PROVIDER.to_string(),
+                    status: ConnectorLoginPollStatus::Error,
+                    message:
+                        "Gmail OAuth callback state did not match the active login session. Start connection again."
+                            .to_string(),
+                    interval_secs: session.interval_secs,
+                    connector: None,
+                });
+            }
+
+            match exchange_gmail_code_for_token(&session, &success.code).await {
+                Ok(parsed) => complete_gmail_login(login_session_id, session, parsed).await,
+                Err(message) => {
+                    clear_login_session(&login_session_id)?;
+                    Ok(ConnectorLoginPollResult {
+                        connector_id: "gmail".to_string(),
+                        provider: GMAIL_OAUTH_PROVIDER.to_string(),
+                        status: ConnectorLoginPollStatus::Error,
+                        message,
+                        interval_secs: session.interval_secs,
+                        connector: None,
+                    })
+                }
+            }
+        }
+        BrowserOAuthCallbackResult::ProviderError(error) => {
+            clear_login_session(&login_session_id)?;
+            let error_code = error.error.unwrap_or_else(|| "oauth_error".to_string());
+            let status = if error_code == "access_denied" {
+                ConnectorLoginPollStatus::Denied
+            } else {
+                ConnectorLoginPollStatus::Error
+            };
+            Ok(ConnectorLoginPollResult {
+                connector_id: "gmail".to_string(),
+                provider: GMAIL_OAUTH_PROVIDER.to_string(),
+                status,
+                message: format!(
+                    "Gmail authorization returned {error_code}: {}",
+                    error
+                        .error_description
+                        .unwrap_or_else(|| "No additional details provided.".to_string())
+                ),
+                interval_secs: session.interval_secs,
+                connector: None,
+            })
+        }
+        BrowserOAuthCallbackResult::ListenerError(message) => {
+            clear_login_session(&login_session_id)?;
+            Ok(ConnectorLoginPollResult {
+                connector_id: "gmail".to_string(),
+                provider: GMAIL_OAUTH_PROVIDER.to_string(),
+                status: ConnectorLoginPollStatus::Error,
+                message,
+                interval_secs: session.interval_secs,
+                connector: None,
+            })
+        }
     }
 }
 
@@ -1333,6 +1500,111 @@ fn clear_login_session(login_session_id: &str) -> Result<(), String> {
         .map_err(|_| "connector login session lock poisoned".to_string())?
         .remove(login_session_id);
     Ok(())
+}
+
+async fn exchange_gmail_code_for_token(
+    session: &LoginSession,
+    code: &str,
+) -> Result<GoogleOAuthTokenResponse, String> {
+    let client_secret = session
+        .client_secret
+        .as_deref()
+        .ok_or_else(|| "Gmail OAuth session is missing client secret".to_string())?;
+    let redirect_uri = session
+        .redirect_uri
+        .as_deref()
+        .ok_or_else(|| "Gmail OAuth session is missing redirect URI".to_string())?;
+    let response = reqwest::Client::new()
+        .post(google_token_url())
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form_body(&[
+            ("client_id", session.client_id.clone()),
+            ("client_secret", client_secret.to_string()),
+            ("code", code.to_string()),
+            ("grant_type", "authorization_code".to_string()),
+            ("redirect_uri", redirect_uri.to_string()),
+        ]))
+        .send()
+        .await
+        .map_err(|err| format!("exchange Gmail OAuth code: {err}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("read Gmail OAuth token response: {err}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "Gmail OAuth token request returned {status}: {}",
+            http::redact_and_truncate(&body, 600)
+        ));
+    }
+    let parsed = serde_json::from_str::<GoogleOAuthTokenResponse>(&body)
+        .map_err(|err| format!("parse Gmail OAuth token response: {err}"))?;
+    if parsed.error.is_some() || parsed.error_description.is_some() {
+        return Err(format!(
+            "Gmail OAuth token response returned {}: {}",
+            parsed
+                .error
+                .clone()
+                .unwrap_or_else(|| "oauth_error".to_string()),
+            parsed
+                .error_description
+                .clone()
+                .unwrap_or_else(|| "No additional details provided.".to_string())
+        ));
+    }
+    Ok(parsed)
+}
+
+async fn complete_gmail_login(
+    login_session_id: String,
+    session: LoginSession,
+    parsed: GoogleOAuthTokenResponse,
+) -> Result<ConnectorLoginPollResult, String> {
+    let token = parsed
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Gmail OAuth token response did not include an access_token".to_string())?;
+    secret_store::store_connector_secret("gmail", GMAIL_OAUTH_TOKEN_SECRET, token)?;
+    if let Some(refresh_token) = parsed
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        secret_store::store_connector_secret(
+            "gmail",
+            GMAIL_OAUTH_REFRESH_TOKEN_SECRET,
+            refresh_token,
+        )?;
+    }
+    clear_login_session(&login_session_id)?;
+    let account_label = gmail_profile_email(token).await.ok();
+    let connector = connect_connector(ConnectorConnectRequest {
+        connector_id: "gmail".to_string(),
+        account_label: account_label.clone(),
+        auth_source: Some("oauth_browser".to_string()),
+    })?;
+    let account = account_label.unwrap_or_else(|| "Gmail account".to_string());
+    let expiry = parsed
+        .expires_in
+        .map(|seconds| format!(", expires in {seconds}s"))
+        .unwrap_or_default();
+    Ok(ConnectorLoginPollResult {
+        connector_id: "gmail".to_string(),
+        provider: GMAIL_OAUTH_PROVIDER.to_string(),
+        status: ConnectorLoginPollStatus::Complete,
+        message: format!(
+            "Gmail login complete for {account}. Token type: {}{expiry}. Scopes: {}. Secret stored outside connectors/config.json.",
+            parsed.token_type.unwrap_or_else(|| "Bearer".to_string()),
+            parsed.scope.unwrap_or_else(|| "configured".to_string())
+        ),
+        interval_secs: session.interval_secs,
+        connector: Some(connector),
+    })
 }
 
 async fn exchange_notion_code_for_token(
@@ -1833,6 +2105,24 @@ async fn github_user_login(token: &str) -> Result<String, String> {
         .ok_or_else(|| "GitHub /user response did not include login".to_string())
 }
 
+async fn gmail_profile_email(token: &str) -> Result<String, String> {
+    let value = http::send_connector_json(
+        ConnectorHttpRequest::new(
+            "Gmail",
+            Method::GET,
+            format!("{}/users/me/profile", gmail_api_base_url()),
+        )
+        .bearer_token(token),
+    )
+    .await
+    .map_err(|err| err.user_message())?;
+    value
+        .get("emailAddress")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "Gmail profile response did not include emailAddress".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1877,40 +2167,26 @@ mod tests {
     }
 
     #[test]
-    fn hosted_connector_install_url_matches_codex_app_url_shape() {
-        assert_eq!(
-            hosted_connector_install_url("github", "GitHub"),
-            "https://chatgpt.com/apps/github/github"
+    fn gmail_authorization_url_contains_omiga_oauth_params() {
+        let url = gmail_authorization_url(
+            "google client",
+            "http://127.0.0.1:17656/connectors/gmail/callback",
+            "state value",
         );
-        assert_eq!(
-            hosted_connector_install_url("slack", "Slack"),
-            "https://chatgpt.com/apps/slack/slack"
-        );
-        assert_eq!(
-            hosted_connector_install_url("custom-app", "Custom App!"),
-            "https://chatgpt.com/apps/custom-app/custom-app"
-        );
-    }
 
-    #[test]
-    fn hosted_app_login_does_not_surface_product_oauth_config_to_users() {
-        let result = start_hosted_app_login(
-            "notion",
-            "Notion",
-            Some("Notion browser login requires OMIGA_NOTION_OAUTH_CLIENT_ID".to_string()),
-        )
-        .expect("hosted login should start");
-
-        assert_eq!(result.provider, HOSTED_APP_PROVIDER);
-        assert_eq!(
-            result.verification_uri,
-            "https://chatgpt.com/apps/notion/notion"
-        );
-        assert!(result.message.contains("Codex/OpenAI 托管授权页"));
-        assert!(result
-            .message
-            .contains("不需要你配置 Client ID 或 Client Secret"));
-        assert!(!result.message.contains("OMIGA_NOTION_OAUTH_CLIENT_ID"));
+        assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
+        assert!(url.contains("client_id=google+client"));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains(
+            "redirect_uri=http%3A%2F%2F127.0.0.1%3A17656%2Fconnectors%2Fgmail%2Fcallback"
+        ));
+        assert!(url.contains("scope="));
+        assert!(url.contains("gmail.readonly"));
+        assert!(url.contains("gmail.send"));
+        assert!(url.contains("access_type=offline"));
+        assert!(url.contains("prompt=consent"));
+        assert!(url.contains("state=state+value"));
+        assert!(!url.contains("chatgpt.com"));
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod integrations_config;
 pub mod mcp;
 pub mod memory;
 pub mod mode_resume;
+pub mod operators;
 pub mod orchestration;
 pub mod pageindex;
 pub mod permissions;

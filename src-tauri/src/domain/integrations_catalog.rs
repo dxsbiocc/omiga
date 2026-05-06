@@ -30,6 +30,11 @@ pub struct McpServerCatalogEntry {
     pub normalized_key: String,
     pub enabled: bool,
     pub config: McpServerConfigCatalogEntry,
+    /// Whether Settings has actively probed `tools/list` for this server in this UI session.
+    pub tool_list_checked: bool,
+    /// True when an OAuth credential for this HTTP endpoint exists in the secure secret store.
+    /// The token value itself is never serialized to the UI or written to MCP JSON.
+    pub oauth_authenticated: bool,
     /// When tool discovery failed (timeout, handshake error, etc.); UI can show error state.
     pub list_tools_error: Option<String>,
     pub tools: Vec<McpToolCatalogEntry>,

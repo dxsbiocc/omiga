@@ -67,4 +67,36 @@ describe("PermissionPromptBar connector intent", () => {
     expect(labels.connectorWarning).toContain("批准或拒绝都会写入连接器审计记录");
     expect(labels.approveLabel).not.toBe("运行（高风险）");
   });
+
+  it("uses Bash descriptions as the concrete request operation", () => {
+    const intent = inferIntent("Bash", {
+      description: "Per-group FCN3 expression statistics",
+      command: "python3 - <<'PYEOF'\nprint('stats')\nPYEOF",
+    });
+
+    expect(intent.title).toBe("执行命令");
+    expect(intent.operation).toBe("运行：Per-group FCN3 expression statistics");
+    expect(intent.contentLabel).toBe("运行内容");
+    expect(intent.detail).toContain("python3");
+  });
+
+  it("normalizes email connector send requests", () => {
+    const intent = inferConnectorPermissionIntent("connector", {
+      connector: "qq-mail",
+      operation: "send_email",
+      to: "user@example.com",
+      subject: "周报",
+      confirm_write: true,
+    });
+
+    expect(intent).toMatchObject({
+      connectorId: "qq_mail",
+      connectorLabel: "QQ 邮箱",
+      operation: "send_message",
+      operationLabel: "发送邮件",
+      isWrite: true,
+      target: "user@example.com",
+      payloadPreview: "周报",
+    });
+  });
 });

@@ -19,6 +19,7 @@ pub mod integrations_settings;
 pub mod local_envs;
 pub mod memory;
 pub mod notebook;
+pub mod operators;
 pub mod permissions;
 pub mod plugins;
 pub mod ralph;

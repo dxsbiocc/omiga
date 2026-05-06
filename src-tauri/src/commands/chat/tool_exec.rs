@@ -1379,6 +1379,67 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
             );
             (tool_use_id.clone(), error_msg, true)
         }
+    } else if tool_name.starts_with(crate::domain::operators::OPERATOR_TOOL_PREFIX) {
+        let ctx = {
+            let web_use_proxy = crate::llm::config::load_web_use_proxy_setting();
+            let web_search_engine = crate::llm::config::load_web_search_engine_setting();
+            let web_search_methods = crate::llm::config::load_web_search_methods_setting();
+            let base = ToolContext::new(project_root.to_path_buf())
+                .with_session_id(Some(session_id.to_string()))
+                .with_todos(session_todos.clone())
+                .with_agent_tasks(session_agent_tasks.clone())
+                .with_plan_mode(agent_runtime.and_then(|r| r.plan_mode_flag.clone()))
+                .with_web_search_api_keys(web_search_api_keys.clone())
+                .with_web_use_proxy(web_use_proxy)
+                .with_web_search_engine(web_search_engine)
+                .with_web_search_methods(web_search_methods)
+                .with_tool_results_dir(tool_results_dir.to_path_buf())
+                .with_execution_environment(execution_environment.clone())
+                .with_ssh_server(ssh_server.clone())
+                .with_sandbox_backend(sandbox_backend.clone())
+                .with_local_venv(local_venv_type.clone(), local_venv_name.clone())
+                .with_env_store(Some(env_store.clone()))
+                .with_skill_cache(skill_cache.clone());
+            match &round_cancel {
+                Some(t) => base.with_cancel_token(t.clone()),
+                None => base,
+            }
+        };
+        let (output_text, is_error) =
+            crate::domain::operators::execute_operator_tool_call(&ctx, tool_name, arguments).await;
+        let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
+            let prefix = truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
+            format!(
+                "{}\n\n[Output truncated... {} total characters]",
+                prefix,
+                output_text.len()
+            )
+        } else {
+            output_text.clone()
+        };
+        let display_input = if arguments.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+            let prefix = truncate_utf8_prefix(arguments, TOOL_DISPLAY_MAX_INPUT_CHARS);
+            format!(
+                "{}\n\n[Input truncated... {} total characters]",
+                prefix,
+                arguments.len()
+            )
+        } else {
+            arguments.clone()
+        };
+        let _ = app.emit(
+            &format!("chat-stream-{}", message_id),
+            &StreamOutputItem::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                name: tool_name.clone(),
+                input: display_input,
+                output: display_output,
+                is_error,
+            },
+        );
+        let model_output =
+            process_tool_output_for_model(output_text.clone(), tool_use_id, tool_results_dir).await;
+        (tool_use_id.clone(), model_output, is_error)
     } else if tool_name.starts_with("mcp__") {
         let timeout = std::time::Duration::from_secs(120);
         // Use the session-aware MCP connection manager to avoid spawning new processes

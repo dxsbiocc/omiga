@@ -2901,7 +2901,24 @@ pub async fn send_message(
             );
         }
         sort_tool_schemas_for_model(&mut built);
-        let base_names: HashSet<String> = built.iter().map(|t| t.name.clone()).collect();
+        let operator_schemas = crate::domain::operators::enabled_operator_tool_schemas();
+        let n_operator_before = operator_schemas.len();
+        let operator_after_deny =
+            filter_tool_schemas_by_deny_rule_entries(operator_schemas, &deny_entries);
+        let n_operator_after = operator_after_deny.len();
+        if n_operator_after < n_operator_before {
+            tracing::debug!(
+                target: "omiga::operators",
+                before = n_operator_before,
+                after = n_operator_after,
+                "operator tool schemas after permissions.deny filter"
+            );
+        }
+        let mut base_names: HashSet<String> = built.iter().map(|t| t.name.clone()).collect();
+        let operator_filtered: Vec<_> = operator_after_deny
+            .into_iter()
+            .filter(|schema| base_names.insert(schema.name.clone()))
+            .collect();
         let mcp_stage_started_at = std::time::Instant::now();
         let current_mcp_config_signature =
             crate::domain::mcp::merged_mcp_servers_signature(&project_root);
@@ -3077,7 +3094,11 @@ pub async fn send_message(
             .collect();
         let mcp_filtered =
             integrations_config::filter_mcp_tools_by_integrations(mcp_filtered, &integrations_cfg);
-        let mut combined: Vec<ToolSchema> = built.into_iter().chain(mcp_filtered).collect();
+        let mut combined: Vec<ToolSchema> = built
+            .into_iter()
+            .chain(operator_filtered)
+            .chain(mcp_filtered)
+            .collect();
         if coordinator::is_coordinator_mode() {
             let before = combined.len();
             combined = coordinator::filter_coordinator_tool_schemas(combined);
@@ -3099,6 +3120,7 @@ pub async fn send_message(
                 serde_json::json!({
                     "toolCount": combined.len(),
                     "builtinCount": n_builtin_after,
+                    "operatorCount": n_operator_after,
                     "mcpCount": n_mcp_after,
                 }),
             )

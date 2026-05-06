@@ -37,6 +37,7 @@ import {
   buildPluginDiagnostics,
   buildRetrievalRuntimeDiagnostics,
   flattenMarketplacePlugins,
+  type OperatorSummary,
   type PluginProcessPoolRouteStatus,
   type PluginMarketplaceEntry,
   type PluginRetrievalLifecycleState,
@@ -417,6 +418,18 @@ export function pluginCardSubtitle(plugin: PluginSummary): string {
     return `${sources.length} ${category} routes`;
   }
   return description(plugin);
+}
+
+export function operatorDisplayName(operator: OperatorSummary): string {
+  return operator.name?.trim() || operator.id;
+}
+
+export function operatorPrimaryAlias(operator: OperatorSummary): string {
+  return operator.enabledAliases.find((alias) => alias.trim().length > 0) || operator.id;
+}
+
+export function operatorToolName(alias: string): string {
+  return `operator__${alias}`;
 }
 
 function groupRetrievalPlugins(plugins: PluginSummary[]) {
@@ -1012,10 +1025,163 @@ function PluginDetailsDialog({
   );
 }
 
+function OperatorCatalogSection({
+  operators,
+  registryPath,
+  busy,
+  onToggle,
+}: {
+  operators: OperatorSummary[];
+  registryPath: string | null;
+  busy: boolean;
+  onToggle: (operator: OperatorSummary, enabled: boolean) => void;
+}) {
+  const theme = useTheme();
+  const sortedOperators = [...operators].sort((left, right) =>
+    left.id
+      .localeCompare(right.id)
+      || left.sourcePlugin.localeCompare(right.sourcePlugin)
+      || left.version.localeCompare(right.version),
+  );
+  const exposedCount = operators.filter((operator) => operator.exposed).length;
+  const unavailableCount = operators.filter((operator) => operator.unavailableReason).length;
+
+  return (
+    <Accordion disableGutters elevation={0} sx={accordionSx}>
+      <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={accordionSummarySx}>
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+          <Typography variant="subtitle2" fontWeight={700}>Operators</Typography>
+          <Chip size="small" variant="outlined" label={`${exposedCount} exposed`} />
+          <Chip size="small" variant="outlined" label={`${operators.length} discovered`} />
+          {unavailableCount > 0 && (
+            <Chip size="small" color="warning" variant="filled" label={`${unavailableCount} unavailable`} />
+          )}
+        </Stack>
+      </AccordionSummary>
+      <AccordionDetails sx={{ px: 2, pt: 0.75, pb: 2 }}>
+        <Stack spacing={1.25} useFlexGap>
+          <Typography variant="body2" color="text.secondary">
+            Operators are plugin-defined tools that agents can call directly after exposure. Runtime follows the current session environment; the registry stays local.
+          </Typography>
+          {registryPath && (
+            <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
+              Registry: {registryPath}
+            </Typography>
+          )}
+          {operators.length === 0 ? (
+            <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, textAlign: "center" }}>
+              <ExtensionRounded sx={{ color: "text.secondary", mb: 1 }} />
+              <Typography variant="body2" color="text.secondary">
+                No operators discovered from enabled plugins yet.
+              </Typography>
+            </Paper>
+          ) : (
+            <Box sx={pluginCardGridSx} role="region" aria-label="Plugin operator list">
+              {sortedOperators.map((operator) => {
+                const alias = operatorPrimaryAlias(operator);
+                const aliases = operator.enabledAliases.filter((value) => value.trim().length > 0);
+                const title = operatorDisplayName(operator);
+                const tone = operator.exposed ? theme.palette.success.main : theme.palette.text.secondary;
+                return (
+                  <Paper
+                    key={`${operator.id}:${operator.version}:${operator.sourcePlugin}:${operator.manifestPath}`}
+                    variant="outlined"
+                    sx={{
+                      p: 1.25,
+                      borderRadius: 2.5,
+                      bgcolor: "background.paper",
+                      borderColor: operator.exposed
+                        ? alpha(theme.palette.success.main, 0.28)
+                        : "divider",
+                    }}
+                  >
+                    <Stack spacing={1.1}>
+                      <Stack direction="row" spacing={1.25} alignItems="center">
+                        <Box
+                          sx={{
+                            width: 36,
+                            height: 36,
+                            borderRadius: 2,
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            color: tone,
+                            bgcolor: alpha(tone, theme.palette.mode === "dark" ? 0.18 : 0.08),
+                            border: `1px solid ${alpha(tone, theme.palette.mode === "dark" ? 0.22 : 0.12)}`,
+                            flexShrink: 0,
+                          }}
+                        >
+                          <ExtensionRounded fontSize="small" />
+                        </Box>
+                        <Box sx={{ minWidth: 0, flex: 1 }}>
+                          <Typography variant="subtitle2" fontWeight={850} noWrap title={title}>
+                            {title}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary" noWrap title={operator.id}>
+                            {operator.id} · v{operator.version}
+                          </Typography>
+                        </Box>
+                        <Switch
+                          size="small"
+                          checked={operator.exposed}
+                          disabled={busy}
+                          onChange={(event) => onToggle(operator, event.target.checked)}
+                          inputProps={{ "aria-label": `${operator.exposed ? "Disable" : "Expose"} operator ${operator.id}` }}
+                        />
+                      </Stack>
+
+                      <Typography
+                        variant="body2"
+                        color="text.secondary"
+                        sx={{ minHeight: 20 }}
+                      >
+                        {operator.description?.trim() || "Plugin-defined operator callable by agents as a tool."}
+                      </Typography>
+
+                      <Stack direction="row" gap={0.75} flexWrap="wrap">
+                        <Chip
+                          size="small"
+                          color={operator.exposed ? "success" : "default"}
+                          variant={operator.exposed ? "filled" : "outlined"}
+                          label={operator.exposed ? "Exposed" : "Not exposed"}
+                        />
+                        {operator.exposed ? (
+                          aliases.map((enabledAlias) => (
+                            <Chip
+                              key={enabledAlias}
+                              size="small"
+                              variant="outlined"
+                              label={operatorToolName(enabledAlias)}
+                            />
+                          ))
+                        ) : (
+                          <Chip size="small" variant="outlined" label={`alias ${alias}`} />
+                        )}
+                        <Chip size="small" variant="outlined" label={operator.sourcePlugin} />
+                      </Stack>
+
+                      {operator.unavailableReason && (
+                        <Typography variant="caption" color="warning.main" sx={{ wordBreak: "break-word" }}>
+                          {operator.unavailableReason}
+                        </Typography>
+                      )}
+                    </Stack>
+                  </Paper>
+                );
+              })}
+            </Box>
+          )}
+        </Stack>
+      </AccordionDetails>
+    </Accordion>
+  );
+}
 
 export function PluginsPanel({ projectPath }: { projectPath: string }) {
   const {
     marketplaces,
+    operators,
+    operatorRegistryPath,
     retrievalStatuses,
     processPoolStatuses,
     isLoading,
@@ -1026,6 +1192,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     installPlugin,
     uninstallPlugin,
     setPluginEnabled,
+    setOperatorEnabled,
   } = usePluginStore();
   const [message, setMessage] = useState<string | null>(null);
   const [detailPluginId, setDetailPluginId] = useState<string | null>(null);
@@ -1039,6 +1206,10 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   }, [loadPlugins, projectRoot]);
 
   const allPlugins = useMemo(() => flattenMarketplacePlugins(marketplaces), [marketplaces]);
+  const exposedOperators = useMemo(
+    () => operators.filter((operator) => operator.exposed),
+    [operators],
+  );
   const pluginsById = useMemo(() => {
     const byId = new Map<string, PluginSummary>();
     for (const plugin of allPlugins) {
@@ -1173,6 +1344,31 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     }
   };
 
+  const handleOperatorToggle = async (operator: OperatorSummary, enabled: boolean) => {
+    const alias = operatorPrimaryAlias(operator);
+    setMessage(null);
+    try {
+      await setOperatorEnabled(
+        {
+          alias,
+          operatorId: operator.id,
+          sourcePlugin: operator.sourcePlugin,
+          version: operator.version,
+          enabled,
+        },
+        projectRoot,
+      );
+      const toolName = operatorToolName(alias);
+      setMessage(
+        enabled
+          ? `Exposed ${operatorDisplayName(operator)} as ${toolName}`
+          : `Disabled ${toolName}`,
+      );
+    } catch {
+      // Store exposes the error banner.
+    }
+  };
+
   const handleClearProcessPool = async () => {
     setMessage(null);
     try {
@@ -1281,6 +1477,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
             {[
               ["Enabled", enabledPlugins.length],
               ["Installable", availablePlugins.length],
+              ["Operators", exposedOperators.length],
               ["Issues", quarantinedRouteCount + degradedRouteCount],
               ["Pooled", processPoolStatuses.length],
             ].map(([label, value]) => (
@@ -1545,6 +1742,13 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           </Stack>
         </AccordionDetails>
       </Accordion>
+
+      <OperatorCatalogSection
+        operators={operators}
+        registryPath={operatorRegistryPath}
+        busy={isMutating}
+        onToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
+      />
 
       <Accordion defaultExpanded disableGutters elevation={0} sx={accordionSx}>
         <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={accordionSummarySx}>

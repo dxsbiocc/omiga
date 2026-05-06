@@ -21,6 +21,8 @@ pub mod grep;
 pub mod list_mcp_resources;
 pub mod list_skills;
 pub mod notebook_edit;
+pub mod operator_describe;
+pub mod operator_list;
 pub mod query;
 pub mod read_mcp_resource;
 pub mod recall;
@@ -73,6 +75,8 @@ pub enum ToolKind {
     Connector,
     TodoWrite,
     NotebookEdit,
+    OperatorList,
+    OperatorDescribe,
     Visualization,
     Sleep,
     AskUserQuestion,
@@ -123,6 +127,8 @@ impl fmt::Display for ToolKind {
             ToolKind::Connector => write!(f, "connector"),
             ToolKind::TodoWrite => write!(f, "todo_write"),
             ToolKind::NotebookEdit => write!(f, "notebook_edit"),
+            ToolKind::OperatorList => write!(f, "operator_list"),
+            ToolKind::OperatorDescribe => write!(f, "operator_describe"),
             ToolKind::Visualization => write!(f, "visualization"),
             ToolKind::Sleep => write!(f, "sleep"),
             ToolKind::AskUserQuestion => write!(f, "ask_user_question"),
@@ -163,6 +169,8 @@ pub enum Tool {
     Connector(connector::ConnectorArgs),
     TodoWrite(todo_write::TodoWriteArgs),
     NotebookEdit(notebook_edit::NotebookEditArgs),
+    OperatorList(operator_list::OperatorListArgs),
+    OperatorDescribe(operator_describe::OperatorDescribeArgs),
     Visualization(visualization::VisualizationArgs),
     Sleep(sleep::SleepArgs),
     AskUserQuestion(ask_user_question::AskUserQuestionArgs),
@@ -204,6 +212,8 @@ impl Tool {
             Tool::Connector(_) => ToolKind::Connector,
             Tool::TodoWrite(_) => ToolKind::TodoWrite,
             Tool::NotebookEdit(_) => ToolKind::NotebookEdit,
+            Tool::OperatorList(_) => ToolKind::OperatorList,
+            Tool::OperatorDescribe(_) => ToolKind::OperatorDescribe,
             Tool::Visualization(_) => ToolKind::Visualization,
             Tool::Sleep(_) => ToolKind::Sleep,
             Tool::AskUserQuestion(_) => ToolKind::AskUserQuestion,
@@ -242,6 +252,8 @@ impl Tool {
             Tool::Connector(_) => "connector",
             Tool::TodoWrite(_) => "TodoWrite",
             Tool::NotebookEdit(_) => "NotebookEdit",
+            Tool::OperatorList(_) => "operator_list",
+            Tool::OperatorDescribe(_) => "operator_describe",
             Tool::Visualization(_) => "Visualization",
             Tool::Sleep(_) => "Sleep",
             Tool::AskUserQuestion(_) => "AskUserQuestion",
@@ -280,6 +292,8 @@ impl Tool {
             Tool::Connector(_) => connector::DESCRIPTION,
             Tool::TodoWrite(_) => todo_write::DESCRIPTION,
             Tool::NotebookEdit(_) => notebook_edit::DESCRIPTION,
+            Tool::OperatorList(_) => operator_list::DESCRIPTION,
+            Tool::OperatorDescribe(_) => operator_describe::DESCRIPTION,
             Tool::Visualization(_) => visualization::DESCRIPTION,
             Tool::Sleep(_) => sleep::DESCRIPTION,
             Tool::AskUserQuestion(_) => ask_user_question::DESCRIPTION,
@@ -321,6 +335,10 @@ impl Tool {
             Tool::Connector(args) => connector::ConnectorTool::execute(ctx, args).await?,
             Tool::TodoWrite(args) => todo_write::TodoWriteTool::execute(ctx, args).await?,
             Tool::NotebookEdit(args) => notebook_edit::NotebookEditTool::execute(ctx, args).await?,
+            Tool::OperatorList(args) => operator_list::OperatorListTool::execute(ctx, args).await?,
+            Tool::OperatorDescribe(args) => {
+                operator_describe::OperatorDescribeTool::execute(ctx, args).await?
+            }
             Tool::Visualization(args) => {
                 visualization::VisualizationTool::execute(ctx, args).await?
             }
@@ -468,6 +486,18 @@ impl Tool {
                 })?;
                 Ok(Tool::NotebookEdit(args))
             }
+            ToolKind::OperatorList => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid operator_list arguments: {}", e),
+                })?;
+                Ok(Tool::OperatorList(args))
+            }
+            ToolKind::OperatorDescribe => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid operator_describe arguments: {}", e),
+                })?;
+                Ok(Tool::OperatorDescribe(args))
+            }
             ToolKind::Visualization => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
                     message: format!("Invalid visualization arguments: {}", e),
@@ -609,6 +639,8 @@ impl Tool {
             "connector" | "Connector" => ToolKind::Connector,
             "todo_write" => ToolKind::TodoWrite,
             "notebook_edit" => ToolKind::NotebookEdit,
+            "operator_list" | "OperatorList" => ToolKind::OperatorList,
+            "operator_describe" | "OperatorDescribe" => ToolKind::OperatorDescribe,
             "visualization" => ToolKind::Visualization,
             "sleep" => ToolKind::Sleep,
             "ask_user_question" | "AskUserQuestion" => ToolKind::AskUserQuestion,
@@ -1236,6 +1268,8 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         search::schema(),
         connector::schema(),
         todo_write::schema(),
+        operator_list::schema(),
+        operator_describe::schema(),
         visualization::schema(),
         sleep::schema(),
         ask_user_question::schema(),
@@ -1282,8 +1316,10 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "ripgrep" | "grep" => (1, 1),
         "glob" => (1, 2),
         "connector" => (1, 3),
-        "list_mcp_resources" => (1, 4),
-        "read_mcp_resource" => (1, 5),
+        "operator_list" => (1, 4),
+        "operator_describe" => (1, 5),
+        "list_mcp_resources" => (1, 6),
+        "read_mcp_resource" => (1, 7),
 
         // Mutating tools.
         "file_edit" => (2, 0),
@@ -1484,6 +1520,8 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
             | "query"
             | "search"
             | "connector"
+            | "operator_list"
+            | "operator_describe"
             | "ToolSearch"
             | "tool_search"
             | "visualization"

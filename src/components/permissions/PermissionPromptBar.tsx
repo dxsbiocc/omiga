@@ -5,12 +5,6 @@ import {
   Alert,
   Box,
   Chip,
-  Divider,
-  FormControl,
-  FormControlLabel,
-  FormLabel,
-  Radio,
-  RadioGroup,
   Stack,
   Accordion,
   AccordionSummary,
@@ -36,6 +30,15 @@ import {
 } from "../../utils/connectorPermissionIntent";
 
 type AnyArgs = PermissionArgs;
+type Intent = {
+  title: string;
+  detail?: string;
+  connector?: ConnectorPermissionIntent;
+  /** 用户真正要判断的动作，优先显示在标题区。 */
+  operation?: string;
+  /** `detail` 的语义标签，例如运行内容/目标路径。 */
+  contentLabel?: string;
+};
 
 function firstString(v: unknown): string | null {
   if (typeof v === "string" && v.trim()) return v;
@@ -63,10 +66,25 @@ function getPrimaryPath(args: AnyArgs): string | null {
   return null;
 }
 
+function firstNamedString(args: AnyArgs, names: string[]): string | null {
+  if (!args) return null;
+  for (const name of names) {
+    const s = firstString(args[name]);
+    if (s) return s.trim();
+  }
+  return null;
+}
+
+function summarizeShellCommand(command: string): string {
+  const firstLine = command.trim().split(/\r?\n/).find(Boolean) ?? "";
+  if (!firstLine) return "Shell 命令";
+  return firstLine.length > 72 ? `${firstLine.slice(0, 72)}…` : firstLine;
+}
+
 export function inferIntent(
   toolNameRaw: string,
   args: AnyArgs,
-): { title: string; detail?: string; connector?: ConnectorPermissionIntent } {
+): Intent {
   const toolName = (toolNameRaw || "").trim();
   const connector = inferConnectorPermissionIntent(toolNameRaw, args);
   if (connector) {
@@ -80,6 +98,8 @@ export function inferIntent(
         .filter(Boolean)
         .join(" · "),
       connector,
+      operation: `${connector.connectorLabel} · ${connector.operationLabel}`,
+      contentLabel: connector.isWrite ? "写入内容" : "访问内容",
     };
   }
   const path = getPrimaryPath(args);
@@ -89,39 +109,85 @@ export function inferIntent(
     return {
       title: "读取文件",
       detail: path ? path : undefined,
+      operation: path ? `读取文件：${path}` : "读取文件",
+      contentLabel: "目标路径",
     };
   }
   if (toolName === "file_edit" || toolName === "Edit") {
     return {
       title: "修改文件",
       detail: path ? path : undefined,
+      operation: path ? `修改文件：${path}` : "修改文件",
+      contentLabel: "目标路径",
     };
   }
   if (toolName === "file_write" || toolName === "Write") {
     return {
       title: "写入文件",
       detail: path ? path : undefined,
+      operation: path ? `写入文件：${path}` : "写入文件",
+      contentLabel: "目标路径",
     };
   }
   if (toolName === "glob" || toolName === "Glob") {
-    return { title: "查找文件/目录" };
+    const pattern = firstNamedString(args, ["pattern", "glob", "path"]);
+    return {
+      title: "查找文件/目录",
+      detail: pattern ?? undefined,
+      operation: pattern ? `查找：${pattern}` : "查找文件/目录",
+      contentLabel: "查找范围",
+    };
   }
   if (toolName === "grep" || toolName === "Grep" || toolName === "ripgrep" || toolName === "Ripgrep") {
-    return { title: "搜索内容" };
+    const pattern = firstNamedString(args, ["pattern", "query", "regex"]);
+    return {
+      title: "搜索内容",
+      detail: pattern ?? undefined,
+      operation: pattern ? `搜索：${pattern}` : "搜索内容",
+      contentLabel: "搜索内容",
+    };
   }
   if (toolName === "fetch" || toolName === "Fetch") {
-    return { title: "访问网页" };
+    const url = firstNamedString(args, ["url", "uri"]);
+    return {
+      title: "访问网页",
+      detail: url ?? undefined,
+      operation: url ? `访问网页：${url}` : "访问网页",
+      contentLabel: "目标 URL",
+    };
   }
   if (toolName === "query" || toolName === "Query") {
-    return { title: "查询数据库" };
+    const query = firstNamedString(args, ["query", "sql"]);
+    return {
+      title: "查询数据库",
+      detail: query ?? undefined,
+      operation: "查询数据库",
+      contentLabel: "查询内容",
+    };
   }
   if (toolName === "search" || toolName === "Search") {
-    return { title: "联网搜索" };
+    const query = firstNamedString(args, ["query", "q", "search"]);
+    return {
+      title: "联网搜索",
+      detail: query ?? undefined,
+      operation: query ? `联网搜索：${query}` : "联网搜索",
+      contentLabel: "搜索关键词",
+    };
   }
   if (toolName === "bash" || toolName === "Bash") {
     const cmd = firstString(args?.command) ?? firstString(args?.cmd) ?? "";
     const cmdTrim = cmd.trim();
     const lower = cmdTrim.toLowerCase();
+    const description = firstNamedString(args, [
+      "description",
+      "summary",
+      "task",
+      "title",
+      "name",
+    ]);
+    const operation = description
+      ? `运行：${description}`
+      : `执行：${summarizeShellCommand(cmdTrim)}`;
 
     // Helper to check if command contains a destructive operation
     // Uses word boundaries to reduce false positives and bypasses
@@ -145,17 +211,32 @@ export function inferIntent(
       /(^|[;|&]|\$\(|`)\s*find\s+.*-delete/.test(lower) ||
       /(^|[;|&]|\$\(|`)\s*find\s+.*-exec\s+rm/.test(lower)
     ) {
-      return { title: "删除文件/目录", detail: cmdTrim || undefined };
+      return {
+        title: "删除文件/目录",
+        detail: cmdTrim || undefined,
+        operation: description ? `删除/清理：${description}` : "删除文件/目录",
+        contentLabel: "命令内容",
+      };
     }
 
     // Check for move/rename operations
     if (hasCommand("mv") || /(^|[;|&]|\$\(|`)\s*rename\s/.test(lower)) {
-      return { title: "移动/重命名文件", detail: cmdTrim || undefined };
+      return {
+        title: "移动/重命名文件",
+        detail: cmdTrim || undefined,
+        operation: description ? `移动/重命名：${description}` : "移动/重命名文件",
+        contentLabel: "命令内容",
+      };
     }
 
     // Check for copy operations
     if (hasCommand("cp") || hasCommand("scp") || hasCommand("rsync")) {
-      return { title: "复制文件", detail: cmdTrim || undefined };
+      return {
+        title: "复制文件",
+        detail: cmdTrim || undefined,
+        operation: description ? `复制：${description}` : "复制文件",
+        contentLabel: "命令内容",
+      };
     }
 
     // Check for network operations
@@ -168,7 +249,12 @@ export function inferIntent(
       hasCommand("nc") ||
       /(^|[;|&]|\$\(|`)\s*nc\s/.test(lower)
     ) {
-      return { title: "网络/远程操作", detail: cmdTrim || undefined };
+      return {
+        title: "网络/远程操作",
+        detail: cmdTrim || undefined,
+        operation: description ? `网络/远程：${description}` : "网络/远程操作",
+        contentLabel: "命令内容",
+      };
     }
 
     // Check for package installation
@@ -181,19 +267,39 @@ export function inferIntent(
       hasCommand("brew") ||
       /(^|[;|&]|\$\(|`)\s*(apt-get|yum|dnf|pacman|apk)\s/.test(lower)
     ) {
-      return { title: "安装/包管理操作", detail: cmdTrim || undefined };
+      return {
+        title: "安装/包管理操作",
+        detail: cmdTrim || undefined,
+        operation: description ? `安装/包管理：${description}` : "安装/包管理操作",
+        contentLabel: "命令内容",
+      };
     }
 
-    return { title: "执行命令", detail: cmdTrim || undefined };
+    return {
+      title: "执行命令",
+      detail: cmdTrim || undefined,
+      operation,
+      contentLabel: "运行内容",
+    };
   }
 
   // MCP tools (prefix-based)
   if (toolName.startsWith("mcp__")) {
-    return { title: "调用外部工具（MCP）", detail: toolName };
+    return {
+      title: "调用外部工具",
+      detail: toolName,
+      operation: `调用工具：${toolName.replace(/^mcp__/, "")}`,
+      contentLabel: "工具名称",
+    };
   }
 
   // Fallback
-  return { title: "执行敏感操作", detail: toolName || undefined };
+  return {
+    title: "执行敏感操作",
+    detail: toolName || undefined,
+    operation: toolName ? `执行：${toolName}` : "执行敏感操作",
+    contentLabel: "请求内容",
+  };
 }
 
 const getRiskColor = (level: RiskLevel) => {
@@ -265,10 +371,6 @@ const convertModeToBackend = (
   }
 };
 
-function truncateText(value: string, maxChars: number): string {
-  return value.length > maxChars ? `${value.slice(0, maxChars)}…` : value;
-}
-
 export function permissionPromptLabels(
   connectorIntent: ConnectorPermissionIntent | undefined,
   isCritical: boolean,
@@ -304,15 +406,56 @@ export function permissionPromptLabels(
   };
 }
 
+function ScrollableCodeBlock({
+  label,
+  children,
+  maxHeight = 180,
+}: {
+  label: string;
+  children: string;
+  maxHeight?: number;
+}) {
+  return (
+    <Box
+      component="pre"
+      tabIndex={0}
+      aria-label={label}
+      sx={{
+        m: 0,
+        px: 1.25,
+        py: 1,
+        borderRadius: 1.25,
+        border: 1,
+        borderColor: "divider",
+        bgcolor: (t) =>
+          t.palette.mode === "dark"
+            ? "rgba(255,255,255,0.05)"
+            : "rgba(0,0,0,0.035)",
+        color: "text.primary",
+        fontFamily:
+          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+        fontSize: "0.78rem",
+        lineHeight: 1.45,
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        maxHeight,
+        overflow: "auto",
+        overscrollBehavior: "contain",
+      }}
+    >
+      {children}
+    </Box>
+  );
+}
+
 /** 内联在输入框上方，非弹窗 */
 export const PermissionPromptBar: React.FC = () => {
   const { pendingRequest, approveRequest, denyRequest, error, clearError } =
     usePermissionStore();
-  const [modeValue, setModeValue] = useState<ModeChoice>("session");
-  const [timeWindowMinutes, setTimeWindowMinutes] = useState<number>(60);
   const [showDetails, setShowDetails] = useState(false);
-  const [processing, setProcessing] = useState(false);
-  const [cmdExpanded, setCmdExpanded] = useState(false);
+  const [processingAction, setProcessingAction] = useState<
+    ModeChoice | "deny" | null
+  >(null);
   const intent = useMemo(
     () =>
       pendingRequest
@@ -328,12 +471,9 @@ export const PermissionPromptBar: React.FC = () => {
 
   useEffect(() => {
     if (!pendingRequest) return;
-    if (connectorIntent?.isWrite) {
-      setModeValue("askEveryTime");
-      return;
-    }
-    setModeValue("session");
-  }, [connectorIntent?.isWrite, pendingRequest?.request_id]);
+    setShowDetails(false);
+    setProcessingAction(null);
+  }, [pendingRequest?.request_id, pendingRequest?.tool_name]);
 
   if (!pendingRequest || !intent) return null;
 
@@ -342,68 +482,94 @@ export const PermissionPromptBar: React.FC = () => {
     pendingRequest.risk_level === "critical";
   const isCritical = pendingRequest.risk_level === "critical";
   const isConnectorWrite = connectorIntent?.isWrite === true;
+  const processing = processingAction !== null;
 
-  const handleApprove = async () => {
-    setProcessing(true);
+  const handleApprove = async (modeValue: ModeChoice) => {
+    setProcessingAction(modeValue);
     clearError();
     try {
-      const mode = convertModeToBackend(modeValue, timeWindowMinutes);
+      const mode = convertModeToBackend(modeValue, 60);
       await approveRequest(mode);
     } catch {
       // store 已记录
     } finally {
-      setProcessing(false);
+      setProcessingAction(null);
     }
   };
 
   const handleDeny = async () => {
-    setProcessing(true);
+    setProcessingAction("deny");
     clearError();
     try {
       await denyRequest("用户拒绝");
     } catch {
       // store 已记录
     } finally {
-      setProcessing(false);
+      setProcessingAction(null);
     }
   };
 
-  const detail = intent.detail ?? pendingRequest.tool_name;
-  const DETAIL_TRUNCATE = 120;
-  const detailTruncated = truncateText(detail, DETAIL_TRUNCATE);
-  const hasLongDetail = detail.length > DETAIL_TRUNCATE;
+  const detail = intent.detail;
   const connectorTargetLabel = connectorIntent?.target ?? "未提供目标对象";
-  const connectorPreview = connectorIntent?.payloadPreview
-    ? truncateText(connectorIntent.payloadPreview, 180)
-    : null;
+  const connectorPreview = connectorIntent?.payloadPreview ?? null;
   const labels = permissionPromptLabels(connectorIntent, isCritical, processing);
+  const actionTitle = intent.operation ?? intent.title;
+  const contentLabel = intent.contentLabel ?? "请求内容";
+  const allowOnceButtonLabel = isConnectorWrite
+    ? "仅本次写入"
+    : connectorIntent
+      ? "仅本次访问"
+      : "仅本次运行";
 
   return (
     <Box
       sx={{
         px: 2,
-        py: 1.5,
+        py: 1.25,
         borderBottom: 1,
         borderColor: "divider",
         bgcolor: (t) =>
           t.palette.mode === "dark"
             ? "rgba(255,255,255,0.04)"
             : "rgba(0,0,0,0.02)",
-        maxHeight: "50vh",
+        maxHeight: "44vh",
         overflowY: "auto",
       }}
     >
-      <Stack spacing={1}>
-        {/* 标题行：只显示操作类型 + 风险等级 */}
-        <Stack direction="row" alignItems="center" gap={1}>
-          {getRiskIcon(pendingRequest.risk_level)}
-          <Typography variant="subtitle2" fontWeight={700} sx={{ flex: 1 }}>
-            {intent.title}
-          </Typography>
+      <Stack spacing={1.1}>
+        {/* 标题行：只放用户需要判断的具体操作，避免展示 request id / raw payload 等噪音。 */}
+        <Stack direction="row" alignItems="flex-start" gap={1}>
+          <Box sx={{ display: "flex", pt: 0.1 }}>
+            {getRiskIcon(pendingRequest.risk_level)}
+          </Box>
+          <Box sx={{ minWidth: 0, flex: 1 }}>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: "block", lineHeight: 1.3 }}
+            >
+              权限请求
+            </Typography>
+            <Typography
+              variant="subtitle2"
+              fontWeight={700}
+              sx={{
+                lineHeight: 1.35,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                display: "-webkit-box",
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: "vertical",
+              }}
+            >
+              {actionTitle}
+            </Typography>
+          </Box>
           <Chip
             label={getRiskLabel(pendingRequest.risk_level)}
             color={getRiskColor(pendingRequest.risk_level) as never}
             size="small"
+            variant={isDangerous ? "filled" : "outlined"}
           />
         </Stack>
 
@@ -426,13 +592,13 @@ export const PermissionPromptBar: React.FC = () => {
               <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
                 <Chip
                   size="small"
-                  label={`服务：${connectorIntent.connectorLabel}`}
+                  label={connectorIntent.connectorLabel}
                   color={isConnectorWrite ? "error" : "default"}
                   variant={isConnectorWrite ? "filled" : "outlined"}
                 />
                 <Chip
                   size="small"
-                  label={`操作：${connectorIntent.operationLabel}`}
+                  label={connectorIntent.operationLabel}
                   variant="outlined"
                 />
                 <Chip
@@ -447,21 +613,10 @@ export const PermissionPromptBar: React.FC = () => {
                 <Typography variant="caption" color="text.secondary">
                   目标对象
                 </Typography>
-                <Box
-                  component="code"
-                  sx={{
-                    display: "block",
-                    mt: 0.25,
-                    px: 1,
-                    py: 0.5,
-                    borderRadius: 1,
-                    bgcolor: "background.paper",
-                    fontSize: "0.78rem",
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-all",
-                  }}
-                >
-                  {connectorTargetLabel}
+                <Box sx={{ mt: 0.25 }}>
+                  <ScrollableCodeBlock label="目标对象" maxHeight={96}>
+                    {connectorTargetLabel}
+                  </ScrollableCodeBlock>
                 </Box>
               </Box>
 
@@ -470,53 +625,28 @@ export const PermissionPromptBar: React.FC = () => {
                   <Typography variant="caption" color="text.secondary">
                     内容预览
                   </Typography>
-                  <Box
-                    component="code"
-                    sx={{
-                      display: "block",
-                      mt: 0.25,
-                      px: 1,
-                      py: 0.5,
-                      borderRadius: 1,
-                      bgcolor: "background.paper",
-                      fontSize: "0.78rem",
-                      whiteSpace: "pre-wrap",
-                      wordBreak: "break-all",
-                    }}
-                  >
-                    {connectorPreview}
+                  <Box sx={{ mt: 0.25 }}>
+                    <ScrollableCodeBlock label="内容预览">
+                      {connectorPreview}
+                    </ScrollableCodeBlock>
                   </Box>
                 </Box>
               )}
-
-              <Typography variant="caption" color="text.secondary">
-                Connector：{connectorIntent.connectorId} / {connectorIntent.operation}
-              </Typography>
             </Stack>
           </Box>
         )}
 
-        {/* 具体操作内容：路径或命令，限制展示 */}
+        {/* 具体操作内容：始终放入独立滚动区域，长命令/脚本不再撑高权限卡片。 */}
         {!connectorIntent && detail && (
-          <Box
-            component="code"
-            sx={{
-              display: "block",
-              px: 1,
-              py: 0.5,
-              borderRadius: 1,
-              bgcolor: "action.hover",
-              fontSize: "0.78rem",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-all",
-              cursor: hasLongDetail ? "pointer" : "default",
-              maxHeight: cmdExpanded ? 160 : "none",
-              overflowY: cmdExpanded ? "auto" : "visible",
-            }}
-            onClick={hasLongDetail ? () => setCmdExpanded((v) => !v) : undefined}
-            title={hasLongDetail && !cmdExpanded ? "点击展开完整内容" : undefined}
-          >
-            {cmdExpanded ? detail : detailTruncated}
+          <Box>
+            <Typography variant="caption" color="text.secondary">
+              {contentLabel}
+            </Typography>
+            <Box sx={{ mt: 0.25 }}>
+              <ScrollableCodeBlock label={contentLabel}>
+                {detail}
+              </ScrollableCodeBlock>
+            </Box>
           </Box>
         )}
 
@@ -538,7 +668,7 @@ export const PermissionPromptBar: React.FC = () => {
           </Alert>
         ) : null}
 
-        {pendingRequest.detected_risks.length > 0 && (
+        {pendingRequest.detected_risks.length > 0 && showDetails && (
           <Accordion
             expanded={showDetails}
             onChange={() => setShowDetails(!showDetails)}
@@ -571,90 +701,72 @@ export const PermissionPromptBar: React.FC = () => {
           </Accordion>
         )}
 
-        <Divider flexItem />
-
-        <FormControl component="fieldset" variant="standard" disabled={processing}>
-          <FormLabel component="legend" sx={{ typography: "caption", mb: 0.5 }}>
-            记住我的选择
-          </FormLabel>
-          <RadioGroup
-            value={modeValue}
-            onChange={(e) => setModeValue(e.target.value as ModeChoice)}
-          >
-            <FormControlLabel
-              value="askEveryTime"
-              control={<Radio size="small" />}
-              label={labels.allowOnceLabel}
-            />
-            <FormControlLabel
-              value="session"
-              control={<Radio size="small" />}
-              label={labels.sessionLabel}
-            />
-            <FormControlLabel
-              value="timeWindow"
-              control={<Radio size="small" />}
-              label={labels.timeWindowLabel}
-            />
-            <FormControlLabel
-              value="plan"
-              control={<Radio size="small" />}
-              label="Plan 模式（批量确认）"
-            />
-          </RadioGroup>
-        </FormControl>
-
-        {modeValue === "timeWindow" && (
-          <FormControl component="fieldset" variant="standard" disabled={processing}>
-            <FormLabel component="legend" sx={{ typography: "caption", mb: 0.5 }}>
-              时长
-            </FormLabel>
-            <RadioGroup
-              row
-              value={String(timeWindowMinutes)}
-              onChange={(e) => setTimeWindowMinutes(Number(e.target.value))}
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="center"
+          spacing={1}
+        >
+          <Box>
+            {pendingRequest.detected_risks.length > 0 && (
+              <Button
+                size="small"
+                color="inherit"
+                variant="text"
+                onClick={() => setShowDetails((v) => !v)}
+                endIcon={<ExpandMoreIcon fontSize="small" />}
+                sx={{ minHeight: 32 }}
+              >
+                {showDetails ? "收起风险" : "风险详情"}
+              </Button>
+            )}
+          </Box>
+          <Stack direction="row" justifyContent="flex-end" spacing={1}>
+            <Button
+              size="small"
+              onClick={handleDeny}
+              color="inherit"
+              variant="outlined"
+              disabled={processing}
+              startIcon={
+                processingAction === "deny" ? (
+                  <CircularProgress size={14} color="inherit" />
+                ) : null
+              }
             >
-              <FormControlLabel
-                value="60"
-                control={<Radio size="small" />}
-                label="1 小时"
-              />
-              <FormControlLabel
-                value="240"
-                control={<Radio size="small" />}
-                label="4 小时"
-              />
-              <FormControlLabel
-                value="1440"
-                control={<Radio size="small" />}
-                label="24 小时"
-              />
-            </RadioGroup>
-          </FormControl>
-        )}
-
-        <Stack direction="row" justifyContent="flex-end" spacing={1}>
-          <Button
-            size="small"
-            onClick={handleDeny}
-            color="inherit"
-            variant="outlined"
-            disabled={processing}
-          >
-            拒绝
-          </Button>
-          <Button
-            size="small"
-            onClick={handleApprove}
-            color={isDangerous ? "error" : "primary"}
-            variant="contained"
-            disabled={processing}
-            startIcon={
-              processing ? <CircularProgress size={14} color="inherit" /> : null
-            }
-          >
-            {labels.approveLabel}
-          </Button>
+              拒绝
+            </Button>
+            <Button
+              size="small"
+              onClick={() => void handleApprove("session")}
+              color={isDangerous ? "error" : "primary"}
+              variant="outlined"
+              disabled={processing}
+              startIcon={
+                processingAction === "session" ? (
+                  <CircularProgress size={14} color="inherit" />
+                ) : null
+              }
+            >
+              本会话允许
+            </Button>
+            <Button
+              size="small"
+              onClick={() => void handleApprove("askEveryTime")}
+              color={isDangerous ? "error" : "primary"}
+              variant="contained"
+              disabled={processing}
+              startIcon={
+                processingAction === "askEveryTime" ? (
+                  <CircularProgress size={14} color="inherit" />
+                ) : null
+              }
+            >
+              {processingAction === "askEveryTime"
+                ? "处理中…"
+                : allowOnceButtonLabel}
+            </Button>
+          </Stack>
         </Stack>
       </Stack>
     </Box>

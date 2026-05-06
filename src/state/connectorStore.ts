@@ -462,7 +462,7 @@ export const useConnectorStore = create<ConnectorState>((set) => ({
       return result;
     } catch (e) {
       const error = extractErrorMessage(e);
-      set({ isMutating: false, error });
+      set({ isMutating: false });
       throw new Error(error);
     }
   },
@@ -485,7 +485,6 @@ export const useConnectorStore = create<ConnectorState>((set) => ({
       return result;
     } catch (e) {
       const error = extractErrorMessage(e);
-      set({ error });
       throw new Error(error);
     }
   },

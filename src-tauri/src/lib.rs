@@ -88,8 +88,8 @@ pub fn run() {
 
                 tracing::info!("Database initialized successfully");
 
-                // Warm integrations catalog (MCP tools/list + skills scan) in the background so
-                // opening Settings → Integrations is usually instant (cache hit for default cwd).
+                // Warm integrations catalog metadata in the background so opening Settings →
+                // Integrations is usually instant without probing remote MCP servers on startup.
                 let warm_handle = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -239,6 +239,10 @@ pub fn run() {
             commands::claude_import::get_claude_default_paths,
             commands::integrations_settings::list_available_skills,
             commands::integrations_settings::get_integrations_catalog,
+            commands::integrations_settings::verify_mcp_server,
+            commands::integrations_settings::start_mcp_oauth_login,
+            commands::integrations_settings::poll_mcp_oauth_login,
+            commands::integrations_settings::logout_mcp_oauth_server,
             commands::integrations_settings::save_integrations_state,
             commands::connectors::list_omiga_connectors,
             commands::connectors::list_omiga_connector_audit_events,
@@ -261,6 +265,9 @@ pub fn run() {
             commands::plugins::list_omiga_plugin_process_pool_statuses,
             commands::plugins::clear_omiga_plugin_process_pool,
             commands::plugins::validate_omiga_retrieval_plugin,
+            commands::operators::list_omiga_operators,
+            commands::operators::describe_omiga_operator,
+            commands::operators::set_omiga_operator_enabled,
             commands::extensions::vscode_extensions_dir,
             commands::extensions::install_vscode_extension,
             commands::extensions::list_recommended_vscode_extensions,

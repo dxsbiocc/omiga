@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   filterPluginsForCatalog,
+  operatorDisplayName,
+  operatorPrimaryAlias,
+  operatorToolName,
   pluginCardSubtitle,
   pluginRuntimeSummary,
   processPoolStatusDiagnostic,
@@ -8,6 +11,7 @@ import {
   unknownRetrievalRuntimePluginIds,
 } from "./PluginsPanel";
 import type {
+  OperatorSummary,
   PluginProcessPoolRouteStatus,
   PluginRetrievalRouteStatus,
   PluginSummary,
@@ -43,6 +47,21 @@ function pluginSummary(overrides: Partial<PluginSummary> = {}): PluginSummary {
     installPolicy: "AVAILABLE",
     authPolicy: "ON_USE",
     interface: null,
+    ...overrides,
+  };
+}
+
+function operatorSummary(overrides: Partial<OperatorSummary> = {}): OperatorSummary {
+  return {
+    id: "fastqc",
+    version: "1.0.0",
+    name: "FastQC",
+    description: "Run FastQC quality control.",
+    sourcePlugin: "bio-operators@local",
+    manifestPath: "/plugins/bio-operators/operators/fastqc/operator.yaml",
+    enabledAliases: [],
+    exposed: false,
+    unavailableReason: null,
     ...overrides,
   };
 }
@@ -171,6 +190,18 @@ describe("PluginsPanel diagnostics helpers", () => {
     );
 
     expect(subtitle).toBe("NCBI GEO");
+  });
+
+  it("builds stable operator display labels and tool names", () => {
+    expect(operatorDisplayName(operatorSummary())).toBe("FastQC");
+    expect(operatorDisplayName(operatorSummary({ name: " " }))).toBe("fastqc");
+    expect(operatorPrimaryAlias(operatorSummary())).toBe("fastqc");
+    expect(
+      operatorPrimaryAlias(
+        operatorSummary({ enabledAliases: ["", "sample_qc"], exposed: true }),
+      ),
+    ).toBe("sample_qc");
+    expect(operatorToolName("sample_qc")).toBe("operator__sample_qc");
   });
 
   it("summarizes quarantined routes with actionable timing and last error", () => {

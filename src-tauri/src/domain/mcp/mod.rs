@@ -15,6 +15,7 @@ pub mod config;
 pub mod connection_manager;
 pub mod discovery;
 pub mod names;
+pub mod oauth;
 pub mod resource_output;
 pub mod tool_dispatch;
 pub mod tool_pool;

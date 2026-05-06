@@ -9,7 +9,7 @@ use rmcp::model::{
 use rmcp::service::{Peer, RoleClient, RunningService};
 use rmcp::transport::{
     streamable_http_client::{StreamableHttpClientTransportConfig, StreamableHttpClientWorker},
-    ConfigureCommandExt, TokioChildProcess,
+    AuthClient, ConfigureCommandExt, TokioChildProcess,
 };
 use rmcp::ServiceExt;
 use serde_json::json;
@@ -381,6 +381,9 @@ async fn create_running_service(
             let local_proxy = local_env_proxy_for_http();
             let mut bypass_env_proxy = false;
             let default_headers = build_http_header_map(&headers)?;
+            let has_explicit_authorization = headers
+                .keys()
+                .any(|key| key.eq_ignore_ascii_case("authorization"));
 
             for attempt in 0..MAX_RETRIES {
                 if attempt > 0 {
@@ -410,13 +413,28 @@ async fn create_running_service(
                     .build()
                     .map_err(|e| format!("reqwest client build: {e}"))?;
 
-                let worker = StreamableHttpClientWorker::new(
-                    http,
-                    StreamableHttpClientTransportConfig::with_uri(url.clone()),
-                );
+                let transport_config = StreamableHttpClientTransportConfig::with_uri(url.clone());
+                let service_result = if !has_explicit_authorization {
+                    match crate::domain::mcp::oauth::stored_auth_manager_for_url(&url, http.clone())
+                        .await
+                    {
+                        Ok(Some(auth_manager)) => {
+                            serve_http_transport(
+                                AuthClient::new(http.clone(), auth_manager),
+                                transport_config,
+                                timeout,
+                            )
+                            .await
+                        }
+                        Ok(None) => serve_http_transport(http, transport_config, timeout).await,
+                        Err(err) => Err(err),
+                    }
+                } else {
+                    serve_http_transport(http, transport_config, timeout).await
+                };
 
-                match tokio::time::timeout(timeout, ().serve(worker)).await {
-                    Ok(Ok(service)) => {
+                match service_result {
+                    Ok(service) => {
                         if attempt > 0 {
                             tracing::info!(
                                 target: "omiga::mcp",
@@ -427,8 +445,7 @@ async fn create_running_service(
                         }
                         return Ok(service);
                     }
-                    Ok(Err(e)) => {
-                        let error_msg = format!("{}", e);
+                    Err(error_msg) => {
                         // Check if this is a retriable error
                         let error_lower = error_msg.to_ascii_lowercase();
                         let is_retriable = error_lower.contains("connection reset")
@@ -468,43 +485,12 @@ async fn create_running_service(
 
                         if !is_retriable || attempt == MAX_RETRIES - 1 {
                             return Err(with_http_proxy_context(
-                                format!("MCP HTTP handshake: {e}"),
+                                error_msg,
                                 local_proxy.as_deref(),
                                 bypass_env_proxy,
                             ));
                         }
                         last_error = Some(error_msg);
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            target: "omiga::mcp",
-                            url = %url,
-                            attempt = attempt + 1,
-                            bypass_env_proxy = bypass_env_proxy,
-                            "MCP HTTP handshake timed out"
-                        );
-                        if !bypass_env_proxy && local_proxy.is_some() && attempt < MAX_RETRIES - 1 {
-                            let proxy = local_proxy.as_deref().unwrap_or("local proxy");
-                            bypass_env_proxy = true;
-                            last_error = Some(format!(
-                                "Timeout; retrying without environment proxy {proxy}"
-                            ));
-                            tracing::warn!(
-                                target: "omiga::mcp",
-                                url = %url,
-                                proxy = %proxy,
-                                "MCP HTTP handshake timed out while a localhost proxy is configured; retrying direct"
-                            );
-                            continue;
-                        }
-                        if attempt == MAX_RETRIES - 1 {
-                            return Err(with_http_proxy_context(
-                                "MCP HTTP handshake timed out after retries".to_string(),
-                                local_proxy.as_deref(),
-                                bypass_env_proxy,
-                            ));
-                        }
-                        last_error = Some("Timeout".to_string());
                     }
                 }
             }
@@ -521,6 +507,21 @@ async fn create_running_service(
             ))
         }
     }
+}
+
+async fn serve_http_transport<C>(
+    client: C,
+    config: StreamableHttpClientTransportConfig,
+    timeout: Duration,
+) -> Result<RunningService<RoleClient, ()>, String>
+where
+    C: rmcp::transport::streamable_http_client::StreamableHttpClient,
+{
+    let worker = StreamableHttpClientWorker::new(client, config);
+    tokio::time::timeout(timeout, ().serve(worker))
+        .await
+        .map_err(|_| "MCP HTTP handshake timed out".to_string())?
+        .map_err(|err| format!("MCP HTTP handshake: {err}"))
 }
 
 fn local_env_proxy_for_http() -> Option<String> {
