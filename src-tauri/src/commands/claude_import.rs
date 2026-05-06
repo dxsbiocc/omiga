@@ -649,7 +649,10 @@ mod tests {
         })
         .expect("http input");
         assert_eq!(http["url"], "https://example.com/mcp");
-        assert_eq!(http["headers"]["Authorization"], "Bearer ${PAPERCLIP_TOKEN}");
+        assert_eq!(
+            http["headers"]["Authorization"],
+            "Bearer ${PAPERCLIP_TOKEN}"
+        );
     }
 
     #[test]

@@ -1851,7 +1851,10 @@ mod tests {
         let mut mcp_servers = HashMap::new();
         mcp_servers.insert(
             "sample".to_string(),
-            McpServerConfig::Url { url: "https://sample.example/mcp".to_string(), headers: HashMap::new() },
+            McpServerConfig::Url {
+                url: "https://sample.example/mcp".to_string(),
+                headers: HashMap::new(),
+            },
         );
         let outcome = PluginLoadOutcome::from_plugins(vec![LoadedPlugin {
             id: "sample@market".to_string(),
@@ -1912,7 +1915,10 @@ mod tests {
         let mut mcp_servers = HashMap::new();
         mcp_servers.insert(
             "sample".to_string(),
-            McpServerConfig::Url { url: "https://sample.example/mcp".to_string(), headers: HashMap::new() },
+            McpServerConfig::Url {
+                url: "https://sample.example/mcp".to_string(),
+                headers: HashMap::new(),
+            },
         );
         let outcome = PluginLoadOutcome::from_plugins(vec![LoadedPlugin {
             id: "sample@market".to_string(),

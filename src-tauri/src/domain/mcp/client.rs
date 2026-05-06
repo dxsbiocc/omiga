@@ -1,6 +1,7 @@
 //! Connect to MCP servers via **rmcp** (stdio or streamable HTTP) and run `resources/*` calls.
 
 use crate::domain::mcp::config::{merged_mcp_servers, McpServerConfig};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use rmcp::model::Tool as McpTool;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ReadResourceRequestParams, ReadResourceResult,
@@ -11,7 +12,6 @@ use rmcp::transport::{
     ConfigureCommandExt, TokioChildProcess,
 };
 use rmcp::ServiceExt;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;

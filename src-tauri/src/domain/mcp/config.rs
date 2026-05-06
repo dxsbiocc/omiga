@@ -66,7 +66,10 @@ fn parse_headers(v: &Json) -> HashMap<String, String> {
         headers.extend(auth_headers);
     }
 
-    if !headers.keys().any(|key| key.eq_ignore_ascii_case("authorization")) {
+    if !headers
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case("authorization"))
+    {
         if let Some(token) = v
             .get("bearerToken")
             .or_else(|| v.get("bearer_token"))
@@ -264,8 +267,14 @@ mod tests {
         let m = servers_from_mcp_json(raw);
         match m.get("paperclip") {
             Some(McpServerConfig::Url { headers, .. }) => {
-                assert_eq!(headers.get("X-Api-Key").map(String::as_str), Some("${PAPERCLIP_API_KEY}"));
-                assert_eq!(headers.get("Authorization").map(String::as_str), Some("Bearer abc"));
+                assert_eq!(
+                    headers.get("X-Api-Key").map(String::as_str),
+                    Some("${PAPERCLIP_API_KEY}")
+                );
+                assert_eq!(
+                    headers.get("Authorization").map(String::as_str),
+                    Some("Bearer abc")
+                );
             }
             other => panic!("expected paperclip URL MCP server, got {other:?}"),
         }
