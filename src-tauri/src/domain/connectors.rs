@@ -41,6 +41,8 @@ const CONNECTOR_AUDIT_MAX_LIMIT: usize = 500;
 const GITHUB_CLI_AUTH_TIMEOUT: Duration = Duration::from_secs(2);
 const CODEX_APPS_MCP_SERVER_NAME: &str = "codex_apps";
 const MCP_CONNECTOR_BRIDGE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAIL_ADDRESS_SECRET: &str = "mail_address";
+const MAIL_AUTHORIZATION_CODE_SECRET: &str = "mail_authorization_code";
 
 #[cfg(test)]
 pub(crate) static CONNECTOR_TEST_ENV_LOCK: tokio::sync::Mutex<()> =
@@ -158,6 +160,14 @@ pub struct ConnectorConnectRequest {
     pub account_label: Option<String>,
     #[serde(default)]
     pub auth_source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MailConnectorCredentialRequest {
+    pub connector_id: String,
+    pub email_address: String,
+    pub authorization_code: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -347,6 +357,7 @@ enum ConnectorCredentialSource {
     OAuthDevice,
     OAuthBrowser,
     GitHubCli,
+    MailCredentials,
 }
 
 impl ConnectorCredentialSource {
@@ -356,6 +367,7 @@ impl ConnectorCredentialSource {
             ConnectorCredentialSource::OAuthDevice => "oauth_device",
             ConnectorCredentialSource::OAuthBrowser => "oauth_browser",
             ConnectorCredentialSource::GitHubCli => "github_cli",
+            ConnectorCredentialSource::MailCredentials => "mail_credentials",
         }
     }
 }
@@ -861,10 +873,14 @@ pub fn builtin_connector_definitions() -> Vec<ConnectorDefinition> {
         connector(
             "gmail",
             "Gmail",
-            "Use Gmail messages for support, coordination, and research workflows.",
+            "Use Gmail messages for support, coordination, and research workflows through Omiga mail login or OAuth.",
             "email",
             ConnectorAuthType::OAuth,
             &[
+                "GMAIL_ADDRESS",
+                "GMAIL_USERNAME",
+                "GMAIL_APP_PASSWORD",
+                "GMAIL_AUTH_CODE",
                 "OMIGA_GMAIL_OAUTH_CLIENT_ID",
                 "OMIGA_GMAIL_OAUTH_CLIENT_SECRET",
                 "GMAIL_ACCESS_TOKEN",
@@ -904,24 +920,6 @@ pub fn builtin_connector_definitions() -> Vec<ConnectorDefinition> {
             ],
             Some("https://mail.163.com/"),
             Some("https://help.mail.163.com/"),
-            email_connector_tools(),
-        ),
-        connector(
-            "imap_smtp_mail",
-            "Email (IMAP/SMTP)",
-            "Connect other mailboxes that expose IMAP/SMTP credentials or an external mail MCP.",
-            "email",
-            ConnectorAuthType::ApiKey,
-            &[
-                "MAIL_ADDRESS",
-                "MAIL_USERNAME",
-                "MAIL_APP_PASSWORD",
-                "MAIL_PASSWORD",
-                "IMAP_SMTP_PASSWORD",
-                "MAIL_IMAP_HOST",
-            ],
-            None,
-            None,
             email_connector_tools(),
         ),
         connector(
@@ -1092,7 +1090,7 @@ fn canonical_connector_permission_operation(connector: &str, operation: &str) ->
             "get_issue" | "issue" => "read_issue",
             other => other,
         },
-        "gmail" | "outlook" | "qq_mail" | "netease_mail" | "imap_smtp_mail" => match operation {
+        "gmail" | "outlook" | "qq_mail" | "netease_mail" => match operation {
             "search" | "messages" | "list_messages" | "mail" | "emails" => "search_messages",
             "get_message" | "message" | "read_email" | "email" => "read_message",
             "send" | "send_email" | "compose" => "send_message",
@@ -1204,7 +1202,7 @@ fn connector_permission_audit_target(
                 _ => channel.to_string(),
             })
         }
-        "gmail" | "outlook" | "qq_mail" | "netease_mail" | "imap_smtp_mail" => {
+        "gmail" | "outlook" | "qq_mail" | "netease_mail" => {
             connector_permission_string_field(args, &["id", "message_id", "messageId", "thread_id"])
                 .map(str::to_string)
                 .or_else(|| {
@@ -1681,13 +1679,45 @@ pub fn connect_connector(request: ConnectorConnectRequest) -> Result<ConnectorIn
     })
 }
 
+pub fn save_mail_connector_credentials(
+    request: MailConnectorCredentialRequest,
+) -> Result<ConnectorInfo, String> {
+    let connector_id = validate_connector_id(&request.connector_id)?;
+    if !matches!(connector_id.as_str(), "gmail" | "qq_mail" | "netease_mail") {
+        return Err(format!(
+            "connector `{connector_id}` does not support mailbox credential login"
+        ));
+    }
+
+    let email_address = sanitize_email_address(&request.email_address)?;
+    let authorization_code =
+        sanitize_secret_field(&request.authorization_code, "mail authorization code", 512)?;
+
+    secret_store::store_connector_secret(&connector_id, MAIL_ADDRESS_SECRET, &email_address)?;
+    secret_store::store_connector_secret(
+        &connector_id,
+        MAIL_AUTHORIZATION_CODE_SECRET,
+        &authorization_code,
+    )?;
+
+    connect_connector(ConnectorConnectRequest {
+        connector_id,
+        account_label: Some(email_address),
+        auth_source: Some("mail_credentials".to_string()),
+    })
+}
+
 pub fn disconnect_connector(connector_id: &str) -> Result<ConnectorInfo, String> {
     let normalized_connector_id = validate_connector_id(connector_id)?;
     match normalized_connector_id.as_str() {
         "github" => oauth::delete_github_oauth_token()?,
-        "gmail" => oauth::delete_gmail_oauth_token()?,
+        "gmail" => {
+            oauth::delete_gmail_oauth_token()?;
+            delete_mail_connector_credentials(&normalized_connector_id)?;
+        }
         "notion" => oauth::delete_notion_oauth_token()?,
         "slack" => oauth::delete_slack_oauth_token()?,
+        "qq_mail" | "netease_mail" => delete_mail_connector_credentials(&normalized_connector_id)?,
         _ => {}
     }
     mutate_connector_config(connector_id, |entry| {
@@ -1720,6 +1750,29 @@ fn sanitize_text_field(value: &str, field: &str, max_chars: usize) -> Result<Str
         return Err(format!("{field} must be at most {max_chars} characters"));
     }
     Ok(text)
+}
+
+fn sanitize_secret_field(value: &str, field: &str, max_chars: usize) -> Result<String, String> {
+    let text = value.trim().to_string();
+    if text.is_empty() {
+        return Err(format!("{field} is required"));
+    }
+    if text.chars().count() > max_chars {
+        return Err(format!("{field} must be at most {max_chars} characters"));
+    }
+    Ok(text)
+}
+
+fn sanitize_email_address(value: &str) -> Result<String, String> {
+    let email = sanitize_text_field(value, "mail address", 254)?;
+    if email.contains(char::is_whitespace)
+        || !email.contains('@')
+        || email.starts_with('@')
+        || email.ends_with('@')
+    {
+        return Err("mail address must look like name@example.com".to_string());
+    }
+    Ok(email)
 }
 
 fn validate_optional_url(value: Option<String>, field: &str) -> Result<Option<String>, String> {
@@ -2047,7 +2100,6 @@ fn native_connector_test_available(connector_id: &str) -> bool {
             | "slack"
             | "qq_mail"
             | "netease_mail"
-            | "imap_smtp_mail"
             | "discord"
             | "jira"
             | "confluence"
@@ -2361,10 +2413,19 @@ fn connector_credential_source(
 ) -> Option<ConnectorCredentialSource> {
     match connector_id {
         "github" => github_token_with_source(use_env_credentials).map(|(_, source)| source),
+        "gmail" if stored_mail_credentials_configured(connector_id) => {
+            Some(ConnectorCredentialSource::MailCredentials)
+        }
+        "gmail" if use_env_credentials && mail_credentials_configured(connector_id) => {
+            Some(ConnectorCredentialSource::Environment)
+        }
         "gmail" => gmail_token_with_source(use_env_credentials).map(|(_, source)| source),
         "notion" => notion_token_with_source(use_env_credentials).map(|(_, source)| source),
         "slack" => slack_token_with_source(use_env_credentials).map(|(_, source)| source),
-        "qq_mail" | "netease_mail" | "imap_smtp_mail"
+        "qq_mail" | "netease_mail" if stored_mail_credentials_configured(connector_id) => {
+            Some(ConnectorCredentialSource::MailCredentials)
+        }
+        "qq_mail" | "netease_mail"
             if use_env_credentials && mail_credentials_configured(connector_id) =>
         {
             Some(ConnectorCredentialSource::Environment)
@@ -2389,8 +2450,33 @@ pub(crate) fn gmail_api_base_url() -> String {
         .unwrap_or_else(|| "https://gmail.googleapis.com/gmail/v1".to_string())
 }
 
+fn stored_mail_secret_value(connector_id: &str, secret_name: &str) -> Option<String> {
+    secret_store::read_connector_secret(connector_id, secret_name)
+        .ok()
+        .flatten()
+}
+
+fn stored_mail_credentials_configured(connector_id: &str) -> bool {
+    stored_mail_secret_value(connector_id, MAIL_ADDRESS_SECRET).is_some()
+        && stored_mail_secret_value(connector_id, MAIL_AUTHORIZATION_CODE_SECRET).is_some()
+}
+
+fn delete_mail_connector_credentials(connector_id: &str) -> Result<(), String> {
+    secret_store::delete_connector_secret(connector_id, MAIL_ADDRESS_SECRET)?;
+    secret_store::delete_connector_secret(connector_id, MAIL_AUTHORIZATION_CODE_SECRET)
+}
+
 fn mail_identity(connector_id: &str) -> Option<String> {
+    if let Some(identity) = stored_mail_secret_value(connector_id, MAIL_ADDRESS_SECRET) {
+        return Some(identity);
+    }
     match connector_id {
+        "gmail" => first_non_empty_env(&[
+            "GMAIL_ADDRESS",
+            "GMAIL_USERNAME",
+            "MAIL_ADDRESS",
+            "MAIL_USERNAME",
+        ]),
         "qq_mail" => first_non_empty_env(&[
             "QQ_MAIL_ADDRESS",
             "QQ_MAIL_USERNAME",
@@ -2403,18 +2489,18 @@ fn mail_identity(connector_id: &str) -> Option<String> {
             "MAIL_ADDRESS",
             "MAIL_USERNAME",
         ]),
-        "imap_smtp_mail" => first_non_empty_env(&[
-            "MAIL_ADDRESS",
-            "MAIL_USERNAME",
-            "IMAP_SMTP_USERNAME",
-            "IMAP_USERNAME",
-        ]),
         _ => None,
     }
 }
 
 fn mail_secret(connector_id: &str) -> Option<String> {
+    if let Some(secret) = stored_mail_secret_value(connector_id, MAIL_AUTHORIZATION_CODE_SECRET) {
+        return Some(secret);
+    }
     match connector_id {
+        "gmail" => {
+            first_non_empty_env(&["GMAIL_APP_PASSWORD", "GMAIL_AUTH_CODE", "MAIL_APP_PASSWORD"])
+        }
         "qq_mail" => first_non_empty_env(&[
             "QQ_MAIL_AUTH_CODE",
             "QQ_MAIL_APP_PASSWORD",
@@ -2425,32 +2511,27 @@ fn mail_secret(connector_id: &str) -> Option<String> {
             "NETEASE_MAIL_APP_PASSWORD",
             "MAIL_APP_PASSWORD",
         ]),
-        "imap_smtp_mail" => first_non_empty_env(&[
-            "MAIL_APP_PASSWORD",
-            "MAIL_PASSWORD",
-            "IMAP_SMTP_PASSWORD",
-            "IMAP_PASSWORD",
-        ]),
         _ => None,
     }
 }
 
 fn mail_imap_host(connector_id: &str) -> Option<String> {
     match connector_id {
+        "gmail" => first_non_empty_env(&["GMAIL_IMAP_HOST", "MAIL_IMAP_HOST"])
+            .or_else(|| Some("imap.gmail.com".to_string())),
         "qq_mail" => first_non_empty_env(&["QQ_MAIL_IMAP_HOST", "MAIL_IMAP_HOST"])
             .or_else(|| Some("imap.qq.com".to_string())),
         "netease_mail" => first_non_empty_env(&["NETEASE_MAIL_IMAP_HOST", "MAIL_IMAP_HOST"])
             .or_else(|| Some("imap.163.com".to_string())),
-        "imap_smtp_mail" => first_non_empty_env(&["MAIL_IMAP_HOST", "IMAP_HOST"]),
         _ => None,
     }
 }
 
 fn mail_imap_port(connector_id: &str) -> u16 {
     let env_port = match connector_id {
+        "gmail" => first_non_empty_env(&["GMAIL_IMAP_PORT", "MAIL_IMAP_PORT"]),
         "qq_mail" => first_non_empty_env(&["QQ_MAIL_IMAP_PORT", "MAIL_IMAP_PORT"]),
         "netease_mail" => first_non_empty_env(&["NETEASE_MAIL_IMAP_PORT", "MAIL_IMAP_PORT"]),
-        "imap_smtp_mail" => first_non_empty_env(&["MAIL_IMAP_PORT", "IMAP_PORT"]),
         _ => None,
     };
     env_port
@@ -2718,15 +2799,19 @@ fn mail_credential_check(connector: &ConnectorInfo) -> NativeConnectionCheck {
     let connector_id = connector.definition.id.as_str();
     let service_name = connector.definition.name.as_str();
     let Some(identity) = mail_identity(connector_id) else {
-        return NativeConnectionCheck::missing_credentials(
-            service_name,
-            "mail account env vars such as QQ_MAIL_ADDRESS, NETEASE_MAIL_ADDRESS, or MAIL_ADDRESS",
+        return NativeConnectionCheck::local_error(
+            format!("{service_name} 需要邮箱地址才能连接。"),
+            "missing_credentials",
+            "在连接界面输入邮箱地址；Omiga 会把账号标识写入用户级连接状态。",
+            false,
         );
     };
     if mail_secret(connector_id).is_none() {
-        return NativeConnectionCheck::missing_credentials(
-            service_name,
-            "mail authorization code/app password env vars such as QQ_MAIL_AUTH_CODE, NETEASE_MAIL_AUTH_CODE, or MAIL_APP_PASSWORD",
+        return NativeConnectionCheck::local_error(
+            format!("{service_name} 需要邮箱授权码或应用专用密码才能连接。"),
+            "missing_credentials",
+            "在连接界面输入邮箱服务商生成的授权码；Omiga 会保存到系统安全存储，不写入 connectors/config.json。",
+            false,
         );
     }
 
@@ -2740,7 +2825,7 @@ fn mail_credential_check(connector: &ConnectorInfo) -> NativeConnectionCheck {
     let Some(host) = mail_imap_host(connector_id) else {
         return NativeConnectionCheck::local_ok(
             format!("{service_name} mailbox credentials are configured for {identity}."),
-            "No IMAP host was configured, so Omiga validated local credential presence only. Set MAIL_IMAP_HOST/IMAP_HOST for reachability checks.",
+            "No IMAP host was configured, so Omiga validated local credential presence only.",
         );
     };
     let port = mail_imap_port(connector_id);
@@ -2867,6 +2952,15 @@ async fn test_native_connector_connection(
             }
         }
         "gmail" => {
+            if mail_credentials_configured("gmail") {
+                let check = mail_credential_check(connector);
+                return connector_test_result_from_check(
+                    connector,
+                    check.error_code.is_none(),
+                    ConnectorConnectionTestKind::LocalState,
+                    check,
+                );
+            }
             let Some(token) = gmail_token() else {
                 return connector_test_result_from_check(
                     connector,
@@ -2874,7 +2968,7 @@ async fn test_native_connector_connection(
                     ConnectorConnectionTestKind::NativeApi,
                     NativeConnectionCheck::missing_credentials(
                         "Gmail",
-                        "Gmail browser OAuth login or GMAIL_ACCESS_TOKEN/GOOGLE_OAUTH_ACCESS_TOKEN advanced credentials",
+                        "Gmail app password credentials from the connection dialog or Gmail browser OAuth login",
                     ),
                 );
             };
@@ -3048,7 +3142,7 @@ async fn test_native_connector_connection(
                 ),
             }
         }
-        "qq_mail" | "netease_mail" | "imap_smtp_mail" => {
+        "qq_mail" | "netease_mail" => {
             let check = mail_credential_check(connector);
             connector_test_result_from_check(
                 connector,
@@ -3779,6 +3873,10 @@ mod tests {
             ),
             ("GMAIL_ACCESS_TOKEN", String::new()),
             ("GOOGLE_OAUTH_ACCESS_TOKEN", String::new()),
+            ("GMAIL_ADDRESS", String::new()),
+            ("GMAIL_USERNAME", String::new()),
+            ("GMAIL_APP_PASSWORD", String::new()),
+            ("GMAIL_AUTH_CODE", String::new()),
         ]);
 
         secret_store::store_connector_secret("gmail", "oauth_access_token", "gmail-oauth-token")
@@ -3834,6 +3932,104 @@ mod tests {
         assert_eq!(result.check_kind, ConnectorConnectionTestKind::LocalState);
         assert!(result.message.contains("credentials are configured"));
         assert_eq!(result.auth_source.as_deref(), Some("environment"));
+    }
+
+    #[tokio::test]
+    async fn mail_connector_credentials_are_saved_in_secret_store() {
+        let _lock = CONNECTOR_TEST_ENV_LOCK.lock().await;
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("connectors.json");
+        let secret_dir = dir.path().join("secrets");
+        let _env = ScopedEnv::set(&[
+            (
+                "OMIGA_CONNECTORS_CONFIG_PATH",
+                config_path.to_string_lossy().to_string(),
+            ),
+            (
+                "OMIGA_CONNECTOR_SECRET_STORE_DIR",
+                secret_dir.to_string_lossy().to_string(),
+            ),
+            ("OMIGA_MAIL_SKIP_NETWORK_CHECK", "1".to_string()),
+            ("QQ_MAIL_ADDRESS", String::new()),
+            ("QQ_MAIL_AUTH_CODE", String::new()),
+            ("QQ_MAIL_APP_PASSWORD", String::new()),
+        ]);
+
+        let connector = save_mail_connector_credentials(MailConnectorCredentialRequest {
+            connector_id: "qq_mail".to_string(),
+            email_address: "user@qq.com".to_string(),
+            authorization_code: "qq-auth-code".to_string(),
+        })
+        .expect("save mail connector credentials");
+
+        assert!(connector.accessible);
+        assert_eq!(connector.account_label.as_deref(), Some("user@qq.com"));
+        assert_eq!(connector.auth_source.as_deref(), Some("mail_credentials"));
+        assert_eq!(mail_identity("qq_mail").as_deref(), Some("user@qq.com"));
+        assert_eq!(mail_secret("qq_mail").as_deref(), Some("qq-auth-code"));
+
+        let result = test_connector_connection("qq_mail", None)
+            .await
+            .expect("test mail connector");
+        assert!(result.ok);
+        assert_eq!(result.auth_source.as_deref(), Some("mail_credentials"));
+
+        let config = fs::read_to_string(config_path).expect("read connector config");
+        assert!(config.contains("user@qq.com"));
+        assert!(!config.contains("qq-auth-code"));
+    }
+
+    #[tokio::test]
+    async fn gmail_can_use_mail_app_password_credentials_without_oauth_config() {
+        let _lock = CONNECTOR_TEST_ENV_LOCK.lock().await;
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("connectors.json");
+        let secret_dir = dir.path().join("secrets");
+        let _env = ScopedEnv::set(&[
+            (
+                "OMIGA_CONNECTORS_CONFIG_PATH",
+                config_path.to_string_lossy().to_string(),
+            ),
+            (
+                "OMIGA_CONNECTOR_SECRET_STORE_DIR",
+                secret_dir.to_string_lossy().to_string(),
+            ),
+            ("OMIGA_MAIL_SKIP_NETWORK_CHECK", "1".to_string()),
+            ("OMIGA_GMAIL_OAUTH_CLIENT_ID", String::new()),
+            ("OMIGA_GMAIL_OAUTH_CLIENT_SECRET", String::new()),
+            ("GMAIL_ACCESS_TOKEN", String::new()),
+            ("GOOGLE_OAUTH_ACCESS_TOKEN", String::new()),
+            ("GMAIL_ADDRESS", String::new()),
+            ("GMAIL_USERNAME", String::new()),
+            ("GMAIL_APP_PASSWORD", String::new()),
+            ("GMAIL_AUTH_CODE", String::new()),
+        ]);
+
+        let connector = save_mail_connector_credentials(MailConnectorCredentialRequest {
+            connector_id: "gmail".to_string(),
+            email_address: "user@gmail.com".to_string(),
+            authorization_code: "gmail-app-password".to_string(),
+        })
+        .expect("save Gmail app password credentials");
+
+        assert!(connector.accessible);
+        assert_eq!(connector.account_label.as_deref(), Some("user@gmail.com"));
+        assert_eq!(connector.auth_source.as_deref(), Some("mail_credentials"));
+        assert_eq!(mail_identity("gmail").as_deref(), Some("user@gmail.com"));
+        assert_eq!(mail_secret("gmail").as_deref(), Some("gmail-app-password"));
+
+        let result = test_connector_connection("gmail", None)
+            .await
+            .expect("test Gmail mail connector");
+        assert!(result.ok);
+        assert_eq!(result.auth_source.as_deref(), Some("mail_credentials"));
+        assert!(result
+            .message
+            .contains("mailbox credentials are configured"));
+
+        let config = fs::read_to_string(config_path).expect("read connector config");
+        assert!(config.contains("user@gmail.com"));
+        assert!(!config.contains("gmail-app-password"));
     }
 
     #[tokio::test]
@@ -4253,7 +4449,6 @@ mod tests {
             "gmail",
             "qq_mail",
             "netease_mail",
-            "imap_smtp_mail",
             "outlook",
             "dropbox",
         ] {

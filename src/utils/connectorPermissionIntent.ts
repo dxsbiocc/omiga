@@ -72,7 +72,6 @@ const CONNECTOR_LABELS: Record<string, string> = {
   linear: "Linear",
   microsoft_teams: "Microsoft Teams",
   gmail: "Gmail",
-  imap_smtp_mail: "Email",
   netease_mail: "网易邮箱",
   notion: "Notion",
   outlook: "Outlook",
@@ -158,8 +157,7 @@ function canonicalConnectorOperation(
     connectorId === "gmail" ||
     connectorId === "outlook" ||
     connectorId === "qq_mail" ||
-    connectorId === "netease_mail" ||
-    connectorId === "imap_smtp_mail"
+    connectorId === "netease_mail"
   ) {
     if (
       operation === "search" ||
@@ -312,8 +310,7 @@ function connectorTarget(
     connectorId === "gmail" ||
     connectorId === "outlook" ||
     connectorId === "qq_mail" ||
-    connectorId === "netease_mail" ||
-    connectorId === "imap_smtp_mail"
+    connectorId === "netease_mail"
   ) {
     const messageId = connectorStringField(args, [
       "id",

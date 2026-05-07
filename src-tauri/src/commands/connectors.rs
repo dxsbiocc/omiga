@@ -9,7 +9,7 @@ use crate::domain::connectors::{
     self, ConnectorAuditEvent, ConnectorCatalog, ConnectorConnectRequest,
     ConnectorConnectionTestResult, ConnectorInfo, ConnectorLoginPollResult,
     ConnectorLoginStartResult, CustomConnectorExport, CustomConnectorImportRequest,
-    CustomConnectorRequest,
+    CustomConnectorRequest, MailConnectorCredentialRequest,
 };
 use crate::errors::AppError;
 use std::path::PathBuf;
@@ -47,6 +47,14 @@ pub fn connect_omiga_connector(
     _project_root: Option<String>,
 ) -> CommandResult<ConnectorInfo> {
     connectors::connect_connector(request).map_err(connector_error)
+}
+
+#[tauri::command]
+pub fn save_omiga_mail_connector_credentials(
+    request: MailConnectorCredentialRequest,
+    _project_root: Option<String>,
+) -> CommandResult<ConnectorInfo> {
+    connectors::save_mail_connector_credentials(request).map_err(connector_error)
 }
 
 #[tauri::command]

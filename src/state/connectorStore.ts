@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { extractErrorMessage } from "../utils/errorMessage";
 
 const CONNECTOR_TEST_HISTORY_LIMIT = 20;
+const CONNECTOR_CATALOG_CACHE_TTL_MS = 30_000;
 
 export type ConnectorAuthType =
   | "none"
@@ -142,6 +143,12 @@ export interface ConnectorLoginPollResult {
   connector?: ConnectorInfo | null;
 }
 
+export interface MailConnectorCredentialRequest {
+  connectorId: string;
+  emailAddress: string;
+  authorizationCode: string;
+}
+
 export interface CustomConnectorRequest {
   id: string;
   name: string;
@@ -161,6 +168,11 @@ export interface CustomConnectorExport {
   connectors: ConnectorDefinition[];
 }
 
+export interface LoadConnectorsOptions {
+  force?: boolean;
+  background?: boolean;
+}
+
 interface ConnectorState {
   catalog: ConnectorCatalog | null;
   auditEvents: ConnectorAuditEvent[];
@@ -169,18 +181,22 @@ interface ConnectorState {
   testingConnectorIds: Record<string, boolean>;
   testResults: Record<string, ConnectorConnectionTestResult>;
   error: string | null;
-  loadConnectors: () => Promise<void>;
+  loadedAt: number | null;
+  loadConnectors: (options?: LoadConnectorsOptions) => Promise<void>;
   loadConnectorAuditEvents: (connectorId?: string | null) => Promise<void>;
   setConnectorEnabled: (connectorId: string, enabled: boolean) => Promise<void>;
   connectConnector: (
     connectorId: string,
     options?: { accountLabel?: string; authSource?: string },
   ) => Promise<void>;
+  saveMailConnectorCredentials: (
+    request: MailConnectorCredentialRequest,
+  ) => Promise<ConnectorInfo>;
   disconnectConnector: (connectorId: string) => Promise<void>;
   testConnectorConnection: (
     connectorId: string,
     projectRoot?: string | null,
-  ) => Promise<void>;
+  ) => Promise<ConnectorConnectionTestResult>;
   startConnectorLogin: (
     connectorId: string,
   ) => Promise<ConnectorLoginStartResult>;
@@ -292,7 +308,7 @@ function replaceConnectorLastConnectionTest(
   };
 }
 
-export const useConnectorStore = create<ConnectorState>((set) => ({
+export const useConnectorStore = create<ConnectorState>((set, get) => ({
   catalog: null,
   auditEvents: [],
   isLoading: false,
@@ -300,21 +316,35 @@ export const useConnectorStore = create<ConnectorState>((set) => ({
   testingConnectorIds: {},
   testResults: {},
   error: null,
+  loadedAt: null,
 
-  loadConnectors: async () => {
-    set({ isLoading: true, error: null });
+  loadConnectors: async (options = {}) => {
+    const { force = false, background = false } = options;
+    const state = get();
+    const now = Date.now();
+    if (
+      !force &&
+      (state.isLoading ||
+        (state.catalog &&
+          state.loadedAt &&
+          now - state.loadedAt < CONNECTOR_CATALOG_CACHE_TTL_MS))
+    ) {
+      if (state.error) set({ error: null });
+      return;
+    }
+
+    if (background) {
+      set({ error: null });
+    } else {
+      set({ isLoading: true, error: null });
+    }
     try {
-      const [catalog, auditEvents] = await Promise.all([
-        invoke<ConnectorCatalog>("list_omiga_connectors"),
-        invoke<ConnectorAuditEvent[]>("list_omiga_connector_audit_events", {
-          limit: 100,
-        }),
-      ]);
+      const catalog = await invoke<ConnectorCatalog>("list_omiga_connectors");
       set({
         catalog,
-        auditEvents,
         testResults: collectLastTestResults(catalog),
         isLoading: false,
+        loadedAt: Date.now(),
       });
     } catch (e) {
       set({ isLoading: false, error: extractErrorMessage(e) });
@@ -392,6 +422,28 @@ export const useConnectorStore = create<ConnectorState>((set) => ({
     }
   },
 
+  saveMailConnectorCredentials: async (request) => {
+    set({ isMutating: true, error: null });
+    try {
+      const connector = await invoke<ConnectorInfo>(
+        "save_omiga_mail_connector_credentials",
+        {
+          request,
+        },
+      );
+      set((state) => ({
+        catalog: replaceConnector(state.catalog, connector),
+        testResults: removeTestResult(state.testResults, request.connectorId),
+        isMutating: false,
+      }));
+      return connector;
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
+      throw new Error(error);
+    }
+  },
+
   disconnectConnector: async (connectorId) => {
     set({ isMutating: true, error: null });
     try {
@@ -438,6 +490,7 @@ export const useConnectorStore = create<ConnectorState>((set) => ({
         ),
         testResults: { ...state.testResults, [connectorId]: result },
       }));
+      return result;
     } catch (e) {
       const error = extractErrorMessage(e);
       set((state) => ({
@@ -502,6 +555,7 @@ export const useConnectorStore = create<ConnectorState>((set) => ({
         catalog,
         testResults: collectLastTestResults(catalog),
         isMutating: false,
+        loadedAt: Date.now(),
       }));
     } catch (e) {
       const error = extractErrorMessage(e);
@@ -523,6 +577,7 @@ export const useConnectorStore = create<ConnectorState>((set) => ({
         catalog,
         testResults: collectLastTestResults(catalog),
         isMutating: false,
+        loadedAt: Date.now(),
       }));
     } catch (e) {
       const error = extractErrorMessage(e);
@@ -560,6 +615,7 @@ export const useConnectorStore = create<ConnectorState>((set) => ({
         catalog,
         testResults: collectLastTestResults(catalog),
         isMutating: false,
+        loadedAt: Date.now(),
       });
     } catch (e) {
       const error = extractErrorMessage(e);

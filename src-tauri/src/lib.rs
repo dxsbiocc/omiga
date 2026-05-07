@@ -248,6 +248,7 @@ pub fn run() {
             commands::connectors::list_omiga_connector_audit_events,
             commands::connectors::set_omiga_connector_enabled,
             commands::connectors::connect_omiga_connector,
+            commands::connectors::save_omiga_mail_connector_credentials,
             commands::connectors::disconnect_omiga_connector,
             commands::connectors::test_omiga_connector_connection,
             commands::connectors::start_omiga_connector_login,

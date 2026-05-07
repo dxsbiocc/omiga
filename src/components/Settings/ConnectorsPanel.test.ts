@@ -83,7 +83,7 @@ describe("connector product integration state", () => {
     ).toBe(false);
   });
 
-  it("treats Gmail as integrated through Omiga browser OAuth", () => {
+  it("treats Gmail as integrated through Omiga mailbox credential validation", () => {
     expect(
       connectorIsProductIntegrated(
         connector({
@@ -144,10 +144,11 @@ describe("connector product integration state", () => {
       true,
     );
 
-    expect(message).toContain("需要 Omiga 自有 OAuth 配置");
-    expect(message).toContain("OMIGA_*_OAUTH_CLIENT_ID");
+    expect(message).toContain("登录服务尚未在当前构建中启用");
+    expect(message).toContain("Omiga 自有 OAuth 服务");
     expect(message).toContain("不会跳转到 OpenAI/Codex 托管授权页");
     expect(message).not.toContain("SLACK_BOT_TOKEN");
+    expect(message).not.toContain("OMIGA_SLACK_OAUTH_CLIENT_ID");
     expect(message).not.toContain("chatgpt.com");
   });
 });
