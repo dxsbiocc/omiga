@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 pub const OPERATOR_API_VERSION_V1ALPHA1: &str = "omiga.ai/operator/v1alpha1";
 pub const OPERATOR_KIND: &str = "Operator";
 pub const OPERATOR_TOOL_PREFIX: &str = "operator__";
+const OPERATOR_STATE_DIR_NAME: &str = ".omiga";
 const REGISTRY_RELATIVE_PATH: &str = "operators/registry.json";
+const RUNS_RELATIVE_PATH: &str = "runs";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,6 +169,8 @@ pub struct OperatorSpec {
     pub kind: String,
     pub metadata: OperatorMetadata,
     pub interface: OperatorInterfaceSpec,
+    #[serde(default)]
+    pub smoke_tests: Vec<OperatorSmokeTestSpec>,
     pub execution: OperatorExecutionSpec,
     #[serde(default)]
     pub runtime: Option<JsonValue>,
@@ -188,9 +192,32 @@ pub struct OperatorCandidateSummary {
     pub description: Option<String>,
     pub source_plugin: String,
     pub manifest_path: String,
+    #[serde(default)]
+    pub smoke_tests: Vec<OperatorSmokeTestSpec>,
     pub enabled_aliases: Vec<String>,
     pub exposed: bool,
     pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorSmokeTestSpec {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub arguments: OperatorInvocation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorManifestDiagnostic {
+    pub source_plugin: String,
+    pub manifest_path: String,
+    pub severity: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +301,8 @@ struct RawOperatorManifest {
     metadata: RawOperatorMetadata,
     #[serde(default)]
     interface: RawOperatorInterface,
+    #[serde(default, alias = "tests", alias = "smoke")]
+    smoke_tests: Vec<RawOperatorSmokeTestSpec>,
     execution: RawOperatorExecution,
     #[serde(default)]
     runtime: Option<JsonValue>,
@@ -283,6 +312,24 @@ struct RawOperatorManifest {
     bindings: Vec<OperatorBindingSpec>,
     #[serde(default)]
     permissions: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawOperatorSmokeTestSpec {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    arguments: Option<OperatorInvocation>,
+    #[serde(default)]
+    inputs: BTreeMap<String, JsonValue>,
+    #[serde(default)]
+    params: BTreeMap<String, JsonValue>,
+    #[serde(default)]
+    resources: BTreeMap<String, JsonValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -359,6 +406,35 @@ enum RawResourceSpec {
     Scalar(JsonValue),
 }
 
+impl TryFrom<RawOperatorSmokeTestSpec> for OperatorSmokeTestSpec {
+    type Error = String;
+
+    fn try_from(raw: RawOperatorSmokeTestSpec) -> Result<Self, Self::Error> {
+        let id = raw.id.trim();
+        if id.is_empty() {
+            return Err("operator smokeTests.id must not be empty".to_string());
+        }
+        if !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        {
+            return Err(format!(
+                "operator smoke test id `{id}` may contain only letters, numbers, `_`, or `-`"
+            ));
+        }
+        let mut arguments = raw.arguments.unwrap_or_default();
+        arguments.inputs.extend(raw.inputs);
+        arguments.params.extend(raw.params);
+        arguments.resources.extend(raw.resources);
+        Ok(Self {
+            id: id.to_string(),
+            name: raw.name,
+            description: raw.description,
+            arguments,
+        })
+    }
+}
+
 impl From<RawFieldSpec> for OperatorFieldSpec {
     fn from(raw: RawFieldSpec) -> Self {
         Self {
@@ -392,7 +468,7 @@ impl From<RawResourceSpec> for OperatorResourceSpec {
 pub fn registry_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".omiga")
+        .join(OPERATOR_STATE_DIR_NAME)
         .join(REGISTRY_RELATIVE_PATH)
 }
 
@@ -447,7 +523,7 @@ pub fn load_operator_manifest(
     if argv.is_empty() {
         return Err("operator execution.argv must not be empty".to_string());
     }
-    Ok(OperatorSpec {
+    let spec = OperatorSpec {
         api_version: parsed.api_version,
         kind: parsed.kind,
         metadata: OperatorMetadata {
@@ -477,6 +553,11 @@ pub fn load_operator_manifest(
                 .map(|(key, value)| (key, value.into()))
                 .collect(),
         },
+        smoke_tests: parsed
+            .smoke_tests
+            .into_iter()
+            .map(OperatorSmokeTestSpec::try_from)
+            .collect::<Result<Vec<_>, _>>()?,
         execution: OperatorExecutionSpec { argv },
         runtime: parsed.runtime,
         resources: parsed
@@ -491,7 +572,66 @@ pub fn load_operator_manifest(
             plugin_root: plugin_root.into(),
             manifest_path: manifest_path.to_path_buf(),
         },
-    })
+    };
+    validate_operator_smoke_tests(&spec)?;
+    Ok(spec)
+}
+
+fn validate_operator_smoke_tests(spec: &OperatorSpec) -> Result<(), String> {
+    let mut seen = HashSet::new();
+    for smoke_test in &spec.smoke_tests {
+        if !seen.insert(smoke_test.id.as_str()) {
+            return Err(format!(
+                "operator smoke test id `{}` is declared more than once",
+                smoke_test.id
+            ));
+        }
+        let args = &smoke_test.arguments;
+        reject_unknown_fields(
+            &format!("smokeTests.{}.inputs", smoke_test.id),
+            args.inputs.keys(),
+            &spec.interface.inputs,
+        )
+        .map_err(|error| smoke_validation_error(&smoke_test.id, error))?;
+        reject_unknown_fields(
+            &format!("smokeTests.{}.params", smoke_test.id),
+            args.params.keys(),
+            &spec.interface.params,
+        )
+        .map_err(|error| smoke_validation_error(&smoke_test.id, error))?;
+        let mut effective_params = apply_param_defaults(spec, args.params.clone());
+        validate_field_values(
+            &format!("smokeTests.{}.inputs", smoke_test.id),
+            &spec.interface.inputs,
+            &args.inputs,
+        )
+        .map_err(|error| smoke_validation_error(&smoke_test.id, error))?;
+        validate_field_values(
+            &format!("smokeTests.{}.params", smoke_test.id),
+            &spec.interface.params,
+            &effective_params,
+        )
+        .map_err(|error| smoke_validation_error(&smoke_test.id, error))?;
+        let effective_resources =
+            apply_resource_defaults_and_overrides(spec, args.resources.clone())
+                .map_err(|error| smoke_validation_error(&smoke_test.id, error))?;
+        apply_equal_bindings(spec, &mut effective_params, &effective_resources)
+            .map_err(|error| smoke_validation_error(&smoke_test.id, error))?;
+    }
+    Ok(())
+}
+
+fn smoke_validation_error(test_id: &str, error: OperatorToolError) -> String {
+    match error.field {
+        Some(field) => format!(
+            "operator smoke test `{test_id}` is invalid at {field}: {}",
+            error.message
+        ),
+        None => format!(
+            "operator smoke test `{test_id}` is invalid: {}",
+            error.message
+        ),
+    }
 }
 
 fn validate_operator_id(id: &str) -> Result<(), String> {
@@ -510,10 +650,17 @@ fn validate_operator_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn discover_operator_candidates() -> Vec<OperatorSpec> {
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn discover_operator_candidates_from_plugins<'a>(
+    plugins: impl IntoIterator<Item = &'a crate::domain::plugins::LoadedPlugin>,
+) -> Vec<OperatorSpec> {
     let mut out = Vec::new();
-    let outcome = crate::domain::plugins::plugin_load_outcome();
-    for plugin in outcome.plugins().iter().filter(|plugin| plugin.is_active()) {
+    for plugin in plugins.into_iter().filter(|plugin| plugin.is_active()) {
         for manifest_path in discover_manifest_paths(&plugin.root) {
             match load_operator_manifest(&manifest_path, plugin.id.clone(), plugin.root.clone()) {
                 Ok(spec) => out.push(spec),
@@ -533,6 +680,43 @@ pub fn discover_operator_candidates() -> Vec<OperatorSpec> {
             .then_with(|| left.source.source_plugin.cmp(&right.source.source_plugin))
     });
     out
+}
+
+pub fn discover_operator_candidates() -> Vec<OperatorSpec> {
+    let outcome = crate::domain::plugins::plugin_load_outcome();
+    discover_operator_candidates_from_plugins(outcome.plugins())
+}
+
+fn operator_manifest_diagnostics_from_plugins<'a>(
+    plugins: impl IntoIterator<Item = &'a crate::domain::plugins::LoadedPlugin>,
+) -> Vec<OperatorManifestDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for plugin in plugins.into_iter().filter(|plugin| plugin.is_active()) {
+        for manifest_path in discover_manifest_paths(&plugin.root) {
+            if let Err(error) =
+                load_operator_manifest(&manifest_path, plugin.id.clone(), plugin.root.clone())
+            {
+                diagnostics.push(OperatorManifestDiagnostic {
+                    source_plugin: plugin.id.clone(),
+                    manifest_path: manifest_path.to_string_lossy().into_owned(),
+                    severity: "error".to_string(),
+                    message: error,
+                });
+            }
+        }
+    }
+    diagnostics.sort_by(|left, right| {
+        left.source_plugin
+            .cmp(&right.source_plugin)
+            .then_with(|| left.manifest_path.cmp(&right.manifest_path))
+            .then_with(|| left.message.cmp(&right.message))
+    });
+    diagnostics
+}
+
+pub fn list_operator_manifest_diagnostics() -> Vec<OperatorManifestDiagnostic> {
+    let outcome = crate::domain::plugins::plugin_load_outcome();
+    operator_manifest_diagnostics_from_plugins(outcome.plugins())
 }
 
 fn discover_manifest_paths(plugin_root: &Path) -> Vec<PathBuf> {
@@ -795,6 +979,7 @@ pub fn list_operator_summaries() -> Vec<OperatorCandidateSummary> {
                     .manifest_path
                     .to_string_lossy()
                     .into_owned(),
+                smoke_tests: candidate.smoke_tests,
                 exposed: !aliases.is_empty(),
                 enabled_aliases: aliases,
                 unavailable_reason: None,
@@ -966,7 +1151,7 @@ fn resources_object_schema(resources: &BTreeMap<String, OperatorResourceSpec>) -
     })
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperatorInvocation {
     #[serde(default)]
@@ -1036,11 +1221,16 @@ impl OperatorToolError {
 struct OperatorRunResult {
     status: String,
     run_id: String,
+    location: String,
     operator: OperatorRunIdentity,
     run_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    run_context: Option<OperatorRunContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     provenance_path: Option<String>,
     outputs: BTreeMap<String, Vec<ArtifactRef>>,
+    effective_inputs: BTreeMap<String, JsonValue>,
+    input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
     enforcement: JsonValue,
@@ -1060,6 +1250,55 @@ struct OperatorRunIdentity {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct OperatorRunStatusMetadata {
+    run_id: String,
+    location: String,
+    operator: OperatorRunIdentity,
+    run_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_context: Option<OperatorRunContext>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorRunContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smoke_test_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smoke_test_name: Option<String>,
+}
+
+impl OperatorRunContext {
+    fn is_empty(&self) -> bool {
+        self.kind.as_deref().unwrap_or_default().trim().is_empty()
+            && self
+                .smoke_test_id
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            && self
+                .smoke_test_name
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+    }
+
+    fn normalized(self) -> Option<Self> {
+        let normalized = Self {
+            kind: normalize_optional_string(self.kind),
+            smoke_test_id: normalize_optional_string(self.smoke_test_id),
+            smoke_test_name: normalize_optional_string(self.smoke_test_name),
+        };
+        (!normalized.is_empty()).then_some(normalized)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArtifactRef {
     pub location: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1071,17 +1310,185 @@ pub struct ArtifactRef {
     pub fingerprint: Option<JsonValue>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorRunSummary {
+    pub run_id: String,
+    pub status: String,
+    pub location: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_plugin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smoke_test_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smoke_test_name: Option<String>,
+    pub run_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance_path: Option<String>,
+    pub output_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout_tail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr_tail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorRunDetail {
+    pub run_id: String,
+    pub location: String,
+    pub run_dir: String,
+    pub source_path: String,
+    pub document: JsonValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorRunLog {
+    pub run_id: String,
+    pub location: String,
+    pub log_name: String,
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorRunVerification {
+    pub run_id: String,
+    pub location: String,
+    pub run_dir: String,
+    pub ok: bool,
+    pub checks: Vec<OperatorRunCheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorRunCheck {
+    pub name: String,
+    pub ok: bool,
+    pub severity: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperatorExecutionSurfaceKind {
+    Local,
+    Ssh,
+    Sandbox,
+}
+
+#[derive(Debug, Clone)]
+struct OperatorExecutionSurface {
+    kind: OperatorExecutionSurfaceKind,
+    run_dir: String,
+}
+
+impl OperatorExecutionSurface {
+    fn for_context(ctx: &crate::domain::tools::ToolContext, run_id: &str) -> Self {
+        match ctx.execution_environment.as_str() {
+            "ssh" => Self {
+                kind: OperatorExecutionSurfaceKind::Ssh,
+                run_dir: crate::domain::tools::env_store::remote_path(
+                    ctx,
+                    &operator_run_relative_path(run_id),
+                ),
+            },
+            "sandbox" | "remote" => Self {
+                kind: OperatorExecutionSurfaceKind::Sandbox,
+                run_dir: crate::domain::tools::env_store::remote_path(
+                    ctx,
+                    &operator_run_relative_path(run_id),
+                ),
+            },
+            _ => Self {
+                kind: OperatorExecutionSurfaceKind::Local,
+                run_dir: operator_run_dir(&ctx.project_root, run_id)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        }
+    }
+
+    fn for_runs_root(ctx: &crate::domain::tools::ToolContext) -> Self {
+        match ctx.execution_environment.as_str() {
+            "ssh" => Self {
+                kind: OperatorExecutionSurfaceKind::Ssh,
+                run_dir: crate::domain::tools::env_store::remote_path(
+                    ctx,
+                    &operator_runs_relative_path(),
+                ),
+            },
+            "sandbox" | "remote" => Self {
+                kind: OperatorExecutionSurfaceKind::Sandbox,
+                run_dir: crate::domain::tools::env_store::remote_path(
+                    ctx,
+                    &operator_runs_relative_path(),
+                ),
+            },
+            _ => Self {
+                kind: OperatorExecutionSurfaceKind::Local,
+                run_dir: operator_runs_root(&ctx.project_root)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        }
+    }
+
+    fn is_environment(&self) -> bool {
+        self.kind != OperatorExecutionSurfaceKind::Local
+    }
+
+    fn artifact_location(&self) -> &'static str {
+        match self.kind {
+            OperatorExecutionSurfaceKind::Local => "local",
+            OperatorExecutionSurfaceKind::Ssh => "ssh",
+            OperatorExecutionSurfaceKind::Sandbox => "sandbox",
+        }
+    }
+}
+
 pub async fn execute_operator_tool_call(
     ctx: &crate::domain::tools::ToolContext,
     tool_name: &str,
     arguments: &str,
 ) -> (String, bool) {
+    execute_operator_tool_call_with_context(ctx, tool_name, arguments, None).await
+}
+
+pub async fn execute_operator_tool_call_with_context(
+    ctx: &crate::domain::tools::ToolContext,
+    tool_name: &str,
+    arguments: &str,
+    run_context: Option<OperatorRunContext>,
+) -> (String, bool) {
+    let run_context = run_context.and_then(OperatorRunContext::normalized);
     let alias = tool_name
         .strip_prefix(OPERATOR_TOOL_PREFIX)
         .unwrap_or(tool_name);
     let resolved = match resolve_operator_alias(alias) {
         Ok(resolved) => resolved,
-        Err(error) => return (failure_json(alias, None, None, error), true),
+        Err(error) => return (failure_json(alias, None, None, run_context, error), true),
     };
     let invocation = match serde_json::from_str::<OperatorInvocation>(arguments) {
         Ok(invocation) => invocation,
@@ -1096,17 +1503,21 @@ pub async fn execute_operator_tool_call(
             .with_suggested_action(
                 "Retry with the operator schema's inputs/params/resources shape.",
             );
-            return (failure_json(alias, Some(&resolved), None, error), true);
+            return (
+                failure_json(alias, Some(&resolved), None, run_context, error),
+                true,
+            );
         }
     };
 
-    match execute_resolved_operator(ctx, resolved.clone(), invocation).await {
+    match execute_resolved_operator(ctx, resolved.clone(), invocation, run_context.clone()).await {
         Ok(result) => (
             serde_json::to_string_pretty(&result).unwrap_or_else(|err| {
                 failure_json(
                     alias,
                     Some(&resolved),
                     None,
+                    run_context.clone(),
                     OperatorToolError::new("serialization_failed", false, err.to_string()),
                 )
             }),
@@ -1115,7 +1526,13 @@ pub async fn execute_operator_tool_call(
         Err(error) => {
             let run_dir = error.run_dir.clone();
             (
-                failure_json(alias, Some(&resolved), run_dir.as_deref(), error),
+                failure_json(
+                    alias,
+                    Some(&resolved),
+                    run_dir.as_deref(),
+                    run_context,
+                    error,
+                ),
                 true,
             )
         }
@@ -1126,6 +1543,7 @@ fn failure_json(
     alias: &str,
     resolved: Option<&ResolvedOperator>,
     run_dir: Option<&str>,
+    run_context: Option<OperatorRunContext>,
     error: OperatorToolError,
 ) -> String {
     let identity = resolved.map(|resolved| OperatorRunIdentity {
@@ -1144,6 +1562,7 @@ fn failure_json(
         "status": "failed",
         "operator": identity,
         "runDir": run_dir,
+        "runContext": run_context,
         "error": error,
     }))
     .unwrap_or_else(|_| "{\"status\":\"failed\"}".to_string())
@@ -1153,6 +1572,7 @@ async fn execute_resolved_operator(
     ctx: &crate::domain::tools::ToolContext,
     resolved: ResolvedOperator,
     invocation: OperatorInvocation,
+    run_context: Option<OperatorRunContext>,
 ) -> Result<OperatorRunResult, OperatorToolError> {
     if !runtime_supported(ctx, &resolved.spec) {
         return Err(OperatorToolError::new(
@@ -1173,56 +1593,73 @@ async fn execute_resolved_operator(
         chrono::Utc::now().format("%Y%m%d%H%M%S"),
         uuid::Uuid::new_v4().simple()
     );
-    let is_ssh = ctx.execution_environment == "ssh";
-    let run_dir = if is_ssh {
-        crate::domain::tools::env_store::remote_path(ctx, &format!(".omiga/runs/{run_id}"))
-    } else {
-        ctx.project_root
-            .join(".omiga")
-            .join("runs")
-            .join(&run_id)
-            .to_string_lossy()
-            .into_owned()
-    };
+    let surface = OperatorExecutionSurface::for_context(ctx, &run_id);
 
+    reject_unknown_fields(
+        "inputs",
+        invocation.inputs.keys(),
+        &resolved.spec.interface.inputs,
+    )?;
+    reject_unknown_fields(
+        "params",
+        invocation.params.keys(),
+        &resolved.spec.interface.params,
+    )?;
     let mut effective_params = apply_param_defaults(&resolved.spec, invocation.params);
+    validate_field_values("params", &resolved.spec.interface.params, &effective_params)?;
     let effective_resources =
         apply_resource_defaults_and_overrides(&resolved.spec, invocation.resources)?;
     apply_equal_bindings(&resolved.spec, &mut effective_params, &effective_resources)?;
 
-    let canonical_inputs = canonicalize_inputs(ctx, &resolved.spec, invocation.inputs, is_ssh)?;
+    let canonical_inputs = canonicalize_inputs(
+        ctx,
+        &resolved.spec,
+        invocation.inputs,
+        surface.is_environment(),
+    )?;
+    let input_fingerprints = fingerprint_inputs(
+        ctx,
+        &resolved.spec,
+        &canonical_inputs,
+        surface.artifact_location(),
+    );
     let argv = expand_argv(
         &resolved.spec,
         &canonical_inputs,
         &effective_params,
         &effective_resources,
-        &run_dir,
+        &surface.run_dir,
     )?;
-    let walltime_secs =
-        resource_walltime_secs(&effective_resources).unwrap_or(ctx.timeout_secs.max(60));
+    let walltime_secs = effective_walltime_secs(&effective_resources, ctx.timeout_secs);
 
-    if is_ssh {
-        execute_in_environment(
-            ctx,
-            &resolved,
-            &run_id,
-            &run_dir,
-            &argv,
-            walltime_secs,
-            effective_params,
-            effective_resources,
-        )
-        .await
-    } else {
+    if surface.kind == OperatorExecutionSurfaceKind::Local {
         execute_local(
             ctx,
             &resolved,
             &run_id,
-            &run_dir,
+            &surface.run_dir,
             &argv,
             walltime_secs,
+            canonical_inputs,
+            input_fingerprints,
             effective_params,
             effective_resources,
+            run_context,
+        )
+        .await
+    } else {
+        execute_in_environment(
+            ctx,
+            &resolved,
+            &run_id,
+            &surface,
+            &argv,
+            walltime_secs,
+            canonical_inputs,
+            input_fingerprints,
+            effective_params,
+            effective_resources,
+            run_context,
         )
         .await
     }
@@ -1238,23 +1675,32 @@ fn runtime_supported(ctx: &crate::domain::tools::ToolContext, spec: &OperatorSpe
         _ => "local",
     };
     let container = match ctx.execution_environment.as_str() {
-        "sandbox" | "remote" => ctx.sandbox_backend.as_str(),
+        "sandbox" | "remote" => {
+            let backend = ctx.sandbox_backend.trim();
+            if backend.is_empty() {
+                "none"
+            } else {
+                backend
+            }
+        }
         _ => "none",
     };
     let placements = runtime_axis_values(runtime, "placement");
     let containers = runtime_axis_values(runtime, "container");
+    let schedulers = runtime_axis_values(runtime, "scheduler");
     let flat = runtime
         .get("supported")
         .and_then(|value| value.as_array())
         .map(|items| {
             items
                 .iter()
-                .filter_map(|item| item.as_str().map(str::to_string))
+                .filter_map(|item| item.as_str().map(|s| s.trim().to_ascii_lowercase()))
                 .collect::<HashSet<_>>()
         })
         .unwrap_or_default();
     (placements.is_empty() || placements.contains(placement) || flat.contains(placement))
         && (containers.is_empty() || containers.contains(container) || flat.contains(container))
+        && (schedulers.is_empty() || schedulers.contains("none") || flat.contains("scheduler=none"))
 }
 
 fn runtime_axis_values(runtime: &JsonValue, axis: &str) -> HashSet<String> {
@@ -1289,6 +1735,220 @@ fn apply_param_defaults(
     params
 }
 
+fn reject_unknown_fields<'a>(
+    scope: &str,
+    names: impl Iterator<Item = &'a String>,
+    declared: &BTreeMap<String, OperatorFieldSpec>,
+) -> Result<(), OperatorToolError> {
+    for name in names {
+        if !declared.contains_key(name) {
+            return Err(OperatorToolError::new(
+                "invalid_arguments",
+                false,
+                format!("Unknown {scope} field `{name}`."),
+            )
+            .with_field(format!("{scope}.{name}"))
+            .with_suggested_action("Retry with only fields declared in the operator schema."));
+        }
+    }
+    Ok(())
+}
+
+fn validate_field_values(
+    scope: &str,
+    fields: &BTreeMap<String, OperatorFieldSpec>,
+    values: &BTreeMap<String, JsonValue>,
+) -> Result<(), OperatorToolError> {
+    for (name, field) in fields {
+        match values.get(name) {
+            Some(value) => validate_field_value(scope, name, field, value)?,
+            None if field.required => {
+                return Err(OperatorToolError::new(
+                    "input_validation_failed",
+                    false,
+                    format!("Required {scope} field `{name}` is missing."),
+                )
+                .with_field(format!("{scope}.{name}")))
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_field_value(
+    scope: &str,
+    name: &str,
+    field: &OperatorFieldSpec,
+    value: &JsonValue,
+) -> Result<(), OperatorToolError> {
+    let field_path = format!("{scope}.{name}");
+    if value.is_null() {
+        if field.required {
+            return Err(OperatorToolError::new(
+                "input_validation_failed",
+                false,
+                format!("Required {scope} field `{name}` must not be null."),
+            )
+            .with_field(field_path));
+        }
+        return Ok(());
+    }
+
+    match field.kind {
+        OperatorFieldKind::String | OperatorFieldKind::File | OperatorFieldKind::Directory => {
+            let text = value.as_str().ok_or_else(|| {
+                OperatorToolError::new(
+                    "input_validation_failed",
+                    false,
+                    format!("{scope} field `{name}` must be a string."),
+                )
+                .with_field(field_path.clone())
+            })?;
+            if field.non_empty.unwrap_or(false) && text.trim().is_empty() {
+                return Err(OperatorToolError::new(
+                    "input_validation_failed",
+                    false,
+                    format!("{scope} field `{name}` must not be empty."),
+                )
+                .with_field(field_path));
+            }
+        }
+        OperatorFieldKind::Integer => {
+            let number = value.as_i64().or_else(|| value.as_u64().map(|n| n as i64));
+            let Some(number) = number else {
+                return Err(OperatorToolError::new(
+                    "input_validation_failed",
+                    false,
+                    format!("{scope} field `{name}` must be an integer."),
+                )
+                .with_field(field_path));
+            };
+            validate_numeric_bounds(scope, name, &field_path, number as f64, field)?;
+        }
+        OperatorFieldKind::Number => {
+            let Some(number) = value.as_f64() else {
+                return Err(OperatorToolError::new(
+                    "input_validation_failed",
+                    false,
+                    format!("{scope} field `{name}` must be a number."),
+                )
+                .with_field(field_path));
+            };
+            validate_numeric_bounds(scope, name, &field_path, number, field)?;
+        }
+        OperatorFieldKind::Boolean => {
+            if !value.is_boolean() {
+                return Err(OperatorToolError::new(
+                    "input_validation_failed",
+                    false,
+                    format!("{scope} field `{name}` must be a boolean."),
+                )
+                .with_field(field_path));
+            }
+        }
+        OperatorFieldKind::Json => {
+            if !value.is_object() {
+                return Err(OperatorToolError::new(
+                    "input_validation_failed",
+                    false,
+                    format!("{scope} field `{name}` must be a JSON object."),
+                )
+                .with_field(field_path));
+            }
+        }
+        OperatorFieldKind::FileArray | OperatorFieldKind::DirectoryArray => {
+            let array = value.as_array().ok_or_else(|| {
+                OperatorToolError::new(
+                    "input_validation_failed",
+                    false,
+                    format!("{scope} field `{name}` must be an array of strings."),
+                )
+                .with_field(field_path.clone())
+            })?;
+            if field.non_empty.unwrap_or(false) && array.is_empty() {
+                return Err(OperatorToolError::new(
+                    "input_validation_failed",
+                    false,
+                    format!("{scope} field `{name}` must not be empty."),
+                )
+                .with_field(field_path.clone()));
+            }
+            if let Some(min_size) = field.min_size {
+                if (array.len() as u64) < min_size {
+                    return Err(OperatorToolError::new(
+                        "input_validation_failed",
+                        false,
+                        format!("{scope} field `{name}` requires at least {min_size} item(s)."),
+                    )
+                    .with_field(field_path.clone()));
+                }
+            }
+            for (index, item) in array.iter().enumerate() {
+                if !item.is_string() {
+                    return Err(OperatorToolError::new(
+                        "input_validation_failed",
+                        false,
+                        format!("{scope} field `{name}[{index}]` must be a string."),
+                    )
+                    .with_field(format!("{field_path}[{index}]")));
+                }
+            }
+        }
+        OperatorFieldKind::Enum => {}
+    }
+
+    if !field.enum_values.is_empty() && !field.enum_values.iter().any(|item| item == value) {
+        return Err(OperatorToolError::new(
+            "input_validation_failed",
+            false,
+            format!("{scope} field `{name}` is not one of the allowed enum values."),
+        )
+        .with_field(field_path));
+    }
+    Ok(())
+}
+
+fn validate_numeric_bounds(
+    scope: &str,
+    name: &str,
+    field_path: &str,
+    number: f64,
+    field: &OperatorFieldSpec,
+) -> Result<(), OperatorToolError> {
+    if field
+        .minimum
+        .map(|minimum| number < minimum)
+        .unwrap_or(false)
+    {
+        return Err(OperatorToolError::new(
+            "input_validation_failed",
+            false,
+            format!(
+                "{scope} field `{name}` must be >= {}.",
+                field.minimum.unwrap_or_default()
+            ),
+        )
+        .with_field(field_path.to_string()));
+    }
+    if field
+        .maximum
+        .map(|maximum| number > maximum)
+        .unwrap_or(false)
+    {
+        return Err(OperatorToolError::new(
+            "input_validation_failed",
+            false,
+            format!(
+                "{scope} field `{name}` must be <= {}.",
+                field.maximum.unwrap_or_default()
+            ),
+        )
+        .with_field(field_path.to_string()));
+    }
+    Ok(())
+}
+
 fn apply_resource_defaults_and_overrides(
     spec: &OperatorSpec,
     overrides: BTreeMap<String, JsonValue>,
@@ -1316,9 +1976,49 @@ fn apply_resource_defaults_and_overrides(
             )
             .with_field(format!("resources.{name}")));
         }
+        validate_resource_value(&name, &value, resource)?;
         out.insert(name, value);
     }
+    for (name, value) in &out {
+        if let Some(resource) = spec.resources.get(name) {
+            validate_resource_value(name, value, resource)?;
+        }
+    }
     Ok(out)
+}
+
+fn validate_resource_value(
+    name: &str,
+    value: &JsonValue,
+    spec: &OperatorResourceSpec,
+) -> Result<(), OperatorToolError> {
+    if let (Some(value), Some(minimum)) = (
+        value.as_f64(),
+        spec.min.as_ref().and_then(JsonValue::as_f64),
+    ) {
+        if value < minimum {
+            return Err(OperatorToolError::new(
+                "invalid_arguments",
+                false,
+                format!("Resource `{name}` must be >= {minimum}."),
+            )
+            .with_field(format!("resources.{name}")));
+        }
+    }
+    if let (Some(value), Some(maximum)) = (
+        value.as_f64(),
+        spec.max.as_ref().and_then(JsonValue::as_f64),
+    ) {
+        if value > maximum {
+            return Err(OperatorToolError::new(
+                "invalid_arguments",
+                false,
+                format!("Resource `{name}` must be <= {maximum}."),
+            )
+            .with_field(format!("resources.{name}")));
+        }
+    }
+    Ok(())
 }
 
 fn apply_equal_bindings(
@@ -1373,6 +2073,7 @@ fn canonicalize_inputs(
             }
             continue;
         };
+        validate_field_value("inputs", name, field, &value)?;
         let canonical = if field.kind.is_path_like() {
             canonicalize_path_value(ctx, &field.kind, name, value, is_ssh)?
         } else {
@@ -1475,6 +2176,79 @@ fn canonicalize_one_path(
     Ok(canonical.to_string_lossy().into_owned())
 }
 
+fn fingerprint_inputs(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    inputs: &BTreeMap<String, JsonValue>,
+    location: &str,
+) -> BTreeMap<String, JsonValue> {
+    let mut out = BTreeMap::new();
+    for (name, value) in inputs {
+        let Some(field) = spec.interface.inputs.get(name) else {
+            continue;
+        };
+        if !field.kind.is_path_like() {
+            out.insert(
+                name.clone(),
+                json!({"mode": "value", "fingerprint": stable_json_fingerprint(value)}),
+            );
+            continue;
+        }
+        if field.kind.is_array() {
+            let items = value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.as_str())
+                .map(|path| path_fingerprint(ctx, location, path))
+                .collect::<Vec<_>>();
+            out.insert(name.clone(), JsonValue::Array(items));
+        } else if let Some(path) = value.as_str() {
+            out.insert(name.clone(), path_fingerprint(ctx, location, path));
+        }
+    }
+    out
+}
+
+fn stable_json_fingerprint(value: &JsonValue) -> String {
+    // FNV-1a over serde_json's canonical-ish rendering is sufficient for the
+    // MVP lightweight fingerprint. It is intentionally not a strong cache key.
+    let raw = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in raw.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn path_fingerprint(
+    _ctx: &crate::domain::tools::ToolContext,
+    location: &str,
+    path: &str,
+) -> JsonValue {
+    if location == "local" {
+        let metadata = fs::metadata(path).ok();
+        let size = metadata.as_ref().map(|metadata| metadata.len());
+        let modified = metadata
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs());
+        return json!({
+            "mode": "stat",
+            "location": location,
+            "path": path,
+            "size": size,
+            "modifiedUnixSecs": modified
+        });
+    }
+    json!({
+        "mode": "reference",
+        "location": location,
+        "path": path
+    })
+}
+
 fn expand_argv(
     spec: &OperatorSpec,
     inputs: &BTreeMap<String, JsonValue>,
@@ -1489,13 +2263,11 @@ fn expand_argv(
             continue;
         }
         let mut replaced = replace_token_vars(token, spec, inputs, params, resources, run_dir)?;
-        if index == 0 && replaced.contains('/') && !Path::new(&replaced).is_absolute() {
-            replaced = spec
-                .source
-                .plugin_root
-                .join(replaced)
-                .to_string_lossy()
-                .into_owned();
+        if replaced.contains('/') && !Path::new(&replaced).is_absolute() {
+            let plugin_file = spec.source.plugin_root.join(&replaced);
+            if plugin_file.is_file() || index == 0 {
+                replaced = plugin_file.to_string_lossy().into_owned();
+            }
         }
         argv.push(replaced);
     }
@@ -1586,11 +2358,21 @@ async fn execute_local(
     run_dir: &str,
     argv: &[String],
     walltime_secs: u64,
+    effective_inputs: BTreeMap<String, JsonValue>,
+    input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
+    run_context: Option<OperatorRunContext>,
 ) -> Result<OperatorRunResult, OperatorToolError> {
     let run_path = PathBuf::from(run_dir);
-    update_local_status(&run_path, "created", None)?;
+    let status_metadata = OperatorRunStatusMetadata {
+        run_id: run_id.to_string(),
+        location: "local".to_string(),
+        operator: run_identity(resolved),
+        run_dir: run_dir.to_string(),
+        run_context: run_context.clone(),
+    };
+    update_local_status(&run_path, "created", None, Some(&status_metadata))?;
     fs::create_dir_all(run_path.join("work")).map_err(|err| {
         OperatorToolError::new(
             "execution_infra_error",
@@ -1615,7 +2397,7 @@ async fn execute_local(
         )
         .with_run_dir(run_dir)
     })?;
-    update_local_status(&run_path, "running", None)?;
+    update_local_status(&run_path, "running", None, Some(&status_metadata))?;
 
     let command = command_with_log_capture(argv);
     let result = execute_env_command(ctx, run_dir, &command, walltime_secs).await?;
@@ -1630,11 +2412,16 @@ async fn execute_local(
         .with_run_dir(run_dir)
         .with_logs(stdout_tail, stderr_tail)
         .with_suggested_action("Inspect stdout/stderr, then adjust inputs or params and retry.");
-        update_local_status(&run_path, "failed", Some(&error))?;
+        update_local_status(&run_path, "failed", Some(&error), Some(&status_metadata))?;
         return Err(error);
     }
 
-    update_local_status(&run_path, "collecting_outputs", None)?;
+    update_local_status(
+        &run_path,
+        "collecting_outputs",
+        None,
+        Some(&status_metadata),
+    )?;
     let out_tmp = run_path.join("out.tmp");
     let out = run_path.join("out");
     if out.exists() {
@@ -1652,15 +2439,30 @@ async fn execute_local(
         .with_run_dir(run_dir)
     })?;
 
-    let outputs = collect_local_outputs(&resolved.spec, &out)?;
+    let outputs = match collect_local_outputs(&resolved.spec, &out) {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            let error = if error.run_dir.is_none() {
+                error.with_run_dir(run_dir)
+            } else {
+                error
+            };
+            update_local_status(&run_path, "failed", Some(&error), Some(&status_metadata))?;
+            return Err(error);
+        }
+    };
     let provenance_path = run_path.join("provenance.json");
     let result = OperatorRunResult {
         status: "succeeded".to_string(),
         run_id: run_id.to_string(),
-        operator: run_identity(resolved),
+        location: "local".to_string(),
+        operator: status_metadata.operator.clone(),
         run_dir: run_dir.to_string(),
+        run_context,
         provenance_path: Some(provenance_path.to_string_lossy().into_owned()),
         outputs,
+        effective_inputs,
+        input_fingerprints,
         effective_params,
         effective_resources,
         enforcement: enforcement_json(ctx),
@@ -1669,7 +2471,7 @@ async fn execute_local(
     write_json_file(&provenance_path, &result).map_err(|err| {
         OperatorToolError::new("provenance_write_failed", false, err).with_run_dir(run_dir)
     })?;
-    update_local_status(&run_path, "succeeded", None)?;
+    update_local_status(&run_path, "succeeded", None, Some(&status_metadata))?;
     Ok(result)
 }
 
@@ -1677,12 +2479,23 @@ async fn execute_in_environment(
     ctx: &crate::domain::tools::ToolContext,
     resolved: &ResolvedOperator,
     run_id: &str,
-    run_dir: &str,
+    surface: &OperatorExecutionSurface,
     argv: &[String],
     walltime_secs: u64,
+    effective_inputs: BTreeMap<String, JsonValue>,
+    input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
+    run_context: Option<OperatorRunContext>,
 ) -> Result<OperatorRunResult, OperatorToolError> {
+    let run_dir = surface.run_dir.as_str();
+    let status_metadata = OperatorRunStatusMetadata {
+        run_id: run_id.to_string(),
+        location: surface.artifact_location().to_string(),
+        operator: run_identity(resolved),
+        run_dir: run_dir.to_string(),
+        run_context: run_context.clone(),
+    };
     let mkdir = format!(
         "mkdir -p {}/work {}/out.tmp {}/logs",
         sh_quote(run_dir),
@@ -1690,13 +2503,15 @@ async fn execute_in_environment(
         sh_quote(run_dir)
     );
     execute_env_command(ctx, "~", &mkdir, 30).await?;
+    update_environment_status(ctx, run_dir, "created", None, Some(&status_metadata)).await?;
+    update_environment_status(ctx, run_dir, "running", None, Some(&status_metadata)).await?;
     let staged_argv = stage_remote_plugin_files(ctx, &resolved.spec, run_dir, argv).await?;
     let command = command_with_log_capture(&staged_argv);
     let result = execute_env_command(ctx, run_dir, &command, walltime_secs).await?;
     let stdout_tail = remote_tail(ctx, run_dir, "logs/stdout.txt").await;
     let stderr_tail = remote_tail(ctx, run_dir, "logs/stderr.txt").await;
     if result.returncode != 0 {
-        return Err(OperatorToolError::new(
+        let error = OperatorToolError::new(
             "tool_exit_nonzero",
             false,
             format!("Operator process exited with code {}.", result.returncode),
@@ -1705,23 +2520,45 @@ async fn execute_in_environment(
         .with_logs(stdout_tail, stderr_tail)
         .with_suggested_action(
             "Inspect the remote run logs, then adjust inputs or params and retry.",
-        ));
+        );
+        update_environment_status(ctx, run_dir, "failed", Some(&error), Some(&status_metadata))
+            .await?;
+        return Err(error);
     }
     let publish = "rm -rf out && mv out.tmp out";
     execute_env_command(ctx, run_dir, publish, 30).await?;
-    let outputs = collect_remote_outputs(ctx, &resolved.spec, run_dir).await?;
-    Ok(OperatorRunResult {
+    let outputs = match collect_environment_outputs(ctx, &resolved.spec, surface).await {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            let error = if error.run_dir.is_none() {
+                error.with_run_dir(run_dir)
+            } else {
+                error
+            };
+            update_environment_status(ctx, run_dir, "failed", Some(&error), Some(&status_metadata))
+                .await?;
+            return Err(error);
+        }
+    };
+    let result = OperatorRunResult {
         status: "succeeded".to_string(),
         run_id: run_id.to_string(),
-        operator: run_identity(resolved),
+        location: surface.artifact_location().to_string(),
+        operator: status_metadata.operator.clone(),
         run_dir: run_dir.to_string(),
+        run_context,
         provenance_path: Some(format!("{run_dir}/provenance.json")),
         outputs,
+        effective_inputs,
+        input_fingerprints,
         effective_params,
         effective_resources,
         enforcement: enforcement_json(ctx),
         error: None,
-    })
+    };
+    write_environment_json(ctx, run_dir, "provenance.json", &result).await?;
+    update_environment_status(ctx, run_dir, "succeeded", None, Some(&status_metadata)).await?;
+    Ok(result)
 }
 
 async fn stage_remote_plugin_files(
@@ -1887,11 +2724,12 @@ fn collect_local_outputs(
     Ok(outputs)
 }
 
-async fn collect_remote_outputs(
+async fn collect_environment_outputs(
     ctx: &crate::domain::tools::ToolContext,
     spec: &OperatorSpec,
-    run_dir: &str,
+    surface: &OperatorExecutionSurface,
 ) -> Result<BTreeMap<String, Vec<ArtifactRef>>, OperatorToolError> {
+    let run_dir = surface.run_dir.as_str();
     let mut outputs = BTreeMap::new();
     for (name, field) in &spec.interface.outputs {
         let pattern = field.glob.as_deref().unwrap_or("*");
@@ -1913,8 +2751,10 @@ async fn collect_remote_outputs(
                 format!("{run_dir}/{line}")
             };
             artifacts.push(ArtifactRef {
-                location: "ssh".to_string(),
-                server: ctx.ssh_server.clone(),
+                location: surface.artifact_location().to_string(),
+                server: (surface.kind == OperatorExecutionSurfaceKind::Ssh)
+                    .then(|| ctx.ssh_server.clone())
+                    .flatten(),
                 path,
                 size: None,
                 fingerprint: None,
@@ -1946,24 +2786,148 @@ async fn remote_tail(
         .map(|result| result.output)
 }
 
+async fn read_environment_json(
+    ctx: &crate::domain::tools::ToolContext,
+    run_dir: &str,
+    rel: &str,
+) -> Result<Option<JsonValue>, OperatorToolError> {
+    let target = format!("{}/{}", run_dir.trim_end_matches('/'), rel);
+    let command = format!(
+        "if [ -f {} ]; then cat {}; else printf %s __OMIGA_OPERATOR_MISSING__; fi",
+        sh_quote(&target),
+        sh_quote(&target),
+    );
+    let result = execute_env_command(ctx, "~", &command, 30).await?;
+    if result.output.trim() == "__OMIGA_OPERATOR_MISSING__" {
+        return Ok(None);
+    }
+    serde_json::from_str::<JsonValue>(&result.output)
+        .map(Some)
+        .map_err(|err| {
+            OperatorToolError::new(
+                "run_state_read_failed",
+                true,
+                format!("parse remote run JSON {target}: {err}"),
+            )
+            .with_run_dir(run_dir)
+        })
+}
+
+async fn read_environment_text_tail(
+    ctx: &crate::domain::tools::ToolContext,
+    run_dir: &str,
+    rel: &str,
+    limit_bytes: u64,
+) -> Result<Option<String>, OperatorToolError> {
+    let target = format!("{}/{}", run_dir.trim_end_matches('/'), rel);
+    let command = format!(
+        "if [ -f {} ]; then tail -c {} {}; else printf %s __OMIGA_OPERATOR_MISSING__; fi",
+        sh_quote(&target),
+        limit_bytes,
+        sh_quote(&target),
+    );
+    let result = execute_env_command(ctx, "~", &command, 30).await?;
+    if result.output.trim() == "__OMIGA_OPERATOR_MISSING__" {
+        Ok(None)
+    } else {
+        Ok(Some(result.output))
+    }
+}
+
+async fn update_environment_status(
+    ctx: &crate::domain::tools::ToolContext,
+    run_dir: &str,
+    status: &str,
+    error: Option<&OperatorToolError>,
+    metadata: Option<&OperatorRunStatusMetadata>,
+) -> Result<(), OperatorToolError> {
+    let mut value = json!({
+        "status": status,
+        "updatedAt": chrono::Utc::now().to_rfc3339(),
+        "error": error,
+    });
+    apply_status_metadata(&mut value, metadata);
+    write_environment_json(ctx, run_dir, "status.json", &value).await
+}
+
+async fn write_environment_json(
+    ctx: &crate::domain::tools::ToolContext,
+    run_dir: &str,
+    rel: &str,
+    value: &impl Serialize,
+) -> Result<(), OperatorToolError> {
+    let raw = serde_json::to_vec_pretty(value).map_err(|err| {
+        OperatorToolError::new("provenance_write_failed", false, err.to_string())
+            .with_run_dir(run_dir)
+    })?;
+    use base64::{engine::general_purpose, Engine as _};
+    let encoded = general_purpose::STANDARD.encode(raw);
+    let target = format!("{}/{}", run_dir.trim_end_matches('/'), rel);
+    let command = format!(
+        "mkdir -p {} && printf %s {} | base64 -d > {}",
+        sh_quote(run_dir),
+        sh_quote(&encoded),
+        sh_quote(&target),
+    );
+    execute_env_command(ctx, "~", &command, 30)
+        .await
+        .map(|_| ())
+        .map_err(|err| {
+            OperatorToolError::new("provenance_write_failed", true, err.message)
+                .with_run_dir(run_dir)
+        })
+}
+
 fn update_local_status(
     run_path: &Path,
     status: &str,
     error: Option<&OperatorToolError>,
+    metadata: Option<&OperatorRunStatusMetadata>,
 ) -> Result<(), OperatorToolError> {
     fs::create_dir_all(run_path).map_err(|err| {
         OperatorToolError::new("execution_infra_error", true, err.to_string())
             .with_run_dir(run_path.to_string_lossy())
     })?;
-    let value = json!({
+    let mut value = json!({
         "status": status,
         "updatedAt": chrono::Utc::now().to_rfc3339(),
         "error": error,
     });
+    apply_status_metadata(&mut value, metadata);
     write_json_file(&run_path.join("status.json"), &value).map_err(|err| {
         OperatorToolError::new("provenance_write_failed", false, err)
             .with_run_dir(run_path.to_string_lossy())
     })
+}
+
+fn apply_status_metadata(value: &mut JsonValue, metadata: Option<&OperatorRunStatusMetadata>) {
+    let Some(metadata) = metadata else {
+        return;
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "runId".to_string(),
+            JsonValue::String(metadata.run_id.clone()),
+        );
+        object.insert(
+            "location".to_string(),
+            JsonValue::String(metadata.location.clone()),
+        );
+        object.insert(
+            "runDir".to_string(),
+            JsonValue::String(metadata.run_dir.clone()),
+        );
+        object.insert(
+            "operator".to_string(),
+            serde_json::to_value(&metadata.operator).unwrap_or(JsonValue::Null),
+        );
+        if let Some(run_context) = &metadata.run_context {
+            object.insert(
+                "runContext".to_string(),
+                serde_json::to_value(run_context).unwrap_or(JsonValue::Null),
+            );
+        }
+    }
 }
 
 fn write_json_file(path: &Path, value: &impl Serialize) -> Result<(), String> {
@@ -1971,10 +2935,709 @@ fn write_json_file(path: &Path, value: &impl Serialize) -> Result<(), String> {
     fs::write(path, format!("{raw}\n")).map_err(|err| err.to_string())
 }
 
+pub fn list_local_operator_runs(project_root: &Path, limit: usize) -> Vec<OperatorRunSummary> {
+    let runs_root = operator_runs_root(project_root);
+    let Ok(entries) = fs::read_dir(&runs_root) else {
+        return Vec::new();
+    };
+    let mut summaries = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .filter_map(|entry| {
+            let run_id = entry.file_name().to_string_lossy().into_owned();
+            if !is_safe_operator_run_id(&run_id) {
+                return None;
+            }
+            summarize_local_operator_run_dir(&entry.path(), &run_id)
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| {
+        right
+            .summary
+            .updated_at
+            .cmp(&left.summary.updated_at)
+            .then_with(|| right.sort_key.cmp(&left.sort_key))
+            .then_with(|| right.summary.run_id.cmp(&left.summary.run_id))
+    });
+    summaries
+        .into_iter()
+        .take(limit)
+        .map(|item| item.summary)
+        .collect()
+}
+
+pub async fn list_operator_runs_for_context(
+    ctx: &crate::domain::tools::ToolContext,
+    limit: usize,
+) -> Result<Vec<OperatorRunSummary>, String> {
+    let surface = OperatorExecutionSurface::for_runs_root(ctx);
+    if surface.kind == OperatorExecutionSurfaceKind::Local {
+        return Ok(list_local_operator_runs(&ctx.project_root, limit));
+    }
+
+    let command = format!(
+        "if [ -d {} ]; then find {} -mindepth 1 -maxdepth 1 -type d -name 'oprun_*' -print; fi",
+        sh_quote(&surface.run_dir),
+        sh_quote(&surface.run_dir)
+    );
+    let result = execute_env_command(ctx, "~", &command, 30)
+        .await
+        .map_err(|err| err.message)?;
+    let mut summaries = Vec::new();
+    for run_dir in result
+        .output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let run_id = run_dir.rsplit('/').next().unwrap_or(run_dir);
+        if !is_safe_operator_run_id(run_id) {
+            continue;
+        }
+        let provenance = read_environment_json(ctx, run_dir, "provenance.json")
+            .await
+            .map_err(|err| err.message)?;
+        let status_doc = read_environment_json(ctx, run_dir, "status.json")
+            .await
+            .map_err(|err| err.message)?;
+        let updated_at = status_doc
+            .as_ref()
+            .and_then(|value| json_string_at(value, &["updatedAt"]))
+            .or_else(|| {
+                provenance
+                    .as_ref()
+                    .and_then(|value| json_string_at(value, &["updatedAt"]))
+            });
+        let sort_key = rfc3339_sort_key(updated_at.as_deref());
+        if let Some(summary) = summarize_operator_run_documents(
+            run_id,
+            surface.artifact_location(),
+            run_dir.to_string(),
+            Some(format!("{}/provenance.json", run_dir.trim_end_matches('/'))),
+            provenance,
+            status_doc,
+            updated_at,
+            sort_key,
+        ) {
+            summaries.push(summary);
+        }
+    }
+    summaries.sort_by(|left, right| {
+        right
+            .summary
+            .updated_at
+            .cmp(&left.summary.updated_at)
+            .then_with(|| right.sort_key.cmp(&left.sort_key))
+            .then_with(|| right.summary.run_id.cmp(&left.summary.run_id))
+    });
+    Ok(summaries
+        .into_iter()
+        .take(limit)
+        .map(|item| item.summary)
+        .collect())
+}
+
+pub fn read_local_operator_run(project_root: &Path, run_id: &str) -> Result<JsonValue, String> {
+    let run_id = run_id.trim();
+    if !is_safe_operator_run_id(run_id) {
+        return Err(
+            "operator run id must start with `oprun_` and contain only letters, numbers, `_`, or `-`"
+                .to_string(),
+        );
+    }
+    let runs_root = operator_runs_root(project_root);
+    let run_dir = runs_root.join(run_id);
+    let canonical_root = runs_root.canonicalize().unwrap_or(runs_root);
+    let canonical_run_dir = run_dir
+        .canonicalize()
+        .map_err(|err| format!("operator run `{run_id}` not found: {err}"))?;
+    if !canonical_run_dir.starts_with(&canonical_root) {
+        return Err(format!(
+            "operator run `{run_id}` is outside the run registry"
+        ));
+    }
+    let provenance = canonical_run_dir.join("provenance.json");
+    if provenance.is_file() {
+        return read_json_value(&provenance);
+    }
+    let status = canonical_run_dir.join("status.json");
+    if status.is_file() {
+        return read_json_value(&status);
+    }
+    Err(format!(
+        "operator run `{run_id}` has no provenance.json or status.json"
+    ))
+}
+
+pub async fn read_operator_run_for_context(
+    ctx: &crate::domain::tools::ToolContext,
+    run_id: &str,
+) -> Result<OperatorRunDetail, String> {
+    let run_id = run_id.trim();
+    if !is_safe_operator_run_id(run_id) {
+        return Err(
+            "operator run id must start with `oprun_` and contain only letters, numbers, `_`, or `-`"
+                .to_string(),
+        );
+    }
+    let surface = OperatorExecutionSurface::for_context(ctx, run_id);
+    if surface.kind == OperatorExecutionSurfaceKind::Local {
+        let document = read_local_operator_run(&ctx.project_root, run_id)?;
+        let source_path = document
+            .get("provenancePath")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                operator_run_dir(&ctx.project_root, run_id)
+                    .join("status.json")
+                    .to_string_lossy()
+                    .into_owned()
+            });
+        return Ok(OperatorRunDetail {
+            run_id: run_id.to_string(),
+            location: "local".to_string(),
+            run_dir: surface.run_dir,
+            source_path,
+            document,
+        });
+    }
+
+    let run_dir = surface.run_dir.clone();
+    for rel in ["provenance.json", "status.json"] {
+        if let Some(document) = read_environment_json(ctx, &run_dir, rel)
+            .await
+            .map_err(|err| err.message)?
+        {
+            return Ok(OperatorRunDetail {
+                run_id: run_id.to_string(),
+                location: surface.artifact_location().to_string(),
+                run_dir,
+                source_path: format!("{}/{}", surface.run_dir.trim_end_matches('/'), rel),
+                document,
+            });
+        }
+    }
+    Err(format!(
+        "operator run `{run_id}` has no remote provenance.json or status.json at {}",
+        surface.run_dir
+    ))
+}
+
+pub async fn read_operator_run_log_for_context(
+    ctx: &crate::domain::tools::ToolContext,
+    run_id: &str,
+    log_name: &str,
+    limit_bytes: u64,
+) -> Result<OperatorRunLog, String> {
+    let run_id = run_id.trim();
+    if !is_safe_operator_run_id(run_id) {
+        return Err(
+            "operator run id must start with `oprun_` and contain only letters, numbers, `_`, or `-`"
+                .to_string(),
+        );
+    }
+    let normalized_log = match log_name.trim() {
+        "stdout" | "stdout.txt" => "stdout",
+        "stderr" | "stderr.txt" => "stderr",
+        other => return Err(format!("unsupported operator log `{other}`")),
+    };
+    let rel = format!("logs/{normalized_log}.txt");
+    let surface = OperatorExecutionSurface::for_context(ctx, run_id);
+    let limit = limit_bytes.clamp(1, 64 * 1024);
+    let path = format!("{}/{}", surface.run_dir.trim_end_matches('/'), rel);
+    let content = if surface.kind == OperatorExecutionSurfaceKind::Local {
+        read_tail_limited(&path, limit as usize).ok_or_else(|| {
+            format!("operator run `{run_id}` has no local `{normalized_log}` log at {path}")
+        })?
+    } else {
+        read_environment_text_tail(ctx, &surface.run_dir, &rel, limit)
+            .await
+            .map_err(|err| err.message)?
+            .ok_or_else(|| {
+                format!("operator run `{run_id}` has no remote `{normalized_log}` log at {path}")
+            })?
+    };
+    Ok(OperatorRunLog {
+        run_id: run_id.to_string(),
+        location: surface.artifact_location().to_string(),
+        log_name: normalized_log.to_string(),
+        path,
+        content,
+    })
+}
+
+pub async fn verify_operator_run_for_context(
+    ctx: &crate::domain::tools::ToolContext,
+    run_id: &str,
+) -> Result<OperatorRunVerification, String> {
+    let detail = read_operator_run_for_context(ctx, run_id).await?;
+    let mut checks = Vec::new();
+    checks.push(OperatorRunCheck {
+        name: "run_state_readable".to_string(),
+        ok: true,
+        severity: "info".to_string(),
+        message: "Run status/provenance is readable.".to_string(),
+        path: Some(detail.source_path.clone()),
+    });
+
+    let status =
+        json_string_at(&detail.document, &["status"]).unwrap_or_else(|| "unknown".to_string());
+    let status_ok = status == "succeeded";
+    checks.push(OperatorRunCheck {
+        name: "run_status".to_string(),
+        ok: status_ok,
+        severity: if status_ok { "info" } else { "error" }.to_string(),
+        message: if status_ok {
+            "Run status is succeeded.".to_string()
+        } else {
+            format!("Run status is `{status}`.")
+        },
+        path: Some(detail.source_path.clone()),
+    });
+
+    for log_name in ["stdout", "stderr"] {
+        match read_operator_run_log_for_context(ctx, run_id, log_name, 256).await {
+            Ok(log) => checks.push(OperatorRunCheck {
+                name: format!("{log_name}_log_readable"),
+                ok: true,
+                severity: "info".to_string(),
+                message: format!("{} log is readable.", log_name),
+                path: Some(log.path),
+            }),
+            Err(error) => checks.push(OperatorRunCheck {
+                name: format!("{log_name}_log_readable"),
+                ok: false,
+                severity: "warning".to_string(),
+                message: error,
+                path: Some(format!(
+                    "{}/logs/{log_name}.txt",
+                    detail.run_dir.trim_end_matches('/')
+                )),
+            }),
+        }
+    }
+
+    let artifacts = output_artifact_paths(&detail.document);
+    if artifacts.is_empty() {
+        checks.push(OperatorRunCheck {
+            name: "output_artifacts_declared".to_string(),
+            ok: true,
+            severity: "info".to_string(),
+            message: "No output artifact refs were declared in this run.".to_string(),
+            path: None,
+        });
+    } else {
+        for (output_name, path) in artifacts {
+            let check =
+                verify_artifact_path_for_context(ctx, &detail.location, &output_name, &path).await;
+            checks.push(check);
+        }
+    }
+
+    let ok = checks
+        .iter()
+        .filter(|check| check.severity == "error")
+        .all(|check| check.ok);
+    Ok(OperatorRunVerification {
+        run_id: detail.run_id,
+        location: detail.location,
+        run_dir: detail.run_dir,
+        ok,
+        checks,
+    })
+}
+
+fn output_artifact_paths(document: &JsonValue) -> Vec<(String, String)> {
+    let Some(outputs) = json_value_at(document, &["outputs"]).and_then(JsonValue::as_object) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for (name, artifacts) in outputs {
+        for artifact in artifacts.as_array().into_iter().flatten() {
+            if let Some(path) = json_string_at(artifact, &["path"]) {
+                paths.push((name.clone(), path));
+            }
+        }
+    }
+    paths
+}
+
+async fn verify_artifact_path_for_context(
+    ctx: &crate::domain::tools::ToolContext,
+    location: &str,
+    output_name: &str,
+    path: &str,
+) -> OperatorRunCheck {
+    if location == "local" {
+        let metadata = fs::metadata(path).ok();
+        let ok = metadata
+            .as_ref()
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false);
+        return OperatorRunCheck {
+            name: format!("output_artifact:{output_name}"),
+            ok,
+            severity: if ok { "info" } else { "error" }.to_string(),
+            message: if ok {
+                format!(
+                    "Output artifact `{output_name}` exists ({} bytes).",
+                    metadata.map(|metadata| metadata.len()).unwrap_or(0)
+                )
+            } else {
+                format!("Output artifact `{output_name}` is missing.")
+            },
+            path: Some(path.to_string()),
+        };
+    }
+
+    let command = format!(
+        "if [ -f {} ]; then wc -c < {}; else exit 2; fi",
+        sh_quote(path),
+        sh_quote(path)
+    );
+    match execute_env_command(ctx, "~", &command, 30).await {
+        Ok(result) if result.returncode == 0 => OperatorRunCheck {
+            name: format!("output_artifact:{output_name}"),
+            ok: true,
+            severity: "info".to_string(),
+            message: format!(
+                "Output artifact `{output_name}` exists remotely ({} bytes).",
+                result.output.trim()
+            ),
+            path: Some(path.to_string()),
+        },
+        Ok(result) => OperatorRunCheck {
+            name: format!("output_artifact:{output_name}"),
+            ok: false,
+            severity: "error".to_string(),
+            message: format!(
+                "Output artifact `{output_name}` is missing or unreadable remotely (exit {}).",
+                result.returncode
+            ),
+            path: Some(path.to_string()),
+        },
+        Err(error) => OperatorRunCheck {
+            name: format!("output_artifact:{output_name}"),
+            ok: false,
+            severity: "error".to_string(),
+            message: error.message,
+            path: Some(path.to_string()),
+        },
+    }
+}
+
+fn operator_runs_root(project_root: &Path) -> PathBuf {
+    project_root
+        .join(OPERATOR_STATE_DIR_NAME)
+        .join(RUNS_RELATIVE_PATH)
+}
+
+fn operator_run_dir(project_root: &Path, run_id: &str) -> PathBuf {
+    operator_runs_root(project_root).join(run_id)
+}
+
+fn operator_run_relative_path(run_id: &str) -> String {
+    format!("{OPERATOR_STATE_DIR_NAME}/{RUNS_RELATIVE_PATH}/{run_id}")
+}
+
+fn operator_runs_relative_path() -> String {
+    format!("{OPERATOR_STATE_DIR_NAME}/{RUNS_RELATIVE_PATH}")
+}
+
+#[derive(Debug)]
+struct OperatorRunSummaryWithSortKey {
+    summary: OperatorRunSummary,
+    sort_key: u64,
+}
+
+fn summarize_local_operator_run_dir(
+    run_dir: &Path,
+    run_id: &str,
+) -> Option<OperatorRunSummaryWithSortKey> {
+    let provenance_path = run_dir.join("provenance.json");
+    let status_path = run_dir.join("status.json");
+    let provenance = read_json_value(&provenance_path).ok();
+    let status_doc = read_json_value(&status_path).ok();
+    if provenance.is_none() && status_doc.is_none() {
+        return None;
+    }
+    let modified_path = if provenance_path.is_file() {
+        provenance_path.as_path()
+    } else if status_path.is_file() {
+        status_path.as_path()
+    } else {
+        run_dir
+    };
+    let updated_at = status_doc
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["updatedAt"]))
+        .or_else(|| {
+            provenance
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["updatedAt"]))
+        })
+        .or_else(|| file_modified_rfc3339(modified_path));
+    let default_provenance_path = if provenance_path.is_file() {
+        Some(provenance_path.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    summarize_operator_run_documents(
+        run_id,
+        "local",
+        run_dir.to_string_lossy().into_owned(),
+        default_provenance_path,
+        provenance,
+        status_doc,
+        updated_at,
+        file_modified_sort_key(modified_path),
+    )
+}
+
+fn summarize_operator_run_documents(
+    run_id: &str,
+    default_location: &str,
+    default_run_dir: String,
+    default_provenance_path: Option<String>,
+    provenance: Option<JsonValue>,
+    status_doc: Option<JsonValue>,
+    updated_at: Option<String>,
+    sort_key: u64,
+) -> Option<OperatorRunSummaryWithSortKey> {
+    if provenance.is_none() && status_doc.is_none() {
+        return None;
+    }
+    let status = status_doc
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["status"]))
+        .or_else(|| {
+            provenance
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["status"]))
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let location = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["location"]))
+        .unwrap_or_else(|| default_location.to_string());
+    let operator_alias = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["operator", "alias"]));
+    let operator_id = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["operator", "id"]))
+        .or_else(|| {
+            status_doc
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["operator", "id"]))
+        });
+    let operator_alias = operator_alias.or_else(|| {
+        status_doc
+            .as_ref()
+            .and_then(|value| json_string_at(value, &["operator", "alias"]))
+    });
+    let operator_version = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["operator", "version"]))
+        .or_else(|| {
+            status_doc
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["operator", "version"]))
+        });
+    let source_plugin = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["operator", "sourcePlugin"]))
+        .or_else(|| {
+            status_doc
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["operator", "sourcePlugin"]))
+        });
+    let run_kind = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["runContext", "kind"]))
+        .or_else(|| {
+            status_doc
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["runContext", "kind"]))
+        });
+    let smoke_test_id = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["runContext", "smokeTestId"]))
+        .or_else(|| {
+            status_doc
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["runContext", "smokeTestId"]))
+        });
+    let smoke_test_name = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["runContext", "smokeTestName"]))
+        .or_else(|| {
+            status_doc
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["runContext", "smokeTestName"]))
+        });
+    let run_dir_value = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["runDir"]))
+        .or_else(|| {
+            status_doc
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["runDir"]))
+        })
+        .unwrap_or(default_run_dir);
+    let provenance_path_value = provenance.as_ref().and_then(|value| {
+        json_string_at(value, &["provenancePath"]).or(default_provenance_path.clone())
+    });
+    let output_count = provenance.as_ref().map(output_artifact_count).unwrap_or(0);
+    let error_message = status_doc
+        .as_ref()
+        .and_then(operator_error_message)
+        .or_else(|| provenance.as_ref().and_then(operator_error_message));
+    let error_kind = status_doc
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["error", "kind"]))
+        .or_else(|| {
+            provenance
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["error", "kind"]))
+        });
+    let retryable = status_doc
+        .as_ref()
+        .and_then(|value| json_bool_at(value, &["error", "retryable"]))
+        .or_else(|| {
+            provenance
+                .as_ref()
+                .and_then(|value| json_bool_at(value, &["error", "retryable"]))
+        });
+    let suggested_action = status_doc
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["error", "suggestedAction"]))
+        .or_else(|| {
+            provenance
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["error", "suggestedAction"]))
+        });
+    let stdout_tail = status_doc
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["error", "stdoutTail"]))
+        .or_else(|| {
+            provenance
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["error", "stdoutTail"]))
+        });
+    let stderr_tail = status_doc
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["error", "stderrTail"]))
+        .or_else(|| {
+            provenance
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["error", "stderrTail"]))
+        });
+    Some(OperatorRunSummaryWithSortKey {
+        summary: OperatorRunSummary {
+            run_id: run_id.to_string(),
+            status,
+            location,
+            operator_alias,
+            operator_id,
+            operator_version,
+            source_plugin,
+            run_kind,
+            smoke_test_id,
+            smoke_test_name,
+            run_dir: run_dir_value,
+            updated_at,
+            provenance_path: provenance_path_value,
+            output_count,
+            error_message,
+            error_kind,
+            retryable,
+            suggested_action,
+            stdout_tail,
+            stderr_tail,
+        },
+        sort_key,
+    })
+}
+
+fn is_safe_operator_run_id(run_id: &str) -> bool {
+    run_id.starts_with("oprun_")
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn read_json_value(path: &Path) -> Result<JsonValue, String> {
+    let raw = fs::read_to_string(path).map_err(|err| err.to_string())?;
+    serde_json::from_str(&raw).map_err(|err| err.to_string())
+}
+
+fn json_value_at<'a>(value: &'a JsonValue, path: &[&str]) -> Option<&'a JsonValue> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    Some(current)
+}
+
+fn json_string_at(value: &JsonValue, path: &[&str]) -> Option<String> {
+    json_value_at(value, path).and_then(|value| match value {
+        JsonValue::String(value) if !value.trim().is_empty() => Some(value.clone()),
+        _ => None,
+    })
+}
+
+fn json_bool_at(value: &JsonValue, path: &[&str]) -> Option<bool> {
+    json_value_at(value, path).and_then(JsonValue::as_bool)
+}
+
+fn operator_error_message(value: &JsonValue) -> Option<String> {
+    json_string_at(value, &["error", "message"])
+}
+
+fn output_artifact_count(value: &JsonValue) -> usize {
+    json_value_at(value, &["outputs"])
+        .and_then(JsonValue::as_object)
+        .map(|outputs| {
+            outputs
+                .values()
+                .filter_map(JsonValue::as_array)
+                .map(Vec::len)
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn file_modified_sort_key(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn rfc3339_sort_key(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .and_then(|value| u64::try_from(value.timestamp()).ok())
+        .unwrap_or(0)
+}
+
+fn file_modified_rfc3339(path: &Path) -> Option<String> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    let datetime: chrono::DateTime<chrono::Utc> = modified.into();
+    Some(datetime.to_rfc3339())
+}
+
 fn read_tail(path: impl AsRef<Path>) -> Option<String> {
+    read_tail_limited(path, 4000)
+}
+
+fn read_tail_limited(path: impl AsRef<Path>, limit_chars: usize) -> Option<String> {
     let raw = fs::read_to_string(path).ok()?;
     let chars = raw.chars().collect::<Vec<_>>();
-    let start = chars.len().saturating_sub(4000);
+    let start = chars.len().saturating_sub(limit_chars);
     Some(chars[start..].iter().collect())
 }
 
@@ -1996,18 +3659,31 @@ fn run_identity(resolved: &ResolvedOperator) -> OperatorRunIdentity {
 fn enforcement_json(ctx: &crate::domain::tools::ToolContext) -> JsonValue {
     match ctx.execution_environment.as_str() {
         "sandbox" | "remote" => json!({
+            "placement": "local",
+            "container": if ctx.sandbox_backend.trim().is_empty() { "sandbox" } else { ctx.sandbox_backend.trim() },
             "filesystem": "container_best_effort",
-            "network": "not_yet_enforced_by_operator_mvp"
+            "network": "backend_policy_or_manifest_permissions_best_effort"
         }),
         "ssh" => json!({
+            "placement": "ssh",
+            "container": "none",
             "filesystem": "trusted_remote_best_effort",
             "network": "remote_user_environment"
         }),
         _ => json!({
+            "placement": "local",
+            "container": "none",
             "filesystem": "local_best_effort",
             "network": "local_user_environment"
         }),
     }
+}
+
+fn effective_walltime_secs(resources: &BTreeMap<String, JsonValue>, session_hard_secs: u64) -> u64 {
+    let hard_limit = session_hard_secs.max(1);
+    resource_walltime_secs(resources)
+        .unwrap_or(hard_limit)
+        .min(hard_limit)
 }
 
 fn resource_walltime_secs(resources: &BTreeMap<String, JsonValue>) -> Option<u64> {
@@ -2041,6 +3717,19 @@ fn parse_duration_secs(raw: &str) -> Option<u64> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn bundled_smoke_operator_paths() -> (PathBuf, PathBuf) {
+        let plugin_root = crate::domain::plugins::dev_builtin_marketplace_path()
+            .parent()
+            .unwrap()
+            .join("plugins")
+            .join("operator-smoke");
+        let manifest = plugin_root
+            .join("operators")
+            .join("write-text-report")
+            .join("operator.yaml");
+        (plugin_root, manifest)
+    }
 
     #[test]
     fn parses_manifest_and_generates_tool_schema() {
@@ -2094,6 +3783,131 @@ bindings:
     }
 
     #[test]
+    fn discovers_bundled_smoke_operator_from_active_plugin() {
+        let (plugin_root, manifest) = bundled_smoke_operator_paths();
+        assert!(manifest.is_file());
+
+        let plugin = crate::domain::plugins::LoadedPlugin {
+            id: "operator-smoke@omiga-curated".to_string(),
+            manifest_name: Some("operator-smoke".to_string()),
+            display_name: Some("Operator Smoke Test".to_string()),
+            description: None,
+            root: plugin_root,
+            enabled: true,
+            skill_roots: Vec::new(),
+            mcp_servers: HashMap::new(),
+            apps: Vec::new(),
+            retrieval: None,
+            error: None,
+        };
+
+        let candidates = discover_operator_candidates_from_plugins([&plugin]);
+        let smoke = candidates
+            .iter()
+            .find(|candidate| candidate.metadata.id == "write_text_report")
+            .expect("bundled smoke operator should be discovered");
+        assert_eq!(smoke.source.source_plugin, "operator-smoke@omiga-curated");
+        assert_eq!(smoke.metadata.version, "0.1.0");
+        assert_eq!(smoke.execution.argv[0], "/bin/sh");
+        assert_eq!(smoke.execution.argv[1], "./bin/write_text_report.sh");
+        assert_eq!(smoke.smoke_tests.len(), 1);
+        assert_eq!(smoke.smoke_tests[0].id, "default");
+        assert_eq!(
+            smoke.smoke_tests[0].arguments.params["message"],
+            "hello operator smoke"
+        );
+
+        let schema = operator_parameters_schema(smoke);
+        assert_eq!(
+            schema["properties"]["params"]["properties"]["message"]["type"],
+            "string"
+        );
+        let argv = expand_argv(
+            smoke,
+            &BTreeMap::new(),
+            &BTreeMap::from([
+                ("message".to_string(), json!("hello")),
+                ("repeat".to_string(), json!(1)),
+            ]),
+            &BTreeMap::new(),
+            "/tmp/run",
+        )
+        .unwrap();
+        assert!(Path::new(&argv[1]).is_absolute());
+        assert!(argv[1].ends_with("bin/write_text_report.sh"));
+    }
+
+    #[test]
+    fn rejects_smoke_test_ids_with_invalid_characters() {
+        let tmp = TempDir::new().unwrap();
+        let manifest = tmp.path().join("operator.yaml");
+        fs::write(
+            &manifest,
+            r#"
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: bad_smoke
+  version: 1
+smokeTests:
+  - id: bad/id
+    params: {}
+execution:
+  argv: ["true"]
+"#,
+        )
+        .unwrap();
+
+        let error = load_operator_manifest(&manifest, "p@m", tmp.path()).unwrap_err();
+        assert!(error.contains("operator smoke test id `bad/id`"));
+    }
+
+    #[test]
+    fn reports_invalid_operator_manifest_diagnostics() {
+        let tmp = TempDir::new().unwrap();
+        let manifest = tmp
+            .path()
+            .join("operators")
+            .join("bad")
+            .join("operator.yaml");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(
+            &manifest,
+            r#"
+apiVersion: wrong/v1
+kind: Operator
+metadata:
+  id: bad
+  version: 1
+execution:
+  argv: ["true"]
+"#,
+        )
+        .unwrap();
+        let plugin = crate::domain::plugins::LoadedPlugin {
+            id: "bad-operator@local".to_string(),
+            manifest_name: Some("bad-operator".to_string()),
+            display_name: Some("Bad Operator".to_string()),
+            description: None,
+            root: tmp.path().to_path_buf(),
+            enabled: true,
+            skill_roots: Vec::new(),
+            mcp_servers: HashMap::new(),
+            apps: Vec::new(),
+            retrieval: None,
+            error: None,
+        };
+
+        let diagnostics = operator_manifest_diagnostics_from_plugins([&plugin]);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].source_plugin, "bad-operator@local");
+        assert_eq!(diagnostics[0].severity, "error");
+        assert!(diagnostics[0]
+            .message
+            .contains("unsupported operator apiVersion"));
+    }
+
+    #[test]
     fn registry_requires_disambiguation_for_conflicts() {
         let tmp = TempDir::new().unwrap();
         let source = |plugin: &str| OperatorSpec {
@@ -2107,6 +3921,7 @@ bindings:
                 tags: Vec::new(),
             },
             interface: OperatorInterfaceSpec::default(),
+            smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
             },
@@ -2145,6 +3960,7 @@ bindings:
                 tags: Vec::new(),
             },
             interface: OperatorInterfaceSpec::default(),
+            smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
             },
@@ -2201,6 +4017,7 @@ bindings:
                 tags: Vec::new(),
             },
             interface: OperatorInterfaceSpec::default(),
+            smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec!["cat".to_string(), "${inputs.files}".to_string()],
             },
@@ -2223,6 +4040,277 @@ bindings:
         )
         .unwrap();
         assert_eq!(argv, vec!["cat", "a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn validates_params_resources_and_container_runtime_support() {
+        let tmp = TempDir::new().unwrap();
+        let spec = OperatorSpec {
+            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
+            kind: OPERATOR_KIND.to_string(),
+            metadata: OperatorMetadata {
+                id: "container_op".to_string(),
+                version: "1".to_string(),
+                name: None,
+                description: None,
+                tags: Vec::new(),
+            },
+            interface: OperatorInterfaceSpec {
+                params: BTreeMap::from([(
+                    "repeat".to_string(),
+                    OperatorFieldSpec {
+                        kind: OperatorFieldKind::Integer,
+                        required: true,
+                        minimum: Some(1.0),
+                        maximum: Some(2.0),
+                        ..OperatorFieldSpec::default()
+                    },
+                )]),
+                ..OperatorInterfaceSpec::default()
+            },
+            smoke_tests: Vec::new(),
+            execution: OperatorExecutionSpec {
+                argv: vec!["true".to_string()],
+            },
+            runtime: Some(json!({
+                "placement": { "supported": ["local"] },
+                "container": { "supported": ["docker"] },
+                "scheduler": { "supported": ["none"] }
+            })),
+            resources: BTreeMap::from([(
+                "cpu".to_string(),
+                OperatorResourceSpec {
+                    default: Some(json!(1)),
+                    min: Some(json!(1)),
+                    max: Some(json!(4)),
+                    exposed: true,
+                },
+            )]),
+            bindings: Vec::new(),
+            permissions: None,
+            source: OperatorSource {
+                source_plugin: "p".to_string(),
+                plugin_root: tmp.path().to_path_buf(),
+                manifest_path: tmp.path().join("operator.yaml"),
+            },
+        };
+
+        let docker_ctx = crate::domain::tools::ToolContext::new(tmp.path())
+            .with_execution_environment("sandbox")
+            .with_sandbox_backend("docker");
+        assert!(runtime_supported(&docker_ctx, &spec));
+        assert!(!runtime_supported(
+            &crate::domain::tools::ToolContext::new(tmp.path()),
+            &spec
+        ));
+
+        let params = BTreeMap::from([("repeat".to_string(), json!(3))]);
+        let err = validate_field_values("params", &spec.interface.params, &params).unwrap_err();
+        assert_eq!(err.field.as_deref(), Some("params.repeat"));
+
+        let err = apply_resource_defaults_and_overrides(
+            &spec,
+            BTreeMap::from([("cpu".to_string(), json!(8))]),
+        )
+        .unwrap_err();
+        assert_eq!(err.field.as_deref(), Some("resources.cpu"));
+    }
+
+    #[test]
+    fn lists_and_reads_local_operator_runs() {
+        let tmp = TempDir::new().unwrap();
+        let runs_root = tmp.path().join(".omiga/runs");
+        let succeeded = runs_root.join("oprun_20260506_success");
+        let failed = runs_root.join("oprun_20260506_failed");
+        fs::create_dir_all(&succeeded).unwrap();
+        fs::create_dir_all(&failed).unwrap();
+        write_json_file(
+            &succeeded.join("provenance.json"),
+            &json!({
+                "status": "succeeded",
+                "runId": "oprun_20260506_success",
+                "operator": {
+                    "alias": "write_text_report",
+                    "id": "write_text_report",
+                    "version": "0.1.0",
+                    "sourcePlugin": "operator-smoke@omiga-curated"
+                },
+                "runDir": succeeded.to_string_lossy(),
+                "provenancePath": succeeded.join("provenance.json").to_string_lossy(),
+                "outputs": {
+                    "report": [
+                        { "location": "local", "path": succeeded.join("out/report.txt").to_string_lossy() }
+                    ]
+                }
+            }),
+        )
+        .unwrap();
+        write_json_file(
+            &succeeded.join("status.json"),
+            &json!({
+                "status": "succeeded",
+                "updatedAt": "2026-05-06T12:00:00Z",
+                "error": null
+            }),
+        )
+        .unwrap();
+        write_json_file(
+            &failed.join("status.json"),
+            &json!({
+                "status": "failed",
+                "updatedAt": "2026-05-06T11:00:00Z",
+                "operator": {
+                    "alias": "write_text_report",
+                    "id": "write_text_report",
+                    "version": "0.1.0",
+                    "sourcePlugin": "operator-smoke@omiga-curated"
+                },
+                "runContext": {
+                    "kind": "smoke",
+                    "smokeTestId": "default",
+                    "smokeTestName": "Write text report smoke"
+                },
+                "error": {
+                    "kind": "tool_exit_nonzero",
+                    "retryable": false,
+                    "message": "bad input",
+                    "suggestedAction": "Inspect stdout/stderr, then adjust inputs or params and retry.",
+                    "stdoutTail": "partial stdout\n",
+                    "stderrTail": "bad flag\n"
+                }
+            }),
+        )
+        .unwrap();
+
+        let runs = list_local_operator_runs(tmp.path(), 10);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].run_id, "oprun_20260506_success");
+        assert_eq!(runs[0].operator_alias.as_deref(), Some("write_text_report"));
+        assert_eq!(
+            runs[0].source_plugin.as_deref(),
+            Some("operator-smoke@omiga-curated")
+        );
+        assert_eq!(runs[0].output_count, 1);
+        assert_eq!(runs[1].status, "failed");
+        assert_eq!(runs[1].operator_alias.as_deref(), Some("write_text_report"));
+        assert_eq!(runs[1].run_kind.as_deref(), Some("smoke"));
+        assert_eq!(runs[1].smoke_test_id.as_deref(), Some("default"));
+        assert_eq!(runs[1].error_message.as_deref(), Some("bad input"));
+        assert_eq!(runs[1].error_kind.as_deref(), Some("tool_exit_nonzero"));
+        assert_eq!(runs[1].retryable, Some(false));
+        assert_eq!(
+            runs[1].suggested_action.as_deref(),
+            Some("Inspect stdout/stderr, then adjust inputs or params and retry.")
+        );
+        assert_eq!(runs[1].stdout_tail.as_deref(), Some("partial stdout\n"));
+        assert_eq!(runs[1].stderr_tail.as_deref(), Some("bad flag\n"));
+
+        let detail = read_local_operator_run(tmp.path(), "oprun_20260506_success").unwrap();
+        assert_eq!(detail["operator"]["id"], "write_text_report");
+        assert!(read_local_operator_run(tmp.path(), "../oprun_escape").is_err());
+    }
+
+    #[tokio::test]
+    async fn reads_local_operator_run_detail_and_log_through_context() {
+        let tmp = TempDir::new().unwrap();
+        let run_id = "oprun_20260506_detail";
+        let run_dir = tmp.path().join(".omiga/runs").join(run_id);
+        fs::create_dir_all(run_dir.join("logs")).unwrap();
+        fs::create_dir_all(run_dir.join("out")).unwrap();
+        fs::write(run_dir.join("logs/stdout.txt"), "operator stdout\n").unwrap();
+        fs::write(run_dir.join("logs/stderr.txt"), "").unwrap();
+        fs::write(run_dir.join("out/report.txt"), "hello\n").unwrap();
+        write_json_file(
+            &run_dir.join("provenance.json"),
+            &json!({
+                "status": "succeeded",
+                "runId": run_id,
+                "location": "local",
+                "operator": {
+                    "alias": "write_text_report",
+                    "id": "write_text_report",
+                    "version": "0.1.0",
+                    "sourcePlugin": "operator-smoke@omiga-curated"
+                },
+                "runDir": run_dir.to_string_lossy(),
+                "provenancePath": run_dir.join("provenance.json").to_string_lossy(),
+                "outputs": {
+                    "report": [
+                        { "location": "local", "path": run_dir.join("out/report.txt").to_string_lossy() }
+                    ]
+                }
+            }),
+        )
+        .unwrap();
+
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let runs = list_operator_runs_for_context(&ctx, 10).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, run_id);
+
+        let detail = read_operator_run_for_context(&ctx, run_id).await.unwrap();
+        assert_eq!(detail.location, "local");
+        assert_eq!(detail.document["runId"], run_id);
+        assert!(detail.source_path.ends_with("provenance.json"));
+
+        let log = read_operator_run_log_for_context(&ctx, run_id, "stdout", 1024)
+            .await
+            .unwrap();
+        assert_eq!(log.location, "local");
+        assert_eq!(log.log_name, "stdout");
+        assert_eq!(log.content, "operator stdout\n");
+
+        let verification = verify_operator_run_for_context(&ctx, run_id).await.unwrap();
+        assert!(verification.ok);
+        assert!(verification
+            .checks
+            .iter()
+            .any(|check| check.name == "output_artifact:report" && check.ok));
+    }
+
+    #[tokio::test]
+    async fn executes_bundled_smoke_operator_locally() {
+        let tmp = TempDir::new().unwrap();
+        let (plugin_root, manifest) = bundled_smoke_operator_paths();
+        let spec =
+            load_operator_manifest(&manifest, "operator-smoke@omiga-curated", plugin_root).unwrap();
+        let smoke_invocation = spec.smoke_tests[0].arguments.clone();
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let result = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "write_text_report".to_string(),
+                spec,
+            },
+            smoke_invocation,
+            Some(OperatorRunContext {
+                kind: Some("smoke".to_string()),
+                smoke_test_id: Some("default".to_string()),
+                smoke_test_name: Some("Write text report smoke".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, "succeeded");
+        assert_eq!(
+            result
+                .run_context
+                .as_ref()
+                .and_then(|context| context.kind.as_deref()),
+            Some("smoke")
+        );
+        let runs = list_local_operator_runs(tmp.path(), 10);
+        assert_eq!(runs[0].run_kind.as_deref(), Some("smoke"));
+        assert_eq!(runs[0].smoke_test_id.as_deref(), Some("default"));
+        let report_path = Path::new(&result.outputs["report"][0].path);
+        assert_eq!(
+            fs::read_to_string(report_path).unwrap(),
+            "hello operator smoke\nhello operator smoke\n"
+        );
+        assert!(Path::new(&format!("{}/status.json", result.run_dir)).is_file());
+        assert!(Path::new(&format!("{}/provenance.json", result.run_dir)).is_file());
     }
 
     #[tokio::test]
@@ -2260,6 +4348,7 @@ bindings:
                 )]),
                 ..OperatorInterfaceSpec::default()
             },
+            smoke_tests: Vec::new(),
             execution: OperatorExecutionSpec {
                 argv: vec![
                     "/bin/sh".to_string(),
@@ -2292,11 +4381,18 @@ bindings:
                 params: BTreeMap::new(),
                 resources: BTreeMap::new(),
             },
+            None,
         )
         .await
         .unwrap();
         assert_eq!(result.status, "succeeded");
         assert_eq!(result.outputs["report"].len(), 1);
         assert!(Path::new(&result.outputs["report"][0].path).is_file());
+        assert_eq!(
+            result.effective_inputs["input"],
+            json!(input.canonicalize().unwrap().to_string_lossy().into_owned())
+        );
+        assert_eq!(result.input_fingerprints["input"]["mode"], "stat");
+        assert_eq!(result.input_fingerprints["input"]["location"], "local");
     }
 }

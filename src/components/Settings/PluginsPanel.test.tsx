@@ -1,16 +1,34 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   filterPluginsForCatalog,
+  groupPluginsByCatalogGroup,
+  groupPluginsByCatalogSection,
   operatorDisplayName,
   operatorPrimaryAlias,
+  operatorRunBelongsToOperator,
+  operatorRunDiagnosisSummary,
+  operatorRunDiagnosticsPayload,
+  operatorRunIsSmoke,
+  operatorRunStats,
+  operatorSmokeRunLabel,
+  operatorSmokeTestForRun,
+  operatorSmokeTestSummary,
+  operatorRunStatusColor,
+  operatorRunTitle,
+  operatorSmokeRunArguments,
+  operatorSupportsSmokeRun,
+  operatorRunsForOperator,
   operatorToolName,
   pluginCardSubtitle,
+  pluginCatalogGroupId,
   pluginRuntimeSummary,
   processPoolStatusDiagnostic,
   retrievalStatusDiagnostic,
   unknownRetrievalRuntimePluginIds,
 } from "./PluginsPanel";
 import type {
+  OperatorRunSummary,
   OperatorSummary,
   PluginProcessPoolRouteStatus,
   PluginRetrievalRouteStatus,
@@ -59,6 +77,7 @@ function operatorSummary(overrides: Partial<OperatorSummary> = {}): OperatorSumm
     description: "Run FastQC quality control.",
     sourcePlugin: "bio-operators@local",
     manifestPath: "/plugins/bio-operators/operators/fastqc/operator.yaml",
+    smokeTests: [],
     enabledAliases: [],
     exposed: false,
     unavailableReason: null,
@@ -66,7 +85,37 @@ function operatorSummary(overrides: Partial<OperatorSummary> = {}): OperatorSumm
   };
 }
 
+function operatorRunSummary(
+  overrides: Partial<OperatorRunSummary> = {},
+): OperatorRunSummary {
+  return {
+    runId: "oprun_20260506_success",
+    status: "succeeded",
+    location: "local",
+    operatorAlias: "write_text_report",
+    operatorId: "write_text_report",
+    operatorVersion: "0.1.0",
+    sourcePlugin: "operator-smoke@omiga-curated",
+    runKind: null,
+    smokeTestId: null,
+    smokeTestName: null,
+    runDir: "/project/.omiga/runs/oprun_20260506_success",
+    updatedAt: "2026-05-06T12:00:00Z",
+    provenancePath: "/project/.omiga/runs/oprun_20260506_success/provenance.json",
+    outputCount: 1,
+    errorMessage: null,
+    ...overrides,
+  };
+}
+
 describe("PluginsPanel diagnostics helpers", () => {
+  it("keeps the operator catalog section mounted for manual smoke runs", () => {
+    const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
+
+    expect(source).toMatch(/<OperatorCatalogSection[\s\S]*onSmokeRun=/);
+    expect(source).not.toContain("{false && (\n      <OperatorCatalogSection");
+  });
+
   it("filters plugin cards by search text and catalog state", () => {
     const geo = pluginSummary({
       installed: true,
@@ -111,7 +160,47 @@ describe("PluginsPanel diagnostics helpers", () => {
         screenshots: [],
       },
     });
-    const plugins = [geo, notebook];
+    const operatorPlugin = pluginSummary({
+      id: "operator-smoke@omiga-curated",
+      name: "operator-smoke",
+      interface: {
+        displayName: "Operator Smoke Test",
+        shortDescription: "Adds a write-text-report operator",
+        longDescription: null,
+        developerName: null,
+        category: "Operator",
+        capabilities: ["Operator", "Local Execution"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const functionPlugin = pluginSummary({
+      id: "function-catalog@omiga-curated",
+      name: "function-catalog",
+      interface: {
+        displayName: "Function Catalog",
+        shortDescription: "Adds callable helper functions",
+        longDescription: null,
+        developerName: null,
+        category: "Function",
+        capabilities: ["Function", "Custom Tool"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const plugins = [geo, notebook, operatorPlugin, functionPlugin];
 
     expect(filterPluginsForCatalog(plugins, "geo expression", "all")).toEqual([
       geo,
@@ -122,10 +211,113 @@ describe("PluginsPanel diagnostics helpers", () => {
     expect(filterPluginsForCatalog(plugins, "", "general")).toEqual([
       notebook,
     ]);
+    expect(filterPluginsForCatalog(plugins, "", "operators")).toEqual([
+      operatorPlugin,
+    ]);
+    expect(filterPluginsForCatalog(plugins, "", "tools")).toEqual([
+      functionPlugin,
+    ]);
     expect(filterPluginsForCatalog(plugins, "", "enabled")).toEqual([geo]);
     expect(filterPluginsForCatalog(plugins, "repair", "available")).toEqual([
       notebook,
     ]);
+  });
+
+  it("groups plugin cards by top-level plugin type before source category", () => {
+    const geo = pluginSummary({
+      retrieval: {
+        protocolVersion: 1,
+        sources: [
+          {
+            id: "geo",
+            category: "dataset",
+            label: "NCBI GEO",
+            description: "Gene expression datasets",
+            subcategories: ["expression"],
+            capabilities: ["search", "query", "fetch"],
+            requiredCredentialRefs: [],
+            optionalCredentialRefs: [],
+            defaultEnabled: true,
+            replacesBuiltin: true,
+          },
+        ],
+      },
+    });
+    const operatorPlugin = pluginSummary({
+      id: "operator-smoke@omiga-curated",
+      name: "operator-smoke",
+      interface: {
+        displayName: "Operator Smoke Test",
+        shortDescription: null,
+        longDescription: null,
+        developerName: null,
+        category: "Operator",
+        capabilities: [],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const functionPlugin = pluginSummary({
+      id: "function-runner@omiga-curated",
+      name: "function-runner",
+      interface: {
+        displayName: "Function Runner",
+        shortDescription: null,
+        longDescription: null,
+        developerName: null,
+        category: "Function",
+        capabilities: ["Custom Tool"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+    const notebook = pluginSummary({
+      id: "notebook-helper@omiga-curated",
+      name: "notebook-helper",
+      interface: {
+        displayName: "Notebook Helper",
+        shortDescription: null,
+        longDescription: null,
+        developerName: null,
+        category: "Notebook",
+        capabilities: ["Workflow"],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt: [],
+        brandColor: null,
+        composerIcon: null,
+        logo: null,
+        screenshots: [],
+      },
+    });
+
+    expect(pluginCatalogGroupId(operatorPlugin)).toBe("operator");
+    expect(pluginCatalogGroupId(functionPlugin)).toBe("tools");
+    expect(pluginCatalogGroupId(geo)).toBe("source");
+    expect(pluginCatalogGroupId(notebook)).toBe("other");
+    expect(
+      groupPluginsByCatalogGroup([notebook, geo, functionPlugin, operatorPlugin])
+        .map((group) => group.id),
+    ).toEqual(["operator", "tools", "source", "other"]);
+    expect(
+      groupPluginsByCatalogSection("source", [geo]).map((section) => section.title),
+    ).toEqual(["Dataset sources"]);
+    expect(
+      groupPluginsByCatalogSection("other", [notebook]).map((section) => section.title),
+    ).toEqual(["Notebook"]);
   });
 
   it("detects stale runtime records whose plugin id is no longer catalogued", () => {
@@ -202,6 +394,188 @@ describe("PluginsPanel diagnostics helpers", () => {
       ),
     ).toBe("sample_qc");
     expect(operatorToolName("sample_qc")).toBe("operator__sample_qc");
+  });
+
+  it("recognizes manifest-declared smoke tests and builds deterministic smoke args", () => {
+    const smokeOperator = operatorSummary({
+      smokeTests: [
+        {
+          id: "default",
+          name: "Write text report smoke",
+          description: "Generates a deterministic two-line report artifact.",
+          arguments: {
+            inputs: {},
+            params: {
+              message: "hello operator smoke",
+              repeat: 2,
+            },
+            resources: {},
+          },
+        },
+        {
+          id: "large",
+          name: "Large smoke",
+          description: "Uses a larger repeat count.",
+          arguments: {
+            inputs: {},
+            params: {
+              message: "large smoke",
+              repeat: 5,
+            },
+            resources: {},
+          },
+        },
+      ],
+    });
+
+    expect(operatorSupportsSmokeRun(smokeOperator)).toBe(true);
+    expect(operatorSmokeTestForRun(smokeOperator, "large")?.id).toBe("large");
+    expect(operatorSmokeTestForRun(smokeOperator, "missing")?.id).toBe("default");
+    expect(operatorSmokeRunLabel(smokeOperator)).toBe("Write text report smoke");
+    expect(operatorSmokeRunLabel(smokeOperator, "large")).toBe("Large smoke");
+    expect(operatorSmokeTestSummary(smokeOperator)).toBe(
+      "Write text report smoke: Generates a deterministic two-line report artifact. · +1 more",
+    );
+    expect(operatorSmokeTestSummary(smokeOperator, "large")).toBe(
+      "Large smoke: Uses a larger repeat count. · +1 more",
+    );
+    expect(operatorSmokeRunArguments(smokeOperator)).toEqual({
+      inputs: {},
+      params: {
+        message: "hello operator smoke",
+        repeat: 2,
+      },
+      resources: {},
+    });
+    expect(operatorSmokeRunArguments(smokeOperator, "large")).toEqual({
+      inputs: {},
+      params: {
+        message: "large smoke",
+        repeat: 5,
+      },
+      resources: {},
+    });
+    expect(operatorSmokeRunArguments(smokeOperator, "missing")).toEqual({
+      inputs: {},
+      params: {
+        message: "hello operator smoke",
+        repeat: 2,
+      },
+      resources: {},
+    });
+    expect(
+      operatorSupportsSmokeRun(
+        operatorSummary({
+          id: "write_text_report",
+          sourcePlugin: "operator-smoke@omiga-curated",
+        }),
+      ),
+    ).toBe(false);
+    expect(operatorSupportsSmokeRun(operatorSummary())).toBe(false);
+    expect(operatorSmokeTestSummary(operatorSummary())).toBeNull();
+    expect(operatorSmokeRunArguments(operatorSummary())).toEqual({
+      inputs: {},
+      params: {},
+      resources: {},
+    });
+  });
+
+  it("labels operator run status and titles for diagnostics", () => {
+    expect(operatorRunTitle(operatorRunSummary())).toBe(
+      "operator__write_text_report",
+    );
+    expect(
+      operatorRunTitle(
+        operatorRunSummary({ operatorAlias: null, operatorId: "fastqc" }),
+      ),
+    ).toBe("fastqc");
+    expect(operatorRunStatusColor("succeeded")).toBe("success");
+    expect(operatorRunStatusColor("failed")).toBe("error");
+    expect(operatorRunStatusColor("running")).toBe("info");
+    expect(operatorRunStatusColor("timed_out")).toBe("warning");
+  });
+
+  it("builds per-operator run statistics for cards and details", () => {
+    const operator = operatorSummary({
+      id: "write_text_report",
+      version: "0.1.0",
+      sourcePlugin: "operator-smoke@omiga-curated",
+      enabledAliases: ["write_text_report"],
+      exposed: true,
+    });
+    const success = operatorRunSummary({
+      runId: "oprun_success",
+      status: "succeeded",
+      updatedAt: "2026-05-06T12:00:00Z",
+    });
+    const failed = operatorRunSummary({
+      runId: "oprun_failed",
+      status: "failed",
+      updatedAt: "2026-05-06T13:00:00Z",
+      errorMessage: "bad input",
+      errorKind: "tool_exit_nonzero",
+      retryable: false,
+      suggestedAction: "Inspect stderr and retry.",
+      stderrTail: "bad flag\n",
+    });
+    const running = operatorRunSummary({
+      runId: "oprun_running",
+      status: "running",
+      updatedAt: "2026-05-06T14:00:00Z",
+    });
+    const smoke = operatorRunSummary({
+      runId: "oprun_smoke",
+      status: "succeeded",
+      runKind: "smoke",
+      smokeTestId: "default",
+      smokeTestName: "Default smoke",
+      updatedAt: "2026-05-06T15:00:00Z",
+    });
+    const unrelated = operatorRunSummary({
+      runId: "oprun_fastqc",
+      operatorAlias: "fastqc",
+      operatorId: "fastqc",
+      sourcePlugin: "bio-operators@local",
+      operatorVersion: "1.0.0",
+    });
+
+    expect(operatorRunBelongsToOperator(operator, success)).toBe(true);
+    expect(operatorRunBelongsToOperator(operator, unrelated)).toBe(false);
+    expect(operatorRunIsSmoke(smoke)).toBe(true);
+    expect(operatorRunIsSmoke(success)).toBe(false);
+    expect(operatorRunDiagnosisSummary(failed)).toBe("bad input");
+    expect(JSON.parse(operatorRunDiagnosticsPayload(failed, operator))).toMatchObject({
+      operator: {
+        id: "write_text_report",
+      },
+      run: {
+        runId: "oprun_failed",
+      },
+      error: {
+        kind: "tool_exit_nonzero",
+        message: "bad input",
+        retryable: false,
+        suggestedAction: "Inspect stderr and retry.",
+        stderrTail: "bad flag\n",
+      },
+    });
+    expect(operatorRunsForOperator(operator, [success, unrelated, failed])).toEqual([
+      success,
+      failed,
+    ]);
+    expect(operatorRunStats(operator, [success, failed, running, smoke, unrelated])).toMatchObject({
+      total: 4,
+      succeeded: 2,
+      failed: 1,
+      running: 1,
+      smokeTotal: 1,
+      smokeSucceeded: 1,
+      smokeFailed: 0,
+      regularTotal: 3,
+      latestRun: smoke,
+      latestSmokeRun: smoke,
+      latestRegularRun: running,
+    });
   });
 
   it("summarizes quarantined routes with actionable timing and last error", () => {

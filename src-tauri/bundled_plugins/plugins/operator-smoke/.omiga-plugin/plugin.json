@@ -1,0 +1,22 @@
+{
+  "name": "operator-smoke",
+  "version": "0.1.0",
+  "description": "Minimal built-in operator plugin for validating Omiga operator discovery, exposure, and execution.",
+  "interface": {
+    "displayName": "Operator Smoke Test",
+    "shortDescription": "Adds a tiny write-text-report operator",
+    "longDescription": "Provides a deterministic built-in operator that writes a report artifact without external services. Use it to validate operator registry exposure and single-operator agent calls.",
+    "developerName": "Omiga",
+    "category": "Operator",
+    "capabilities": [
+      "Operator",
+      "Local Execution",
+      "SSH Execution",
+      "Smoke Test"
+    ],
+    "brandColor": "#7C3AED",
+    "defaultPrompt": [
+      "Expose the write-text-report operator and run it with message 'hello operator'."
+    ]
+  }
+}

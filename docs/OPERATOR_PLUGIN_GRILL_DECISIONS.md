@@ -46,6 +46,9 @@ Non-goal for MVP: full DAG workflow orchestration, Snakemake/Nextflow parity, sc
 34. **Run state**: MVP uses a persisted run state machine even if tool calls are initially synchronous.
 35. **Call mode**: `operator__id` synchronously waits until success/failure/timeout for MVP.
 36. **Timeouts**: effective timeout comes from manifest walltime, allowed override, and session/global hard limit; infra/run/collection timeouts are distinct.
+37. **Run history**: local run history is discovered from `{project}/.omiga/runs/*/status.json|provenance.json`; SSH/sandbox run provenance remains on the selected remote execution environment and is accessed through remote file tooling rather than copied locally.
+38. **Run verification**: first-version run QA is read-only and checks run state, status, logs, and declared output artifact references in-place on the selected execution surface.
+39. **Smoke tests**: operator manifests may declare `smokeTests[]` with typed `{ inputs, params, resources }` invocation payloads; the UI uses those declarations instead of project-specific hardcoded smoke runners.
 
 ## MVP implementation slice
 
@@ -58,3 +61,22 @@ Recommended first vertical slice:
 5. Implement local/no-container execution first, with isolated run dirs and structured results.
 6. Extend to SSH/no-container by using the local registry/schema and reusing the existing session execution environment and remote file access primitives.
 7. Add local Docker/Singularity once no-container behavior is stable.
+
+## Built-in validation fixture
+
+- Bundled plugin: `operator-smoke@omiga-curated`.
+- Bundled operator: `write_text_report@0.1.0`, exposed as `operator__write_text_report` after installation + enablement.
+- Purpose: deterministic end-to-end validation for plugin discovery, registry exposure, plugin wrapper staging, single operator invocation, run dirs, logs, provenance, and required output collection.
+- Runtime support: `local+none` and `ssh+none`; registry/schema remain local, while SSH run artifacts remain on the selected remote server.
+- Manifest authoring reference: [`docs/OPERATOR_PLUGIN_MANIFEST.md`](./OPERATOR_PLUGIN_MANIFEST.md).
+
+## Current first-version completion notes
+
+- Operator run listing, details, logs, and verification are execution-surface aware: local reads use `{project}/.omiga/runs`, while SSH/sandbox reads use the active remote workspace `.omiga/runs` through the existing execution environment.
+- Remote operator artifacts/logs/provenance are never copied into the local registry or workspace; UI and Agent-facing results keep remote references and read/verify them in place.
+- Smoke runs are now manifest-driven via `smokeTests`, so user-added and built-in plugins can expose deterministic validation payloads through the same generic operator runner. When multiple smoke tests are declared, the UI lets the user choose which payload to run and then opens/verifies the resulting run.
+- Operator cards summarize calls/successes/failures/latest status from the current execution surface run history; clicking a card opens an operator detail view with manifest identity, aliases, smoke tests, and matching run statuses.
+- Smoke run provenance/status now records `runContext.kind=smoke` plus smoke test id/name, so cards can distinguish normal calls from smoke validation runs, including failed smoke runs that only have `status.json`.
+- Failed runs now surface structured diagnostics (`kind`, `retryable`, `message`, `suggestedAction`, stdout/stderr tails) in run summaries and details so the user or Agent can inspect/copy a concrete correction payload without moving remote artifacts locally.
+- Manual local smoke E2E was verified on 2026-05-07 with `operator__write_text_report`, producing `.omiga/runs/{run_id}/out/operator-report.txt` containing two `hello operator smoke` lines.
+- Regression coverage now locks smoke UI visibility, smoke-test selection fallback, store-level smoke run context propagation, failed-run diagnostic preservation, command project-root normalization, invalid smoke test ids, and bundled smoke execution.

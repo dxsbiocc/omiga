@@ -1,9 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeMock,
+}));
+
 import {
   RETRIEVAL_PLUGIN_PROTOCOL_DOC_PATH,
   buildPluginDiagnostics,
   buildRetrievalRuntimeDiagnostics,
   flattenMarketplacePlugins,
+  summarizeOperatorRunResult,
+  updateOperatorEnabledInCatalog,
+  updatePluginEnabledInMarketplaces,
+  usePluginStore,
+  type OperatorSummary,
   type PluginMarketplaceEntry,
   type PluginProcessPoolRouteStatus,
   type PluginRetrievalRouteStatus,
@@ -55,6 +67,316 @@ describe("flattenMarketplacePlugins", () => {
     ]);
 
     expect(flattened).toEqual([first, other]);
+  });
+});
+
+describe("local plugin catalog updates", () => {
+  it("updates one plugin enabled flag without rebuilding unrelated marketplace entries", () => {
+    const target = plugin({
+      id: "retrieval-dataset-geo@omiga-curated",
+      name: "retrieval-dataset-geo",
+      installed: true,
+      enabled: false,
+    });
+    const other = plugin({
+      id: "notebook-helper@omiga-curated",
+      name: "notebook-helper",
+      installed: true,
+      enabled: true,
+    });
+    const original = [marketplace("/marketplace.json", [target, other])];
+
+    const updated = updatePluginEnabledInMarketplaces(
+      original,
+      "retrieval-dataset-geo@omiga-curated",
+      true,
+    );
+
+    expect(updated).not.toBe(original);
+    expect(updated[0]).not.toBe(original[0]);
+    expect(updated[0].plugins[0]).toMatchObject({ enabled: true });
+    expect(updated[0].plugins[1]).toBe(other);
+  });
+
+  it("updates one operator registry entry without requiring a full plugin reload", () => {
+    const operator: OperatorSummary = {
+      id: "write_text_report",
+      version: "0.1.0",
+      name: "Write Text Report",
+      description: null,
+      sourcePlugin: "operator-smoke@omiga-curated",
+      manifestPath: "/plugins/operator-smoke/operators/write_text_report.yaml",
+      smokeTests: [],
+      enabledAliases: [],
+      exposed: false,
+      unavailableReason: null,
+    };
+    const other: OperatorSummary = {
+      ...operator,
+      id: "fastqc",
+      sourcePlugin: "bio-operators@local",
+      manifestPath: "/plugins/bio/operators/fastqc.yaml",
+    };
+
+    const enabled = updateOperatorEnabledInCatalog([operator, other], {
+      alias: "write_text_report",
+      operatorId: "write_text_report",
+      sourcePlugin: "operator-smoke@omiga-curated",
+      version: "0.1.0",
+      enabled: true,
+    });
+
+    expect(enabled[0]).toMatchObject({
+      exposed: true,
+      enabledAliases: ["write_text_report"],
+    });
+    expect(enabled[1]).toBe(other);
+
+    const disabled = updateOperatorEnabledInCatalog(enabled, {
+      alias: "write_text_report",
+      operatorId: "write_text_report",
+      sourcePlugin: "operator-smoke@omiga-curated",
+      version: "0.1.0",
+      enabled: false,
+    });
+    expect(disabled[0]).toMatchObject({
+      exposed: false,
+      enabledAliases: [],
+    });
+  });
+});
+
+describe("summarizeOperatorRunResult", () => {
+  it("returns null when operator run result is missing required fields", () => {
+    expect(summarizeOperatorRunResult({})).toBeNull();
+    expect(
+      summarizeOperatorRunResult({
+        status: "succeeded",
+        runId: "oprun_missing_dir",
+      }),
+    ).toBeNull();
+    expect(
+      summarizeOperatorRunResult({
+        status: "succeeded",
+        runDir: "/project/.omiga/runs/oprun_missing_id",
+      }),
+    ).toBeNull();
+  });
+
+  it("preserves smoke run context for operator statistics", () => {
+    expect(
+      summarizeOperatorRunResult({
+        status: "succeeded",
+        runId: "oprun_20260506_smoke",
+        location: "local",
+        operator: {
+          alias: "write_text_report",
+          id: "write_text_report",
+          version: "0.1.0",
+          sourcePlugin: "operator-smoke@omiga-curated",
+        },
+        runDir: "/project/.omiga/runs/oprun_20260506_smoke",
+        runContext: {
+          kind: "smoke",
+          smokeTestId: "default",
+          smokeTestName: "Write text report smoke",
+        },
+        error: {
+          kind: "tool_exit_nonzero",
+          retryable: false,
+          message: "bad input",
+          suggestedAction: "Inspect stderr.",
+          stderrTail: "bad flag\n",
+        },
+        outputs: {
+          report: [{ path: "/project/.omiga/runs/oprun_20260506_smoke/out/report.txt" }],
+        },
+      }),
+    ).toMatchObject({
+      runId: "oprun_20260506_smoke",
+      runKind: "smoke",
+      smokeTestId: "default",
+      smokeTestName: "Write text report smoke",
+      errorKind: "tool_exit_nonzero",
+      retryable: false,
+      suggestedAction: "Inspect stderr.",
+      stderrTail: "bad flag\n",
+      outputCount: 1,
+    });
+  });
+});
+
+describe("usePluginStore operator actions", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    usePluginStore.setState({
+      marketplaces: [],
+      operators: [],
+      operatorDiagnostics: [],
+      operatorRegistryPath: null,
+      operatorRuns: [],
+      retrievalStatuses: [],
+      processPoolStatuses: [],
+      isLoading: false,
+      isMutating: false,
+      error: null,
+    });
+  });
+
+  it("invokes smoke runs with run context and stores the returned summary", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "run_operator") {
+        return {
+          ok: true,
+          result: {
+            status: "succeeded",
+            runId: "oprun_20260507_smoke",
+            location: "local",
+            operator: {
+              alias: "write_text_report",
+              id: "write_text_report",
+              version: "0.1.0",
+              sourcePlugin: "operator-smoke@omiga-curated",
+            },
+            runDir: "/project/.omiga/runs/oprun_20260507_smoke",
+            runContext: {
+              kind: "smoke",
+              smokeTestId: "default",
+              smokeTestName: "Write text report smoke",
+            },
+            outputs: {
+              report: [
+                {
+                  path: "/project/.omiga/runs/oprun_20260507_smoke/out/operator-report.txt",
+                },
+              ],
+            },
+          },
+        };
+      }
+      if (command === "list_operator_runs") return [];
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await usePluginStore.getState().runOperator(
+      "write_text_report",
+      {
+        inputs: {},
+        params: {
+          message: "hello operator smoke",
+          repeat: 2,
+        },
+        resources: {},
+      },
+      "/project",
+      {
+        sessionId: "session-1",
+        executionEnvironment: "local",
+        sshServer: null,
+        sandboxBackend: "docker",
+      },
+      {
+        kind: "smoke",
+        smokeTestId: "default",
+        smokeTestName: "Write text report smoke",
+      },
+    );
+
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      1,
+      "run_operator",
+      expect.objectContaining({
+        alias: "write_text_report",
+        projectRoot: "/project",
+        sessionId: "session-1",
+        executionEnvironment: "local",
+        sandboxBackend: "docker",
+        runKind: "smoke",
+        smokeTestId: "default",
+        smokeTestName: "Write text report smoke",
+      }),
+    );
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      2,
+      "list_operator_runs",
+      expect.objectContaining({
+        projectRoot: "/project",
+        sessionId: "session-1",
+        executionEnvironment: "local",
+        sandboxBackend: "docker",
+      }),
+    );
+    expect(usePluginStore.getState().operatorRuns[0]).toMatchObject({
+      runId: "oprun_20260507_smoke",
+      runKind: "smoke",
+      smokeTestId: "default",
+      smokeTestName: "Write text report smoke",
+      outputCount: 1,
+    });
+  });
+
+  it("keeps failed run diagnostics when run_operator returns an error result", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "run_operator") {
+        return {
+          ok: false,
+          result: {
+            status: "failed",
+            runId: "oprun_20260507_failed",
+            location: "local",
+            operator: {
+              alias: "write_text_report",
+              id: "write_text_report",
+              version: "0.1.0",
+              sourcePlugin: "operator-smoke@omiga-curated",
+            },
+            runDir: "/project/.omiga/runs/oprun_20260507_failed",
+            runContext: {
+              kind: "smoke",
+              smokeTestId: "default",
+              smokeTestName: "Write text report smoke",
+            },
+            error: {
+              kind: "tool_exit_nonzero",
+              retryable: false,
+              message: "bad input",
+              suggestedAction: "Inspect stdout/stderr, then adjust inputs or params and retry.",
+              stdoutTail: "partial stdout\n",
+              stderrTail: "bad flag\n",
+            },
+          },
+        };
+      }
+      if (command === "list_operator_runs") return [];
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await expect(
+      usePluginStore.getState().runOperator(
+        "write_text_report",
+        { inputs: {}, params: { repeat: 0 }, resources: {} },
+        "/project",
+        { executionEnvironment: "local" },
+        {
+          kind: "smoke",
+          smokeTestId: "default",
+          smokeTestName: "Write text report smoke",
+        },
+      ),
+    ).rejects.toThrow("bad input");
+
+    expect(usePluginStore.getState().error).toBe("bad input");
+    expect(usePluginStore.getState().operatorRuns[0]).toMatchObject({
+      runId: "oprun_20260507_failed",
+      status: "failed",
+      runKind: "smoke",
+      errorMessage: "bad input",
+      errorKind: "tool_exit_nonzero",
+      retryable: false,
+      suggestedAction: "Inspect stdout/stderr, then adjust inputs or params and retry.",
+      stdoutTail: "partial stdout\n",
+      stderrTail: "bad flag\n",
+    });
   });
 });
 
