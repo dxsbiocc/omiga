@@ -87,6 +87,28 @@ impl OperatorFieldKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorInputStagingMode {
+    Reference,
+    Bind,
+    Copy,
+}
+
+impl OperatorInputStagingMode {
+    fn parse(raw: Option<&str>) -> Option<Self> {
+        match raw.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(value) => match value.to_ascii_lowercase().as_str() {
+                "reference" | "ref" => Some(Self::Reference),
+                "bind" | "mount" | "symlink" => Some(Self::Bind),
+                "copy" => Some(Self::Copy),
+                _ => None,
+            },
+            None => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperatorFieldSpec {
@@ -111,6 +133,8 @@ pub struct OperatorFieldSpec {
     pub glob: Option<String>,
     #[serde(default)]
     pub non_empty: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staging: Option<OperatorInputStagingMode>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -383,6 +407,8 @@ struct RawFieldSpec {
     glob: Option<String>,
     #[serde(default)]
     non_empty: Option<bool>,
+    #[serde(default, alias = "stage")]
+    staging: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -451,6 +477,7 @@ impl From<RawFieldSpec> for OperatorFieldSpec {
             min_size: raw.min_size,
             glob: raw.glob,
             non_empty: raw.non_empty,
+            staging: OperatorInputStagingMode::parse(raw.staging.as_deref()),
         }
     }
 }
@@ -1682,13 +1709,6 @@ async fn execute_resolved_operator(
         surface.artifact_location(),
     )
     .await;
-    let argv = expand_argv(
-        &resolved.spec,
-        &canonical_inputs,
-        &effective_params,
-        &effective_resources,
-        &surface.run_dir,
-    )?;
     let walltime_secs = effective_walltime_secs(&effective_resources, ctx.timeout_secs);
 
     let retry_policy = operator_retry_policy(&resolved.spec);
@@ -1699,6 +1719,38 @@ async fn execute_resolved_operator(
             max_attempts: retry_policy.max_attempts,
             previous_errors: previous_errors.clone(),
         };
+        let staged_inputs =
+            match stage_operator_inputs(ctx, &resolved.spec, &surface, &canonical_inputs).await {
+                Ok(staged_inputs) => staged_inputs,
+                Err(error) => {
+                    let error = error.with_retry_state(&retry_state);
+                    if should_retry_operator_error(&error, &retry_policy, attempt) {
+                        let summary = OperatorRetryAttemptSummary::from_error(attempt, &error);
+                        let mut retrying_state = retry_state.clone();
+                        retrying_state.previous_errors.push(summary.clone());
+                        let _ = record_operator_retry_status(
+                            ctx,
+                            &resolved,
+                            &run_id,
+                            &surface,
+                            run_context.clone(),
+                            &retrying_state,
+                            &error,
+                        )
+                        .await;
+                        previous_errors.push(summary);
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
+        let argv = expand_argv(
+            &resolved.spec,
+            &staged_inputs,
+            &effective_params,
+            &effective_resources,
+            &surface.run_dir,
+        )?;
         let result = if surface.kind == OperatorExecutionSurfaceKind::Local {
             execute_local(
                 ctx,
@@ -1707,7 +1759,7 @@ async fn execute_resolved_operator(
                 &surface.run_dir,
                 &argv,
                 walltime_secs,
-                canonical_inputs.clone(),
+                staged_inputs,
                 input_fingerprints.clone(),
                 effective_params.clone(),
                 effective_resources.clone(),
@@ -1723,7 +1775,7 @@ async fn execute_resolved_operator(
                 &surface,
                 &argv,
                 walltime_secs,
-                canonical_inputs.clone(),
+                staged_inputs,
                 input_fingerprints.clone(),
                 effective_params.clone(),
                 effective_resources.clone(),
@@ -2762,6 +2814,249 @@ async fn record_operator_retry_status(
     }
 }
 
+async fn stage_operator_inputs(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    surface: &OperatorExecutionSurface,
+    inputs: &BTreeMap<String, JsonValue>,
+) -> Result<BTreeMap<String, JsonValue>, OperatorToolError> {
+    let mut staged = inputs.clone();
+    for (name, field) in &spec.interface.inputs {
+        if !field.kind.is_path_like() || field.staging != Some(OperatorInputStagingMode::Copy) {
+            continue;
+        }
+        let Some(value) = inputs.get(name) else {
+            continue;
+        };
+        let staged_value = if field.kind.is_array() {
+            let mut out = Vec::new();
+            for (index, item) in value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(JsonValue::as_str)
+                .enumerate()
+            {
+                out.push(JsonValue::String(
+                    stage_operator_input_path(ctx, surface, name, Some(index), item, &field.kind)
+                        .await?,
+                ));
+            }
+            JsonValue::Array(out)
+        } else if let Some(path) = value.as_str() {
+            JsonValue::String(
+                stage_operator_input_path(ctx, surface, name, None, path, &field.kind).await?,
+            )
+        } else {
+            continue;
+        };
+        staged.insert(name.clone(), staged_value);
+    }
+    Ok(staged)
+}
+
+async fn stage_operator_input_path(
+    ctx: &crate::domain::tools::ToolContext,
+    surface: &OperatorExecutionSurface,
+    name: &str,
+    index: Option<usize>,
+    source: &str,
+    kind: &OperatorFieldKind,
+) -> Result<String, OperatorToolError> {
+    let destination = staged_input_destination(&surface.run_dir, name, index, source);
+    if surface.kind == OperatorExecutionSurfaceKind::Local {
+        copy_local_operator_input(source, &destination, kind, &surface.run_dir)?;
+    } else {
+        copy_environment_operator_input(ctx, source, &destination, kind, &surface.run_dir).await?;
+    }
+    Ok(destination)
+}
+
+fn staged_input_destination(
+    run_dir: &str,
+    name: &str,
+    index: Option<usize>,
+    source: &str,
+) -> String {
+    let input_name = safe_path_component(name, "input");
+    let basename = safe_path_component(path_basename(source).unwrap_or(name), "value");
+    let filename = match index {
+        Some(index) => format!("{index:04}_{basename}"),
+        None => basename,
+    };
+    format!(
+        "{}/inputs/{}/{}",
+        run_dir.trim_end_matches('/'),
+        input_name,
+        filename
+    )
+}
+
+fn path_basename(path: &str) -> Option<&str> {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .find(|part| !part.trim().is_empty())
+}
+
+fn safe_path_component(raw: &str, fallback: &str) -> String {
+    let mut out = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    while out.starts_with('.') {
+        out.remove(0);
+    }
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out
+    }
+}
+
+fn copy_local_operator_input(
+    source: &str,
+    destination: &str,
+    kind: &OperatorFieldKind,
+    run_dir: &str,
+) -> Result<(), OperatorToolError> {
+    let source = PathBuf::from(source);
+    let destination = PathBuf::from(destination);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            OperatorToolError::new(
+                "input_staging_failed",
+                false,
+                format!("create input staging dir {}: {err}", parent.display()),
+            )
+            .with_run_dir(run_dir)
+        })?;
+    }
+    remove_local_path_if_exists(&destination).map_err(|err| {
+        OperatorToolError::new(
+            "input_staging_failed",
+            false,
+            format!("replace staged input {}: {err}", destination.display()),
+        )
+        .with_run_dir(run_dir)
+    })?;
+    if matches!(
+        kind,
+        OperatorFieldKind::Directory | OperatorFieldKind::DirectoryArray
+    ) {
+        copy_local_dir_recursive(&source, &destination).map_err(|err| {
+            OperatorToolError::new(
+                "input_staging_failed",
+                false,
+                format!(
+                    "copy input directory {} to {}: {err}",
+                    source.display(),
+                    destination.display()
+                ),
+            )
+            .with_run_dir(run_dir)
+        })?;
+    } else {
+        fs::copy(&source, &destination).map_err(|err| {
+            OperatorToolError::new(
+                "input_staging_failed",
+                false,
+                format!(
+                    "copy input file {} to {}: {err}",
+                    source.display(),
+                    destination.display()
+                ),
+            )
+            .with_run_dir(run_dir)
+        })?;
+    }
+    Ok(())
+}
+
+fn remove_local_path_if_exists(path: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+fn copy_local_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_local_dir_recursive(&source_path, &destination_path)?;
+        } else {
+            fs::copy(source_path, destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+async fn copy_environment_operator_input(
+    ctx: &crate::domain::tools::ToolContext,
+    source: &str,
+    destination: &str,
+    kind: &OperatorFieldKind,
+    run_dir: &str,
+) -> Result<(), OperatorToolError> {
+    let parent = destination
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or(run_dir);
+    let copy_command = if matches!(
+        kind,
+        OperatorFieldKind::Directory | OperatorFieldKind::DirectoryArray
+    ) {
+        format!(
+            "rm -rf {} && mkdir -p {} && cp -R {} {}",
+            sh_quote(destination),
+            sh_quote(parent),
+            sh_quote(source),
+            sh_quote(destination)
+        )
+    } else {
+        format!(
+            "rm -f {} && mkdir -p {} && cp {} {}",
+            sh_quote(destination),
+            sh_quote(parent),
+            sh_quote(source),
+            sh_quote(destination)
+        )
+    };
+    let result = execute_env_command(ctx, "~", &copy_command, 30)
+        .await
+        .map_err(|err| {
+            OperatorToolError::new("execution_infra_error", true, err.message).with_run_dir(run_dir)
+        })?;
+    if result.returncode != 0 {
+        return Err(OperatorToolError::new(
+            "input_staging_failed",
+            false,
+            format!(
+                "Copy input `{source}` to `{destination}` failed with code {}.",
+                result.returncode
+            ),
+        )
+        .with_run_dir(run_dir)
+        .with_suggested_action(
+            "Verify the input path exists on the selected execution environment.",
+        ));
+    }
+    Ok(())
+}
+
 async fn execute_local(
     ctx: &crate::domain::tools::ToolContext,
     resolved: &ResolvedOperator,
@@ -3217,6 +3512,9 @@ fn operator_container_mounts(
     }
 
     for path in path_like_input_values(spec, inputs) {
+        if path_is_within_run_dir(&path, run_dir) {
+            continue;
+        }
         insert_container_mount(&mut mounts, &path, false);
     }
 
@@ -3224,6 +3522,12 @@ fn operator_container_mounts(
         .into_iter()
         .map(|(path, writable)| OperatorContainerMount { path, writable })
         .collect()
+}
+
+fn path_is_within_run_dir(path: &str, run_dir: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let run_dir = run_dir.trim_end_matches('/');
+    path == run_dir || path.starts_with(&format!("{run_dir}/"))
 }
 
 fn insert_container_mount(mounts: &mut BTreeMap<String, bool>, path: &str, writable: bool) {
@@ -4381,6 +4685,7 @@ interface:
     reads:
       kind: file_array
       required: true
+      staging: copy
       formats: [fastq.gz]
   params:
     threads:
@@ -4405,6 +4710,10 @@ bindings:
         .unwrap();
         let spec = load_operator_manifest(&manifest, "p@m", tmp.path()).unwrap();
         assert_eq!(spec.metadata.id, "fastqc");
+        assert_eq!(
+            spec.interface.inputs["reads"].staging,
+            Some(OperatorInputStagingMode::Copy)
+        );
         let schema = operator_parameters_schema(&spec);
         assert_eq!(schema["required"][0], "inputs");
         assert!(schema["properties"]["inputs"]["properties"]["reads"]["items"].is_object());
@@ -5441,6 +5750,98 @@ execution:
         assert_eq!(
             result.input_fingerprints["input"]["fingerprint"],
             format!("sha256:{expected_sha256}")
+        );
+    }
+
+    #[tokio::test]
+    async fn stages_copy_inputs_into_local_run_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let input = tmp.path().join("input.txt");
+        fs::write(&input, "copy me\n").unwrap();
+        let spec = OperatorSpec {
+            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
+            kind: OPERATOR_KIND.to_string(),
+            metadata: OperatorMetadata {
+                id: "copy_staged_input".to_string(),
+                version: "1".to_string(),
+                name: None,
+                description: Some("copy staged input to report".to_string()),
+                tags: Vec::new(),
+            },
+            interface: OperatorInterfaceSpec {
+                inputs: BTreeMap::from([(
+                    "input".to_string(),
+                    OperatorFieldSpec {
+                        kind: OperatorFieldKind::File,
+                        required: true,
+                        staging: Some(OperatorInputStagingMode::Copy),
+                        ..OperatorFieldSpec::default()
+                    },
+                )]),
+                outputs: BTreeMap::from([(
+                    "report".to_string(),
+                    OperatorFieldSpec {
+                        kind: OperatorFieldKind::File,
+                        glob: Some("copy.txt".to_string()),
+                        required: true,
+                        ..OperatorFieldSpec::default()
+                    },
+                )]),
+                ..OperatorInterfaceSpec::default()
+            },
+            smoke_tests: Vec::new(),
+            execution: OperatorExecutionSpec {
+                argv: vec![
+                    "cp".to_string(),
+                    "${inputs.input}".to_string(),
+                    "${outdir}/copy.txt".to_string(),
+                ],
+            },
+            runtime: None,
+            resources: BTreeMap::new(),
+            bindings: Vec::new(),
+            permissions: None,
+            source: OperatorSource {
+                source_plugin: "test@local".to_string(),
+                plugin_root: tmp.path().to_path_buf(),
+                manifest_path: tmp.path().join("operator.yaml"),
+            },
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let result = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "copy_staged_input".to_string(),
+                spec,
+            },
+            OperatorInvocation {
+                inputs: BTreeMap::from([(
+                    "input".to_string(),
+                    JsonValue::String("input.txt".to_string()),
+                )]),
+                params: BTreeMap::new(),
+                resources: BTreeMap::new(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let staged_input = result.effective_inputs["input"].as_str().unwrap();
+        assert!(staged_input.starts_with(&format!("{}/inputs/input/", result.run_dir)));
+        assert_ne!(
+            staged_input,
+            input.canonicalize().unwrap().to_string_lossy()
+        );
+        assert_eq!(fs::read_to_string(staged_input).unwrap(), "copy me\n");
+        assert_eq!(
+            fs::read_to_string(&result.outputs["report"][0].path).unwrap(),
+            "copy me\n"
+        );
+        let expected_sha256 = sha256_file(&input.to_string_lossy()).unwrap();
+        assert_eq!(
+            result.input_fingerprints["input"]["sha256"],
+            expected_sha256
         );
     }
 }

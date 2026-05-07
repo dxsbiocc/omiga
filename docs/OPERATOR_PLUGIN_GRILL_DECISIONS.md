@@ -82,6 +82,7 @@ Recommended first vertical slice:
 - Bundled container smoke coverage now includes `container_text_report@0.1.0` with Docker/Singularity runtime declarations, a generic active-backend smoke payload, and a live ignored Docker test for manual validation against the installed container runtime.
 - Retry policy now retries only retryable infrastructure failures and records `attempt`, `maxAttempts`, and `previousErrors`; tool exits, validation failures, and output failures remain Agent-correction errors.
 - Path-like input provenance now records strong local sha256 fingerprints and best-effort remote sha256 fingerprints, with stat/reference fallback when remote checksum tools are unavailable.
+- Path-like inputs that declare `staging: copy` are copied into the active run workspace before argv expansion; remote copies happen on the selected remote execution surface and are not copied back locally.
 - Manual local smoke E2E was verified on 2026-05-07 with `operator__write_text_report`, producing `.omiga/runs/{run_id}/out/operator-report.txt` containing two `hello operator smoke` lines.
 - Manual local Docker smoke E2E was verified on 2026-05-07 with `operator__container_text_report`, producing `.omiga/runs/{run_id}/out/container-operator-report.txt` from the `alpine:3.19` image.
 - Regression coverage now locks smoke UI visibility, smoke-test selection fallback, store-level smoke run context propagation, failed-run diagnostic preservation, command project-root normalization, invalid smoke test ids, and bundled smoke execution.
