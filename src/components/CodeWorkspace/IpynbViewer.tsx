@@ -80,7 +80,7 @@ interface IpynbViewerProps {
 interface NotebookToolbarButtonProps {
   title: string;
   icon: ReactNode;
-  label: string;
+  label?: string;
   disabled?: boolean;
   onClick?: () => void;
 }
@@ -102,6 +102,9 @@ function NotebookTooltip({
     <Tooltip
       title={title}
       arrow
+      enterDelay={650}
+      enterNextDelay={650}
+      leaveDelay={80}
       componentsProps={{
         tooltip: {
           sx: {
@@ -193,9 +196,11 @@ function NotebookToolbarButton({
         >
           {icon}
         </Box>
-        <Box component="span" sx={{ display: "inline-block", lineHeight: "32px" }}>
-          {label}
-        </Box>
+        {label ? (
+          <Box component="span" sx={{ display: "inline-block", lineHeight: "32px" }}>
+            {label}
+          </Box>
+        ) : null}
       </Box>
     </NotebookTooltip>
   );
@@ -946,8 +951,6 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
   const [activeCellIndex, setActiveCellIndex] = useState<number | null>(0);
 
   const virtualizeCells = useNotebookViewerStore((s) => s.virtualizeCells);
-  const enableNotebookShortcuts = useNotebookViewerStore((s) => s.enableNotebookShortcuts);
-  const enablePythonShellMagicHint = useNotebookViewerStore((s) => s.enablePythonShellMagic);
 
   const isEmptyNotebookFile = content.trim().length === 0;
   const autoInitializedEmptyFileRef = useRef<string | null>(null);
@@ -1397,11 +1400,6 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
     activeNotebookCell?.cell_type === "raw"
       ? activeNotebookCell.cell_type
       : "raw";
-  const shortcutSummary = [
-    enableNotebookShortcuts ? "Shift+Enter / Ctrl+Enter" : "快捷键已关闭",
-    enablePythonShellMagicHint ? "支持 Python ! shell" : "Python ! shell 已关闭",
-  ].join(" · ");
-
   const virtualItems = rowVirtualizer.getVirtualItems();
   const totalVirtH = rowVirtualizer.getTotalSize();
 
@@ -1422,12 +1420,12 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
         gap={0}
         sx={{
           minHeight: 34,
-          px: 0.75,
+          px: 0.5,
           borderBottom: 1,
           borderColor: isDark ? alpha(theme.palette.common.white, 0.12) : "divider",
           bgcolor: isDark ? "#252526" : alpha(theme.palette.background.paper, 0.98),
           color: "text.secondary",
-          overflowX: "auto",
+          overflow: "hidden",
           overflowY: "hidden",
           whiteSpace: "nowrap",
         }}
@@ -1452,24 +1450,7 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
           icon={<ClearAllIcon sx={{ fontSize: 16 }} />}
           label="Clear Outputs"
         />
-        <NotebookToolbarButton
-          title="重启内核（本地执行器暂未保持长驻 kernel，会在后续版本接入）"
-          disabled
-          icon={<Typography component="span" sx={{ fontSize: 16, lineHeight: 1 }}>↻</Typography>}
-          label="Restart"
-        />
-        <NotebookToolbarButton
-          title="中断当前运行（长驻 kernel 接入后启用）"
-          disabled
-          icon={<Typography component="span" sx={{ fontSize: 12, lineHeight: 1 }}>■</Typography>}
-          label="Interrupt"
-        />
-        <NotebookToolbarButton
-          title="变量视图将在 Notebook runtime 接入后启用"
-          disabled
-          icon={<Typography component="span" sx={{ fontSize: 14, lineHeight: 1 }}>▦</Typography>}
-          label="Variables"
-        />
+        <Box sx={{ flex: 1, minWidth: 8 }} />
         <NotebookTooltip title="更改当前选中单元格类型">
           <Select
             size="small"
@@ -1485,7 +1466,8 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
             aria-label="更改当前单元格类型"
             sx={{
               mx: 0.25,
-              minWidth: 104,
+              minWidth: 86,
+              maxWidth: 120,
               flexShrink: 0,
               height: 28,
               fontSize: 12,
@@ -1501,19 +1483,6 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
             <MenuItem value="raw">Raw</MenuItem>
           </Select>
         </NotebookTooltip>
-        <NotebookTooltip title={`${OMIGA_NOTEBOOK_PLUGIN.displayName} · ${shortcutSummary}`}>
-          <IconButton
-            size="small"
-            aria-label="notebook details"
-            sx={{ width: 28, height: 28, ml: 0.25, flexShrink: 0 }}
-          >
-            <Typography component="span" sx={{ fontSize: 18, lineHeight: 1 }}>
-              ⋯
-            </Typography>
-          </IconButton>
-        </NotebookTooltip>
-        <Divider orientation="vertical" flexItem sx={{ mx: 0.5, flexShrink: 0 }} />
-        <Box sx={{ flex: 1, minWidth: 16 }} />
         <NotebookTooltip title={`Kernel: ${kernelName}`}>
           <Select
             size="small"
@@ -1522,7 +1491,8 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
             renderValue={() => selectedKernelLabel}
             aria-label="选择 notebook kernel"
             sx={{
-              minWidth: 170,
+              minWidth: 104,
+              maxWidth: 132,
               flexShrink: 0,
               height: 28,
               fontSize: 12,
