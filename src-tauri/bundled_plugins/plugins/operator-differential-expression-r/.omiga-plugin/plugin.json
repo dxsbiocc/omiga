@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Built-in atomic operator plugin: Single differential-expression operator powered by base R.",
   "interface": {
-    "displayName": "Differential Expression R",
+    "displayName": "Differential Expression",
     "shortDescription": "Differential expression powered by base R",
     "longDescription": "Provides one atomic dependency-light Welch-test differential expression operator for feature-by-sample matrices and sample metadata groups.",
     "developerName": "Omiga",
@@ -17,7 +17,7 @@
     ],
     "brandColor": "#0F766E",
     "defaultPrompt": [
-      "Expose the differential expression R plugin and run it with my matrix and metadata."
+      "Expose the differential expression plugin and run it with my matrix and metadata."
     ]
   }
 }

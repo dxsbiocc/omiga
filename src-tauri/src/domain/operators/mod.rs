@@ -5798,7 +5798,7 @@ bindings:
         let plugin = crate::domain::plugins::LoadedPlugin {
             id: "operator-smoke@omiga-curated".to_string(),
             manifest_name: Some("operator-smoke".to_string()),
-            display_name: Some("Operator Smoke Test".to_string()),
+            display_name: Some("Smoke Test".to_string()),
             description: None,
             root: plugin_root,
             enabled: true,

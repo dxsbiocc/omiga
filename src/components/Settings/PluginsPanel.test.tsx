@@ -5,7 +5,7 @@ import {
   filterPluginsForCatalog,
   groupPluginsByCatalogGroup,
   groupPluginsByCatalogSection,
-  operatorPluginLanguageBadge,
+  operatorPluginIconSpec,
   operatorDisplayName,
   operatorPrimaryAlias,
   operatorRunBelongsToOperator,
@@ -197,7 +197,7 @@ describe("PluginsPanel diagnostics helpers", () => {
       id: "operator-smoke@omiga-curated",
       name: "operator-smoke",
       interface: {
-        displayName: "Operator Smoke Test",
+        displayName: "Smoke Test",
         shortDescription: "Adds a write-text-report operator",
         longDescription: null,
         developerName: null,
@@ -280,7 +280,7 @@ describe("PluginsPanel diagnostics helpers", () => {
       id: "operator-smoke@omiga-curated",
       name: "operator-smoke",
       interface: {
-        displayName: "Operator Smoke Test",
+        displayName: "Smoke Test",
         shortDescription: null,
         longDescription: null,
         developerName: null,
@@ -441,7 +441,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     expect(
       displayName(pluginSummary({
         interface: {
-          displayName: "PCA R Operator",
+          displayName: "PCA Operator",
           shortDescription: null,
           longDescription: null,
           developerName: null,
@@ -457,15 +457,15 @@ describe("PluginsPanel diagnostics helpers", () => {
           screenshots: [],
         },
       })),
-    ).toBe("PCA R");
+    ).toBe("PCA");
   });
 
-  it("uses language badges for operator plugin cards", () => {
+  it("uses Iconify-backed implementation icons for operator plugin cards", () => {
     expect(
-      operatorPluginLanguageBadge(pluginSummary({
+      operatorPluginIconSpec(pluginSummary({
         name: "operator-pca-r",
         interface: {
-          displayName: "PCA R",
+          displayName: "PCA",
           shortDescription: "PCA powered by base R",
           longDescription: null,
           developerName: null,
@@ -480,10 +480,31 @@ describe("PluginsPanel diagnostics helpers", () => {
           logo: null,
           screenshots: [],
         },
-      })),
-    ).toBe("R");
+      }))?.kind,
+    ).toBe("r");
     expect(
-      operatorPluginLanguageBadge(pluginSummary({
+      operatorPluginIconSpec(pluginSummary({
+        name: "operator-pca-r",
+        interface: {
+          displayName: "PCA",
+          shortDescription: "PCA powered by base R",
+          longDescription: null,
+          developerName: null,
+          category: "Operator",
+          capabilities: ["Operator", "Rscript"],
+          websiteUrl: null,
+          privacyPolicyUrl: null,
+          termsOfServiceUrl: null,
+          defaultPrompt: [],
+          brandColor: null,
+          composerIcon: null,
+          logo: null,
+          screenshots: [],
+        },
+      }))?.body,
+    ).toContain("<path");
+    expect(
+      operatorPluginIconSpec(pluginSummary({
         name: "operator-seqtk",
         interface: {
           displayName: "seqtk",
@@ -501,9 +522,9 @@ describe("PluginsPanel diagnostics helpers", () => {
           logo: null,
           screenshots: [],
         },
-      })),
-    ).toBe("C");
-    expect(operatorPluginLanguageBadge(pluginSummary())).toBeNull();
+      }))?.kind,
+    ).toBe("c");
+    expect(operatorPluginIconSpec(pluginSummary())).toBeNull();
   });
 
   it("builds stable operator display labels and tool names", () => {

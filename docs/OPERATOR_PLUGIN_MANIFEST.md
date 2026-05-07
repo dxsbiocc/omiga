@@ -249,7 +249,7 @@ The built-in validation fixture is:
 Recommended manual path:
 
 1. Open **Settings → Plugins**.
-2. Search for **Operator Smoke Test** and click **Add to Omiga** if it is not installed.
+2. Search for **Smoke Test** and click **Add to Omiga** if it is not installed.
 3. Ensure the plugin is enabled.
 4. In the **Operators** section, expose **Write Text Report**.
 5. Click **Run Write text report smoke**.

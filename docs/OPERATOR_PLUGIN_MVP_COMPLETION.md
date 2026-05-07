@@ -24,7 +24,7 @@ Implemented:
 - Cache observability in the operator UI: run summaries, operator cards, detail dialogs, and copyable diagnosis payloads expose cache hit/miss counts plus source run ids/directories.
 - Workspace-scoped run cleanup: the settings UI previews old/cache run cleanup globally or for a single operator, preserves the latest matching runs, estimates candidate size, asks for confirmation, and deletes only under the active local/SSH/sandbox `.omiga/runs` root.
 - Operator settings UI with cards, run counts, success/failure/smoke statistics, details dialog, failed-run diagnosis, copyable diagnosis payload, run detail/log/verify actions, and smoke-run launcher.
-- Plugin catalog cards suppress redundant role suffixes such as `Operator`/`Retrieval Source`; operator cards use language/tool badges such as `R`, `C`, or `sh` instead of a generic plugin icon.
+- Plugin catalog cards suppress redundant role suffixes such as `Operator`/`Retrieval Source`; operator cards keep titles focused on the tool/operator name and use Iconify-backed implementation icons for R, C/C++, Python, or shell tools instead of a generic plugin icon.
 - Built-in validation plugin `operator-smoke@omiga-curated` exposing `write_text_report@0.1.0` and `container_text_report@0.1.0`.
 - Built-in practical atomic operator plugins: `operator-pca-r@omiga-curated`, `operator-differential-expression-r@omiga-curated`, `operator-enrichment-r@omiga-curated`, and `operator-seqtk@omiga-curated`.
 
