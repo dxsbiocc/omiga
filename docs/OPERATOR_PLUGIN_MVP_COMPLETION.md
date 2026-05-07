@@ -66,6 +66,25 @@ Manual local Docker smoke E2E was verified on 2026-05-07:
   - Output artifact: `.omiga/runs/{run_id}/out/container-operator-report.txt`
   - Content included `hello container operator smoke` and a `container smoke runtime:` marker.
 
+Manual SSH smoke E2E was verified on 2026-05-07:
+
+- Agent/tool path: `operator__write_text_report`
+- Smoke test id: `default`
+- Execution environment: SSH remote GPU node
+- Selected remote session workspace: `data/query`
+- Observed result:
+  - Status: `succeeded`
+  - Location: `ssh`
+  - Run dir: `data/query/.omiga/runs/oprun_20260507091617_16c6dd0f143a4895b53387d37b2f7e9f`
+  - Output artifact: `data/query/.omiga/runs/{run_id}/out/operator-report.txt`
+  - Run files stayed under the remote workspace (`logs/`, `out/`, `plugin/`, `work/`, `provenance.json`, `status.json`)
+  - Content:
+
+```text
+hello operator smoke
+hello operator smoke
+```
+
 ## Automated validation evidence
 
 Latest verification run:

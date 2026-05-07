@@ -85,4 +85,5 @@ Recommended first vertical slice:
 - Output collection is bounded to the active session run workspace: manifests declare relative output globs under `${outdir}`, and absolute or parent-directory output globs are rejected.
 - Manual local smoke E2E was verified on 2026-05-07 with `operator__write_text_report`, producing `.omiga/runs/{run_id}/out/operator-report.txt` containing two `hello operator smoke` lines.
 - Manual local Docker smoke E2E was verified on 2026-05-07 with `operator__container_text_report`, producing `.omiga/runs/{run_id}/out/container-operator-report.txt` from the `alpine:3.19` image.
+- Manual SSH smoke E2E was verified on 2026-05-07 with `operator__write_text_report` on the remote GPU execution surface, producing `data/query/.omiga/runs/{run_id}/out/operator-report.txt` and keeping logs/provenance/artifacts inside the selected remote session workspace rather than remote `~`.
 - Regression coverage now locks smoke UI visibility, smoke-test selection fallback, store-level smoke run context propagation, failed-run diagnostic preservation, command project-root normalization, invalid smoke test ids, and bundled smoke execution.
