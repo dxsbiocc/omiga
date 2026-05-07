@@ -1393,124 +1393,198 @@ function OperatorMetaLine({ label, value }: { label: string; value: string }) {
   );
 }
 
-function OperatorSchemaFieldList({
+type OperatorSchemaEntry = [string, { kind?: string | null; required?: boolean; default?: unknown; description?: string | null }];
+
+function OperatorSchemaAccordion({
   title,
   entries,
+  count,
+  requiredCount,
+  defaultExpanded = false,
   emptyLabel = "None declared",
 }: {
   title: string;
-  entries: Array<[string, { kind?: string | null; required?: boolean; default?: unknown; description?: string | null }]>;
+  entries: OperatorSchemaEntry[];
+  count: number;
+  requiredCount?: number;
+  defaultExpanded?: boolean;
   emptyLabel?: string;
 }) {
   return (
-    <Paper
-      variant="outlined"
+    <Accordion
+      disableGutters
+      elevation={0}
+      defaultExpanded={defaultExpanded}
       sx={{
-        p: 1.1,
+        border: 1,
+        borderColor: "divider",
         borderRadius: 2,
-        minHeight: 104,
+        overflow: "hidden",
         bgcolor: "background.paper",
+        "&:before": { display: "none" },
+        "&.Mui-expanded": { m: 0 },
       }}
     >
-      <Typography variant="caption" color="text.secondary" fontWeight={900} sx={{ textTransform: "uppercase", letterSpacing: 0.4 }}>
-        {title}
-      </Typography>
-      <Stack spacing={0.6} sx={{ mt: 0.8 }}>
-        {entries.length > 0 ? entries.map(([name, field]) => (
-          <Box
-            key={name}
-            sx={{
-              display: "grid",
-              gridTemplateColumns: "minmax(0, 1fr) auto",
-              gap: 0.75,
-              alignItems: "center",
-              px: 0.75,
-              py: 0.6,
-              borderRadius: 1.4,
-              bgcolor: "action.hover",
-            }}
-          >
-            <Box sx={{ minWidth: 0 }}>
-              <Typography
-                variant="caption"
-                fontWeight={850}
-                sx={{
-                  display: "block",
-                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-                title={name}
-              >
-                {name}
-              </Typography>
-              {field.description?.trim() ? (
+      <AccordionSummary
+        expandIcon={<ExpandMoreRounded />}
+        sx={{
+          px: 1.1,
+          minHeight: 44,
+          "&.Mui-expanded": { minHeight: 44 },
+          "& .MuiAccordionSummary-content": { my: 0.8 },
+          "& .MuiAccordionSummary-content.Mui-expanded": { my: 0.8 },
+        }}
+      >
+        <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+          <Typography variant="caption" color="text.secondary" fontWeight={900} sx={{ textTransform: "uppercase", letterSpacing: 0.4 }}>
+            {title}
+          </Typography>
+          <Chip size="small" variant="outlined" label={`${count} item${count === 1 ? "" : "s"}`} sx={{ height: 22 }} />
+          {requiredCount != null && requiredCount > 0 && (
+            <Chip size="small" color="warning" variant="outlined" label={`${requiredCount} required`} sx={{ height: 22 }} />
+          )}
+        </Stack>
+      </AccordionSummary>
+      <AccordionDetails sx={{ px: 1.1, pt: 0, pb: 1.1 }}>
+        <Stack
+          spacing={0.6}
+          sx={{
+            maxHeight: 172,
+            overflowY: "auto",
+            pr: 0.4,
+          }}
+        >
+          {entries.length > 0 ? entries.map(([name, field]) => (
+            <Box
+              key={name}
+              sx={{
+                display: "grid",
+                gridTemplateColumns: "minmax(0, 1fr) auto",
+                gap: 0.75,
+                alignItems: "center",
+                px: 0.75,
+                py: 0.6,
+                borderRadius: 1.4,
+                bgcolor: "action.hover",
+              }}
+            >
+              <Box sx={{ minWidth: 0 }}>
                 <Typography
                   variant="caption"
-                  color="text.secondary"
-                  sx={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                  title={field.description}
+                  fontWeight={850}
+                  sx={{
+                    display: "block",
+                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                  title={name}
                 >
-                  {field.description}
+                  {name}
                 </Typography>
-              ) : null}
+                {field.description?.trim() ? (
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                    title={field.description}
+                  >
+                    {field.description}
+                  </Typography>
+                ) : null}
+              </Box>
+              <Stack direction="row" spacing={0.45} alignItems="center" sx={{ justifySelf: "end" }}>
+                {field.kind && <Chip size="small" variant="outlined" label={field.kind} sx={{ height: 22 }} />}
+                {field.required && <Chip size="small" color="warning" variant="outlined" label="required" sx={{ height: 22 }} />}
+                {field.default !== undefined && field.default !== null && (
+                  <Chip size="small" variant="outlined" label={`=${previewValue(field.default)}`} sx={{ height: 22 }} />
+                )}
+              </Stack>
             </Box>
-            <Stack direction="row" spacing={0.45} alignItems="center" sx={{ justifySelf: "end" }}>
-              {field.kind && <Chip size="small" variant="outlined" label={field.kind} sx={{ height: 22 }} />}
-              {field.required && <Chip size="small" color="warning" variant="outlined" label="required" sx={{ height: 22 }} />}
-              {field.default !== undefined && field.default !== null && (
-                <Chip size="small" variant="outlined" label={`=${previewValue(field.default)}`} sx={{ height: 22 }} />
-              )}
-            </Stack>
-          </Box>
-        )) : (
-          <Typography variant="caption" color="text.secondary" sx={{ py: 0.75 }}>
-            {emptyLabel}
-          </Typography>
-        )}
-      </Stack>
-    </Paper>
+          )) : (
+            <Typography variant="caption" color="text.secondary" sx={{ py: 0.75 }}>
+              {emptyLabel}
+            </Typography>
+          )}
+        </Stack>
+      </AccordionDetails>
+    </Accordion>
   );
 }
 
-function OperatorResourceList({ entries }: { entries: ReturnType<typeof operatorResourceEntries> }) {
+function OperatorResourceAccordion({
+  entries,
+  defaultExpanded = false,
+}: {
+  entries: ReturnType<typeof operatorResourceEntries>;
+  defaultExpanded?: boolean;
+}) {
   return (
-    <Paper variant="outlined" sx={{ p: 1.1, borderRadius: 2, minHeight: 104, bgcolor: "background.paper" }}>
-      <Typography variant="caption" color="text.secondary" fontWeight={900} sx={{ textTransform: "uppercase", letterSpacing: 0.4 }}>
-        Resources
-      </Typography>
-      <Stack spacing={0.6} sx={{ mt: 0.8 }}>
-        {entries.length > 0 ? entries.map(([name, resource]) => (
-          <Box
-            key={name}
-            sx={{
-              display: "flex",
-              justifyContent: "space-between",
-              gap: 1,
-              alignItems: "center",
-              px: 0.75,
-              py: 0.6,
-              borderRadius: 1.4,
-              bgcolor: "action.hover",
-            }}
-          >
-            <Typography variant="caption" fontWeight={850} sx={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
-              {name}
-            </Typography>
-            <Stack direction="row" spacing={0.45}>
-              {resource.default != null && <Chip size="small" variant="outlined" label={`default ${previewValue(resource.default)}`} sx={{ height: 22 }} />}
-              {resource.min != null && <Chip size="small" variant="outlined" label={`min ${previewValue(resource.min)}`} sx={{ height: 22 }} />}
-              {resource.max != null && <Chip size="small" variant="outlined" label={`max ${previewValue(resource.max)}`} sx={{ height: 22 }} />}
-            </Stack>
-          </Box>
-        )) : (
-          <Typography variant="caption" color="text.secondary" sx={{ py: 0.75 }}>
-            No exposed resources.
+    <Accordion
+      disableGutters
+      elevation={0}
+      defaultExpanded={defaultExpanded}
+      sx={{
+        border: 1,
+        borderColor: "divider",
+        borderRadius: 2,
+        overflow: "hidden",
+        bgcolor: "background.paper",
+        "&:before": { display: "none" },
+        "&.Mui-expanded": { m: 0 },
+      }}
+    >
+      <AccordionSummary
+        expandIcon={<ExpandMoreRounded />}
+        sx={{
+          px: 1.1,
+          minHeight: 44,
+          "&.Mui-expanded": { minHeight: 44 },
+          "& .MuiAccordionSummary-content": { my: 0.8 },
+          "& .MuiAccordionSummary-content.Mui-expanded": { my: 0.8 },
+        }}
+      >
+        <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+          <Typography variant="caption" color="text.secondary" fontWeight={900} sx={{ textTransform: "uppercase", letterSpacing: 0.4 }}>
+            Resources
           </Typography>
-        )}
-      </Stack>
-    </Paper>
+          <Chip size="small" variant="outlined" label={`${entries.length} item${entries.length === 1 ? "" : "s"}`} sx={{ height: 22 }} />
+        </Stack>
+      </AccordionSummary>
+      <AccordionDetails sx={{ px: 1.1, pt: 0, pb: 1.1 }}>
+        <Stack spacing={0.6} sx={{ maxHeight: 172, overflowY: "auto", pr: 0.4 }}>
+          {entries.length > 0 ? entries.map(([name, resource]) => (
+            <Box
+              key={name}
+              sx={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 1,
+                alignItems: "center",
+                px: 0.75,
+                py: 0.6,
+                borderRadius: 1.4,
+                bgcolor: "action.hover",
+              }}
+            >
+              <Typography variant="caption" fontWeight={850} sx={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
+                {name}
+              </Typography>
+              <Stack direction="row" spacing={0.45} flexWrap="wrap" justifyContent="flex-end">
+                {resource.default != null && <Chip size="small" variant="outlined" label={`default ${previewValue(resource.default)}`} sx={{ height: 22 }} />}
+                {resource.min != null && <Chip size="small" variant="outlined" label={`min ${previewValue(resource.min)}`} sx={{ height: 22 }} />}
+                {resource.max != null && <Chip size="small" variant="outlined" label={`max ${previewValue(resource.max)}`} sx={{ height: 22 }} />}
+              </Stack>
+            </Box>
+          )) : (
+            <Typography variant="caption" color="text.secondary" sx={{ py: 0.75 }}>
+              No exposed resources.
+            </Typography>
+          )}
+        </Stack>
+      </AccordionDetails>
+    </Accordion>
   );
 }
 
@@ -1524,9 +1598,9 @@ function OperatorBundleContentList({ operators }: { operators: OperatorSummary[]
       {sorted.map((operator) => {
         const stats = operatorSchemaStats(operator);
         const script = operatorTemplateScript(operator);
-        const inputEntries = operatorFieldEntries(operator.interface?.inputs).slice(0, 5);
-        const paramEntries = operatorFieldEntries(operator.interface?.params).slice(0, 6);
-        const outputEntries = operatorFieldEntries(operator.interface?.outputs).slice(0, 5);
+        const inputEntries = operatorFieldEntries(operator.interface?.inputs);
+        const paramEntries = operatorFieldEntries(operator.interface?.params);
+        const outputEntries = operatorFieldEntries(operator.interface?.outputs);
         const resourceEntries = operatorResourceEntries(operator);
         const icon = operatorImplementationIconSpec(operator);
         const iconTone = icon.color ?? theme.palette.text.secondary;
@@ -1629,10 +1703,26 @@ function OperatorBundleContentList({ operators }: { operators: OperatorSummary[]
                   gap: 1,
                 }}
               >
-                <OperatorSchemaFieldList title="Inputs" entries={inputEntries} />
-                <OperatorSchemaFieldList title="Params" entries={paramEntries} />
-                <OperatorSchemaFieldList title="Outputs" entries={outputEntries} />
-                <OperatorResourceList entries={resourceEntries} />
+                <OperatorSchemaAccordion
+                  title="Inputs"
+                  entries={inputEntries}
+                  count={stats.inputs}
+                  requiredCount={stats.requiredInputs}
+                  defaultExpanded
+                />
+                <OperatorSchemaAccordion
+                  title="Params"
+                  entries={paramEntries}
+                  count={stats.params}
+                  requiredCount={stats.requiredParams}
+                />
+                <OperatorSchemaAccordion
+                  title="Outputs"
+                  entries={outputEntries}
+                  count={stats.outputs}
+                  requiredCount={outputEntries.filter(([, field]) => field.required).length}
+                />
+                <OperatorResourceAccordion entries={resourceEntries} />
               </Box>
             </Stack>
           </Paper>
