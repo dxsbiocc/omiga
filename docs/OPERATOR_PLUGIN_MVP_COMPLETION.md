@@ -25,7 +25,7 @@ Implemented:
 - Workspace-scoped run cleanup: the settings UI previews old/cache run cleanup globally or for a single operator, preserves the latest matching runs, estimates candidate size, asks for confirmation, and deletes only under the active local/SSH/sandbox `.omiga/runs` root.
 - Operator settings UI with cards, run counts, success/failure/smoke statistics, details dialog, failed-run diagnosis, copyable diagnosis payload, run detail/log/verify actions, and smoke-run launcher.
 - Built-in validation plugin `operator-smoke@omiga-curated` exposing `write_text_report@0.1.0` and `container_text_report@0.1.0`.
-- Built-in practical omics plugin `operator-omics@omiga-curated` exposing base-R PCA, basic differential expression, basic functional enrichment, and `seqtk sample` operators.
+- Built-in practical atomic operator plugins: `operator-pca-r@omiga-curated`, `operator-differential-expression-r@omiga-curated`, `operator-enrichment-r@omiga-curated`, and `operator-seqtk@omiga-curated`.
 
 ## Manual validation evidence
 

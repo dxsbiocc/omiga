@@ -1,0 +1,23 @@
+{
+  "name": "operator-pca-r",
+  "version": "0.1.0",
+  "description": "Built-in atomic operator plugin: Single PCA operator powered by base R.",
+  "interface": {
+    "displayName": "PCA R Operator",
+    "shortDescription": "Single PCA operator powered by base R",
+    "longDescription": "Provides one atomic PCA operator for numeric expression/count matrices. Inputs stay in the active local or SSH workspace; outputs are written under the operator run outdir.",
+    "developerName": "Omiga",
+    "category": "Operator",
+    "capabilities": [
+      "Operator",
+      "PCA",
+      "Rscript",
+      "Local Execution",
+      "SSH Execution"
+    ],
+    "brandColor": "#0F766E",
+    "defaultPrompt": [
+      "Expose the PCA R operator and run it on my expression matrix."
+    ]
+  }
+}

@@ -29,10 +29,46 @@
       "category": "Operator"
     },
     {
-      "name": "operator-omics",
+      "name": "operator-pca-r",
       "source": {
         "source": "local",
-        "path": "./plugins/operator-omics"
+        "path": "./plugins/operator-pca-r"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Operator"
+    },
+    {
+      "name": "operator-differential-expression-r",
+      "source": {
+        "source": "local",
+        "path": "./plugins/operator-differential-expression-r"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Operator"
+    },
+    {
+      "name": "operator-enrichment-r",
+      "source": {
+        "source": "local",
+        "path": "./plugins/operator-enrichment-r"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Operator"
+    },
+    {
+      "name": "operator-seqtk",
+      "source": {
+        "source": "local",
+        "path": "./plugins/operator-seqtk"
       },
       "policy": {
         "installation": "AVAILABLE",

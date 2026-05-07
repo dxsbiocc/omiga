@@ -5863,66 +5863,71 @@ bindings:
     }
 
     #[test]
-    fn discovers_bundled_omics_operators_from_active_plugin() {
-        let (plugin_root, manifest) =
-            bundled_plugin_operator_manifest_path("operator-omics", "pca-matrix");
-        assert!(manifest.is_file());
-
-        let plugin = crate::domain::plugins::LoadedPlugin {
-            id: "operator-omics@omiga-curated".to_string(),
-            manifest_name: Some("operator-omics".to_string()),
-            display_name: Some("Omics Operators".to_string()),
-            description: None,
-            root: plugin_root,
-            enabled: true,
-            skill_roots: Vec::new(),
-            mcp_servers: HashMap::new(),
-            apps: Vec::new(),
-            retrieval: None,
-            error: None,
-        };
-
-        let candidates = discover_operator_candidates_from_plugins([&plugin]);
-        let ids = candidates
-            .iter()
-            .map(|candidate| candidate.metadata.id.as_str())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            ids,
-            BTreeSet::from([
-                "omics_differential_expression_basic",
-                "omics_functional_enrichment_basic",
+    fn discovers_atomic_bundled_analysis_operator_plugins() {
+        let cases = [
+            (
+                "operator-pca-r",
+                "pca-matrix",
                 "omics_pca_matrix",
+                "Rscript",
+            ),
+            (
+                "operator-differential-expression-r",
+                "differential-expression-basic",
+                "omics_differential_expression_basic",
+                "Rscript",
+            ),
+            (
+                "operator-enrichment-r",
+                "functional-enrichment-basic",
+                "omics_functional_enrichment_basic",
+                "Rscript",
+            ),
+            (
+                "operator-seqtk",
+                "seqtk-sample",
                 "seqtk_sample_reads",
-            ])
-        );
-        let pca = candidates
-            .iter()
-            .find(|candidate| candidate.metadata.id == "omics_pca_matrix")
-            .unwrap();
-        assert_eq!(pca.execution.argv[0], "Rscript");
-        assert!(matches!(
-            pca.interface.outputs["summary"].kind,
-            OperatorFieldKind::Json
-        ));
-        assert_eq!(
-            pca.interface.outputs["scores"].glob.as_deref(),
-            Some("pca-scores.tsv")
-        );
+                "/bin/sh",
+            ),
+        ];
 
-        let seqtk = candidates
-            .iter()
-            .find(|candidate| candidate.metadata.id == "seqtk_sample_reads")
-            .unwrap();
-        assert_eq!(seqtk.execution.argv[0], "/bin/sh");
-        assert!(matches!(
-            seqtk.interface.inputs["reads"].kind,
-            OperatorFieldKind::File
-        ));
-        assert_eq!(
-            seqtk.interface.outputs["sampled_reads"].glob.as_deref(),
-            Some("seqtk-sampled*")
-        );
+        for (plugin_name, operator_dir, operator_id, first_argv) in cases {
+            let (plugin_root, manifest) =
+                bundled_plugin_operator_manifest_path(plugin_name, operator_dir);
+            assert!(manifest.is_file(), "{plugin_name} manifest should exist");
+
+            let plugin = crate::domain::plugins::LoadedPlugin {
+                id: format!("{plugin_name}@omiga-curated"),
+                manifest_name: Some(plugin_name.to_string()),
+                display_name: None,
+                description: None,
+                root: plugin_root,
+                enabled: true,
+                skill_roots: Vec::new(),
+                mcp_servers: HashMap::new(),
+                apps: Vec::new(),
+                retrieval: None,
+                error: None,
+            };
+
+            let candidates = discover_operator_candidates_from_plugins([&plugin]);
+            assert_eq!(
+                candidates.len(),
+                1,
+                "{plugin_name} should expose one operator"
+            );
+            let operator = &candidates[0];
+            assert_eq!(operator.metadata.id, operator_id);
+            assert_eq!(operator.execution.argv[0], first_argv);
+            assert!(matches!(
+                operator.interface.outputs["summary"].kind,
+                OperatorFieldKind::Json
+            ));
+            assert_eq!(
+                operator.source.source_plugin,
+                format!("{plugin_name}@omiga-curated")
+            );
+        }
     }
 
     #[test]
