@@ -9,7 +9,6 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { useNotebookViewerStore } from "../../state";
 import Editor from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
@@ -35,16 +34,29 @@ import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import ClearAllIcon from "@mui/icons-material/ClearAll";
 import {
+  nextCellTargetAfterRun,
+  resolveNotebookEditorCommand,
+  type NotebookEditorCommand,
+  type NotebookEditorKey,
+} from "../../lib/notebookEvents";
+import {
+  NotebookExecutionController,
+  type NotebookExecutionControllerHost,
+  type NotebookExecutionStatus,
+} from "../../lib/notebookExecution";
+import { createTauriNotebookRuntimeAdapter } from "../../lib/notebookRuntimeAdapter";
+import {
+  registerWorkspaceContentProvider,
+  useWorkspaceStore,
+} from "../../state/workspaceStore";
+import {
   NOTEBOOK_EXECUTABLE_KERNEL_OPTIONS,
   OMIGA_NOTEBOOK_PLUGIN,
-  buildNotebookExecutionPrelude,
-  buildOutputsFromRun,
   createEmptyNotebook,
   createNotebookCell,
   executionLanguageForNotebook,
   getCellSource,
   monacoLanguageForNotebook,
-  nextGlobalExecutionCount,
   notebookKernelLanguage,
   notebookKernelName,
   parseNotebookContent,
@@ -53,10 +65,10 @@ import {
   setCellSource,
   setNotebookCellType,
   setNotebookKernelLanguage,
-  type ExecuteResult,
   type NotebookCell,
   type NotebookDocument,
   type NotebookOutput,
+  type NotebookParseResult,
 } from "../../lib/notebookPlugin";
 
 interface IpynbViewerProps {
@@ -440,7 +452,7 @@ interface NotebookCellBodyProps {
   updateCellSource: (index: number, text: string) => void;
   updateCellType: (index: number, type: "code" | "markdown" | "raw") => void;
   insertCell: (index: number, type: "code" | "markdown", position: "before" | "after") => void;
-  runCell: (index: number) => void;
+  runCell: (index: number) => Promise<boolean>;
   clearOneOutput: (index: number) => void;
   deleteCell: (index: number) => void;
   attachCellEditorKeys: (
@@ -485,6 +497,16 @@ function cloneNotebookForCellEdit(
     },
     cell,
   };
+}
+
+function notebookEditorKeyFromMonaco(
+  keyCode: number,
+  keyCodes: typeof import("monaco-editor").KeyCode,
+): NotebookEditorKey {
+  if (keyCode === keyCodes.Enter) return "Enter";
+  if (keyCode === keyCodes.UpArrow) return "ArrowUp";
+  if (keyCode === keyCodes.DownArrow) return "ArrowDown";
+  return "Other";
 }
 
 const NotebookCellBody = memo(function NotebookCellBody({
@@ -912,6 +934,8 @@ const NotebookCellBody = memo(function NotebookCellBody({
 );
 
 const ESTIMATE_CELL_H = 320;
+const NOTEBOOK_DRAFT_EMIT_DELAY_MS = 140;
+type NotebookCommitMode = "immediate" | "deferred";
 
 export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
   const theme = useTheme();
@@ -940,24 +964,101 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
     onChange(serializeNotebook(createEmptyNotebook()));
   }, [filePath, isEmptyNotebookFile, onChange]);
 
-  const parsed = useMemo(() => parseNotebookContent(content), [content]);
+  const [parsed, setParsed] = useState<NotebookParseResult>(() =>
+    parseNotebookContent(content),
+  );
+  const latestContentPropRef = useRef(content);
+  const lastEmittedContentRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (latestContentPropRef.current === content) return;
+    latestContentPropRef.current = content;
+    if (lastEmittedContentRef.current === content) return;
+    setParsed(parseNotebookContent(content));
+  }, [content]);
 
   const kernelLang = parsed.ok ? notebookKernelLanguage(parsed.nb) : "python";
   const langArg = executionLanguageForNotebook(kernelLang);
 
   const nbRef = useRef(parsed.ok ? parsed.nb : null);
   if (parsed.ok) nbRef.current = parsed.nb;
+  useEffect(
+    () =>
+      registerWorkspaceContentProvider(filePath, () => {
+        const nb = nbRef.current;
+        return nb ? serializeNotebook(nb) : content;
+      }),
+    [content, filePath],
+  );
   const runningIdxRef = useRef(runningIdx);
   const runningAllRef = useRef(runningAll);
   runningIdxRef.current = runningIdx;
   runningAllRef.current = runningAll;
 
-  const pushNotebook = useCallback(
+  const pendingEmitNbRef = useRef<NotebookDocument | null>(null);
+  const emitTimerRef = useRef<number | null>(null);
+
+  const emitNotebookContent = useCallback(
     (nb: NotebookDocument) => {
-      nbRef.current = nb;
-      onChange?.(serializeNotebook(nb));
+      const serialized = serializeNotebook(nb);
+      lastEmittedContentRef.current = serialized;
+      latestContentPropRef.current = serialized;
+      onChange?.(serialized);
     },
     [onChange],
+  );
+
+  const flushPendingNotebookEmit = useCallback(() => {
+    if (emitTimerRef.current !== null) {
+      window.clearTimeout(emitTimerRef.current);
+      emitTimerRef.current = null;
+    }
+    const pending = pendingEmitNbRef.current;
+    pendingEmitNbRef.current = null;
+    if (pending) emitNotebookContent(pending);
+  }, [emitNotebookContent]);
+
+  const scheduleNotebookEmit = useCallback(
+    (nb: NotebookDocument) => {
+      pendingEmitNbRef.current = nb;
+      useWorkspaceStore.getState().markContentDirty(filePath);
+      if (emitTimerRef.current !== null) {
+        window.clearTimeout(emitTimerRef.current);
+      }
+      emitTimerRef.current = window.setTimeout(() => {
+        flushPendingNotebookEmit();
+      }, NOTEBOOK_DRAFT_EMIT_DELAY_MS);
+    },
+    [filePath, flushPendingNotebookEmit],
+  );
+
+  useEffect(
+    () => () => {
+      if (emitTimerRef.current !== null) {
+        window.clearTimeout(emitTimerRef.current);
+        emitTimerRef.current = null;
+      }
+      pendingEmitNbRef.current = null;
+    },
+    [],
+  );
+
+  const pushNotebook = useCallback(
+    (nb: NotebookDocument, mode: NotebookCommitMode = "immediate") => {
+      nbRef.current = nb;
+      setParsed({ ok: true, nb, initialized: false, warnings: [] });
+      if (mode === "deferred") {
+        scheduleNotebookEmit(nb);
+        return;
+      }
+      if (emitTimerRef.current !== null) {
+        window.clearTimeout(emitTimerRef.current);
+        emitTimerRef.current = null;
+      }
+      pendingEmitNbRef.current = null;
+      emitNotebookContent(nb);
+    },
+    [emitNotebookContent, scheduleNotebookEmit],
   );
 
   const scrollParentRef = useRef<HTMLDivElement | null>(null);
@@ -983,7 +1084,7 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
       const edit = cloneNotebookForCellEdit(current, index);
       if (!edit) return;
       setCellSource(edit.cell, text);
-      pushNotebook(edit.nb);
+      pushNotebook(edit.nb, "deferred");
     },
     [pushNotebook],
   );
@@ -1036,86 +1137,69 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
     [pushNotebook],
   );
 
-  const runCell = useCallback(
-    async (index: number) => {
-      if (runningIdxRef.current !== null || runningAllRef.current) return;
-      const current = nbRef.current;
-      if (!current) return;
-      const cell = current.cells[index];
-      if (!cell || cell.cell_type !== "code") return;
-      const source = getCellSource(cell);
-      setRunError(null);
-      runningIdxRef.current = index;
-      setRunningIdx(index);
-      try {
-        const res = await invoke<ExecuteResult>("execute_ipynb_cell", {
-          notebookPath: filePath,
-          cellIndex: index,
-          source,
-          prelude: buildNotebookExecutionPrelude(current.cells, index),
-          language: langArg,
-          shellMagic: useNotebookViewerStore.getState().enablePythonShellMagic,
-        });
-        const latest = nbRef.current;
-        if (!latest) return;
-        const edit = cloneNotebookForCellEdit(latest, index);
-        if (!edit || edit.cell.cell_type !== "code") return;
-        edit.cell.outputs = buildOutputsFromRun(res);
-        edit.cell.execution_count = nextGlobalExecutionCount(edit.nb);
-        pushNotebook(edit.nb);
-      } catch (e) {
-        setRunError(String(e));
-      } finally {
-        runningIdxRef.current = null;
-        setRunningIdx(null);
-      }
-    },
-    [filePath, langArg, pushNotebook],
+  const runtimeAdapter = useMemo(() => createTauriNotebookRuntimeAdapter(), []);
+
+  const notebookExecutionOptions = useCallback(
+    () => ({
+      notebookPath: filePath,
+      language: langArg,
+      shellMagic: useNotebookViewerStore.getState().enablePythonShellMagic,
+    }),
+    [filePath, langArg],
   );
+
+  const updateExecutionStatus = useCallback((status: NotebookExecutionStatus) => {
+    runningIdxRef.current = status.runningCellIndex;
+    runningAllRef.current = status.runningAll;
+    setRunningIdx(status.runningCellIndex);
+    setRunningAll(status.runningAll);
+    setRunError(status.error);
+  }, []);
+
+  const executionHostRef = useRef<NotebookExecutionControllerHost | null>(null);
+  executionHostRef.current = {
+    getNotebook: () => nbRef.current,
+    getOptions: notebookExecutionOptions,
+    execute: runtimeAdapter.executeCell,
+    commit: pushNotebook,
+    onStatus: updateExecutionStatus,
+    formatError: (error) => String(error),
+  };
+
+  const executionControllerRef = useRef<NotebookExecutionController | null>(null);
+  if (!executionControllerRef.current) {
+    executionControllerRef.current = new NotebookExecutionController({
+      getNotebook: () => executionHostRef.current?.getNotebook() ?? null,
+      getOptions: () => {
+        const host = executionHostRef.current;
+        if (!host) return { notebookPath: filePath, language: langArg, shellMagic: true };
+        return host.getOptions();
+      },
+      execute: (request) => {
+        const host = executionHostRef.current;
+        if (!host) return Promise.reject(new Error("Notebook execution host not ready"));
+        return host.execute(request);
+      },
+      commit: (nb) => executionHostRef.current?.commit(nb),
+      onStatus: (status) => executionHostRef.current?.onStatus(status),
+      formatError: (error) => executionHostRef.current?.formatError?.(error) ?? String(error),
+    });
+  }
+
+  const runCell = useCallback(async (index: number) => {
+    const controller = executionControllerRef.current;
+    if (!controller) return false;
+    return controller.runCell(index);
+  }, []);
 
   const runCellRef = useRef(runCell);
   runCellRef.current = runCell;
 
   const runAll = useCallback(async () => {
-    if (runningIdxRef.current !== null || runningAllRef.current) return;
-    let working = nbRef.current;
-    if (!working) return;
-    setRunError(null);
-    runningAllRef.current = true;
-    setRunningAll(true);
-    try {
-      let seq = 1;
-      for (let i = 0; i < working.cells.length; i++) {
-        const currentCell = working.cells[i];
-        if (currentCell.cell_type !== "code") continue;
-        runningIdxRef.current = i;
-        setRunningIdx(i);
-        const res = await invoke<ExecuteResult>("execute_ipynb_cell", {
-          notebookPath: filePath,
-          cellIndex: i,
-          source: getCellSource(currentCell),
-          prelude: buildNotebookExecutionPrelude(working.cells, i),
-          language: langArg,
-          shellMagic: useNotebookViewerStore.getState().enablePythonShellMagic,
-        });
-        const latest = nbRef.current ?? working;
-        const edit = cloneNotebookForCellEdit(latest, i);
-        if (!edit || edit.cell.cell_type !== "code") continue;
-        edit.cell.outputs = buildOutputsFromRun(res);
-        edit.cell.execution_count = seq;
-        seq += 1;
-        working = edit.nb;
-        pushNotebook(edit.nb);
-      }
-    } catch (e) {
-      setRunError(String(e));
-    } finally {
-      runningIdxRef.current = null;
-      runningAllRef.current = false;
-      setRunningIdx(null);
-      setRunningAll(false);
-    }
-  }, [pushNotebook, filePath, langArg]);
+    const controller = executionControllerRef.current;
+    if (!controller) return false;
+    return controller.runAll();
+  }, []);
 
   const clearAllOutputs = useCallback(() => {
     const current = nbRef.current;
@@ -1206,90 +1290,80 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
     [pushNotebook],
   );
 
+  const executeNotebookEditorCommand = useCallback(
+    async (command: NotebookEditorCommand) => {
+      switch (command.type) {
+        case "none":
+        case "blocked":
+          return;
+        case "run-cell":
+          await runCellRef.current(command.cellIndex);
+          return;
+        case "focus-relative-cell":
+          focusNotebookCell(command.fromIndex + command.offset, command.placement);
+          return;
+        case "run-and-focus-next": {
+          const current = nbRef.current;
+          if (!current) return;
+          if (current.cells[command.cellIndex]?.cell_type === "code") {
+            await runCellRef.current(command.cellIndex);
+          }
+
+          const latest = nbRef.current;
+          if (!latest) return;
+          const target = nextCellTargetAfterRun(command.cellIndex, latest.cells.length);
+          if (!target.createCodeCell) {
+            focusNotebookCell(target.targetIndex, "start");
+            return;
+          }
+
+          const cells = latest.cells.slice();
+          cells.splice(target.targetIndex, 0, createNotebookCell("code"));
+          pushNotebook({ ...latest, cells });
+          focusNotebookCell(target.targetIndex, "start");
+        }
+      }
+    },
+    [focusNotebookCell, pushNotebook],
+  );
+
   const attachCellEditorKeys = useCallback(
     (index: number, editorInst: editor.IStandaloneCodeEditor, monaco: typeof import("monaco-editor")) => {
       codeEditorRefs.current.set(index, editorInst);
-      const runOnly = () => {
-        if (runningIdxRef.current !== null || runningAllRef.current) return;
-        const currentCell = nbRef.current?.cells[index];
-        if (currentCell?.cell_type === "code") {
-          void runCellRef.current(index);
-        }
-      };
-      const moveToAdjacentCell = (
-        targetIndex: number,
-        placement: "start" | "end" = "start",
-      ) => {
-        const cells = nbRef.current?.cells;
-        if (!cells || targetIndex < 0 || targetIndex >= cells.length) return false;
-        focusNotebookCell(targetIndex, placement);
-        return true;
-      };
-      const runAndNext = () => {
-        if (runningIdxRef.current !== null || runningAllRef.current) return;
-        const run = nbRef.current?.cells[index]?.cell_type === "code"
-          ? runCellRef.current(index)
-          : Promise.resolve();
-        void run.then(() => {
-          const current = nbRef.current;
-          if (!current) return;
-          const next = index + 1;
-          if (next < current.cells.length) {
-            focusNotebookCell(next, "start");
-            return;
-          }
-          const at = index + 1;
-          const newCell: NotebookCell = createNotebookCell("code");
-          const nextCells = current.cells.slice();
-          nextCells.splice(at, 0, newCell);
-          pushNotebook({ ...current, cells: nextCells });
-          focusNotebookCell(at, "start");
-        });
-      };
       const sub = editorInst.onKeyDown((e) => {
-        if (!useNotebookViewerStore.getState().enableNotebookShortcuts) return;
-        if (e.keyCode === monaco.KeyCode.Enter) {
-          if (e.shiftKey) {
-            e.preventDefault();
-            e.stopPropagation();
-            runAndNext();
-            return;
-          }
-          if (e.ctrlKey || e.metaKey) {
-            e.preventDefault();
-            e.stopPropagation();
-            runOnly();
-          }
-          return;
-        }
-
-        if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
         const model = editorInst.getModel();
         const position = editorInst.getPosition();
-        if (!model || !position) return;
-        if (e.keyCode === monaco.KeyCode.UpArrow && position.lineNumber === 1) {
-          if (moveToAdjacentCell(index - 1, "end")) {
-            e.preventDefault();
-            e.stopPropagation();
-          }
-          return;
-        }
-        if (
-          e.keyCode === monaco.KeyCode.DownArrow &&
-          position.lineNumber === model.getLineCount()
-        ) {
-          if (moveToAdjacentCell(index + 1, "start")) {
-            e.preventDefault();
-            e.stopPropagation();
-          }
-        }
+        const cells = nbRef.current?.cells ?? [];
+        const cell = cells[index];
+        const command = resolveNotebookEditorCommand(
+          {
+            key: notebookEditorKeyFromMonaco(e.keyCode, monaco.KeyCode),
+            shiftKey: e.shiftKey,
+            ctrlKey: e.ctrlKey,
+            metaKey: e.metaKey,
+            altKey: e.altKey,
+          },
+          {
+            shortcutsEnabled: useNotebookViewerStore.getState().enableNotebookShortcuts,
+            isBusy: runningIdxRef.current !== null || runningAllRef.current,
+            cellIndex: index,
+            cellCount: cells.length,
+            cellType: cell?.cell_type ?? "raw",
+            cursorLineNumber: position?.lineNumber ?? 1,
+            lineCount: model?.getLineCount() ?? 1,
+          },
+        );
+        if (!command.consume) return;
+        e.preventDefault();
+        e.stopPropagation();
+        void executeNotebookEditorCommand(command);
       });
       return () => {
         sub.dispose();
         codeEditorRefs.current.delete(index);
       };
     },
-    [focusNotebookCell, pushNotebook],
+    [executeNotebookEditorCommand],
   );
 
   if (!parsed.ok) {

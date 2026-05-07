@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { getLocalWorkspaceSessionId, getWorkspaceFileContext } from "../utils/sshWorkspace";
 import { extractErrorMessage } from "../utils/errorMessage";
+import { countTextLines } from "../utils/textMetrics";
 
 // File types that must NOT be read as text — handled by their own viewers
 const BINARY_EXTS = new Set([
@@ -18,6 +19,33 @@ interface FileReadResponse {
 interface FileWriteResponse {
   bytes_written: number;
   new_hash: string;
+}
+
+interface WorkspaceContentProvider {
+  filePath: string;
+  getContent: () => string;
+}
+
+let activeContentProvider: WorkspaceContentProvider | null = null;
+
+export function registerWorkspaceContentProvider(
+  filePath: string,
+  getContent: () => string,
+): () => void {
+  const provider = { filePath, getContent };
+  activeContentProvider = provider;
+  return () => {
+    if (activeContentProvider === provider) {
+      activeContentProvider = null;
+    }
+  };
+}
+
+function getLatestWorkspaceContent(filePath: string, fallback: string): string {
+  if (activeContentProvider?.filePath === filePath) {
+    return activeContentProvider.getContent();
+  }
+  return fallback;
 }
 
 interface WorkspaceState {
@@ -37,6 +65,8 @@ interface WorkspaceState {
   clearFile: () => void;
   /** Called by the editor whenever content changes. */
   setContent: (value: string) => void;
+  /** Mark dirty when an editor owns a local draft that has not been serialized yet. */
+  markContentDirty: (filePath: string) => void;
   saveFile: () => Promise<void>;
 }
 
@@ -162,18 +192,36 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }),
 
   setContent: (value: string) => {
-    const { savedContent } = get();
+    const { savedContent, content, isDirty, saveError } = get();
+    const nextDirty = value !== savedContent;
+    if (content === value && isDirty === nextDirty && saveError === null) return;
     set({
       content: value,
-      isDirty: value !== savedContent,
+      isDirty: nextDirty,
       saveError: null,
-      totalLines: value.split(/\r?\n/u).length,
+      totalLines: countTextLines(value),
     });
   },
 
+  markContentDirty: (path: string) => {
+    const { filePath, isDirty, saveError } = get();
+    if (filePath !== path) return;
+    if (isDirty && saveError === null) return;
+    set({ isDirty: true, saveError: null });
+  },
+
   saveFile: async () => {
-    const { filePath, content } = get();
+    const { filePath, content: storeContent } = get();
     if (!filePath) return;
+    const content = getLatestWorkspaceContent(filePath, storeContent);
+    if (content !== storeContent) {
+      set({
+        content,
+        isDirty: true,
+        saveError: null,
+        totalLines: countTextLines(content),
+      });
+    }
     set({ isSaving: true, saveError: null });
     try {
       const ctx = getWorkspaceFileContext();
