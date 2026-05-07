@@ -223,6 +223,10 @@ export interface OperatorRunCleanupRequest {
   includeFailed: boolean;
   includeSucceeded: boolean;
   limit?: number | null;
+  operatorAlias?: string | null;
+  operatorId?: string | null;
+  operatorVersion?: string | null;
+  sourcePlugin?: string | null;
 }
 
 export interface OperatorRunCleanupCandidate {

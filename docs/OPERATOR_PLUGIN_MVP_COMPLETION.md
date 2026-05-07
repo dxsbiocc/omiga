@@ -21,7 +21,7 @@ Implemented:
 - Session-bounded output collection: output globs are relative to the operator `${outdir}`, and absolute or parent-directory output globs are rejected so collected results stay under the active session run workspace.
 - Explicit opt-in cache policy: cache-enabled operators reuse prior succeeded runs only within the active local/SSH/sandbox workspace `.omiga/runs`, verify cached artifact refs in place, and write cache-hit provenance without copying outputs. Smoke runs bypass cache.
 - Cache observability in the operator UI: run summaries, operator cards, detail dialogs, and copyable diagnosis payloads expose cache hit/miss counts plus source run ids/directories.
-- Workspace-scoped run cleanup: the settings UI previews old/cache run cleanup, preserves the latest runs, estimates candidate size, asks for confirmation, and deletes only under the active local/SSH/sandbox `.omiga/runs` root.
+- Workspace-scoped run cleanup: the settings UI previews old/cache run cleanup globally or for a single operator, preserves the latest matching runs, estimates candidate size, asks for confirmation, and deletes only under the active local/SSH/sandbox `.omiga/runs` root.
 - Operator settings UI with cards, run counts, success/failure/smoke statistics, details dialog, failed-run diagnosis, copyable diagnosis payload, run detail/log/verify actions, and smoke-run launcher.
 - Built-in validation plugin `operator-smoke@omiga-curated` exposing `write_text_report@0.1.0` and `container_text_report@0.1.0`.
 
@@ -143,5 +143,5 @@ Recommended follow-up after MVP commit:
 
 1. Live Singularity smoke validation against an installed Singularity/Apptainer runtime.
 2. Richer structured output manifest support beyond `outputs.glob`.
-3. Per-operator cleanup controls and richer retention policy presets.
+3. Richer retention policy presets and saved cleanup preferences.
 4. Multi-operator workflow/rule composition.

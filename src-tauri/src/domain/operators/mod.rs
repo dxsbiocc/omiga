@@ -1483,6 +1483,14 @@ pub struct OperatorRunCleanupRequest {
     pub include_succeeded: bool,
     #[serde(default)]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub operator_alias: Option<String>,
+    #[serde(default)]
+    pub operator_id: Option<String>,
+    #[serde(default)]
+    pub operator_version: Option<String>,
+    #[serde(default)]
+    pub source_plugin: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4471,14 +4479,18 @@ fn select_operator_cleanup_candidates(
     request: &OperatorRunCleanupRequest,
 ) -> Vec<(OperatorRunSummary, String)> {
     let keep_latest = request.keep_latest.unwrap_or(25);
-    let protected = summaries
+    let scoped = summaries
+        .iter()
+        .filter(|summary| cleanup_request_matches_summary(summary, request))
+        .collect::<Vec<_>>();
+    let protected = scoped
         .iter()
         .take(keep_latest)
         .map(|summary| summary.run_id.as_str())
         .collect::<HashSet<_>>();
     let mut selected = Vec::new();
     let mut selected_ids = HashSet::new();
-    for summary in summaries {
+    for summary in &scoped {
         if protected.contains(summary.run_id.as_str())
             || !is_terminal_operator_status(&summary.status)
         {
@@ -4501,7 +4513,7 @@ fn select_operator_cleanup_candidates(
         };
         if let Some(reason) = reason {
             selected_ids.insert(summary.run_id.clone());
-            selected.push((summary.clone(), reason));
+            selected.push(((*summary).clone(), reason));
         }
     }
 
@@ -4511,7 +4523,7 @@ fn select_operator_cleanup_candidates(
             .filter(|(summary, _)| summary.cache_hit != Some(true))
             .map(|(summary, _)| summary.run_id.clone())
             .collect::<HashSet<_>>();
-        for summary in summaries {
+        for summary in &scoped {
             if protected.contains(summary.run_id.as_str())
                 || selected_ids.contains(&summary.run_id)
                 || summary.cache_hit != Some(true)
@@ -4525,12 +4537,12 @@ fn select_operator_cleanup_candidates(
                 .unwrap_or(false)
             {
                 selected_ids.insert(summary.run_id.clone());
-                selected.push((summary.clone(), "cache_source_cleanup".to_string()));
+                selected.push(((*summary).clone(), "cache_source_cleanup".to_string()));
             }
         }
     }
 
-    let retained_cache_sources = summaries
+    let retained_cache_sources = scoped
         .iter()
         .filter(|summary| {
             summary.cache_hit == Some(true) && !selected_ids.contains(&summary.run_id)
@@ -4543,6 +4555,44 @@ fn select_operator_cleanup_candidates(
             summary.cache_hit == Some(true) || !retained_cache_sources.contains(&summary.run_id)
         })
         .collect()
+}
+
+fn cleanup_request_matches_summary(
+    summary: &OperatorRunSummary,
+    request: &OperatorRunCleanupRequest,
+) -> bool {
+    cleanup_text_filter_matches(
+        request.operator_id.as_deref(),
+        summary.operator_id.as_deref(),
+    ) && cleanup_operator_alias_matches(
+        request.operator_alias.as_deref(),
+        summary.operator_alias.as_deref(),
+        summary.operator_id.as_deref(),
+    ) && cleanup_text_filter_matches(
+        request.operator_version.as_deref(),
+        summary.operator_version.as_deref(),
+    ) && cleanup_text_filter_matches(
+        request.source_plugin.as_deref(),
+        summary.source_plugin.as_deref(),
+    )
+}
+
+fn cleanup_text_filter_matches(filter: Option<&str>, value: Option<&str>) -> bool {
+    let Some(filter) = filter.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    value.map(str::trim) == Some(filter)
+}
+
+fn cleanup_operator_alias_matches(
+    filter: Option<&str>,
+    alias: Option<&str>,
+    operator_id: Option<&str>,
+) -> bool {
+    let Some(filter) = filter.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    alias.map(str::trim) == Some(filter) || operator_id.map(str::trim) == Some(filter)
 }
 
 fn is_terminal_operator_status(status: &str) -> bool {
@@ -6289,7 +6339,9 @@ execution:
             status: &str,
             updated_at: &str,
             cache: Option<JsonValue>,
+            operator_id: Option<&str>,
         ) -> PathBuf {
+            let operator_id = operator_id.unwrap_or("write_text_report");
             let run_dir = root.join(".omiga/runs").join(run_id);
             fs::create_dir_all(run_dir.join("out")).unwrap();
             fs::create_dir_all(run_dir.join("logs")).unwrap();
@@ -6301,8 +6353,8 @@ execution:
                 "runId": run_id,
                 "location": "local",
                 "operator": {
-                    "alias": "write_text_report",
-                    "id": "write_text_report",
+                    "alias": operator_id,
+                    "id": operator_id,
                     "version": "0.1.0",
                     "sourcePlugin": "operator-smoke@omiga-curated"
                 },
@@ -6336,6 +6388,7 @@ execution:
             "succeeded",
             "2099-01-01T00:00:00Z",
             None,
+            None,
         );
         let old_success = write_run(
             tmp.path(),
@@ -6343,12 +6396,14 @@ execution:
             "succeeded",
             "2000-01-01T00:00:00Z",
             None,
+            None,
         );
         let old_failed = write_run(
             tmp.path(),
             "oprun_20000101_failed",
             "failed",
             "2000-01-01T00:00:00Z",
+            None,
             None,
         );
         let cache_hit = write_run(
@@ -6362,6 +6417,15 @@ execution:
                 "sourceRunId": "oprun_20000101_success",
                 "sourceRunDir": old_success.to_string_lossy()
             })),
+            None,
+        );
+        let other_operator = write_run(
+            tmp.path(),
+            "oprun_20000101_other",
+            "succeeded",
+            "2000-01-01T00:00:00Z",
+            None,
+            Some("other_operator"),
         );
         let ctx = crate::domain::tools::ToolContext::new(tmp.path());
         let request = OperatorRunCleanupRequest {
@@ -6372,6 +6436,10 @@ execution:
             include_failed: true,
             include_succeeded: true,
             limit: Some(50),
+            operator_alias: None,
+            operator_id: Some("write_text_report".to_string()),
+            operator_version: Some("0.1.0".to_string()),
+            source_plugin: Some("operator-smoke@omiga-curated".to_string()),
         };
 
         let preview = cleanup_operator_runs_for_context(&ctx, request.clone())
@@ -6379,7 +6447,7 @@ execution:
             .unwrap();
         assert!(preview.dry_run);
         assert_eq!(preview.location, "local");
-        assert_eq!(preview.scanned_count, 4);
+        assert_eq!(preview.scanned_count, 5);
         assert_eq!(preview.matched_count, 3);
         assert_eq!(preview.deleted_count, 0);
         assert!(preview.estimated_bytes.unwrap_or_default() > 0);
@@ -6400,6 +6468,7 @@ execution:
         assert!(old_success.is_dir());
         assert!(old_failed.is_dir());
         assert!(cache_hit.is_dir());
+        assert!(other_operator.is_dir());
 
         let result = cleanup_operator_runs_for_context(
             &ctx,
@@ -6416,6 +6485,7 @@ execution:
         assert!(!old_success.exists());
         assert!(!old_failed.exists());
         assert!(!cache_hit.exists());
+        assert!(other_operator.is_dir());
     }
 
     #[tokio::test]

@@ -428,6 +428,10 @@ describe("usePluginStore operator actions", () => {
       includeFailed: true,
       includeSucceeded: true,
       limit: 500,
+      operatorAlias: "write_text_report",
+      operatorId: "write_text_report",
+      operatorVersion: "0.1.0",
+      sourcePlugin: "operator-smoke@omiga-curated",
     };
     const result = await usePluginStore.getState().cleanupOperatorRuns(
       request,

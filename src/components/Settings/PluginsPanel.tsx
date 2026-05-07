@@ -41,6 +41,7 @@ import {
   flattenMarketplacePlugins,
   summarizeOperatorRunResult,
   type OperatorManifestDiagnostic,
+  type OperatorRunCleanupRequest,
   type OperatorRunDetail,
   type OperatorRunVerification,
   type OperatorRunLog,
@@ -1895,14 +1896,18 @@ function OperatorRunDetailsDialog({
 function OperatorDetailsDialog({
   operator,
   runs,
+  busy,
   onClose,
   onOpenRun,
+  onCleanupRuns,
   onCopy,
 }: {
   operator: OperatorSummary | null;
   runs: OperatorRunSummary[];
+  busy: boolean;
   onClose: () => void;
   onOpenRun: (run: OperatorRunSummary) => void;
+  onCleanupRuns: (operator: OperatorSummary) => void;
   onCopy: (text: string, successMessage: string) => void;
 }) {
   if (!operator) return null;
@@ -2015,6 +2020,17 @@ function OperatorDetailsDialog({
                   Latest regular: {stats.latestRegularRun.status} · {stats.latestRegularRun.runId}
                 </Typography>
               )}
+              <Button
+                size="small"
+                variant="outlined"
+                color="warning"
+                startIcon={<DeleteOutlineRounded />}
+                disabled={busy || operatorRuns.length === 0}
+                onClick={() => onCleanupRuns(operator)}
+                sx={{ alignSelf: "flex-start", textTransform: "none", borderRadius: 1.5 }}
+              >
+                Clean this operator's old/cache runs
+              </Button>
             </Stack>
           </Paper>
 
@@ -2258,7 +2274,7 @@ function OperatorCatalogSection({
   onToggle: (operator: OperatorSummary, enabled: boolean) => void;
   onSmokeRun: (operator: OperatorSummary, smokeTestId?: string | null) => void;
   onRefreshRuns: () => void;
-  onCleanupRuns: () => void;
+  onCleanupRuns: (operator?: OperatorSummary) => void;
   onOpenRun: (run: OperatorRunSummary) => void;
   onCopy: (text: string, successMessage: string) => void;
 }) {
@@ -2282,8 +2298,10 @@ function OperatorCatalogSection({
       <OperatorDetailsDialog
         operator={detailOperator}
         runs={runs}
+        busy={busy}
         onClose={() => setDetailOperator(null)}
         onOpenRun={onOpenRun}
+        onCleanupRuns={onCleanupRuns}
         onCopy={onCopy}
       />
       <Accordion disableGutters elevation={0} sx={accordionSx}>
@@ -2381,7 +2399,7 @@ function OperatorCatalogSection({
                     color="warning"
                     startIcon={<DeleteOutlineRounded />}
                     disabled={busy || runs.length === 0}
-                    onClick={onCleanupRuns}
+                    onClick={() => onCleanupRuns()}
                     sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", sm: "center" } }}
                   >
                     Clean old/cache runs
@@ -3048,22 +3066,31 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     }
   };
 
-  const handleCleanupOperatorRuns = async () => {
+  const operatorCleanupRequest = (operator?: OperatorSummary): OperatorRunCleanupRequest => ({
+    dryRun: true,
+    keepLatest: 25,
+    maxAgeDays: 30,
+    includeCacheHits: true,
+    includeFailed: true,
+    includeSucceeded: true,
+    limit: 500,
+    operatorAlias: operator ? operatorPrimaryAlias(operator) : null,
+    operatorId: operator?.id ?? null,
+    operatorVersion: operator?.version ?? null,
+    sourcePlugin: operator?.sourcePlugin ?? null,
+  });
+
+  const handleCleanupOperatorRuns = async (operator?: OperatorSummary) => {
     setMessage(null);
-    const request = {
-      dryRun: true,
-      keepLatest: 25,
-      maxAgeDays: 30,
-      includeCacheHits: true,
-      includeFailed: true,
-      includeSucceeded: true,
-      limit: 500,
-    };
+    const request = operatorCleanupRequest(operator);
+    const scopeLabel = operator
+      ? ` for ${operatorDisplayName(operator)}`
+      : "";
     try {
       const preview = await cleanupOperatorRuns(request, projectRoot, operatorSurface);
       if (preview.matchedCount === 0) {
         setMessage(
-          `No cleanup candidates in ${preview.runsRoot}; latest 25 runs are preserved.`,
+          `No cleanup candidates${scopeLabel} in ${preview.runsRoot}; latest 25 matching runs are preserved.`,
         );
         return;
       }
@@ -3075,7 +3102,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         ? `\n… and ${preview.candidates.length - 8} more`
         : "";
       const confirmed = window.confirm(
-        `Delete ${preview.matchedCount} operator run director${preview.matchedCount === 1 ? "y" : "ies"} from the current ${preview.location} workspace?\n\n` +
+        `Delete ${preview.matchedCount} operator run director${preview.matchedCount === 1 ? "y" : "ies"}${scopeLabel} from the current ${preview.location} workspace?\n\n` +
         `Runs root: ${preview.runsRoot}\n` +
         `Estimated space: ${formatBytes(preview.estimatedBytes)}\n\n` +
         `${candidateLines}${remaining}\n\n` +
@@ -3091,7 +3118,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         operatorSurface,
       );
       setMessage(
-        `Deleted ${result.deletedCount} operator run director${result.deletedCount === 1 ? "y" : "ies"}${result.skippedCount > 0 ? ` · ${result.skippedCount} skipped` : ""} · ${formatBytes(result.estimatedBytes)} estimated`,
+        `Deleted ${result.deletedCount} operator run director${result.deletedCount === 1 ? "y" : "ies"}${scopeLabel}${result.skippedCount > 0 ? ` · ${result.skippedCount} skipped` : ""} · ${formatBytes(result.estimatedBytes)} estimated`,
       );
     } catch {
       // Store exposes the error banner.
@@ -3534,7 +3561,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         onToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
         onSmokeRun={(operator, smokeTestId) => void handleOperatorSmokeRun(operator, smokeTestId)}
         onRefreshRuns={() => void handleRefreshOperatorRuns()}
-        onCleanupRuns={() => void handleCleanupOperatorRuns()}
+        onCleanupRuns={(operator) => void handleCleanupOperatorRuns(operator)}
         onOpenRun={(run) => void handleOpenOperatorRun(run)}
         onCopy={(text, successMessage) => void copyToClipboard(text, successMessage)}
       />
