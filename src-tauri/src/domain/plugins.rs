@@ -968,8 +968,11 @@ fn plugin_kind_for_manifest(
         return PluginKind::Workflow;
     }
     if manifest.skills.is_some()
+        || source_path.join("skills").is_dir()
         || manifest.mcp_servers.is_some()
+        || source_path.join(".mcp.json").is_file()
         || manifest.apps.is_some()
+        || source_path.join(".app.json").is_file()
         || category_matches(&["tool", "tools", "skill", "mcp", "app"])
     {
         return PluginKind::Tool;
@@ -1011,7 +1014,6 @@ fn active_plugin_root_from_roots(cache_root: &Path, plugin_id: &PluginId) -> Opt
     typed_plugin_base_roots(&store_root, plugin_id)
         .into_iter()
         .find_map(|base| active_plugin_root_in_base(&base))
-        .or_else(|| active_plugin_root_in_cache(cache_root, plugin_id))
 }
 
 pub fn active_plugin_root(plugin_id: &PluginId) -> Option<PathBuf> {
@@ -1172,6 +1174,7 @@ fn load_configured_plugin(
 }
 
 fn load_plugins_from_config(config: &PluginConfigFile, cache_root: &Path) -> PluginLoadOutcome {
+    migrate_legacy_plugin_cache_best_effort(cache_root);
     repair_configured_builtin_source_runner_assets(config, cache_root);
     let mut configured = config.plugins.iter().collect::<Vec<_>>();
     configured.sort_by(|(left, _), (right, _)| left.cmp(right));
@@ -1313,17 +1316,62 @@ fn cached_plugin_ids_in_cache(cache_root: &Path) -> Vec<PluginId> {
     ids
 }
 
+fn migrate_legacy_plugin_cache(cache_root: &Path) -> Result<usize, String> {
+    let store_root = plugin_store_root_from_cache_root(cache_root);
+    let mut migrated = 0;
+    for plugin_id in cached_plugin_ids_in_cache(cache_root) {
+        let legacy_base = plugin_base_root_in_cache(cache_root, &plugin_id);
+        let Some(legacy_root) = active_plugin_root_in_cache(cache_root, &plugin_id) else {
+            continue;
+        };
+        let Some(manifest) = load_plugin_manifest(&legacy_root) else {
+            continue;
+        };
+        let kind = plugin_kind_for_manifest(&legacy_root, None, &manifest);
+        let target = plugin_base_root_for_kind(&store_root, kind, &plugin_id);
+        if target.exists() {
+            remove_path_if_exists(&legacy_base)?;
+            continue;
+        }
+        let parent = target
+            .parent()
+            .ok_or_else(|| format!("plugin install path has no parent: {}", target.display()))?;
+        fs::create_dir_all(parent).map_err(|err| format!("create plugin install dir: {err}"))?;
+        fs::rename(&legacy_root, &target).map_err(|err| {
+            format!(
+                "move legacy plugin `{}` from {} to {}: {err}",
+                plugin_id.key(),
+                legacy_root.display(),
+                target.display()
+            )
+        })?;
+        remove_path_if_exists(&legacy_base)?;
+        migrated += 1;
+    }
+    Ok(migrated)
+}
+
+fn migrate_legacy_plugin_cache_best_effort(cache_root: &Path) {
+    match migrate_legacy_plugin_cache(cache_root) {
+        Ok(migrated) if migrated > 0 => {
+            tracing::info!(count = migrated, "migrated legacy plugin cache entries")
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!("failed to migrate legacy plugin cache entries: {err}"),
+    }
+}
+
 fn unlisted_installed_plugin_summaries(
     config: &PluginConfigFile,
     listed_ids: &HashSet<String>,
     cache_root: &Path,
 ) -> Vec<PluginSummary> {
+    migrate_legacy_plugin_cache_best_effort(cache_root);
     let mut ids = config
         .plugins
         .keys()
         .filter_map(|key| PluginId::parse(key).ok())
         .collect::<Vec<_>>();
-    ids.extend(cached_plugin_ids_in_cache(cache_root));
     ids.sort_by_key(PluginId::key);
     ids.dedup_by(|a, b| a.key() == b.key());
 
@@ -1347,8 +1395,9 @@ pub fn list_plugin_marketplaces(
     project_root: Option<&Path>,
     resource_dir: Option<&Path>,
 ) -> Vec<PluginMarketplaceEntry> {
-    let config = read_config();
     let cache_root = plugin_cache_root();
+    migrate_legacy_plugin_cache_best_effort(&cache_root);
+    let config = read_config();
     let mut out = Vec::new();
     let mut listed_ids = HashSet::new();
     for path in marketplace_paths(project_root, resource_dir) {
@@ -1409,6 +1458,7 @@ pub fn list_plugin_marketplaces(
 }
 
 pub fn read_plugin(marketplace_path: &Path, plugin_name: &str) -> Result<PluginDetail, String> {
+    migrate_legacy_plugin_cache_best_effort(&plugin_cache_root());
     let marketplace = read_marketplace(marketplace_path)?;
     let config = read_config();
     let entry = marketplace
@@ -1955,17 +2005,10 @@ mod tests {
     }
 
     #[test]
-    fn typed_plugin_root_takes_precedence_over_legacy_cache() {
+    fn active_plugin_root_does_not_read_legacy_cache() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store_root = tmp.path().join("plugins");
         let cache_root = store_root.join("cache");
-        let typed_root = write_typed_plugin(
-            &store_root,
-            PluginKind::Operator,
-            "sample",
-            r#"{"displayName":"Typed Sample","category":"Operator"}"#,
-            false,
-        );
         write_cached_plugin(
             &cache_root,
             "market",
@@ -1977,10 +2020,39 @@ mod tests {
         );
         let plugin_id = PluginId::new("sample", "market").unwrap();
 
-        assert_eq!(
-            active_plugin_root_from_roots(&cache_root, &plugin_id),
-            Some(typed_root)
+        assert_eq!(active_plugin_root_from_roots(&cache_root, &plugin_id), None);
+    }
+
+    #[test]
+    fn legacy_cache_plugins_are_migrated_to_typed_root_before_loading() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store_root = tmp.path().join("plugins");
+        let cache_root = store_root.join("cache");
+        let legacy_root = write_cached_plugin(
+            &cache_root,
+            "market",
+            "sample",
+            r#"{"displayName":"Sample Operator","category":"Operator"}"#,
+            None,
+            None,
+            true,
         );
+        let mut config = PluginConfigFile::default();
+        config.plugins.insert(
+            "sample@market".to_string(),
+            PluginConfigEntry { enabled: true },
+        );
+        let typed_root = store_root.join("operators").join("sample");
+
+        let outcome = load_plugins_from_config(&config, &cache_root);
+
+        assert_eq!(outcome.plugins()[0].root, typed_root);
+        assert_eq!(
+            outcome.effective_skill_roots(),
+            vec![typed_root.join("skills")]
+        );
+        assert!(!legacy_root.exists());
+        assert!(!cache_root.join("market").join("sample").exists());
     }
 
     #[test]
@@ -2051,7 +2123,7 @@ mod tests {
     fn plugin_load_outcome_collects_effective_capabilities() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cache_root = tmp.path().join("cache");
-        let plugin_root = write_cached_plugin(
+        let legacy_root = write_cached_plugin(
             &cache_root,
             "market",
             "sample",
@@ -2070,6 +2142,9 @@ mod tests {
 
         assert_eq!(outcome.plugins().len(), 1);
         assert!(outcome.plugins()[0].is_active());
+        let plugin_root = tmp.path().join("tools").join("sample");
+        assert_eq!(outcome.plugins()[0].root, plugin_root);
+        assert!(!legacy_root.exists());
         assert_eq!(
             outcome.effective_skill_roots(),
             vec![plugin_root.join("skills")]
@@ -2267,9 +2342,10 @@ mod tests {
     }
 
     #[test]
-    fn unlisted_installed_plugins_are_summarized_from_cache() {
+    fn unlisted_installed_plugins_are_migrated_then_summarized() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cache_root = tmp.path().join("cache");
+        let legacy_base = cache_root.join("removed-market").join("orphan");
         let plugin_root = cache_root
             .join("removed-market")
             .join("orphan")
@@ -2294,9 +2370,15 @@ mod tests {
 
         assert_eq!(summaries.len(), 1);
         let summary = &summaries[0];
+        let typed_root = tmp.path().join("other").join("orphan");
         assert_eq!(summary.id, "orphan@removed-market");
         assert!(summary.installed);
         assert!(summary.enabled);
+        assert_eq!(
+            summary.installed_path.as_deref(),
+            Some(typed_root.to_str().unwrap())
+        );
+        assert!(!legacy_base.exists());
         assert_eq!(
             summary
                 .interface
@@ -2307,9 +2389,10 @@ mod tests {
     }
 
     #[test]
-    fn listed_installed_plugins_are_not_duplicated_from_cache() {
+    fn listed_legacy_plugins_are_not_duplicated_after_migration() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cache_root = tmp.path().join("cache");
+        let legacy_base = cache_root.join("market").join("known");
         let plugin_root = cache_root.join("market").join("known").join("local");
         fs::create_dir_all(plugin_root.join(".omiga-plugin")).unwrap();
         fs::write(
@@ -2323,6 +2406,7 @@ mod tests {
         let summaries = unlisted_installed_plugin_summaries(&config, &listed_ids, &cache_root);
 
         assert!(summaries.is_empty());
+        assert!(!legacy_base.exists());
     }
 
     #[test]
