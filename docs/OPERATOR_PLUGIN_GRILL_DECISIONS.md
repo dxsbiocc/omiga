@@ -49,6 +49,7 @@ Non-goal for MVP: full DAG workflow orchestration, Snakemake/Nextflow parity, sc
 37. **Run history**: local run history is discovered from `{project}/.omiga/runs/*/status.json|provenance.json`; SSH/sandbox run provenance remains on the selected remote execution environment and is accessed through remote file tooling rather than copied locally.
 38. **Run verification**: first-version run QA is read-only and checks run state, status, logs, and declared output artifact references in-place on the selected execution surface.
 39. **Smoke tests**: operator manifests may declare `smokeTests[]` with typed `{ inputs, params, resources }` invocation payloads; the UI uses those declarations instead of project-specific hardcoded smoke runners.
+40. **Deferred environment model**: operators remain atomic, but execution environments must be shared and capability-oriented, not one environment per operator. A future implementation should add reusable environment profiles (for example `system`, `r-base-light`, `r-omics-basic`, `python-basic`, `bioseq-cli`, or explicit container image refs) and let operator manifests declare only `envRef` plus concrete requirements. The resolver should preflight the active session environment first, then shared configured environments, and use containers only as an explicit optional fallback.
 
 ## MVP implementation slice
 
@@ -61,6 +62,13 @@ Recommended first vertical slice:
 5. Implement local/no-container execution first, with isolated run dirs and structured results.
 6. Extend to SSH/no-container by using the local registry/schema and reusing the existing session execution environment and remote file access primitives.
 7. Add local/SSH Docker/Singularity command wrapping once no-container behavior is stable.
+
+Deferred post-MVP runtime-environment slice:
+
+1. Add a shared environment profile registry for reusable operator execution capabilities.
+2. Extend operator manifests with an `envRef`/requirements model without creating per-operator environments.
+3. Add preflight resolution for commands, language runtimes, packages, container availability, and resource compatibility on the active local/SSH/sandbox session surface.
+4. Keep the default path as the current session environment; do not install, clone, or copy large environments for each operator.
 
 ## Built-in validation fixture
 

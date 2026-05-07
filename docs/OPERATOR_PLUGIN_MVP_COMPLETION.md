@@ -150,7 +150,13 @@ Keep separate from the operator MVP commit unless intentionally bundled:
 
 Recommended follow-up after MVP commit:
 
-1. Live Singularity smoke validation against an installed Singularity/Apptainer runtime.
-2. Richer custom UI renderers for typed `structuredOutputs` values.
-3. Richer retention policy presets and saved cleanup preferences.
-4. Multi-operator workflow/rule composition.
+1. Shared operator environment profiles and preflight resolver:
+   - Do not create one execution environment per operator.
+   - Keep `Operator` as the atomic callable unit, but make execution environments reusable capability profiles.
+   - Add manifest support for `envRef` plus concrete requirements such as commands, language runtimes, packages, and optional container images.
+   - Resolve in this order: active session environment first, user/shared configured environment second, explicit container fallback last.
+   - Keep large environments, images, and run outputs out of user-home plugin/package paths; run outputs remain under the active session workspace `.omiga/runs`.
+2. Live Singularity smoke validation against an installed Singularity/Apptainer runtime.
+3. Richer custom UI renderers for typed `structuredOutputs` values.
+4. Richer retention policy presets and saved cleanup preferences.
+5. Multi-operator workflow/rule composition.
