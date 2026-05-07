@@ -184,6 +184,33 @@ const operatorIconColors: Record<Exclude<OperatorPluginIconKind, "operator">, st
   shell: "#4EAA25",
 };
 
+const operatorIconLabels: Record<OperatorPluginIconKind, string> = {
+  r: "R",
+  cpp: "C++",
+  python: "Python",
+  c: "C",
+  shell: "Shell",
+  operator: "Operator",
+};
+
+function operatorIconKindFromHaystack(haystack: string): OperatorPluginIconKind {
+  if (/\bc\+\+\b|\bcpp\b/.test(haystack)) return "cpp";
+  if (/\brscript\b|\bbase r\b|\br\b/.test(haystack)) return "r";
+  if (/\bpython\b|\bpython3\b|\bpy\b/.test(haystack)) return "python";
+  if (/\bseqtk\b|\bc\b/.test(haystack)) return "c";
+  if (/\bshell\b|\bsh\b|\bbash\b|\bcontainer\b|\bsmoke\b/.test(haystack)) return "shell";
+  return "operator";
+}
+
+function buildOperatorIconSpec(kind: OperatorPluginIconKind): OperatorPluginIconSpec {
+  return {
+    kind,
+    label: operatorIconLabels[kind],
+    body: kind === "operator" ? null : operatorIconifyBodies[kind],
+    color: kind === "operator" ? null : operatorIconColors[kind],
+  };
+}
+
 export function operatorPluginIconSpec(plugin: PluginSummary): OperatorPluginIconSpec | null {
   if (!isOperatorPlugin(plugin)) return null;
   const haystack = [
@@ -197,28 +224,7 @@ export function operatorPluginIconSpec(plugin: PluginSummary): OperatorPluginIco
     .filter((value): value is string => Boolean(value?.trim()))
     .join(" ")
     .toLowerCase();
-  const kind: OperatorPluginIconKind = (() => {
-    if (/\bc\+\+\b|\bcpp\b/.test(haystack)) return "cpp";
-    if (/\brscript\b|\bbase r\b|\br\b/.test(haystack)) return "r";
-    if (/\bpython\b|\bpython3\b|\bpy\b/.test(haystack)) return "python";
-    if (/\bseqtk\b|\bc\b/.test(haystack)) return "c";
-    if (/\bshell\b|\bsh\b|\bbash\b|\bcontainer\b|\bsmoke\b/.test(haystack)) return "shell";
-    return "operator";
-  })();
-  const labels: Record<OperatorPluginIconKind, string> = {
-    r: "R",
-    cpp: "C++",
-    python: "Python",
-    c: "C",
-    shell: "Shell",
-    operator: "Operator",
-  };
-  return {
-    kind,
-    label: labels[kind],
-    body: kind === "operator" ? null : operatorIconifyBodies[kind],
-    color: kind === "operator" ? null : operatorIconColors[kind],
-  };
+  return buildOperatorIconSpec(operatorIconKindFromHaystack(haystack));
 }
 
 function isFunctionPlugin(plugin: PluginSummary): boolean {
@@ -734,6 +740,20 @@ export function operatorTemplateScript(operator: OperatorSummary): string | null
   );
 }
 
+export function operatorImplementationIconSpec(operator: OperatorSummary): OperatorPluginIconSpec {
+  const haystack = [
+    operator.id,
+    operator.name,
+    operator.description,
+    ...(operator.tags ?? []),
+    ...(operator.execution?.argv ?? []),
+  ]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .join(" ")
+    .toLowerCase();
+  return buildOperatorIconSpec(operatorIconKindFromHaystack(haystack));
+}
+
 export function operatorRuntimeSummary(operator: OperatorSummary): string {
   const runtime = operator.runtime;
   const placement = runtimeAxisValues(runtime, "placement");
@@ -772,15 +792,6 @@ function operatorExecutionCommand(operator: OperatorSummary): string {
   if (argv.length === 0) return "No execution argv declared";
   const command = argv.join(" ");
   return command.length > 180 ? `${command.slice(0, 177)}…` : command;
-}
-
-function operatorFieldLabel(name: string, field: { kind?: string | null; required?: boolean; default?: unknown }): string {
-  const pieces = [name, field.kind ? `:${field.kind}` : ""].filter(Boolean).join("");
-  const flags = [
-    field.required ? "required" : null,
-    field.default !== undefined && field.default !== null ? `default=${previewValue(field.default)}` : null,
-  ].filter((value): value is string => Boolean(value));
-  return flags.length > 0 ? `${pieces} (${flags.join(", ")})` : pieces;
 }
 
 function operatorFieldEntries(
@@ -1332,44 +1343,240 @@ function PluginCatalogGroupList({
   );
 }
 
+function OperatorMetricCard({ label, value }: { label: string; value: string | number }) {
+  return (
+    <Box
+      sx={{
+        px: 1.15,
+        py: 0.85,
+        minWidth: 0,
+        borderRadius: 1.75,
+        bgcolor: "background.paper",
+        border: 1,
+        borderColor: "divider",
+      }}
+    >
+      <Typography variant="subtitle2" fontWeight={900} sx={{ lineHeight: 1.1 }}>
+        {value}
+      </Typography>
+      <Typography variant="caption" color="text.secondary" fontWeight={750}>
+        {label}
+      </Typography>
+    </Box>
+  );
+}
+
+function OperatorMetaLine({ label, value }: { label: string; value: string }) {
+  return (
+    <Stack direction={{ xs: "column", sm: "row" }} spacing={0.75} sx={{ minWidth: 0 }}>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        fontWeight={850}
+        sx={{ minWidth: 92, flexShrink: 0 }}
+      >
+        {label}
+      </Typography>
+      <Typography
+        variant="caption"
+        sx={{
+          minWidth: 0,
+          color: "text.secondary",
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          overflowWrap: "anywhere",
+          lineHeight: 1.55,
+        }}
+      >
+        {value}
+      </Typography>
+    </Stack>
+  );
+}
+
+function OperatorSchemaFieldList({
+  title,
+  entries,
+  emptyLabel = "None declared",
+}: {
+  title: string;
+  entries: Array<[string, { kind?: string | null; required?: boolean; default?: unknown; description?: string | null }]>;
+  emptyLabel?: string;
+}) {
+  return (
+    <Paper
+      variant="outlined"
+      sx={{
+        p: 1.1,
+        borderRadius: 2,
+        minHeight: 104,
+        bgcolor: "background.paper",
+      }}
+    >
+      <Typography variant="caption" color="text.secondary" fontWeight={900} sx={{ textTransform: "uppercase", letterSpacing: 0.4 }}>
+        {title}
+      </Typography>
+      <Stack spacing={0.6} sx={{ mt: 0.8 }}>
+        {entries.length > 0 ? entries.map(([name, field]) => (
+          <Box
+            key={name}
+            sx={{
+              display: "grid",
+              gridTemplateColumns: "minmax(0, 1fr) auto",
+              gap: 0.75,
+              alignItems: "center",
+              px: 0.75,
+              py: 0.6,
+              borderRadius: 1.4,
+              bgcolor: "action.hover",
+            }}
+          >
+            <Box sx={{ minWidth: 0 }}>
+              <Typography
+                variant="caption"
+                fontWeight={850}
+                sx={{
+                  display: "block",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+                title={name}
+              >
+                {name}
+              </Typography>
+              {field.description?.trim() ? (
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                  title={field.description}
+                >
+                  {field.description}
+                </Typography>
+              ) : null}
+            </Box>
+            <Stack direction="row" spacing={0.45} alignItems="center" sx={{ justifySelf: "end" }}>
+              {field.kind && <Chip size="small" variant="outlined" label={field.kind} sx={{ height: 22 }} />}
+              {field.required && <Chip size="small" color="warning" variant="outlined" label="required" sx={{ height: 22 }} />}
+              {field.default !== undefined && field.default !== null && (
+                <Chip size="small" variant="outlined" label={`=${previewValue(field.default)}`} sx={{ height: 22 }} />
+              )}
+            </Stack>
+          </Box>
+        )) : (
+          <Typography variant="caption" color="text.secondary" sx={{ py: 0.75 }}>
+            {emptyLabel}
+          </Typography>
+        )}
+      </Stack>
+    </Paper>
+  );
+}
+
+function OperatorResourceList({ entries }: { entries: ReturnType<typeof operatorResourceEntries> }) {
+  return (
+    <Paper variant="outlined" sx={{ p: 1.1, borderRadius: 2, minHeight: 104, bgcolor: "background.paper" }}>
+      <Typography variant="caption" color="text.secondary" fontWeight={900} sx={{ textTransform: "uppercase", letterSpacing: 0.4 }}>
+        Resources
+      </Typography>
+      <Stack spacing={0.6} sx={{ mt: 0.8 }}>
+        {entries.length > 0 ? entries.map(([name, resource]) => (
+          <Box
+            key={name}
+            sx={{
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 1,
+              alignItems: "center",
+              px: 0.75,
+              py: 0.6,
+              borderRadius: 1.4,
+              bgcolor: "action.hover",
+            }}
+          >
+            <Typography variant="caption" fontWeight={850} sx={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
+              {name}
+            </Typography>
+            <Stack direction="row" spacing={0.45}>
+              {resource.default != null && <Chip size="small" variant="outlined" label={`default ${previewValue(resource.default)}`} sx={{ height: 22 }} />}
+              {resource.min != null && <Chip size="small" variant="outlined" label={`min ${previewValue(resource.min)}`} sx={{ height: 22 }} />}
+              {resource.max != null && <Chip size="small" variant="outlined" label={`max ${previewValue(resource.max)}`} sx={{ height: 22 }} />}
+            </Stack>
+          </Box>
+        )) : (
+          <Typography variant="caption" color="text.secondary" sx={{ py: 0.75 }}>
+            No exposed resources.
+          </Typography>
+        )}
+      </Stack>
+    </Paper>
+  );
+}
+
 function OperatorBundleContentList({ operators }: { operators: OperatorSummary[] }) {
+  const theme = useTheme();
   const sorted = [...operators].sort((left, right) =>
     operatorDisplayName(left).localeCompare(operatorDisplayName(right)),
   );
   return (
-    <Stack divider={<Box sx={{ height: 1, bgcolor: "divider" }} />}>
+    <Stack spacing={1.25} sx={{ p: 1.25 }}>
       {sorted.map((operator) => {
         const stats = operatorSchemaStats(operator);
         const script = operatorTemplateScript(operator);
-        const inputEntries = operatorFieldEntries(operator.interface?.inputs).slice(0, 4);
-        const paramEntries = operatorFieldEntries(operator.interface?.params).slice(0, 5);
-        const outputEntries = operatorFieldEntries(operator.interface?.outputs).slice(0, 4);
+        const inputEntries = operatorFieldEntries(operator.interface?.inputs).slice(0, 5);
+        const paramEntries = operatorFieldEntries(operator.interface?.params).slice(0, 6);
+        const outputEntries = operatorFieldEntries(operator.interface?.outputs).slice(0, 5);
         const resourceEntries = operatorResourceEntries(operator);
+        const icon = operatorImplementationIconSpec(operator);
+        const iconTone = icon.color ?? theme.palette.text.secondary;
         return (
-          <Box key={operatorCatalogKey(operator)} sx={{ p: 1.4 }}>
-            <Stack spacing={1}>
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={1.25} alignItems={{ xs: "stretch", sm: "flex-start" }}>
+          <Paper
+            key={operatorCatalogKey(operator)}
+            variant="outlined"
+            sx={{
+              p: 1.5,
+              borderRadius: 2.75,
+              overflow: "hidden",
+              bgcolor: alpha(theme.palette.background.paper, theme.palette.mode === "dark" ? 0.52 : 0.9),
+              borderColor: alpha(iconTone, theme.palette.mode === "dark" ? 0.28 : 0.18),
+              background: `linear-gradient(135deg, ${alpha(iconTone, theme.palette.mode === "dark" ? 0.15 : 0.09)}, transparent 42%)`,
+            }}
+          >
+            <Stack spacing={1.35}>
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1.35} alignItems={{ xs: "stretch", sm: "flex-start" }}>
                 <Box
                   sx={{
-                    width: 34,
-                    height: 34,
-                    borderRadius: "50%",
+                    width: 44,
+                    height: 44,
+                    borderRadius: 2.2,
                     display: "inline-flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    bgcolor: "action.hover",
-                    color: "text.secondary",
+                    bgcolor: alpha(iconTone, theme.palette.mode === "dark" ? 0.18 : 0.1),
+                    color: iconTone,
+                    border: `1px solid ${alpha(iconTone, theme.palette.mode === "dark" ? 0.28 : 0.18)}`,
                     flexShrink: 0,
                   }}
                 >
-                  <ExtensionRounded fontSize="small" />
+                  {icon.body ? (
+                    <Box
+                      component="svg"
+                      viewBox="0 0 24 24"
+                      aria-label={`${icon.label} operator`}
+                      sx={{ width: 27, height: 27, display: "block" }}
+                      dangerouslySetInnerHTML={{ __html: icon.body }}
+                    />
+                  ) : (
+                    <ExtensionRounded fontSize="small" />
+                  )}
                 </Box>
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-                    <Typography variant="subtitle2" fontWeight={850}>
+                    <Typography variant="subtitle1" fontWeight={900} sx={{ lineHeight: 1.2 }}>
                       {operatorDisplayName(operator)}
                     </Typography>
-                    <Chip size="small" variant="outlined" label={operator.id} />
+                    <Chip size="small" variant="outlined" label={operator.id} sx={{ maxWidth: 360 }} />
                     <Chip size="small" variant="outlined" label={`v${operator.version}`} />
                     <Chip
                       size="small"
@@ -1378,105 +1585,57 @@ function OperatorBundleContentList({ operators }: { operators: OperatorSummary[]
                       label={operator.exposed ? "Exposed" : "Not exposed"}
                     />
                   </Stack>
-                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.35, wordBreak: "break-word" }}>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.45, lineHeight: 1.5, wordBreak: "break-word" }}>
                     {operator.description?.trim() || "Plugin-defined operator callable by agents as a tool."}
                   </Typography>
                 </Box>
               </Stack>
 
-              <Stack direction="row" gap={0.75} flexWrap="wrap">
-                <Chip size="small" variant="outlined" label={`${stats.inputs} inputs · ${stats.requiredInputs} required`} />
-                <Chip size="small" variant="outlined" label={`${stats.params} params`} />
-                <Chip size="small" variant="outlined" label={`${stats.outputs} outputs`} />
-                <Chip size="small" variant="outlined" label={`${stats.resources} resources`} />
-                {(operator.smokeTests?.length ?? 0) > 0 && (
-                  <Chip size="small" variant="outlined" label={`${operator.smokeTests?.length ?? 0} smoke tests`} />
-                )}
-              </Stack>
+              <Box
+                sx={{
+                  display: "grid",
+                  gridTemplateColumns: { xs: "repeat(2, minmax(0, 1fr))", md: "repeat(5, minmax(0, 1fr))" },
+                  gap: 0.75,
+                }}
+              >
+                <OperatorMetricCard label="inputs" value={`${stats.inputs}/${stats.requiredInputs}`} />
+                <OperatorMetricCard label="params" value={stats.params} />
+                <OperatorMetricCard label="outputs" value={stats.outputs} />
+                <OperatorMetricCard label="resources" value={stats.resources} />
+                <OperatorMetricCard label="smoke" value={operator.smokeTests?.length ?? 0} />
+              </Box>
+
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 1.15,
+                  borderRadius: 2,
+                  bgcolor: alpha(theme.palette.common.black, theme.palette.mode === "dark" ? 0.12 : 0.03),
+                  borderColor: alpha(theme.palette.divider, 0.8),
+                }}
+              >
+                <Stack spacing={0.65}>
+                  <OperatorMetaLine label="Script" value={script || "not declared"} />
+                  <OperatorMetaLine label="Environment" value={operatorRuntimeSummary(operator)} />
+                  <OperatorMetaLine label="Command" value={operatorExecutionCommand(operator)} />
+                  <OperatorMetaLine label="Manifest" value={operator.manifestPath} />
+                </Stack>
+              </Paper>
 
               <Box
                 sx={{
-                  p: 1,
-                  borderRadius: 1.5,
-                  bgcolor: "action.hover",
-                  border: 1,
-                  borderColor: "divider",
+                  display: "grid",
+                  gridTemplateColumns: { xs: "1fr", md: "repeat(2, minmax(0, 1fr))" },
+                  gap: 1,
                 }}
               >
-                <Stack spacing={0.5}>
-                  <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                    Template script: {script || "not declared"}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                    Environment: {operatorRuntimeSummary(operator)}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                    Command: {operatorExecutionCommand(operator)}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                    Manifest: {operator.manifestPath}
-                  </Typography>
-                </Stack>
+                <OperatorSchemaFieldList title="Inputs" entries={inputEntries} />
+                <OperatorSchemaFieldList title="Params" entries={paramEntries} />
+                <OperatorSchemaFieldList title="Outputs" entries={outputEntries} />
+                <OperatorResourceList entries={resourceEntries} />
               </Box>
-
-              <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
-                <Box sx={{ flex: 1, minWidth: 0 }}>
-                  <Typography variant="caption" fontWeight={850}>
-                    Inputs
-                  </Typography>
-                  <Stack direction="row" gap={0.5} flexWrap="wrap" sx={{ mt: 0.5 }}>
-                    {inputEntries.length > 0 ? inputEntries.map(([name, field]) => (
-                      <Chip key={name} size="small" variant="outlined" label={operatorFieldLabel(name, field)} />
-                    )) : <Typography variant="caption" color="text.secondary">None</Typography>}
-                  </Stack>
-                </Box>
-                <Box sx={{ flex: 1, minWidth: 0 }}>
-                  <Typography variant="caption" fontWeight={850}>
-                    Params
-                  </Typography>
-                  <Stack direction="row" gap={0.5} flexWrap="wrap" sx={{ mt: 0.5 }}>
-                    {paramEntries.length > 0 ? paramEntries.map(([name, field]) => (
-                      <Chip key={name} size="small" variant="outlined" label={operatorFieldLabel(name, field)} />
-                    )) : <Typography variant="caption" color="text.secondary">None</Typography>}
-                  </Stack>
-                </Box>
-              </Stack>
-
-              {(outputEntries.length > 0 || resourceEntries.length > 0) && (
-                <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
-                  {outputEntries.length > 0 && (
-                    <Box sx={{ flex: 1, minWidth: 0 }}>
-                      <Typography variant="caption" fontWeight={850}>
-                        Outputs
-                      </Typography>
-                      <Stack direction="row" gap={0.5} flexWrap="wrap" sx={{ mt: 0.5 }}>
-                        {outputEntries.map(([name, field]) => (
-                          <Chip key={name} size="small" variant="outlined" label={operatorFieldLabel(name, field)} />
-                        ))}
-                      </Stack>
-                    </Box>
-                  )}
-                  {resourceEntries.length > 0 && (
-                    <Box sx={{ flex: 1, minWidth: 0 }}>
-                      <Typography variant="caption" fontWeight={850}>
-                        Resources
-                      </Typography>
-                      <Stack direction="row" gap={0.5} flexWrap="wrap" sx={{ mt: 0.5 }}>
-                        {resourceEntries.map(([name, resource]) => (
-                          <Chip
-                            key={name}
-                            size="small"
-                            variant="outlined"
-                            label={`${name}${resource.default != null ? `=${previewValue(resource.default)}` : ""}`}
-                          />
-                        ))}
-                      </Stack>
-                    </Box>
-                  )}
-                </Stack>
-              )}
             </Stack>
-          </Box>
+          </Paper>
         );
       })}
     </Stack>

@@ -5,6 +5,7 @@ import {
   filterPluginsForCatalog,
   groupPluginsByCatalogGroup,
   groupPluginsByCatalogSection,
+  operatorImplementationIconSpec,
   operatorPluginIconSpec,
   operatorDisplayName,
   operatorPrimaryAlias,
@@ -591,6 +592,7 @@ describe("PluginsPanel diagnostics helpers", () => {
     });
 
     expect(operatorTemplateScript(operator)).toBe("./bin/pca_matrix.R");
+    expect(operatorImplementationIconSpec(operator).kind).toBe("r");
     expect(operatorRuntimeSummary(operator)).toBe("placement: local, ssh · container: none");
     expect(operatorSchemaStats(operator)).toEqual({
       inputs: 1,
