@@ -167,8 +167,9 @@ describe("connector product integration state", () => {
       true,
     );
 
-    expect(message).toContain("登录服务尚未在当前构建中启用");
-    expect(message).toContain("Omiga 自有 OAuth 服务");
+    expect(message).toContain("一键登录即将支持");
+    expect(message).toContain("当前构建没有可用的 Omiga 授权服务");
+    expect(message).toContain("高级 token 仍可作为备用方式");
     expect(message).toContain("不会跳转到 OpenAI/Codex 托管授权页");
     expect(message).not.toContain("SLACK_BOT_TOKEN");
     expect(message).not.toContain("OMIGA_SLACK_OAUTH_CLIENT_ID");

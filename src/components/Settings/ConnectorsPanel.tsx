@@ -222,7 +222,7 @@ function authHint(connector: ConnectorInfo): string {
     return "Use Slack login/authorization; env bot tokens are advanced fallbacks";
   }
   if (connector.definition.id === "gmail") {
-    return "输入 Gmail 地址和密码；Omiga 保存到系统安全存储并完成本机校验";
+    return "优先使用 Gmail 浏览器 OAuth；不可用时使用 Google 应用专用密码备用，密钥只进系统安全存储";
   }
   if (connector.definition.id === "qq_mail") {
     return "输入 QQ 邮箱账号和授权码；Omiga 保存到系统安全存储并完成本机校验";
@@ -872,7 +872,7 @@ function connectorAuthLabel(connector: ConnectorInfo): string {
     return "Slack 浏览器登录 / 高级凭证";
   }
   if (connector.definition.id === "gmail") {
-    return "Gmail 账号 / 密码";
+    return "Gmail OAuth / Google 应用专用密码";
   }
   if (connector.definition.id === "qq_mail") {
     return "QQ 邮箱账号 / 授权码";
@@ -929,6 +929,7 @@ function connectorStatusText(connector: ConnectorInfo): string {
 
 function connectorSupportsLogin(connector: ConnectorInfo): boolean {
   return (
+    connector.definition.id === "gmail" ||
     connector.definition.id === "github" ||
     connector.definition.id === "notion" ||
     connector.definition.id === "slack"
@@ -953,6 +954,14 @@ function connectorHasMissingProductOAuthConfig(
       normalized.includes("notion browser login requires")
     );
   }
+  if (connector.definition.id === "gmail") {
+    return (
+      normalized.includes("omiga_gmail_oauth") ||
+      normalized.includes("omiga_google_oauth") ||
+      normalized.includes("gmail browser login requires") ||
+      normalized.includes("google oauth client id")
+    );
+  }
   if (connector.definition.id === "github") {
     return (
       normalized.includes("omiga_github_oauth") ||
@@ -969,7 +978,10 @@ export function connectorLoginFailureMessage(
 ): string {
   const action = openedHostedPage ? "已尝试启动 Omiga 授权；" : "";
   if (connectorHasMissingProductOAuthConfig(connector, errorMessage)) {
-    return `${action}${connector.definition.name} 的 Omiga 登录服务尚未在当前构建中启用。请更新到包含该连接器登录服务的 Omiga 版本，或由应用提供方接入 Omiga 自有 OAuth 服务；不会跳转到 OpenAI/Codex 托管授权页。`;
+    if (connector.definition.id === "gmail") {
+      return `${action}Gmail 浏览器登录暂未在当前构建启用，已保留 Google 应用专用密码备用方式。Omiga 不会跳转到 OpenAI/Codex 托管授权页。`;
+    }
+    return `${action}${connector.definition.name} 一键登录即将支持。当前构建没有可用的 Omiga 授权服务；高级 token 仍可作为备用方式。Omiga 不会跳转到 OpenAI/Codex 托管授权页。`;
   }
   return errorMessage || `${connector.definition.name} 登录启动失败。`;
 }
@@ -977,7 +989,10 @@ export function connectorLoginFailureMessage(
 function connectorConnectionCtaLabel(connector: ConnectorInfo): string {
   if (!connectorIsProductIntegrated(connector)) return "暂未接入";
   if (connector.accessible) return "已连接";
-  if (connectorSupportsBothTokenAndMailboxLogin(connector)) return "获取登录 token";
+  if (connector.definition.id === "gmail" && connectorSupportsLogin(connector)) {
+    return "浏览器登录 Gmail";
+  }
+  if (connectorSupportsBothTokenAndMailboxLogin(connector)) return "浏览器登录";
   if (connectorSupportsLogin(connector)) return `一键连接 ${connector.definition.name}`;
   if (connectorSupportsCredentialValidation(connector)) return `连接 ${connector.definition.name}`;
   return "暂未接入";
@@ -987,7 +1002,7 @@ function connectorAuthFlowButtonLabel(flow: ConnectorAuthFlow): string {
   if (flow.status === "opening") return "打开中…";
   if (flow.status === "checking") return "检测中…";
   if (flow.status === "setup_required") {
-    return flow.provider === "credential_validation" ? "需要授权码" : "服务未启用";
+    return flow.provider === "credential_validation" ? "需要授权码" : "即将支持";
   }
   if (flow.status === "error") return "重新连接";
   return "等待授权";
@@ -1015,7 +1030,7 @@ function connectorAuthFlowTitle(
   if (flow?.status === "setup_required") {
     return connectorSupportsCredentialValidation(connector)
       ? "需要邮箱账号和授权码"
-      : "登录服务未就绪";
+      : "一键登录即将支持";
   }
   if (flow?.status === "error") return "授权未完成";
   if (connector.accessible) return "连接已可用";
@@ -1035,16 +1050,16 @@ function connectorAuthFlowChipColor(
 function connectorSetupHints(connector: ConnectorInfo): string[] {
   switch (connector.definition.id) {
     case "gmail":
-      return ["在上方输入 Gmail 地址和密码。"];
+      return ["推荐浏览器 OAuth；当前不可用时使用 Google 应用专用密码备用。"];
     case "notion":
       return [
-        "当前版本未内置 Notion 的 Omiga 登录服务。",
-        "请更新应用或安装提供 Notion OAuth 的 Omiga 连接器组件。",
+        "Notion 一键登录即将支持。",
+        "高级 token 可作为备用方式。",
       ];
     case "slack":
       return [
-        "当前版本未内置 Slack 的 Omiga 登录服务。",
-        "请更新应用或安装提供 Slack OAuth 的 Omiga 连接器组件。",
+        "Slack 一键登录即将支持。",
+        "高级 token 可作为备用方式。",
       ];
     case "github":
       return ["可以使用 GitHub CLI 登录；OAuth 服务未内置时 Omiga 会自动尝试本机 GitHub CLI。"];
@@ -1063,6 +1078,9 @@ function connectorAuthFlowMessage(
 ): string {
   if (!flow) {
     if (connector.accessible) return "已连接，可以在对话中使用该连接器。";
+    if (connectorSupportsBothTokenAndMailboxLogin(connector)) {
+      return "会优先打开浏览器登录；不可用时可切换到服务商授权码备用方式。";
+    }
     if (connectorSupportsLogin(connector)) return "点击连接后会在默认浏览器打开授权页。";
     if (connectorSupportsCredentialValidation(connector)) {
       return "输入邮箱账号和授权码后，Omiga 会保存到系统安全存储并校验连接状态。";
@@ -1148,26 +1166,10 @@ function connectorConnectRows(connector: ConnectorInfo): Array<{
     ];
   }
   if (connectorSupportsCredentialValidation(connector)) {
-    if (connector.definition.id === "gmail") {
-      return [
-        {
-          title: "输入 Gmail 账号和密码",
-          body: "连接流程直接在 Omiga 内完成，不需要配置环境变量，也不会跳转到 OpenAI/Codex 授权页。",
-        },
-        {
-          title: "Omiga 保存到系统安全存储",
-          body: "密码不会写入 connectors/config.json，也不会显示在连接器列表中。",
-        },
-        {
-          title: "自动校验连接状态",
-          body: "连接时会立即检测 Gmail 默认 IMAP 端点，确认该邮箱连接可以使用。",
-        },
-      ];
-    }
     return [
       {
         title: "输入邮箱账号和授权码",
-        body: "这是面向普通用户的连接流程，不需要手动配置环境变量。",
+        body: "QQ 和网易邮箱使用服务商生成的授权码或应用专用密码，不抓取网页登录 cookie/token。",
       },
       {
         title: "Omiga 保存到系统安全存储",
@@ -1201,6 +1203,50 @@ function connectorConnectRows(connector: ConnectorInfo): Array<{
       body: "当前只展示连接器元数据。接入 OAuth、本机软件登录或原生工具后才能连接。",
     },
   ];
+}
+
+function mailCredentialHeading(connector: ConnectorInfo): string {
+  if (connector.definition.id === "gmail") return "Gmail 应用专用密码备用方式";
+  return "邮箱授权码";
+}
+
+function mailCredentialEmailPlaceholder(connector: ConnectorInfo): string {
+  if (connector.definition.id === "gmail") return "name@gmail.com";
+  if (connector.definition.id === "qq_mail") return "name@qq.com";
+  if (connector.definition.id === "netease_mail") return "name@163.com / name@126.com";
+  return "name@example.com";
+}
+
+function mailCredentialSecretLabel(connector: ConnectorInfo): string {
+  if (connector.definition.id === "gmail") return "Google 应用专用密码";
+  return "邮箱授权码 / 应用专用密码";
+}
+
+function mailCredentialSecretPlaceholder(connector: ConnectorInfo): string {
+  if (connector.definition.id === "gmail") return "Google 账号生成的 16 位应用专用密码";
+  if (connector.definition.id === "qq_mail") return "QQ 邮箱设置中生成的授权码";
+  if (connector.definition.id === "netease_mail") return "网易邮箱设置中生成的授权码";
+  return "邮箱服务商生成的授权码";
+}
+
+function mailCredentialHelpLabel(connector: ConnectorInfo): string | null {
+  if (connector.definition.id === "gmail") return "打开 Google 应用专用密码";
+  if (connector.definition.id === "qq_mail") return "打开 QQ 邮箱授权码";
+  if (connector.definition.id === "netease_mail") return "打开网易邮箱授权码";
+  return null;
+}
+
+function mailCredentialHelpUrl(connector: ConnectorInfo): string | null {
+  if (connector.definition.id === "gmail") {
+    return connector.definition.docsUrl ?? "https://myaccount.google.com/apppasswords";
+  }
+  if (connector.definition.id === "qq_mail") {
+    return connector.definition.docsUrl ?? connector.definition.installUrl ?? "https://mail.qq.com/";
+  }
+  if (connector.definition.id === "netease_mail") {
+    return connector.definition.docsUrl ?? connector.definition.installUrl ?? "https://mail.163.com/";
+  }
+  return connector.definition.docsUrl ?? connector.definition.installUrl ?? null;
 }
 
 function ConnectorConnectDialog({
@@ -1250,7 +1296,6 @@ function ConnectorConnectDialog({
     if (!open || !connector) return;
     if (busy || testing || authFlow || connector.accessible) return;
     if (!connectorSupportsLogin(connector)) return;
-    if (connectorSupportsCredentialValidation(connector)) return;
     onConnect(connector);
   }, [
     authFlow,
@@ -1297,7 +1342,7 @@ function ConnectorConnectDialog({
     : isWorking
       ? "正在连接…"
       : setupBlocked
-        ? "登录服务未启用"
+        ? "即将支持"
       : isMailCredentialFlow
         ? `连接 ${connector.definition.name}`
         : displayAuthFlow
@@ -1311,7 +1356,7 @@ function ConnectorConnectDialog({
       if (!mailDraftComplete) {
         setMailDraftError(
           connector.definition.id === "gmail"
-            ? "请输入 Gmail 地址和密码。"
+            ? "请输入 Gmail 地址和 Google 应用专用密码。"
             : "请输入邮箱地址和授权码。",
         );
         return;
@@ -1505,7 +1550,7 @@ function ConnectorConnectDialog({
                       sx={{ textAlign: "left", lineHeight: 1.5 }}
                     >
                       {isMailCredentialFlow
-                        ? "当前使用备用邮箱授权方式；也可以切回浏览器登录获取 token。"
+                        ? "当前使用备用授权码方式；也可以切回浏览器登录。"
                         : "推荐使用浏览器登录获取 token，不需要在 Omiga 输入邮箱密码。"}
                     </Typography>
                     <Button
@@ -1523,7 +1568,7 @@ function ConnectorConnectDialog({
                       sx={{ borderRadius: 999, fontWeight: 800, flexShrink: 0 }}
                     >
                       {isMailCredentialFlow
-                        ? "改用 token 登录"
+                        ? "改用浏览器登录"
                         : "使用应用专用密码"}
                     </Button>
                   </Stack>
@@ -1538,11 +1583,21 @@ function ConnectorConnectDialog({
                       fontWeight={900}
                       sx={{ textAlign: "left" }}
                     >
-                      {connector.definition.id === "gmail" ? "Gmail 登录" : "邮箱账号"}
+                      {mailCredentialHeading(connector)}
+                    </Typography>
+                    <Typography
+                      component="label"
+                      htmlFor={`connector-mail-email-${connector.definition.id}`}
+                      variant="caption"
+                      color="text.secondary"
+                      fontWeight={800}
+                      sx={{ textAlign: "left" }}
+                    >
+                      邮箱地址
                     </Typography>
                     <TextField
+                      id={`connector-mail-email-${connector.definition.id}`}
                       size="small"
-                      label="邮箱地址"
                       value={mailDraft.emailAddress}
                       onChange={(event) => {
                         setMailDraft((prev) => ({
@@ -1551,23 +1606,23 @@ function ConnectorConnectDialog({
                         }));
                         setMailDraftError(null);
                       }}
-                      placeholder={
-                        connector.definition.id === "gmail"
-                          ? "name@gmail.com"
-                          : connector.definition.id === "qq_mail"
-                            ? "name@qq.com"
-                            : "name@163.com"
-                      }
+                      placeholder={mailCredentialEmailPlaceholder(connector)}
                       autoComplete="email"
                       fullWidth
                     />
+                    <Typography
+                      component="label"
+                      htmlFor={`connector-mail-secret-${connector.definition.id}`}
+                      variant="caption"
+                      color="text.secondary"
+                      fontWeight={800}
+                      sx={{ textAlign: "left" }}
+                    >
+                      {mailCredentialSecretLabel(connector)}
+                    </Typography>
                     <TextField
+                      id={`connector-mail-secret-${connector.definition.id}`}
                       size="small"
-                      label={
-                        connector.definition.id === "gmail"
-                          ? "密码 / 应用专用密码"
-                          : "邮箱授权码 / 应用专用密码"
-                      }
                       type="password"
                       value={mailDraft.authorizationCode}
                       onChange={(event) => {
@@ -1577,18 +1632,40 @@ function ConnectorConnectDialog({
                         }));
                         setMailDraftError(null);
                       }}
+                      placeholder={mailCredentialSecretPlaceholder(connector)}
                       autoComplete="current-password"
                       fullWidth
                     />
-                    <Typography
-                      variant="caption"
-                      color="text.secondary"
-                      sx={{ textAlign: "left", lineHeight: 1.5 }}
+                    <Stack
+                      direction={{ xs: "column", sm: "row" }}
+                      spacing={1}
+                      alignItems={{ xs: "stretch", sm: "center" }}
+                      justifyContent="space-between"
                     >
-                      {connector.definition.id === "gmail"
-                        ? "Omiga 会写入系统安全存储，并使用 Gmail 默认 IMAP 服务自动检测。"
-                        : "授权码由邮箱服务商生成；Omiga 会写入系统安全存储，并使用默认 IMAP 服务自动检测。"}
-                    </Typography>
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ textAlign: "left", lineHeight: 1.5 }}
+                      >
+                        {connector.definition.id === "gmail"
+                          ? "Omiga 只保存 Google 应用专用密码备用凭据，不保存你的 Google 登录密码。"
+                          : "授权码由邮箱服务商生成；Omiga 写入系统安全存储并用默认 IMAP 端点检测。"}
+                      </Typography>
+                      {mailCredentialHelpUrl(connector) && mailCredentialHelpLabel(connector) && (
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          endIcon={<OpenInNewRounded fontSize="small" />}
+                          onClick={() => {
+                            const url = mailCredentialHelpUrl(connector);
+                            if (url) void openUrl(url);
+                          }}
+                          sx={{ borderRadius: 999, fontWeight: 800, flexShrink: 0 }}
+                        >
+                          {mailCredentialHelpLabel(connector)}
+                        </Button>
+                      )}
+                    </Stack>
                     {mailDraftError && (
                       <Alert severity="warning" variant="outlined" sx={{ borderRadius: 2 }}>
                         {mailDraftError}
@@ -2382,13 +2459,6 @@ function ConnectorDetailsDialog({
                                       size="small"
                                       variant="outlined"
                                       label={hint}
-                                      sx={{
-                                        fontFamily:
-                                          hint.includes("OMIGA_") ||
-                                          hint.startsWith("Redirect:")
-                                            ? "monospace"
-                                            : undefined,
-                                      }}
                                     />
                                   ))}
                                 </Stack>
@@ -2778,7 +2848,9 @@ export function ConnectorsPanel({
         const canFallbackToMailbox = connectorSupportsCredentialValidation(connector);
         const message =
           missingProductOAuth && canFallbackToMailbox
-            ? `${connector.definition.name} 浏览器 token 登录服务尚未在当前构建中启用，已自动切换到备用邮箱授权方式。输入邮箱地址和授权码/应用专用密码后即可保存连接。`
+            ? connector.definition.id === "gmail"
+              ? "Gmail 浏览器登录暂未启用，已自动切换到 Google 应用专用密码备用方式。输入 Gmail 地址和应用专用密码后即可连接。"
+              : `${connector.definition.name} 浏览器登录暂未启用，已自动切换到邮箱授权码备用方式。输入邮箱地址和授权码后即可连接。`
             : connectorLoginFailureMessage(connector, errorMessage, false);
         const status: ConnectorAuthFlowStatus =
           missingProductOAuth ? "setup_required" : "error";
@@ -3070,17 +3142,19 @@ export function ConnectorsPanel({
               <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
                 <TextField
                   size="small"
-                  label="Search connectors"
+                  placeholder="Search"
+                  inputProps={{ "aria-label": "Search connectors" }}
                   value={searchQuery}
                   onChange={(event) => setSearchQuery(event.target.value)}
                   fullWidth
                 />
                 <TextField
                   size="small"
-                  label="Category"
+                  inputProps={{ "aria-label": "Category" }}
                   value={categoryFilter}
                   onChange={(event) => setCategoryFilter(event.target.value)}
                   select
+                  SelectProps={{ displayEmpty: true }}
                   sx={{ minWidth: 180 }}
                 >
                   <MenuItem value="all">All</MenuItem>
@@ -3092,12 +3166,13 @@ export function ConnectorsPanel({
                 </TextField>
                 <TextField
                   size="small"
-                  label="Status"
+                  inputProps={{ "aria-label": "Status" }}
                   value={statusFilter}
                   onChange={(event) =>
                     setStatusFilter(event.target.value as ConnectorStatusFilter)
                   }
                   select
+                  SelectProps={{ displayEmpty: true }}
                   sx={{ minWidth: 170 }}
                 >
                   <MenuItem value="all">All</MenuItem>
@@ -3116,12 +3191,13 @@ export function ConnectorsPanel({
                 </TextField>
                 <TextField
                   size="small"
-                  label="Source"
+                  inputProps={{ "aria-label": "Source" }}
                   value={sourceFilter}
                   onChange={(event) =>
                     setSourceFilter(event.target.value as ConnectorSourceFilter)
                   }
                   select
+                  SelectProps={{ displayEmpty: true }}
                   sx={{ minWidth: 150 }}
                 >
                   <MenuItem value="all">All</MenuItem>
