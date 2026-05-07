@@ -1,9 +1,7 @@
-import { useState, useCallback, useTransition } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useTransition } from "react";
 import {
   Box,
   Typography,
-  Button,
   Stack,
   Paper,
   useTheme,
@@ -12,7 +10,6 @@ import {
   IconButton,
   Tooltip,
 } from "@mui/material";
-import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import SaveRoundedIcon from "@mui/icons-material/SaveRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -23,21 +20,12 @@ import { extToLabel } from "./CodeViewer";
  * Code editor region — shows file content from workspace store (opened from file tree).
  * Supports editing + saving via Monaco Editor.
  */
-interface DocRenderResult {
-  stdout: string;
-  stderr: string;
-  exit_code: number;
-}
-
 export function CodeWorkspace() {
   const theme = useTheme();
   const isDark = theme.palette.mode === "dark";
   const toolbarStripe = isDark
     ? alpha(theme.palette.background.default, 0.92)
     : alpha(theme.palette.grey[100], 0.85);
-  const renderOutBg = isDark
-    ? alpha(theme.palette.background.default, 0.55)
-    : alpha(theme.palette.grey[100], 0.6);
   const statusBarBg = isDark
     ? alpha(theme.palette.common.white, 0.06)
     : alpha(theme.palette.grey[200], 0.45);
@@ -56,50 +44,26 @@ export function CodeWorkspace() {
     saveFile,
   } = useWorkspaceStore();
 
-  const [renderOut, setRenderOut] = useState<DocRenderResult | null>(null);
-  const [renderErr, setRenderErr] = useState<string | null>(null);
-  const [renderLoading, setRenderLoading] = useState(false);
-  
   // Use transition for closing file to avoid blocking UI during Monaco cleanup
   const [isClosing, startClosing] = useTransition();
 
   const fileExt = fileName ? (fileName.split(".").pop() ?? "").toLowerCase() : "";
   const languageLabel = fileExt ? extToLabel(fileExt) : "Plain Text";
   const isReadOnly = ["png","jpg","jpeg","gif","webp","svg","bmp","ico","tiff","tif","avif","pdf"].includes(fileExt);
-  const isRmd = fileExt === "rmd";
-  const isQmd = fileExt === "qmd";
-  const isRenderableDoc = isRmd || isQmd;
+  const canSave = Boolean(filePath && !isReadOnly && isDirty && !isSaving);
 
-  const handleRunDoc = useCallback(async () => {
-    if (!filePath || !isRenderableDoc || renderLoading) return;
-    setRenderErr(null);
-    setRenderOut(null);
-    setRenderLoading(true);
-    try {
-      if (isDirty) {
-        await saveFile();
-        const saveErr = useWorkspaceStore.getState().saveError;
-        if (saveErr) {
-          setRenderErr(`请先保存文件: ${saveErr}`);
-          return;
-        }
-      }
-      const res = await invoke<DocRenderResult>(
-        isRmd ? "render_rmarkdown" : "render_quarto",
-        { path: filePath },
-      );
-      setRenderOut(res);
-      if (res.exit_code !== 0) {
-        setRenderErr(
-          `${isRmd ? "R" : "Quarto"} 进程退出码 ${res.exit_code}`,
-        );
-      }
-    } catch (e) {
-      setRenderErr(String(e));
-    } finally {
-      setRenderLoading(false);
-    }
-  }, [filePath, isRmd, isQmd, isDirty, renderLoading, saveFile]);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
+      if (!filePath || isReadOnly) return;
+      event.preventDefault();
+      if (!isDirty || isSaving) return;
+      void saveFile();
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [filePath, isReadOnly, isDirty, isSaving, saveFile]);
 
   return (
     <Paper
@@ -196,73 +160,35 @@ export function CodeWorkspace() {
         <Stack direction="row" alignItems="center" gap={0.75} sx={{ pr: 1 }}>
           {/* Save button — only for editable files */}
           {filePath && !isReadOnly && (
-            <Tooltip title={isDirty ? "保存文件 (⌘S)" : "已保存"}>
+            <Tooltip title={isDirty ? "保存文件 (⌘/Ctrl+S)" : "已保存"}>
               <span>
-                <Button
+                <IconButton
                   size="small"
-                  variant={isDirty ? "outlined" : "text"}
-                  color={isDirty ? "warning" : "inherit"}
-                  disableElevation
-                  disabled={!isDirty || isSaving}
+                  aria-label="保存文件"
+                  disabled={!canSave}
                   onClick={() => void saveFile()}
-                  startIcon={
-                    isSaving ? (
-                      <CircularProgress size={13} color="inherit" />
-                    ) : (
-                      <SaveRoundedIcon sx={{ fontSize: 16 }} />
-                    )
-                  }
                   sx={{
-                    textTransform: "none",
-                    minHeight: 30,
-                    px: 1.25,
+                    width: 30,
+                    height: 30,
                     borderRadius: 1.5,
-                    fontSize: 12,
-                    fontWeight: 600,
+                    color: isDirty ? "warning.main" : "text.secondary",
+                    bgcolor: isDirty
+                      ? alpha(theme.palette.warning.main, isDark ? 0.14 : 0.08)
+                      : "transparent",
+                    "&:hover": {
+                      bgcolor: alpha(theme.palette.warning.main, isDark ? 0.22 : 0.14),
+                    },
                   }}
                 >
-                  {isSaving ? "保存中…" : "保存"}
-                </Button>
+                  {isSaving ? (
+                    <CircularProgress size={15} color="inherit" />
+                  ) : (
+                    <SaveRoundedIcon sx={{ fontSize: 17 }} />
+                  )}
+                </IconButton>
               </span>
             </Tooltip>
           )}
-
-          <Tooltip
-            title={
-              isRmd
-                ? "调用 Rscript 执行 rmarkdown::render（需本机已安装 R 与 rmarkdown 包）"
-                : isQmd
-                  ? "quarto CLI 需达到 OMIGA_MIN_QUARTO_VERSION（默认 1.3.0）；未安装或低于该版本时回退到 R 的 quarto::quarto_render"
-                  : "当前仅支持对 .Rmd / .qmd 执行渲染"
-            }
-          >
-            <span>
-              <Button
-                size="small"
-                variant="contained"
-                disableElevation
-                disabled={!filePath || !isRenderableDoc || renderLoading}
-                onClick={() => void handleRunDoc()}
-                startIcon={
-                  renderLoading ? (
-                    <CircularProgress size={14} color="inherit" />
-                  ) : (
-                    <PlayArrowRoundedIcon sx={{ fontSize: 18 }} />
-                  )
-                }
-                sx={{
-                  textTransform: "none",
-                  minHeight: 30,
-                  px: 1.5,
-                  borderRadius: 1.5,
-                  fontSize: 13,
-                  fontWeight: 600,
-                }}
-              >
-                {isRmd ? "渲染 Rmd" : isQmd ? "渲染 Quarto" : "Run"}
-              </Button>
-            </span>
-          </Tooltip>
         </Stack>
       </Stack>
 
@@ -330,56 +256,6 @@ export function CodeWorkspace() {
                   请从右侧「工具目录」点击文件查看源码
                 </Typography>
               </Stack>
-            )}
-            {isRenderableDoc && (renderOut || renderErr || renderLoading) && (
-              <Box
-                sx={{
-                  flexShrink: 0,
-                  maxHeight: 200,
-                  overflow: "auto",
-                  borderTop: 1,
-                  borderColor: "divider",
-                  px: 1.5,
-                  py: 1,
-                  bgcolor: renderOutBg,
-                  fontFamily: "JetBrains Mono, Monaco, Consolas, monospace",
-                  fontSize: 11,
-                  lineHeight: 1.5,
-                }}
-              >
-                <Typography variant="caption" fontWeight={700} color="text.secondary" display="block" sx={{ mb: 0.5 }}>
-                  {isQmd ? "Quarto 渲染输出" : "R Markdown 渲染输出"}
-                </Typography>
-                {renderLoading && (
-                  <Typography variant="caption" color="text.secondary">
-                    {isQmd ? "正在渲染 Quarto 文档…" : "正在调用 Rscript …"}
-                  </Typography>
-                )}
-                {renderErr && (
-                  <Typography variant="caption" color="error" display="block" sx={{ whiteSpace: "pre-wrap" }}>
-                    {renderErr}
-                  </Typography>
-                )}
-                {renderOut?.stdout ? (
-                  <Box component="pre" sx={{ m: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                    {renderOut.stdout}
-                  </Box>
-                ) : null}
-                {renderOut?.stderr ? (
-                  <Box
-                    component="pre"
-                    sx={{
-                      m: 0,
-                      mt: renderOut.stdout ? 1 : 0,
-                      whiteSpace: "pre-wrap",
-                      wordBreak: "break-word",
-                      color: "error.main",
-                    }}
-                  >
-                    {renderOut.stderr}
-                  </Box>
-                ) : null}
-              </Box>
             )}
           </>
         )}

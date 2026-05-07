@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "description": "Built-in atomic operator plugin: Single functional-enrichment operator powered by base R.",
   "interface": {
-    "displayName": "Functional Enrichment R Operator",
-    "shortDescription": "Single functional-enrichment operator powered by base R",
+    "displayName": "Functional Enrichment R",
+    "shortDescription": "Functional enrichment powered by base R",
     "longDescription": "Provides one atomic hypergeometric functional enrichment operator for query gene lists and GMT or two-column TSV gene sets.",
     "developerName": "Omiga",
     "category": "Operator",
@@ -17,7 +17,7 @@
     ],
     "brandColor": "#0F766E",
     "defaultPrompt": [
-      "Expose the enrichment R operator and run it on my gene list and gene sets."
+      "Expose the enrichment R plugin and run it on my gene list and gene sets."
     ]
   }
 }

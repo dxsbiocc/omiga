@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
+  displayName,
   filterPluginsForCatalog,
   groupPluginsByCatalogGroup,
   groupPluginsByCatalogSection,
+  operatorPluginLanguageBadge,
   operatorDisplayName,
   operatorPrimaryAlias,
   operatorRunBelongsToOperator,
@@ -413,6 +415,95 @@ describe("PluginsPanel diagnostics helpers", () => {
     );
 
     expect(subtitle).toBe("NCBI GEO");
+  });
+
+  it("removes redundant plugin role suffixes from display titles", () => {
+    expect(
+      displayName(pluginSummary({
+        interface: {
+          displayName: "GEO Retrieval Source",
+          shortDescription: null,
+          longDescription: null,
+          developerName: null,
+          category: "Retrieval",
+          capabilities: [],
+          websiteUrl: null,
+          privacyPolicyUrl: null,
+          termsOfServiceUrl: null,
+          defaultPrompt: [],
+          brandColor: null,
+          composerIcon: null,
+          logo: null,
+          screenshots: [],
+        },
+      })),
+    ).toBe("GEO");
+    expect(
+      displayName(pluginSummary({
+        interface: {
+          displayName: "PCA R Operator",
+          shortDescription: null,
+          longDescription: null,
+          developerName: null,
+          category: "Operator",
+          capabilities: ["Operator", "Rscript"],
+          websiteUrl: null,
+          privacyPolicyUrl: null,
+          termsOfServiceUrl: null,
+          defaultPrompt: [],
+          brandColor: null,
+          composerIcon: null,
+          logo: null,
+          screenshots: [],
+        },
+      })),
+    ).toBe("PCA R");
+  });
+
+  it("uses language badges for operator plugin cards", () => {
+    expect(
+      operatorPluginLanguageBadge(pluginSummary({
+        name: "operator-pca-r",
+        interface: {
+          displayName: "PCA R",
+          shortDescription: "PCA powered by base R",
+          longDescription: null,
+          developerName: null,
+          category: "Operator",
+          capabilities: ["Operator", "Rscript"],
+          websiteUrl: null,
+          privacyPolicyUrl: null,
+          termsOfServiceUrl: null,
+          defaultPrompt: [],
+          brandColor: null,
+          composerIcon: null,
+          logo: null,
+          screenshots: [],
+        },
+      })),
+    ).toBe("R");
+    expect(
+      operatorPluginLanguageBadge(pluginSummary({
+        name: "operator-seqtk",
+        interface: {
+          displayName: "seqtk",
+          shortDescription: "FASTQ/FASTA subsampling with seqtk",
+          longDescription: null,
+          developerName: null,
+          category: "Operator",
+          capabilities: ["Operator", "seqtk"],
+          websiteUrl: null,
+          privacyPolicyUrl: null,
+          termsOfServiceUrl: null,
+          defaultPrompt: [],
+          brandColor: null,
+          composerIcon: null,
+          logo: null,
+          screenshots: [],
+        },
+      })),
+    ).toBe("C");
+    expect(operatorPluginLanguageBadge(pluginSummary())).toBeNull();
   });
 
   it("builds stable operator display labels and tool names", () => {

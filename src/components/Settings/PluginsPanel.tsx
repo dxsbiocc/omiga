@@ -112,8 +112,16 @@ const capabilityLabel = (value: string): string =>
     .replace(/[-_]+/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
 
-function displayName(plugin: PluginSummary): string {
-  return plugin.interface?.displayName || plugin.name;
+export function displayName(plugin: PluginSummary): string {
+  return cleanPluginDisplayName(plugin.interface?.displayName || plugin.name);
+}
+
+function cleanPluginDisplayName(value: string): string {
+  return value
+    .replace(/\s+Retrieval\s+Source$/i, "")
+    .replace(/\s+Source$/i, "")
+    .replace(/\s+Operator$/i, "")
+    .trim() || value;
 }
 
 function description(plugin: PluginSummary): string {
@@ -148,6 +156,27 @@ function pluginHasTerm(plugin: PluginSummary, terms: string[]): boolean {
 
 function isOperatorPlugin(plugin: PluginSummary): boolean {
   return pluginHasTerm(plugin, ["operator", "operators"]);
+}
+
+export function operatorPluginLanguageBadge(plugin: PluginSummary): string | null {
+  if (!isOperatorPlugin(plugin)) return null;
+  const haystack = [
+    plugin.name,
+    plugin.id,
+    plugin.interface?.displayName,
+    plugin.interface?.shortDescription,
+    plugin.interface?.longDescription,
+    ...(plugin.interface?.capabilities ?? []),
+  ]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .join(" ")
+    .toLowerCase();
+  if (/\bc\+\+\b|\bcpp\b/.test(haystack)) return "C++";
+  if (/\brscript\b|\bbase r\b|\br\b/.test(haystack)) return "R";
+  if (/\bpython\b|\bpython3\b|\bpy\b/.test(haystack)) return "Py";
+  if (/\bseqtk\b|\bc\b/.test(haystack)) return "C";
+  if (/\bshell\b|\bsh\b|\bbash\b|\bcontainer\b|\bsmoke\b/.test(haystack)) return "sh";
+  return "op";
 }
 
 function isFunctionPlugin(plugin: PluginSummary): boolean {
@@ -934,6 +963,7 @@ function PluginCard({
   const operatorRegistrationLabel = operators.length === 1
     ? operatorRegistrationChecked ? "Registered" : "Not registered"
     : `${registeredOperatorCount}/${operators.length} registered`;
+  const languageBadge = operatorPluginLanguageBadge(plugin);
 
   const openDetails = () => onOpenDetails(plugin);
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -993,7 +1023,17 @@ function PluginCard({
           flexShrink: 0,
         }}
       >
-        <ExtensionRounded fontSize="small" />
+        {languageBadge ? (
+          <Typography
+            variant="caption"
+            fontWeight={950}
+            sx={{ letterSpacing: languageBadge.length > 1 ? -0.5 : 0 }}
+          >
+            {languageBadge}
+          </Typography>
+        ) : (
+          <ExtensionRounded fontSize="small" />
+        )}
       </Box>
 
       <Box sx={{ minWidth: 0, flex: 1 }}>
@@ -1190,6 +1230,7 @@ function PluginDetailsDialog({
     retrievalStatuses,
     processPoolStatuses,
   );
+  const languageBadge = operatorPluginLanguageBadge(plugin);
   const hasRuntimeDetails =
     retrievalStatuses.length > 0 || processPoolStatuses.length > 0 || runtimeSummary.lastError;
   const action = plugin.installed ? (
@@ -1273,7 +1314,17 @@ function PluginDetailsDialog({
                 flexShrink: 0,
               }}
             >
-              <ExtensionRounded sx={{ fontSize: 34 }} />
+              {languageBadge ? (
+                <Typography
+                  variant="h5"
+                  fontWeight={950}
+                  sx={{ letterSpacing: languageBadge.length > 1 ? -0.8 : 0 }}
+                >
+                  {languageBadge}
+                </Typography>
+              ) : (
+                <ExtensionRounded sx={{ fontSize: 34 }} />
+              )}
             </Box>
 
             <Box sx={{ flex: 1, minWidth: 0 }}>

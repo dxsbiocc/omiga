@@ -13,9 +13,11 @@ use super::{
 };
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
+use rand::RngCore;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -32,9 +34,12 @@ const GITHUB_CLI_LOGIN_INTERVAL_SECS: u64 = 3;
 
 const GMAIL_OAUTH_TOKEN_SECRET: &str = "oauth_access_token";
 const GMAIL_OAUTH_REFRESH_TOKEN_SECRET: &str = "oauth_refresh_token";
+const GMAIL_OAUTH_EXPIRES_AT_SECRET: &str = "oauth_access_token_expires_at";
 const GMAIL_OAUTH_PROVIDER: &str = "gmail_oauth";
 const GMAIL_BROWSER_LOGIN_EXPIRES_IN: u64 = 10 * 60;
 const GMAIL_BROWSER_LOGIN_INTERVAL_SECS: u64 = 2;
+#[allow(dead_code)]
+const GMAIL_OAUTH_EXPIRY_SKEW_SECS: i64 = 60;
 const GMAIL_DEFAULT_CALLBACK_PORT: u16 = 17656;
 const GMAIL_DEFAULT_CALLBACK_PATH: &str = "/connectors/gmail/callback";
 const GMAIL_DEFAULT_SCOPES: &str =
@@ -100,6 +105,7 @@ struct LoginSession {
     provider: String,
     client_id: String,
     client_secret: Option<String>,
+    code_verifier: Option<String>,
     device_code: String,
     redirect_uri: Option<String>,
     state: Option<String>,
@@ -118,6 +124,12 @@ struct BrowserOAuthProviderError {
     state: Option<String>,
     error: Option<String>,
     error_description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PkceCodes {
+    code_verifier: String,
+    code_challenge: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +193,22 @@ struct GoogleOAuthTokenResponse {
     error: Option<String>,
     #[serde(default)]
     error_description: Option<String>,
+}
+
+fn gmail_refresh_token_form(
+    client_id: &str,
+    client_secret: Option<&str>,
+    refresh_token: &str,
+) -> Vec<(&'static str, String)> {
+    let mut form = vec![
+        ("client_id", client_id.to_string()),
+        ("grant_type", "refresh_token".to_string()),
+        ("refresh_token", refresh_token.to_string()),
+    ];
+    if let Some(client_secret) = client_secret.filter(|value| !value.trim().is_empty()) {
+        form.push(("client_secret", client_secret.to_string()));
+    }
+    form
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,6 +277,29 @@ fn first_non_empty_env(names: &[&str]) -> Option<String> {
     })
 }
 
+fn first_non_empty_bundled(values: &[Option<&'static str>]) -> Option<String> {
+    values.iter().find_map(|value| {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn generate_pkce_codes() -> PkceCodes {
+    let mut bytes = [0u8; 64];
+    rand::thread_rng().fill_bytes(&mut bytes);
+
+    let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let digest = Sha256::digest(code_verifier.as_bytes());
+    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+
+    PkceCodes {
+        code_verifier,
+        code_challenge,
+    }
+}
+
 fn github_device_code_url() -> String {
     first_non_empty_env(&["OMIGA_GITHUB_DEVICE_CODE_URL"])
         .unwrap_or_else(|| "https://github.com/login/device/code".to_string())
@@ -289,24 +340,30 @@ fn gmail_oauth_client_id() -> Result<String, String> {
         "OMIGA_GMAIL_OAUTH_CLIENT_ID",
         "OMIGA_GOOGLE_OAUTH_CLIENT_ID",
     ])
+    .or_else(|| {
+        first_non_empty_bundled(&[
+            option_env!("OMIGA_GMAIL_OAUTH_CLIENT_ID"),
+            option_env!("OMIGA_GOOGLE_OAUTH_CLIENT_ID"),
+        ])
+    })
     .ok_or_else(|| {
         format!(
-            "Gmail browser login requires Omiga's own Google OAuth client config: OMIGA_GMAIL_OAUTH_CLIENT_ID and OMIGA_GMAIL_OAUTH_CLIENT_SECRET. Register the redirect URI as {}.",
+            "Gmail browser login requires Omiga's own Google OAuth client ID: OMIGA_GMAIL_OAUTH_CLIENT_ID or OMIGA_GOOGLE_OAUTH_CLIENT_ID. Omiga implements the local OAuth flow with PKCE; the app build must ship a Google Desktop OAuth client ID registered for the redirect URI {}.",
             default_gmail_redirect_uri()
         )
     })
 }
 
-fn gmail_oauth_client_secret() -> Result<String, String> {
+fn gmail_oauth_client_secret() -> Option<String> {
     first_non_empty_env(&[
         "OMIGA_GMAIL_OAUTH_CLIENT_SECRET",
         "OMIGA_GOOGLE_OAUTH_CLIENT_SECRET",
     ])
-    .ok_or_else(|| {
-        format!(
-            "Gmail browser login requires OMIGA_GMAIL_OAUTH_CLIENT_SECRET for Omiga's Google OAuth app. Register the redirect URI as {}; GMAIL_ACCESS_TOKEN remains an advanced fallback only.",
-            default_gmail_redirect_uri()
-        )
+    .or_else(|| {
+        first_non_empty_bundled(&[
+            option_env!("OMIGA_GMAIL_OAUTH_CLIENT_SECRET"),
+            option_env!("OMIGA_GOOGLE_OAUTH_CLIENT_SECRET"),
+        ])
     })
 }
 
@@ -550,7 +607,12 @@ fn slack_registered_redirect_uri() -> Result<String, String> {
     Ok(redirect_uri)
 }
 
-fn gmail_authorization_url(client_id: &str, redirect_uri: &str, state: &str) -> String {
+fn gmail_authorization_url(
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    code_challenge: &str,
+) -> String {
     let base = google_authorize_url();
     let separator = if base.contains('?') { "&" } else { "?" };
     format!(
@@ -562,6 +624,8 @@ fn gmail_authorization_url(client_id: &str, redirect_uri: &str, state: &str) -> 
             ("scope", gmail_oauth_scope()),
             ("access_type", "offline".to_string()),
             ("prompt", "consent".to_string()),
+            ("code_challenge", code_challenge.to_string()),
+            ("code_challenge_method", "S256".to_string()),
             ("state", state.to_string()),
         ])
     )
@@ -613,9 +677,47 @@ pub(crate) fn gmail_oauth_token() -> Option<String> {
         .flatten()
 }
 
+#[allow(dead_code)]
+fn gmail_oauth_refresh_token() -> Option<String> {
+    secret_store::read_connector_secret("gmail", GMAIL_OAUTH_REFRESH_TOKEN_SECRET)
+        .ok()
+        .flatten()
+}
+
+#[allow(dead_code)]
+fn gmail_oauth_access_token_expires_at() -> Option<DateTime<Utc>> {
+    secret_store::read_connector_secret("gmail", GMAIL_OAUTH_EXPIRES_AT_SECRET)
+        .ok()
+        .flatten()
+        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+        .map(|value| value.with_timezone(&Utc))
+}
+
+#[allow(dead_code)]
+fn gmail_oauth_access_token_is_fresh() -> bool {
+    gmail_oauth_access_token_expires_at()
+        .map(|expires_at| Utc::now() + Duration::seconds(GMAIL_OAUTH_EXPIRY_SKEW_SECS) < expires_at)
+        .unwrap_or(true)
+}
+
+#[allow(dead_code)]
+pub(crate) async fn gmail_oauth_token_or_refresh() -> Option<String> {
+    let access_token = gmail_oauth_token();
+    if access_token.is_some() && gmail_oauth_access_token_is_fresh() {
+        return access_token;
+    }
+
+    let refresh_token = gmail_oauth_refresh_token()?;
+    refresh_gmail_access_token(&refresh_token)
+        .await
+        .ok()
+        .or(access_token)
+}
+
 pub(crate) fn delete_gmail_oauth_token() -> Result<(), String> {
     secret_store::delete_connector_secret("gmail", GMAIL_OAUTH_TOKEN_SECRET)?;
-    secret_store::delete_connector_secret("gmail", GMAIL_OAUTH_REFRESH_TOKEN_SECRET)
+    secret_store::delete_connector_secret("gmail", GMAIL_OAUTH_REFRESH_TOKEN_SECRET)?;
+    secret_store::delete_connector_secret("gmail", GMAIL_OAUTH_EXPIRES_AT_SECRET)
 }
 
 pub(crate) fn notion_oauth_token() -> Option<String> {
@@ -654,8 +756,9 @@ pub async fn start_connector_login(
 
 async fn start_gmail_login() -> Result<ConnectorLoginStartResult, String> {
     let client_id = gmail_oauth_client_id()?;
-    let client_secret = gmail_oauth_client_secret()?;
+    let client_secret = gmail_oauth_client_secret();
     let (redirect_uri, callback_port, callback_path) = gmail_redirect_config()?;
+    let pkce = generate_pkce_codes();
     let state = Uuid::new_v4().to_string();
     let expires_at =
         Utc::now() + Duration::seconds(GMAIL_BROWSER_LOGIN_EXPIRES_IN.min(i64::MAX as u64) as i64);
@@ -673,7 +776,8 @@ async fn start_gmail_login() -> Result<ConnectorLoginStartResult, String> {
         connector_id: "gmail".to_string(),
         provider: GMAIL_OAUTH_PROVIDER.to_string(),
         client_id: client_id.clone(),
-        client_secret: Some(client_secret),
+        client_secret,
+        code_verifier: Some(pkce.code_verifier),
         device_code: String::new(),
         redirect_uri: Some(redirect_uri.clone()),
         state: Some(state.clone()),
@@ -690,7 +794,12 @@ async fn start_gmail_login() -> Result<ConnectorLoginStartResult, String> {
         connector_name: "Gmail".to_string(),
         provider: GMAIL_OAUTH_PROVIDER.to_string(),
         login_session_id,
-        verification_uri: gmail_authorization_url(&client_id, &redirect_uri, &state),
+        verification_uri: gmail_authorization_url(
+            &client_id,
+            &redirect_uri,
+            &state,
+            &pkce.code_challenge,
+        ),
         verification_uri_complete: None,
         user_code: String::new(),
         expires_in: GMAIL_BROWSER_LOGIN_EXPIRES_IN,
@@ -757,6 +866,7 @@ async fn start_github_device_login(client_id: String) -> Result<ConnectorLoginSt
         provider: "github".to_string(),
         client_id,
         client_secret: None,
+        code_verifier: None,
         device_code: parsed.device_code,
         redirect_uri: None,
         state: None,
@@ -805,6 +915,7 @@ async fn start_notion_login() -> Result<ConnectorLoginStartResult, String> {
         provider: NOTION_OAUTH_PROVIDER.to_string(),
         client_id: client_id.clone(),
         client_secret: Some(client_secret),
+        code_verifier: None,
         device_code: String::new(),
         redirect_uri: Some(redirect_uri.clone()),
         state: Some(state.clone()),
@@ -856,6 +967,7 @@ async fn start_slack_login() -> Result<ConnectorLoginStartResult, String> {
         provider: SLACK_OAUTH_PROVIDER.to_string(),
         client_id: client_id.clone(),
         client_secret: Some(client_secret),
+        code_verifier: None,
         device_code: String::new(),
         redirect_uri: Some(registered_redirect_uri.clone()),
         state: Some(state.clone()),
@@ -972,6 +1084,7 @@ fn start_github_cli_login(oauth_error: String) -> Result<ConnectorLoginStartResu
         provider: "github_cli".to_string(),
         client_id: String::new(),
         client_secret: None,
+        code_verifier: None,
         device_code: String::new(),
         redirect_uri: None,
         state: None,
@@ -1506,25 +1619,33 @@ async fn exchange_gmail_code_for_token(
     session: &LoginSession,
     code: &str,
 ) -> Result<GoogleOAuthTokenResponse, String> {
-    let client_secret = session
-        .client_secret
+    let code_verifier = session
+        .code_verifier
         .as_deref()
-        .ok_or_else(|| "Gmail OAuth session is missing client secret".to_string())?;
+        .ok_or_else(|| "Gmail OAuth session is missing PKCE code verifier".to_string())?;
     let redirect_uri = session
         .redirect_uri
         .as_deref()
         .ok_or_else(|| "Gmail OAuth session is missing redirect URI".to_string())?;
+    let mut form = vec![
+        ("client_id", session.client_id.clone()),
+        ("code", code.to_string()),
+        ("grant_type", "authorization_code".to_string()),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("code_verifier", code_verifier.to_string()),
+    ];
+    if let Some(client_secret) = session
+        .client_secret
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        form.push(("client_secret", client_secret.to_string()));
+    }
     let response = reqwest::Client::new()
         .post(google_token_url())
         .header("Accept", "application/json")
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(form_body(&[
-            ("client_id", session.client_id.clone()),
-            ("client_secret", client_secret.to_string()),
-            ("code", code.to_string()),
-            ("grant_type", "authorization_code".to_string()),
-            ("redirect_uri", redirect_uri.to_string()),
-        ]))
+        .body(form_body(&form))
         .send()
         .await
         .map_err(|err| format!("exchange Gmail OAuth code: {err}"))?;
@@ -1557,11 +1678,57 @@ async fn exchange_gmail_code_for_token(
     Ok(parsed)
 }
 
-async fn complete_gmail_login(
-    login_session_id: String,
-    session: LoginSession,
-    parsed: GoogleOAuthTokenResponse,
-) -> Result<ConnectorLoginPollResult, String> {
+#[allow(dead_code)]
+async fn refresh_gmail_access_token(refresh_token: &str) -> Result<String, String> {
+    let client_id = gmail_oauth_client_id()?;
+    let client_secret = gmail_oauth_client_secret();
+    let response = reqwest::Client::new()
+        .post(google_token_url())
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form_body(&gmail_refresh_token_form(
+            &client_id,
+            client_secret.as_deref(),
+            refresh_token,
+        )))
+        .send()
+        .await
+        .map_err(|err| format!("refresh Gmail OAuth token: {err}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("read Gmail OAuth refresh response: {err}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "Gmail OAuth refresh returned {status}: {}",
+            http::redact_and_truncate(&body, 600)
+        ));
+    }
+    let parsed = serde_json::from_str::<GoogleOAuthTokenResponse>(&body)
+        .map_err(|err| format!("parse Gmail OAuth refresh response: {err}"))?;
+    if parsed.error.is_some() || parsed.error_description.is_some() {
+        return Err(format!(
+            "Gmail OAuth refresh failed: {}{}",
+            parsed.error.unwrap_or_else(|| "oauth_error".to_string()),
+            parsed
+                .error_description
+                .map(|description| format!(" - {description}"))
+                .unwrap_or_default()
+        ));
+    }
+    let token = parsed
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Gmail OAuth refresh response did not include access_token".to_string())?
+        .to_string();
+    store_gmail_token_response(&parsed)?;
+    Ok(token)
+}
+
+fn store_gmail_token_response(parsed: &GoogleOAuthTokenResponse) -> Result<(), String> {
     let token = parsed
         .access_token
         .as_deref()
@@ -1581,6 +1748,29 @@ async fn complete_gmail_login(
             refresh_token,
         )?;
     }
+    if let Some(expires_in) = parsed.expires_in {
+        let expires_at = Utc::now() + Duration::seconds(expires_in.min(i64::MAX as u64) as i64);
+        secret_store::store_connector_secret(
+            "gmail",
+            GMAIL_OAUTH_EXPIRES_AT_SECRET,
+            &expires_at.to_rfc3339(),
+        )?;
+    }
+    Ok(())
+}
+
+async fn complete_gmail_login(
+    login_session_id: String,
+    session: LoginSession,
+    parsed: GoogleOAuthTokenResponse,
+) -> Result<ConnectorLoginPollResult, String> {
+    let token = parsed
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Gmail OAuth token response did not include an access_token".to_string())?;
+    store_gmail_token_response(&parsed)?;
     clear_login_session(&login_session_id)?;
     let account_label = gmail_profile_email(token).await.ok();
     let connector = connect_connector(ConnectorConnectRequest {
@@ -2172,6 +2362,7 @@ mod tests {
             "google client",
             "http://127.0.0.1:17656/connectors/gmail/callback",
             "state value",
+            "pkce challenge",
         );
 
         assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
@@ -2185,8 +2376,37 @@ mod tests {
         assert!(url.contains("gmail.send"));
         assert!(url.contains("access_type=offline"));
         assert!(url.contains("prompt=consent"));
+        assert!(url.contains("code_challenge=pkce+challenge"));
+        assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("state=state+value"));
         assert!(!url.contains("chatgpt.com"));
+    }
+
+    #[test]
+    fn generated_pkce_codes_are_url_safe_and_linked() {
+        let pkce = generate_pkce_codes();
+        let digest = Sha256::digest(pkce.code_verifier.as_bytes());
+        let expected_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+
+        assert!(pkce.code_verifier.len() >= 43);
+        assert!(pkce.code_verifier.len() <= 128);
+        assert_eq!(pkce.code_challenge, expected_challenge);
+        assert!(!pkce.code_verifier.contains('+'));
+        assert!(!pkce.code_verifier.contains('/'));
+        assert!(!pkce.code_verifier.contains('='));
+    }
+
+    #[test]
+    fn gmail_refresh_token_form_uses_pkce_public_client_shape() {
+        let public_form = gmail_refresh_token_form("google client", None, "refresh-token");
+        assert!(public_form.contains(&("client_id", "google client".to_string())));
+        assert!(public_form.contains(&("grant_type", "refresh_token".to_string())));
+        assert!(public_form.contains(&("refresh_token", "refresh-token".to_string())));
+        assert!(!public_form.iter().any(|(key, _)| *key == "client_secret"));
+
+        let confidential_form =
+            gmail_refresh_token_form("google client", Some("secret"), "refresh-token");
+        assert!(confidential_form.contains(&("client_secret", "secret".to_string())));
     }
 
     #[test]

@@ -6,9 +6,6 @@ import {
   Box,
   Chip,
   Stack,
-  Accordion,
-  AccordionSummary,
-  AccordionDetails,
   CircularProgress,
 } from "@mui/material";
 import {
@@ -16,7 +13,6 @@ import {
   Error as ErrorIcon,
   CheckCircle as CheckIcon,
   Info as InfoIcon,
-  ExpandMore as ExpandMoreIcon,
 } from "@mui/icons-material";
 import {
   usePermissionStore,
@@ -409,11 +405,13 @@ export function permissionPromptLabels(
 function ScrollableCodeBlock({
   label,
   children,
-  maxHeight = 180,
+  maxHeight = 320,
+  minHeight,
 }: {
   label: string;
   children: string;
-  maxHeight?: number;
+  maxHeight?: number | string;
+  minHeight?: number | string;
 }) {
   return (
     <Box
@@ -438,6 +436,7 @@ function ScrollableCodeBlock({
         lineHeight: 1.45,
         whiteSpace: "pre-wrap",
         wordBreak: "break-word",
+        minHeight,
         maxHeight,
         overflow: "auto",
         overscrollBehavior: "contain",
@@ -452,7 +451,6 @@ function ScrollableCodeBlock({
 export const PermissionPromptBar: React.FC = () => {
   const { pendingRequest, approveRequest, denyRequest, error, clearError } =
     usePermissionStore();
-  const [showDetails, setShowDetails] = useState(false);
   const [processingAction, setProcessingAction] = useState<
     ModeChoice | "deny" | null
   >(null);
@@ -471,7 +469,6 @@ export const PermissionPromptBar: React.FC = () => {
 
   useEffect(() => {
     if (!pendingRequest) return;
-    setShowDetails(false);
     setProcessingAction(null);
   }, [pendingRequest?.request_id, pendingRequest?.tool_name]);
 
@@ -643,7 +640,11 @@ export const PermissionPromptBar: React.FC = () => {
               {contentLabel}
             </Typography>
             <Box sx={{ mt: 0.25 }}>
-              <ScrollableCodeBlock label={contentLabel}>
+              <ScrollableCodeBlock
+                label={contentLabel}
+                minHeight={120}
+                maxHeight="min(34vh, 360px)"
+              >
                 {detail}
               </ScrollableCodeBlock>
             </Box>
@@ -660,67 +661,9 @@ export const PermissionPromptBar: React.FC = () => {
           <Alert severity="error" sx={{ py: 0.5 }}>
             {labels.connectorWarning}
           </Alert>
-        ) : isDangerous ? (
-          <Alert severity={isCritical ? "error" : "warning"} sx={{ py: 0.5 }}>
-            {isCritical
-              ? "此操作可能导致数据丢失，请格外谨慎！"
-              : "高风险操作，请确认您了解其后果。"}
-          </Alert>
         ) : null}
 
-        {pendingRequest.detected_risks.length > 0 && showDetails && (
-          <Accordion
-            expanded={showDetails}
-            onChange={() => setShowDetails(!showDetails)}
-            variant="outlined"
-            disableGutters
-            sx={{ "&:before": { display: "none" } }}
-          >
-            <AccordionSummary expandIcon={<ExpandMoreIcon />} sx={{ minHeight: 32, "& .MuiAccordionSummary-content": { my: 0.5 } }}>
-              <Typography variant="caption">
-                {pendingRequest.detected_risks.length} 个风险点
-              </Typography>
-            </AccordionSummary>
-            <AccordionDetails sx={{ pt: 0.5 }}>
-              <Stack spacing={0.75}>
-                {pendingRequest.detected_risks.map((risk, idx) => (
-                  <Alert
-                    key={idx}
-                    severity={getRiskColor(risk.severity) as never}
-                    variant="outlined"
-                    sx={{ py: 0.25 }}
-                  >
-                    <Typography variant="caption" fontWeight={600} display="block">
-                      {risk.category}
-                    </Typography>
-                    <Typography variant="caption">{risk.description}</Typography>
-                  </Alert>
-                ))}
-              </Stack>
-            </AccordionDetails>
-          </Accordion>
-        )}
-
-        <Stack
-          direction="row"
-          justifyContent="space-between"
-          alignItems="center"
-          spacing={1}
-        >
-          <Box>
-            {pendingRequest.detected_risks.length > 0 && (
-              <Button
-                size="small"
-                color="inherit"
-                variant="text"
-                onClick={() => setShowDetails((v) => !v)}
-                endIcon={<ExpandMoreIcon fontSize="small" />}
-                sx={{ minHeight: 32 }}
-              >
-                {showDetails ? "收起风险" : "风险详情"}
-              </Button>
-            )}
-          </Box>
+        <Stack direction="row" justifyContent="flex-end" alignItems="center">
           <Stack direction="row" justifyContent="flex-end" spacing={1}>
             <Button
               size="small"

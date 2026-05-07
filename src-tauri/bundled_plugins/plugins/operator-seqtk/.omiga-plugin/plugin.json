@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "description": "Built-in atomic operator plugin: Single seqtk sample operator.",
   "interface": {
-    "displayName": "seqtk Operator",
-    "shortDescription": "Single seqtk sample operator",
+    "displayName": "seqtk",
+    "shortDescription": "FASTQ/FASTA subsampling with seqtk",
     "longDescription": "Provides one atomic seqtk sample wrapper for FASTQ/FASTA subsampling on the active local or SSH environment. The selected environment must provide seqtk on PATH.",
     "developerName": "Omiga",
     "category": "Operator",
@@ -18,7 +18,7 @@
     ],
     "brandColor": "#0F766E",
     "defaultPrompt": [
-      "Expose the seqtk sample operator and subsample my FASTQ file."
+      "Expose seqtk and subsample my FASTQ file."
     ]
   }
 }

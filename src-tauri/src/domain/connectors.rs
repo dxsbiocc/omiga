@@ -26,6 +26,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -873,21 +874,17 @@ pub fn builtin_connector_definitions() -> Vec<ConnectorDefinition> {
         connector(
             "gmail",
             "Gmail",
-            "Use Gmail messages for support, coordination, and research workflows through Omiga mail login or OAuth.",
+            "Use Gmail messages through mailbox account/password login.",
             "email",
-            ConnectorAuthType::OAuth,
+            ConnectorAuthType::ApiKey,
             &[
                 "GMAIL_ADDRESS",
                 "GMAIL_USERNAME",
                 "GMAIL_APP_PASSWORD",
                 "GMAIL_AUTH_CODE",
-                "OMIGA_GMAIL_OAUTH_CLIENT_ID",
-                "OMIGA_GMAIL_OAUTH_CLIENT_SECRET",
-                "GMAIL_ACCESS_TOKEN",
-                "GOOGLE_OAUTH_ACCESS_TOKEN",
             ],
             Some("https://mail.google.com/"),
-            Some("https://developers.google.com/gmail/api"),
+            Some("https://support.google.com/accounts/answer/185833"),
             email_connector_tools(),
         ),
         connector(
@@ -2367,19 +2364,6 @@ fn github_token_with_source(
         })
 }
 
-fn gmail_token_with_source(
-    use_external_credentials: bool,
-) -> Option<(String, ConnectorCredentialSource)> {
-    oauth::gmail_oauth_token()
-        .map(|token| (token, ConnectorCredentialSource::OAuthBrowser))
-        .or_else(|| {
-            use_external_credentials
-                .then(|| first_non_empty_env(&["GMAIL_ACCESS_TOKEN", "GOOGLE_OAUTH_ACCESS_TOKEN"]))
-                .flatten()
-                .map(|token| (token, ConnectorCredentialSource::Environment))
-        })
-}
-
 fn notion_token_with_source(
     use_external_credentials: bool,
 ) -> Option<(String, ConnectorCredentialSource)> {
@@ -2419,7 +2403,6 @@ fn connector_credential_source(
         "gmail" if use_env_credentials && mail_credentials_configured(connector_id) => {
             Some(ConnectorCredentialSource::Environment)
         }
-        "gmail" => gmail_token_with_source(use_env_credentials).map(|(_, source)| source),
         "notion" => notion_token_with_source(use_env_credentials).map(|(_, source)| source),
         "slack" => slack_token_with_source(use_env_credentials).map(|(_, source)| source),
         "qq_mail" | "netease_mail" if stored_mail_credentials_configured(connector_id) => {
@@ -2439,10 +2422,6 @@ fn connector_credential_source(
 
 pub(crate) fn github_token() -> Option<String> {
     github_token_with_source(true).map(|(token, _source)| token)
-}
-
-fn gmail_token() -> Option<String> {
-    gmail_token_with_source(true).map(|(token, _source)| token)
 }
 
 pub(crate) fn gmail_api_base_url() -> String {
@@ -2807,10 +2786,20 @@ fn mail_credential_check(connector: &ConnectorInfo) -> NativeConnectionCheck {
         );
     };
     if mail_secret(connector_id).is_none() {
+        let credential_name = if connector_id == "gmail" {
+            "邮箱密码或应用专用密码"
+        } else {
+            "邮箱授权码或应用专用密码"
+        };
+        let credential_hint = if connector_id == "gmail" {
+            "在连接界面输入 Gmail 密码；Omiga 会保存到系统安全存储，不写入 connectors/config.json。"
+        } else {
+            "在连接界面输入邮箱服务商生成的授权码；Omiga 会保存到系统安全存储，不写入 connectors/config.json。"
+        };
         return NativeConnectionCheck::local_error(
-            format!("{service_name} 需要邮箱授权码或应用专用密码才能连接。"),
+            format!("{service_name} 需要{credential_name}才能连接。"),
             "missing_credentials",
-            "在连接界面输入邮箱服务商生成的授权码；Omiga 会保存到系统安全存储，不写入 connectors/config.json。",
+            credential_hint,
             false,
         );
     }
@@ -2828,42 +2817,185 @@ fn mail_credential_check(connector: &ConnectorInfo) -> NativeConnectionCheck {
             "No IMAP host was configured, so Omiga validated local credential presence only.",
         );
     };
-    let port = mail_imap_port(connector_id);
-    let addr = format!("{host}:{port}");
     let timeout = Duration::from_secs(3);
-    let resolved = match addr.to_socket_addrs() {
-        Ok(mut addrs) => addrs.next(),
-        Err(err) => {
-            return NativeConnectionCheck::local_error(
-                format!("{service_name} IMAP host could not be resolved."),
-                "mail_host_resolution_failed",
-                format!("{addr}: {err}"),
-                true,
-            );
-        }
+    let port = mail_imap_port(connector_id);
+    let Some(secret) = mail_secret(connector_id) else {
+        unreachable!("mail secret presence is checked before IMAP login")
     };
-    let Some(socket_addr) = resolved else {
-        return NativeConnectionCheck::local_error(
-            format!("{service_name} IMAP host did not resolve to an address."),
-            "mail_host_resolution_failed",
-            addr,
-            true,
-        );
-    };
-    match TcpStream::connect_timeout(&socket_addr, timeout) {
-        Ok(_) => NativeConnectionCheck::local_ok(
-            format!("{service_name} mailbox credentials are configured and IMAP is reachable."),
+    mail_imap_login_check(service_name, &identity, &secret, &host, port, timeout)
+}
+
+fn mail_imap_login_check(
+    service_name: &str,
+    identity: &str,
+    secret: &str,
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> NativeConnectionCheck {
+    match mail_imap_login(host, port, identity, secret, timeout) {
+        Ok(details) => NativeConnectionCheck::local_ok(
+            format!("{service_name} IMAP 登录成功。"),
             format!(
-                "Checked account {identity} and reached {addr}. Omiga does not store the authorization code in connectors/config.json."
+                "Authenticated account {identity} against {host}:{port}. {details} Secrets remain outside connectors/config.json."
             ),
         ),
-        Err(err) => NativeConnectionCheck::local_error(
-            format!("{service_name} IMAP endpoint is not reachable."),
-            "mail_imap_unreachable",
-            format!("Tried {addr} for account {identity}: {err}"),
+        Err(MailImapLoginError::AuthRejected(details)) => NativeConnectionCheck::local_error(
+            format!("{service_name} IMAP 登录被拒绝。"),
+            "mail_imap_auth_failed",
+            format!(
+                "Gmail/邮箱服务拒绝了 {identity} 的登录：{details}。请确认密码、应用专用密码或 IMAP 开关。"
+            ),
+            false,
+        ),
+        Err(MailImapLoginError::Network(details)) => NativeConnectionCheck::local_error(
+            format!("{service_name} IMAP 登录不可用。"),
+            "mail_imap_login_unreachable",
+            format!("Tried {host}:{port} for account {identity}: {details}"),
+            true,
+        ),
+        Err(MailImapLoginError::Tls(details)) => NativeConnectionCheck::local_error(
+            format!("{service_name} IMAP TLS 校验失败。"),
+            "mail_imap_tls_failed",
+            format!("Tried {host}:{port} for account {identity}: {details}"),
+            true,
+        ),
+        Err(MailImapLoginError::Protocol(details)) => NativeConnectionCheck::local_error(
+            format!("{service_name} IMAP 响应无法识别。"),
+            "mail_imap_protocol_error",
+            format!("Tried {host}:{port} for account {identity}: {details}"),
             true,
         ),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MailImapLoginError {
+    AuthRejected(String),
+    Network(String),
+    Tls(String),
+    Protocol(String),
+}
+
+fn mail_imap_login(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    timeout: Duration,
+) -> Result<String, MailImapLoginError> {
+    let addr = format!("{host}:{port}");
+    let socket_addr = addr
+        .to_socket_addrs()
+        .map_err(|err| MailImapLoginError::Network(format!("resolve {addr}: {err}")))?
+        .next()
+        .ok_or_else(|| MailImapLoginError::Network(format!("{addr} did not resolve")))?;
+    let tcp_stream = TcpStream::connect_timeout(&socket_addr, timeout)
+        .map_err(|err| MailImapLoginError::Network(format!("connect {addr}: {err}")))?;
+    tcp_stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|err| MailImapLoginError::Network(format!("set read timeout: {err}")))?;
+    tcp_stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|err| MailImapLoginError::Network(format!("set write timeout: {err}")))?;
+
+    let mut root_store = rustls::RootCertStore::empty();
+    let certs = rustls_native_certs::load_native_certs();
+    for cert in certs.certs {
+        root_store
+            .add(cert)
+            .map_err(|err| MailImapLoginError::Tls(format!("load root certificate: {err}")))?;
+    }
+    if root_store.is_empty() {
+        return Err(MailImapLoginError::Tls(
+            "no platform root certificates were loaded".to_string(),
+        ));
+    }
+
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|err| MailImapLoginError::Tls(format!("invalid server name `{host}`: {err}")))?;
+    let tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let tls_connection = rustls::ClientConnection::new(Arc::new(tls_config), server_name)
+        .map_err(|err| MailImapLoginError::Tls(format!("create TLS client: {err}")))?;
+    let tls_stream = rustls::StreamOwned::new(tls_connection, tcp_stream);
+    let mut reader = BufReader::new(tls_stream);
+
+    let greeting = read_imap_line(&mut reader).map_err(MailImapLoginError::Network)?;
+    if !greeting.starts_with("* OK") {
+        return Err(MailImapLoginError::Protocol(format!(
+            "unexpected greeting `{}`",
+            sanitize_imap_response(&greeting)
+        )));
+    }
+
+    let tag = "A0001";
+    let command = format!(
+        "{tag} LOGIN \"{}\" \"{}\"\r\n",
+        imap_quoted(username),
+        imap_quoted(password)
+    );
+    reader
+        .get_mut()
+        .write_all(command.as_bytes())
+        .map_err(|err| MailImapLoginError::Network(format!("write LOGIN command: {err}")))?;
+    reader
+        .get_mut()
+        .flush()
+        .map_err(|err| MailImapLoginError::Network(format!("flush LOGIN command: {err}")))?;
+
+    let response = read_imap_tagged_response(&mut reader, tag)?;
+    let sanitized = sanitize_imap_response(&response);
+    if response.starts_with(&format!("{tag} OK")) {
+        let logout = "A0002 LOGOUT\r\n";
+        let _ = reader.get_mut().write_all(logout.as_bytes());
+        let _ = reader.get_mut().flush();
+        return Ok(format!("Server response: {sanitized}."));
+    }
+    if response.starts_with(&format!("{tag} NO")) || response.starts_with(&format!("{tag} BAD")) {
+        return Err(MailImapLoginError::AuthRejected(sanitized));
+    }
+    Err(MailImapLoginError::Protocol(format!(
+        "unexpected tagged response `{sanitized}`"
+    )))
+}
+
+fn read_imap_line<R: BufRead>(reader: &mut R) -> Result<String, String> {
+    let mut line = String::new();
+    let read = reader
+        .read_line(&mut line)
+        .map_err(|err| format!("read IMAP response: {err}"))?;
+    if read == 0 {
+        return Err("server closed the IMAP connection".to_string());
+    }
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn read_imap_tagged_response<R: BufRead>(
+    reader: &mut R,
+    tag: &str,
+) -> Result<String, MailImapLoginError> {
+    for _ in 0..64 {
+        let line = read_imap_line(reader).map_err(MailImapLoginError::Network)?;
+        if line.starts_with(tag) {
+            return Ok(line);
+        }
+    }
+    Err(MailImapLoginError::Protocol(
+        "IMAP server did not return a tagged LOGIN response".to_string(),
+    ))
+}
+
+fn imap_quoted(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\r', '\n'], " ")
+}
+
+fn sanitize_imap_response(value: &str) -> String {
+    truncate_for_display(value.trim(), 240)
 }
 
 async fn http_status_check(
@@ -2952,47 +3084,13 @@ async fn test_native_connector_connection(
             }
         }
         "gmail" => {
-            if mail_credentials_configured("gmail") {
-                let check = mail_credential_check(connector);
-                return connector_test_result_from_check(
-                    connector,
-                    check.error_code.is_none(),
-                    ConnectorConnectionTestKind::LocalState,
-                    check,
-                );
-            }
-            let Some(token) = gmail_token() else {
-                return connector_test_result_from_check(
-                    connector,
-                    false,
-                    ConnectorConnectionTestKind::NativeApi,
-                    NativeConnectionCheck::missing_credentials(
-                        "Gmail",
-                        "Gmail app password credentials from the connection dialog or Gmail browser OAuth login",
-                    ),
-                );
-            };
-            match http_status_check(
-                "Gmail",
-                format!("{}/users/me/profile", gmail_api_base_url()),
-                Some(token),
-                None,
+            let check = mail_credential_check(connector);
+            connector_test_result_from_check(
+                connector,
+                check.error_code.is_none(),
+                ConnectorConnectionTestKind::LocalState,
+                check,
             )
-            .await
-            {
-                Ok(check) => connector_test_result_from_check(
-                    connector,
-                    true,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-                Err(check) => connector_test_result_from_check(
-                    connector,
-                    false,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-            }
         }
         "gitlab" => {
             let token = gitlab_token();
@@ -3862,7 +3960,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gmail_oauth_secret_makes_gmail_accessible_without_env_token() {
+    async fn gmail_uses_mail_credentials_not_oauth_secret_for_connection_state() {
         let _lock = CONNECTOR_TEST_ENV_LOCK.lock().await;
         let dir = tempdir().unwrap();
         let secret_dir = dir.path().join("secrets");
@@ -3881,7 +3979,10 @@ mod tests {
 
         secret_store::store_connector_secret("gmail", "oauth_access_token", "gmail-oauth-token")
             .unwrap();
-        assert_eq!(gmail_token().as_deref(), Some("gmail-oauth-token"));
+        assert_eq!(
+            oauth::gmail_oauth_token().as_deref(),
+            Some("gmail-oauth-token")
+        );
 
         let definition = builtin_connector_definitions()
             .into_iter()
@@ -3894,9 +3995,10 @@ mod tests {
             Vec::new(),
         );
 
-        assert!(gmail.connected);
-        assert!(gmail.accessible);
-        assert_eq!(gmail.auth_source.as_deref(), Some("oauth_browser"));
+        assert!(!gmail.connected);
+        assert!(!gmail.accessible);
+        assert_eq!(gmail.status, ConnectorConnectionStatus::NeedsAuth);
+        assert_eq!(gmail.auth_source.as_deref(), None);
         assert!(!gmail.env_configured);
     }
 
@@ -3932,6 +4034,20 @@ mod tests {
         assert_eq!(result.check_kind, ConnectorConnectionTestKind::LocalState);
         assert!(result.message.contains("credentials are configured"));
         assert_eq!(result.auth_source.as_deref(), Some("environment"));
+    }
+
+    #[test]
+    fn imap_login_command_values_are_quoted_without_leaking_control_chars() {
+        assert_eq!(imap_quoted(r#"name"test\user"#), r#"name\"test\\user"#);
+        assert_eq!(imap_quoted("line\r\nbreak"), "line  break");
+    }
+
+    #[test]
+    fn imap_tagged_response_reader_skips_untagged_lines() {
+        let mut reader =
+            BufReader::new(b"* CAPABILITY IMAP4rev1\r\nA0001 OK LOGIN completed\r\n".as_slice());
+        let response = read_imap_tagged_response(&mut reader, "A0001").unwrap();
+        assert_eq!(response, "A0001 OK LOGIN completed");
     }
 
     #[tokio::test]

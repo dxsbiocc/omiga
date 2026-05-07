@@ -83,7 +83,7 @@ describe("connector product integration state", () => {
     ).toBe(false);
   });
 
-  it("treats Gmail as integrated through Omiga mailbox credential validation", () => {
+  it("treats Gmail as integrated through mailbox credential login", () => {
     expect(
       connectorIsProductIntegrated(
         connector({
@@ -92,8 +92,8 @@ describe("connector product integration state", () => {
             name: "Gmail",
             description: "Reference mailbox messages.",
             category: "email",
-            authType: "oauth",
-            envVars: ["GMAIL_ACCESS_TOKEN"],
+            authType: "apiKey",
+            envVars: ["GMAIL_ADDRESS", "GMAIL_APP_PASSWORD"],
             defaultEnabled: true,
             tools: [
               tool({
@@ -105,6 +105,29 @@ describe("connector product integration state", () => {
         }),
       ),
     ).toBe(true);
+  });
+
+  it("passes through Gmail mailbox credential errors without OAuth setup copy", () => {
+    const message = connectorLoginFailureMessage(
+      connector({
+        definition: {
+          id: "gmail",
+          name: "Gmail",
+          description: "Reference mailbox messages.",
+          category: "email",
+          authType: "apiKey",
+          envVars: ["GMAIL_ADDRESS", "GMAIL_APP_PASSWORD"],
+          defaultEnabled: true,
+          tools: [tool({ name: "search_messages" })],
+        },
+      }),
+      "Gmail 需要邮箱密码才能连接。",
+      false,
+    );
+
+    expect(message).toBe("Gmail 需要邮箱密码才能连接。");
+    expect(message).not.toContain("OAuth");
+    expect(message).not.toContain("OMIGA_GMAIL_OAUTH_CLIENT_ID");
   });
 
   it("does not expose token-only native connectors as product-integrated UI", () => {

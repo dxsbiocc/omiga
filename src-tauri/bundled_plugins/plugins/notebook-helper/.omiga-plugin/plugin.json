@@ -1,20 +1,21 @@
 {
   "name": "notebook-helper",
-  "version": "1.0.0",
-  "description": "Notebook-focused workflow prompts for creating, repairing, and explaining Jupyter notebooks inside Omiga.",
+  "version": "2.0.0",
+  "description": "Jupyter notebook authoring, repair, rendering, and local execution guidance for Omiga.",
   "skills": "./skills",
   "interface": {
-    "displayName": "Notebook Helper",
-    "shortDescription": "Create and repair notebooks",
-    "longDescription": "Adds an Omiga-native skill that helps initialize empty notebooks, repair malformed ipynb JSON, and explain notebook execution plans.",
+    "displayName": "Jupyter Notebook",
+    "shortDescription": "Edit, render, and repair .ipynb files",
+    "longDescription": "Adds an Omiga-native notebook workflow inspired by VS Code Jupyter's split between notebook serialization, cell language detection, output renderers, and kernel/controller execution. Omiga keeps execution local and does not run VS Code extension webviews.",
     "developerName": "Omiga",
     "category": "Notebook",
-    "capabilities": ["Notebook", "Repair", "Workflow"],
+    "capabilities": ["Notebook", "Jupyter", "ipynb", "Renderer", "Repair", "Workflow"],
     "brandColor": "#7C9A6D",
     "defaultPrompt": [
       "Initialize this empty notebook with a Python starter cell.",
       "Repair this ipynb and explain what changed.",
-      "Turn this analysis plan into notebook cells."
+      "Turn this analysis plan into notebook cells.",
+      "Explain which notebook outputs require unsupported Jupyter widget renderers."
     ]
   }
 }
