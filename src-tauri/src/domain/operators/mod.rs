@@ -27,6 +27,7 @@ const REGISTRY_RELATIVE_PATH: &str = "operators/registry.json";
 const RUNS_RELATIVE_PATH: &str = "runs";
 const OPERATOR_DEFAULT_MAX_ATTEMPTS: u32 = 2;
 const OPERATOR_MAX_MAX_ATTEMPTS: u32 = 5;
+const OPERATOR_CACHE_SCAN_LIMIT: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -177,6 +178,8 @@ pub struct OperatorSpec {
     #[serde(default)]
     pub runtime: Option<JsonValue>,
     #[serde(default)]
+    pub cache: Option<JsonValue>,
+    #[serde(default)]
     pub resources: BTreeMap<String, OperatorResourceSpec>,
     #[serde(default)]
     pub bindings: Vec<OperatorBindingSpec>,
@@ -308,6 +311,8 @@ struct RawOperatorManifest {
     execution: RawOperatorExecution,
     #[serde(default)]
     runtime: Option<JsonValue>,
+    #[serde(default)]
+    cache: Option<JsonValue>,
     #[serde(default)]
     resources: BTreeMap<String, RawResourceSpec>,
     #[serde(default)]
@@ -562,6 +567,7 @@ pub fn load_operator_manifest(
             .collect::<Result<Vec<_>, _>>()?,
         execution: OperatorExecutionSpec { argv },
         runtime: parsed.runtime,
+        cache: parsed.cache,
         resources: parsed
             .resources
             .into_iter()
@@ -1164,7 +1170,7 @@ pub struct OperatorInvocation {
     pub resources: BTreeMap<String, JsonValue>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperatorToolError {
     pub kind: String,
@@ -1254,7 +1260,7 @@ impl OperatorRetryAttemptSummary {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct OperatorRetryState {
     attempt: u32,
@@ -1268,7 +1274,19 @@ struct OperatorRetryPolicy {
     max_attempts: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OperatorRunCacheMetadata {
+    key: String,
+    #[serde(default)]
+    hit: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_run_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OperatorRunResult {
     status: String,
@@ -1291,10 +1309,12 @@ struct OperatorRunResult {
     previous_errors: Vec<OperatorRetryAttemptSummary>,
     enforcement: JsonValue,
     #[serde(skip_serializing_if = "Option::is_none")]
+    cache: Option<OperatorRunCacheMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<OperatorToolError>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OperatorRunIdentity {
     alias: String,
@@ -1304,7 +1324,7 @@ struct OperatorRunIdentity {
     manifest_path: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OperatorRunStatusMetadata {
     run_id: String,
@@ -1355,7 +1375,7 @@ impl OperatorRunContext {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactRef {
     pub location: String,
@@ -1689,6 +1709,39 @@ async fn execute_resolved_operator(
         &effective_resources,
         &surface.run_dir,
     )?;
+    let enforcement = enforcement_json(ctx, &resolved.spec);
+    let cache_key = operator_cache_key(
+        ctx,
+        &resolved,
+        &surface,
+        &canonical_inputs,
+        &input_fingerprints,
+        &effective_params,
+        &effective_resources,
+        &resolved.spec.execution.argv,
+        &enforcement,
+    );
+    let cache_metadata =
+        operator_cache_metadata(&resolved.spec, run_context.as_ref(), cache_key.clone());
+    if let Some(cache) = cache_metadata.as_ref() {
+        if let Some(hit) = find_operator_cache_hit(ctx, &resolved, &cache.key).await {
+            return record_operator_cache_hit(
+                ctx,
+                &resolved,
+                &run_id,
+                &surface,
+                run_context,
+                cache.key.clone(),
+                hit,
+                canonical_inputs,
+                input_fingerprints,
+                effective_params,
+                effective_resources,
+                enforcement,
+            )
+            .await;
+        }
+    }
     let walltime_secs = effective_walltime_secs(&effective_resources, ctx.timeout_secs);
 
     let retry_policy = operator_retry_policy(&resolved.spec);
@@ -1711,6 +1764,8 @@ async fn execute_resolved_operator(
                 input_fingerprints.clone(),
                 effective_params.clone(),
                 effective_resources.clone(),
+                enforcement.clone(),
+                cache_metadata.clone(),
                 run_context.clone(),
                 retry_state.clone(),
             )
@@ -1727,6 +1782,8 @@ async fn execute_resolved_operator(
                 input_fingerprints.clone(),
                 effective_params.clone(),
                 effective_resources.clone(),
+                enforcement.clone(),
+                cache_metadata.clone(),
                 run_context.clone(),
                 retry_state.clone(),
             )
@@ -1758,6 +1815,304 @@ async fn execute_resolved_operator(
         }
     }
     unreachable!("operator retry loop must return on success or final failure")
+}
+
+struct OperatorCacheHit {
+    run_id: String,
+    run_dir: String,
+    result: OperatorRunResult,
+}
+
+fn operator_cache_metadata(
+    spec: &OperatorSpec,
+    run_context: Option<&OperatorRunContext>,
+    key: String,
+) -> Option<OperatorRunCacheMetadata> {
+    operator_cache_enabled(spec, run_context).then_some(OperatorRunCacheMetadata {
+        key,
+        hit: false,
+        source_run_id: None,
+        source_run_dir: None,
+    })
+}
+
+fn operator_cache_enabled(spec: &OperatorSpec, run_context: Option<&OperatorRunContext>) -> bool {
+    if run_context
+        .and_then(|context| context.kind.as_deref())
+        .map(|kind| kind.eq_ignore_ascii_case("smoke"))
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    cache_config_enabled(spec.cache.as_ref())
+        || spec
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.get("cache"))
+            .map(cache_config_enabled_value)
+            .unwrap_or(false)
+}
+
+fn cache_config_enabled(value: Option<&JsonValue>) -> bool {
+    value.map(cache_config_enabled_value).unwrap_or(false)
+}
+
+fn cache_config_enabled_value(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Bool(enabled) => *enabled,
+        JsonValue::Object(object) => object
+            .get("enabled")
+            .or_else(|| object.get("enable"))
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn operator_cache_key(
+    ctx: &crate::domain::tools::ToolContext,
+    resolved: &ResolvedOperator,
+    surface: &OperatorExecutionSurface,
+    canonical_inputs: &BTreeMap<String, JsonValue>,
+    input_fingerprints: &BTreeMap<String, JsonValue>,
+    effective_params: &BTreeMap<String, JsonValue>,
+    effective_resources: &BTreeMap<String, JsonValue>,
+    argv_template: &[String],
+    enforcement: &JsonValue,
+) -> String {
+    let payload = json!({
+        "schema": "operator-cache/v1",
+        "operator": {
+            "alias": resolved.alias.as_str(),
+            "id": resolved.spec.metadata.id.as_str(),
+            "version": resolved.spec.metadata.version.as_str(),
+            "sourcePlugin": resolved.spec.source.source_plugin.as_str(),
+            "manifestPath": resolved.spec.source.manifest_path.to_string_lossy(),
+        },
+        "surface": {
+            "location": surface.artifact_location(),
+            "executionEnvironment": ctx.execution_environment.as_str(),
+            "sshServer": ctx.ssh_server.as_deref(),
+            "sandboxBackend": ctx.sandbox_backend.as_str(),
+        },
+        "inputs": canonical_inputs,
+        "inputFingerprints": input_fingerprints,
+        "params": effective_params,
+        "resources": effective_resources,
+        "argvTemplate": argv_template,
+        "enforcement": enforcement,
+    });
+    stable_sha256_json(&payload)
+}
+
+fn stable_sha256_json(value: &JsonValue) -> String {
+    use sha2::{Digest, Sha256};
+
+    let raw = serde_json::to_vec(value).unwrap_or_else(|_| value.to_string().into_bytes());
+    let digest = Sha256::digest(&raw);
+    format!("sha256:{digest:x}")
+}
+
+async fn find_operator_cache_hit(
+    ctx: &crate::domain::tools::ToolContext,
+    resolved: &ResolvedOperator,
+    cache_key: &str,
+) -> Option<OperatorCacheHit> {
+    let summaries = list_operator_runs_for_context(ctx, OPERATOR_CACHE_SCAN_LIMIT)
+        .await
+        .ok()?;
+    for summary in summaries {
+        if summary.status != "succeeded"
+            || summary.operator_alias.as_deref() != Some(resolved.alias.as_str())
+            || summary.operator_id.as_deref() != Some(resolved.spec.metadata.id.as_str())
+            || summary.operator_version.as_deref() != Some(resolved.spec.metadata.version.as_str())
+            || summary.source_plugin.as_deref() != Some(resolved.spec.source.source_plugin.as_str())
+        {
+            continue;
+        }
+        let detail = match read_operator_run_for_context(ctx, &summary.run_id).await {
+            Ok(detail) => detail,
+            Err(_) => continue,
+        };
+        let result = match serde_json::from_value::<OperatorRunResult>(detail.document.clone()) {
+            Ok(result) => result,
+            Err(_) => continue,
+        };
+        let Some(cache) = result.cache.as_ref() else {
+            continue;
+        };
+        if result.status != "succeeded" || cache.hit || cache.key.as_str() != cache_key {
+            continue;
+        }
+        if !operator_cached_outputs_exist(ctx, &result.location, &result.outputs).await {
+            continue;
+        }
+        return Some(OperatorCacheHit {
+            run_id: detail.run_id,
+            run_dir: detail.run_dir,
+            result,
+        });
+    }
+    None
+}
+
+async fn operator_cached_outputs_exist(
+    ctx: &crate::domain::tools::ToolContext,
+    location: &str,
+    outputs: &BTreeMap<String, Vec<ArtifactRef>>,
+) -> bool {
+    let paths = outputs
+        .values()
+        .flat_map(|artifacts| artifacts.iter())
+        .map(|artifact| artifact.path.as_str())
+        .filter(|path| !path.trim().is_empty())
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return true;
+    }
+    if location == "local" {
+        return paths.iter().all(|path| {
+            fs::metadata(path)
+                .map(|metadata| metadata.is_file())
+                .unwrap_or(false)
+        });
+    }
+    let tests = paths
+        .iter()
+        .map(|path| format!("[ -f {} ]", sh_quote(path)))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    execute_env_command(ctx, &operator_environment_cwd(ctx), &tests, 30)
+        .await
+        .map(|result| result.returncode == 0)
+        .unwrap_or(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_operator_cache_hit(
+    ctx: &crate::domain::tools::ToolContext,
+    resolved: &ResolvedOperator,
+    run_id: &str,
+    surface: &OperatorExecutionSurface,
+    run_context: Option<OperatorRunContext>,
+    cache_key: String,
+    hit: OperatorCacheHit,
+    effective_inputs: BTreeMap<String, JsonValue>,
+    input_fingerprints: BTreeMap<String, JsonValue>,
+    effective_params: BTreeMap<String, JsonValue>,
+    effective_resources: BTreeMap<String, JsonValue>,
+    enforcement: JsonValue,
+) -> Result<OperatorRunResult, OperatorToolError> {
+    let run_dir = surface.run_dir.as_str();
+    let retry_state = OperatorRetryState {
+        attempt: 0,
+        max_attempts: 0,
+        previous_errors: Vec::new(),
+    };
+    let status_metadata = operator_run_status_metadata(
+        resolved,
+        run_id,
+        surface.artifact_location(),
+        run_dir,
+        run_context.clone(),
+        retry_state.clone(),
+    );
+    let cache = OperatorRunCacheMetadata {
+        key: cache_key,
+        hit: true,
+        source_run_id: Some(hit.run_id.clone()),
+        source_run_dir: Some(hit.run_dir.clone()),
+    };
+    let result = OperatorRunResult {
+        status: "succeeded".to_string(),
+        run_id: run_id.to_string(),
+        location: surface.artifact_location().to_string(),
+        operator: status_metadata.operator.clone(),
+        run_dir: run_dir.to_string(),
+        run_context,
+        provenance_path: Some(if surface.kind == OperatorExecutionSurfaceKind::Local {
+            PathBuf::from(run_dir)
+                .join("provenance.json")
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            format!("{run_dir}/provenance.json")
+        }),
+        outputs: hit.result.outputs.clone(),
+        effective_inputs,
+        input_fingerprints,
+        effective_params,
+        effective_resources,
+        attempt: retry_state.attempt,
+        max_attempts: retry_state.max_attempts,
+        previous_errors: Vec::new(),
+        enforcement,
+        cache: Some(cache),
+        error: None,
+    };
+    if surface.kind == OperatorExecutionSurfaceKind::Local {
+        record_local_operator_cache_hit(run_dir, &hit, &status_metadata, &result)?;
+    } else {
+        record_environment_operator_cache_hit(ctx, run_dir, &hit, &status_metadata, &result)
+            .await?;
+    }
+    Ok(result)
+}
+
+fn record_local_operator_cache_hit(
+    run_dir: &str,
+    hit: &OperatorCacheHit,
+    status_metadata: &OperatorRunStatusMetadata,
+    result: &OperatorRunResult,
+) -> Result<(), OperatorToolError> {
+    let run_path = PathBuf::from(run_dir);
+    fs::create_dir_all(run_path.join("logs")).map_err(|err| {
+        OperatorToolError::new("execution_infra_error", true, err.to_string()).with_run_dir(run_dir)
+    })?;
+    fs::create_dir_all(run_path.join("out")).map_err(|err| {
+        OperatorToolError::new("execution_infra_error", true, err.to_string()).with_run_dir(run_dir)
+    })?;
+    fs::create_dir_all(run_path.join("work")).map_err(|err| {
+        OperatorToolError::new("execution_infra_error", true, err.to_string()).with_run_dir(run_dir)
+    })?;
+    fs::write(
+        run_path.join("logs/stdout.txt"),
+        format!("Operator cache hit: reused run {}.\n", hit.run_id),
+    )
+    .map_err(|err| {
+        OperatorToolError::new("provenance_write_failed", false, err.to_string())
+            .with_run_dir(run_dir)
+    })?;
+    fs::write(run_path.join("logs/stderr.txt"), "").map_err(|err| {
+        OperatorToolError::new("provenance_write_failed", false, err.to_string())
+            .with_run_dir(run_dir)
+    })?;
+    write_json_file(&run_path.join("provenance.json"), result).map_err(|err| {
+        OperatorToolError::new("provenance_write_failed", false, err).with_run_dir(run_dir)
+    })?;
+    update_local_status(&run_path, "succeeded", None, Some(status_metadata))
+}
+
+async fn record_environment_operator_cache_hit(
+    ctx: &crate::domain::tools::ToolContext,
+    run_dir: &str,
+    hit: &OperatorCacheHit,
+    status_metadata: &OperatorRunStatusMetadata,
+    result: &OperatorRunResult,
+) -> Result<(), OperatorToolError> {
+    let stdout = format!("Operator cache hit: reused run {}.\n", hit.run_id);
+    let command = format!(
+        "mkdir -p {}/logs {}/out {}/work && printf %s {} > {}/logs/stdout.txt && : > {}/logs/stderr.txt",
+        sh_quote(run_dir),
+        sh_quote(run_dir),
+        sh_quote(run_dir),
+        sh_quote(&stdout),
+        sh_quote(run_dir),
+        sh_quote(run_dir)
+    );
+    execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 30).await?;
+    write_environment_json(ctx, run_dir, "provenance.json", result).await?;
+    update_environment_status(ctx, run_dir, "succeeded", None, Some(status_metadata)).await
 }
 
 fn runtime_supported(ctx: &crate::domain::tools::ToolContext, spec: &OperatorSpec) -> bool {
@@ -2515,7 +2870,7 @@ async fn remote_path_fingerprint(
         "p={}; if [ -f \"$p\" ]; then size=$(wc -c < \"$p\" 2>/dev/null | tr -d ' '); modified=$( (stat -c %Y \"$p\" 2>/dev/null || stat -f %m \"$p\" 2>/dev/null) | head -n 1 ); checksum=$(sha256sum \"$p\" 2>/dev/null | awk '{{print $1}}'); if [ -z \"$checksum\" ]; then checksum=$(shasum -a 256 \"$p\" 2>/dev/null | awk '{{print $1}}'); fi; printf '__OMIGA_FILE__\\n%s\\n%s\\n%s\\n' \"$size\" \"$modified\" \"$checksum\"; elif [ -e \"$p\" ]; then modified=$( (stat -c %Y \"$p\" 2>/dev/null || stat -f %m \"$p\" 2>/dev/null) | head -n 1 ); printf '__OMIGA_PATH__\\n%s\\n' \"$modified\"; else printf '__OMIGA_MISSING__\\n'; fi",
         sh_quote(path)
     );
-    match execute_env_command(ctx, "~", &command, 30).await {
+    match execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 30).await {
         Ok(result) => parse_remote_path_fingerprint(location, path, &result.output),
         Err(_) => json!({
             "mode": "reference",
@@ -2773,6 +3128,8 @@ async fn execute_local(
     input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
+    enforcement: JsonValue,
+    cache: Option<OperatorRunCacheMetadata>,
     run_context: Option<OperatorRunContext>,
     retry_state: OperatorRetryState,
 ) -> Result<OperatorRunResult, OperatorToolError> {
@@ -2888,7 +3245,8 @@ async fn execute_local(
         attempt: retry_state.attempt,
         max_attempts: retry_state.max_attempts,
         previous_errors: retry_state.previous_errors,
-        enforcement: enforcement_json(ctx, &resolved.spec),
+        enforcement,
+        cache,
         error: None,
     };
     write_json_file(&provenance_path, &result).map_err(|err| {
@@ -2909,6 +3267,8 @@ async fn execute_in_environment(
     input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
+    enforcement: JsonValue,
+    cache: Option<OperatorRunCacheMetadata>,
     run_context: Option<OperatorRunContext>,
     retry_state: OperatorRetryState,
 ) -> Result<OperatorRunResult, OperatorToolError> {
@@ -2927,7 +3287,7 @@ async fn execute_in_environment(
         sh_quote(run_dir),
         sh_quote(run_dir)
     );
-    execute_env_command(ctx, "~", &mkdir, 30).await?;
+    execute_env_command(ctx, &operator_environment_cwd(ctx), &mkdir, 30).await?;
     update_environment_status(ctx, run_dir, "created", None, Some(&status_metadata)).await?;
     update_environment_status(ctx, run_dir, "running", None, Some(&status_metadata)).await?;
     let staged_argv = stage_remote_plugin_files(ctx, &resolved.spec, run_dir, argv).await?;
@@ -2988,7 +3348,8 @@ async fn execute_in_environment(
         attempt: retry_state.attempt,
         max_attempts: retry_state.max_attempts,
         previous_errors: retry_state.previous_errors,
-        enforcement: enforcement_json(ctx, &resolved.spec),
+        enforcement,
+        cache,
         error: None,
     };
     write_environment_json(ctx, run_dir, "provenance.json", &result).await?;
@@ -3047,7 +3408,7 @@ async fn stage_remote_plugin_files(
                 sh_quote(&remote_path),
                 sh_quote(&remote_path)
             );
-            execute_env_command(ctx, "~", &command, 30).await?;
+            execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 30).await?;
             staged.push(remote_path);
         } else {
             staged.push(arg.clone());
@@ -3100,6 +3461,10 @@ async fn execute_env_command(
         OperatorToolError::new("execution_infra_error", true, err.to_string())
             .with_suggested_action("Retry if the execution backend was temporarily unavailable.")
     })
+}
+
+fn operator_environment_cwd(ctx: &crate::domain::tools::ToolContext) -> String {
+    crate::domain::tools::env_store::remote_path(ctx, ".")
 }
 
 fn command_with_log_capture(argv: &[String]) -> String {
@@ -3507,7 +3872,7 @@ async fn read_environment_json(
         sh_quote(&target),
         sh_quote(&target),
     );
-    let result = execute_env_command(ctx, "~", &command, 30).await?;
+    let result = execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 30).await?;
     if result.output.trim() == "__OMIGA_OPERATOR_MISSING__" {
         return Ok(None);
     }
@@ -3536,7 +3901,7 @@ async fn read_environment_text_tail(
         limit_bytes,
         sh_quote(&target),
     );
-    let result = execute_env_command(ctx, "~", &command, 30).await?;
+    let result = execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 30).await?;
     if result.output.trim() == "__OMIGA_OPERATOR_MISSING__" {
         Ok(None)
     } else {
@@ -3579,7 +3944,7 @@ async fn write_environment_json(
         sh_quote(&encoded),
         sh_quote(&target),
     );
-    execute_env_command(ctx, "~", &command, 30)
+    execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 30)
         .await
         .map(|_| ())
         .map_err(|err| {
@@ -3700,7 +4065,7 @@ pub async fn list_operator_runs_for_context(
         sh_quote(&surface.run_dir),
         sh_quote(&surface.run_dir)
     );
-    let result = execute_env_command(ctx, "~", &command, 30)
+    let result = execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 30)
         .await
         .map_err(|err| err.message)?;
     let mut summaries = Vec::new();
@@ -4015,7 +4380,7 @@ async fn verify_artifact_path_for_context(
         sh_quote(path),
         sh_quote(path)
     );
-    match execute_env_command(ctx, "~", &command, 30).await {
+    match execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 30).await {
         Ok(result) if result.returncode == 0 => OperatorRunCheck {
             name: format!("output_artifact:{output_name}"),
             ok: true,
@@ -4473,6 +4838,74 @@ mod tests {
         (plugin_root, manifest)
     }
 
+    fn cached_report_operator_spec(
+        tmp: &TempDir,
+        marker_path: &Path,
+        cache: Option<JsonValue>,
+    ) -> OperatorSpec {
+        OperatorSpec {
+            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
+            kind: OPERATOR_KIND.to_string(),
+            metadata: OperatorMetadata {
+                id: "cached_report".to_string(),
+                version: "1".to_string(),
+                name: None,
+                description: Some("cacheable local report".to_string()),
+                tags: Vec::new(),
+            },
+            interface: OperatorInterfaceSpec {
+                inputs: BTreeMap::from([(
+                    "input".to_string(),
+                    OperatorFieldSpec {
+                        kind: OperatorFieldKind::File,
+                        required: true,
+                        ..OperatorFieldSpec::default()
+                    },
+                )]),
+                outputs: BTreeMap::from([(
+                    "report".to_string(),
+                    OperatorFieldSpec {
+                        kind: OperatorFieldKind::File,
+                        required: true,
+                        glob: Some("report.txt".to_string()),
+                        ..OperatorFieldSpec::default()
+                    },
+                )]),
+                ..OperatorInterfaceSpec::default()
+            },
+            smoke_tests: Vec::new(),
+            execution: OperatorExecutionSpec {
+                argv: vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "printf 'run\\n' >> \"$1\"; cat \"$2\" > \"$3/report.txt\"".to_string(),
+                    "cached_report".to_string(),
+                    marker_path.to_string_lossy().into_owned(),
+                    "${inputs.input}".to_string(),
+                    "${outdir}".to_string(),
+                ],
+            },
+            runtime: None,
+            cache,
+            resources: BTreeMap::new(),
+            bindings: Vec::new(),
+            permissions: None,
+            source: OperatorSource {
+                source_plugin: "test@local".to_string(),
+                plugin_root: tmp.path().to_path_buf(),
+                manifest_path: tmp.path().join("operator.yaml"),
+            },
+        }
+    }
+
+    fn input_file_invocation(input: &str) -> OperatorInvocation {
+        OperatorInvocation {
+            inputs: BTreeMap::from([("input".to_string(), JsonValue::String(input.to_string()))]),
+            params: BTreeMap::new(),
+            resources: BTreeMap::new(),
+        }
+    }
+
     #[test]
     fn parses_manifest_and_generates_tool_schema() {
         let tmp = TempDir::new().unwrap();
@@ -4503,6 +4936,8 @@ interface:
       required: true
 execution:
   argv: ["fastqc", "--threads", "${params.threads}", "${inputs.reads}"]
+cache:
+  enabled: true
 resources:
   cpu:
     default: 4
@@ -4515,6 +4950,7 @@ bindings:
         .unwrap();
         let spec = load_operator_manifest(&manifest, "p@m", tmp.path()).unwrap();
         assert_eq!(spec.metadata.id, "fastqc");
+        assert_eq!(spec.cache, Some(json!({"enabled": true})));
         let schema = operator_parameters_schema(&spec);
         assert_eq!(schema["required"][0], "inputs");
         assert!(schema["properties"]["inputs"]["properties"]["reads"]["items"].is_object());
@@ -4778,6 +5214,7 @@ execution:
                 argv: vec!["true".to_string()],
             },
             runtime: None,
+            cache: None,
             resources: BTreeMap::new(),
             bindings: Vec::new(),
             permissions: None,
@@ -4817,6 +5254,7 @@ execution:
                 argv: vec!["true".to_string()],
             },
             runtime: None,
+            cache: None,
             resources: BTreeMap::new(),
             bindings: Vec::new(),
             permissions: None,
@@ -4874,6 +5312,7 @@ execution:
                 argv: vec!["cat".to_string(), "${inputs.files}".to_string()],
             },
             runtime: None,
+            cache: None,
             resources: BTreeMap::new(),
             bindings: Vec::new(),
             permissions: None,
@@ -4929,6 +5368,7 @@ execution:
                 "container": { "supported": ["docker"] },
                 "scheduler": { "supported": ["none"] }
             })),
+            cache: None,
             resources: BTreeMap::from([(
                 "cpu".to_string(),
                 OperatorResourceSpec {
@@ -4992,6 +5432,7 @@ execution:
                 "scheduler": { "supported": ["none"] },
                 "retry": { "maxAttempts": 4 }
             })),
+            cache: None,
             resources: BTreeMap::new(),
             bindings: Vec::new(),
             permissions: None,
@@ -5145,6 +5586,7 @@ execution:
                 },
                 "scheduler": { "supported": ["none"] }
             })),
+            cache: None,
             resources: BTreeMap::new(),
             bindings: Vec::new(),
             permissions: None,
@@ -5206,6 +5648,7 @@ execution:
                 },
                 "scheduler": { "supported": ["none"] }
             })),
+            cache: None,
             resources: BTreeMap::new(),
             bindings: Vec::new(),
             permissions: None,
@@ -5257,6 +5700,7 @@ execution:
                 "container": { "supported": ["none", "docker"] },
                 "scheduler": { "supported": ["none"] }
             })),
+            cache: None,
             resources: BTreeMap::new(),
             bindings: Vec::new(),
             permissions: None,
@@ -5480,6 +5924,149 @@ execution:
     }
 
     #[tokio::test]
+    async fn cacheable_local_operator_reuses_workspace_run_outputs() {
+        let tmp = TempDir::new().unwrap();
+        let input = tmp.path().join("input.txt");
+        let marker = tmp.path().join("executions.txt");
+        fs::write(&input, "first\n").unwrap();
+        let spec = cached_report_operator_spec(&tmp, &marker, Some(json!({"enabled": true})));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let invocation = input_file_invocation("input.txt");
+
+        let first = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "cached_report".to_string(),
+                spec: spec.clone(),
+            },
+            invocation.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.status, "succeeded");
+        assert_eq!(
+            first.cache.as_ref().map(|cache| cache.hit),
+            Some(false),
+            "fresh cache-enabled runs should record their cache key without claiming a hit"
+        );
+        assert!(first
+            .run_dir
+            .starts_with(&tmp.path().join(".omiga/runs").to_string_lossy().to_string()));
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "run\n");
+
+        let second = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "cached_report".to_string(),
+                spec: spec.clone(),
+            },
+            invocation.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.status, "succeeded");
+        assert_ne!(second.run_id, first.run_id);
+        let second_cache = second.cache.as_ref().expect("second run cache metadata");
+        assert!(second_cache.hit);
+        assert_eq!(
+            second_cache.source_run_id.as_deref(),
+            Some(first.run_id.as_str())
+        );
+        assert_eq!(
+            second_cache.source_run_dir.as_deref(),
+            Some(first.run_dir.as_str())
+        );
+        assert_eq!(
+            second.outputs["report"][0].path, first.outputs["report"][0].path,
+            "cache hits reuse the prior workspace artifact reference instead of copying outputs"
+        );
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            "run\n",
+            "cache hit must not execute the operator command again"
+        );
+        let second_stdout = fs::read_to_string(Path::new(&second.run_dir).join("logs/stdout.txt"))
+            .expect("cache hit stdout log");
+        assert!(
+            second_stdout.contains(&format!("Operator cache hit: reused run {}.", first.run_id))
+        );
+
+        fs::write(&input, "changed\n").unwrap();
+        let third = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "cached_report".to_string(),
+                spec,
+            },
+            invocation,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(third.status, "succeeded");
+        assert_eq!(third.cache.as_ref().map(|cache| cache.hit), Some(false));
+        assert_ne!(
+            third.outputs["report"][0].path,
+            first.outputs["report"][0].path
+        );
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            "run\nrun\n",
+            "changed input fingerprint should miss the workspace cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn smoke_operator_runs_bypass_cache() {
+        let tmp = TempDir::new().unwrap();
+        let input = tmp.path().join("input.txt");
+        let marker = tmp.path().join("smoke-executions.txt");
+        fs::write(&input, "smoke\n").unwrap();
+        let spec = cached_report_operator_spec(&tmp, &marker, Some(json!({"enabled": true})));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let invocation = input_file_invocation("input.txt");
+        let run_context = Some(OperatorRunContext {
+            kind: Some("smoke".to_string()),
+            smoke_test_id: Some("default".to_string()),
+            smoke_test_name: Some("Cache bypass smoke".to_string()),
+        });
+
+        let first = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "cached_report".to_string(),
+                spec: spec.clone(),
+            },
+            invocation.clone(),
+            run_context.clone(),
+        )
+        .await
+        .unwrap();
+        let second = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "cached_report".to_string(),
+                spec,
+            },
+            invocation,
+            run_context,
+        )
+        .await
+        .unwrap();
+
+        assert!(first.cache.is_none());
+        assert!(second.cache.is_none());
+        assert_ne!(second.run_id, first.run_id);
+        assert_ne!(
+            second.outputs["report"][0].path,
+            first.outputs["report"][0].path
+        );
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "run\nrun\n");
+    }
+
+    #[tokio::test]
     async fn executes_local_operator_and_collects_outputs() {
         let tmp = TempDir::new().unwrap();
         let input = tmp.path().join("input.txt");
@@ -5523,6 +6110,7 @@ execution:
                 ],
             },
             runtime: None,
+            cache: None,
             resources: BTreeMap::new(),
             bindings: Vec::new(),
             permissions: None,
@@ -5607,6 +6195,7 @@ execution:
                     argv: vec!["true".to_string()],
                 },
                 runtime: None,
+                cache: None,
                 resources: BTreeMap::new(),
                 bindings: Vec::new(),
                 permissions: None,

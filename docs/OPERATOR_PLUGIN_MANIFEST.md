@@ -139,6 +139,33 @@ Manual Docker validation can be run with:
 cargo test --manifest-path src-tauri/Cargo.toml executes_bundled_container_smoke_operator_with_docker_runtime --lib -- --ignored --nocapture
 ```
 
+## Cache policy
+
+Operator result reuse is explicit opt-in. Add either a top-level cache policy or a runtime cache policy:
+
+```yaml
+cache:
+  enabled: true
+```
+
+or:
+
+```yaml
+runtime:
+  cache:
+    enabled: true
+```
+
+Cache keys are scoped to the active execution surface and include operator identity/version/source, the selected local/SSH/sandbox surface, canonical inputs, input fingerprints, effective params/resources, the manifest argv template, and enforcement metadata.
+
+Rules:
+
+- Cache lookup only scans the active session run registry: `.omiga/runs` under the current local workspace, selected SSH workspace, or sandbox workspace.
+- Cache never uses a global user-home output store and never copies outputs into a new run directory.
+- A cache hit creates a new run record under the active workspace and records `cache.hit=true`, `sourceRunId`, and `sourceRunDir`, while output artifact refs point to the original workspace artifact.
+- Cached output refs are verified in place before reuse.
+- Smoke runs bypass cache even when the manifest enables cache, so validation always executes the operator command.
+
 ## Execution
 
 Execution is structured argv, not an inline shell template. Plugin wrapper files can be referenced relative to the plugin root and are staged into remote run workspaces when executing over SSH/sandbox.
@@ -166,6 +193,7 @@ Operators must write durable result artifacts under `${outdir}`. Output globs ar
 - Remote artifacts, logs, and provenance stay remote; results keep references and are read/verified in place.
 - Path-like input fingerprints are persisted in provenance. Local file inputs use `sha256` plus size/mtime; remote file inputs best-effort `sha256sum`/`shasum -a 256` on the selected execution surface and fall back to stat/reference metadata if checksum tooling is unavailable.
 - Operator outputs are collected only from `.omiga/runs/{run_id}/out` in the active session workspace or selected remote workspace.
+- Cache hit records are also written under the active workspace `.omiga/runs/{run_id}` and only reference prior artifacts inside that same execution surface.
 
 ## Failure diagnostics
 

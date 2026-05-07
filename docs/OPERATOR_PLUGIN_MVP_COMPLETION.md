@@ -19,6 +19,7 @@ Implemented:
 - Explicit retry policy for retryable infrastructure failures with `attempt`, `maxAttempts`, and `previousErrors` recorded in status/provenance and Agent-facing failures.
 - Strong path-like input fingerprints: local file inputs persist sha256/size/mtime, and remote file inputs best-effort checksum on the selected execution surface with stat/reference fallback.
 - Session-bounded output collection: output globs are relative to the operator `${outdir}`, and absolute or parent-directory output globs are rejected so collected results stay under the active session run workspace.
+- Explicit opt-in cache policy: cache-enabled operators reuse prior succeeded runs only within the active local/SSH/sandbox workspace `.omiga/runs`, verify cached artifact refs in place, and write cache-hit provenance without copying outputs. Smoke runs bypass cache.
 - Operator settings UI with cards, run counts, success/failure/smoke statistics, details dialog, failed-run diagnosis, copyable diagnosis payload, run detail/log/verify actions, and smoke-run launcher.
 - Built-in validation plugin `operator-smoke@omiga-curated` exposing `write_text_report@0.1.0` and `container_text_report@0.1.0`.
 
@@ -90,15 +91,11 @@ hello operator smoke
 Latest verification run:
 
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all && cargo test --manifest-path src-tauri/Cargo.toml operators --lib`
-  - Result: 21 passed, 1 ignored live Docker smoke
-- `cargo test --manifest-path src-tauri/Cargo.toml executes_bundled_container_smoke_operator_with_docker_runtime --lib -- --ignored --nocapture`
-  - Result: passed
+  - Result: 24 passed, 1 ignored live Docker smoke
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`
+  - Result: blocked by unrelated working-tree connector code (`src/domain/connectors.rs::gmail_token` dead code)
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings -A dead-code`
   - Result: passed
-- `./node_modules/.bin/tsc --noEmit`
-  - Result: passed
-- `bun run test src/components/Settings/PluginsPanel.test.tsx src/state/pluginStore.test.ts`
-  - Result: 22 passed
 - `git diff --check`
   - Result: passed
 - Naming/path invariants:
@@ -143,6 +140,6 @@ Keep separate from the operator MVP commit unless intentionally bundled:
 Recommended follow-up after MVP commit:
 
 1. Live Singularity smoke validation against an installed Singularity/Apptainer runtime.
-2. Cache policy using strong input fingerprints and run identity.
-3. Richer structured output manifest support beyond `outputs.glob`.
+2. Richer structured output manifest support beyond `outputs.glob`.
+3. Cache UI/Agent affordances for explaining cache hits and invalidation.
 4. Multi-operator workflow/rule composition.
