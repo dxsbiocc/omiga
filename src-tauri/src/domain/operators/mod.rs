@@ -2412,12 +2412,13 @@ fn validate_field_values(
     fields: &BTreeMap<String, OperatorFieldSpec>,
     values: &BTreeMap<String, JsonValue>,
 ) -> Result<(), OperatorToolError> {
+    let error_kind = field_validation_error_kind(scope);
     for (name, field) in fields {
         match values.get(name) {
             Some(value) => validate_field_value(scope, name, field, value)?,
             None if field.required => {
                 return Err(OperatorToolError::new(
-                    "input_validation_failed",
+                    error_kind,
                     false,
                     format!("Required {scope} field `{name}` is missing."),
                 )
@@ -2429,17 +2430,26 @@ fn validate_field_values(
     Ok(())
 }
 
+fn field_validation_error_kind(scope: &str) -> &'static str {
+    if scope == "structuredOutputs" {
+        "output_validation_failed"
+    } else {
+        "input_validation_failed"
+    }
+}
+
 fn validate_field_value(
     scope: &str,
     name: &str,
     field: &OperatorFieldSpec,
     value: &JsonValue,
 ) -> Result<(), OperatorToolError> {
+    let error_kind = field_validation_error_kind(scope);
     let field_path = format!("{scope}.{name}");
     if value.is_null() {
         if field.required {
             return Err(OperatorToolError::new(
-                "input_validation_failed",
+                error_kind,
                 false,
                 format!("Required {scope} field `{name}` must not be null."),
             )
@@ -2452,7 +2462,7 @@ fn validate_field_value(
         OperatorFieldKind::String | OperatorFieldKind::File | OperatorFieldKind::Directory => {
             let text = value.as_str().ok_or_else(|| {
                 OperatorToolError::new(
-                    "input_validation_failed",
+                    error_kind,
                     false,
                     format!("{scope} field `{name}` must be a string."),
                 )
@@ -2460,7 +2470,7 @@ fn validate_field_value(
             })?;
             if field.non_empty.unwrap_or(false) && text.trim().is_empty() {
                 return Err(OperatorToolError::new(
-                    "input_validation_failed",
+                    error_kind,
                     false,
                     format!("{scope} field `{name}` must not be empty."),
                 )
@@ -2471,7 +2481,7 @@ fn validate_field_value(
             let number = value.as_i64().or_else(|| value.as_u64().map(|n| n as i64));
             let Some(number) = number else {
                 return Err(OperatorToolError::new(
-                    "input_validation_failed",
+                    error_kind,
                     false,
                     format!("{scope} field `{name}` must be an integer."),
                 )
@@ -2482,7 +2492,7 @@ fn validate_field_value(
         OperatorFieldKind::Number => {
             let Some(number) = value.as_f64() else {
                 return Err(OperatorToolError::new(
-                    "input_validation_failed",
+                    error_kind,
                     false,
                     format!("{scope} field `{name}` must be a number."),
                 )
@@ -2493,7 +2503,7 @@ fn validate_field_value(
         OperatorFieldKind::Boolean => {
             if !value.is_boolean() {
                 return Err(OperatorToolError::new(
-                    "input_validation_failed",
+                    error_kind,
                     false,
                     format!("{scope} field `{name}` must be a boolean."),
                 )
@@ -2503,7 +2513,7 @@ fn validate_field_value(
         OperatorFieldKind::Json => {
             if !value.is_object() {
                 return Err(OperatorToolError::new(
-                    "input_validation_failed",
+                    error_kind,
                     false,
                     format!("{scope} field `{name}` must be a JSON object."),
                 )
@@ -2513,7 +2523,7 @@ fn validate_field_value(
         OperatorFieldKind::FileArray | OperatorFieldKind::DirectoryArray => {
             let array = value.as_array().ok_or_else(|| {
                 OperatorToolError::new(
-                    "input_validation_failed",
+                    error_kind,
                     false,
                     format!("{scope} field `{name}` must be an array of strings."),
                 )
@@ -2521,7 +2531,7 @@ fn validate_field_value(
             })?;
             if field.non_empty.unwrap_or(false) && array.is_empty() {
                 return Err(OperatorToolError::new(
-                    "input_validation_failed",
+                    error_kind,
                     false,
                     format!("{scope} field `{name}` must not be empty."),
                 )
@@ -2530,7 +2540,7 @@ fn validate_field_value(
             if let Some(min_size) = field.min_size {
                 if (array.len() as u64) < min_size {
                     return Err(OperatorToolError::new(
-                        "input_validation_failed",
+                        error_kind,
                         false,
                         format!("{scope} field `{name}` requires at least {min_size} item(s)."),
                     )
@@ -2540,7 +2550,7 @@ fn validate_field_value(
             for (index, item) in array.iter().enumerate() {
                 if !item.is_string() {
                     return Err(OperatorToolError::new(
-                        "input_validation_failed",
+                        error_kind,
                         false,
                         format!("{scope} field `{name}[{index}]` must be a string."),
                     )
@@ -2553,7 +2563,7 @@ fn validate_field_value(
 
     if !field.enum_values.is_empty() && !field.enum_values.iter().any(|item| item == value) {
         return Err(OperatorToolError::new(
-            "input_validation_failed",
+            error_kind,
             false,
             format!("{scope} field `{name}` is not one of the allowed enum values."),
         )
@@ -2569,13 +2579,14 @@ fn validate_numeric_bounds(
     number: f64,
     field: &OperatorFieldSpec,
 ) -> Result<(), OperatorToolError> {
+    let error_kind = field_validation_error_kind(scope);
     if field
         .minimum
         .map(|minimum| number < minimum)
         .unwrap_or(false)
     {
         return Err(OperatorToolError::new(
-            "input_validation_failed",
+            error_kind,
             false,
             format!(
                 "{scope} field `{name}` must be >= {}.",
@@ -2590,7 +2601,7 @@ fn validate_numeric_bounds(
         .unwrap_or(false)
     {
         return Err(OperatorToolError::new(
-            "input_validation_failed",
+            error_kind,
             false,
             format!(
                 "{scope} field `{name}` must be <= {}.",
@@ -3307,18 +3318,21 @@ async fn execute_local(
             return Err(error);
         }
     };
-    let structured_outputs = match read_local_structured_outputs(&out, run_dir) {
-        Ok(outputs) => outputs,
-        Err(error) => {
-            let error = if error.run_dir.is_none() {
-                error.with_run_dir(run_dir)
-            } else {
-                error
-            };
-            update_local_status(&run_path, "failed", Some(&error), Some(&status_metadata))?;
-            return Err(error);
-        }
-    };
+    let structured_outputs =
+        match read_local_structured_outputs(&out, run_dir).and_then(|outputs| {
+            validate_structured_outputs_against_manifest(outputs, &resolved.spec, run_dir)
+        }) {
+            Ok(outputs) => outputs,
+            Err(error) => {
+                let error = if error.run_dir.is_none() {
+                    error.with_run_dir(run_dir)
+                } else {
+                    error
+                };
+                update_local_status(&run_path, "failed", Some(&error), Some(&status_metadata))?;
+                return Err(error);
+            }
+        };
     let provenance_path = run_path.join("provenance.json");
     let result = OperatorRunResult {
         status: "succeeded".to_string(),
@@ -3424,7 +3438,11 @@ async fn execute_in_environment(
             return Err(error);
         }
     };
-    let structured_outputs = match read_environment_structured_outputs(ctx, run_dir).await {
+    let structured_outputs = match read_environment_structured_outputs(ctx, run_dir)
+        .await
+        .and_then(|outputs| {
+            validate_structured_outputs_against_manifest(outputs, &resolved.spec, run_dir)
+        }) {
         Ok(outputs) => outputs,
         Err(error) => {
             let error = if error.run_dir.is_none() {
@@ -4065,7 +4083,7 @@ fn read_local_structured_outputs(
         .with_run_dir(run_dir)
         .with_suggested_action("Write valid JSON object metadata to `${outdir}/outputs.json`.")
     })?;
-    validate_structured_outputs(value, run_dir).map(Some)
+    validate_structured_outputs_shape(value, run_dir).map(Some)
 }
 
 async fn read_environment_structured_outputs(
@@ -4191,10 +4209,10 @@ cat "$target""#,
         .with_run_dir(run_dir)
         .with_suggested_action("Write valid JSON object metadata to `${outdir}/outputs.json`.")
     })?;
-    validate_structured_outputs(value, run_dir).map(Some)
+    validate_structured_outputs_shape(value, run_dir).map(Some)
 }
 
-fn validate_structured_outputs(
+fn validate_structured_outputs_shape(
     value: JsonValue,
     run_dir: &str,
 ) -> Result<JsonValue, OperatorToolError> {
@@ -4209,6 +4227,74 @@ fn validate_structured_outputs(
     .with_field("structuredOutputs")
     .with_run_dir(run_dir)
     .with_suggested_action("Write object-shaped metadata to `${outdir}/outputs.json`."))
+}
+
+fn validate_structured_outputs_against_manifest(
+    value: Option<JsonValue>,
+    spec: &OperatorSpec,
+    run_dir: &str,
+) -> Result<Option<JsonValue>, OperatorToolError> {
+    let Some(value) = value else {
+        if let Some((name, _field)) = spec
+            .interface
+            .outputs
+            .iter()
+            .find(|(_name, field)| is_structured_output_field(field) && field.required)
+        {
+            return Err(OperatorToolError::new(
+                "output_validation_failed",
+                false,
+                format!(
+                    "Required structured output `{name}` is missing because `${{outdir}}/{OPERATOR_STRUCTURED_OUTPUTS_FILE}` was not written."
+                ),
+            )
+            .with_field(format!("structuredOutputs.{name}"))
+            .with_run_dir(run_dir)
+            .with_suggested_action(
+                "Write a JSON object to `${outdir}/outputs.json` with all required structured output fields.",
+            ));
+        }
+        return Ok(None);
+    };
+    let Some(object) = value.as_object() else {
+        return validate_structured_outputs_shape(value, run_dir).map(Some);
+    };
+    for (name, field) in &spec.interface.outputs {
+        if !is_structured_output_field(field) {
+            continue;
+        }
+        match object.get(name) {
+            Some(field_value) => {
+                validate_field_value("structuredOutputs", name, field, field_value).map_err(
+                    |error| {
+                        if error.run_dir.is_none() {
+                            error.with_run_dir(run_dir)
+                        } else {
+                            error
+                        }
+                    },
+                )?
+            }
+            None if field.required => {
+                return Err(OperatorToolError::new(
+                    "output_validation_failed",
+                    false,
+                    format!("Required structured output `{name}` is missing."),
+                )
+                .with_field(format!("structuredOutputs.{name}"))
+                .with_run_dir(run_dir)
+                .with_suggested_action(
+                    "Write all required structured output fields in `${outdir}/outputs.json`.",
+                ))
+            }
+            None => {}
+        }
+    }
+    Ok(Some(value))
+}
+
+fn is_structured_output_field(field: &OperatorFieldSpec) -> bool {
+    field.glob.is_none() && !field.kind.is_path_like()
 }
 
 async fn remote_tail(
@@ -7014,6 +7100,20 @@ execution:
                         glob: Some("report.txt".to_string()),
                         ..OperatorFieldSpec::default()
                     },
+                ), (
+                    "summary".to_string(),
+                    OperatorFieldSpec {
+                        kind: OperatorFieldKind::Json,
+                        required: true,
+                        ..OperatorFieldSpec::default()
+                    },
+                ), (
+                    "ok".to_string(),
+                    OperatorFieldSpec {
+                        kind: OperatorFieldKind::Boolean,
+                        required: true,
+                        ..OperatorFieldSpec::default()
+                    },
                 )]),
                 ..OperatorInterfaceSpec::default()
             },
@@ -7099,6 +7199,114 @@ execution:
         assert_eq!(error.kind, "output_validation_failed");
         assert_eq!(error.field.as_deref(), Some("structuredOutputs"));
         assert!(error.message.contains("parse structured output manifest"));
+    }
+
+    #[test]
+    fn validates_structured_outputs_against_manifest_fields() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().join(".omiga/runs/oprun_structured_schema");
+        let spec = OperatorSpec {
+            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
+            kind: OPERATOR_KIND.to_string(),
+            metadata: OperatorMetadata {
+                id: "structured_report".to_string(),
+                version: "1".to_string(),
+                name: None,
+                description: None,
+                tags: Vec::new(),
+            },
+            interface: OperatorInterfaceSpec {
+                outputs: BTreeMap::from([
+                    (
+                        "report".to_string(),
+                        OperatorFieldSpec {
+                            kind: OperatorFieldKind::File,
+                            required: true,
+                            glob: Some("report.txt".to_string()),
+                            ..OperatorFieldSpec::default()
+                        },
+                    ),
+                    (
+                        "summary".to_string(),
+                        OperatorFieldSpec {
+                            kind: OperatorFieldKind::Json,
+                            required: true,
+                            ..OperatorFieldSpec::default()
+                        },
+                    ),
+                    (
+                        "passed".to_string(),
+                        OperatorFieldSpec {
+                            kind: OperatorFieldKind::Boolean,
+                            required: true,
+                            ..OperatorFieldSpec::default()
+                        },
+                    ),
+                    (
+                        "score".to_string(),
+                        OperatorFieldSpec {
+                            kind: OperatorFieldKind::Number,
+                            minimum: Some(0.0),
+                            maximum: Some(1.0),
+                            ..OperatorFieldSpec::default()
+                        },
+                    ),
+                ]),
+                ..OperatorInterfaceSpec::default()
+            },
+            smoke_tests: Vec::new(),
+            execution: OperatorExecutionSpec {
+                argv: vec!["true".to_string()],
+            },
+            runtime: None,
+            cache: None,
+            resources: BTreeMap::new(),
+            bindings: Vec::new(),
+            permissions: None,
+            source: OperatorSource {
+                source_plugin: "test@local".to_string(),
+                plugin_root: tmp.path().to_path_buf(),
+                manifest_path: tmp.path().join("operator.yaml"),
+            },
+        };
+
+        let valid = validate_structured_outputs_against_manifest(
+            Some(json!({
+                "summary": { "lineCount": 2 },
+                "passed": true,
+                "score": 0.75,
+                "extra": "allowed metadata"
+            })),
+            &spec,
+            &run_dir.to_string_lossy(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(valid["summary"]["lineCount"], json!(2));
+
+        let error = validate_structured_outputs_against_manifest(
+            Some(json!({ "summary": { "lineCount": 2 }, "passed": "yes" })),
+            &spec,
+            &run_dir.to_string_lossy(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, "output_validation_failed");
+        assert_eq!(error.field.as_deref(), Some("structuredOutputs.passed"));
+
+        let error = validate_structured_outputs_against_manifest(
+            Some(json!({ "passed": true })),
+            &spec,
+            &run_dir.to_string_lossy(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, "output_validation_failed");
+        assert_eq!(error.field.as_deref(), Some("structuredOutputs.summary"));
+
+        let error =
+            validate_structured_outputs_against_manifest(None, &spec, &run_dir.to_string_lossy())
+                .unwrap_err();
+        assert_eq!(error.kind, "output_validation_failed");
+        assert_eq!(error.field.as_deref(), Some("structuredOutputs.passed"));
     }
 
     #[test]

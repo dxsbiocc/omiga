@@ -46,6 +46,12 @@ interface:
       kind: file
       glob: report.html
       required: true
+    summary:
+      kind: json
+      required: true
+      description: Small structured summary written to out/outputs.json.
+    passed:
+      kind: boolean
 ```
 
 Supported field kinds include `string`, `integer`, `number`, `boolean`, `enum`, `json`, `file`, `file_array`, `directory`, and `directory_array`.
@@ -185,6 +191,8 @@ Available substitutions include `${inputs.name}`, `${params.name}`, `${resources
 Operators must write durable result artifacts under `${outdir}`. Output globs are relative to `${outdir}`; absolute paths and `..` components are rejected so collected results cannot escape the active session run workspace.
 
 Operators may also write a small structured metadata manifest to `${outdir}/outputs.json`. When present, it must be a JSON object and stay under the same run outdir; it is persisted in provenance as `structuredOutputs` while large files continue to be referenced through declared `outputs.*.glob` artifacts.
+
+Structured output fields are declared in `interface.outputs` without `glob` and with a non-path kind such as `string`, `integer`, `number`, `boolean`, `enum`, or `json`. Required structured output fields must be present in `${outdir}/outputs.json`, and declared values are validated with the same type/bounds/enum rules as inputs and params. Extra metadata keys are allowed for now, but agents should rely only on declared fields.
 
 ## Run storage
 

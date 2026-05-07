@@ -15,6 +15,7 @@ import {
   operatorSmokeRunLabel,
   operatorSmokeTestForRun,
   operatorSmokeTestSummary,
+  operatorStructuredOutputEntries,
   operatorRunStatusColor,
   operatorRunTitle,
   operatorSmokeRunArguments,
@@ -115,6 +116,35 @@ describe("PluginsPanel diagnostics helpers", () => {
 
     expect(source).toMatch(/<OperatorCatalogSection[\s\S]*onSmokeRun=/);
     expect(source).not.toContain("{false && (\n      <OperatorCatalogSection");
+  });
+
+  it("extracts structured output entries from run details", () => {
+    expect(
+      operatorStructuredOutputEntries({
+        runId: "oprun_20260507_structured",
+        location: "local",
+        runDir: "/project/.omiga/runs/oprun_20260507_structured",
+        sourcePath: "/project/.omiga/runs/oprun_20260507_structured/provenance.json",
+        document: {
+          structuredOutputs: {
+            summary: { lineCount: 2 },
+            ok: true,
+          },
+        },
+      }),
+    ).toEqual([
+      ["summary", { lineCount: 2 }],
+      ["ok", true],
+    ]);
+    expect(
+      operatorStructuredOutputEntries({
+        runId: "oprun_20260507_no_structured",
+        location: "local",
+        runDir: "/project/.omiga/runs/oprun_20260507_no_structured",
+        sourcePath: "/project/.omiga/runs/oprun_20260507_no_structured/status.json",
+        document: { structuredOutputs: [] },
+      }),
+    ).toEqual([]);
   });
 
   it("filters plugin cards by search text and catalog state", () => {

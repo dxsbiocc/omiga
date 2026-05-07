@@ -710,6 +710,23 @@ function operatorRunCacheState(
   };
 }
 
+export function operatorStructuredOutputEntries(
+  detail?: OperatorRunDetail | null,
+): Array<[string, unknown]> {
+  const outputs = detail?.document?.structuredOutputs;
+  if (!outputs || typeof outputs !== "object" || Array.isArray(outputs)) return [];
+  return Object.entries(outputs as Record<string, unknown>);
+}
+
+function formatStructuredOutputPreview(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value == null) return "null";
+  const raw = JSON.stringify(value);
+  if (!raw) return String(value);
+  return raw.length > 240 ? `${raw.slice(0, 237)}…` : raw;
+}
+
 export function operatorRunDiagnosisSummary(run: OperatorRunSummary): string | null {
   return (
     run.errorMessage?.trim() ||
@@ -1607,6 +1624,10 @@ function OperatorRunDetailsDialog({
 }) {
   if (!run) return null;
   const detailJson = detail ? JSON.stringify(detail.document, null, 2) : "";
+  const structuredOutputEntries = operatorStructuredOutputEntries(detail);
+  const structuredOutputsJson = structuredOutputEntries.length > 0
+    ? JSON.stringify(Object.fromEntries(structuredOutputEntries), null, 2)
+    : "";
   const cacheState = operatorRunCacheState(run, detail);
   return (
     <Dialog open={Boolean(run)} onClose={onClose} fullWidth maxWidth="md" aria-labelledby="operator-run-details-title">
@@ -1703,6 +1724,36 @@ function OperatorRunDetailsDialog({
             </Stack>
           )}
           {error && <Alert severity="warning" sx={{ borderRadius: 2 }}>{error}</Alert>}
+          {structuredOutputEntries.length > 0 && (
+            <Paper variant="outlined" sx={{ borderRadius: 2, overflow: "hidden" }}>
+              <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between" sx={{ px: 1.25, py: 0.75, bgcolor: "action.hover" }}>
+                <Typography variant="caption" fontWeight={850}>
+                  Structured outputs
+                </Typography>
+                <Button
+                  size="small"
+                  variant="text"
+                  startIcon={<ContentCopyRounded />}
+                  onClick={() => onCopy(structuredOutputsJson, `Copied ${run.runId} structured outputs`)}
+                  sx={{ textTransform: "none", borderRadius: 1.5 }}
+                >
+                  Copy
+                </Button>
+              </Stack>
+              <Stack spacing={0.75} sx={{ p: 1.25 }}>
+                {structuredOutputEntries.map(([name, value]) => (
+                  <Box key={name} sx={{ p: 0.85, borderRadius: 1.5, bgcolor: "action.hover" }}>
+                    <Typography variant="caption" fontWeight={850} sx={{ display: "block", wordBreak: "break-all" }}>
+                      {name}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", wordBreak: "break-word", whiteSpace: "pre-wrap" }}>
+                      {formatStructuredOutputPreview(value)}
+                    </Typography>
+                  </Box>
+                ))}
+              </Stack>
+            </Paper>
+          )}
           {operatorRunStatusColor(run.status) === "error" && (
             <Alert severity="error" sx={{ borderRadius: 2 }}>
               <Stack spacing={0.75}>
