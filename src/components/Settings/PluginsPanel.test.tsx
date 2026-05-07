@@ -501,6 +501,27 @@ describe("PluginsPanel diagnostics helpers", () => {
           logo: null,
           screenshots: [],
         },
+      }))?.color,
+    ).toBe("#276DC3");
+    expect(
+      operatorPluginIconSpec(pluginSummary({
+        name: "operator-pca-r",
+        interface: {
+          displayName: "PCA",
+          shortDescription: "PCA powered by base R",
+          longDescription: null,
+          developerName: null,
+          category: "Operator",
+          capabilities: ["Operator", "Rscript"],
+          websiteUrl: null,
+          privacyPolicyUrl: null,
+          termsOfServiceUrl: null,
+          defaultPrompt: [],
+          brandColor: null,
+          composerIcon: null,
+          logo: null,
+          screenshots: [],
+        },
       }))?.body,
     ).toContain("<path");
     expect(

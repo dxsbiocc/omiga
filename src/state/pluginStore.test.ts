@@ -14,6 +14,7 @@ import {
   summarizeOperatorRunResult,
   updateOperatorEnabledInCatalog,
   updatePluginEnabledInMarketplaces,
+  updatePluginInstalledInMarketplaces,
   usePluginStore,
   type OperatorSummary,
   type PluginMarketplaceEntry,
@@ -95,6 +96,42 @@ describe("local plugin catalog updates", () => {
     expect(updated).not.toBe(original);
     expect(updated[0]).not.toBe(original[0]);
     expect(updated[0].plugins[0]).toMatchObject({ enabled: true });
+    expect(updated[0].plugins[1]).toBe(other);
+  });
+
+  it("marks one installed plugin without rebuilding unrelated marketplace entries", () => {
+    const target = plugin({
+      id: "operator-pca-r@omiga-curated",
+      name: "operator-pca-r",
+      installed: false,
+      enabled: false,
+    });
+    const other = plugin({
+      id: "operator-seqtk@omiga-curated",
+      name: "operator-seqtk",
+      installed: false,
+      enabled: false,
+    });
+    const original = [marketplace("/marketplace.json", [target, other])];
+
+    const updated = updatePluginInstalledInMarketplaces(
+      original,
+      "operator-pca-r@omiga-curated",
+      {
+        pluginId: "operator-pca-r@omiga-curated",
+        installedPath: "/plugins/operator-pca-r",
+        authPolicy: "ON_USE",
+      },
+    );
+
+    expect(updated).not.toBe(original);
+    expect(updated[0]).not.toBe(original[0]);
+    expect(updated[0].plugins[0]).toMatchObject({
+      installed: true,
+      enabled: true,
+      installedPath: "/plugins/operator-pca-r",
+      authPolicy: "ON_USE",
+    });
     expect(updated[0].plugins[1]).toBe(other);
   });
 
@@ -236,6 +273,66 @@ describe("usePluginStore operator actions", () => {
       isMutating: false,
       error: null,
     });
+  });
+
+  it("installs plugins with a local catalog update instead of a full marketplace reload", async () => {
+    const target = plugin({
+      id: "operator-pca-r@omiga-curated",
+      name: "operator-pca-r",
+      installed: false,
+      enabled: false,
+    });
+    const other = plugin({
+      id: "operator-seqtk@omiga-curated",
+      name: "operator-seqtk",
+      installed: false,
+      enabled: false,
+    });
+    usePluginStore.setState({
+      marketplaces: [marketplace("/marketplace.json", [target, other])],
+    });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "install_omiga_plugin") {
+        return {
+          pluginId: "operator-pca-r@omiga-curated",
+          installedPath: "/plugins/operator-pca-r",
+          authPolicy: "ON_USE",
+        };
+      }
+      if (command === "list_omiga_plugin_retrieval_statuses") return [];
+      if (command === "list_omiga_plugin_process_pool_statuses") return [];
+      if (command === "list_operators") {
+        return {
+          registryPath: "/registry.json",
+          operators: [],
+          diagnostics: [],
+        };
+      }
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    await usePluginStore.getState().installPlugin(target, "/project");
+
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "list_omiga_plugin_marketplaces",
+      expect.anything(),
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "list_omiga_plugin_retrieval_statuses",
+      expect.anything(),
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "list_omiga_plugin_process_pool_statuses",
+      expect.anything(),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("list_operators");
+    expect(usePluginStore.getState().marketplaces[0].plugins[0]).toMatchObject({
+      installed: true,
+      enabled: true,
+      installedPath: "/plugins/operator-pca-r",
+    });
+    expect(usePluginStore.getState().marketplaces[0].plugins[1]).toBe(other);
+    expect(usePluginStore.getState().isMutating).toBe(false);
   });
 
   it("invokes smoke runs with run context and stores the returned summary", async () => {

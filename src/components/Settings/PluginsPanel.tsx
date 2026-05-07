@@ -164,6 +164,7 @@ type OperatorPluginIconSpec = {
   kind: OperatorPluginIconKind;
   label: string;
   body: string | null;
+  color: string | null;
 };
 
 const operatorIconifyBodies: Record<Exclude<OperatorPluginIconKind, "operator">, string> = {
@@ -173,6 +174,14 @@ const operatorIconifyBodies: Record<Exclude<OperatorPluginIconKind, "operator">,
   python: '<path fill="currentColor" d="m14.25.18l.9.2l.73.26l.59.3l.45.32l.34.34l.25.34l.16.33l.1.3l.04.26l.02.2l-.01.13V8.5l-.05.63l-.13.55l-.21.46l-.26.38l-.3.31l-.33.25l-.35.19l-.35.14l-.33.1l-.3.07l-.26.04l-.21.02H8.77l-.69.05l-.59.14l-.5.22l-.41.27l-.33.32l-.27.35l-.2.36l-.15.37l-.1.35l-.07.32l-.04.27l-.02.21v3.06H3.17l-.21-.03l-.28-.07l-.32-.12l-.35-.18l-.36-.26l-.36-.36l-.35-.46l-.32-.59l-.28-.73l-.21-.88l-.14-1.05l-.05-1.23l.06-1.22l.16-1.04l.24-.87l.32-.71l.36-.57l.4-.44l.42-.33l.42-.24l.4-.16l.36-.1l.32-.05l.24-.01h.16l.06.01h8.16v-.83H6.18l-.01-2.75l-.02-.37l.05-.34l.11-.31l.17-.28l.25-.26l.31-.23l.38-.2l.44-.18l.51-.15l.58-.12l.64-.1l.71-.06l.77-.04l.84-.02l1.27.05zm-6.3 1.98l-.23.33l-.08.41l.08.41l.23.34l.33.22l.41.09l.41-.09l.33-.22l.23-.34l.08-.41l-.08-.41l-.23-.33l-.33-.22l-.41-.09l-.41.09zm13.09 3.95l.28.06l.32.12l.35.18l.36.27l.36.35l.35.47l.32.59l.28.73l.21.88l.14 1.04l.05 1.23l-.06 1.23l-.16 1.04l-.24.86l-.32.71l-.36.57l-.4.45l-.42.33l-.42.24l-.4.16l-.36.09l-.32.05l-.24.02l-.16-.01h-8.22v.82h5.84l.01 2.76l.02.36l-.05.34l-.11.31l-.17.29l-.25.25l-.31.24l-.38.2l-.44.17l-.51.15l-.58.13l-.64.09l-.71.07l-.77.04l-.84.01l-1.27-.04l-1.07-.14l-.9-.2l-.73-.25l-.59-.3l-.45-.33l-.34-.34l-.25-.34l-.16-.33l-.1-.3l-.04-.25l-.02-.2l.01-.13v-5.34l.05-.64l.13-.54l.21-.46l.26-.38l.3-.32l.33-.24l.35-.2l.35-.14l.33-.1l.3-.06l.26-.04l.21-.02l.13-.01h5.84l.69-.05l.59-.14l.5-.21l.41-.28l.33-.32l.27-.35l.2-.36l.15-.36l.1-.35l.07-.32l.04-.28l.02-.21V6.07h2.09l.14.01zm-6.47 14.25l-.23.33l-.08.41l.08.41l.23.33l.33.23l.41.08l.41-.08l.33-.23l.23-.33l.08-.41l-.08-.41l-.23-.33l-.33-.23l-.41-.08l-.41.08z"/>',
   c: '<path fill="currentColor" d="M16.592 9.196s-.354-3.298-3.627-3.39c-3.274-.09-4.955 2.474-4.955 6.14s1.858 6.597 5.045 6.597c3.184 0 3.538-3.665 3.538-3.665l6.104.365s.36 3.31-2.196 5.836c-2.552 2.524-5.69 2.937-7.876 2.92c-2.19-.016-5.226.035-8.16-2.97c-2.938-3.01-3.436-5.93-3.436-8.8s.556-6.67 4.047-9.55C7.444.72 9.849 0 12.254 0c10.042 0 10.717 9.26 10.717 9.26z"/>',
   shell: '<path fill="currentColor" d="M21.038 4.9L13.461.402a2.86 2.86 0 0 0-2.923.001L2.961 4.9A3.02 3.02 0 0 0 1.5 7.503v8.995c0 1.073.557 2.066 1.462 2.603l7.577 4.497a2.86 2.86 0 0 0 2.922 0l7.577-4.497a3.02 3.02 0 0 0 1.462-2.603V7.503A3.02 3.02 0 0 0 21.038 4.9M15.17 18.946l.013.646c.001.078-.05.167-.111.198l-.383.22c-.061.031-.111-.007-.112-.085l-.007-.635c-.328.136-.66.169-.872.084c-.04-.016-.057-.075-.041-.142l.139-.584a.24.24 0 0 1 .069-.121a.2.2 0 0 1 .036-.026q.033-.017.062-.006c.229.077.521.041.802-.101c.357-.181.596-.545.592-.907c-.003-.328-.181-.465-.613-.468c-.55.001-1.064-.107-1.072-.917c-.007-.667.34-1.361.889-1.8l-.007-.652c-.001-.08.048-.168.111-.2l.37-.236c.061-.031.111.007.112.087l.006.653c.273-.109.511-.138.726-.088c.047.012.067.076.048.151l-.144.578a.26.26 0 0 1-.065.116a.2.2 0 0 1-.038.028a.1.1 0 0 1-.057.009c-.098-.022-.332-.073-.699.113c-.385.195-.52.53-.517.778c.003.297.155.387.681.396c.7.012 1.003.318 1.01 1.023c.007.689-.362 1.433-.928 1.888m3.973-1.087c0 .06-.008.116-.058.145l-1.916 1.164c-.05.029-.09.004-.09-.056v-.494c0-.06.037-.093.087-.122l1.887-1.129c.05-.029.09-.004.09.056zm1.316-11.062l-7.168 4.427c-.894.523-1.553 1.109-1.553 2.187v8.833c0 .645.26 1.063.66 1.184a2.3 2.3 0 0 1-.398.039c-.42 0-.833-.114-1.197-.33L3.226 18.64a2.5 2.5 0 0 1-1.201-2.142V7.503c0-.881.46-1.702 1.201-2.142L10.803.863a2.34 2.34 0 0 1 2.394 0l7.577 4.498a2.48 2.48 0 0 1 1.164 1.732c-.252-.536-.818-.682-1.479-.296"/>',
+};
+
+const operatorIconColors: Record<Exclude<OperatorPluginIconKind, "operator">, string> = {
+  r: "#276DC3",
+  cpp: "#00599C",
+  python: "#3776AB",
+  c: "#A8B9CC",
+  shell: "#4EAA25",
 };
 
 export function operatorPluginIconSpec(plugin: PluginSummary): OperatorPluginIconSpec | null {
@@ -208,6 +217,7 @@ export function operatorPluginIconSpec(plugin: PluginSummary): OperatorPluginIco
     kind,
     label: labels[kind],
     body: kind === "operator" ? null : operatorIconifyBodies[kind],
+    color: kind === "operator" ? null : operatorIconColors[kind],
   };
 }
 
@@ -996,6 +1006,7 @@ function PluginCard({
     ? operatorRegistrationChecked ? "Registered" : "Not registered"
     : `${registeredOperatorCount}/${operators.length} registered`;
   const operatorIcon = operatorPluginIconSpec(plugin);
+  const iconTone = operatorIcon?.color ?? tone;
 
   const openDetails = () => onOpenDetails(plugin);
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -1049,9 +1060,9 @@ function PluginCard({
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
-          color: tone,
-          bgcolor: alpha(tone, theme.palette.mode === "dark" ? 0.18 : 0.09),
-          border: `1px solid ${alpha(tone, theme.palette.mode === "dark" ? 0.22 : 0.12)}`,
+          color: iconTone,
+          bgcolor: alpha(iconTone, theme.palette.mode === "dark" ? 0.18 : 0.09),
+          border: `1px solid ${alpha(iconTone, theme.palette.mode === "dark" ? 0.22 : 0.12)}`,
           flexShrink: 0,
         }}
       >
@@ -1148,6 +1159,7 @@ function PluginCatalogGroupList({
   processPoolStatusesByPlugin,
   operatorsByPlugin,
   busy,
+  busyPluginIds,
   onInstall,
   onToggle,
   onOperatorRegistrationChange,
@@ -1158,6 +1170,7 @@ function PluginCatalogGroupList({
   processPoolStatusesByPlugin: Map<string, PluginProcessPoolRouteStatus[]>;
   operatorsByPlugin: Map<string, OperatorSummary[]>;
   busy: boolean;
+  busyPluginIds: Set<string>;
   onInstall: (plugin: PluginSummary) => void;
   onToggle: (plugin: PluginSummary, enabled: boolean) => void;
   onOperatorRegistrationChange: (operators: OperatorSummary[], enabled: boolean) => void;
@@ -1203,7 +1216,7 @@ function PluginCatalogGroupList({
                           retrievalStatuses={retrievalStatusesByPlugin.get(plugin.id)}
                           processPoolStatuses={processPoolStatusesByPlugin.get(plugin.id)}
                           operators={pluginOperators}
-                          busy={busy}
+                          busy={busy || busyPluginIds.has(plugin.id)}
                           onInstall={onInstall}
                           onToggle={onToggle}
                           onOperatorRegistrationChange={onOperatorRegistrationChange}
@@ -1263,6 +1276,8 @@ function PluginDetailsDialog({
     processPoolStatuses,
   );
   const operatorIcon = operatorPluginIconSpec(plugin);
+  const detailIconTone = operatorIcon?.color
+    ?? (plugin.installed && plugin.enabled ? theme.palette.success.main : theme.palette.text.secondary);
   const hasRuntimeDetails =
     retrievalStatuses.length > 0 || processPoolStatuses.length > 0 || runtimeSummary.lastError;
   const action = plugin.installed ? (
@@ -1337,12 +1352,9 @@ function PluginDetailsDialog({
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
-                color: plugin.installed && plugin.enabled ? "success.main" : "text.secondary",
-                bgcolor: alpha(
-                  plugin.installed && plugin.enabled ? theme.palette.success.main : theme.palette.text.primary,
-                  theme.palette.mode === "dark" ? 0.16 : 0.07,
-                ),
-                border: `1px solid ${alpha(theme.palette.text.primary, theme.palette.mode === "dark" ? 0.18 : 0.1)}`,
+                color: detailIconTone,
+                bgcolor: alpha(detailIconTone, theme.palette.mode === "dark" ? 0.16 : 0.07),
+                border: `1px solid ${alpha(detailIconTone, theme.palette.mode === "dark" ? 0.2 : 0.11)}`,
                 flexShrink: 0,
               }}
             >
@@ -2912,6 +2924,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   const [pluginSearch, setPluginSearch] = useState("");
   const [pluginFilter, setPluginFilter] = useState<PluginCatalogFilter>("all");
   const [dismissedFeedbackKey, setDismissedFeedbackKey] = useState<string | null>(null);
+  const [installingPluginId, setInstallingPluginId] = useState<string | null>(null);
   const projectRoot = projectPath.trim() || undefined;
   const theme = useTheme();
   const sessionId = useSessionStore((state) => state.currentSession?.id ?? null);
@@ -3023,6 +3036,10 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     return grouped;
   }, [processPoolStatuses]);
   const hasPluginCatalogFilters = pluginSearch.trim().length > 0 || pluginFilter !== "all";
+  const busyPluginIds = useMemo(
+    () => new Set(installingPluginId ? [installingPluginId] : []),
+    [installingPluginId],
+  );
   const feedbackText = error || message;
   const feedbackSeverity = error ? "error" : "success";
   const feedbackKey = feedbackText ? `${feedbackSeverity}:${feedbackText}` : null;
@@ -3040,11 +3057,14 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
 
   const handleInstall = async (plugin: PluginSummary) => {
     setMessage(null);
+    setInstallingPluginId(plugin.id);
     try {
       await installPlugin(plugin, projectRoot);
       setMessage(`Installed ${displayName(plugin)}`);
     } catch {
       // Store exposes the error banner.
+    } finally {
+      setInstallingPluginId((current) => (current === plugin.id ? null : current));
     }
   };
 
@@ -3499,7 +3519,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         open={Boolean(detailPlugin)}
         retrievalStatuses={detailPlugin ? retrievalStatusesByPlugin.get(detailPlugin.id) : undefined}
         processPoolStatuses={detailPlugin ? processPoolStatusesByPlugin.get(detailPlugin.id) : undefined}
-        busy={isMutating}
+        busy={isMutating || (detailPlugin ? busyPluginIds.has(detailPlugin.id) : false)}
         onClose={() => setDetailPluginId(null)}
         onInstall={(plugin) => void handleInstall(plugin)}
         onUninstall={(plugin) => void handleUninstall(plugin)}
@@ -3730,6 +3750,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           processPoolStatusesByPlugin={processPoolStatusesByPlugin}
           operatorsByPlugin={operatorsByPlugin}
           busy={isMutating}
+          busyPluginIds={busyPluginIds}
           onInstall={(plugin) => void handleInstall(plugin)}
           onToggle={(plugin, enabled) => void handleToggle(plugin, enabled)}
           onOperatorRegistrationChange={(targetOperators, enabled) =>

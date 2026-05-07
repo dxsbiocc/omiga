@@ -394,6 +394,43 @@ export function updatePluginEnabledInMarketplaces(
   return changed ? next : marketplaces;
 }
 
+export function updatePluginInstalledInMarketplaces(
+  marketplaces: PluginMarketplaceEntry[],
+  pluginId: string,
+  result: PluginInstallResult,
+): PluginMarketplaceEntry[] {
+  let changed = false;
+  const next = marketplaces.map((marketplace) => {
+    let marketplaceChanged = false;
+    const plugins = marketplace.plugins.map((plugin) => {
+      if (plugin.id !== pluginId) return plugin;
+      changed = true;
+      marketplaceChanged = true;
+      return {
+        ...plugin,
+        installed: true,
+        enabled: true,
+        installedPath: result.installedPath,
+        authPolicy: result.authPolicy,
+      };
+    });
+    return marketplaceChanged ? { ...marketplace, plugins } : marketplace;
+  });
+  return changed ? next : marketplaces;
+}
+
+function pluginDeclaresOperator(plugin: PluginSummary): boolean {
+  const terms = [
+    plugin.interface?.category,
+    ...(plugin.interface?.capabilities ?? []),
+    plugin.name,
+    plugin.id,
+  ]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .map((value) => value.trim().toLowerCase().replace(/[-_]+/g, " "));
+  return terms.some((value) => value === "operator" || value.includes("operator"));
+}
+
 export function updateOperatorEnabledInCatalog(
   operators: OperatorSummary[],
   update: OperatorRegistryUpdate,
@@ -824,19 +861,32 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   },
 
   installPlugin: async (plugin: PluginSummary, projectRoot?: string) => {
-    set({ isMutating: true, error: null });
+    const previousMarketplaces = get().marketplaces;
+    set({ error: null });
     try {
       const result = await invoke<PluginInstallResult>("install_omiga_plugin", {
         marketplacePath: plugin.marketplacePath,
         pluginName: plugin.name,
         projectRoot,
       });
-      await get().loadPlugins(projectRoot);
-      set({ isMutating: false });
+      set({
+        marketplaces: updatePluginInstalledInMarketplaces(
+          previousMarketplaces,
+          result.pluginId,
+          result,
+        ),
+      });
+      const refreshes: Array<Promise<void>> = [];
+      if (plugin.retrieval?.sources.length) {
+        refreshes.push(get().loadRetrievalStatuses(projectRoot));
+        refreshes.push(get().loadProcessPoolStatuses(projectRoot));
+      }
+      if (pluginDeclaresOperator(plugin)) refreshes.push(get().loadOperators());
+      await Promise.all(refreshes);
       return result;
     } catch (e) {
       const error = extractErrorMessage(e);
-      set({ isMutating: false, error });
+      set({ marketplaces: previousMarketplaces, error });
       throw new Error(error);
     }
   },
