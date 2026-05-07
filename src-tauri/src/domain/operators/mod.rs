@@ -1680,7 +1680,8 @@ async fn execute_resolved_operator(
         &resolved.spec,
         &canonical_inputs,
         surface.artifact_location(),
-    );
+    )
+    .await;
     let argv = expand_argv(
         &resolved.spec,
         &canonical_inputs,
@@ -2394,7 +2395,7 @@ fn canonicalize_one_path(
     Ok(canonical.to_string_lossy().into_owned())
 }
 
-fn fingerprint_inputs(
+async fn fingerprint_inputs(
     ctx: &crate::domain::tools::ToolContext,
     spec: &OperatorSpec,
     inputs: &BTreeMap<String, JsonValue>,
@@ -2413,16 +2414,21 @@ fn fingerprint_inputs(
             continue;
         }
         if field.kind.is_array() {
-            let items = value
+            let mut items = Vec::new();
+            for path in value
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|item| item.as_str())
-                .map(|path| path_fingerprint(ctx, location, path))
-                .collect::<Vec<_>>();
+                .filter_map(JsonValue::as_str)
+            {
+                items.push(path_fingerprint(ctx, location, path, &field.kind).await);
+            }
             out.insert(name.clone(), JsonValue::Array(items));
         } else if let Some(path) = value.as_str() {
-            out.insert(name.clone(), path_fingerprint(ctx, location, path));
+            out.insert(
+                name.clone(),
+                path_fingerprint(ctx, location, path, &field.kind).await,
+            );
         }
     }
     out
@@ -2440,31 +2446,136 @@ fn stable_json_fingerprint(value: &JsonValue) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
-fn path_fingerprint(
-    _ctx: &crate::domain::tools::ToolContext,
+async fn path_fingerprint(
+    ctx: &crate::domain::tools::ToolContext,
+    location: &str,
+    path: &str,
+    kind: &OperatorFieldKind,
+) -> JsonValue {
+    if location == "local" {
+        return local_path_fingerprint(location, path, kind);
+    }
+    remote_path_fingerprint(ctx, location, path).await
+}
+
+fn local_path_fingerprint(location: &str, path: &str, kind: &OperatorFieldKind) -> JsonValue {
+    let metadata = fs::metadata(path).ok();
+    let size = metadata.as_ref().map(|metadata| metadata.len());
+    let modified = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs());
+    let mut value = json!({
+        "mode": "stat",
+        "location": location,
+        "path": path,
+        "size": size,
+        "modifiedUnixSecs": modified
+    });
+    if matches!(kind, OperatorFieldKind::File | OperatorFieldKind::FileArray)
+        && metadata
+            .as_ref()
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+    {
+        if let Some(sha256) = sha256_file(path) {
+            value["mode"] = json!("sha256");
+            value["algorithm"] = json!("sha256");
+            value["fingerprint"] = json!(format!("sha256:{sha256}"));
+            value["sha256"] = json!(sha256);
+        }
+    }
+    value
+}
+
+fn sha256_file(path: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+async fn remote_path_fingerprint(
+    ctx: &crate::domain::tools::ToolContext,
     location: &str,
     path: &str,
 ) -> JsonValue {
-    if location == "local" {
-        let metadata = fs::metadata(path).ok();
-        let size = metadata.as_ref().map(|metadata| metadata.len());
-        let modified = metadata
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs());
-        return json!({
-            "mode": "stat",
+    let command = format!(
+        "p={}; if [ -f \"$p\" ]; then size=$(wc -c < \"$p\" 2>/dev/null | tr -d ' '); modified=$( (stat -c %Y \"$p\" 2>/dev/null || stat -f %m \"$p\" 2>/dev/null) | head -n 1 ); checksum=$(sha256sum \"$p\" 2>/dev/null | awk '{{print $1}}'); if [ -z \"$checksum\" ]; then checksum=$(shasum -a 256 \"$p\" 2>/dev/null | awk '{{print $1}}'); fi; printf '__OMIGA_FILE__\\n%s\\n%s\\n%s\\n' \"$size\" \"$modified\" \"$checksum\"; elif [ -e \"$p\" ]; then modified=$( (stat -c %Y \"$p\" 2>/dev/null || stat -f %m \"$p\" 2>/dev/null) | head -n 1 ); printf '__OMIGA_PATH__\\n%s\\n' \"$modified\"; else printf '__OMIGA_MISSING__\\n'; fi",
+        sh_quote(path)
+    );
+    match execute_env_command(ctx, "~", &command, 30).await {
+        Ok(result) => parse_remote_path_fingerprint(location, path, &result.output),
+        Err(_) => json!({
+            "mode": "reference",
+            "location": location,
+            "path": path
+        }),
+    }
+}
+
+fn parse_remote_path_fingerprint(location: &str, path: &str, output: &str) -> JsonValue {
+    let lines = output.lines().collect::<Vec<_>>();
+    match lines.first().copied().unwrap_or_default() {
+        "__OMIGA_FILE__" => {
+            let size = lines
+                .get(1)
+                .and_then(|value| value.trim().parse::<u64>().ok());
+            let modified = lines
+                .get(2)
+                .and_then(|value| value.trim().parse::<u64>().ok());
+            let checksum = lines.get(3).map(|value| value.trim()).filter(|value| {
+                value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
+            let mut value = json!({
+                "mode": "stat",
+                "location": location,
+                "path": path,
+                "size": size,
+                "modifiedUnixSecs": modified
+            });
+            if let Some(checksum) = checksum {
+                value["mode"] = json!("sha256");
+                value["algorithm"] = json!("sha256");
+                value["fingerprint"] = json!(format!("sha256:{checksum}"));
+                value["sha256"] = json!(checksum);
+            }
+            value
+        }
+        "__OMIGA_PATH__" => {
+            let modified = lines
+                .get(1)
+                .and_then(|value| value.trim().parse::<u64>().ok());
+            json!({
+                "mode": "stat",
+                "location": location,
+                "path": path,
+                "modifiedUnixSecs": modified
+            })
+        }
+        "__OMIGA_MISSING__" => json!({
+            "mode": "reference",
             "location": location,
             "path": path,
-            "size": size,
-            "modifiedUnixSecs": modified
-        });
+            "available": false
+        }),
+        _ => json!({
+            "mode": "reference",
+            "location": location,
+            "path": path
+        }),
     }
-    json!({
-        "mode": "reference",
-        "location": location,
-        "path": path
-    })
 }
 
 fn expand_argv(
@@ -4840,6 +4951,35 @@ execution:
     }
 
     #[test]
+    fn parses_remote_sha256_and_falls_back_to_reference_fingerprint() {
+        let checksum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let parsed = parse_remote_path_fingerprint(
+            "ssh",
+            "/remote/input.txt",
+            &format!("__OMIGA_FILE__\n12\n1770000000\n{checksum}\n"),
+        );
+        assert_eq!(parsed["mode"], "sha256");
+        assert_eq!(parsed["algorithm"], "sha256");
+        assert_eq!(parsed["sha256"], checksum);
+        assert_eq!(parsed["fingerprint"], format!("sha256:{checksum}"));
+        assert_eq!(parsed["size"], json!(12));
+        assert_eq!(parsed["modifiedUnixSecs"], json!(1770000000_u64));
+
+        let missing =
+            parse_remote_path_fingerprint("ssh", "/remote/missing.txt", "__OMIGA_MISSING__\n");
+        assert_eq!(missing["mode"], "reference");
+        assert_eq!(missing["available"], false);
+
+        let no_checksum = parse_remote_path_fingerprint(
+            "ssh",
+            "/remote/input.txt",
+            "__OMIGA_FILE__\n12\n1770000000\n\n",
+        );
+        assert_eq!(no_checksum["mode"], "stat");
+        assert!(no_checksum.get("sha256").is_none());
+    }
+
+    #[test]
     fn builds_docker_operator_command_for_local_container_runtime() {
         let tmp = TempDir::new().unwrap();
         let input = tmp.path().join("data.txt");
@@ -5290,7 +5430,17 @@ execution:
             result.effective_inputs["input"],
             json!(input.canonicalize().unwrap().to_string_lossy().into_owned())
         );
-        assert_eq!(result.input_fingerprints["input"]["mode"], "stat");
+        assert_eq!(result.input_fingerprints["input"]["mode"], "sha256");
         assert_eq!(result.input_fingerprints["input"]["location"], "local");
+        assert_eq!(result.input_fingerprints["input"]["algorithm"], "sha256");
+        let expected_sha256 = sha256_file(&input.to_string_lossy()).unwrap();
+        assert_eq!(
+            result.input_fingerprints["input"]["sha256"],
+            expected_sha256
+        );
+        assert_eq!(
+            result.input_fingerprints["input"]["fingerprint"],
+            format!("sha256:{expected_sha256}")
+        );
     }
 }

@@ -159,6 +159,7 @@ Available substitutions include `${inputs.name}`, `${params.name}`, `${resources
 - SSH/sandbox runs live under the selected remote workspace: `.omiga/runs/{run_id}`.
 - User registry remains local: `~/.omiga/operators/registry.json`.
 - Remote artifacts, logs, and provenance stay remote; results keep references and are read/verified in place.
+- Path-like input fingerprints are persisted in provenance. Local file inputs use `sha256` plus size/mtime; remote file inputs best-effort `sha256sum`/`shasum -a 256` on the selected execution surface and fall back to stat/reference metadata if checksum tooling is unavailable.
 
 ## Failure diagnostics
 

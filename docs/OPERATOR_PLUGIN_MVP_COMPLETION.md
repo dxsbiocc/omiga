@@ -17,6 +17,7 @@ Implemented:
 - Local/SSH no-container execution, direct Docker/Singularity command wrapping, run status, logs, output collection, provenance, and read-only verification.
 - Structured failed-run diagnostics: `kind`, `retryable`, `message`, `suggestedAction`, `stdoutTail`, and `stderrTail`.
 - Explicit retry policy for retryable infrastructure failures with `attempt`, `maxAttempts`, and `previousErrors` recorded in status/provenance and Agent-facing failures.
+- Strong path-like input fingerprints: local file inputs persist sha256/size/mtime, and remote file inputs best-effort checksum on the selected execution surface with stat/reference fallback.
 - Operator settings UI with cards, run counts, success/failure/smoke statistics, details dialog, failed-run diagnosis, copyable diagnosis payload, run detail/log/verify actions, and smoke-run launcher.
 - Built-in validation plugin `operator-smoke@omiga-curated` exposing `write_text_report@0.1.0` and `container_text_report@0.1.0`.
 
@@ -69,7 +70,7 @@ Manual local Docker smoke E2E was verified on 2026-05-07:
 Latest verification run:
 
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all && cargo test --manifest-path src-tauri/Cargo.toml operators --lib`
-  - Result: 19 passed, 1 ignored live Docker smoke
+  - Result: 20 passed, 1 ignored live Docker smoke
 - `cargo test --manifest-path src-tauri/Cargo.toml executes_bundled_container_smoke_operator_with_docker_runtime --lib -- --ignored --nocapture`
   - Result: passed
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`
@@ -122,6 +123,6 @@ Keep separate from the operator MVP commit unless intentionally bundled:
 Recommended follow-up after MVP commit:
 
 1. Live Singularity smoke validation against an installed Singularity/Apptainer runtime.
-2. Stronger input fingerprinting/checksum cache.
-3. Input staging copy mode for manifests that request copies instead of bind/reference.
+2. Input staging copy mode for manifests that request copies instead of bind/reference.
+3. Cache policy using strong input fingerprints and run identity.
 4. Multi-operator workflow/rule composition.

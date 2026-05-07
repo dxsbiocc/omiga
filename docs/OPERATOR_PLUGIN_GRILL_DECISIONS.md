@@ -33,7 +33,7 @@ Non-goal for MVP: full DAG workflow orchestration, Snakemake/Nextflow parity, sc
 21. **Resources**: manifest defines defaults, ranges, and `exposed`; Agent can override only exposed resources.
 22. **Bindings**: MVP supports simple `param <-> resource` equal bindings such as `threads == cpu`; no general expression language.
 23. **Command execution**: MVP supports structured `argv` plus plugin wrappers; no arbitrary inline shell templates.
-24. **Fingerprinting**: MVP uses lightweight input fingerprinting; no strong cache. Future strong cache requires full checksums.
+24. **Fingerprinting**: path-like inputs use strong sha256 fingerprints where available; no cache is enabled until cache policy is explicit.
 25. **Retries**: MVP retries only execution-infrastructure failures. Tool non-zero exit, invalid inputs, and output validation failures are returned for Agent correction.
 26. **Errors**: operator results are structured JSON. Failures include at least `kind`, `retryable`, and `message`, plus field/run/log/action context where possible.
 27. **Permissions**: manifest declares permissions. Docker/Singularity enforce boundaries where possible; local/SSH no-container are best-effort/trusted and record enforcement level.
@@ -81,6 +81,7 @@ Recommended first vertical slice:
 - Local/SSH Docker/Singularity runtimes now use direct command wrapping when the manifest and active session backend explicitly select a container. The run directory is writable, path-like inputs are read-only bind mounts, and sandbox backends avoid nested container wrapping.
 - Bundled container smoke coverage now includes `container_text_report@0.1.0` with Docker/Singularity runtime declarations, a generic active-backend smoke payload, and a live ignored Docker test for manual validation against the installed container runtime.
 - Retry policy now retries only retryable infrastructure failures and records `attempt`, `maxAttempts`, and `previousErrors`; tool exits, validation failures, and output failures remain Agent-correction errors.
+- Path-like input provenance now records strong local sha256 fingerprints and best-effort remote sha256 fingerprints, with stat/reference fallback when remote checksum tools are unavailable.
 - Manual local smoke E2E was verified on 2026-05-07 with `operator__write_text_report`, producing `.omiga/runs/{run_id}/out/operator-report.txt` containing two `hello operator smoke` lines.
 - Manual local Docker smoke E2E was verified on 2026-05-07 with `operator__container_text_report`, producing `.omiga/runs/{run_id}/out/container-operator-report.txt` from the `alpine:3.19` image.
 - Regression coverage now locks smoke UI visibility, smoke-test selection fallback, store-level smoke run context propagation, failed-run diagnostic preservation, command project-root normalization, invalid smoke test ids, and bundled smoke execution.
