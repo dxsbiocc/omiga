@@ -120,6 +120,14 @@ Container selection rules:
 - Local/SSH direct container execution bind-mounts the isolated run directory read-write and path-like inputs read-only. Local execution also mounts the project root and plugin root read-only. SSH artifacts, logs, and provenance stay on the remote workspace.
 - Sandbox/remote backends remain responsible for their own container isolation; the operator runtime is validated and recorded rather than nested in another container command.
 
+The bundled `operator-smoke@omiga-curated` plugin includes `container_text_report@0.1.0` as a live container validation fixture. It declares Docker and Singularity images and exposes a generic smoke payload that runs through the active container backend.
+
+Manual Docker validation can be run with:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml executes_bundled_container_smoke_operator_with_docker_runtime --lib -- --ignored --nocapture
+```
+
 ## Execution
 
 Execution is structured argv, not an inline shell template. Plugin wrapper files can be referenced relative to the plugin root and are staged into remote run workspaces when executing over SSH/sandbox.

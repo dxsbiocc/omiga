@@ -17,7 +17,7 @@ Implemented:
 - Local/SSH no-container execution, direct Docker/Singularity command wrapping, run status, logs, output collection, provenance, and read-only verification.
 - Structured failed-run diagnostics: `kind`, `retryable`, `message`, `suggestedAction`, `stdoutTail`, and `stderrTail`.
 - Operator settings UI with cards, run counts, success/failure/smoke statistics, details dialog, failed-run diagnosis, copyable diagnosis payload, run detail/log/verify actions, and smoke-run launcher.
-- Built-in validation plugin `operator-smoke@omiga-curated` exposing `write_text_report@0.1.0`.
+- Built-in validation plugin `operator-smoke@omiga-curated` exposing `write_text_report@0.1.0` and `container_text_report@0.1.0`.
 
 ## Manual validation evidence
 
@@ -50,12 +50,27 @@ hello operator smoke
 hello operator smoke
 ```
 
+Manual local Docker smoke E2E was verified on 2026-05-07:
+
+- Agent/tool path: `operator__container_text_report`
+- Smoke test id: `default`
+- Runtime: Docker Desktop / Docker Engine via direct container wrapping
+- Image: `alpine:3.19`
+- Observed result:
+  - Status: `succeeded`
+  - Location: `local`
+  - Enforcement container: `docker`
+  - Output artifact: `.omiga/runs/{run_id}/out/container-operator-report.txt`
+  - Content included `hello container operator smoke` and a `container smoke runtime:` marker.
+
 ## Automated validation evidence
 
 Latest verification run:
 
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all && cargo test --manifest-path src-tauri/Cargo.toml operators --lib`
-  - Result: 16 passed
+  - Result: 17 passed, 1 ignored live Docker smoke
+- `cargo test --manifest-path src-tauri/Cargo.toml executes_bundled_container_smoke_operator_with_docker_runtime --lib -- --ignored --nocapture`
+  - Result: passed
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`
   - Result: passed
 - `./node_modules/.bin/tsc --noEmit`
@@ -105,7 +120,7 @@ Keep separate from the operator MVP commit unless intentionally bundled:
 
 Recommended follow-up after MVP commit:
 
-1. Live Docker/Singularity smoke validation against installed container runtimes.
+1. Live Singularity smoke validation against an installed Singularity/Apptainer runtime.
 2. Explicit retry policy for retryable infrastructure failures.
 3. Stronger input fingerprinting/checksum cache.
 4. Multi-operator workflow/rule composition.

@@ -4036,6 +4036,14 @@ mod tests {
     use tempfile::TempDir;
 
     fn bundled_smoke_operator_paths() -> (PathBuf, PathBuf) {
+        bundled_operator_manifest_path("write-text-report")
+    }
+
+    fn bundled_container_operator_paths() -> (PathBuf, PathBuf) {
+        bundled_operator_manifest_path("container-text-report")
+    }
+
+    fn bundled_operator_manifest_path(operator_dir: &str) -> (PathBuf, PathBuf) {
         let plugin_root = crate::domain::plugins::dev_builtin_marketplace_path()
             .parent()
             .unwrap()
@@ -4043,7 +4051,7 @@ mod tests {
             .join("operator-smoke");
         let manifest = plugin_root
             .join("operators")
-            .join("write-text-report")
+            .join(operator_dir)
             .join("operator.yaml");
         (plugin_root, manifest)
     }
@@ -4134,6 +4142,23 @@ bindings:
             "hello operator smoke"
         );
 
+        let container = candidates
+            .iter()
+            .find(|candidate| candidate.metadata.id == "container_text_report")
+            .expect("bundled container smoke operator should be discovered");
+        assert_eq!(
+            container.source.source_plugin,
+            "operator-smoke@omiga-curated"
+        );
+        assert_eq!(container.metadata.version, "0.1.0");
+        assert_eq!(container.execution.argv[0], "/bin/sh");
+        assert_eq!(
+            container.execution.argv[1],
+            "./bin/write_container_report.sh"
+        );
+        assert_eq!(container.smoke_tests.len(), 1);
+        assert_eq!(container.smoke_tests[0].id, "default");
+
         let schema = operator_parameters_schema(smoke);
         assert_eq!(
             schema["properties"]["params"]["properties"]["message"]["type"],
@@ -4152,6 +4177,99 @@ bindings:
         .unwrap();
         assert!(Path::new(&argv[1]).is_absolute());
         assert!(argv[1].ends_with("bin/write_text_report.sh"));
+    }
+
+    #[test]
+    fn bundled_container_smoke_operator_builds_docker_command() {
+        let tmp = TempDir::new().unwrap();
+        let (plugin_root, manifest) = bundled_container_operator_paths();
+        let spec =
+            load_operator_manifest(&manifest, "operator-smoke@omiga-curated", plugin_root).unwrap();
+        assert_eq!(spec.metadata.id, "container_text_report");
+        assert_eq!(spec.smoke_tests.len(), 1);
+        assert_eq!(spec.smoke_tests[0].id, "default");
+
+        let plain_ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        assert!(!runtime_supported(&plain_ctx, &spec));
+        let docker_ctx =
+            crate::domain::tools::ToolContext::new(tmp.path()).with_sandbox_backend("docker");
+        assert!(runtime_supported(&docker_ctx, &spec));
+        let singularity_ctx =
+            crate::domain::tools::ToolContext::new(tmp.path()).with_sandbox_backend("singularity");
+        assert!(runtime_supported(&singularity_ctx, &spec));
+
+        let smoke = &spec.smoke_tests[0].arguments;
+        let run_dir = "/tmp/oprun_container_smoke";
+        let argv = expand_argv(
+            &spec,
+            &BTreeMap::new(),
+            &smoke.params,
+            &smoke.resources,
+            run_dir,
+        )
+        .unwrap();
+        assert!(Path::new(&argv[1]).is_absolute());
+        assert!(argv[1].ends_with("bin/write_container_report.sh"));
+
+        let command = operator_execution_command(
+            &docker_ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            run_dir,
+            &argv,
+            &BTreeMap::new(),
+        );
+        assert!(command.contains("'docker' 'run' '--rm'"));
+        assert!(command.contains("'alpine:3.19'"));
+        assert!(command.contains("'hello container operator smoke'"));
+        assert!(command.contains("write_container_report.sh"));
+        assert!(command.contains(&format!(
+            "'{}:{}:ro'",
+            spec.source.plugin_root.to_string_lossy(),
+            spec.source.plugin_root.to_string_lossy()
+        )));
+        assert!(command.contains(&format!("'{run_dir}:{run_dir}'")));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a running Docker daemon and access to the alpine:3.19 image"]
+    async fn executes_bundled_container_smoke_operator_with_docker_runtime() {
+        let tmp = TempDir::new().unwrap();
+        let (plugin_root, manifest) = bundled_container_operator_paths();
+        let spec =
+            load_operator_manifest(&manifest, "operator-smoke@omiga-curated", plugin_root).unwrap();
+        let smoke_invocation = spec
+            .smoke_tests
+            .iter()
+            .find(|test| test.id == "default")
+            .expect("container smoke test")
+            .arguments
+            .clone();
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path()).with_sandbox_backend("docker");
+
+        let result = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "container_text_report".to_string(),
+                spec,
+            },
+            smoke_invocation,
+            Some(OperatorRunContext {
+                kind: Some("smoke".to_string()),
+                smoke_test_id: Some("default".to_string()),
+                smoke_test_name: Some("Active container smoke".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, "succeeded");
+        assert_eq!(result.location, "local");
+        assert_eq!(result.outputs["report"].len(), 1);
+        assert_eq!(result.enforcement["container"], "docker");
+        let report = fs::read_to_string(&result.outputs["report"][0].path).unwrap();
+        assert!(report.contains("hello container operator smoke"));
+        assert!(report.contains("container smoke runtime:"));
     }
 
     #[test]
