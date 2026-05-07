@@ -388,6 +388,80 @@ describe("usePluginStore operator actions", () => {
       stderrTail: "bad flag\n",
     });
   });
+
+  it("invokes operator run cleanup with the active execution surface", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cleanup_operator_runs") {
+        return {
+          dryRun: true,
+          location: "local",
+          runsRoot: "/project/.omiga/runs",
+          scannedCount: 3,
+          matchedCount: 1,
+          deletedCount: 0,
+          skippedCount: 0,
+          estimatedBytes: 1024,
+          candidates: [
+            {
+              runId: "oprun_cache",
+              status: "succeeded",
+              location: "local",
+              runDir: "/project/.omiga/runs/oprun_cache",
+              cacheHit: true,
+              outputCount: 1,
+              reason: "cache_hit_record",
+              estimatedBytes: 1024,
+              deleted: false,
+            },
+          ],
+        };
+      }
+      if (command === "list_operator_runs") return [];
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    const request = {
+      dryRun: true,
+      keepLatest: 25,
+      maxAgeDays: 30,
+      includeCacheHits: true,
+      includeFailed: true,
+      includeSucceeded: true,
+      limit: 500,
+    };
+    const result = await usePluginStore.getState().cleanupOperatorRuns(
+      request,
+      "/project",
+      {
+        sessionId: "session-1",
+        executionEnvironment: "ssh",
+        sshServer: "gpu",
+      },
+    );
+
+    expect(result.matchedCount).toBe(1);
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      1,
+      "cleanup_operator_runs",
+      expect.objectContaining({
+        request,
+        projectRoot: "/project",
+        sessionId: "session-1",
+        executionEnvironment: "ssh",
+        sshServer: "gpu",
+      }),
+    );
+    expect(invokeMock).toHaveBeenNthCalledWith(
+      2,
+      "list_operator_runs",
+      expect.objectContaining({
+        projectRoot: "/project",
+        sessionId: "session-1",
+        executionEnvironment: "ssh",
+        sshServer: "gpu",
+      }),
+    );
+  });
 });
 
 describe("buildPluginDiagnostics", () => {

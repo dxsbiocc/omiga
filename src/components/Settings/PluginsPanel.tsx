@@ -869,6 +869,19 @@ function formatOperatorRunTimestamp(updatedAt?: string | null): string | null {
   return date.toLocaleString();
 }
 
+function formatBytes(bytes?: number | null): string {
+  if (!Number.isFinite(bytes ?? Number.NaN) || (bytes ?? 0) <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes ?? 0;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const precision = value >= 10 || unit === 0 ? 0 : 1;
+  return `${value.toFixed(precision)} ${units[unit]}`;
+}
+
 function PluginCard({
   plugin,
   retrievalStatuses = [],
@@ -2233,6 +2246,7 @@ function OperatorCatalogSection({
   onToggle,
   onSmokeRun,
   onRefreshRuns,
+  onCleanupRuns,
   onOpenRun,
   onCopy,
 }: {
@@ -2244,6 +2258,7 @@ function OperatorCatalogSection({
   onToggle: (operator: OperatorSummary, enabled: boolean) => void;
   onSmokeRun: (operator: OperatorSummary, smokeTestId?: string | null) => void;
   onRefreshRuns: () => void;
+  onCleanupRuns: () => void;
   onOpenRun: (run: OperatorRunSummary) => void;
   onCopy: (text: string, successMessage: string) => void;
 }) {
@@ -2349,16 +2364,29 @@ function OperatorCatalogSection({
                   </Typography>
                   <Chip size="small" variant="outlined" label={`${runs.length} recorded`} />
                 </Stack>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  startIcon={<RefreshRounded />}
-                  disabled={busy}
-                  onClick={onRefreshRuns}
-                  sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", sm: "center" } }}
-                >
-                  Refresh runs
-                </Button>
+                <Stack direction="row" gap={0.75} flexWrap="wrap">
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<RefreshRounded />}
+                    disabled={busy}
+                    onClick={onRefreshRuns}
+                    sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", sm: "center" } }}
+                  >
+                    Refresh runs
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="warning"
+                    startIcon={<DeleteOutlineRounded />}
+                    disabled={busy || runs.length === 0}
+                    onClick={onCleanupRuns}
+                    sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", sm: "center" } }}
+                  >
+                    Clean old/cache runs
+                  </Button>
+                </Stack>
               </Stack>
               {runs.length === 0 ? (
                 <Typography variant="body2" color="text.secondary">
@@ -2702,6 +2730,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     readOperatorRun,
     readOperatorRunLog,
     verifyOperatorRun,
+    cleanupOperatorRuns,
     clearProcessPool,
     installPlugin,
     uninstallPlugin,
@@ -3014,6 +3043,56 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     try {
       await loadOperatorRuns(projectRoot, operatorSurface);
       setMessage("Refreshed operator runs");
+    } catch {
+      // Store exposes the error banner.
+    }
+  };
+
+  const handleCleanupOperatorRuns = async () => {
+    setMessage(null);
+    const request = {
+      dryRun: true,
+      keepLatest: 25,
+      maxAgeDays: 30,
+      includeCacheHits: true,
+      includeFailed: true,
+      includeSucceeded: true,
+      limit: 500,
+    };
+    try {
+      const preview = await cleanupOperatorRuns(request, projectRoot, operatorSurface);
+      if (preview.matchedCount === 0) {
+        setMessage(
+          `No cleanup candidates in ${preview.runsRoot}; latest 25 runs are preserved.`,
+        );
+        return;
+      }
+      const candidateLines = preview.candidates
+        .slice(0, 8)
+        .map((candidate) => `• ${candidate.runId} (${candidate.status}, ${candidate.reason})`)
+        .join("\n");
+      const remaining = preview.candidates.length > 8
+        ? `\n… and ${preview.candidates.length - 8} more`
+        : "";
+      const confirmed = window.confirm(
+        `Delete ${preview.matchedCount} operator run director${preview.matchedCount === 1 ? "y" : "ies"} from the current ${preview.location} workspace?\n\n` +
+        `Runs root: ${preview.runsRoot}\n` +
+        `Estimated space: ${formatBytes(preview.estimatedBytes)}\n\n` +
+        `${candidateLines}${remaining}\n\n` +
+        "This only affects the active session workspace and cannot be undone.",
+      );
+      if (!confirmed) {
+        setMessage("Operator run cleanup cancelled");
+        return;
+      }
+      const result = await cleanupOperatorRuns(
+        { ...request, dryRun: false },
+        projectRoot,
+        operatorSurface,
+      );
+      setMessage(
+        `Deleted ${result.deletedCount} operator run director${result.deletedCount === 1 ? "y" : "ies"}${result.skippedCount > 0 ? ` · ${result.skippedCount} skipped` : ""} · ${formatBytes(result.estimatedBytes)} estimated`,
+      );
     } catch {
       // Store exposes the error banner.
     }
@@ -3455,6 +3534,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         onToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
         onSmokeRun={(operator, smokeTestId) => void handleOperatorSmokeRun(operator, smokeTestId)}
         onRefreshRuns={() => void handleRefreshOperatorRuns()}
+        onCleanupRuns={() => void handleCleanupOperatorRuns()}
         onOpenRun={(run) => void handleOpenOperatorRun(run)}
         onCopy={(text, successMessage) => void copyToClipboard(text, successMessage)}
       />

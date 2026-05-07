@@ -194,6 +194,7 @@ Operators must write durable result artifacts under `${outdir}`. Output globs ar
 - Path-like input fingerprints are persisted in provenance. Local file inputs use `sha256` plus size/mtime; remote file inputs best-effort `sha256sum`/`shasum -a 256` on the selected execution surface and fall back to stat/reference metadata if checksum tooling is unavailable.
 - Operator outputs are collected only from `.omiga/runs/{run_id}/out` in the active session workspace or selected remote workspace.
 - Cache hit records are also written under the active workspace `.omiga/runs/{run_id}` and only reference prior artifacts inside that same execution surface.
+- Run cleanup is workspace-scoped. The UI previews candidates, preserves the latest runs, and requires confirmation before deleting old/cache run directories under the active `.omiga/runs` root.
 
 ## Failure diagnostics
 

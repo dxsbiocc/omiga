@@ -215,6 +215,43 @@ export interface OperatorRunVerification {
   checks: OperatorRunCheck[];
 }
 
+export interface OperatorRunCleanupRequest {
+  dryRun: boolean;
+  keepLatest?: number | null;
+  maxAgeDays?: number | null;
+  includeCacheHits: boolean;
+  includeFailed: boolean;
+  includeSucceeded: boolean;
+  limit?: number | null;
+}
+
+export interface OperatorRunCleanupCandidate {
+  runId: string;
+  status: string;
+  location: string;
+  runDir: string;
+  updatedAt?: string | null;
+  cacheHit?: boolean | null;
+  cacheSourceRunId?: string | null;
+  outputCount: number;
+  reason: string;
+  estimatedBytes?: number | null;
+  deleted: boolean;
+  error?: string | null;
+}
+
+export interface OperatorRunCleanupResult {
+  dryRun: boolean;
+  location: string;
+  runsRoot: string;
+  scannedCount: number;
+  matchedCount: number;
+  deletedCount: number;
+  skippedCount: number;
+  estimatedBytes?: number | null;
+  candidates: OperatorRunCleanupCandidate[];
+}
+
 export const RETRIEVAL_PLUGIN_PROTOCOL_DOC_PATH =
   "docs/retrieval-plugin-protocol.md";
 
@@ -293,6 +330,11 @@ interface PluginState {
     projectRoot?: string,
     surface?: OperatorExecutionSurfaceArgs,
   ) => Promise<OperatorRunVerification>;
+  cleanupOperatorRuns: (
+    request: OperatorRunCleanupRequest,
+    projectRoot?: string,
+    surface?: OperatorExecutionSurfaceArgs,
+  ) => Promise<OperatorRunCleanupResult>;
   loadRetrievalStatuses: (projectRoot?: string) => Promise<void>;
   loadProcessPoolStatuses: (projectRoot?: string) => Promise<void>;
   clearProcessPool: (projectRoot?: string) => Promise<number>;
@@ -704,6 +746,28 @@ export const usePluginStore = create<PluginState>((set, get) => ({
     } catch (e) {
       const error = extractErrorMessage(e);
       set({ error });
+      throw new Error(error);
+    }
+  },
+
+  cleanupOperatorRuns: async (
+    request: OperatorRunCleanupRequest,
+    projectRoot?: string,
+    surface?: OperatorExecutionSurfaceArgs,
+  ) => {
+    set({ isMutating: true, error: null });
+    try {
+      const result = await invoke<OperatorRunCleanupResult>("cleanup_operator_runs", {
+        request,
+        projectRoot,
+        ...operatorSurfacePayload(surface),
+      });
+      await get().loadOperatorRuns(projectRoot, surface);
+      set({ isMutating: false });
+      return result;
+    } catch (e) {
+      const error = extractErrorMessage(e);
+      set({ isMutating: false, error });
       throw new Error(error);
     }
   },

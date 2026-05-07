@@ -274,6 +274,7 @@ pub fn run() {
             commands::operators::read_operator_run,
             commands::operators::read_operator_run_log,
             commands::operators::verify_operator_run,
+            commands::operators::cleanup_operator_runs,
             commands::extensions::vscode_extensions_dir,
             commands::extensions::install_vscode_extension,
             commands::extensions::list_recommended_vscode_extensions,

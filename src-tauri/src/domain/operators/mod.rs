@@ -1466,6 +1466,63 @@ pub struct OperatorRunVerification {
     pub checks: Vec<OperatorRunCheck>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorRunCleanupRequest {
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub keep_latest: Option<usize>,
+    #[serde(default)]
+    pub max_age_days: Option<u64>,
+    #[serde(default)]
+    pub include_cache_hits: bool,
+    #[serde(default)]
+    pub include_failed: bool,
+    #[serde(default)]
+    pub include_succeeded: bool,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorRunCleanupCandidate {
+    pub run_id: String,
+    pub status: String,
+    pub location: String,
+    pub run_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hit: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_source_run_id: Option<String>,
+    pub output_count: usize,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_bytes: Option<u64>,
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorRunCleanupResult {
+    pub dry_run: bool,
+    pub location: String,
+    pub runs_root: String,
+    pub scanned_count: usize,
+    pub matched_count: usize,
+    pub deleted_count: usize,
+    pub skipped_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_bytes: Option<u64>,
+    pub candidates: Vec<OperatorRunCleanupCandidate>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperatorRunCheck {
@@ -4340,6 +4397,291 @@ pub async fn verify_operator_run_for_context(
     })
 }
 
+pub async fn cleanup_operator_runs_for_context(
+    ctx: &crate::domain::tools::ToolContext,
+    request: OperatorRunCleanupRequest,
+) -> Result<OperatorRunCleanupResult, String> {
+    let limit = request.limit.unwrap_or(500).clamp(1, 2_000);
+    let surface = OperatorExecutionSurface::for_runs_root(ctx);
+    let summaries = list_operator_runs_for_context(ctx, limit).await?;
+    let selected = select_operator_cleanup_candidates(&summaries, &request);
+    let mut candidates = Vec::new();
+    let mut estimated_total = 0_u64;
+
+    for (summary, reason) in selected {
+        let estimated_bytes = if surface.kind == OperatorExecutionSurfaceKind::Local {
+            Some(local_operator_run_dir_size(&ctx.project_root, &summary.run_id).unwrap_or(0))
+        } else {
+            estimate_environment_run_dir_size(ctx, &summary.run_dir).await
+        };
+        if let Some(bytes) = estimated_bytes {
+            estimated_total = estimated_total.saturating_add(bytes);
+        }
+        let mut candidate = OperatorRunCleanupCandidate {
+            run_id: summary.run_id.clone(),
+            status: summary.status.clone(),
+            location: summary.location.clone(),
+            run_dir: summary.run_dir.clone(),
+            updated_at: summary.updated_at.clone(),
+            cache_hit: summary.cache_hit,
+            cache_source_run_id: summary.cache_source_run_id.clone(),
+            output_count: summary.output_count,
+            reason,
+            estimated_bytes,
+            deleted: false,
+            error: None,
+        };
+        if !request.dry_run {
+            let deletion = if surface.kind == OperatorExecutionSurfaceKind::Local {
+                delete_local_operator_run_dir(&ctx.project_root, &summary.run_id)
+            } else {
+                delete_environment_operator_run_dir(ctx, &surface.run_dir, &summary.run_dir).await
+            };
+            match deletion {
+                Ok(()) => candidate.deleted = true,
+                Err(error) => candidate.error = Some(error),
+            }
+        }
+        candidates.push(candidate);
+    }
+
+    let deleted_count = candidates
+        .iter()
+        .filter(|candidate| candidate.deleted)
+        .count();
+    let skipped_count = candidates
+        .iter()
+        .filter(|candidate| candidate.error.is_some())
+        .count();
+    Ok(OperatorRunCleanupResult {
+        dry_run: request.dry_run,
+        location: surface.artifact_location().to_string(),
+        runs_root: surface.run_dir,
+        scanned_count: summaries.len(),
+        matched_count: candidates.len(),
+        deleted_count,
+        skipped_count,
+        estimated_bytes: Some(estimated_total),
+        candidates,
+    })
+}
+
+fn select_operator_cleanup_candidates(
+    summaries: &[OperatorRunSummary],
+    request: &OperatorRunCleanupRequest,
+) -> Vec<(OperatorRunSummary, String)> {
+    let keep_latest = request.keep_latest.unwrap_or(25);
+    let protected = summaries
+        .iter()
+        .take(keep_latest)
+        .map(|summary| summary.run_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut selected = Vec::new();
+    let mut selected_ids = HashSet::new();
+    for summary in summaries {
+        if protected.contains(summary.run_id.as_str())
+            || !is_terminal_operator_status(&summary.status)
+        {
+            continue;
+        }
+        let reason = if request.include_cache_hits && summary.cache_hit == Some(true) {
+            Some("cache_hit_record".to_string())
+        } else if request.include_failed
+            && is_failed_operator_status(&summary.status)
+            && run_matches_cleanup_age(summary, request.max_age_days)
+        {
+            Some("old_failed_run".to_string())
+        } else if request.include_succeeded
+            && is_succeeded_operator_status(&summary.status)
+            && run_matches_cleanup_age(summary, request.max_age_days)
+        {
+            Some("old_succeeded_run".to_string())
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            selected_ids.insert(summary.run_id.clone());
+            selected.push((summary.clone(), reason));
+        }
+    }
+
+    if request.include_cache_hits {
+        let selected_sources = selected
+            .iter()
+            .filter(|(summary, _)| summary.cache_hit != Some(true))
+            .map(|(summary, _)| summary.run_id.clone())
+            .collect::<HashSet<_>>();
+        for summary in summaries {
+            if protected.contains(summary.run_id.as_str())
+                || selected_ids.contains(&summary.run_id)
+                || summary.cache_hit != Some(true)
+            {
+                continue;
+            }
+            if summary
+                .cache_source_run_id
+                .as_ref()
+                .map(|source| selected_sources.contains(source))
+                .unwrap_or(false)
+            {
+                selected_ids.insert(summary.run_id.clone());
+                selected.push((summary.clone(), "cache_source_cleanup".to_string()));
+            }
+        }
+    }
+
+    let retained_cache_sources = summaries
+        .iter()
+        .filter(|summary| {
+            summary.cache_hit == Some(true) && !selected_ids.contains(&summary.run_id)
+        })
+        .filter_map(|summary| summary.cache_source_run_id.clone())
+        .collect::<HashSet<_>>();
+    selected
+        .into_iter()
+        .filter(|(summary, _)| {
+            summary.cache_hit == Some(true) || !retained_cache_sources.contains(&summary.run_id)
+        })
+        .collect()
+}
+
+fn is_terminal_operator_status(status: &str) -> bool {
+    let status = status.trim().to_ascii_lowercase();
+    matches!(
+        status.as_str(),
+        "succeeded" | "success" | "failed" | "error" | "cancelled" | "timeout" | "timed_out"
+    )
+}
+
+fn is_failed_operator_status(status: &str) -> bool {
+    let status = status.trim().to_ascii_lowercase();
+    matches!(
+        status.as_str(),
+        "failed" | "error" | "cancelled" | "timeout" | "timed_out"
+    )
+}
+
+fn is_succeeded_operator_status(status: &str) -> bool {
+    let status = status.trim().to_ascii_lowercase();
+    matches!(status.as_str(), "succeeded" | "success")
+}
+
+fn run_matches_cleanup_age(summary: &OperatorRunSummary, max_age_days: Option<u64>) -> bool {
+    let Some(max_age_days) = max_age_days else {
+        return true;
+    };
+    let Some(updated_at) = summary.updated_at.as_deref() else {
+        return true;
+    };
+    let Ok(updated_at) = chrono::DateTime::parse_from_rfc3339(updated_at) else {
+        return true;
+    };
+    let age = chrono::Utc::now().signed_duration_since(updated_at.with_timezone(&chrono::Utc));
+    age.num_seconds() >= (max_age_days as i64).saturating_mul(24 * 60 * 60)
+}
+
+fn local_operator_run_dir_size(project_root: &Path, run_id: &str) -> Result<u64, String> {
+    let run_dir = safe_local_operator_run_dir(project_root, run_id)?;
+    Ok(path_tree_size(&run_dir))
+}
+
+fn safe_local_operator_run_dir(project_root: &Path, run_id: &str) -> Result<PathBuf, String> {
+    if !is_safe_operator_run_id(run_id) {
+        return Err(
+            "operator run id must start with `oprun_` and contain only letters, numbers, `_`, or `-`"
+                .to_string(),
+        );
+    }
+    let runs_root = operator_runs_root(project_root);
+    let run_dir = runs_root.join(run_id);
+    let canonical_root = runs_root.canonicalize().unwrap_or(runs_root);
+    let canonical_run_dir = run_dir
+        .canonicalize()
+        .map_err(|err| format!("operator run `{run_id}` not found: {err}"))?;
+    if !canonical_run_dir.starts_with(&canonical_root) {
+        return Err(format!(
+            "operator run `{run_id}` is outside the run registry"
+        ));
+    }
+    Ok(canonical_run_dir)
+}
+
+fn path_tree_size(path: &Path) -> u64 {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    fs::read_dir(path)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| path_tree_size(&entry.path()))
+        .fold(0_u64, u64::saturating_add)
+}
+
+fn delete_local_operator_run_dir(project_root: &Path, run_id: &str) -> Result<(), String> {
+    let run_dir = safe_local_operator_run_dir(project_root, run_id)?;
+    fs::remove_dir_all(&run_dir).map_err(|err| {
+        format!(
+            "delete operator run `{run_id}` at {}: {err}",
+            run_dir.display()
+        )
+    })
+}
+
+async fn estimate_environment_run_dir_size(
+    ctx: &crate::domain::tools::ToolContext,
+    run_dir: &str,
+) -> Option<u64> {
+    let command = format!(
+        "du -sk {} 2>/dev/null | awk '{{print $1}}'",
+        sh_quote(run_dir)
+    );
+    let result = execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 30)
+        .await
+        .ok()?;
+    result.output.trim().parse::<u64>().ok().map(|kb| kb * 1024)
+}
+
+async fn delete_environment_operator_run_dir(
+    ctx: &crate::domain::tools::ToolContext,
+    runs_root: &str,
+    run_dir: &str,
+) -> Result<(), String> {
+    let normalized_root = runs_root.trim_end_matches('/');
+    let normalized_run_dir = run_dir.trim_end_matches('/');
+    let run_id = normalized_run_dir.rsplit('/').next().unwrap_or_default();
+    if !is_safe_operator_run_id(run_id)
+        || !normalized_run_dir.starts_with(&format!("{normalized_root}/oprun_"))
+    {
+        return Err(format!(
+            "refusing to delete operator run outside active run registry: {run_dir}"
+        ));
+    }
+    let command = format!(
+        "target={}; root={}; case \"$target\" in \"$root\"/oprun_*) rm -rf -- \"$target\" ;; *) exit 64 ;; esac",
+        sh_quote(normalized_run_dir),
+        sh_quote(normalized_root),
+    );
+    let result = execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 30)
+        .await
+        .map_err(|err| err.message)?;
+    if result.returncode == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "remote cleanup command exited with code {}",
+            result.returncode
+        ))
+    }
+}
+
 fn output_artifact_paths(document: &JsonValue) -> Vec<(String, String)> {
     let Some(outputs) = json_value_at(document, &["outputs"]).and_then(JsonValue::as_object) else {
         return Vec::new();
@@ -5937,6 +6279,143 @@ execution:
             .checks
             .iter()
             .any(|check| check.name == "output_artifact:report" && check.ok));
+    }
+
+    #[tokio::test]
+    async fn cleanup_operator_runs_previews_and_deletes_workspace_scoped_candidates() {
+        fn write_run(
+            root: &Path,
+            run_id: &str,
+            status: &str,
+            updated_at: &str,
+            cache: Option<JsonValue>,
+        ) -> PathBuf {
+            let run_dir = root.join(".omiga/runs").join(run_id);
+            fs::create_dir_all(run_dir.join("out")).unwrap();
+            fs::create_dir_all(run_dir.join("logs")).unwrap();
+            fs::write(run_dir.join("out/report.txt"), format!("{run_id}\n")).unwrap();
+            fs::write(run_dir.join("logs/stdout.txt"), "").unwrap();
+            fs::write(run_dir.join("logs/stderr.txt"), "").unwrap();
+            let mut document = json!({
+                "status": status,
+                "runId": run_id,
+                "location": "local",
+                "operator": {
+                    "alias": "write_text_report",
+                    "id": "write_text_report",
+                    "version": "0.1.0",
+                    "sourcePlugin": "operator-smoke@omiga-curated"
+                },
+                "runDir": run_dir.to_string_lossy(),
+                "provenancePath": run_dir.join("provenance.json").to_string_lossy(),
+                "outputs": {
+                    "report": [
+                        { "location": "local", "path": run_dir.join("out/report.txt").to_string_lossy() }
+                    ]
+                }
+            });
+            if let Some(cache) = cache {
+                document["cache"] = cache;
+            }
+            write_json_file(&run_dir.join("provenance.json"), &document).unwrap();
+            write_json_file(
+                &run_dir.join("status.json"),
+                &json!({
+                    "status": status,
+                    "updatedAt": updated_at
+                }),
+            )
+            .unwrap();
+            run_dir
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let latest = write_run(
+            tmp.path(),
+            "oprun_20990101_latest",
+            "succeeded",
+            "2099-01-01T00:00:00Z",
+            None,
+        );
+        let old_success = write_run(
+            tmp.path(),
+            "oprun_20000101_success",
+            "succeeded",
+            "2000-01-01T00:00:00Z",
+            None,
+        );
+        let old_failed = write_run(
+            tmp.path(),
+            "oprun_20000101_failed",
+            "failed",
+            "2000-01-01T00:00:00Z",
+            None,
+        );
+        let cache_hit = write_run(
+            tmp.path(),
+            "oprun_20000101_cache",
+            "succeeded",
+            "2000-01-02T00:00:00Z",
+            Some(json!({
+                "key": "sha256:test",
+                "hit": true,
+                "sourceRunId": "oprun_20000101_success",
+                "sourceRunDir": old_success.to_string_lossy()
+            })),
+        );
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let request = OperatorRunCleanupRequest {
+            dry_run: true,
+            keep_latest: Some(1),
+            max_age_days: Some(30),
+            include_cache_hits: true,
+            include_failed: true,
+            include_succeeded: true,
+            limit: Some(50),
+        };
+
+        let preview = cleanup_operator_runs_for_context(&ctx, request.clone())
+            .await
+            .unwrap();
+        assert!(preview.dry_run);
+        assert_eq!(preview.location, "local");
+        assert_eq!(preview.scanned_count, 4);
+        assert_eq!(preview.matched_count, 3);
+        assert_eq!(preview.deleted_count, 0);
+        assert!(preview.estimated_bytes.unwrap_or_default() > 0);
+        let preview_ids = preview
+            .candidates
+            .iter()
+            .map(|candidate| candidate.run_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            preview_ids,
+            BTreeSet::from([
+                "oprun_20000101_cache",
+                "oprun_20000101_failed",
+                "oprun_20000101_success",
+            ])
+        );
+        assert!(latest.is_dir());
+        assert!(old_success.is_dir());
+        assert!(old_failed.is_dir());
+        assert!(cache_hit.is_dir());
+
+        let result = cleanup_operator_runs_for_context(
+            &ctx,
+            OperatorRunCleanupRequest {
+                dry_run: false,
+                ..request
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.deleted_count, 3);
+        assert_eq!(result.skipped_count, 0);
+        assert!(latest.is_dir());
+        assert!(!old_success.exists());
+        assert!(!old_failed.exists());
+        assert!(!cache_hit.exists());
     }
 
     #[tokio::test]

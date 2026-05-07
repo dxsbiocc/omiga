@@ -4,8 +4,8 @@ use crate::app_state::OmigaAppState;
 use crate::commands::CommandResult;
 use crate::domain::operators::{
     self, OperatorCandidateSummary, OperatorManifestDiagnostic, OperatorRegistryUpdate,
-    OperatorRunContext, OperatorRunDetail, OperatorRunLog, OperatorRunSummary,
-    OperatorRunVerification, OperatorSpec,
+    OperatorRunCleanupRequest, OperatorRunCleanupResult, OperatorRunContext, OperatorRunDetail,
+    OperatorRunLog, OperatorRunSummary, OperatorRunVerification, OperatorSpec,
 };
 use crate::domain::tools::{env_store::EnvStore, ToolContext};
 use crate::errors::AppError;
@@ -293,6 +293,31 @@ pub async fn verify_operator_run(
     )
     .await;
     operators::verify_operator_run_for_context(&ctx, &run_id)
+        .await
+        .map_err(operator_error)
+}
+
+#[tauri::command]
+pub async fn cleanup_operator_runs(
+    state: State<'_, OmigaAppState>,
+    project_root: Option<String>,
+    request: OperatorRunCleanupRequest,
+    session_id: Option<String>,
+    execution_environment: Option<String>,
+    ssh_server: Option<String>,
+    sandbox_backend: Option<String>,
+) -> CommandResult<OperatorRunCleanupResult> {
+    let ctx = build_operator_context(
+        &state,
+        project_root,
+        session_id,
+        execution_environment,
+        ssh_server,
+        sandbox_backend,
+        30,
+    )
+    .await;
+    operators::cleanup_operator_runs_for_context(&ctx, request)
         .await
         .map_err(operator_error)
 }
