@@ -29,6 +29,18 @@
       "category": "Operator"
     },
     {
+      "name": "operator-omics",
+      "source": {
+        "source": "local",
+        "path": "./plugins/operator-omics"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Operator"
+    },
+    {
       "name": "retrieval-dataset-geo",
       "source": {
         "source": "local",

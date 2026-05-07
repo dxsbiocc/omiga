@@ -5649,11 +5649,18 @@ mod tests {
     }
 
     fn bundled_operator_manifest_path(operator_dir: &str) -> (PathBuf, PathBuf) {
+        bundled_plugin_operator_manifest_path("operator-smoke", operator_dir)
+    }
+
+    fn bundled_plugin_operator_manifest_path(
+        plugin_name: &str,
+        operator_dir: &str,
+    ) -> (PathBuf, PathBuf) {
         let plugin_root = crate::domain::plugins::dev_builtin_marketplace_path()
             .parent()
             .unwrap()
             .join("plugins")
-            .join("operator-smoke");
+            .join(plugin_name);
         let manifest = plugin_root
             .join("operators")
             .join(operator_dir)
@@ -5853,6 +5860,69 @@ bindings:
         .unwrap();
         assert!(Path::new(&argv[1]).is_absolute());
         assert!(argv[1].ends_with("bin/write_text_report.sh"));
+    }
+
+    #[test]
+    fn discovers_bundled_omics_operators_from_active_plugin() {
+        let (plugin_root, manifest) =
+            bundled_plugin_operator_manifest_path("operator-omics", "pca-matrix");
+        assert!(manifest.is_file());
+
+        let plugin = crate::domain::plugins::LoadedPlugin {
+            id: "operator-omics@omiga-curated".to_string(),
+            manifest_name: Some("operator-omics".to_string()),
+            display_name: Some("Omics Operators".to_string()),
+            description: None,
+            root: plugin_root,
+            enabled: true,
+            skill_roots: Vec::new(),
+            mcp_servers: HashMap::new(),
+            apps: Vec::new(),
+            retrieval: None,
+            error: None,
+        };
+
+        let candidates = discover_operator_candidates_from_plugins([&plugin]);
+        let ids = candidates
+            .iter()
+            .map(|candidate| candidate.metadata.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            ids,
+            BTreeSet::from([
+                "omics_differential_expression_basic",
+                "omics_functional_enrichment_basic",
+                "omics_pca_matrix",
+                "seqtk_sample_reads",
+            ])
+        );
+        let pca = candidates
+            .iter()
+            .find(|candidate| candidate.metadata.id == "omics_pca_matrix")
+            .unwrap();
+        assert_eq!(pca.execution.argv[0], "Rscript");
+        assert!(matches!(
+            pca.interface.outputs["summary"].kind,
+            OperatorFieldKind::Json
+        ));
+        assert_eq!(
+            pca.interface.outputs["scores"].glob.as_deref(),
+            Some("pca-scores.tsv")
+        );
+
+        let seqtk = candidates
+            .iter()
+            .find(|candidate| candidate.metadata.id == "seqtk_sample_reads")
+            .unwrap();
+        assert_eq!(seqtk.execution.argv[0], "/bin/sh");
+        assert!(matches!(
+            seqtk.interface.inputs["reads"].kind,
+            OperatorFieldKind::File
+        ));
+        assert_eq!(
+            seqtk.interface.outputs["sampled_reads"].glob.as_deref(),
+            Some("seqtk-sampled*")
+        );
     }
 
     #[test]

@@ -1,0 +1,75 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: omics_functional_enrichment_basic
+  version: 0.1.0
+  name: Basic Functional Enrichment
+  description: Run base-R hypergeometric enrichment for a query gene list against GMT or two-column TSV gene sets.
+  tags: [omics, enrichment, gene-sets, r]
+interface:
+  inputs:
+    genes:
+      kind: file
+      required: true
+      description: Query gene list; first token/column of each non-comment line is used.
+    gene_sets:
+      kind: file
+      required: true
+      description: Gene sets in GMT or two-column TSV format. TSV columns should be term/gene or first/second columns.
+  params:
+    gene_sets_format:
+      kind: enum
+      enum: [auto, gmt, tsv]
+      default: auto
+    min_size:
+      kind: integer
+      default: 5
+      minimum: 1
+    max_size:
+      kind: integer
+      default: 500
+      minimum: 1
+    pvalue_threshold:
+      kind: number
+      default: 0.05
+      minimum: 0
+      maximum: 1
+  outputs:
+    results:
+      kind: file
+      glob: enrichment-results.tsv
+      required: true
+    top:
+      kind: file
+      glob: enrichment-top.tsv
+      required: true
+    plot:
+      kind: file
+      glob: enrichment-barplot.svg
+      required: true
+    summary:
+      kind: json
+      required: true
+runtime:
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+resources:
+  cpu:
+    default: 1
+    exposed: true
+  walltime:
+    default: 600s
+    exposed: true
+execution:
+  argv:
+    - Rscript
+    - ./bin/functional_enrichment_basic.R
+    - ${inputs.genes}
+    - ${inputs.gene_sets}
+    - ${outdir}
+    - ${params.gene_sets_format}
+    - ${params.min_size}
+    - ${params.max_size}
+    - ${params.pvalue_threshold}

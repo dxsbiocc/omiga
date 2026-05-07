@@ -1,0 +1,103 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: omics_differential_expression_basic
+  version: 0.1.0
+  name: Basic Differential Expression
+  description: Run a dependency-light Welch t-test differential expression screen on an expression/count matrix using sample metadata groups.
+  tags: [omics, differential-expression, expression, r]
+interface:
+  inputs:
+    matrix:
+      kind: file
+      required: true
+      description: Numeric feature-by-sample matrix with feature ids in the first column by default.
+    metadata:
+      kind: file
+      required: true
+      description: Sample metadata table containing sample and group columns.
+  params:
+    group_column:
+      kind: string
+      required: true
+      non_empty: true
+      description: Metadata column containing group labels.
+    case_group:
+      kind: string
+      required: true
+      non_empty: true
+      description: Group label for numerator/case samples.
+    control_group:
+      kind: string
+      required: true
+      non_empty: true
+      description: Group label for denominator/control samples.
+    sample_column:
+      kind: string
+      default: sample
+      non_empty: true
+      description: Metadata column containing sample ids matching matrix columns.
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    row_names:
+      kind: boolean
+      default: true
+    pseudocount:
+      kind: number
+      default: 1
+      minimum: 0
+    log2fc_threshold:
+      kind: number
+      default: 1
+      minimum: 0
+    pvalue_threshold:
+      kind: number
+      default: 0.05
+      minimum: 0
+      maximum: 1
+  outputs:
+    results:
+      kind: file
+      glob: de-results.tsv
+      required: true
+    significant:
+      kind: file
+      glob: de-significant.tsv
+      required: true
+    plot:
+      kind: file
+      glob: de-volcano.svg
+      required: true
+    summary:
+      kind: json
+      required: true
+runtime:
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+resources:
+  cpu:
+    default: 1
+    exposed: true
+  walltime:
+    default: 600s
+    exposed: true
+execution:
+  argv:
+    - Rscript
+    - ./bin/differential_expression_basic.R
+    - ${inputs.matrix}
+    - ${inputs.metadata}
+    - ${outdir}
+    - ${params.group_column}
+    - ${params.case_group}
+    - ${params.control_group}
+    - ${params.sample_column}
+    - ${params.delimiter}
+    - ${params.row_names}
+    - ${params.pseudocount}
+    - ${params.log2fc_threshold}
+    - ${params.pvalue_threshold}

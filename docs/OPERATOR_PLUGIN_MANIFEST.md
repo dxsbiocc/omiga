@@ -139,6 +139,13 @@ Container selection rules:
 
 The bundled `operator-smoke@omiga-curated` plugin includes `container_text_report@0.1.0` as a live container validation fixture. It declares Docker and Singularity images and exposes a generic smoke payload that runs through the active container backend.
 
+The bundled `operator-omics@omiga-curated` plugin provides practical single-step operators:
+
+- `omics_pca_matrix@0.1.0` — base-R PCA for expression/count matrices.
+- `omics_differential_expression_basic@0.1.0` — dependency-light Welch-test differential expression using sample metadata groups.
+- `omics_functional_enrichment_basic@0.1.0` — base-R hypergeometric enrichment over GMT or two-column TSV gene sets.
+- `seqtk_sample_reads@0.1.0` — `seqtk sample` wrapper for FASTQ/FASTA subsampling on the active local/SSH environment.
+
 Manual Docker validation can be run with:
 
 ```sh

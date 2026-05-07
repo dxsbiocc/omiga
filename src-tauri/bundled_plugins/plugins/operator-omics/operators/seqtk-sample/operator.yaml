@@ -1,0 +1,53 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: seqtk_sample_reads
+  version: 0.1.0
+  name: seqtk Sample Reads
+  description: Use seqtk sample to subsample FASTQ/FASTA reads from the active execution environment.
+  tags: [seqtk, fastq, fasta, sequencing]
+interface:
+  inputs:
+    reads:
+      kind: file
+      required: true
+      description: FASTQ/FASTA input readable by seqtk.
+  params:
+    sample_size:
+      kind: string
+      default: "0.1"
+      non_empty: true
+      description: seqtk sample size argument, e.g. 0.1 for fraction or 10000 for count.
+    seed:
+      kind: integer
+      default: 11
+      minimum: 0
+      maximum: 2147483647
+  outputs:
+    sampled_reads:
+      kind: file
+      glob: seqtk-sampled*
+      required: true
+    summary:
+      kind: json
+      required: true
+runtime:
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+resources:
+  cpu:
+    default: 1
+    exposed: true
+  walltime:
+    default: 300s
+    exposed: true
+execution:
+  argv:
+    - /bin/sh
+    - ./bin/seqtk_sample.sh
+    - ${inputs.reads}
+    - ${outdir}
+    - ${params.sample_size}
+    - ${params.seed}

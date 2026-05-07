@@ -25,6 +25,7 @@ Implemented:
 - Workspace-scoped run cleanup: the settings UI previews old/cache run cleanup globally or for a single operator, preserves the latest matching runs, estimates candidate size, asks for confirmation, and deletes only under the active local/SSH/sandbox `.omiga/runs` root.
 - Operator settings UI with cards, run counts, success/failure/smoke statistics, details dialog, failed-run diagnosis, copyable diagnosis payload, run detail/log/verify actions, and smoke-run launcher.
 - Built-in validation plugin `operator-smoke@omiga-curated` exposing `write_text_report@0.1.0` and `container_text_report@0.1.0`.
+- Built-in practical omics plugin `operator-omics@omiga-curated` exposing base-R PCA, basic differential expression, basic functional enrichment, and `seqtk sample` operators.
 
 ## Manual validation evidence
 
@@ -94,7 +95,7 @@ hello operator smoke
 Latest verification run:
 
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all && cargo test --manifest-path src-tauri/Cargo.toml operators --lib`
-  - Result: 27 passed, 1 ignored live Docker smoke
+  - Result: 28 passed, 1 ignored live Docker smoke
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`
   - Result: blocked by unrelated working-tree connector code (`src/domain/connectors.rs::gmail_token` dead code)
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings -A dead-code`
@@ -104,6 +105,8 @@ Latest verification run:
 - `bun run test src/state/pluginStore.test.ts src/components/Settings/PluginsPanel.test.tsx`
   - Result: 24 passed
 - `git diff --check`
+  - Result: passed
+- `Rscript` syntax check plus tiny PCA / differential-expression / enrichment smoke over synthetic TSV/GMT inputs
   - Result: passed
 - Naming/path invariants:
   - Operator command names stay generic and do not include the product/project name.
