@@ -25,10 +25,10 @@ export const OPEN_SETTINGS_TAB_DETAIL: Record<string, number> = {
   customize: 4,
   mcp: 5,
   skills: 6,
-  /** Jupyter / .ipynb viewer */
-  notebook: 7,
-  jupyter: 7,
-  ipynb: 7,
+  /** Jupyter / .ipynb viewer settings live in Plugins → Notebook Helper */
+  notebook: 4,
+  jupyter: 4,
+  ipynb: 4,
   /** Profile files: ~/.omiga/SOUL.md, USER.md, MEMORY.md */
   profile: 12,
   soul: 12,

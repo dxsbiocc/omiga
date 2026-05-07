@@ -43,7 +43,6 @@ import {
 import { useSessionStore } from "../../state/sessionStore";
 import { useColorModeStore } from "../../state/themeStore";
 import { PermissionSettingsTab } from "./PermissionSettingsTab";
-import { NotebookSettingsTab } from "./NotebookSettingsTab";
 import { ClaudeCodeImportPanel } from "./ClaudeCodeImportPanel";
 import { IntegrationsCatalogPanel } from "./IntegrationsCatalogPanel";
 import { UnifiedMemoryTab } from "./UnifiedMemoryTab";
@@ -94,7 +93,6 @@ const SETTINGS_SECTIONS: {
       { index: 2, label: "Permissions" },
       { index: 3, label: "Theme" },
       { index: 10, label: "Harness" },
-      { index: 7, label: "Notebook" },
     ],
   },
   {
@@ -124,10 +122,11 @@ const SETTINGS_NAV_FLAT = SETTINGS_SECTIONS.flatMap((s) => s.items);
 const SETTINGS_TAB_MAX = 14;
 
 function clampSettingsTab(i: number): number {
-  return Math.min(
+  const clamped = Math.min(
     Math.max(0, Math.floor(Number.isFinite(i) ? i : 0)),
     SETTINGS_TAB_MAX,
   );
+  return clamped === 7 ? 4 : clamped;
 }
 
 function parseSettingBool(raw: unknown, defaultVal: boolean): boolean {
@@ -3493,12 +3492,6 @@ export function Settings({
                   projectPath={projectPath}
                   mode="skills"
                 />
-              </Box>
-            )}
-
-            {activeTab === 7 && (
-              <Box>
-                <NotebookSettingsTab />
               </Box>
             )}
 
