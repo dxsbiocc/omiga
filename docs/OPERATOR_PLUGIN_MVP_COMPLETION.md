@@ -10,7 +10,7 @@ Implemented:
 
 - Plugin-provided `operator.yaml` manifests with `apiVersion: omiga.ai/operator/v1alpha1`.
 - User-scoped operator registry at `~/.omiga/operators/registry.json`.
-- Session workspace run state at `.omiga/runs/{run_id}` for local execution and the selected remote workspace for SSH/sandbox execution.
+- Session workspace run state at `.omiga/runs/{run_id}` for local execution and the selected remote workspace for SSH execution; SSH runs never fall back to remote `~/.omiga/runs`.
 - Dynamic Agent tools named `operator__{alias}` plus read-only `operator_list` and `operator_describe`.
 - Tauri operator commands with generic names: `list_operators`, `describe_operator`, `set_operator_enabled`, `run_operator`, `list_operator_runs`, `read_operator_run`, `read_operator_run_log`, and `verify_operator_run`.
 - Manifest-declared `smokeTests[]` with static validation and UI selection.

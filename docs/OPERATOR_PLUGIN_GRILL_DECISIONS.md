@@ -27,7 +27,7 @@ Non-goal for MVP: full DAG workflow orchestration, Snakemake/Nextflow parity, sc
 15. **Inputs**: Agent may pass plain path strings; executor canonicalizes to `FileRef`/`ArtifactRef`.
 16. **Input staging**: do not copy operator inputs. Inputs are resolved as references inside the active session execution environment; operators write any derived files under the session run workspace.
 17. **Outputs**: MVP collects outputs mainly with `outputs.glob`; optional `outputs.json` is reserved for structured output manifests.
-18. **Workspace**: every run uses an isolated workspace. Local run dirs live under `.omiga/runs/{run_id}`; SSH run dirs stay on the remote server.
+18. **Workspace**: every run uses an isolated workspace under the current session workspace. Local run dirs live under `<session-workspace>/.omiga/runs/{run_id}`; SSH run dirs live under `<remote-session-workspace>/.omiga/runs/{run_id}`, never under remote `~/.omiga/runs`.
 19. **SSH artifacts**: SSH outputs/logs/provenance remain remote; local results contain remote references only.
 20. **SSH registry/runtime split**: SSH runs use local registry/schema resolution, then execute on the selected remote session environment. Plugin wrapper files referenced by `argv` are staged into the remote run workspace as execution support files; generated artifacts remain remote.
 21. **Resources**: manifest defines defaults, ranges, and `exposed`; Agent can override only exposed resources.
@@ -72,7 +72,7 @@ Recommended first vertical slice:
 
 ## Current first-version completion notes
 
-- Operator run listing, details, logs, and verification are execution-surface aware: local reads use `{project}/.omiga/runs`, while SSH/sandbox reads use the active remote workspace `.omiga/runs` through the existing execution environment.
+- Operator run listing, details, logs, and verification are execution-surface aware: local reads use `{session-workspace}/.omiga/runs`, while SSH/sandbox reads use the active remote workspace `.omiga/runs` through the existing execution environment.
 - Remote operator artifacts/logs/provenance are never copied into the local registry or workspace; UI and Agent-facing results keep remote references and read/verify them in place.
 - Smoke runs are now manifest-driven via `smokeTests`, so user-added and built-in plugins can expose deterministic validation payloads through the same generic operator runner. When multiple smoke tests are declared, the UI lets the user choose which payload to run and then opens/verifies the resulting run.
 - Operator cards summarize calls/successes/failures/latest status from the current execution surface run history; clicking a card opens an operator detail view with manifest identity, aliases, smoke tests, and matching run statuses.

@@ -5090,6 +5090,24 @@ execution:
     }
 
     #[test]
+    fn ssh_operator_run_dirs_use_session_workspace_root() {
+        let ctx = crate::domain::tools::ToolContext::new("/remote/work/data/query")
+            .with_execution_environment("ssh")
+            .with_ssh_server(Some("gpu".to_string()));
+
+        let run_surface = OperatorExecutionSurface::for_context(&ctx, "oprun_123");
+        assert_eq!(run_surface.kind, OperatorExecutionSurfaceKind::Ssh);
+        assert_eq!(
+            run_surface.run_dir,
+            "/remote/work/data/query/.omiga/runs/oprun_123"
+        );
+
+        let runs_surface = OperatorExecutionSurface::for_runs_root(&ctx);
+        assert_eq!(runs_surface.kind, OperatorExecutionSurfaceKind::Ssh);
+        assert_eq!(runs_surface.run_dir, "/remote/work/data/query/.omiga/runs");
+    }
+
+    #[test]
     fn builds_docker_operator_command_for_local_container_runtime() {
         let tmp = TempDir::new().unwrap();
         let input = tmp.path().join("data.txt");

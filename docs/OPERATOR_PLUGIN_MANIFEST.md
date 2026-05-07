@@ -160,7 +160,8 @@ Operators must write durable result artifacts under `${outdir}`. Output globs ar
 ## Run storage
 
 - Local runs live under the current session workspace: `.omiga/runs/{run_id}`.
-- SSH/sandbox runs live under the selected remote workspace: `.omiga/runs/{run_id}`.
+- SSH runs live under the selected remote session workspace: `.omiga/runs/{run_id}`. They must not fall back to `~/.omiga/runs`.
+- Sandbox runs live under the sandbox workspace: `/workspace/.omiga/runs/{run_id}`.
 - User registry remains local: `~/.omiga/operators/registry.json`.
 - Remote artifacts, logs, and provenance stay remote; results keep references and are read/verified in place.
 - Path-like input fingerprints are persisted in provenance. Local file inputs use `sha256` plus size/mtime; remote file inputs best-effort `sha256sum`/`shasum -a 256` on the selected execution surface and fall back to stat/reference metadata if checksum tooling is unavailable.

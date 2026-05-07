@@ -279,10 +279,9 @@ pub(crate) struct BashRawOutput {
     pub(crate) stderr: Vec<String>,
 }
 
-/// Map local cwd under `project_root` to a path on the SSH host. Set `OMIGA_SSH_REMOTE_ROOT`
-/// to the directory on the server that corresponds to the project root (default `~`).
+/// Map local cwd under `project_root` to the active SSH session workspace.
 fn ssh_remote_cwd(project_root: &Path, local_cwd: &Path) -> String {
-    let root = std::env::var("OMIGA_SSH_REMOTE_ROOT").unwrap_or_else(|_| "~".to_string());
+    let root = crate::domain::tools::env_store::ssh_remote_root_for_project(project_root);
     let rel = match local_cwd.strip_prefix(project_root) {
         Ok(p) if p.as_os_str().is_empty() => {
             return root;
@@ -367,7 +366,7 @@ fn pick_remote_backend(cfg: &LlmConfigFile, ctx: &ToolContext) -> Result<RemoteB
         "「远程」bash 需要可用的远端执行配置：在 omiga.yaml 的 execution_envs.ssh 下添加已启用且含 HostName/User 的主机；\
          或在沙箱菜单选择 SSH / Modal / Daytona / Docker / Singularity，\
          或设置 OMIGA_REMOTE_BACKEND=modal|daytona|docker|singularity 并配置对应环境。\
-         可选环境变量：OMIGA_SSH_REMOTE_ROOT（远端项目根目录，默认 ~）、OMIGA_SSH_PROFILE（指定 ssh 配置名）。"
+         可选环境变量：OMIGA_SSH_PROFILE（指定 ssh 配置名）。"
             .to_string(),
     )
 }
