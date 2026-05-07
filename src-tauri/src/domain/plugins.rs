@@ -23,8 +23,38 @@ pub const CODEX_PLUGIN_MANIFEST_PATH: &str = ".codex-plugin/plugin.json";
 const MARKETPLACE_FILE_NAME: &str = "marketplace.json";
 const USER_PLUGINS_CONFIG_FILE: &str = "plugins/config.json";
 const PLUGINS_CACHE_DIR: &str = "plugins/cache";
+const PLUGINS_ROOT_DIR: &str = "plugins";
 const SOURCE_RUNNERS_DIR: &str = "source_runners";
 const DEFAULT_PLUGIN_VERSION: &str = "local";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginKind {
+    Operator,
+    Source,
+    Workflow,
+    Tool,
+    Other,
+}
+
+impl PluginKind {
+    const ALL: [Self; 5] = [
+        Self::Operator,
+        Self::Source,
+        Self::Workflow,
+        Self::Tool,
+        Self::Other,
+    ];
+
+    fn dir_name(self) -> &'static str {
+        match self {
+            Self::Operator => "operators",
+            Self::Source => "source",
+            Self::Workflow => "workflow",
+            Self::Tool => "tools",
+            Self::Other => "other",
+        }
+    }
+}
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -609,6 +639,17 @@ fn plugin_cache_root() -> PathBuf {
     omiga_home().join(PLUGINS_CACHE_DIR)
 }
 
+fn plugin_store_root() -> PathBuf {
+    omiga_home().join(PLUGINS_ROOT_DIR)
+}
+
+fn plugin_store_root_from_cache_root(cache_root: &Path) -> PathBuf {
+    cache_root
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(plugin_store_root)
+}
+
 pub fn dev_builtin_marketplace_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("bundled_plugins")
@@ -866,26 +907,83 @@ fn plugin_base_root_in_cache(cache_root: &Path, plugin_id: &PluginId) -> PathBuf
         .join(&plugin_id.name)
 }
 
-fn plugin_base_root(plugin_id: &PluginId) -> PathBuf {
-    plugin_base_root_in_cache(&plugin_cache_root(), plugin_id)
+fn plugin_base_root_for_kind(store_root: &Path, kind: PluginKind, plugin_id: &PluginId) -> PathBuf {
+    store_root.join(kind.dir_name()).join(&plugin_id.name)
 }
 
-fn sanitize_version(version: Option<&str>) -> String {
-    let version = version.unwrap_or(DEFAULT_PLUGIN_VERSION).trim();
-    let clean: String = version
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
-        .collect();
-    if clean.is_empty() || clean.contains("..") {
-        DEFAULT_PLUGIN_VERSION.to_string()
-    } else {
-        clean
+fn typed_plugin_base_roots(store_root: &Path, plugin_id: &PluginId) -> Vec<PathBuf> {
+    PluginKind::ALL
+        .into_iter()
+        .map(|kind| plugin_base_root_for_kind(store_root, kind, plugin_id))
+        .collect()
+}
+
+fn plugin_text_matches<I, S>(values: I, needles: &[&str]) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    values.into_iter().any(|value| {
+        let value = value.as_ref().trim().to_ascii_lowercase();
+        needles.iter().any(|needle| value == *needle)
+    })
+}
+
+fn plugin_interface_matches(interface: Option<&PluginInterface>, needles: &[&str]) -> bool {
+    let Some(interface) = interface else {
+        return false;
+    };
+    plugin_text_matches(interface.category.as_deref(), needles)
+        || plugin_text_matches(interface.capabilities.iter().map(String::as_str), needles)
+}
+
+fn plugin_kind_for_manifest(
+    source_path: &Path,
+    marketplace_category: Option<&str>,
+    manifest: &PluginManifest,
+) -> PluginKind {
+    let category_matches = |needles: &[&str]| {
+        plugin_text_matches(marketplace_category, needles)
+            || plugin_interface_matches(manifest.interface.as_ref(), needles)
+    };
+
+    if source_path.join("operators").is_dir() || category_matches(&["operator"]) {
+        return PluginKind::Operator;
     }
+    if manifest.retrieval.is_some()
+        || category_matches(&[
+            "source",
+            "retrieval",
+            "dataset",
+            "literature",
+            "knowledge",
+            "search",
+            "query",
+            "fetch",
+        ])
+    {
+        return PluginKind::Source;
+    }
+    if category_matches(&["workflow", "notebook"]) {
+        return PluginKind::Workflow;
+    }
+    if manifest.skills.is_some()
+        || manifest.mcp_servers.is_some()
+        || manifest.apps.is_some()
+        || category_matches(&["tool", "tools", "skill", "mcp", "app"])
+    {
+        return PluginKind::Tool;
+    }
+    PluginKind::Other
 }
 
-fn active_plugin_root_in_cache(cache_root: &Path, plugin_id: &PluginId) -> Option<PathBuf> {
-    let base = plugin_base_root_in_cache(cache_root, plugin_id);
-    let mut versions = fs::read_dir(&base)
+fn active_plugin_root_in_base(base: &Path) -> Option<PathBuf> {
+    if base.join(OMIGA_PLUGIN_MANIFEST_PATH).is_file()
+        || base.join(CODEX_PLUGIN_MANIFEST_PATH).is_file()
+    {
+        return Some(base.to_path_buf());
+    }
+    let mut versions = fs::read_dir(base)
         .ok()?
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_type().ok()?.is_dir().then(|| entry.file_name()))
@@ -904,8 +1002,20 @@ fn active_plugin_root_in_cache(cache_root: &Path, plugin_id: &PluginId) -> Optio
     Some(base.join(version))
 }
 
+fn active_plugin_root_in_cache(cache_root: &Path, plugin_id: &PluginId) -> Option<PathBuf> {
+    active_plugin_root_in_base(&plugin_base_root_in_cache(cache_root, plugin_id))
+}
+
+fn active_plugin_root_from_roots(cache_root: &Path, plugin_id: &PluginId) -> Option<PathBuf> {
+    let store_root = plugin_store_root_from_cache_root(cache_root);
+    typed_plugin_base_roots(&store_root, plugin_id)
+        .into_iter()
+        .find_map(|base| active_plugin_root_in_base(&base))
+        .or_else(|| active_plugin_root_in_cache(cache_root, plugin_id))
+}
+
 pub fn active_plugin_root(plugin_id: &PluginId) -> Option<PathBuf> {
-    active_plugin_root_in_cache(&plugin_cache_root(), plugin_id)
+    active_plugin_root_from_roots(&plugin_cache_root(), plugin_id)
 }
 
 fn prompt_safe_description(description: Option<&str>) -> Option<String> {
@@ -1000,12 +1110,13 @@ fn load_configured_plugin(
     cache_root: &Path,
 ) -> LoadedPlugin {
     let parsed_id = PluginId::parse(&configured_id);
+    let store_root = plugin_store_root_from_cache_root(cache_root);
     let root = parsed_id
         .as_ref()
         .ok()
-        .and_then(|plugin_id| active_plugin_root_in_cache(cache_root, plugin_id))
+        .and_then(|plugin_id| active_plugin_root_from_roots(cache_root, plugin_id))
         .unwrap_or_else(|| match &parsed_id {
-            Ok(plugin_id) => plugin_base_root_in_cache(cache_root, plugin_id),
+            Ok(plugin_id) => plugin_base_root_for_kind(&store_root, PluginKind::Other, plugin_id),
             Err(_) => cache_root.to_path_buf(),
         });
     let mut loaded = LoadedPlugin {
@@ -1033,7 +1144,7 @@ fn load_configured_plugin(
             return loaded;
         }
     };
-    let Some(plugin_root) = active_plugin_root_in_cache(cache_root, &plugin_id) else {
+    let Some(plugin_root) = active_plugin_root_from_roots(cache_root, &plugin_id) else {
         loaded.error = Some("plugin is not installed".to_string());
         return loaded;
     };
@@ -1137,21 +1248,22 @@ fn plugin_summary_from_installed_root(
     plugin_id: &PluginId,
     plugin_root: &Path,
     config: &PluginConfigFile,
-    cache_root: &Path,
 ) -> PluginSummary {
     let manifest = load_plugin_manifest(plugin_root);
     let retrieval = manifest
         .as_ref()
         .and_then(|manifest| plugin_retrieval_summary(manifest.retrieval.as_ref()));
     let key = plugin_id.key();
+    let marketplace_path = plugin_root
+        .parent()
+        .unwrap_or(plugin_root)
+        .to_string_lossy()
+        .into_owned();
     PluginSummary {
         id: key.clone(),
         name: plugin_id.name.clone(),
         marketplace_name: plugin_id.marketplace.clone(),
-        marketplace_path: cache_root
-            .join(&plugin_id.marketplace)
-            .to_string_lossy()
-            .into_owned(),
+        marketplace_path,
         source_path: plugin_root.to_string_lossy().into_owned(),
         installed_path: Some(plugin_root.to_string_lossy().into_owned()),
         installed: true,
@@ -1206,19 +1318,26 @@ fn unlisted_installed_plugin_summaries(
     listed_ids: &HashSet<String>,
     cache_root: &Path,
 ) -> Vec<PluginSummary> {
-    cached_plugin_ids_in_cache(cache_root)
-        .into_iter()
+    let mut ids = config
+        .plugins
+        .keys()
+        .filter_map(|key| PluginId::parse(key).ok())
+        .collect::<Vec<_>>();
+    ids.extend(cached_plugin_ids_in_cache(cache_root));
+    ids.sort_by_key(PluginId::key);
+    ids.dedup_by(|a, b| a.key() == b.key());
+
+    ids.into_iter()
         .filter_map(|plugin_id| {
             let key = plugin_id.key();
             if listed_ids.contains(&key) {
                 return None;
             }
-            let plugin_root = active_plugin_root_in_cache(cache_root, &plugin_id)?;
+            let plugin_root = active_plugin_root_from_roots(cache_root, &plugin_id)?;
             Some(plugin_summary_from_installed_root(
                 &plugin_id,
                 &plugin_root,
                 config,
-                cache_root,
             ))
         })
         .collect()
@@ -1276,8 +1395,10 @@ pub fn list_plugin_marketplaces(
     let installed_plugins = unlisted_installed_plugin_summaries(&config, &listed_ids, &cache_root);
     if !installed_plugins.is_empty() {
         out.push(PluginMarketplaceEntry {
-            name: "omiga-installed-cache".to_string(),
-            path: cache_root.to_string_lossy().into_owned(),
+            name: "installed-plugins".to_string(),
+            path: plugin_store_root_from_cache_root(&cache_root)
+                .to_string_lossy()
+                .into_owned(),
             interface: Some(MarketplaceInterface {
                 display_name: Some("Installed plugins".to_string()),
             }),
@@ -1530,14 +1651,16 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
 
 fn copy_marketplace_source_runner_assets(
     marketplace_path: &Path,
-    marketplace_name: &str,
+    _marketplace_name: &str,
     cache_root: &Path,
 ) -> Result<bool, String> {
     let source = marketplace_root_dir(marketplace_path).join(SOURCE_RUNNERS_DIR);
     if !source.is_dir() {
         return Ok(false);
     }
-    let target = cache_root.join(marketplace_name).join(SOURCE_RUNNERS_DIR);
+    let target = plugin_store_root_from_cache_root(cache_root)
+        .join(PluginKind::Source.dir_name())
+        .join(SOURCE_RUNNERS_DIR);
     copy_dir_recursive(&source, &target)?;
     Ok(true)
 }
@@ -1577,25 +1700,23 @@ fn remove_path_if_exists(path: &Path) -> Result<(), String> {
     }
 }
 
-fn replace_plugin_root_atomically(
-    source: &Path,
-    target_base: &Path,
-    version: &str,
-) -> Result<PathBuf, String> {
-    let parent = target_base
-        .parent()
-        .ok_or_else(|| format!("plugin cache path has no parent: {}", target_base.display()))?;
-    fs::create_dir_all(parent).map_err(|err| format!("create plugin cache dir: {err}"))?;
+fn replace_plugin_root_atomically(source: &Path, target_base: &Path) -> Result<PathBuf, String> {
+    let parent = target_base.parent().ok_or_else(|| {
+        format!(
+            "plugin install path has no parent: {}",
+            target_base.display()
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|err| format!("create plugin install dir: {err}"))?;
     let staged_base = parent.join(format!(".install-{}", uuid::Uuid::new_v4()));
-    let staged_version = staged_base.join(version);
-    copy_dir_recursive(source, &staged_version)?;
+    copy_dir_recursive(source, &staged_base)?;
 
     if target_base.exists() {
         remove_path_if_exists(target_base)?;
     }
     fs::rename(&staged_base, target_base)
-        .map_err(|err| format!("activate plugin cache entry: {err}"))?;
-    Ok(target_base.join(version))
+        .map_err(|err| format!("activate plugin install entry: {err}"))?;
+    Ok(target_base.to_path_buf())
 }
 
 pub fn install_plugin(
@@ -1629,14 +1750,16 @@ pub fn install_plugin(
         ));
     }
     let plugin_id = PluginId::new(&entry.name, &marketplace.name)?;
-    let version = sanitize_version(manifest.version.as_deref());
+    let kind = plugin_kind_for_manifest(&source_path, entry.category.as_deref(), &manifest);
     copy_marketplace_source_runner_assets(
         marketplace_path,
         &marketplace.name,
         &plugin_cache_root(),
     )?;
-    let installed_path =
-        replace_plugin_root_atomically(&source_path, &plugin_base_root(&plugin_id), &version)?;
+    let installed_path = replace_plugin_root_atomically(
+        &source_path,
+        &plugin_base_root_for_kind(&plugin_store_root(), kind, &plugin_id),
+    )?;
     set_plugin_enabled(&plugin_id.key(), true)?;
     Ok(PluginInstallResult {
         plugin_id: plugin_id.key(),
@@ -1647,7 +1770,10 @@ pub fn install_plugin(
 
 pub fn uninstall_plugin(plugin_id: &str) -> Result<(), String> {
     let plugin_id = PluginId::parse(plugin_id)?;
-    remove_path_if_exists(&plugin_base_root(&plugin_id))?;
+    for target in typed_plugin_base_roots(&plugin_store_root(), &plugin_id) {
+        remove_path_if_exists(&target)?;
+    }
+    remove_path_if_exists(&plugin_base_root_in_cache(&plugin_cache_root(), &plugin_id))?;
     let mut config = read_config();
     config.plugins.remove(&plugin_id.key());
     write_config(&config)
@@ -1718,6 +1844,39 @@ mod tests {
         plugin_root
     }
 
+    fn write_typed_plugin(
+        store_root: &Path,
+        kind: PluginKind,
+        name: &str,
+        manifest_interface: &str,
+        with_skill: bool,
+    ) -> PathBuf {
+        let plugin_root = store_root.join(kind.dir_name()).join(name);
+        fs::create_dir_all(plugin_root.join(".omiga-plugin")).unwrap();
+        fs::write(
+            plugin_root.join(".omiga-plugin/plugin.json"),
+            format!(
+                r#"{{
+                  "name": "{name}",
+                  "version": "0.1.0",
+                  "description": "{name} plugin",
+                  "interface": {manifest_interface}
+                }}"#
+            ),
+        )
+        .unwrap();
+        if with_skill {
+            let skill_dir = plugin_root.join("skills").join("sample-skill");
+            fs::create_dir_all(&skill_dir).unwrap();
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                "---\nname: sample-skill\ndescription: sample skill\n---\n",
+            )
+            .unwrap();
+        }
+        plugin_root
+    }
+
     #[test]
     fn resolves_manifest_paths_safely() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1767,7 +1926,90 @@ mod tests {
     }
 
     #[test]
-    fn marketplace_source_runners_are_copied_to_cache_root() {
+    fn configured_plugins_load_from_typed_operator_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store_root = tmp.path().join("plugins");
+        let cache_root = store_root.join("cache");
+        let plugin_root = write_typed_plugin(
+            &store_root,
+            PluginKind::Operator,
+            "sample-operator",
+            r#"{"displayName":"Sample Operator","category":"Operator"}"#,
+            true,
+        );
+        let mut config = PluginConfigFile::default();
+        config.plugins.insert(
+            "sample-operator@market".to_string(),
+            PluginConfigEntry { enabled: true },
+        );
+
+        let outcome = load_plugins_from_config(&config, &cache_root);
+
+        assert_eq!(outcome.plugins().len(), 1);
+        assert!(outcome.plugins()[0].is_active());
+        assert_eq!(outcome.plugins()[0].root, plugin_root);
+        assert_eq!(
+            outcome.effective_skill_roots(),
+            vec![plugin_root.join("skills")]
+        );
+    }
+
+    #[test]
+    fn typed_plugin_root_takes_precedence_over_legacy_cache() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store_root = tmp.path().join("plugins");
+        let cache_root = store_root.join("cache");
+        let typed_root = write_typed_plugin(
+            &store_root,
+            PluginKind::Operator,
+            "sample",
+            r#"{"displayName":"Typed Sample","category":"Operator"}"#,
+            false,
+        );
+        write_cached_plugin(
+            &cache_root,
+            "market",
+            "sample",
+            r#"{"displayName":"Legacy Sample"}"#,
+            None,
+            None,
+            false,
+        );
+        let plugin_id = PluginId::new("sample", "market").unwrap();
+
+        assert_eq!(
+            active_plugin_root_from_roots(&cache_root, &plugin_id),
+            Some(typed_root)
+        );
+    }
+
+    #[test]
+    fn plugin_kind_classification_matches_install_sections() {
+        let builtin = Path::new(env!("CARGO_MANIFEST_DIR")).join("bundled_plugins/plugins");
+        let operator_root = builtin.join("operator-pca-r");
+        let source_root = builtin.join("retrieval-dataset-geo");
+        let workflow_root = builtin.join("notebook-helper");
+
+        let operator_manifest = load_plugin_manifest(&operator_root).expect("operator manifest");
+        let source_manifest = load_plugin_manifest(&source_root).expect("source manifest");
+        let workflow_manifest = load_plugin_manifest(&workflow_root).expect("workflow manifest");
+
+        assert_eq!(
+            plugin_kind_for_manifest(&operator_root, Some("Operator"), &operator_manifest),
+            PluginKind::Operator
+        );
+        assert_eq!(
+            plugin_kind_for_manifest(&source_root, Some("Retrieval"), &source_manifest),
+            PluginKind::Source
+        );
+        assert_eq!(
+            plugin_kind_for_manifest(&workflow_root, Some("Notebook"), &workflow_manifest),
+            PluginKind::Workflow
+        );
+    }
+
+    #[test]
+    fn marketplace_source_runners_are_copied_to_source_root() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let marketplace_root = tmp.path().join("marketplace");
         let source_runners = marketplace_root.join(SOURCE_RUNNERS_DIR);
@@ -1782,7 +2024,7 @@ mod tests {
             r#"{"name":"omiga-curated","plugins":[]}"#,
         )
         .unwrap();
-        let cache_root = tmp.path().join("cache");
+        let cache_root = tmp.path().join("plugins").join("cache");
 
         let copied = copy_marketplace_source_runner_assets(
             &marketplace_root.join(MARKETPLACE_FILE_NAME),
@@ -1794,8 +2036,9 @@ mod tests {
         assert!(copied);
         assert_eq!(
             fs::read_to_string(
-                cache_root
-                    .join("omiga-curated")
+                tmp.path()
+                    .join("plugins")
+                    .join("source")
                     .join(SOURCE_RUNNERS_DIR)
                     .join("public_knowledge_sources.py")
             )
