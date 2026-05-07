@@ -698,6 +698,103 @@ export function operatorSmokeTestSummary(
   return description ? `${label}: ${description}${extra}` : `${label}${extra}`;
 }
 
+function previewValue(value: unknown): string {
+  if (value == null) return "null";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  const raw = JSON.stringify(value);
+  if (!raw) return String(value);
+  return raw.length > 80 ? `${raw.slice(0, 77)}…` : raw;
+}
+
+function runtimeAxisValues(runtime: unknown, axis: string): string[] {
+  if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) return [];
+  const value = (runtime as Record<string, unknown>)[axis];
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const supported = (value as Record<string, unknown>).supported;
+    if (typeof supported === "string" && supported.trim()) return [supported.trim()];
+    if (Array.isArray(supported)) {
+      return supported.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+    }
+  }
+  return [];
+}
+
+export function operatorTemplateScript(operator: OperatorSummary): string | null {
+  const argv = operator.execution?.argv ?? [];
+  return (
+    argv.find((token) => /(^|\/)bin\/[^/]+$/.test(token.trim())) ||
+    argv.find((token) => /\.(r|R|py|sh|bash|pl|rb|jl|cpp|c)(\s|$)/.test(token.trim())) ||
+    argv[0] ||
+    null
+  );
+}
+
+export function operatorRuntimeSummary(operator: OperatorSummary): string {
+  const runtime = operator.runtime;
+  const placement = runtimeAxisValues(runtime, "placement");
+  const container = runtimeAxisValues(runtime, "container");
+  const scheduler = runtimeAxisValues(runtime, "scheduler");
+  const parts = [
+    placement.length > 0 ? `placement: ${placement.join(", ")}` : null,
+    container.length > 0 ? `container: ${container.join(", ")}` : null,
+    scheduler.length > 0 ? `scheduler: ${scheduler.join(", ")}` : null,
+  ].filter((part): part is string => Boolean(part));
+  return parts.join(" · ") || "runtime: user environment";
+}
+
+export function operatorSchemaStats(operator: OperatorSummary): {
+  inputs: number;
+  requiredInputs: number;
+  params: number;
+  requiredParams: number;
+  outputs: number;
+  resources: number;
+} {
+  const inputs = Object.values(operator.interface?.inputs ?? {});
+  const params = Object.values(operator.interface?.params ?? {});
+  return {
+    inputs: inputs.length,
+    requiredInputs: inputs.filter((field) => field.required).length,
+    params: params.length,
+    requiredParams: params.filter((field) => field.required).length,
+    outputs: Object.keys(operator.interface?.outputs ?? {}).length,
+    resources: Object.values(operator.resources ?? {}).filter((resource) => resource.exposed !== false).length,
+  };
+}
+
+function operatorExecutionCommand(operator: OperatorSummary): string {
+  const argv = operator.execution?.argv ?? [];
+  if (argv.length === 0) return "No execution argv declared";
+  const command = argv.join(" ");
+  return command.length > 180 ? `${command.slice(0, 177)}…` : command;
+}
+
+function operatorFieldLabel(name: string, field: { kind?: string | null; required?: boolean; default?: unknown }): string {
+  const pieces = [name, field.kind ? `:${field.kind}` : ""].filter(Boolean).join("");
+  const flags = [
+    field.required ? "required" : null,
+    field.default !== undefined && field.default !== null ? `default=${previewValue(field.default)}` : null,
+  ].filter((value): value is string => Boolean(value));
+  return flags.length > 0 ? `${pieces} (${flags.join(", ")})` : pieces;
+}
+
+function operatorFieldEntries(
+  fields: Record<string, { kind?: string | null; required?: boolean; default?: unknown; description?: string | null }> | undefined,
+): Array<[string, { kind?: string | null; required?: boolean; default?: unknown; description?: string | null }]> {
+  return Object.entries(fields ?? {}).sort(([left], [right]) => left.localeCompare(right));
+}
+
+function operatorResourceEntries(operator: OperatorSummary) {
+  return Object.entries(operator.resources ?? {})
+    .filter(([, resource]) => resource.exposed !== false)
+    .sort(([left], [right]) => left.localeCompare(right));
+}
+
 function operatorCatalogKey(operator: OperatorSummary): string {
   return `${operator.id}:${operator.version}:${operator.sourcePlugin}:${operator.manifestPath}`;
 }
@@ -1235,11 +1332,163 @@ function PluginCatalogGroupList({
   );
 }
 
+function OperatorBundleContentList({ operators }: { operators: OperatorSummary[] }) {
+  const sorted = [...operators].sort((left, right) =>
+    operatorDisplayName(left).localeCompare(operatorDisplayName(right)),
+  );
+  return (
+    <Stack divider={<Box sx={{ height: 1, bgcolor: "divider" }} />}>
+      {sorted.map((operator) => {
+        const stats = operatorSchemaStats(operator);
+        const script = operatorTemplateScript(operator);
+        const inputEntries = operatorFieldEntries(operator.interface?.inputs).slice(0, 4);
+        const paramEntries = operatorFieldEntries(operator.interface?.params).slice(0, 5);
+        const outputEntries = operatorFieldEntries(operator.interface?.outputs).slice(0, 4);
+        const resourceEntries = operatorResourceEntries(operator);
+        return (
+          <Box key={operatorCatalogKey(operator)} sx={{ p: 1.4 }}>
+            <Stack spacing={1}>
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1.25} alignItems={{ xs: "stretch", sm: "flex-start" }}>
+                <Box
+                  sx={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: "50%",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    bgcolor: "action.hover",
+                    color: "text.secondary",
+                    flexShrink: 0,
+                  }}
+                >
+                  <ExtensionRounded fontSize="small" />
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+                    <Typography variant="subtitle2" fontWeight={850}>
+                      {operatorDisplayName(operator)}
+                    </Typography>
+                    <Chip size="small" variant="outlined" label={operator.id} />
+                    <Chip size="small" variant="outlined" label={`v${operator.version}`} />
+                    <Chip
+                      size="small"
+                      color={operator.exposed ? "success" : "default"}
+                      variant={operator.exposed ? "filled" : "outlined"}
+                      label={operator.exposed ? "Exposed" : "Not exposed"}
+                    />
+                  </Stack>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.35, wordBreak: "break-word" }}>
+                    {operator.description?.trim() || "Plugin-defined operator callable by agents as a tool."}
+                  </Typography>
+                </Box>
+              </Stack>
+
+              <Stack direction="row" gap={0.75} flexWrap="wrap">
+                <Chip size="small" variant="outlined" label={`${stats.inputs} inputs · ${stats.requiredInputs} required`} />
+                <Chip size="small" variant="outlined" label={`${stats.params} params`} />
+                <Chip size="small" variant="outlined" label={`${stats.outputs} outputs`} />
+                <Chip size="small" variant="outlined" label={`${stats.resources} resources`} />
+                {(operator.smokeTests?.length ?? 0) > 0 && (
+                  <Chip size="small" variant="outlined" label={`${operator.smokeTests?.length ?? 0} smoke tests`} />
+                )}
+              </Stack>
+
+              <Box
+                sx={{
+                  p: 1,
+                  borderRadius: 1.5,
+                  bgcolor: "action.hover",
+                  border: 1,
+                  borderColor: "divider",
+                }}
+              >
+                <Stack spacing={0.5}>
+                  <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
+                    Template script: {script || "not declared"}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
+                    Environment: {operatorRuntimeSummary(operator)}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
+                    Command: {operatorExecutionCommand(operator)}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
+                    Manifest: {operator.manifestPath}
+                  </Typography>
+                </Stack>
+              </Box>
+
+              <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Typography variant="caption" fontWeight={850}>
+                    Inputs
+                  </Typography>
+                  <Stack direction="row" gap={0.5} flexWrap="wrap" sx={{ mt: 0.5 }}>
+                    {inputEntries.length > 0 ? inputEntries.map(([name, field]) => (
+                      <Chip key={name} size="small" variant="outlined" label={operatorFieldLabel(name, field)} />
+                    )) : <Typography variant="caption" color="text.secondary">None</Typography>}
+                  </Stack>
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Typography variant="caption" fontWeight={850}>
+                    Params
+                  </Typography>
+                  <Stack direction="row" gap={0.5} flexWrap="wrap" sx={{ mt: 0.5 }}>
+                    {paramEntries.length > 0 ? paramEntries.map(([name, field]) => (
+                      <Chip key={name} size="small" variant="outlined" label={operatorFieldLabel(name, field)} />
+                    )) : <Typography variant="caption" color="text.secondary">None</Typography>}
+                  </Stack>
+                </Box>
+              </Stack>
+
+              {(outputEntries.length > 0 || resourceEntries.length > 0) && (
+                <Stack direction={{ xs: "column", md: "row" }} spacing={1}>
+                  {outputEntries.length > 0 && (
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography variant="caption" fontWeight={850}>
+                        Outputs
+                      </Typography>
+                      <Stack direction="row" gap={0.5} flexWrap="wrap" sx={{ mt: 0.5 }}>
+                        {outputEntries.map(([name, field]) => (
+                          <Chip key={name} size="small" variant="outlined" label={operatorFieldLabel(name, field)} />
+                        ))}
+                      </Stack>
+                    </Box>
+                  )}
+                  {resourceEntries.length > 0 && (
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography variant="caption" fontWeight={850}>
+                        Resources
+                      </Typography>
+                      <Stack direction="row" gap={0.5} flexWrap="wrap" sx={{ mt: 0.5 }}>
+                        {resourceEntries.map(([name, resource]) => (
+                          <Chip
+                            key={name}
+                            size="small"
+                            variant="outlined"
+                            label={`${name}${resource.default != null ? `=${previewValue(resource.default)}` : ""}`}
+                          />
+                        ))}
+                      </Stack>
+                    </Box>
+                  )}
+                </Stack>
+              )}
+            </Stack>
+          </Box>
+        );
+      })}
+    </Stack>
+  );
+}
+
 function PluginDetailsDialog({
   plugin,
   open,
   retrievalStatuses = [],
   processPoolStatuses = [],
+  operators = [],
   busy,
   onClose,
   onInstall,
@@ -1251,6 +1500,7 @@ function PluginDetailsDialog({
   open: boolean;
   retrievalStatuses?: PluginRetrievalRouteStatus[];
   processPoolStatuses?: PluginProcessPoolRouteStatus[];
+  operators?: OperatorSummary[];
   busy: boolean;
   onClose: () => void;
   onInstall: (plugin: PluginSummary) => void;
@@ -1267,6 +1517,7 @@ function PluginDetailsDialog({
 
   const chips = capabilityChips(plugin).slice(0, 2);
   const declaredRetrievalSources = plugin.retrieval?.sources ?? [];
+  const hasOperatorContent = operators.length > 0;
   const installable = plugin.installPolicy !== "NOT_AVAILABLE";
   const isNotebookHelper = isNotebookPlugin(plugin);
   const primaryPrompt = plugin.interface?.defaultPrompt?.[0] ?? null;
@@ -1514,7 +1765,7 @@ function PluginDetailsDialog({
 
           <Stack spacing={1.25}>
             <Typography variant="subtitle1" fontWeight={850}>
-              {declaredRetrievalSources.length > 0 ? "Routes" : "Included content"}
+              {declaredRetrievalSources.length > 0 ? "Routes" : hasOperatorContent ? "Operators" : "Included content"}
             </Typography>
             <Paper variant="outlined" sx={{ borderRadius: 2.5, overflow: "hidden" }}>
               <Stack divider={<Box sx={{ height: 1, bgcolor: "divider" }} />}>
@@ -1553,6 +1804,8 @@ function PluginDetailsDialog({
                       </Box>
                     </Stack>
                   ))
+                ) : hasOperatorContent ? (
+                  <OperatorBundleContentList operators={operators} />
                 ) : (
                   <Stack direction="row" spacing={1.4} alignItems="center" sx={{ p: 1.5 }}>
                     <Box
@@ -2975,6 +3228,9 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     return byId;
   }, [allPlugins]);
   const detailPlugin = detailPluginId ? pluginsById.get(detailPluginId) ?? null : null;
+  const detailPluginOperators = detailPlugin
+    ? operatorsByPlugin.get(detailPlugin.id) ?? operatorsByPlugin.get(detailPlugin.name) ?? []
+    : [];
   const installedPlugins = useMemo(
     () => allPlugins.filter((plugin) => plugin.installed),
     [allPlugins],
@@ -3519,6 +3775,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         open={Boolean(detailPlugin)}
         retrievalStatuses={detailPlugin ? retrievalStatusesByPlugin.get(detailPlugin.id) : undefined}
         processPoolStatuses={detailPlugin ? processPoolStatusesByPlugin.get(detailPlugin.id) : undefined}
+        operators={detailPluginOperators}
         busy={isMutating || (detailPlugin ? busyPluginIds.has(detailPlugin.id) : false)}
         onClose={() => setDetailPluginId(null)}
         onInstall={(plugin) => void handleInstall(plugin)}

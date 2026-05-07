@@ -96,12 +96,48 @@ export interface OperatorSummary {
   version: string;
   name?: string | null;
   description?: string | null;
+  tags?: string[];
   sourcePlugin: string;
   manifestPath: string;
+  interface?: OperatorInterfaceSpec;
+  execution?: OperatorExecutionSpec;
+  runtime?: Record<string, unknown> | null;
+  resources?: Record<string, OperatorResourceSpec>;
   smokeTests?: OperatorSmokeTestSpec[];
   enabledAliases: string[];
   exposed: boolean;
   unavailableReason?: string | null;
+}
+
+export interface OperatorFieldSpec {
+  kind?: string | null;
+  required?: boolean;
+  description?: string | null;
+  default?: unknown;
+  enum?: unknown[];
+  formats?: string[];
+  minimum?: number | null;
+  maximum?: number | null;
+  minSize?: number | null;
+  glob?: string | null;
+  nonEmpty?: boolean | null;
+}
+
+export interface OperatorInterfaceSpec {
+  inputs?: Record<string, OperatorFieldSpec>;
+  params?: Record<string, OperatorFieldSpec>;
+  outputs?: Record<string, OperatorFieldSpec>;
+}
+
+export interface OperatorExecutionSpec {
+  argv?: string[];
+}
+
+export interface OperatorResourceSpec {
+  default?: unknown;
+  min?: unknown;
+  max?: unknown;
+  exposed?: boolean;
 }
 
 export interface OperatorSmokeTestSpec {

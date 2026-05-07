@@ -8,6 +8,7 @@ import {
   operatorPluginIconSpec,
   operatorDisplayName,
   operatorPrimaryAlias,
+  operatorRuntimeSummary,
   operatorRunBelongsToOperator,
   operatorRunDiagnosisSummary,
   operatorRunDiagnosticsPayload,
@@ -17,7 +18,9 @@ import {
   operatorSmokeRunLabel,
   operatorSmokeTestForRun,
   operatorSmokeTestSummary,
+  operatorSchemaStats,
   operatorStructuredOutputEntries,
+  operatorTemplateScript,
   operatorRunStatusColor,
   operatorRunTitle,
   operatorSmokeRunArguments,
@@ -558,6 +561,45 @@ describe("PluginsPanel diagnostics helpers", () => {
       ),
     ).toBe("sample_qc");
     expect(operatorToolName("sample_qc")).toBe("operator__sample_qc");
+  });
+
+  it("summarizes operator scripts, runtime, and schemas for plugin details", () => {
+    const operator = operatorSummary({
+      execution: {
+        argv: ["Rscript", "./bin/pca_matrix.R", "${inputs.matrix}", "${outdir}"],
+      },
+      runtime: {
+        placement: { supported: ["local", "ssh"] },
+        container: { supported: ["none"] },
+      },
+      interface: {
+        inputs: {
+          matrix: { kind: "file", required: true },
+        },
+        params: {
+          scale: { kind: "boolean", default: true },
+          group_column: { kind: "string", required: true },
+        },
+        outputs: {
+          scores: { kind: "file", required: true, glob: "pca-scores.tsv" },
+        },
+      },
+      resources: {
+        cpu: { default: 1, exposed: true },
+        walltime: { default: "300s", exposed: true },
+      },
+    });
+
+    expect(operatorTemplateScript(operator)).toBe("./bin/pca_matrix.R");
+    expect(operatorRuntimeSummary(operator)).toBe("placement: local, ssh · container: none");
+    expect(operatorSchemaStats(operator)).toEqual({
+      inputs: 1,
+      requiredInputs: 1,
+      params: 2,
+      requiredParams: 1,
+      outputs: 1,
+      resources: 2,
+    });
   });
 
   it("recognizes manifest-declared smoke tests and builds deterministic smoke args", () => {

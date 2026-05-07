@@ -197,8 +197,16 @@ pub struct OperatorCandidateSummary {
     pub version: String,
     pub name: Option<String>,
     pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub source_plugin: String,
     pub manifest_path: String,
+    pub interface: OperatorInterfaceSpec,
+    pub execution: OperatorExecutionSpec,
+    #[serde(default)]
+    pub runtime: Option<JsonValue>,
+    #[serde(default)]
+    pub resources: BTreeMap<String, OperatorResourceSpec>,
     #[serde(default)]
     pub smoke_tests: Vec<OperatorSmokeTestSpec>,
     pub enabled_aliases: Vec<String>,
@@ -983,12 +991,17 @@ pub fn list_operator_summaries() -> Vec<OperatorCandidateSummary> {
                 version: candidate.metadata.version,
                 name: candidate.metadata.name,
                 description: candidate.metadata.description,
+                tags: candidate.metadata.tags,
                 source_plugin: candidate.source.source_plugin,
                 manifest_path: candidate
                     .source
                     .manifest_path
                     .to_string_lossy()
                     .into_owned(),
+                interface: candidate.interface,
+                execution: candidate.execution,
+                runtime: candidate.runtime,
+                resources: candidate.resources,
                 smoke_tests: candidate.smoke_tests,
                 exposed: !aliases.is_empty(),
                 enabled_aliases: aliases,
