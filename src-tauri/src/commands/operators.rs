@@ -129,6 +129,7 @@ pub async fn set_operator_enabled(update: OperatorRegistryUpdate) -> CommandResu
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn run_operator(
     state: State<'_, OmigaAppState>,
     alias: String,
@@ -239,6 +240,7 @@ pub async fn read_operator_run(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn read_operator_run_log(
     state: State<'_, OmigaAppState>,
     project_root: Option<String>,

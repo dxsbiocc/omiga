@@ -84,14 +84,17 @@ Regular Agent calls omit this context. Operator cards use it to separate normal 
 
 ## Runtime and resources
 
-Runtime support is declared as composable axes. The MVP supports local/SSH no-container execution and records container/runtime intent for validation.
+Runtime support is declared as composable axes. Operators can run without a container, or through the active session's direct Docker/Singularity backend when the manifest declares that support.
 
 ```yaml
 runtime:
   placement:
     supported: [local, ssh]
   container:
-    supported: [none]
+    supported: [none, docker, singularity]
+    images:
+      docker: ghcr.io/example/operator:1.0.0
+      singularity: docker://ghcr.io/example/operator:1.0.0
 resources:
   cpu:
     default: 1
@@ -108,6 +111,14 @@ bindings:
 ```
 
 Agents may override only resources marked `exposed: true`.
+
+Container selection rules:
+
+- If `none` is declared, direct local/SSH execution prefers no-container unless the manifest explicitly sets `runtime.container.default`, `preferred`, `type`, or `backend` to `docker`/`singularity`.
+- If only `docker` or `singularity` is declared, the selected session backend must match, or the manifest must explicitly select that backend.
+- Supported image fields are `runtime.container.image`, `runtime.container.images.{docker,singularity}`, `dockerImage`/`docker_image`, and `singularityImage`/`singularity_image`.
+- Local/SSH direct container execution bind-mounts the isolated run directory read-write and path-like inputs read-only. Local execution also mounts the project root and plugin root read-only. SSH artifacts, logs, and provenance stay on the remote workspace.
+- Sandbox/remote backends remain responsible for their own container isolation; the operator runtime is validated and recorded rather than nested in another container command.
 
 ## Execution
 

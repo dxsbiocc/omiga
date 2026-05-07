@@ -14,7 +14,7 @@ Non-goal for MVP: full DAG workflow orchestration, Snakemake/Nextflow parity, sc
 2. **Tool exposure**: each enabled operator is exposed as a dynamic tool named `operator__{id}`.
 3. **Execution entrypoint**: all operator tools route internally through one `execute_operator(operator_id, args)` path.
 4. **Plugin model**: plugins provide declarative `operator.yaml` manifests plus optional wrapper files; no dynamic plugin code is loaded into the Omiga process.
-5. **Runtime model**: manifest uses composable `placement + container + scheduler`; MVP supports `local+none`, `local+docker`, `local+singularity`, `ssh+none`, and `scheduler=none`.
+5. **Runtime model**: manifest uses composable `placement + container + scheduler`; first version supports `local/ssh + none/docker/singularity` with `scheduler=none`.
 6. **Runtime selection**: tool calls do not include runtime; the active session execution surface determines runtime.
 7. **Arguments**: operator tool arguments are always `{ inputs, params, resources }`.
 8. **Versioning**: Agent cannot choose versions in tool args; registry resolves the enabled version and run metadata locks it.
@@ -60,7 +60,7 @@ Recommended first vertical slice:
 4. Add `operator__*` dispatch before MCP/static tool dispatch.
 5. Implement local/no-container execution first, with isolated run dirs and structured results.
 6. Extend to SSH/no-container by using the local registry/schema and reusing the existing session execution environment and remote file access primitives.
-7. Add local Docker/Singularity once no-container behavior is stable.
+7. Add local/SSH Docker/Singularity command wrapping once no-container behavior is stable.
 
 ## Built-in validation fixture
 
@@ -78,5 +78,6 @@ Recommended first vertical slice:
 - Operator cards summarize calls/successes/failures/latest status from the current execution surface run history; clicking a card opens an operator detail view with manifest identity, aliases, smoke tests, and matching run statuses.
 - Smoke run provenance/status now records `runContext.kind=smoke` plus smoke test id/name, so cards can distinguish normal calls from smoke validation runs, including failed smoke runs that only have `status.json`.
 - Failed runs now surface structured diagnostics (`kind`, `retryable`, `message`, `suggestedAction`, stdout/stderr tails) in run summaries and details so the user or Agent can inspect/copy a concrete correction payload without moving remote artifacts locally.
+- Local/SSH Docker/Singularity runtimes now use direct command wrapping when the manifest and active session backend explicitly select a container. The run directory is writable, path-like inputs are read-only bind mounts, and sandbox backends avoid nested container wrapping.
 - Manual local smoke E2E was verified on 2026-05-07 with `operator__write_text_report`, producing `.omiga/runs/{run_id}/out/operator-report.txt` containing two `hello operator smoke` lines.
 - Regression coverage now locks smoke UI visibility, smoke-test selection fallback, store-level smoke run context propagation, failed-run diagnostic preservation, command project-root normalization, invalid smoke test ids, and bundled smoke execution.

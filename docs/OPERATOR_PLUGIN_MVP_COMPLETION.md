@@ -14,7 +14,7 @@ Implemented:
 - Dynamic Agent tools named `operator__{alias}` plus read-only `operator_list` and `operator_describe`.
 - Tauri operator commands with generic names: `list_operators`, `describe_operator`, `set_operator_enabled`, `run_operator`, `list_operator_runs`, `read_operator_run`, `read_operator_run_log`, and `verify_operator_run`.
 - Manifest-declared `smokeTests[]` with static validation and UI selection.
-- Local/SSH no-container execution, run status, logs, output collection, provenance, and read-only verification.
+- Local/SSH no-container execution, direct Docker/Singularity command wrapping, run status, logs, output collection, provenance, and read-only verification.
 - Structured failed-run diagnostics: `kind`, `retryable`, `message`, `suggestedAction`, `stdoutTail`, and `stderrTail`.
 - Operator settings UI with cards, run counts, success/failure/smoke statistics, details dialog, failed-run diagnosis, copyable diagnosis payload, run detail/log/verify actions, and smoke-run launcher.
 - Built-in validation plugin `operator-smoke@omiga-curated` exposing `write_text_report@0.1.0`.
@@ -55,7 +55,9 @@ hello operator smoke
 Latest verification run:
 
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all && cargo test --manifest-path src-tauri/Cargo.toml operators --lib`
-  - Result: 13 passed
+  - Result: 16 passed
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`
+  - Result: passed
 - `./node_modules/.bin/tsc --noEmit`
   - Result: passed
 - `bun run test src/components/Settings/PluginsPanel.test.tsx src/state/pluginStore.test.ts`
@@ -103,7 +105,7 @@ Keep separate from the operator MVP commit unless intentionally bundled:
 
 Recommended follow-up after MVP commit:
 
-1. Real Docker/Singularity operator execution path.
+1. Live Docker/Singularity smoke validation against installed container runtimes.
 2. Explicit retry policy for retryable infrastructure failures.
 3. Stronger input fingerprinting/checksum cache.
 4. Multi-operator workflow/rule composition.

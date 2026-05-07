@@ -15,7 +15,7 @@
 use crate::domain::tools::ToolSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1674,17 +1674,7 @@ fn runtime_supported(ctx: &crate::domain::tools::ToolContext, spec: &OperatorSpe
         "sandbox" | "remote" => "local",
         _ => "local",
     };
-    let container = match ctx.execution_environment.as_str() {
-        "sandbox" | "remote" => {
-            let backend = ctx.sandbox_backend.trim();
-            if backend.is_empty() {
-                "none"
-            } else {
-                backend
-            }
-        }
-        _ => "none",
-    };
+    let container = effective_runtime_container(ctx, runtime);
     let placements = runtime_axis_values(runtime, "placement");
     let containers = runtime_axis_values(runtime, "container");
     let schedulers = runtime_axis_values(runtime, "scheduler");
@@ -1699,8 +1689,28 @@ fn runtime_supported(ctx: &crate::domain::tools::ToolContext, spec: &OperatorSpe
         })
         .unwrap_or_default();
     (placements.is_empty() || placements.contains(placement) || flat.contains(placement))
-        && (containers.is_empty() || containers.contains(container) || flat.contains(container))
+        && (containers.is_empty() || containers.contains(&container) || flat.contains(&container))
         && (schedulers.is_empty() || schedulers.contains("none") || flat.contains("scheduler=none"))
+}
+
+fn effective_runtime_container(
+    ctx: &crate::domain::tools::ToolContext,
+    runtime: &JsonValue,
+) -> String {
+    match ctx.execution_environment.as_str() {
+        "sandbox" | "remote" => {
+            let backend = ctx.sandbox_backend.trim().to_ascii_lowercase();
+            if backend.is_empty() {
+                "none".to_string()
+            } else {
+                backend
+            }
+        }
+        "ssh" | "local" => selected_direct_container(ctx, runtime)
+            .map(|selection| selection.kind.as_str().to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        _ => "none".to_string(),
+    }
 }
 
 fn runtime_axis_values(runtime: &JsonValue, axis: &str) -> HashSet<String> {
@@ -1719,6 +1729,120 @@ fn runtime_axis_values(runtime: &JsonValue, axis: &str) -> HashSet<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperatorContainerKind {
+    Docker,
+    Singularity,
+}
+
+impl OperatorContainerKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Docker => "docker",
+            Self::Singularity => "singularity",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OperatorContainerSelection {
+    kind: OperatorContainerKind,
+    image: String,
+}
+
+fn selected_direct_container(
+    ctx: &crate::domain::tools::ToolContext,
+    runtime: &JsonValue,
+) -> Option<OperatorContainerSelection> {
+    let declared = declared_runtime_containers(runtime);
+    if declared.contains("none") {
+        let explicit = explicit_runtime_container_kind(runtime);
+        return explicit
+            .filter(|kind| declared.contains(kind.as_str()))
+            .map(|kind| OperatorContainerSelection {
+                kind,
+                image: runtime_container_image(runtime, kind),
+            });
+    }
+
+    let backend = ctx.sandbox_backend.trim().to_ascii_lowercase();
+    let preferred =
+        explicit_runtime_container_kind(runtime).or_else(|| container_kind_from_name(&backend));
+    preferred
+        .filter(|kind| declared.contains(kind.as_str()))
+        .map(|kind| OperatorContainerSelection {
+            kind,
+            image: runtime_container_image(runtime, kind),
+        })
+}
+
+fn declared_runtime_containers(runtime: &JsonValue) -> HashSet<String> {
+    let mut out = runtime_axis_values(runtime, "container")
+        .into_iter()
+        .filter(|value| matches!(value.as_str(), "none" | "docker" | "singularity"))
+        .collect::<HashSet<_>>();
+    if let Some(items) = runtime.get("supported").and_then(JsonValue::as_array) {
+        for item in items {
+            if let Some(value) = item.as_str().map(|value| value.trim().to_ascii_lowercase()) {
+                if matches!(value.as_str(), "none" | "docker" | "singularity") {
+                    out.insert(value);
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        out.insert("none".to_string());
+    }
+    out
+}
+
+fn explicit_runtime_container_kind(runtime: &JsonValue) -> Option<OperatorContainerKind> {
+    let container = runtime.get("container")?;
+    ["default", "preferred", "type", "backend"]
+        .into_iter()
+        .filter_map(|key| container.get(key).and_then(JsonValue::as_str))
+        .find_map(|value| container_kind_from_name(value.trim()))
+}
+
+fn container_kind_from_name(value: &str) -> Option<OperatorContainerKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "docker" => Some(OperatorContainerKind::Docker),
+        "singularity" => Some(OperatorContainerKind::Singularity),
+        _ => None,
+    }
+}
+
+fn runtime_container_image(runtime: &JsonValue, kind: OperatorContainerKind) -> String {
+    let container = runtime.get("container").unwrap_or(&JsonValue::Null);
+    let by_kind = match kind {
+        OperatorContainerKind::Docker => container
+            .get("dockerImage")
+            .or_else(|| container.get("docker_image")),
+        OperatorContainerKind::Singularity => container
+            .get("singularityImage")
+            .or_else(|| container.get("singularity_image")),
+    };
+    by_kind
+        .and_then(JsonValue::as_str)
+        .or_else(|| {
+            container
+                .get("images")
+                .and_then(|images| images.get(kind.as_str()))
+                .and_then(JsonValue::as_str)
+        })
+        .or_else(|| container.get("image").and_then(JsonValue::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| match kind {
+            OperatorContainerKind::Docker => {
+                std::env::var("OMIGA_DOCKER_IMAGE").unwrap_or_else(|_| "ubuntu:22.04".to_string())
+            }
+            OperatorContainerKind::Singularity => std::env::var("OMIGA_SINGULARITY_IMAGE")
+                .unwrap_or_else(|_| "docker://ubuntu:22.04".to_string()),
+        })
 }
 
 fn apply_param_defaults(
@@ -2399,7 +2523,14 @@ async fn execute_local(
     })?;
     update_local_status(&run_path, "running", None, Some(&status_metadata))?;
 
-    let command = command_with_log_capture(argv);
+    let command = operator_execution_command(
+        ctx,
+        &resolved.spec,
+        OperatorExecutionSurfaceKind::Local,
+        run_dir,
+        argv,
+        &effective_inputs,
+    );
     let result = execute_env_command(ctx, run_dir, &command, walltime_secs).await?;
     let stdout_tail = read_tail(run_path.join("logs/stdout.txt"));
     let stderr_tail = read_tail(run_path.join("logs/stderr.txt"));
@@ -2465,7 +2596,7 @@ async fn execute_local(
         input_fingerprints,
         effective_params,
         effective_resources,
-        enforcement: enforcement_json(ctx),
+        enforcement: enforcement_json(ctx, &resolved.spec),
         error: None,
     };
     write_json_file(&provenance_path, &result).map_err(|err| {
@@ -2506,7 +2637,14 @@ async fn execute_in_environment(
     update_environment_status(ctx, run_dir, "created", None, Some(&status_metadata)).await?;
     update_environment_status(ctx, run_dir, "running", None, Some(&status_metadata)).await?;
     let staged_argv = stage_remote_plugin_files(ctx, &resolved.spec, run_dir, argv).await?;
-    let command = command_with_log_capture(&staged_argv);
+    let command = operator_execution_command(
+        ctx,
+        &resolved.spec,
+        surface.kind,
+        run_dir,
+        &staged_argv,
+        &effective_inputs,
+    );
     let result = execute_env_command(ctx, run_dir, &command, walltime_secs).await?;
     let stdout_tail = remote_tail(ctx, run_dir, "logs/stdout.txt").await;
     let stderr_tail = remote_tail(ctx, run_dir, "logs/stderr.txt").await;
@@ -2553,7 +2691,7 @@ async fn execute_in_environment(
         input_fingerprints,
         effective_params,
         effective_resources,
-        enforcement: enforcement_json(ctx),
+        enforcement: enforcement_json(ctx, &resolved.spec),
         error: None,
     };
     write_environment_json(ctx, run_dir, "provenance.json", &result).await?;
@@ -2676,6 +2814,171 @@ fn command_with_log_capture(argv: &[String]) -> String {
     format!(
         "set +e\n{rendered} > logs/stdout.txt 2> logs/stderr.txt\ncode=$?\nprintf '\\n__OMIGA_OPERATOR_EXIT_CODE=%s\\n' \"$code\"\nexit \"$code\""
     )
+}
+
+fn operator_execution_command(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    surface_kind: OperatorExecutionSurfaceKind,
+    run_dir: &str,
+    argv: &[String],
+    inputs: &BTreeMap<String, JsonValue>,
+) -> String {
+    let Some(selection) = operator_container_for_command(ctx, spec, surface_kind) else {
+        return command_with_log_capture(argv);
+    };
+    containerized_operator_command(ctx, spec, selection, surface_kind, run_dir, argv, inputs)
+}
+
+fn operator_container_for_command(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    surface_kind: OperatorExecutionSurfaceKind,
+) -> Option<OperatorContainerSelection> {
+    if surface_kind == OperatorExecutionSurfaceKind::Sandbox {
+        return None;
+    }
+    spec.runtime
+        .as_ref()
+        .and_then(|runtime| selected_direct_container(ctx, runtime))
+}
+
+fn containerized_operator_command(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    selection: OperatorContainerSelection,
+    surface_kind: OperatorExecutionSurfaceKind,
+    run_dir: &str,
+    argv: &[String],
+    inputs: &BTreeMap<String, JsonValue>,
+) -> String {
+    let inner = command_with_log_capture(argv);
+    let mounts = operator_container_mounts(ctx, spec, surface_kind, run_dir, inputs);
+    match selection.kind {
+        OperatorContainerKind::Docker => {
+            let mut tokens = vec!["docker".to_string(), "run".to_string(), "--rm".to_string()];
+            for mount in mounts {
+                tokens.push("-v".to_string());
+                tokens.push(container_bind_spec(&mount.path, mount.writable));
+            }
+            tokens.extend([
+                "-w".to_string(),
+                run_dir.to_string(),
+                selection.image,
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                inner,
+            ]);
+            shell_join(&tokens)
+        }
+        OperatorContainerKind::Singularity => {
+            let mut tokens = vec![
+                "singularity".to_string(),
+                "exec".to_string(),
+                "--cleanenv".to_string(),
+                "--pwd".to_string(),
+                run_dir.to_string(),
+            ];
+            for mount in mounts {
+                tokens.push("--bind".to_string());
+                tokens.push(container_bind_spec(&mount.path, mount.writable));
+            }
+            tokens.extend([
+                selection.image,
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                inner,
+            ]);
+            shell_join(&tokens)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct OperatorContainerMount {
+    path: String,
+    writable: bool,
+}
+
+fn operator_container_mounts(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    surface_kind: OperatorExecutionSurfaceKind,
+    run_dir: &str,
+    inputs: &BTreeMap<String, JsonValue>,
+) -> Vec<OperatorContainerMount> {
+    let mut mounts = BTreeMap::<String, bool>::new();
+    insert_container_mount(&mut mounts, run_dir, true);
+
+    if surface_kind == OperatorExecutionSurfaceKind::Local {
+        insert_container_mount(&mut mounts, &ctx.project_root.to_string_lossy(), false);
+        insert_container_mount(
+            &mut mounts,
+            &spec.source.plugin_root.to_string_lossy(),
+            false,
+        );
+    }
+
+    for path in path_like_input_values(spec, inputs) {
+        insert_container_mount(&mut mounts, &path, false);
+    }
+
+    mounts
+        .into_iter()
+        .map(|(path, writable)| OperatorContainerMount { path, writable })
+        .collect()
+}
+
+fn insert_container_mount(mounts: &mut BTreeMap<String, bool>, path: &str, writable: bool) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let entry = mounts.entry(trimmed.to_string()).or_insert(false);
+    *entry = *entry || writable;
+}
+
+fn path_like_input_values(
+    spec: &OperatorSpec,
+    inputs: &BTreeMap<String, JsonValue>,
+) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    for (name, field) in &spec.interface.inputs {
+        if !field.kind.is_path_like() {
+            continue;
+        }
+        let Some(value) = inputs.get(name) else {
+            continue;
+        };
+        if field.kind.is_array() {
+            if let Some(items) = value.as_array() {
+                for item in items {
+                    if let Some(path) = item.as_str() {
+                        paths.insert(path.to_string());
+                    }
+                }
+            }
+        } else if let Some(path) = value.as_str() {
+            paths.insert(path.to_string());
+        }
+    }
+    paths.into_iter().collect()
+}
+
+fn container_bind_spec(path: &str, writable: bool) -> String {
+    if writable {
+        format!("{path}:{path}")
+    } else {
+        format!("{path}:{path}:ro")
+    }
+}
+
+fn shell_join(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .map(|token| sh_quote(token))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn sh_quote(value: &str) -> String {
@@ -3656,7 +3959,7 @@ fn run_identity(resolved: &ResolvedOperator) -> OperatorRunIdentity {
     }
 }
 
-fn enforcement_json(ctx: &crate::domain::tools::ToolContext) -> JsonValue {
+fn enforcement_json(ctx: &crate::domain::tools::ToolContext, spec: &OperatorSpec) -> JsonValue {
     match ctx.execution_environment.as_str() {
         "sandbox" | "remote" => json!({
             "placement": "local",
@@ -3664,18 +3967,32 @@ fn enforcement_json(ctx: &crate::domain::tools::ToolContext) -> JsonValue {
             "filesystem": "container_best_effort",
             "network": "backend_policy_or_manifest_permissions_best_effort"
         }),
-        "ssh" => json!({
-            "placement": "ssh",
-            "container": "none",
-            "filesystem": "trusted_remote_best_effort",
-            "network": "remote_user_environment"
-        }),
-        _ => json!({
-            "placement": "local",
-            "container": "none",
-            "filesystem": "local_best_effort",
-            "network": "local_user_environment"
-        }),
+        "ssh" => {
+            let container = spec
+                .runtime
+                .as_ref()
+                .and_then(|runtime| selected_direct_container(ctx, runtime))
+                .map(|selection| selection.kind.as_str().to_string());
+            json!({
+                "placement": "ssh",
+                "container": container.as_deref().unwrap_or("none"),
+                "filesystem": if container.is_some() { "remote_container_bind_mount_best_effort" } else { "trusted_remote_best_effort" },
+                "network": if container.is_some() { "container_runtime_policy" } else { "remote_user_environment" }
+            })
+        }
+        _ => {
+            let container = spec
+                .runtime
+                .as_ref()
+                .and_then(|runtime| selected_direct_container(ctx, runtime))
+                .map(|selection| selection.kind.as_str().to_string());
+            json!({
+                "placement": "local",
+                "container": container.as_deref().unwrap_or("none"),
+                "filesystem": if container.is_some() { "local_container_bind_mount_best_effort" } else { "local_best_effort" },
+                "network": if container.is_some() { "container_runtime_policy" } else { "local_user_environment" }
+            })
+        }
     }
 }
 
@@ -4114,6 +4431,181 @@ execution:
         )
         .unwrap_err();
         assert_eq!(err.field.as_deref(), Some("resources.cpu"));
+    }
+
+    #[test]
+    fn builds_docker_operator_command_for_local_container_runtime() {
+        let tmp = TempDir::new().unwrap();
+        let input = tmp.path().join("data.txt");
+        fs::write(&input, "hello\n").unwrap();
+        let spec = OperatorSpec {
+            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
+            kind: OPERATOR_KIND.to_string(),
+            metadata: OperatorMetadata {
+                id: "container_op".to_string(),
+                version: "1".to_string(),
+                name: None,
+                description: None,
+                tags: Vec::new(),
+            },
+            interface: OperatorInterfaceSpec {
+                inputs: BTreeMap::from([(
+                    "input".to_string(),
+                    OperatorFieldSpec {
+                        kind: OperatorFieldKind::File,
+                        required: true,
+                        ..OperatorFieldSpec::default()
+                    },
+                )]),
+                ..OperatorInterfaceSpec::default()
+            },
+            smoke_tests: Vec::new(),
+            execution: OperatorExecutionSpec {
+                argv: vec!["/bin/cat".to_string(), "${inputs.input}".to_string()],
+            },
+            runtime: Some(json!({
+                "placement": { "supported": ["local"] },
+                "container": {
+                    "supported": ["docker"],
+                    "image": "alpine:3.19"
+                },
+                "scheduler": { "supported": ["none"] }
+            })),
+            resources: BTreeMap::new(),
+            bindings: Vec::new(),
+            permissions: None,
+            source: OperatorSource {
+                source_plugin: "p".to_string(),
+                plugin_root: tmp.path().to_path_buf(),
+                manifest_path: tmp.path().join("operator.yaml"),
+            },
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path()).with_sandbox_backend("docker");
+        assert!(runtime_supported(&ctx, &spec));
+        let inputs = BTreeMap::from([(
+            "input".to_string(),
+            JsonValue::String(input.to_string_lossy().into_owned()),
+        )]);
+        let command = operator_execution_command(
+            &ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            "/tmp/oprun_container",
+            &["/bin/cat".to_string(), input.to_string_lossy().into_owned()],
+            &inputs,
+        );
+
+        assert!(command.contains("'docker' 'run' '--rm'"));
+        assert!(command.contains("'alpine:3.19'"));
+        assert!(command.contains("'/tmp/oprun_container:/tmp/oprun_container'"));
+        assert!(command.contains(&format!(
+            "'{}:{}:ro'",
+            input.to_string_lossy(),
+            input.to_string_lossy()
+        )));
+        assert!(command.contains("logs/stdout.txt"));
+    }
+
+    #[test]
+    fn builds_singularity_operator_command_from_manifest_image() {
+        let tmp = TempDir::new().unwrap();
+        let spec = OperatorSpec {
+            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
+            kind: OPERATOR_KIND.to_string(),
+            metadata: OperatorMetadata {
+                id: "singularity_op".to_string(),
+                version: "1".to_string(),
+                name: None,
+                description: None,
+                tags: Vec::new(),
+            },
+            interface: OperatorInterfaceSpec::default(),
+            smoke_tests: Vec::new(),
+            execution: OperatorExecutionSpec {
+                argv: vec!["/bin/true".to_string()],
+            },
+            runtime: Some(json!({
+                "placement": { "supported": ["local"] },
+                "container": {
+                    "supported": ["singularity"],
+                    "images": { "singularity": "docker://alpine:3.19" }
+                },
+                "scheduler": { "supported": ["none"] }
+            })),
+            resources: BTreeMap::new(),
+            bindings: Vec::new(),
+            permissions: None,
+            source: OperatorSource {
+                source_plugin: "p".to_string(),
+                plugin_root: tmp.path().to_path_buf(),
+                manifest_path: tmp.path().join("operator.yaml"),
+            },
+        };
+        let ctx =
+            crate::domain::tools::ToolContext::new(tmp.path()).with_sandbox_backend("singularity");
+        assert!(runtime_supported(&ctx, &spec));
+
+        let command = operator_execution_command(
+            &ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            "/tmp/oprun_singularity",
+            &["/bin/true".to_string()],
+            &BTreeMap::new(),
+        );
+
+        assert!(command.contains("'singularity' 'exec'"));
+        assert!(command.contains("'--pwd' '/tmp/oprun_singularity'"));
+        assert!(command.contains("'docker://alpine:3.19'"));
+        assert!(command.contains("logs/stdout.txt"));
+    }
+
+    #[test]
+    fn local_runtime_prefers_no_container_when_manifest_allows_none() {
+        let tmp = TempDir::new().unwrap();
+        let spec = OperatorSpec {
+            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
+            kind: OPERATOR_KIND.to_string(),
+            metadata: OperatorMetadata {
+                id: "portable_op".to_string(),
+                version: "1".to_string(),
+                name: None,
+                description: None,
+                tags: Vec::new(),
+            },
+            interface: OperatorInterfaceSpec::default(),
+            smoke_tests: Vec::new(),
+            execution: OperatorExecutionSpec {
+                argv: vec!["/bin/true".to_string()],
+            },
+            runtime: Some(json!({
+                "placement": { "supported": ["local"] },
+                "container": { "supported": ["none", "docker"] },
+                "scheduler": { "supported": ["none"] }
+            })),
+            resources: BTreeMap::new(),
+            bindings: Vec::new(),
+            permissions: None,
+            source: OperatorSource {
+                source_plugin: "p".to_string(),
+                plugin_root: tmp.path().to_path_buf(),
+                manifest_path: tmp.path().join("operator.yaml"),
+            },
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path()).with_sandbox_backend("docker");
+        assert!(runtime_supported(&ctx, &spec));
+
+        let command = operator_execution_command(
+            &ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            "/tmp/oprun_none",
+            &["/bin/true".to_string()],
+            &BTreeMap::new(),
+        );
+
+        assert!(!command.contains("'docker' 'run'"));
+        assert!(command.starts_with("set +e"));
     }
 
     #[test]
