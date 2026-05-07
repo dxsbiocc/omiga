@@ -184,6 +184,8 @@ Available substitutions include `${inputs.name}`, `${params.name}`, `${resources
 
 Operators must write durable result artifacts under `${outdir}`. Output globs are relative to `${outdir}`; absolute paths and `..` components are rejected so collected results cannot escape the active session run workspace.
 
+Operators may also write a small structured metadata manifest to `${outdir}/outputs.json`. When present, it must be a JSON object and stay under the same run outdir; it is persisted in provenance as `structuredOutputs` while large files continue to be referenced through declared `outputs.*.glob` artifacts.
+
 ## Run storage
 
 - Local runs live under the current session workspace: `.omiga/runs/{run_id}`.
@@ -193,6 +195,7 @@ Operators must write durable result artifacts under `${outdir}`. Output globs ar
 - Remote artifacts, logs, and provenance stay remote; results keep references and are read/verified in place.
 - Path-like input fingerprints are persisted in provenance. Local file inputs use `sha256` plus size/mtime; remote file inputs best-effort `sha256sum`/`shasum -a 256` on the selected execution surface and fall back to stat/reference metadata if checksum tooling is unavailable.
 - Operator outputs are collected only from `.omiga/runs/{run_id}/out` in the active session workspace or selected remote workspace.
+- Structured outputs are read only from `.omiga/runs/{run_id}/out/outputs.json` in that same workspace and are capped at 1 MiB.
 - Cache hit records are also written under the active workspace `.omiga/runs/{run_id}` and only reference prior artifacts inside that same execution surface.
 - Run cleanup is workspace-scoped. The UI previews global or per-operator candidates, preserves the latest matching runs, and requires confirmation before deleting old/cache run directories under the active `.omiga/runs` root.
 

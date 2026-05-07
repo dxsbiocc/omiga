@@ -28,6 +28,8 @@ const RUNS_RELATIVE_PATH: &str = "runs";
 const OPERATOR_DEFAULT_MAX_ATTEMPTS: u32 = 2;
 const OPERATOR_MAX_MAX_ATTEMPTS: u32 = 5;
 const OPERATOR_CACHE_SCAN_LIMIT: usize = 200;
+const OPERATOR_STRUCTURED_OUTPUTS_FILE: &str = "outputs.json";
+const OPERATOR_STRUCTURED_OUTPUTS_MAX_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1299,6 +1301,8 @@ struct OperatorRunResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     provenance_path: Option<String>,
     outputs: BTreeMap<String, Vec<ArtifactRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    structured_outputs: Option<JsonValue>,
     effective_inputs: BTreeMap<String, JsonValue>,
     input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
@@ -1414,6 +1418,7 @@ pub struct OperatorRunSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance_path: Option<String>,
     pub output_count: usize,
+    pub structured_output_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2112,6 +2117,7 @@ async fn record_operator_cache_hit(
             format!("{run_dir}/provenance.json")
         }),
         outputs: hit.result.outputs.clone(),
+        structured_outputs: hit.result.structured_outputs.clone(),
         effective_inputs,
         input_fingerprints,
         effective_params,
@@ -3301,6 +3307,18 @@ async fn execute_local(
             return Err(error);
         }
     };
+    let structured_outputs = match read_local_structured_outputs(&out, run_dir) {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            let error = if error.run_dir.is_none() {
+                error.with_run_dir(run_dir)
+            } else {
+                error
+            };
+            update_local_status(&run_path, "failed", Some(&error), Some(&status_metadata))?;
+            return Err(error);
+        }
+    };
     let provenance_path = run_path.join("provenance.json");
     let result = OperatorRunResult {
         status: "succeeded".to_string(),
@@ -3311,6 +3329,7 @@ async fn execute_local(
         run_context,
         provenance_path: Some(provenance_path.to_string_lossy().into_owned()),
         outputs,
+        structured_outputs,
         effective_inputs,
         input_fingerprints,
         effective_params,
@@ -3405,6 +3424,19 @@ async fn execute_in_environment(
             return Err(error);
         }
     };
+    let structured_outputs = match read_environment_structured_outputs(ctx, run_dir).await {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            let error = if error.run_dir.is_none() {
+                error.with_run_dir(run_dir)
+            } else {
+                error
+            };
+            update_environment_status(ctx, run_dir, "failed", Some(&error), Some(&status_metadata))
+                .await?;
+            return Err(error);
+        }
+    };
     let result = OperatorRunResult {
         status: "succeeded".to_string(),
         run_id: run_id.to_string(),
@@ -3414,6 +3446,7 @@ async fn execute_in_environment(
         run_context,
         provenance_path: Some(format!("{run_dir}/provenance.json")),
         outputs,
+        structured_outputs,
         effective_inputs,
         input_fingerprints,
         effective_params,
@@ -3920,6 +3953,262 @@ async fn collect_environment_outputs(
         outputs.insert(name.clone(), artifacts);
     }
     Ok(outputs)
+}
+
+fn read_local_structured_outputs(
+    out_dir: &Path,
+    run_dir: &str,
+) -> Result<Option<JsonValue>, OperatorToolError> {
+    let target = out_dir.join(OPERATOR_STRUCTURED_OUTPUTS_FILE);
+    if !target.exists() {
+        return Ok(None);
+    }
+    let canonical_run_dir = Path::new(run_dir).canonicalize().map_err(|err| {
+        OperatorToolError::new(
+            "output_validation_failed",
+            false,
+            format!("resolve operator run dir `{run_dir}`: {err}"),
+        )
+        .with_run_dir(run_dir)
+    })?;
+    let canonical_out_dir = out_dir.canonicalize().map_err(|err| {
+        OperatorToolError::new(
+            "output_validation_failed",
+            false,
+            format!("resolve operator output dir {}: {err}", out_dir.display()),
+        )
+        .with_run_dir(run_dir)
+    })?;
+    let canonical_target = target.canonicalize().map_err(|err| {
+        OperatorToolError::new(
+            "output_validation_failed",
+            false,
+            format!(
+                "resolve structured output manifest {}: {err}",
+                target.display()
+            ),
+        )
+        .with_field("structuredOutputs")
+        .with_run_dir(run_dir)
+    })?;
+    if !canonical_out_dir.starts_with(&canonical_run_dir)
+        || !canonical_target.starts_with(&canonical_out_dir)
+    {
+        return Err(OperatorToolError::new(
+            "output_validation_failed",
+            false,
+            "Structured output manifest must stay under the active session outdir.",
+        )
+        .with_field("structuredOutputs")
+        .with_run_dir(run_dir)
+        .with_suggested_action("Write structured metadata only to `${outdir}/outputs.json`."));
+    }
+    let metadata = canonical_target.metadata().map_err(|err| {
+        OperatorToolError::new(
+            "output_validation_failed",
+            false,
+            format!(
+                "read structured output manifest metadata {}: {err}",
+                canonical_target.display()
+            ),
+        )
+        .with_field("structuredOutputs")
+        .with_run_dir(run_dir)
+    })?;
+    if !metadata.is_file() {
+        return Err(OperatorToolError::new(
+            "output_validation_failed",
+            false,
+            "Structured output manifest must be a regular JSON file.",
+        )
+        .with_field("structuredOutputs")
+        .with_run_dir(run_dir)
+        .with_suggested_action("Write a JSON object to `${outdir}/outputs.json`."));
+    }
+    if metadata.len() > OPERATOR_STRUCTURED_OUTPUTS_MAX_BYTES {
+        return Err(OperatorToolError::new(
+            "output_validation_failed",
+            false,
+            format!(
+                "Structured output manifest exceeds {} bytes.",
+                OPERATOR_STRUCTURED_OUTPUTS_MAX_BYTES
+            ),
+        )
+        .with_field("structuredOutputs")
+        .with_run_dir(run_dir)
+        .with_suggested_action(
+            "Keep `${outdir}/outputs.json` small and put large payloads in declared output artifacts.",
+        ));
+    }
+    let raw = fs::read_to_string(&canonical_target).map_err(|err| {
+        OperatorToolError::new(
+            "output_validation_failed",
+            false,
+            format!(
+                "read structured output manifest {}: {err}",
+                target.display()
+            ),
+        )
+        .with_field("structuredOutputs")
+        .with_run_dir(run_dir)
+    })?;
+    let value = serde_json::from_str::<JsonValue>(&raw).map_err(|err| {
+        OperatorToolError::new(
+            "output_validation_failed",
+            false,
+            format!(
+                "parse structured output manifest {}: {err}",
+                target.display()
+            ),
+        )
+        .with_field("structuredOutputs")
+        .with_run_dir(run_dir)
+        .with_suggested_action("Write valid JSON object metadata to `${outdir}/outputs.json`.")
+    })?;
+    validate_structured_outputs(value, run_dir).map(Some)
+}
+
+async fn read_environment_structured_outputs(
+    ctx: &crate::domain::tools::ToolContext,
+    run_dir: &str,
+) -> Result<Option<JsonValue>, OperatorToolError> {
+    let missing = "__OMIGA_OPERATOR_STRUCTURED_OUTPUTS_MISSING__";
+    let prefix = "__OMIGA_OPERATOR_STRUCTURED_OUTPUTS_JSON__";
+    let escaped = "__OMIGA_OPERATOR_STRUCTURED_OUTPUTS_ESCAPED__";
+    let not_file = "__OMIGA_OPERATOR_STRUCTURED_OUTPUTS_NOT_FILE__";
+    let too_large = "__OMIGA_OPERATOR_STRUCTURED_OUTPUTS_TOO_LARGE__";
+    let bad_size = "__OMIGA_OPERATOR_STRUCTURED_OUTPUTS_BAD_SIZE__";
+    let command = format!(
+        r#"target={target}
+if [ ! -e "$target" ]; then printf %s {missing}; exit 0; fi
+if [ ! -f "$target" ]; then printf %s {not_file}; exit 0; fi
+out_root=$(cd out 2>/dev/null && pwd -P) || exit 65
+resolved=$(readlink -f "$target" 2>/dev/null || realpath "$target" 2>/dev/null || printf '')
+case "$resolved" in "$out_root"/*) ;; *) printf %s {escaped}; exit 0 ;; esac
+size=$(wc -c < "$target" | tr -d '[:space:]')
+case "$size" in ''|*[!0-9]*) printf %s {bad_size}; exit 0 ;; esac
+if [ "$size" -gt {max_bytes} ]; then printf %s {too_large}; exit 0; fi
+printf '%s\n' {prefix}
+cat "$target""#,
+        target = sh_quote(&format!("out/{OPERATOR_STRUCTURED_OUTPUTS_FILE}")),
+        missing = sh_quote(missing),
+        not_file = sh_quote(not_file),
+        escaped = sh_quote(escaped),
+        bad_size = sh_quote(bad_size),
+        too_large = sh_quote(too_large),
+        max_bytes = OPERATOR_STRUCTURED_OUTPUTS_MAX_BYTES,
+        prefix = sh_quote(prefix),
+    );
+    let result = execute_env_command(ctx, run_dir, &command, 30).await?;
+    if result.returncode != 0 {
+        return Err(OperatorToolError::new(
+            "output_validation_failed",
+            false,
+            format!(
+                "Structured output manifest validation exited with code {}.",
+                result.returncode
+            ),
+        )
+        .with_field("structuredOutputs")
+        .with_run_dir(run_dir)
+        .with_suggested_action("Check `${outdir}/outputs.json` and retry."));
+    }
+    let trimmed = result.output.trim();
+    match trimmed {
+        value if value == missing => return Ok(None),
+        value if value == not_file => {
+            return Err(OperatorToolError::new(
+                "output_validation_failed",
+                false,
+                "Structured output manifest must be a regular JSON file.",
+            )
+            .with_field("structuredOutputs")
+            .with_run_dir(run_dir)
+            .with_suggested_action("Write a JSON object to `${outdir}/outputs.json`."))
+        }
+        value if value == escaped => {
+            return Err(OperatorToolError::new(
+                "output_validation_failed",
+                false,
+                "Structured output manifest must stay under the active session outdir.",
+            )
+            .with_field("structuredOutputs")
+            .with_run_dir(run_dir)
+            .with_suggested_action(
+                "Write structured metadata only to `${outdir}/outputs.json`.",
+            ))
+        }
+        value if value == too_large => {
+            return Err(OperatorToolError::new(
+                "output_validation_failed",
+                false,
+                format!(
+                    "Structured output manifest exceeds {} bytes.",
+                    OPERATOR_STRUCTURED_OUTPUTS_MAX_BYTES
+                ),
+            )
+            .with_field("structuredOutputs")
+            .with_run_dir(run_dir)
+            .with_suggested_action(
+                "Keep `${outdir}/outputs.json` small and put large payloads in declared output artifacts.",
+            ))
+        }
+        value if value == bad_size => {
+            return Err(OperatorToolError::new(
+                "output_validation_failed",
+                false,
+                "Structured output manifest size could not be validated.",
+            )
+            .with_field("structuredOutputs")
+            .with_run_dir(run_dir)
+            .with_suggested_action("Check `${outdir}/outputs.json` and retry."))
+        }
+        _ => {}
+    }
+    let Some(raw) = result.output.strip_prefix(prefix) else {
+        return Err(OperatorToolError::new(
+            "output_validation_failed",
+            false,
+            "Structured output manifest reader returned an unexpected payload.",
+        )
+        .with_field("structuredOutputs")
+        .with_run_dir(run_dir)
+        .with_suggested_action("Check `${outdir}/outputs.json` and retry."));
+    };
+    let raw = raw
+        .strip_prefix("\r\n")
+        .or_else(|| raw.strip_prefix('\n'))
+        .unwrap_or(raw);
+    let value = serde_json::from_str::<JsonValue>(raw).map_err(|err| {
+        OperatorToolError::new(
+            "output_validation_failed",
+            false,
+            format!(
+                "parse structured output manifest out/{OPERATOR_STRUCTURED_OUTPUTS_FILE}: {err}"
+            ),
+        )
+        .with_field("structuredOutputs")
+        .with_run_dir(run_dir)
+        .with_suggested_action("Write valid JSON object metadata to `${outdir}/outputs.json`.")
+    })?;
+    validate_structured_outputs(value, run_dir).map(Some)
+}
+
+fn validate_structured_outputs(
+    value: JsonValue,
+    run_dir: &str,
+) -> Result<JsonValue, OperatorToolError> {
+    if value.is_object() {
+        return Ok(value);
+    }
+    Err(OperatorToolError::new(
+        "output_validation_failed",
+        false,
+        "Structured output manifest must contain a JSON object.",
+    )
+    .with_field("structuredOutputs")
+    .with_run_dir(run_dir)
+    .with_suggested_action("Write object-shaped metadata to `${outdir}/outputs.json`."))
 }
 
 async fn remote_tail(
@@ -4974,6 +5263,10 @@ fn summarize_operator_run_documents(
         json_string_at(value, &["provenancePath"]).or(default_provenance_path.clone())
     });
     let output_count = provenance.as_ref().map(output_artifact_count).unwrap_or(0);
+    let structured_output_count = provenance
+        .as_ref()
+        .map(structured_output_count)
+        .unwrap_or(0);
     let error_message = status_doc
         .as_ref()
         .and_then(operator_error_message)
@@ -5066,6 +5359,7 @@ fn summarize_operator_run_documents(
             updated_at,
             provenance_path: provenance_path_value,
             output_count,
+            structured_output_count,
             error_message,
             error_kind,
             retryable,
@@ -5126,6 +5420,13 @@ fn output_artifact_count(value: &JsonValue) -> usize {
                 .map(Vec::len)
                 .sum()
         })
+        .unwrap_or(0)
+}
+
+fn structured_output_count(value: &JsonValue) -> usize {
+    json_value_at(value, &["structuredOutputs"])
+        .and_then(JsonValue::as_object)
+        .map(JsonMap::len)
         .unwrap_or(0)
 }
 
@@ -6188,6 +6489,10 @@ execution:
                         { "location": "local", "path": succeeded.join("out/report.txt").to_string_lossy() }
                     ]
                 },
+                "structuredOutputs": {
+                    "summary": { "lineCount": 2 },
+                    "ok": true
+                },
                 "cache": {
                     "key": "sha256:test-cache-key",
                     "hit": true,
@@ -6243,6 +6548,7 @@ execution:
             Some("operator-smoke@omiga-curated")
         );
         assert_eq!(runs[0].output_count, 1);
+        assert_eq!(runs[0].structured_output_count, 2);
         assert_eq!(runs[0].cache_key.as_deref(), Some("sha256:test-cache-key"));
         assert_eq!(runs[0].cache_hit, Some(true));
         assert_eq!(
@@ -6716,7 +7022,7 @@ execution:
                 argv: vec![
                     "/bin/sh".to_string(),
                     "-c".to_string(),
-                    "cat ${inputs.input} > ${outdir}/report.txt".to_string(),
+                    r#"cat ${inputs.input} > ${outdir}/report.txt; printf '%s\n' '{"summary":{"lineCount":1},"ok":true}' > ${outdir}/outputs.json"#.to_string(),
                 ],
             },
             runtime: None,
@@ -6752,6 +7058,9 @@ execution:
         assert_eq!(result.status, "succeeded");
         assert_eq!(result.outputs["report"].len(), 1);
         assert!(Path::new(&result.outputs["report"][0].path).is_file());
+        let structured_outputs = result.structured_outputs.as_ref().unwrap();
+        assert_eq!(structured_outputs["summary"]["lineCount"], json!(1));
+        assert_eq!(structured_outputs["ok"], json!(true));
         assert_eq!(
             result.effective_inputs["input"],
             json!(input.canonicalize().unwrap().to_string_lossy().into_owned())
@@ -6768,6 +7077,28 @@ execution:
             result.input_fingerprints["input"]["fingerprint"],
             format!("sha256:{expected_sha256}")
         );
+    }
+
+    #[test]
+    fn rejects_invalid_local_structured_output_manifest() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().join(".omiga/runs/oprun_structured_invalid");
+        let out_dir = run_dir.join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        fs::write(out_dir.join(OPERATOR_STRUCTURED_OUTPUTS_FILE), "[]").unwrap();
+        let error =
+            read_local_structured_outputs(&out_dir, &run_dir.to_string_lossy()).unwrap_err();
+        assert_eq!(error.kind, "output_validation_failed");
+        assert_eq!(error.field.as_deref(), Some("structuredOutputs"));
+        assert!(error.message.contains("JSON object"));
+
+        fs::write(out_dir.join(OPERATOR_STRUCTURED_OUTPUTS_FILE), "{not json").unwrap();
+        let error =
+            read_local_structured_outputs(&out_dir, &run_dir.to_string_lossy()).unwrap_err();
+        assert_eq!(error.kind, "output_validation_failed");
+        assert_eq!(error.field.as_deref(), Some("structuredOutputs"));
+        assert!(error.message.contains("parse structured output manifest"));
     }
 
     #[test]

@@ -1654,6 +1654,9 @@ function OperatorRunDetailsDialog({
             {run.outputCount > 0 && (
               <Chip size="small" color="success" variant="outlined" label={`${run.outputCount} output${run.outputCount === 1 ? "" : "s"}`} />
             )}
+            {(run.structuredOutputCount ?? 0) > 0 && (
+              <Chip size="small" color="info" variant="outlined" label={`${run.structuredOutputCount} structured`} />
+            )}
             {cacheState.hit === true && (
               <Chip size="small" color="success" variant="outlined" label="cache hit" />
             )}
@@ -2175,6 +2178,9 @@ function OperatorDetailsDialog({
                           {run.outputCount > 0 && (
                             <Chip size="small" color="success" variant="outlined" label={`${run.outputCount} output${run.outputCount === 1 ? "" : "s"}`} />
                           )}
+                          {(run.structuredOutputCount ?? 0) > 0 && (
+                            <Chip size="small" color="info" variant="outlined" label={`${run.structuredOutputCount} structured`} />
+                          )}
                           {operatorRunIsCacheHit(run) && (
                             <Chip size="small" color="success" variant="outlined" label="cache hit" />
                           )}
@@ -2451,6 +2457,9 @@ function OperatorCatalogSection({
                             )}
                             {run.outputCount > 0 && (
                               <Chip size="small" color="success" variant="outlined" label={`${run.outputCount} output${run.outputCount === 1 ? "" : "s"}`} />
+                            )}
+                            {(run.structuredOutputCount ?? 0) > 0 && (
+                              <Chip size="small" color="info" variant="outlined" label={`${run.structuredOutputCount} structured`} />
                             )}
                             {operatorRunIsCacheHit(run) && (
                               <Chip size="small" color="success" variant="outlined" label="cache hit" />

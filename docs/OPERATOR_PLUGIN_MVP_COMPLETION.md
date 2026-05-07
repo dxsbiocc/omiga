@@ -19,6 +19,7 @@ Implemented:
 - Explicit retry policy for retryable infrastructure failures with `attempt`, `maxAttempts`, and `previousErrors` recorded in status/provenance and Agent-facing failures.
 - Strong path-like input fingerprints: local file inputs persist sha256/size/mtime, and remote file inputs best-effort checksum on the selected execution surface with stat/reference fallback.
 - Session-bounded output collection: output globs are relative to the operator `${outdir}`, and absolute or parent-directory output globs are rejected so collected results stay under the active session run workspace.
+- Structured output metadata: operators can write a bounded `${outdir}/outputs.json` JSON object that is persisted as `structuredOutputs` in provenance and summarized in the UI while large files remain artifact refs.
 - Explicit opt-in cache policy: cache-enabled operators reuse prior succeeded runs only within the active local/SSH/sandbox workspace `.omiga/runs`, verify cached artifact refs in place, and write cache-hit provenance without copying outputs. Smoke runs bypass cache.
 - Cache observability in the operator UI: run summaries, operator cards, detail dialogs, and copyable diagnosis payloads expose cache hit/miss counts plus source run ids/directories.
 - Workspace-scoped run cleanup: the settings UI previews old/cache run cleanup globally or for a single operator, preserves the latest matching runs, estimates candidate size, asks for confirmation, and deletes only under the active local/SSH/sandbox `.omiga/runs` root.
@@ -93,11 +94,15 @@ hello operator smoke
 Latest verification run:
 
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all && cargo test --manifest-path src-tauri/Cargo.toml operators --lib`
-  - Result: 24 passed, 1 ignored live Docker smoke
+  - Result: 26 passed, 1 ignored live Docker smoke
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings`
   - Result: blocked by unrelated working-tree connector code (`src/domain/connectors.rs::gmail_token` dead code)
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings -A dead-code`
   - Result: passed
+- `bunx tsc --noEmit`
+  - Result: passed
+- `bun run test src/state/pluginStore.test.ts src/components/Settings/PluginsPanel.test.tsx`
+  - Result: 23 passed
 - `git diff --check`
   - Result: passed
 - Naming/path invariants:
@@ -142,6 +147,6 @@ Keep separate from the operator MVP commit unless intentionally bundled:
 Recommended follow-up after MVP commit:
 
 1. Live Singularity smoke validation against an installed Singularity/Apptainer runtime.
-2. Richer structured output manifest support beyond `outputs.glob`.
+2. Typed structured output schemas and richer UI renderers for `structuredOutputs`.
 3. Richer retention policy presets and saved cleanup preferences.
 4. Multi-operator workflow/rule composition.

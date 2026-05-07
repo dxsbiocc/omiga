@@ -164,6 +164,7 @@ export interface OperatorRunSummary {
   updatedAt?: string | null;
   provenancePath?: string | null;
   outputCount: number;
+  structuredOutputCount?: number;
   errorMessage?: string | null;
   errorKind?: string | null;
   retryable?: boolean | null;
@@ -568,6 +569,11 @@ function outputArtifactCount(outputs: unknown): number {
   ), 0);
 }
 
+function structuredOutputCount(outputs: unknown): number {
+  if (!outputs || typeof outputs !== "object" || Array.isArray(outputs)) return 0;
+  return Object.keys(outputs).length;
+}
+
 export function summarizeOperatorRunResult(result: Record<string, unknown>): OperatorRunSummary | null {
   const runId = stringField(result.runId);
   const status = stringField(result.status);
@@ -599,6 +605,7 @@ export function summarizeOperatorRunResult(result: Record<string, unknown>): Ope
     runDir,
     provenancePath: stringField(result.provenancePath),
     outputCount: outputArtifactCount(result.outputs),
+    structuredOutputCount: structuredOutputCount(result.structuredOutputs),
     errorMessage: stringField(error.message),
     errorKind: stringField(error.kind),
     retryable: booleanField(error.retryable),

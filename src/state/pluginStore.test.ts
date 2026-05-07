@@ -191,6 +191,10 @@ describe("summarizeOperatorRunResult", () => {
         outputs: {
           report: [{ path: "/project/.omiga/runs/oprun_20260506_smoke/out/report.txt" }],
         },
+        structuredOutputs: {
+          summary: { lineCount: 2 },
+          ok: true,
+        },
         cache: {
           key: "sha256:cache-key",
           hit: true,
@@ -208,6 +212,7 @@ describe("summarizeOperatorRunResult", () => {
       suggestedAction: "Inspect stderr.",
       stderrTail: "bad flag\n",
       outputCount: 1,
+      structuredOutputCount: 2,
       cacheKey: "sha256:cache-key",
       cacheHit: true,
       cacheSourceRunId: "oprun_20260506_source",
