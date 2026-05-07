@@ -25,6 +25,8 @@ pub const OPERATOR_TOOL_PREFIX: &str = "operator__";
 const OPERATOR_STATE_DIR_NAME: &str = ".omiga";
 const REGISTRY_RELATIVE_PATH: &str = "operators/registry.json";
 const RUNS_RELATIVE_PATH: &str = "runs";
+const OPERATOR_DEFAULT_MAX_ATTEMPTS: u32 = 2;
+const OPERATOR_MAX_MAX_ATTEMPTS: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1169,6 +1171,12 @@ pub struct OperatorToolError {
     pub retryable: bool,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_errors: Vec<OperatorRetryAttemptSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_dir: Option<String>,
@@ -1186,6 +1194,9 @@ impl OperatorToolError {
             kind: kind.into(),
             retryable,
             message: message.into(),
+            attempt: None,
+            max_attempts: None,
+            previous_errors: Vec::new(),
             field: None,
             run_dir: None,
             stdout_tail: None,
@@ -1214,6 +1225,47 @@ impl OperatorToolError {
         self.suggested_action = Some(action.into());
         self
     }
+
+    fn with_retry_state(mut self, retry: &OperatorRetryState) -> Self {
+        self.attempt = Some(retry.attempt);
+        self.max_attempts = Some(retry.max_attempts);
+        self.previous_errors = retry.previous_errors.clone();
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorRetryAttemptSummary {
+    pub attempt: u32,
+    pub kind: String,
+    pub retryable: bool,
+    pub message: String,
+}
+
+impl OperatorRetryAttemptSummary {
+    fn from_error(attempt: u32, error: &OperatorToolError) -> Self {
+        Self {
+            attempt,
+            kind: error.kind.clone(),
+            retryable: error.retryable,
+            message: error.message.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct OperatorRetryState {
+    attempt: u32,
+    max_attempts: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    previous_errors: Vec<OperatorRetryAttemptSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OperatorRetryPolicy {
+    max_attempts: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1233,6 +1285,10 @@ struct OperatorRunResult {
     input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
+    attempt: u32,
+    max_attempts: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    previous_errors: Vec<OperatorRetryAttemptSummary>,
     enforcement: JsonValue,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<OperatorToolError>,
@@ -1257,6 +1313,8 @@ struct OperatorRunStatusMetadata {
     run_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     run_context: Option<OperatorRunContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry: Option<OperatorRetryState>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1632,37 +1690,73 @@ async fn execute_resolved_operator(
     )?;
     let walltime_secs = effective_walltime_secs(&effective_resources, ctx.timeout_secs);
 
-    if surface.kind == OperatorExecutionSurfaceKind::Local {
-        execute_local(
-            ctx,
-            &resolved,
-            &run_id,
-            &surface.run_dir,
-            &argv,
-            walltime_secs,
-            canonical_inputs,
-            input_fingerprints,
-            effective_params,
-            effective_resources,
-            run_context,
-        )
-        .await
-    } else {
-        execute_in_environment(
-            ctx,
-            &resolved,
-            &run_id,
-            &surface,
-            &argv,
-            walltime_secs,
-            canonical_inputs,
-            input_fingerprints,
-            effective_params,
-            effective_resources,
-            run_context,
-        )
-        .await
+    let retry_policy = operator_retry_policy(&resolved.spec);
+    let mut previous_errors = Vec::new();
+    for attempt in 1..=retry_policy.max_attempts {
+        let retry_state = OperatorRetryState {
+            attempt,
+            max_attempts: retry_policy.max_attempts,
+            previous_errors: previous_errors.clone(),
+        };
+        let result = if surface.kind == OperatorExecutionSurfaceKind::Local {
+            execute_local(
+                ctx,
+                &resolved,
+                &run_id,
+                &surface.run_dir,
+                &argv,
+                walltime_secs,
+                canonical_inputs.clone(),
+                input_fingerprints.clone(),
+                effective_params.clone(),
+                effective_resources.clone(),
+                run_context.clone(),
+                retry_state.clone(),
+            )
+            .await
+        } else {
+            execute_in_environment(
+                ctx,
+                &resolved,
+                &run_id,
+                &surface,
+                &argv,
+                walltime_secs,
+                canonical_inputs.clone(),
+                input_fingerprints.clone(),
+                effective_params.clone(),
+                effective_resources.clone(),
+                run_context.clone(),
+                retry_state.clone(),
+            )
+            .await
+        };
+        match result {
+            Ok(result) => return Ok(result),
+            Err(error) => {
+                let error = error.with_retry_state(&retry_state);
+                if should_retry_operator_error(&error, &retry_policy, attempt) {
+                    let summary = OperatorRetryAttemptSummary::from_error(attempt, &error);
+                    let mut retrying_state = retry_state.clone();
+                    retrying_state.previous_errors.push(summary.clone());
+                    let _ = record_operator_retry_status(
+                        ctx,
+                        &resolved,
+                        &run_id,
+                        &surface,
+                        run_context.clone(),
+                        &retrying_state,
+                        &error,
+                    )
+                    .await;
+                    previous_errors.push(summary);
+                    continue;
+                }
+                return Err(error);
+            }
+        }
     }
+    unreachable!("operator retry loop must return on success or final failure")
 }
 
 fn runtime_supported(ctx: &crate::domain::tools::ToolContext, spec: &OperatorSpec) -> bool {
@@ -2475,6 +2569,88 @@ fn value_to_arg_string(value: &JsonValue) -> String {
     }
 }
 
+fn operator_retry_policy(spec: &OperatorSpec) -> OperatorRetryPolicy {
+    let configured = spec
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.get("retry"))
+        .and_then(|retry| {
+            retry
+                .get("maxAttempts")
+                .or_else(|| retry.get("max_attempts"))
+        })
+        .and_then(JsonValue::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    let max_attempts = configured
+        .unwrap_or(OPERATOR_DEFAULT_MAX_ATTEMPTS)
+        .clamp(1, OPERATOR_MAX_MAX_ATTEMPTS);
+    OperatorRetryPolicy { max_attempts }
+}
+
+fn should_retry_operator_error(
+    error: &OperatorToolError,
+    policy: &OperatorRetryPolicy,
+    attempt: u32,
+) -> bool {
+    attempt < policy.max_attempts && error.retryable && retryable_operator_error_kind(&error.kind)
+}
+
+fn retryable_operator_error_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "environment_unavailable" | "execution_infra_error" | "provenance_write_failed"
+    )
+}
+
+fn operator_run_status_metadata(
+    resolved: &ResolvedOperator,
+    run_id: &str,
+    location: &str,
+    run_dir: &str,
+    run_context: Option<OperatorRunContext>,
+    retry: OperatorRetryState,
+) -> OperatorRunStatusMetadata {
+    OperatorRunStatusMetadata {
+        run_id: run_id.to_string(),
+        location: location.to_string(),
+        operator: run_identity(resolved),
+        run_dir: run_dir.to_string(),
+        run_context,
+        retry: Some(retry),
+    }
+}
+
+async fn record_operator_retry_status(
+    ctx: &crate::domain::tools::ToolContext,
+    resolved: &ResolvedOperator,
+    run_id: &str,
+    surface: &OperatorExecutionSurface,
+    run_context: Option<OperatorRunContext>,
+    retry: &OperatorRetryState,
+    error: &OperatorToolError,
+) -> Result<(), OperatorToolError> {
+    let run_dir = surface.run_dir.as_str();
+    let metadata = operator_run_status_metadata(
+        resolved,
+        run_id,
+        surface.artifact_location(),
+        run_dir,
+        run_context,
+        retry.clone(),
+    );
+    let error = error.clone().with_retry_state(retry);
+    if surface.kind == OperatorExecutionSurfaceKind::Local {
+        update_local_status(
+            &PathBuf::from(run_dir),
+            "retrying",
+            Some(&error),
+            Some(&metadata),
+        )
+    } else {
+        update_environment_status(ctx, run_dir, "retrying", Some(&error), Some(&metadata)).await
+    }
+}
+
 async fn execute_local(
     ctx: &crate::domain::tools::ToolContext,
     resolved: &ResolvedOperator,
@@ -2487,15 +2663,17 @@ async fn execute_local(
     effective_params: BTreeMap<String, JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
     run_context: Option<OperatorRunContext>,
+    retry_state: OperatorRetryState,
 ) -> Result<OperatorRunResult, OperatorToolError> {
     let run_path = PathBuf::from(run_dir);
-    let status_metadata = OperatorRunStatusMetadata {
-        run_id: run_id.to_string(),
-        location: "local".to_string(),
-        operator: run_identity(resolved),
-        run_dir: run_dir.to_string(),
-        run_context: run_context.clone(),
-    };
+    let status_metadata = operator_run_status_metadata(
+        resolved,
+        run_id,
+        "local",
+        run_dir,
+        run_context.clone(),
+        retry_state.clone(),
+    );
     update_local_status(&run_path, "created", None, Some(&status_metadata))?;
     fs::create_dir_all(run_path.join("work")).map_err(|err| {
         OperatorToolError::new(
@@ -2596,6 +2774,9 @@ async fn execute_local(
         input_fingerprints,
         effective_params,
         effective_resources,
+        attempt: retry_state.attempt,
+        max_attempts: retry_state.max_attempts,
+        previous_errors: retry_state.previous_errors,
         enforcement: enforcement_json(ctx, &resolved.spec),
         error: None,
     };
@@ -2618,15 +2799,17 @@ async fn execute_in_environment(
     effective_params: BTreeMap<String, JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
     run_context: Option<OperatorRunContext>,
+    retry_state: OperatorRetryState,
 ) -> Result<OperatorRunResult, OperatorToolError> {
     let run_dir = surface.run_dir.as_str();
-    let status_metadata = OperatorRunStatusMetadata {
-        run_id: run_id.to_string(),
-        location: surface.artifact_location().to_string(),
-        operator: run_identity(resolved),
-        run_dir: run_dir.to_string(),
-        run_context: run_context.clone(),
-    };
+    let status_metadata = operator_run_status_metadata(
+        resolved,
+        run_id,
+        surface.artifact_location(),
+        run_dir,
+        run_context.clone(),
+        retry_state.clone(),
+    );
     let mkdir = format!(
         "mkdir -p {}/work {}/out.tmp {}/logs",
         sh_quote(run_dir),
@@ -2691,6 +2874,9 @@ async fn execute_in_environment(
         input_fingerprints,
         effective_params,
         effective_resources,
+        attempt: retry_state.attempt,
+        max_attempts: retry_state.max_attempts,
+        previous_errors: retry_state.previous_errors,
         enforcement: enforcement_json(ctx, &resolved.spec),
         error: None,
     };
@@ -3229,6 +3415,16 @@ fn apply_status_metadata(value: &mut JsonValue, metadata: Option<&OperatorRunSta
                 "runContext".to_string(),
                 serde_json::to_value(run_context).unwrap_or(JsonValue::Null),
             );
+        }
+        if let Some(retry) = &metadata.retry {
+            object.insert("attempt".to_string(), json!(retry.attempt));
+            object.insert("maxAttempts".to_string(), json!(retry.max_attempts));
+            if !retry.previous_errors.is_empty() {
+                object.insert(
+                    "previousErrors".to_string(),
+                    serde_json::to_value(&retry.previous_errors).unwrap_or(JsonValue::Null),
+                );
+            }
         }
     }
 }
@@ -4549,6 +4745,98 @@ execution:
         )
         .unwrap_err();
         assert_eq!(err.field.as_deref(), Some("resources.cpu"));
+    }
+
+    #[test]
+    fn retry_policy_only_retries_retryable_infrastructure_errors() {
+        let tmp = TempDir::new().unwrap();
+        let spec = OperatorSpec {
+            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
+            kind: OPERATOR_KIND.to_string(),
+            metadata: OperatorMetadata {
+                id: "retry_op".to_string(),
+                version: "1".to_string(),
+                name: None,
+                description: None,
+                tags: Vec::new(),
+            },
+            interface: OperatorInterfaceSpec::default(),
+            smoke_tests: Vec::new(),
+            execution: OperatorExecutionSpec {
+                argv: vec!["true".to_string()],
+            },
+            runtime: Some(json!({
+                "placement": { "supported": ["local"] },
+                "container": { "supported": ["none"] },
+                "scheduler": { "supported": ["none"] },
+                "retry": { "maxAttempts": 4 }
+            })),
+            resources: BTreeMap::new(),
+            bindings: Vec::new(),
+            permissions: None,
+            source: OperatorSource {
+                source_plugin: "p".to_string(),
+                plugin_root: tmp.path().to_path_buf(),
+                manifest_path: tmp.path().join("operator.yaml"),
+            },
+        };
+        let policy = operator_retry_policy(&spec);
+        assert_eq!(policy.max_attempts, 4);
+
+        let infra = OperatorToolError::new("execution_infra_error", true, "backend failed");
+        assert!(should_retry_operator_error(&infra, &policy, 1));
+        assert!(!should_retry_operator_error(&infra, &policy, 4));
+
+        let tool_exit = OperatorToolError::new("tool_exit_nonzero", false, "exit 2");
+        assert!(!should_retry_operator_error(&tool_exit, &policy, 1));
+
+        let validation = OperatorToolError::new("input_validation_failed", true, "bad input");
+        assert!(!should_retry_operator_error(&validation, &policy, 1));
+    }
+
+    #[test]
+    fn retry_metadata_is_recorded_in_status_and_failure_payloads() {
+        let previous = OperatorRetryAttemptSummary {
+            attempt: 1,
+            kind: "environment_unavailable".to_string(),
+            retryable: true,
+            message: "temporary backend issue".to_string(),
+        };
+        let retry = OperatorRetryState {
+            attempt: 2,
+            max_attempts: 3,
+            previous_errors: vec![previous.clone()],
+        };
+        let metadata = OperatorRunStatusMetadata {
+            run_id: "oprun_20260507000000_retry".to_string(),
+            location: "local".to_string(),
+            operator: OperatorRunIdentity {
+                alias: "retry_op".to_string(),
+                id: "retry_op".to_string(),
+                version: "1".to_string(),
+                source_plugin: "p".to_string(),
+                manifest_path: "/tmp/operator.yaml".to_string(),
+            },
+            run_dir: "/tmp/oprun_retry".to_string(),
+            run_context: None,
+            retry: Some(retry.clone()),
+        };
+        let mut status = json!({"status": "running"});
+        apply_status_metadata(&mut status, Some(&metadata));
+        assert_eq!(status["attempt"], json!(2));
+        assert_eq!(status["maxAttempts"], json!(3));
+        assert_eq!(
+            status["previousErrors"][0]["kind"],
+            "environment_unavailable"
+        );
+
+        let error = OperatorToolError::new("execution_infra_error", true, "backend failed")
+            .with_retry_state(&retry);
+        let raw = failure_json("retry_op", None, Some("/tmp/oprun_retry"), None, error);
+        let payload = serde_json::from_str::<JsonValue>(&raw).unwrap();
+        assert_eq!(payload["error"]["attempt"], json!(2));
+        assert_eq!(payload["error"]["maxAttempts"], json!(3));
+        assert_eq!(payload["error"]["previousErrors"][0]["attempt"], json!(1));
     }
 
     #[test]

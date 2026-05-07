@@ -95,6 +95,8 @@ runtime:
     images:
       docker: ghcr.io/example/operator:1.0.0
       singularity: docker://ghcr.io/example/operator:1.0.0
+  retry:
+    maxAttempts: 2
 resources:
   cpu:
     default: 1
@@ -111,6 +113,13 @@ bindings:
 ```
 
 Agents may override only resources marked `exposed: true`.
+
+Retry rules:
+
+- `runtime.retry.maxAttempts` controls infrastructure retries and is clamped to 1-5 attempts; default is 2.
+- Retries apply only to retryable infrastructure failures such as execution backend unavailability, transient command dispatch failure, or remote provenance write failure.
+- Tool non-zero exit, invalid inputs, runtime mismatch, and output validation failures are not retried; they are returned to the Agent for correction.
+- Run status/provenance include `attempt`, `maxAttempts`, and `previousErrors` so the Agent/UI can distinguish a clean first-attempt success from a recovered retry.
 
 Container selection rules:
 
@@ -158,6 +167,8 @@ Failed runs persist structured diagnostics in `status.json` and, when available,
 ```json
 {
   "status": "failed",
+  "attempt": 1,
+  "maxAttempts": 2,
   "error": {
     "kind": "tool_exit_nonzero",
     "retryable": false,
