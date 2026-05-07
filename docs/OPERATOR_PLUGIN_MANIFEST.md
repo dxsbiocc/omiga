@@ -34,7 +34,6 @@ interface:
     reads:
       kind: file_array
       required: true
-      staging: copy
       description: FASTQ files.
   params:
     threads:
@@ -51,7 +50,7 @@ interface:
 
 Supported field kinds include `string`, `integer`, `number`, `boolean`, `enum`, `json`, `file`, `file_array`, `directory`, and `directory_array`.
 
-Path-like inputs support `staging: reference|bind|copy` (alias `stage`). Default behavior is reference/bind-style access. `staging: copy` copies local or remote inputs into the isolated run workspace under `{run_dir}/inputs/{name}/...` before argv expansion, so the operator receives the staged path without copying remote artifacts back to the local machine.
+Path-like inputs are resolved as references inside the active session execution environment. The operator runtime does not copy inputs into a separate staging area; the current local workspace or selected remote workspace is already the execution boundary.
 
 ## Smoke tests
 
@@ -156,6 +155,8 @@ execution:
 
 Available substitutions include `${inputs.name}`, `${params.name}`, `${resources.name}`, `${workdir}`, `${outdir}`, and `${plugin_dir}`. Array inputs used as a whole token expand into multiple argv tokens.
 
+Operators must write durable result artifacts under `${outdir}`. Output globs are relative to `${outdir}`; absolute paths and `..` components are rejected so collected results cannot escape the active session run workspace.
+
 ## Run storage
 
 - Local runs live under the current session workspace: `.omiga/runs/{run_id}`.
@@ -163,7 +164,7 @@ Available substitutions include `${inputs.name}`, `${params.name}`, `${resources
 - User registry remains local: `~/.omiga/operators/registry.json`.
 - Remote artifacts, logs, and provenance stay remote; results keep references and are read/verified in place.
 - Path-like input fingerprints are persisted in provenance. Local file inputs use `sha256` plus size/mtime; remote file inputs best-effort `sha256sum`/`shasum -a 256` on the selected execution surface and fall back to stat/reference metadata if checksum tooling is unavailable.
-- Inputs with `staging: copy` are copied into the active local or remote run workspace before execution; provenance keeps strong fingerprints for the original canonical input paths while `effectiveInputs` records the staged paths passed to the operator.
+- Operator outputs are collected only from `.omiga/runs/{run_id}/out` in the active session workspace or selected remote workspace.
 
 ## Failure diagnostics
 

@@ -25,7 +25,7 @@ Non-goal for MVP: full DAG workflow orchestration, Snakemake/Nextflow parity, sc
 13. **Manifest schema**: manifests must include `apiVersion: omiga.ai/operator/v1alpha1` and `kind: Operator`, parsed into stable internal `OperatorSpec`.
 14. **Rich schema**: manifest uses Omiga-specific rich input/param/output/resource schema; Agent/UI receive generated JSON Schema.
 15. **Inputs**: Agent may pass plain path strings; executor canonicalizes to `FileRef`/`ArtifactRef`.
-16. **Input staging**: default is reference/bind/symlink, not copy; copy only when manifest explicitly requests it.
+16. **Input staging**: do not copy operator inputs. Inputs are resolved as references inside the active session execution environment; operators write any derived files under the session run workspace.
 17. **Outputs**: MVP collects outputs mainly with `outputs.glob`; optional `outputs.json` is reserved for structured output manifests.
 18. **Workspace**: every run uses an isolated workspace. Local run dirs live under `.omiga/runs/{run_id}`; SSH run dirs stay on the remote server.
 19. **SSH artifacts**: SSH outputs/logs/provenance remain remote; local results contain remote references only.
@@ -82,7 +82,7 @@ Recommended first vertical slice:
 - Bundled container smoke coverage now includes `container_text_report@0.1.0` with Docker/Singularity runtime declarations, a generic active-backend smoke payload, and a live ignored Docker test for manual validation against the installed container runtime.
 - Retry policy now retries only retryable infrastructure failures and records `attempt`, `maxAttempts`, and `previousErrors`; tool exits, validation failures, and output failures remain Agent-correction errors.
 - Path-like input provenance now records strong local sha256 fingerprints and best-effort remote sha256 fingerprints, with stat/reference fallback when remote checksum tools are unavailable.
-- Path-like inputs that declare `staging: copy` are copied into the active run workspace before argv expansion; remote copies happen on the selected remote execution surface and are not copied back locally.
+- Output collection is bounded to the active session run workspace: manifests declare relative output globs under `${outdir}`, and absolute or parent-directory output globs are rejected.
 - Manual local smoke E2E was verified on 2026-05-07 with `operator__write_text_report`, producing `.omiga/runs/{run_id}/out/operator-report.txt` containing two `hello operator smoke` lines.
 - Manual local Docker smoke E2E was verified on 2026-05-07 with `operator__container_text_report`, producing `.omiga/runs/{run_id}/out/container-operator-report.txt` from the `alpine:3.19` image.
 - Regression coverage now locks smoke UI visibility, smoke-test selection fallback, store-level smoke run context propagation, failed-run diagnostic preservation, command project-root normalization, invalid smoke test ids, and bundled smoke execution.

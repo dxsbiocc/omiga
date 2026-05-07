@@ -18,7 +18,7 @@ Implemented:
 - Structured failed-run diagnostics: `kind`, `retryable`, `message`, `suggestedAction`, `stdoutTail`, and `stderrTail`.
 - Explicit retry policy for retryable infrastructure failures with `attempt`, `maxAttempts`, and `previousErrors` recorded in status/provenance and Agent-facing failures.
 - Strong path-like input fingerprints: local file inputs persist sha256/size/mtime, and remote file inputs best-effort checksum on the selected execution surface with stat/reference fallback.
-- Manifest-declared `staging: copy` for path-like inputs, copying inputs into the active local or remote run workspace before argv expansion while preserving original input fingerprints.
+- Session-bounded output collection: output globs are relative to the operator `${outdir}`, and absolute or parent-directory output globs are rejected so collected results stay under the active session run workspace.
 - Operator settings UI with cards, run counts, success/failure/smoke statistics, details dialog, failed-run diagnosis, copyable diagnosis payload, run detail/log/verify actions, and smoke-run launcher.
 - Built-in validation plugin `operator-smoke@omiga-curated` exposing `write_text_report@0.1.0` and `container_text_report@0.1.0`.
 
