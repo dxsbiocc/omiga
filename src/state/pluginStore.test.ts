@@ -191,6 +191,12 @@ describe("summarizeOperatorRunResult", () => {
         outputs: {
           report: [{ path: "/project/.omiga/runs/oprun_20260506_smoke/out/report.txt" }],
         },
+        cache: {
+          key: "sha256:cache-key",
+          hit: true,
+          sourceRunId: "oprun_20260506_source",
+          sourceRunDir: "/project/.omiga/runs/oprun_20260506_source",
+        },
       }),
     ).toMatchObject({
       runId: "oprun_20260506_smoke",
@@ -202,6 +208,10 @@ describe("summarizeOperatorRunResult", () => {
       suggestedAction: "Inspect stderr.",
       stderrTail: "bad flag\n",
       outputCount: 1,
+      cacheKey: "sha256:cache-key",
+      cacheHit: true,
+      cacheSourceRunId: "oprun_20260506_source",
+      cacheSourceRunDir: "/project/.omiga/runs/oprun_20260506_source",
     });
   });
 });

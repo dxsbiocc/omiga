@@ -170,6 +170,10 @@ export interface OperatorRunSummary {
   suggestedAction?: string | null;
   stdoutTail?: string | null;
   stderrTail?: string | null;
+  cacheKey?: string | null;
+  cacheHit?: boolean | null;
+  cacheSourceRunId?: string | null;
+  cacheSourceRunDir?: string | null;
 }
 
 export interface OperatorExecutionSurfaceArgs {
@@ -532,6 +536,9 @@ export function summarizeOperatorRunResult(result: Record<string, unknown>): Ope
   const runContext = result.runContext && typeof result.runContext === "object"
     ? result.runContext as Record<string, unknown>
     : {};
+  const cache = result.cache && typeof result.cache === "object"
+    ? result.cache as Record<string, unknown>
+    : {};
   return {
     runId,
     status,
@@ -552,6 +559,10 @@ export function summarizeOperatorRunResult(result: Record<string, unknown>): Ope
     suggestedAction: stringField(error.suggestedAction),
     stdoutTail: stringField(error.stdoutTail),
     stderrTail: stringField(error.stderrTail),
+    cacheKey: stringField(cache.key),
+    cacheHit: booleanField(cache.hit),
+    cacheSourceRunId: stringField(cache.sourceRunId),
+    cacheSourceRunDir: stringField(cache.sourceRunDir),
   };
 }
 

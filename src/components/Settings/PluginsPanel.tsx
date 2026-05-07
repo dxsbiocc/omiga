@@ -666,6 +666,8 @@ export interface OperatorRunStats {
   running: number;
   warning: number;
   other: number;
+  cacheHits: number;
+  cacheMisses: number;
   smokeTotal: number;
   smokeSucceeded: number;
   smokeFailed: number;
@@ -677,6 +679,34 @@ export interface OperatorRunStats {
 
 export function operatorRunIsSmoke(run: OperatorRunSummary): boolean {
   return run.runKind?.trim().toLowerCase() === "smoke" || Boolean(run.smokeTestId?.trim());
+}
+
+export function operatorRunIsCacheHit(run: OperatorRunSummary): boolean {
+  return run.cacheHit === true;
+}
+
+function operatorRunCacheState(
+  run: OperatorRunSummary,
+  detail?: OperatorRunDetail | null,
+): {
+  key: string | null;
+  hit: boolean | null;
+  sourceRunId: string | null;
+  sourceRunDir: string | null;
+} {
+  const cache = detail?.document?.cache;
+  const cacheObject = cache && typeof cache === "object" && !Array.isArray(cache)
+    ? cache as Record<string, unknown>
+    : {};
+  const text = (value: unknown): string | null =>
+    typeof value === "string" && value.trim() ? value : null;
+  const hit = typeof cacheObject.hit === "boolean" ? cacheObject.hit : run.cacheHit ?? null;
+  return {
+    key: text(cacheObject.key) ?? run.cacheKey ?? null,
+    hit,
+    sourceRunId: text(cacheObject.sourceRunId) ?? run.cacheSourceRunId ?? null,
+    sourceRunDir: text(cacheObject.sourceRunDir) ?? run.cacheSourceRunDir ?? null,
+  };
 }
 
 export function operatorRunDiagnosisSummary(run: OperatorRunSummary): string | null {
@@ -720,6 +750,12 @@ export function operatorRunDiagnosticsPayload(
         provenancePath: run.provenancePath,
         outputCount: run.outputCount,
         updatedAt: run.updatedAt,
+      },
+      cache: {
+        hit: run.cacheHit,
+        key: run.cacheKey,
+        sourceRunId: run.cacheSourceRunId,
+        sourceRunDir: run.cacheSourceRunDir,
       },
       error: {
         kind: run.errorKind,
@@ -776,6 +812,8 @@ export function operatorRunStats(
     running: 0,
     warning: 0,
     other: 0,
+    cacheHits: 0,
+    cacheMisses: 0,
     smokeTotal: 0,
     smokeSucceeded: 0,
     smokeFailed: 0,
@@ -794,6 +832,9 @@ export function operatorRunStats(
     else if (color === "info") stats.running += 1;
     else if (color === "warning") stats.warning += 1;
     else stats.other += 1;
+
+    if (run.cacheHit === true) stats.cacheHits += 1;
+    else if (run.cacheHit === false) stats.cacheMisses += 1;
 
     const isSmoke = operatorRunIsSmoke(run);
     if (isSmoke) {
@@ -1552,6 +1593,7 @@ function OperatorRunDetailsDialog({
 }) {
   if (!run) return null;
   const detailJson = detail ? JSON.stringify(detail.document, null, 2) : "";
+  const cacheState = operatorRunCacheState(run, detail);
   return (
     <Dialog open={Boolean(run)} onClose={onClose} fullWidth maxWidth="md" aria-labelledby="operator-run-details-title">
       <DialogTitle id="operator-run-details-title" sx={{ px: 3, py: 2, pr: 7 }}>
@@ -1598,6 +1640,12 @@ function OperatorRunDetailsDialog({
             {run.outputCount > 0 && (
               <Chip size="small" color="success" variant="outlined" label={`${run.outputCount} output${run.outputCount === 1 ? "" : "s"}`} />
             )}
+            {cacheState.hit === true && (
+              <Chip size="small" color="success" variant="outlined" label="cache hit" />
+            )}
+            {cacheState.hit === false && (
+              <Chip size="small" variant="outlined" label="cache miss" />
+            )}
           </Stack>
           <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
             Run dir: {detail?.runDir || run.runDir}
@@ -1606,6 +1654,28 @@ function OperatorRunDetailsDialog({
             <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
               Source: {detail.sourcePath}
             </Typography>
+          )}
+          {cacheState.hit === true && (
+            <Alert severity="info" sx={{ borderRadius: 2 }}>
+              <Stack spacing={0.5}>
+                <Typography variant="body2" fontWeight={850}>
+                  Reused a previous operator result
+                </Typography>
+                <Typography variant="caption" sx={{ wordBreak: "break-all" }}>
+                  Source run: {cacheState.sourceRunId || "unknown"}
+                </Typography>
+                {cacheState.sourceRunDir && (
+                  <Typography variant="caption" sx={{ wordBreak: "break-all" }}>
+                    Source dir: {cacheState.sourceRunDir}
+                  </Typography>
+                )}
+                {cacheState.key && (
+                  <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
+                    Cache key: {cacheState.key}
+                  </Typography>
+                )}
+              </Stack>
+            </Alert>
           )}
           {loading && (
             <Stack direction="row" spacing={1} alignItems="center">
@@ -1898,6 +1968,12 @@ function OperatorDetailsDialog({
                 {stats.running > 0 && <Chip size="small" color="info" variant="outlined" label={`${stats.running} running`} />}
                 {stats.warning > 0 && <Chip size="small" color="warning" variant="outlined" label={`${stats.warning} warning`} />}
                 {stats.other > 0 && <Chip size="small" variant="outlined" label={`${stats.other} other`} />}
+                {stats.cacheHits > 0 && (
+                  <Chip size="small" color="success" variant="outlined" label={`${stats.cacheHits} cache hits`} />
+                )}
+                {stats.cacheMisses > 0 && (
+                  <Chip size="small" variant="outlined" label={`${stats.cacheMisses} cache misses`} />
+                )}
                 {latestRun && (
                   <Chip
                     size="small"
@@ -2070,6 +2146,9 @@ function OperatorDetailsDialog({
                           {run.outputCount > 0 && (
                             <Chip size="small" color="success" variant="outlined" label={`${run.outputCount} output${run.outputCount === 1 ? "" : "s"}`} />
                           )}
+                          {operatorRunIsCacheHit(run) && (
+                            <Chip size="small" color="success" variant="outlined" label="cache hit" />
+                          )}
                         </Stack>
                         {run.errorMessage && (
                           <Typography variant="caption" color="error.main" sx={{ wordBreak: "break-word" }}>
@@ -2102,6 +2181,11 @@ function OperatorDetailsDialog({
                         <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
                           {(formatOperatorRunTimestamp(run.updatedAt) ?? "unknown time")} · {run.runDir}
                         </Typography>
+                        {operatorRunIsCacheHit(run) && (
+                          <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
+                            Reused source run {run.cacheSourceRunId || "unknown"}{run.cacheSourceRunDir ? ` · ${run.cacheSourceRunDir}` : ""}
+                          </Typography>
+                        )}
                         <Stack direction="row" gap={0.75} flexWrap="wrap">
                           <Button
                             size="small"
@@ -2175,6 +2259,7 @@ function OperatorCatalogSection({
   const exposedCount = operators.filter((operator) => operator.exposed).length;
   const unavailableCount = operators.filter((operator) => operator.unavailableReason).length;
   const failedRunCount = runs.filter((run) => operatorRunStatusColor(run.status) === "error").length;
+  const cacheHitCount = runs.filter(operatorRunIsCacheHit).length;
   const diagnosticIssueCount = diagnostics.filter((diagnostic) => diagnostic.severity !== "info").length;
 
   return (
@@ -2197,6 +2282,9 @@ function OperatorCatalogSection({
           )}
           {runs.length > 0 && (
             <Chip size="small" variant="outlined" label={`${runs.length} runs`} />
+          )}
+          {cacheHitCount > 0 && (
+            <Chip size="small" color="success" variant="outlined" label={`${cacheHitCount} cache hits`} />
           )}
           {unavailableCount > 0 && (
             <Chip size="small" color="warning" variant="filled" label={`${unavailableCount} unavailable`} />
@@ -2318,6 +2406,9 @@ function OperatorCatalogSection({
                             {run.outputCount > 0 && (
                               <Chip size="small" color="success" variant="outlined" label={`${run.outputCount} output${run.outputCount === 1 ? "" : "s"}`} />
                             )}
+                            {operatorRunIsCacheHit(run) && (
+                              <Chip size="small" color="success" variant="outlined" label="cache hit" />
+                            )}
                             {run.sourcePlugin && (
                               <Chip size="small" variant="outlined" label={run.sourcePlugin} />
                             )}
@@ -2330,6 +2421,11 @@ function OperatorCatalogSection({
                           <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
                             {timestamp ? `${timestamp} · ` : ""}{run.runDir}
                           </Typography>
+                          {operatorRunIsCacheHit(run) && (
+                            <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
+                              Reused source run {run.cacheSourceRunId || "unknown"}{run.cacheSourceRunDir ? ` · ${run.cacheSourceRunDir}` : ""}
+                            </Typography>
+                          )}
                           <Button
                             size="small"
                             variant="text"
@@ -2492,6 +2588,9 @@ function OperatorCatalogSection({
                               variant="outlined"
                               label={`${stats.smokeTotal} smoke`}
                             />
+                            {stats.cacheHits > 0 && (
+                              <Chip size="small" color="success" variant="outlined" label={`${stats.cacheHits} cache hits`} />
+                            )}
                             {latestRun && (
                               <Chip
                                 size="small"

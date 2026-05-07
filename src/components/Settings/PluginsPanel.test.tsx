@@ -9,6 +9,7 @@ import {
   operatorRunBelongsToOperator,
   operatorRunDiagnosisSummary,
   operatorRunDiagnosticsPayload,
+  operatorRunIsCacheHit,
   operatorRunIsSmoke,
   operatorRunStats,
   operatorSmokeRunLabel,
@@ -531,6 +532,15 @@ describe("PluginsPanel diagnostics helpers", () => {
       smokeTestName: "Default smoke",
       updatedAt: "2026-05-06T15:00:00Z",
     });
+    const cacheHit = operatorRunSummary({
+      runId: "oprun_cache",
+      status: "succeeded",
+      updatedAt: "2026-05-06T16:00:00Z",
+      cacheKey: "sha256:cache-key",
+      cacheHit: true,
+      cacheSourceRunId: "oprun_success",
+      cacheSourceRunDir: "/project/.omiga/runs/oprun_success",
+    });
     const unrelated = operatorRunSummary({
       runId: "oprun_fastqc",
       operatorAlias: "fastqc",
@@ -543,6 +553,8 @@ describe("PluginsPanel diagnostics helpers", () => {
     expect(operatorRunBelongsToOperator(operator, unrelated)).toBe(false);
     expect(operatorRunIsSmoke(smoke)).toBe(true);
     expect(operatorRunIsSmoke(success)).toBe(false);
+    expect(operatorRunIsCacheHit(cacheHit)).toBe(true);
+    expect(operatorRunIsCacheHit(success)).toBe(false);
     expect(operatorRunDiagnosisSummary(failed)).toBe("bad input");
     expect(JSON.parse(operatorRunDiagnosticsPayload(failed, operator))).toMatchObject({
       operator: {
@@ -559,22 +571,32 @@ describe("PluginsPanel diagnostics helpers", () => {
         stderrTail: "bad flag\n",
       },
     });
+    expect(JSON.parse(operatorRunDiagnosticsPayload(cacheHit, operator))).toMatchObject({
+      cache: {
+        hit: true,
+        key: "sha256:cache-key",
+        sourceRunId: "oprun_success",
+        sourceRunDir: "/project/.omiga/runs/oprun_success",
+      },
+    });
     expect(operatorRunsForOperator(operator, [success, unrelated, failed])).toEqual([
       success,
       failed,
     ]);
-    expect(operatorRunStats(operator, [success, failed, running, smoke, unrelated])).toMatchObject({
-      total: 4,
-      succeeded: 2,
+    expect(operatorRunStats(operator, [success, failed, running, smoke, cacheHit, unrelated])).toMatchObject({
+      total: 5,
+      succeeded: 3,
       failed: 1,
       running: 1,
+      cacheHits: 1,
+      cacheMisses: 0,
       smokeTotal: 1,
       smokeSucceeded: 1,
       smokeFailed: 0,
-      regularTotal: 3,
-      latestRun: smoke,
+      regularTotal: 4,
+      latestRun: cacheHit,
       latestSmokeRun: smoke,
-      latestRegularRun: running,
+      latestRegularRun: cacheHit,
     });
   });
 

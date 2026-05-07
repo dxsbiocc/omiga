@@ -1426,6 +1426,14 @@ pub struct OperatorRunSummary {
     pub stdout_tail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr_tail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hit: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_source_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_source_run_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4618,6 +4626,38 @@ fn summarize_operator_run_documents(
                 .as_ref()
                 .and_then(|value| json_string_at(value, &["error", "stderrTail"]))
         });
+    let cache_key = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["cache", "key"]))
+        .or_else(|| {
+            status_doc
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["cache", "key"]))
+        });
+    let cache_hit = provenance
+        .as_ref()
+        .and_then(|value| json_bool_at(value, &["cache", "hit"]))
+        .or_else(|| {
+            status_doc
+                .as_ref()
+                .and_then(|value| json_bool_at(value, &["cache", "hit"]))
+        });
+    let cache_source_run_id = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["cache", "sourceRunId"]))
+        .or_else(|| {
+            status_doc
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["cache", "sourceRunId"]))
+        });
+    let cache_source_run_dir = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["cache", "sourceRunDir"]))
+        .or_else(|| {
+            status_doc
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["cache", "sourceRunDir"]))
+        });
     Some(OperatorRunSummaryWithSortKey {
         summary: OperatorRunSummary {
             run_id: run_id.to_string(),
@@ -4640,6 +4680,10 @@ fn summarize_operator_run_documents(
             suggested_action,
             stdout_tail,
             stderr_tail,
+            cache_key,
+            cache_hit,
+            cache_source_run_id,
+            cache_source_run_dir,
         },
         sort_key,
     })
@@ -5751,6 +5795,12 @@ execution:
                     "report": [
                         { "location": "local", "path": succeeded.join("out/report.txt").to_string_lossy() }
                     ]
+                },
+                "cache": {
+                    "key": "sha256:test-cache-key",
+                    "hit": true,
+                    "sourceRunId": "oprun_20260506_source",
+                    "sourceRunDir": succeeded.parent().unwrap().join("oprun_20260506_source").to_string_lossy()
                 }
             }),
         )
@@ -5801,6 +5851,17 @@ execution:
             Some("operator-smoke@omiga-curated")
         );
         assert_eq!(runs[0].output_count, 1);
+        assert_eq!(runs[0].cache_key.as_deref(), Some("sha256:test-cache-key"));
+        assert_eq!(runs[0].cache_hit, Some(true));
+        assert_eq!(
+            runs[0].cache_source_run_id.as_deref(),
+            Some("oprun_20260506_source")
+        );
+        assert!(runs[0]
+            .cache_source_run_dir
+            .as_deref()
+            .unwrap_or_default()
+            .ends_with("oprun_20260506_source"));
         assert_eq!(runs[1].status, "failed");
         assert_eq!(runs[1].operator_alias.as_deref(), Some("write_text_report"));
         assert_eq!(runs[1].run_kind.as_deref(), Some("smoke"));

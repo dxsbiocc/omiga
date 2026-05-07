@@ -20,6 +20,7 @@ Implemented:
 - Strong path-like input fingerprints: local file inputs persist sha256/size/mtime, and remote file inputs best-effort checksum on the selected execution surface with stat/reference fallback.
 - Session-bounded output collection: output globs are relative to the operator `${outdir}`, and absolute or parent-directory output globs are rejected so collected results stay under the active session run workspace.
 - Explicit opt-in cache policy: cache-enabled operators reuse prior succeeded runs only within the active local/SSH/sandbox workspace `.omiga/runs`, verify cached artifact refs in place, and write cache-hit provenance without copying outputs. Smoke runs bypass cache.
+- Cache observability in the operator UI: run summaries, operator cards, detail dialogs, and copyable diagnosis payloads expose cache hit/miss counts plus source run ids/directories.
 - Operator settings UI with cards, run counts, success/failure/smoke statistics, details dialog, failed-run diagnosis, copyable diagnosis payload, run detail/log/verify actions, and smoke-run launcher.
 - Built-in validation plugin `operator-smoke@omiga-curated` exposing `write_text_report@0.1.0` and `container_text_report@0.1.0`.
 
@@ -141,5 +142,5 @@ Recommended follow-up after MVP commit:
 
 1. Live Singularity smoke validation against an installed Singularity/Apptainer runtime.
 2. Richer structured output manifest support beyond `outputs.glob`.
-3. Cache UI/Agent affordances for explaining cache hits and invalidation.
+3. Cache invalidation controls and cleanup policy for old workspace run records.
 4. Multi-operator workflow/rule composition.
