@@ -838,7 +838,7 @@ impl super::ToolImpl for BashTool {
 
 /// Build the activation preamble for a local virtual environment.
 /// Returns the original command unchanged when no venv is configured.
-fn prepend_venv_activation(venv_type: &str, venv_name: &str, command: &str) -> String {
+pub(crate) fn prepend_venv_activation(venv_type: &str, venv_name: &str, command: &str) -> String {
     let name = venv_name.trim();
     if name.is_empty() || venv_type == "none" || venv_type.is_empty() {
         return command.to_string();

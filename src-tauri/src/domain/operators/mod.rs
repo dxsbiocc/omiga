@@ -2750,6 +2750,12 @@ fn canonicalize_inputs(
             }
             continue;
         };
+        if !field.required
+            && field.kind.is_path_like()
+            && value.as_str().map(str::trim).is_some_and(str::is_empty)
+        {
+            continue;
+        }
         validate_field_value("inputs", name, field, &value)?;
         let canonical = if field.kind.is_path_like() {
             canonicalize_path_value(ctx, &field.kind, name, value, is_ssh)?
@@ -3120,7 +3126,39 @@ fn replace_token_vars(
             out = out.replace(&format!("{{{{ {prefix}.{name} }}}}"), &rendered);
         }
     }
+    clear_missing_optional_vars(
+        &mut out,
+        "inputs",
+        &spec.interface.inputs,
+        inputs,
+        |field| !field.required,
+    );
+    clear_missing_optional_vars(
+        &mut out,
+        "params",
+        &spec.interface.params,
+        params,
+        |field| !field.required,
+    );
+    clear_missing_optional_vars(&mut out, "resources", &spec.resources, resources, |field| {
+        !field.exposed
+    });
     Ok(out)
+}
+
+fn clear_missing_optional_vars<T>(
+    out: &mut String,
+    prefix: &str,
+    specs: &BTreeMap<String, T>,
+    provided: &BTreeMap<String, JsonValue>,
+    optional: impl Fn(&T) -> bool,
+) {
+    for (name, spec) in specs {
+        if optional(spec) && !provided.contains_key(name) {
+            *out = out.replace(&format!("${{{prefix}.{name}}}"), "");
+            *out = out.replace(&format!("{{{{ {prefix}.{name} }}}}"), "");
+        }
+    }
 }
 
 fn value_to_arg_string(value: &JsonValue) -> String {
@@ -3593,8 +3631,17 @@ async fn execute_env_command(
         cwd: Some(cwd.to_string()),
         stdin_data: None,
     };
+    let command = if ctx.execution_environment == "local" {
+        crate::domain::tools::bash::prepend_venv_activation(
+            &ctx.local_venv_type,
+            &ctx.local_venv_name,
+            command,
+        )
+    } else {
+        command.to_string()
+    };
     let mut guard = env.lock().await;
-    guard.execute(command, exec_opts).await.map_err(|err| {
+    guard.execute(&command, exec_opts).await.map_err(|err| {
         OperatorToolError::new("execution_infra_error", true, err.to_string())
             .with_suggested_action("Retry if the execution backend was temporarily unavailable.")
     })
@@ -5741,6 +5788,35 @@ mod tests {
         }
     }
 
+    fn argv_operator_spec(tmp: &TempDir, argv: &[&str]) -> OperatorSpec {
+        OperatorSpec {
+            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
+            kind: OPERATOR_KIND.to_string(),
+            metadata: OperatorMetadata {
+                id: "x".to_string(),
+                version: "1".to_string(),
+                name: None,
+                description: None,
+                tags: Vec::new(),
+            },
+            interface: OperatorInterfaceSpec::default(),
+            smoke_tests: Vec::new(),
+            execution: OperatorExecutionSpec {
+                argv: argv.iter().map(|value| value.to_string()).collect(),
+            },
+            runtime: None,
+            cache: None,
+            resources: BTreeMap::new(),
+            bindings: Vec::new(),
+            permissions: None,
+            source: OperatorSource {
+                source_plugin: "p".to_string(),
+                plugin_root: tmp.path().to_path_buf(),
+                manifest_path: tmp.path().join("operator.yaml"),
+            },
+        }
+    }
+
     fn input_file_invocation(input: &str) -> OperatorInvocation {
         OperatorInvocation {
             inputs: BTreeMap::from([("input".to_string(), JsonValue::String(input.to_string()))]),
@@ -6207,32 +6283,7 @@ execution:
     #[test]
     fn expands_array_inputs_as_multiple_argv_tokens() {
         let tmp = TempDir::new().unwrap();
-        let spec = OperatorSpec {
-            api_version: OPERATOR_API_VERSION_V1ALPHA1.to_string(),
-            kind: OPERATOR_KIND.to_string(),
-            metadata: OperatorMetadata {
-                id: "x".to_string(),
-                version: "1".to_string(),
-                name: None,
-                description: None,
-                tags: Vec::new(),
-            },
-            interface: OperatorInterfaceSpec::default(),
-            smoke_tests: Vec::new(),
-            execution: OperatorExecutionSpec {
-                argv: vec!["cat".to_string(), "${inputs.files}".to_string()],
-            },
-            runtime: None,
-            cache: None,
-            resources: BTreeMap::new(),
-            bindings: Vec::new(),
-            permissions: None,
-            source: OperatorSource {
-                source_plugin: "p".to_string(),
-                plugin_root: tmp.path().to_path_buf(),
-                manifest_path: tmp.path().join("operator.yaml"),
-            },
-        };
+        let spec = argv_operator_spec(&tmp, &["cat", "${inputs.files}"]);
         let argv = expand_argv(
             &spec,
             &BTreeMap::from([("files".to_string(), json!(["a.txt", "b.txt"]))]),
@@ -6242,6 +6293,65 @@ execution:
         )
         .unwrap();
         assert_eq!(argv, vec!["cat", "a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn expands_missing_optional_argv_fields_as_empty_strings() {
+        let tmp = TempDir::new().unwrap();
+        let mut spec = argv_operator_spec(
+            &tmp,
+            &[
+                "Rscript",
+                "plot.R",
+                "${inputs.metadata}",
+                "{{ params.label }}",
+                "${resources.cache_dir}",
+            ],
+        );
+        spec.interface = OperatorInterfaceSpec {
+            inputs: BTreeMap::from([(
+                "metadata".to_string(),
+                OperatorFieldSpec {
+                    kind: OperatorFieldKind::File,
+                    required: false,
+                    ..OperatorFieldSpec::default()
+                },
+            )]),
+            params: BTreeMap::from([(
+                "label".to_string(),
+                OperatorFieldSpec {
+                    kind: OperatorFieldKind::String,
+                    required: false,
+                    ..OperatorFieldSpec::default()
+                },
+            )]),
+            ..OperatorInterfaceSpec::default()
+        };
+        spec.resources = BTreeMap::from([(
+            "cache_dir".to_string(),
+            OperatorResourceSpec {
+                exposed: false,
+                ..OperatorResourceSpec::default()
+            },
+        )]);
+        let argv = expand_argv(
+            &spec,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            "/run",
+        )
+        .unwrap();
+        assert_eq!(argv, vec!["Rscript", "plot.R", "", "", ""]);
+
+        let canonical = canonicalize_inputs(
+            &crate::domain::tools::ToolContext::new(tmp.path()),
+            &spec,
+            BTreeMap::from([("metadata".to_string(), json!(""))]),
+            false,
+        )
+        .unwrap();
+        assert!(!canonical.contains_key("metadata"));
     }
 
     #[test]

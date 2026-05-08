@@ -12,6 +12,10 @@ interface:
       kind: file
       required: true
       description: Numeric matrix file. Default assumes features/genes in rows and samples in columns, with feature ids in the first column.
+    metadata:
+      kind: file
+      required: false
+      description: Optional sample metadata with sample and group/condition columns. Used to color the default PCA plot and tolerated if omitted.
   params:
     delimiter:
       kind: enum
@@ -38,6 +42,22 @@ interface:
       minimum: 2
       maximum: 100000
       description: Limit PCA to the most variable features before zero-variance filtering.
+    sample_column:
+      kind: string
+      default: sample
+      description: Sample column in metadata. Common alternatives such as sample_id are auto-detected when this column is absent.
+    group_column:
+      kind: string
+      default: group
+      description: Group/condition column in metadata. Common alternatives such as condition or treatment are auto-detected when this column is absent.
+    plot_labels:
+      kind: boolean
+      default: true
+      description: Add sample labels to the default PCA scatter plot.
+    confidence_hulls:
+      kind: boolean
+      default: true
+      description: Draw convex hulls around groups with at least three samples.
   outputs:
     scores:
       kind: file
@@ -51,9 +71,17 @@ interface:
       kind: file
       glob: pca-variance.tsv
       required: true
+    group_summary:
+      kind: file
+      glob: pca-group-summary.tsv
+      required: true
     plot:
       kind: file
       glob: pca-plot.svg
+      required: true
+    scree_plot:
+      kind: file
+      glob: pca-scree.svg
       required: true
     summary:
       kind: json
@@ -83,3 +111,8 @@ execution:
     - ${params.center}
     - ${params.scale}
     - ${params.top_variable_features}
+    - ${inputs.metadata}
+    - ${params.sample_column}
+    - ${params.group_column}
+    - ${params.plot_labels}
+    - ${params.confidence_hulls}

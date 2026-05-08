@@ -49,7 +49,7 @@ Non-goal for MVP: full DAG workflow orchestration, Snakemake/Nextflow parity, sc
 37. **Run history**: local run history is discovered from `{project}/.omiga/runs/*/status.json|provenance.json`; SSH/sandbox run provenance remains on the selected remote execution environment and is accessed through remote file tooling rather than copied locally.
 38. **Run verification**: first-version run QA is read-only and checks run state, status, logs, and declared output artifact references in-place on the selected execution surface.
 39. **Smoke tests**: operator manifests may declare `smokeTests[]` with typed `{ inputs, params, resources }` invocation payloads; the UI uses those declarations instead of project-specific hardcoded smoke runners.
-40. **Deferred environment model**: operators remain atomic, but execution environments must be shared and capability-oriented, not one environment per operator. A future implementation should add reusable environment profiles (for example `system`, `r-base-light`, `r-omics-basic`, `python-basic`, `bioseq-cli`, or explicit container image refs) and let operator manifests declare only `envRef` plus concrete requirements. The resolver should preflight the active session environment first, then shared configured environments, and use containers only as an explicit optional fallback.
+40. **Deferred environment model**: operators remain atomic, but execution environments must be shared and capability-oriented, not one environment per operator; R and Python operators default to the same shared analysis environment unless an explicit future override is added. A future implementation should add reusable environment profiles (for example `system`, `r-base-light`, `r-omics-basic`, `python-basic`, `bioseq-cli`, or explicit container image refs) and let operator manifests declare only `envRef` plus concrete requirements. The resolver should preflight the active session environment first, then shared configured environments, and use containers only as an explicit optional fallback.
 
 ## MVP implementation slice
 
@@ -65,7 +65,7 @@ Recommended first vertical slice:
 
 Deferred post-MVP runtime-environment slice:
 
-1. Add a shared environment profile registry for reusable operator execution capabilities.
+1. Add a shared environment profile registry for reusable operator execution capabilities, with one default shared R/Python analysis environment.
 2. Extend operator manifests with an `envRef`/requirements model without creating per-operator environments.
 3. Add preflight resolution for commands, language runtimes, packages, container availability, and resource compatibility on the active local/SSH/sandbox session surface.
 4. Keep the default path as the current session environment; do not install, clone, or copy large environments for each operator.
@@ -92,6 +92,7 @@ Deferred post-MVP runtime-environment slice:
 - Path-like input provenance now records strong local sha256 fingerprints and best-effort remote sha256 fingerprints, with stat/reference fallback when remote checksum tools are unavailable.
 - Output collection is bounded to the active session run workspace: manifests declare relative output globs under `${outdir}`, and absolute or parent-directory output globs are rejected.
 - Cache policy is explicit opt-in via manifest `cache.enabled`. Cache lookup is scoped to the active execution surface's `.omiga/runs`, keys include operator identity plus input fingerprints/run configuration, smoke runs bypass cache, and cache hits record provenance under the active workspace while reusing verified in-place artifact refs instead of copying results.
+- Built-in omics operators now pair atomic analysis with default display artifacts without faking domain results: differential expression uses DESeq2/edgeR/limma priority plus Wilcoxon/chi-square/t-test fallbacks, PCA writes score/scree/group summaries, and functional enrichment uses `clusterProfiler::enricher` plus `fgsea` for ORA/GSEA.
 - Manual local smoke E2E was verified on 2026-05-07 with `operator__write_text_report`, producing `.omiga/runs/{run_id}/out/operator-report.txt` containing two `hello operator smoke` lines.
 - Manual local Docker smoke E2E was verified on 2026-05-07 with `operator__container_text_report`, producing `.omiga/runs/{run_id}/out/container-operator-report.txt` from the `alpine:3.19` image.
 - Manual SSH smoke E2E was verified on 2026-05-07 with `operator__write_text_report` on the remote GPU execution surface, producing `data/query/.omiga/runs/{run_id}/out/operator-report.txt` and keeping logs/provenance/artifacts inside the selected remote session workspace rather than remote `~`.

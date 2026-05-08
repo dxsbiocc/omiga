@@ -27,6 +27,7 @@ Implemented:
 - Plugin catalog cards suppress redundant role suffixes such as `Operator`/`Retrieval Source`; operator cards keep titles focused on the tool/operator name and use Iconify-backed implementation icons for R, C/C++, Python, or shell tools instead of a generic plugin icon.
 - Built-in validation plugin `operator-smoke@omiga-curated` exposing `write_text_report@0.1.0` and `container_text_report@0.1.0`.
 - Built-in practical atomic operator plugins: `operator-pca-r@omiga-curated`, `operator-differential-expression-r@omiga-curated`, `operator-enrichment-r@omiga-curated`, and `operator-seqtk@omiga-curated`.
+- Practical omics operators include default display artifacts while remaining atomic: PCA writes grouped scatter plus scree plots, differential expression prioritizes DESeq2/edgeR/limma with Wilcoxon/chi-square/t-test fallbacks and writes volcano plus comparison-aware quadrant/beeswarm plots, and functional enrichment writes `clusterProfiler` ORA and `fgsea` GSEA bar, dot, and curve plots where applicable.
 
 ## Manual validation evidence
 
@@ -151,9 +152,9 @@ Keep separate from the operator MVP commit unless intentionally bundled:
 Recommended follow-up after MVP commit:
 
 1. Shared operator environment profiles and preflight resolver:
-   - Do not create one execution environment per operator.
+   - Do not create one execution environment per operator; R and Python operators default to the same shared session analysis environment.
    - Keep `Operator` as the atomic callable unit, but make execution environments reusable capability profiles.
-   - Add manifest support for `envRef` plus concrete requirements such as commands, language runtimes, packages, and optional container images.
+   - Add manifest support for a shared `envRef` plus concrete requirements such as commands, language runtimes, packages, and optional container images.
    - Resolve in this order: active session environment first, user/shared configured environment second, explicit container fallback last.
    - Keep large environments, images, and run outputs out of user-home plugin/package paths; run outputs remain under the active session workspace `.omiga/runs`.
 2. Live Singularity smoke validation against an installed Singularity/Apptainer runtime.

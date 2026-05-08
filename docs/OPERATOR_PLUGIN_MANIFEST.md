@@ -141,9 +141,9 @@ The bundled `operator-smoke@omiga-curated` plugin includes `container_text_repor
 
 The bundled curated operator plugins keep one atomic operator per plugin (or a tightly scoped validation pair for smoke tests):
 
-- `operator-pca-r@omiga-curated` exposes `omics_pca_matrix@0.1.0` — base-R PCA for expression/count matrices.
-- `operator-differential-expression-r@omiga-curated` exposes `omics_differential_expression_basic@0.1.0` — dependency-light Welch-test differential expression using sample metadata groups.
-- `operator-enrichment-r@omiga-curated` exposes `omics_functional_enrichment_basic@0.1.0` — base-R hypergeometric enrichment over GMT or two-column TSV gene sets.
+- `operator-pca-r@omiga-curated` exposes `omics_pca_matrix@0.1.0` — base-R PCA for expression/count matrices, optional sample metadata grouping, PCA scatter, and scree defaults.
+- `operator-differential-expression-r@omiga-curated` exposes `omics_differential_expression_basic@0.1.0` — bulk RNA-seq differential expression over one or more group comparisons, auto-prioritizing DESeq2, edgeR, and limma/voom for counts, limma for quantitative matrices, and Wilcoxon/chi-square/t-test/Welch methods as explicit or fallback tests, with volcano/quadrant/beeswarm default displays.
+- `operator-enrichment-r@omiga-curated` exposes `omics_functional_enrichment_basic@0.1.0` — real ORA via `clusterProfiler::enricher` plus ranked GSEA via `fgsea` over GMT or two-column TSV gene sets, with bar/dot/curve default displays.
 - `operator-seqtk@omiga-curated` exposes `seqtk_sample_reads@0.1.0` — `seqtk sample` wrapper for FASTQ/FASTA subsampling on the active local/SSH environment.
 
 Manual Docker validation can be run with:

@@ -4,8 +4,8 @@ metadata:
   id: omics_differential_expression_basic
   version: 0.1.0
   name: Basic Differential Expression
-  description: Run a dependency-light Welch t-test differential expression screen on an expression/count matrix using sample metadata groups.
-  tags: [omics, differential-expression, expression, r]
+  description: Run bulk RNA-seq differential expression with DESeq2/edgeR/limma priority and Wilcoxon, chi-square, or t-test fallbacks over one or more metadata group comparisons.
+  tags: [omics, differential-expression, bulk-rnaseq, deseq2, edger, limma, r]
 interface:
   inputs:
     matrix:
@@ -24,14 +24,12 @@ interface:
       description: Metadata column containing group labels.
     case_group:
       kind: string
-      required: true
-      non_empty: true
-      description: Group label for numerator/case samples.
+      default: ""
+      description: Optional numerator/case group. When omitted with control_group, all pairwise group comparisons are run.
     control_group:
       kind: string
-      required: true
-      non_empty: true
-      description: Group label for denominator/control samples.
+      default: ""
+      description: Optional denominator/control group. When omitted with case_group, all pairwise group comparisons are run.
     sample_column:
       kind: string
       default: sample
@@ -57,6 +55,29 @@ interface:
       default: 0.05
       minimum: 0
       maximum: 1
+    comparisons:
+      kind: string
+      default: ""
+      description: Optional comparison list such as "A:B,B:C" or "A vs B; A vs C". Overrides case/control groups.
+    stat_test:
+      kind: enum
+      enum: [welch, t_test, wilcoxon, chi_square]
+      default: welch
+      description: Simple per-feature statistical test used as an explicit method or as the auto fallback when Bioconductor DE methods are unavailable or unsuitable.
+    de_method:
+      kind: enum
+      enum: [auto, deseq2, edger, limma, welch, t_test, wilcoxon, chi_square]
+      default: auto
+      description: Differential-expression method. auto prioritizes DESeq2, edgeR, then limma-voom for count matrices, and limma then the selected simple test for quantitative matrices.
+    input_data_type:
+      kind: enum
+      enum: [auto, counts, quantitative]
+      default: auto
+      description: auto treats non-negative integer matrices as counts and otherwise as quantitative values.
+    transform_counts:
+      kind: boolean
+      default: true
+      description: Use log2(count + pseudocount) values for count-matrix statistical testing while reporting fold-change on raw means.
   outputs:
     results:
       kind: file
@@ -68,8 +89,20 @@ interface:
       required: true
     plot:
       kind: file
+      glob: de-plot.svg
+      required: true
+    volcano_plot:
+      kind: file
       glob: de-volcano.svg
       required: true
+    quadrant_plot:
+      kind: file
+      glob: de-quadrant.svg
+      required: false
+    beeswarm_plot:
+      kind: file
+      glob: de-beeswarm.svg
+      required: false
     summary:
       kind: json
       required: true
@@ -101,3 +134,8 @@ execution:
     - ${params.pseudocount}
     - ${params.log2fc_threshold}
     - ${params.pvalue_threshold}
+    - ${params.comparisons}
+    - ${params.stat_test}
+    - ${params.input_data_type}
+    - ${params.transform_counts}
+    - ${params.de_method}
