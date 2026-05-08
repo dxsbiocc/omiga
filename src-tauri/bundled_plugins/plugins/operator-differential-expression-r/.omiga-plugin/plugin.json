@@ -5,7 +5,7 @@
   "interface": {
     "displayName": "Differential Expression",
     "shortDescription": "Multi-comparison differential expression",
-    "longDescription": "Provides one atomic differential-expression operator for feature-by-sample matrices and sample metadata groups. For count matrices it prioritizes DESeq2, edgeR, then limma-voom; for quantitative matrices it prioritizes limma; Wilcoxon, chi-square, Welch, and pooled t-tests remain available as explicit methods or fallbacks. It supports explicit or all-pair group comparisons and writes volcano, quadrant, or beeswarm display plots.",
+    "longDescription": "Provides one atomic differential-expression operator for feature-by-sample matrices and sample metadata groups. For count matrices it prioritizes DESeq2, edgeR, then limma-voom; for quantitative matrices it prioritizes limma. It supports explicit or all-pair group comparisons and writes volcano, quadrant, or beeswarm display plots. Simple statistical tests belong in a separate feature/group comparison operator, not this bulk differential-expression operator.",
     "developerName": "Omiga",
     "category": "Operator",
     "capabilities": [
@@ -14,9 +14,6 @@
       "DESeq2",
       "edgeR",
       "limma",
-      "Wilcoxon",
-      "Chi-square",
-      "t-test",
       "Rscript",
       "Local Execution",
       "SSH Execution",
