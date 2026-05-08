@@ -1,7 +1,8 @@
 {
   "mcpServers": {
-    "pubmed": {
-      "url": "https://pubmed.caseyjhand.com/mcp"
+    "paperclip": {
+      "type": "http",
+      "url": "https://paperclip.gxl.ai/mcp"
     }
   }
 }

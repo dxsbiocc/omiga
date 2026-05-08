@@ -4,6 +4,7 @@
 //! - **`~/.omiga/BOOTSTRAP.md`** — 首次引导指令（存在时注入系统提示；Agent 完成引导后自行删除）
 //! - **`~/.omiga/SOUL.md` / `MEMORY.md` / `USER.md`** — 身份、长期笔记、用户画像
 
+use crate::domain::memory::permanent_profile::PermanentProfile;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -27,6 +28,7 @@ pub struct UserOmigaContext {
     pub soul: Option<String>,
     pub memory_md: Option<String>,
     pub user_profile_md: Option<String>,
+    pub permanent_profile: PermanentProfile,
 }
 
 #[derive(Deserialize, Default)]
@@ -125,12 +127,19 @@ pub fn load_user_omiga_context() -> UserOmigaContext {
         (None, None, None, None)
     };
 
+    let permanent_profile = PermanentProfile::compile(
+        soul.as_deref(),
+        user_profile_md.as_deref(),
+        memory_md.as_deref(),
+    );
+
     UserOmigaContext {
         personalities,
         bootstrap_md,
         soul,
         memory_md,
         user_profile_md,
+        permanent_profile,
     }
 }
 
@@ -139,22 +148,14 @@ impl UserOmigaContext {
     ///
     /// 注入顺序（参考 CoPaw）：
     /// 1. BOOTSTRAP.md — 首次引导指令（最高优先级，存在时放最前）
-    /// 2. SOUL.md      — Agent 身份
-    /// 3. USER.md      — 用户画像
-    /// 4. MEMORY.md    — 长期笔记
+    /// 2. Permanent Profile — 由 SOUL.md / USER.md / MEMORY.md 编译后的稳定画像
     pub fn main_system_prompt_sections(&self) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(ref s) = self.bootstrap_md {
             out.push(format!("# BOOTSTRAP.md\n\n{}", s));
         }
-        if let Some(ref s) = self.soul {
-            out.push(format!("# SOUL.md\n\n{}", s));
-        }
-        if let Some(ref s) = self.user_profile_md {
-            out.push(format!("# USER.md\n\n{}", s));
-        }
-        if let Some(ref s) = self.memory_md {
-            out.push(format!("# MEMORY.md\n\n{}", s));
+        if let Some(rendered) = self.permanent_profile.render_for_system_prompt(1_500) {
+            out.push(rendered);
         }
         out
     }

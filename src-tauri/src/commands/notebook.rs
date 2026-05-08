@@ -94,6 +94,53 @@ fn transform_python_shell_magic(source: &str) -> String {
     out
 }
 
+/// Python scripts do not auto-display the final expression, while notebooks do.
+/// Wrap the cell so `1` renders `1` and `df.head()` renders its `repr`, without
+/// requiring IPython/Jupyter as a runtime dependency.
+/// The optional prelude is executed first in the same globals so earlier cells
+/// provide imports/variables without also auto-printing their final expression.
+fn wrap_python_cell_for_display(prelude: &str, source: &str) -> String {
+    let prelude_literal = serde_json::to_string(prelude).unwrap_or_else(|_| "\"\"".to_string());
+    let source_literal = serde_json::to_string(source).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"import ast as __omiga_ast
+__omiga_prelude = {prelude_literal}
+__omiga_source = {source_literal}
+__omiga_globals = globals()
+try:
+    if __omiga_prelude.strip():
+        __omiga_prelude_module = __omiga_ast.parse(__omiga_prelude, filename="<omiga-prelude>", mode="exec")
+        __omiga_ast.fix_missing_locations(__omiga_prelude_module)
+        exec(compile(__omiga_prelude_module, "<omiga-prelude>", "exec"), __omiga_globals, __omiga_globals)
+    __omiga_module = __omiga_ast.parse(__omiga_source, filename="<omiga-cell>", mode="exec")
+    if __omiga_module.body and isinstance(__omiga_module.body[-1], __omiga_ast.Expr):
+        __omiga_expr = __omiga_ast.Expression(__omiga_module.body.pop().value)
+        __omiga_ast.fix_missing_locations(__omiga_module)
+        __omiga_ast.fix_missing_locations(__omiga_expr)
+        exec(compile(__omiga_module, "<omiga-cell>", "exec"), __omiga_globals, __omiga_globals)
+        __omiga_value = eval(compile(__omiga_expr, "<omiga-cell>", "eval"), __omiga_globals, __omiga_globals)
+        if __omiga_value is not None:
+            print(repr(__omiga_value))
+    else:
+        __omiga_ast.fix_missing_locations(__omiga_module)
+        exec(compile(__omiga_module, "<omiga-cell>", "exec"), __omiga_globals, __omiga_globals)
+finally:
+    for __omiga_name in (
+        "__omiga_ast",
+        "__omiga_prelude",
+        "__omiga_source",
+        "__omiga_globals",
+        "__omiga_prelude_module",
+        "__omiga_module",
+        "__omiga_expr",
+        "__omiga_value",
+        "__omiga_name",
+    ):
+        globals().pop(__omiga_name, None)
+"#
+    )
+}
+
 /// Run a code cell in the notebook file's directory (`cwd` = parent of `.ipynb`).
 /// - `language`: optional kernel language — `python` (default) or `r` / `ir`.
 ///   Python: temp `.py` + `python3` / `python`. R: temp `.R` + `Rscript`.
@@ -103,6 +150,7 @@ pub async fn execute_ipynb_cell(
     notebook_path: String,
     _cell_index: usize,
     source: String,
+    prelude: Option<String>,
     language: Option<String>,
     shell_magic: Option<bool>,
 ) -> CommandResult<IpynbCellExecuteResponse> {
@@ -153,10 +201,26 @@ pub async fn execute_ipynb_cell(
     };
 
     let use_shell_magic = shell_magic.unwrap_or(true);
-    let source_to_run = if lang == "python" && use_shell_magic {
-        transform_python_shell_magic(&source)
+    let prelude = prelude.unwrap_or_default();
+    let source_to_run = if lang == "python" {
+        let prelude_to_run = if use_shell_magic {
+            transform_python_shell_magic(&prelude)
+        } else {
+            prelude.clone()
+        };
+        let source_to_run = if use_shell_magic {
+            transform_python_shell_magic(&source)
+        } else {
+            source.clone()
+        };
+        wrap_python_cell_for_display(&prelude_to_run, &source_to_run)
     } else {
-        source.clone()
+        let prelude = prelude.trim_end();
+        if prelude.is_empty() {
+            source.clone()
+        } else {
+            format!("{prelude}\n\n{source}")
+        }
     };
 
     tokio::fs::write(&tmp_path, source_to_run.as_bytes())
@@ -221,5 +285,23 @@ mod tests {
     fn double_bang_not_shell() {
         let s = "x = '!not magic'\n";
         assert_eq!(transform_python_shell_magic(s), s);
+    }
+
+    #[test]
+    fn python_display_wrapper_auto_prints_last_expression() {
+        let wrapped = wrap_python_cell_for_display("", "x = 1\nx\n");
+        assert!(wrapped.contains("eval(compile(__omiga_expr"));
+        assert!(wrapped.contains("print(repr(__omiga_value))"));
+        assert!(wrapped.contains("\"x = 1\\nx\\n\""));
+    }
+
+    #[test]
+    fn python_display_wrapper_executes_prelude_before_cell() {
+        let wrapped =
+            wrap_python_cell_for_display("import os\nbase = '/tmp'\n", "os.path.basename(base)\n");
+        assert!(wrapped.contains("<omiga-prelude>"));
+        assert!(wrapped.contains("exec(compile(__omiga_prelude_module"));
+        assert!(wrapped.contains("\"import os\\nbase = '/tmp'\\n\""));
+        assert!(wrapped.contains("\"os.path.basename(base)\\n\""));
     }
 }

@@ -20,6 +20,8 @@ export interface BackgroundAgentTask {
   output_path?: string | null;
   session_id: string;
   message_id: string;
+  round_id?: string | null;
+  plan_id?: string | null;
 }
 
 export function shortBgTaskLabel(t: BackgroundAgentTask, maxLen = 36): string {

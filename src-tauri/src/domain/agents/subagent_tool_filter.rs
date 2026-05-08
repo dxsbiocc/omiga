@@ -12,21 +12,12 @@ use crate::domain::permissions::canonical_permission_tool_name;
 use crate::domain::tools::ToolSchema;
 
 /// Options for filtering sub-agent tools (`filterToolsForAgent` parity).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct SubagentFilterOptions {
     /// Session is in plan mode (`EnterPlanMode` called) — allows `ExitPlanMode` for sub-agents.
     pub parent_in_plan_mode: bool,
     /// `USER_TYPE=ant` — allows nested `Agent` in sub-agents.
     pub allow_nested_agent: bool,
-}
-
-impl Default for SubagentFilterOptions {
-    fn default() -> Self {
-        Self {
-            parent_in_plan_mode: false,
-            allow_nested_agent: false,
-        }
-    }
 }
 
 #[must_use]
@@ -80,6 +71,7 @@ pub fn should_block_subagent_builtin_call(canonical: &str, opts: SubagentFilterO
             | "enter_plan_mode"
             | "ask_user_question"
             | "task_stop"
+            | "send_user_message" // workers write to blackboard; only the Leader/main agent sends to user
     )
 }
 
@@ -118,15 +110,17 @@ mod tests {
             ToolSchema::new("Agent", "x", serde_json::json!({})),
             ToolSchema::new("TaskOutput", "x", serde_json::json!({})),
             ToolSchema::new("ExitPlanMode", "x", serde_json::json!({})),
+            ToolSchema::new("SendUserMessage", "x", serde_json::json!({})),
             ToolSchema::new("mcp__srv__t", "x", serde_json::json!({})),
         ];
         let out = filter_tool_schemas_for_subagent(v, SubagentFilterOptions::default());
         let names: Vec<_> = out.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"bash"));
         assert!(names.contains(&"mcp__srv__t"));
-        assert!(!names.iter().any(|n| *n == "Agent"));
-        assert!(!names.iter().any(|n| *n == "TaskOutput"));
-        assert!(!names.iter().any(|n| *n == "ExitPlanMode"));
+        assert!(!names.contains(&"Agent"));
+        assert!(!names.contains(&"TaskOutput"));
+        assert!(!names.contains(&"ExitPlanMode"));
+        assert!(!names.contains(&"SendUserMessage"));
     }
 
     #[test]
@@ -144,7 +138,7 @@ mod tests {
         );
         let names: Vec<_> = out.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"ExitPlanMode"));
-        assert!(!names.iter().any(|n| *n == "EnterPlanMode"));
+        assert!(!names.contains(&"EnterPlanMode"));
     }
 
     #[test]

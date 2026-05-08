@@ -1,0 +1,67 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: container_text_report
+  version: 0.1.0
+  name: Container Text Report
+  description: Write a deterministic text artifact from inside Docker or Singularity.
+  tags:
+    - smoke-test
+    - container
+    - docker
+    - singularity
+interface:
+  params:
+    message:
+      kind: string
+      description: Text to write into the generated container report artifact.
+      default: hello from Omiga container operator
+    repeat:
+      kind: integer
+      description: Number of report lines to write before the runtime marker.
+      default: 1
+      minimum: 1
+      maximum: 20
+  outputs:
+    report:
+      kind: file
+      description: Generated container text report.
+      glob: container-operator-report.txt
+      required: true
+smokeTests:
+  - id: default
+    name: Active container smoke
+    description: Runs the operator through the active Docker or Singularity backend and writes a two-line report plus a runtime marker.
+    params:
+      message: hello container operator smoke
+      repeat: 2
+    resources: {}
+runtime:
+  placement:
+    supported:
+      - local
+      - ssh
+  container:
+    supported:
+      - docker
+      - singularity
+    images:
+      docker: alpine:3.19
+      singularity: docker://alpine:3.19
+  scheduler:
+    supported:
+      - none
+resources:
+  cpu:
+    default: 1
+    exposed: true
+  walltime:
+    default: 120s
+    exposed: true
+execution:
+  argv:
+    - /bin/sh
+    - ./bin/write_container_report.sh
+    - ${outdir}
+    - ${params.message}
+    - ${params.repeat}

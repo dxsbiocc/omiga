@@ -5,15 +5,27 @@
 //! - Message history
 //! - Settings/preferences
 //! - Session-scoped tool state (`todo_write`, V2 tasks)
+//! - Session-scoped working memory scratchpad
 
 use crate::domain::agents::background::{BackgroundAgentStatus, BackgroundAgentTask};
-use crate::domain::session::{AgentTask, Message, TodoItem};
+use crate::domain::session::{sanitize_background_sidechain_message, AgentTask, Message, TodoItem};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     Row, SqlitePool,
 };
 use std::path::Path;
 use std::time::Duration;
+
+const MESSAGE_FTS_SCHEMA_KEY: &str = "messages_fts_schema_version";
+const MESSAGE_FTS_SCHEMA_VERSION: &str = "1";
+const MESSAGE_FTS_MATCH_LIMIT: i64 = 500;
+const MESSAGE_TRIGRAM_FTS_SCHEMA_KEY: &str = "messages_trigram_fts_schema_version";
+const MESSAGE_TRIGRAM_FTS_SCHEMA_VERSION: &str = "1";
+const SESSION_FTS_SCHEMA_KEY: &str = "sessions_fts_schema_version";
+const SESSION_FTS_SCHEMA_VERSION: &str = "1";
+const SESSION_FTS_MATCH_LIMIT: i64 = 500;
+const SESSION_TRIGRAM_FTS_SCHEMA_KEY: &str = "sessions_trigram_fts_schema_version";
+const SESSION_TRIGRAM_FTS_SCHEMA_VERSION: &str = "1";
 
 /// Initialize the database.
 ///
@@ -144,6 +156,11 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await;
 
+    // Migration: optional assistant turn summary (persist recap text shown in UI)
+    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN turn_summary TEXT")
+        .execute(pool)
+        .await;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS settings (
@@ -193,6 +210,35 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             created_at TEXT NOT NULL,
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS orchestration_events (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            round_id TEXT,
+            message_id TEXT,
+            mode TEXT,
+            event_type TEXT NOT NULL,
+            phase TEXT,
+            task_id TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_orchestration_events_session
+        ON orchestration_events(session_id, created_at DESC)
         "#,
     )
     .execute(pool)
@@ -330,6 +376,19 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS session_working_memory (
+            session_id TEXT PRIMARY KEY,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     // Background Agent tasks (Rust authority + survive restart; memory cache in BackgroundAgentManager)
     sqlx::query(
         r#"
@@ -337,6 +396,8 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             task_id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
             message_id TEXT NOT NULL,
+            round_id TEXT,
+            plan_id TEXT,
             agent_type TEXT NOT NULL,
             description TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -353,6 +414,9 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+
+    ensure_column_exists(pool, "background_agent_tasks", "round_id", "TEXT").await?;
+    ensure_column_exists(pool, "background_agent_tasks", "plan_id", "TEXT").await?;
 
     sqlx::query(
         r#"
@@ -390,6 +454,493 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    if let Err(err) = ensure_messages_fts(pool).await {
+        tracing::warn!(
+            target: "omiga::persistence",
+            error = %err,
+            "FTS5 message index unavailable; session search will use scan fallback"
+        );
+    }
+    if let Err(err) = ensure_messages_trigram_fts(pool).await {
+        tracing::warn!(
+            target: "omiga::persistence",
+            error = %err,
+            "FTS5 trigram message index unavailable; literal session search will use scan fallback"
+        );
+    }
+    if let Err(err) = ensure_sessions_fts(pool).await {
+        tracing::warn!(
+            target: "omiga::persistence",
+            error = %err,
+            "FTS5 session metadata index unavailable; session search will use scan fallback"
+        );
+    }
+    if let Err(err) = ensure_sessions_trigram_fts(pool).await {
+        tracing::warn!(
+            target: "omiga::persistence",
+            error = %err,
+            "FTS5 trigram session metadata index unavailable; literal session search will use scan fallback"
+        );
+    }
+
+    Ok(())
+}
+
+async fn ensure_messages_fts(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let existed = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'messages_fts'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?
+        > 0;
+
+    sqlx::query(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
+        USING fts5(
+            content,
+            content='messages',
+            content_rowid='rowid',
+            tokenize='unicode61'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS messages_fts_ai
+        AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, content)
+            VALUES (new.rowid, new.content);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS messages_fts_ad
+        AFTER DELETE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, content)
+            VALUES ('delete', old.rowid, old.content);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS messages_fts_au
+        AFTER UPDATE OF content ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, content)
+            VALUES ('delete', old.rowid, old.content);
+            INSERT INTO messages_fts(rowid, content)
+            VALUES (new.rowid, new.content);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let current_version =
+        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
+            .bind(MESSAGE_FTS_SCHEMA_KEY)
+            .fetch_optional(pool)
+            .await?;
+
+    if !existed || current_version.as_deref() != Some(MESSAGE_FTS_SCHEMA_VERSION) {
+        sqlx::query("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+            .execute(pool)
+            .await?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(MESSAGE_FTS_SCHEMA_KEY)
+        .bind(MESSAGE_FTS_SCHEMA_VERSION)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn ensure_messages_trigram_fts(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let existed = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'messages_trigram_fts'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?
+        > 0;
+
+    sqlx::query(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS messages_trigram_fts
+        USING fts5(
+            content,
+            content='messages',
+            content_rowid='rowid',
+            tokenize='trigram'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS messages_trigram_fts_ai
+        AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_trigram_fts(rowid, content)
+            VALUES (new.rowid, new.content);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS messages_trigram_fts_ad
+        AFTER DELETE ON messages BEGIN
+            INSERT INTO messages_trigram_fts(messages_trigram_fts, rowid, content)
+            VALUES ('delete', old.rowid, old.content);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS messages_trigram_fts_au
+        AFTER UPDATE OF content ON messages BEGIN
+            INSERT INTO messages_trigram_fts(messages_trigram_fts, rowid, content)
+            VALUES ('delete', old.rowid, old.content);
+            INSERT INTO messages_trigram_fts(rowid, content)
+            VALUES (new.rowid, new.content);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let current_version =
+        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
+            .bind(MESSAGE_TRIGRAM_FTS_SCHEMA_KEY)
+            .fetch_optional(pool)
+            .await?;
+
+    if !existed || current_version.as_deref() != Some(MESSAGE_TRIGRAM_FTS_SCHEMA_VERSION) {
+        sqlx::query("INSERT INTO messages_trigram_fts(messages_trigram_fts) VALUES ('rebuild')")
+            .execute(pool)
+            .await?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(MESSAGE_TRIGRAM_FTS_SCHEMA_KEY)
+        .bind(MESSAGE_TRIGRAM_FTS_SCHEMA_VERSION)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn ensure_sessions_fts(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let existed = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'sessions_fts'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?
+        > 0;
+
+    sqlx::query(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts
+        USING fts5(
+            name,
+            project_path,
+            content='sessions',
+            content_rowid='rowid',
+            tokenize='unicode61'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS sessions_fts_ai
+        AFTER INSERT ON sessions BEGIN
+            INSERT INTO sessions_fts(rowid, name, project_path)
+            VALUES (new.rowid, new.name, new.project_path);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS sessions_fts_ad
+        AFTER DELETE ON sessions BEGIN
+            INSERT INTO sessions_fts(sessions_fts, rowid, name, project_path)
+            VALUES ('delete', old.rowid, old.name, old.project_path);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS sessions_fts_au
+        AFTER UPDATE OF name, project_path ON sessions BEGIN
+            INSERT INTO sessions_fts(sessions_fts, rowid, name, project_path)
+            VALUES ('delete', old.rowid, old.name, old.project_path);
+            INSERT INTO sessions_fts(rowid, name, project_path)
+            VALUES (new.rowid, new.name, new.project_path);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let current_version =
+        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
+            .bind(SESSION_FTS_SCHEMA_KEY)
+            .fetch_optional(pool)
+            .await?;
+
+    if !existed || current_version.as_deref() != Some(SESSION_FTS_SCHEMA_VERSION) {
+        sqlx::query("INSERT INTO sessions_fts(sessions_fts) VALUES ('rebuild')")
+            .execute(pool)
+            .await?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(SESSION_FTS_SCHEMA_KEY)
+        .bind(SESSION_FTS_SCHEMA_VERSION)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn ensure_sessions_trigram_fts(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let existed = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'sessions_trigram_fts'
+        "#,
+    )
+    .fetch_one(pool)
+    .await?
+        > 0;
+
+    sqlx::query(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS sessions_trigram_fts
+        USING fts5(
+            name,
+            project_path,
+            content='sessions',
+            content_rowid='rowid',
+            tokenize='trigram'
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS sessions_trigram_fts_ai
+        AFTER INSERT ON sessions BEGIN
+            INSERT INTO sessions_trigram_fts(rowid, name, project_path)
+            VALUES (new.rowid, new.name, new.project_path);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS sessions_trigram_fts_ad
+        AFTER DELETE ON sessions BEGIN
+            INSERT INTO sessions_trigram_fts(sessions_trigram_fts, rowid, name, project_path)
+            VALUES ('delete', old.rowid, old.name, old.project_path);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS sessions_trigram_fts_au
+        AFTER UPDATE OF name, project_path ON sessions BEGIN
+            INSERT INTO sessions_trigram_fts(sessions_trigram_fts, rowid, name, project_path)
+            VALUES ('delete', old.rowid, old.name, old.project_path);
+            INSERT INTO sessions_trigram_fts(rowid, name, project_path)
+            VALUES (new.rowid, new.name, new.project_path);
+        END
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let current_version =
+        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
+            .bind(SESSION_TRIGRAM_FTS_SCHEMA_KEY)
+            .fetch_optional(pool)
+            .await?;
+
+    if !existed || current_version.as_deref() != Some(SESSION_TRIGRAM_FTS_SCHEMA_VERSION) {
+        sqlx::query("INSERT INTO sessions_trigram_fts(sessions_trigram_fts) VALUES ('rebuild')")
+            .execute(pool)
+            .await?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(SESSION_TRIGRAM_FTS_SCHEMA_KEY)
+        .bind(SESSION_TRIGRAM_FTS_SCHEMA_VERSION)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+fn fts5_query_for_session_search(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .take(12)
+        .map(|term| {
+            let term = term.chars().take(48).collect::<String>();
+            format!("{term}*")
+        })
+        .collect();
+
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" "))
+    }
+}
+
+fn fts5_trigram_query_for_session_search(query: &str) -> Option<String> {
+    let q = query.trim();
+    if q.chars().count() < 3 {
+        return None;
+    }
+
+    let escaped = q.replace('"', "\"\"");
+    Some(format!("\"{escaped}\""))
+}
+
+fn query_requires_literal_scan(query: &str) -> bool {
+    query
+        .chars()
+        .any(|ch| !ch.is_ascii() || (!ch.is_alphanumeric() && !ch.is_whitespace()))
+}
+
+fn merge_session_search_results(
+    target: &mut Vec<SessionSearchResult>,
+    rows: Vec<SessionSearchResult>,
+) {
+    for row in rows {
+        if let Some(existing) = target.iter_mut().find(|item| item.id == row.id) {
+            if existing.match_snippet.is_none() {
+                existing.match_snippet = row.match_snippet;
+            }
+        } else {
+            target.push(row);
+        }
+    }
+}
+
+fn sort_and_limit_session_search_results(rows: &mut Vec<SessionSearchResult>, limit: i64) {
+    rows.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    rows.truncate(limit as usize);
+}
+
+async fn ensure_column_exists(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    column_def: &str,
+) -> Result<(), sqlx::Error> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let rows = sqlx::query(&pragma).fetch_all(pool).await?;
+    let exists = rows.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|name| name == column)
+            .unwrap_or(false)
+    });
+    if exists {
+        return Ok(());
+    }
+
+    let alter = format!("ALTER TABLE {table} ADD COLUMN {column} {column_def}");
+    sqlx::query(&alter).execute(pool).await?;
     Ok(())
 }
 
@@ -418,6 +969,8 @@ struct BackgroundAgentTaskRow {
     task_id: String,
     session_id: String,
     message_id: String,
+    round_id: Option<String>,
+    plan_id: Option<String>,
     agent_type: String,
     description: String,
     status: String,
@@ -443,6 +996,8 @@ fn row_to_background_task(row: BackgroundAgentTaskRow) -> BackgroundAgentTask {
         output_path: row.output_path,
         session_id: row.session_id,
         message_id: row.message_id,
+        round_id: row.round_id,
+        plan_id: row.plan_id,
     }
 }
 
@@ -481,6 +1036,278 @@ impl SessionRepository {
         Ok(sessions)
     }
 
+    /// Search sessions by title, project path, or message body.
+    pub async fn search_sessions(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchResult>, sqlx::Error> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let limit = limit.clamp(1, 100);
+
+        let mut fts_results = Vec::new();
+        let mut fts_failed = false;
+
+        if !query_requires_literal_scan(q) {
+            if let Some(fts_query) = fts5_query_for_session_search(q) {
+                match self.search_sessions_fts(&fts_query, limit).await {
+                    Ok(rows) => merge_session_search_results(&mut fts_results, rows),
+                    Err(err) => {
+                        fts_failed = true;
+                        tracing::debug!(
+                            target: "omiga::persistence",
+                            error = %err,
+                            "FTS5 session search failed; falling back to literal scan"
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(trigram_query) = fts5_trigram_query_for_session_search(q) {
+            match self
+                .search_sessions_trigram_fts(q, &trigram_query, limit)
+                .await
+            {
+                Ok(rows) => merge_session_search_results(&mut fts_results, rows),
+                Err(err) => {
+                    fts_failed = true;
+                    tracing::debug!(
+                        target: "omiga::persistence",
+                        error = %err,
+                        "FTS5 trigram session search failed; falling back to literal scan"
+                    );
+                }
+            }
+        }
+
+        if !fts_results.is_empty() {
+            sort_and_limit_session_search_results(&mut fts_results, limit);
+            return Ok(fts_results);
+        }
+
+        if fts_failed {
+            tracing::debug!(
+                target: "omiga::persistence",
+                "FTS session search produced no usable results after an error; falling back to literal scan"
+            );
+        }
+        self.search_sessions_scan(q, limit).await
+    }
+
+    async fn search_sessions_fts(
+        &self,
+        fts_query: &str,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchResult>, sqlx::Error> {
+        sqlx::query_as::<_, SessionSearchResult>(
+            r#"
+            WITH
+            message_hits AS (
+                SELECT
+                    m.session_id AS id,
+                    snippet(messages_fts, 0, '', '', '…', 32) AS match_snippet,
+                    0 AS source_order
+                FROM messages_fts
+                JOIN messages m ON m.rowid = messages_fts.rowid
+                WHERE messages_fts MATCH ?
+                ORDER BY bm25(messages_fts), m.created_at ASC, m.id ASC
+                LIMIT ?
+            ),
+            session_hits AS (
+                SELECT
+                    s.id AS id,
+                    NULL AS match_snippet,
+                    1 AS source_order
+                FROM sessions_fts
+                JOIN sessions s ON s.rowid = sessions_fts.rowid
+                WHERE sessions_fts MATCH ?
+                ORDER BY bm25(sessions_fts), s.updated_at DESC
+                LIMIT ?
+            ),
+            hits AS (
+                SELECT id, match_snippet, source_order FROM message_hits
+                UNION ALL
+                SELECT id, match_snippet, source_order FROM session_hits
+            ),
+            picked AS (
+                SELECT
+                    h.id,
+                    (
+                        SELECT h2.match_snippet
+                        FROM hits h2
+                        WHERE h2.id = h.id
+                          AND h2.match_snippet IS NOT NULL
+                        ORDER BY h2.source_order
+                        LIMIT 1
+                    ) AS match_snippet
+                FROM hits h
+                GROUP BY h.id
+            )
+            SELECT
+                s.id,
+                s.name,
+                s.project_path,
+                s.created_at,
+                s.updated_at,
+                (SELECT COUNT(*) FROM messages WHERE session_id = s.id) as message_count,
+                picked.match_snippet
+            FROM picked
+            JOIN sessions s ON s.id = picked.id
+            ORDER BY s.updated_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(fts_query)
+        .bind(MESSAGE_FTS_MATCH_LIMIT)
+        .bind(fts_query)
+        .bind(SESSION_FTS_MATCH_LIMIT)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    async fn search_sessions_trigram_fts(
+        &self,
+        query: &str,
+        trigram_query: &str,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchResult>, sqlx::Error> {
+        let q = query.trim().to_lowercase();
+        sqlx::query_as::<_, SessionSearchResult>(
+            r#"
+            WITH
+            message_hits AS (
+                SELECT
+                    m.session_id AS id,
+                    snippet(messages_trigram_fts, 0, '', '', '…', 32) AS match_snippet,
+                    0 AS source_order
+                FROM messages_trigram_fts
+                JOIN messages m ON m.rowid = messages_trigram_fts.rowid
+                WHERE messages_trigram_fts MATCH ?
+                  AND instr(lower(COALESCE(m.content, '')), ?) > 0
+                ORDER BY bm25(messages_trigram_fts), m.created_at ASC, m.id ASC
+                LIMIT ?
+            ),
+            session_hits AS (
+                SELECT
+                    s.id AS id,
+                    NULL AS match_snippet,
+                    1 AS source_order
+                FROM sessions_trigram_fts
+                JOIN sessions s ON s.rowid = sessions_trigram_fts.rowid
+                WHERE sessions_trigram_fts MATCH ?
+                  AND (
+                    instr(lower(s.name), ?) > 0
+                    OR instr(lower(s.project_path), ?) > 0
+                  )
+                ORDER BY bm25(sessions_trigram_fts), s.updated_at DESC
+                LIMIT ?
+            ),
+            hits AS (
+                SELECT id, match_snippet, source_order FROM message_hits
+                UNION ALL
+                SELECT id, match_snippet, source_order FROM session_hits
+            ),
+            picked AS (
+                SELECT
+                    h.id,
+                    (
+                        SELECT h2.match_snippet
+                        FROM hits h2
+                        WHERE h2.id = h.id
+                          AND h2.match_snippet IS NOT NULL
+                        ORDER BY h2.source_order
+                        LIMIT 1
+                    ) AS match_snippet
+                FROM hits h
+                GROUP BY h.id
+            )
+            SELECT
+                s.id,
+                s.name,
+                s.project_path,
+                s.created_at,
+                s.updated_at,
+                (SELECT COUNT(*) FROM messages WHERE session_id = s.id) as message_count,
+                picked.match_snippet
+            FROM picked
+            JOIN sessions s ON s.id = picked.id
+            ORDER BY s.updated_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(trigram_query)
+        .bind(&q)
+        .bind(MESSAGE_FTS_MATCH_LIMIT)
+        .bind(trigram_query)
+        .bind(&q)
+        .bind(&q)
+        .bind(SESSION_FTS_MATCH_LIMIT)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    async fn search_sessions_scan(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<SessionSearchResult>, sqlx::Error> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        sqlx::query_as::<_, SessionSearchResult>(
+            r#"
+            SELECT
+                s.id,
+                s.name,
+                s.project_path,
+                s.created_at,
+                s.updated_at,
+                (SELECT COUNT(*) FROM messages WHERE session_id = s.id) as message_count,
+                (
+                    SELECT
+                        CASE
+                            WHEN instr(lower(COALESCE(m.content, '')), ?) > 80
+                            THEN '…' || substr(m.content, instr(lower(COALESCE(m.content, '')), ?) - 80, 240)
+                            ELSE substr(m.content, 1, 240)
+                        END
+                    FROM messages m
+                    WHERE m.session_id = s.id
+                      AND instr(lower(COALESCE(m.content, '')), ?) > 0
+                    ORDER BY m.created_at ASC, m.id ASC
+                    LIMIT 1
+                ) as match_snippet
+            FROM sessions s
+            WHERE instr(lower(s.name), ?) > 0
+               OR instr(lower(s.project_path), ?) > 0
+               OR EXISTS (
+                    SELECT 1
+                    FROM messages m
+                    WHERE m.session_id = s.id
+                      AND instr(lower(COALESCE(m.content, '')), ?) > 0
+               )
+            ORDER BY s.updated_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(&q)
+        .bind(&q)
+        .bind(&q)
+        .bind(&q)
+        .bind(&q)
+        .bind(&q)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     /// Get session metadata only (no messages) — used by the paginated `load_session` path.
     pub async fn get_session_meta(&self, id: &str) -> Result<Option<SessionRecord>, sqlx::Error> {
         sqlx::query_as::<_, SessionRecord>(
@@ -491,13 +1318,31 @@ impl SessionRepository {
         .await
     }
 
+    pub async fn find_latest_session_id_for_project(
+        &self,
+        project_path: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let row: Option<(String,)> = sqlx::query_as(
+            r#"
+            SELECT id
+            FROM sessions
+            WHERE project_path = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(project_path)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(id,)| id))
+    }
+
     /// Return at most `limit` messages for `session_id`, ordered newest-first.
     /// The caller takes `limit` rows and checks `len > limit - 1` to detect older pages.
     ///
-    /// `reasoning_content` (extended-thinking chain-of-thought) is excluded here — it can be
-    /// several KB per assistant message and the frontend `RawMessage` interface does not use it
-    /// on load.  Sending it over the Tauri WebView bridge was the primary cause of the
-    /// ~200 ms session-switch IPC latency.  Use `get_message_reasoning` if you need it later.
+    /// Include reasoning only for assistant rows that own tool calls: the frontend uses that
+    /// text to rebuild the ReAct fold "Thoughts" preface after refresh. Keep non-tool
+    /// reasoning out of the paged load path to avoid reintroducing large IPC payloads.
     pub async fn get_session_messages_paged(
         &self,
         session_id: &str,
@@ -507,7 +1352,18 @@ impl SessionRepository {
         sqlx::query_as::<_, MessageRecord>(
             r#"
             SELECT id, session_id, role, content, tool_calls, tool_call_id,
-                   token_usage_json, NULL as reasoning_content, follow_up_suggestions_json, created_at
+                   token_usage_json,
+                   CASE
+                       WHEN role = 'assistant'
+                            AND reasoning_content IS NOT NULL
+                            AND trim(reasoning_content) <> ''
+                            AND tool_calls IS NOT NULL
+                            AND trim(tool_calls) <> ''
+                            AND trim(tool_calls) <> '[]'
+                       THEN reasoning_content
+                       ELSE NULL
+                   END as reasoning_content,
+                   follow_up_suggestions_json, turn_summary, created_at
             FROM messages
             WHERE session_id = ?
             ORDER BY created_at DESC, id DESC
@@ -522,7 +1378,8 @@ impl SessionRepository {
 
     /// Return at most `limit` messages older than `before_id`, newest-first.
     /// The caller reverses the result to get chronological order.
-    /// `reasoning_content` excluded for the same reason as `get_session_messages_paged`.
+    /// `reasoning_content` is included only for tool-call assistant rows, matching
+    /// `get_session_messages_paged`.
     pub async fn get_messages_before(
         &self,
         session_id: &str,
@@ -532,7 +1389,18 @@ impl SessionRepository {
         sqlx::query_as::<_, MessageRecord>(
             r#"
             SELECT id, session_id, role, content, tool_calls, tool_call_id,
-                   token_usage_json, NULL as reasoning_content, follow_up_suggestions_json, created_at
+                   token_usage_json,
+                   CASE
+                       WHEN role = 'assistant'
+                            AND reasoning_content IS NOT NULL
+                            AND trim(reasoning_content) <> ''
+                            AND tool_calls IS NOT NULL
+                            AND trim(tool_calls) <> ''
+                            AND trim(tool_calls) <> '[]'
+                       THEN reasoning_content
+                       ELSE NULL
+                   END as reasoning_content,
+                   follow_up_suggestions_json, turn_summary, created_at
             FROM messages
             WHERE session_id = ?
               AND (created_at, id) < (
@@ -568,7 +1436,7 @@ impl SessionRepository {
         // Get all messages for this session
         let messages = sqlx::query_as::<_, MessageRecord>(
             r#"
-            SELECT id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, follow_up_suggestions_json, created_at
+            SELECT id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, follow_up_suggestions_json, turn_summary, created_at
             FROM messages
             WHERE session_id = ?
             ORDER BY created_at ASC, id ASC
@@ -688,35 +1556,25 @@ impl SessionRepository {
     }
 
     /// Save a message
-    pub async fn save_message(
-        &self,
-        id: &str,
-        session_id: &str,
-        role: &str,
-        content: &str,
-        tool_calls: Option<&str>,
-        tool_call_id: Option<&str>,
-        token_usage_json: Option<&str>,
-        reasoning_content: Option<&str>,
-        follow_up_suggestions_json: Option<&str>,
-    ) -> Result<(), sqlx::Error> {
+    pub async fn save_message(&self, message: NewMessageRecord<'_>) -> Result<(), sqlx::Error> {
         let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(
             r#"
-            INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, follow_up_suggestions_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (id, session_id, role, content, tool_calls, tool_call_id, token_usage_json, reasoning_content, follow_up_suggestions_json, turn_summary, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#
         )
-        .bind(id)
-        .bind(session_id)
-        .bind(role)
-        .bind(content)
-        .bind(tool_calls)
-        .bind(tool_call_id)
-        .bind(token_usage_json)
-        .bind(reasoning_content)
-        .bind(follow_up_suggestions_json)
+        .bind(message.id)
+        .bind(message.session_id)
+        .bind(message.role)
+        .bind(message.content)
+        .bind(message.tool_calls)
+        .bind(message.tool_call_id)
+        .bind(message.token_usage_json)
+        .bind(message.reasoning_content)
+        .bind(message.follow_up_suggestions_json)
+        .bind(message.turn_summary)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -747,8 +1605,8 @@ impl SessionRepository {
                 r#"
                 INSERT INTO messages
                     (id, session_id, role, content, tool_calls, tool_call_id,
-                     token_usage_json, reasoning_content, follow_up_suggestions_json, created_at)
-                VALUES (?, ?, 'tool', ?, NULL, ?, NULL, NULL, NULL, ?)
+                     token_usage_json, reasoning_content, follow_up_suggestions_json, turn_summary, created_at)
+                VALUES (?, ?, 'tool', ?, NULL, ?, NULL, NULL, NULL, NULL, ?)
                 "#,
             )
             .bind(&msg_id)
@@ -785,6 +1643,20 @@ impl SessionRepository {
     ) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE messages SET follow_up_suggestions_json = ? WHERE id = ?")
             .bind(follow_up_suggestions_json)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Update turn summary on an existing assistant message row.
+    pub async fn update_message_turn_summary(
+        &self,
+        id: &str,
+        turn_summary: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE messages SET turn_summary = ? WHERE id = ?")
+            .bind(turn_summary)
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -962,6 +1834,53 @@ impl SessionRepository {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn append_orchestration_event(
+        &self,
+        event: NewOrchestrationEventRecord<'_>,
+    ) -> Result<(), sqlx::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO orchestration_events
+                (id, session_id, round_id, message_id, mode, event_type, phase, task_id, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(event.session_id)
+        .bind(event.round_id)
+        .bind(event.message_id)
+        .bind(event.mode)
+        .bind(event.event_type)
+        .bind(event.phase)
+        .bind(event.task_id)
+        .bind(event.payload_json)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_orchestration_events_for_session(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<OrchestrationEventRecord>, sqlx::Error> {
+        sqlx::query_as::<_, OrchestrationEventRecord>(
+            r#"
+            SELECT id, session_id, round_id, message_id, mode, event_type, phase, task_id, payload_json, created_at
+            FROM orchestration_events
+            WHERE session_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(session_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
     }
 
     pub async fn list_runtime_constraint_events_for_round(
@@ -1146,6 +2065,24 @@ impl SessionRepository {
         Ok((todos, tasks))
     }
 
+    /// Load session working memory scratchpad JSON.
+    pub async fn get_session_working_memory(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::domain::memory::working_memory::WorkingMemoryState>, sqlx::Error>
+    {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT state_json FROM session_working_memory WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        Ok(row.and_then(|(json,)| {
+            serde_json::from_str::<crate::domain::memory::working_memory::WorkingMemoryState>(&json)
+                .ok()
+        }))
+    }
+
     /// Upsert one background agent task row (authoritative store; memory cache may overlay).
     pub async fn upsert_background_agent_task(
         &self,
@@ -1157,13 +2094,15 @@ impl SessionRepository {
         sqlx::query(
             r#"
             INSERT INTO background_agent_tasks (
-                task_id, session_id, message_id, agent_type, description, status,
+                task_id, session_id, message_id, round_id, plan_id, agent_type, description, status,
                 created_at, started_at, completed_at, result_summary, error_message, output_path, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 message_id = excluded.message_id,
+                round_id = excluded.round_id,
+                plan_id = excluded.plan_id,
                 agent_type = excluded.agent_type,
                 description = excluded.description,
                 status = excluded.status,
@@ -1178,6 +2117,8 @@ impl SessionRepository {
         .bind(&task.task_id)
         .bind(&task.session_id)
         .bind(&task.message_id)
+        .bind(task.round_id.as_deref())
+        .bind(task.plan_id.as_deref())
         .bind(&task.agent_type)
         .bind(&task.description)
         .bind(status)
@@ -1201,7 +2142,7 @@ impl SessionRepository {
     ) -> Result<Vec<BackgroundAgentTask>, sqlx::Error> {
         let rows = sqlx::query_as::<_, BackgroundAgentTaskRow>(
             r#"
-            SELECT task_id, session_id, message_id, agent_type, description, status,
+            SELECT task_id, session_id, message_id, round_id, plan_id, agent_type, description, status,
                    created_at, started_at, completed_at, result_summary, error_message, output_path
             FROM background_agent_tasks
             WHERE session_id = ?
@@ -1222,7 +2163,7 @@ impl SessionRepository {
     ) -> Result<Option<BackgroundAgentTask>, sqlx::Error> {
         let row = sqlx::query_as::<_, BackgroundAgentTaskRow>(
             r#"
-            SELECT task_id, session_id, message_id, agent_type, description, status,
+            SELECT task_id, session_id, message_id, round_id, plan_id, agent_type, description, status,
                    created_at, started_at, completed_at, result_summary, error_message, output_path
             FROM background_agent_tasks
             WHERE task_id = ?
@@ -1242,7 +2183,8 @@ impl SessionRepository {
         session_id: &str,
         message: &Message,
     ) -> Result<(), sqlx::Error> {
-        let payload_json = serde_json::to_string(message).unwrap_or_else(|_| "{}".to_string());
+        let message = sanitize_background_sidechain_message(message);
+        let payload_json = serde_json::to_string(&message).unwrap_or_else(|_| "{}".to_string());
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -1293,7 +2235,8 @@ impl SessionRepository {
         .await?;
 
         for (i, message) in messages.iter().enumerate() {
-            let payload_json = serde_json::to_string(message).unwrap_or_else(|_| "{}".to_string());
+            let message = sanitize_background_sidechain_message(message);
+            let payload_json = serde_json::to_string(&message).unwrap_or_else(|_| "{}".to_string());
             let id = uuid::Uuid::new_v4().to_string();
             let seq = base_seq + 1 + i as i64;
             sqlx::query(
@@ -1376,6 +2319,33 @@ impl SessionRepository {
         Ok(())
     }
 
+    /// Persist session working memory scratchpad (best-effort JSON).
+    pub async fn upsert_session_working_memory(
+        &self,
+        session_id: &str,
+        state: &crate::domain::memory::working_memory::WorkingMemoryState,
+    ) -> Result<(), sqlx::Error> {
+        let state_json = serde_json::to_string(state).unwrap_or_else(|_| "{}".to_string());
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            r#"
+            INSERT INTO session_working_memory (session_id, state_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                state_json = excluded.state_json,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(session_id)
+        .bind(&state_json)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// Get all rounds for a session (for history/replay)
     pub async fn get_session_rounds(
         &self,
@@ -1420,8 +2390,20 @@ pub struct SessionWithCount {
     pub message_count: i64,
 }
 
-/// Message database record
+/// Session search result with an optional message-body snippet.
 #[derive(Debug, sqlx::FromRow)]
+pub struct SessionSearchResult {
+    pub id: String,
+    pub name: String,
+    pub project_path: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub message_count: i64,
+    pub match_snippet: Option<String>,
+}
+
+/// Message database record
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct MessageRecord {
     pub id: String,
     pub session_id: String,
@@ -1432,11 +2414,27 @@ pub struct MessageRecord {
     pub token_usage_json: Option<String>,
     pub reasoning_content: Option<String>,
     pub follow_up_suggestions_json: Option<String>,
+    pub turn_summary: Option<String>,
     pub created_at: String,
 }
 
+/// Borrowed message insert payload.
+#[derive(Debug, Clone, Copy)]
+pub struct NewMessageRecord<'a> {
+    pub id: &'a str,
+    pub session_id: &'a str,
+    pub role: &'a str,
+    pub content: &'a str,
+    pub tool_calls: Option<&'a str>,
+    pub tool_call_id: Option<&'a str>,
+    pub token_usage_json: Option<&'a str>,
+    pub reasoning_content: Option<&'a str>,
+    pub follow_up_suggestions_json: Option<&'a str>,
+    pub turn_summary: Option<&'a str>,
+}
+
 /// Session with all messages
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionWithMessages {
     pub id: String,
     pub name: String,
@@ -1524,4 +2522,447 @@ pub struct RuntimeConstraintRoundTraceRecord {
     pub event_count: i64,
     pub first_event_at: String,
     pub last_event_at: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OrchestrationEventRecord {
+    pub id: String,
+    pub session_id: String,
+    pub round_id: Option<String>,
+    pub message_id: Option<String>,
+    pub mode: Option<String>,
+    pub event_type: String,
+    pub phase: Option<String>,
+    pub task_id: Option<String>,
+    pub payload_json: String,
+    pub created_at: String,
+}
+
+/// Borrowed orchestration-event insert payload.
+#[derive(Debug, Clone, Copy)]
+pub struct NewOrchestrationEventRecord<'a> {
+    pub session_id: &'a str,
+    pub round_id: Option<&'a str>,
+    pub message_id: Option<&'a str>,
+    pub mode: Option<&'a str>,
+    pub event_type: &'a str,
+    pub phase: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub payload_json: &'a str,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn persists_and_lists_orchestration_events() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        repo.create_session("session-1", "Scenario A", "/tmp/project")
+            .await
+            .expect("create session");
+
+        repo.append_orchestration_event(NewOrchestrationEventRecord {
+            session_id: "session-1",
+            round_id: Some("round-1"),
+            message_id: Some("message-1"),
+            mode: Some("schedule"),
+            event_type: "schedule_plan_created",
+            phase: None,
+            task_id: None,
+            payload_json: r#"{"planId":"plan-1","taskCount":3}"#,
+        })
+        .await
+        .expect("append event");
+
+        repo.append_orchestration_event(NewOrchestrationEventRecord {
+            session_id: "session-1",
+            round_id: Some("round-1"),
+            message_id: Some("message-1"),
+            mode: Some("team"),
+            event_type: "phase_changed",
+            phase: Some("executing"),
+            task_id: None,
+            payload_json: r#"{"goal":"fix export flow"}"#,
+        })
+        .await
+        .expect("append phase event");
+
+        let events = repo
+            .list_orchestration_events_for_session("session-1", 10)
+            .await
+            .expect("list events");
+
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .any(|e| e.event_type == "schedule_plan_created"));
+        assert!(events
+            .iter()
+            .any(|e| e.event_type == "phase_changed" && e.phase.as_deref() == Some("executing")));
+    }
+
+    #[tokio::test]
+    async fn paged_messages_restore_tool_call_reasoning_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        repo.create_session("session-1", "Reasoning", "/tmp/project")
+            .await
+            .expect("create session");
+
+        repo.save_message(NewMessageRecord {
+            id: "assistant-tool",
+            session_id: "session-1",
+            role: "assistant",
+            content: "",
+            tool_calls: Some(r#"[{"id":"call-1","name":"bash","arguments":"{}"}]"#),
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: Some("I should inspect the CAS1-specific file first."),
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
+        .await
+        .expect("save tool assistant");
+
+        repo.save_message(NewMessageRecord {
+            id: "assistant-plain",
+            session_id: "session-1",
+            role: "assistant",
+            content: "final answer",
+            tool_calls: None,
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: Some("This non-tool reasoning should stay out of paged loads."),
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
+        .await
+        .expect("save plain assistant");
+
+        let messages = repo
+            .get_session_messages_paged("session-1", 10, 0)
+            .await
+            .expect("load paged messages");
+
+        let tool_owner = messages
+            .iter()
+            .find(|msg| msg.id == "assistant-tool")
+            .expect("tool assistant row");
+        assert_eq!(
+            tool_owner.reasoning_content.as_deref(),
+            Some("I should inspect the CAS1-specific file first.")
+        );
+
+        let plain = messages
+            .iter()
+            .find(|msg| msg.id == "assistant-plain")
+            .expect("plain assistant row");
+        assert!(plain.reasoning_content.is_none());
+    }
+
+    #[tokio::test]
+    async fn search_sessions_matches_message_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        repo.create_session("session-1", "Unrelated title", "/tmp/project-a")
+            .await
+            .expect("create session 1");
+        repo.create_session("session-2", "QSDB title", "/tmp/project-b")
+            .await
+            .expect("create session 2");
+
+        repo.save_message(NewMessageRecord {
+            id: "message-1",
+            session_id: "session-1",
+            role: "user",
+            content: "Please extract QS core gene sequence from the uploaded FASTA.",
+            tool_calls: None,
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: None,
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
+        .await
+        .expect("save matching message");
+
+        repo.save_message(NewMessageRecord {
+            id: "message-2",
+            session_id: "session-2",
+            role: "user",
+            content: "No special body text here.",
+            tool_calls: None,
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: None,
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
+        .await
+        .expect("save nonmatching message");
+
+        let body_rows = repo
+            .search_sessions("core gene", 10)
+            .await
+            .expect("search body content");
+        assert_eq!(body_rows.len(), 1);
+        assert_eq!(body_rows[0].id, "session-1");
+        assert!(body_rows[0]
+            .match_snippet
+            .as_deref()
+            .expect("body match snippet")
+            .contains("core gene"));
+
+        let title_rows = repo
+            .search_sessions("qsdb", 10)
+            .await
+            .expect("search title");
+        assert_eq!(title_rows.len(), 1);
+        assert_eq!(title_rows[0].id, "session-2");
+    }
+
+    #[tokio::test]
+    async fn message_fts_index_tracks_message_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool.clone());
+
+        repo.create_session("session-1", "FTS", "/tmp/project")
+            .await
+            .expect("create session");
+        repo.save_message(NewMessageRecord {
+            id: "message-1",
+            session_id: "session-1",
+            role: "user",
+            content: "alpha omega marker",
+            tool_calls: None,
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: None,
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
+        .await
+        .expect("save message");
+
+        let omega_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?")
+                .bind("omega*")
+                .fetch_one(&pool)
+                .await
+                .expect("query inserted fts row");
+        assert_eq!(omega_count, 1);
+
+        repo.update_message_content("message-1", "beta marker")
+            .await
+            .expect("update message content");
+
+        let old_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?")
+                .bind("omega*")
+                .fetch_one(&pool)
+                .await
+                .expect("query removed fts row");
+        let beta_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?")
+                .bind("beta*")
+                .fetch_one(&pool)
+                .await
+                .expect("query updated fts row");
+        assert_eq!(old_count, 0);
+        assert_eq!(beta_count, 1);
+
+        repo.clear_messages("session-1")
+            .await
+            .expect("delete messages");
+        let deleted_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?")
+                .bind("beta*")
+                .fetch_one(&pool)
+                .await
+                .expect("query deleted fts row");
+        assert_eq!(deleted_count, 0);
+    }
+
+    #[tokio::test]
+    async fn session_fts_index_tracks_metadata_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool.clone());
+
+        repo.create_session("session-1", "Alpha Signal", "/tmp/project")
+            .await
+            .expect("create session");
+
+        let alpha_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions_fts WHERE sessions_fts MATCH ?")
+                .bind("alpha*")
+                .fetch_one(&pool)
+                .await
+                .expect("query inserted session fts row");
+        assert_eq!(alpha_count, 1);
+
+        repo.rename_session("session-1", "Beta Signal")
+            .await
+            .expect("rename session");
+
+        let old_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions_fts WHERE sessions_fts MATCH ?")
+                .bind("alpha*")
+                .fetch_one(&pool)
+                .await
+                .expect("query removed session fts row");
+        let beta_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions_fts WHERE sessions_fts MATCH ?")
+                .bind("beta*")
+                .fetch_one(&pool)
+                .await
+                .expect("query renamed session fts row");
+        assert_eq!(old_count, 0);
+        assert_eq!(beta_count, 1);
+
+        repo.update_session_project_path("session-1", "/tmp/gamma-project")
+            .await
+            .expect("update project path");
+
+        let search_rows = repo
+            .search_sessions("gamma", 10)
+            .await
+            .expect("search project path through fts");
+        assert_eq!(search_rows.len(), 1);
+        assert_eq!(search_rows[0].id, "session-1");
+
+        repo.delete_session("session-1")
+            .await
+            .expect("delete session");
+        let deleted_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions_fts WHERE sessions_fts MATCH ?")
+                .bind("beta*")
+                .fetch_one(&pool)
+                .await
+                .expect("query deleted session fts row");
+        assert_eq!(deleted_count, 0);
+    }
+
+    #[tokio::test]
+    async fn trigram_fts_accelerates_literal_session_search() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool.clone());
+
+        let has_trigram: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name IN ('messages_trigram_fts', 'sessions_trigram_fts')
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check trigram fts tables");
+
+        // Older SQLite builds may not provide the FTS5 trigram tokenizer. Runtime code
+        // intentionally falls back to scan in that case, so keep this test portable.
+        if has_trigram < 2 {
+            return;
+        }
+
+        repo.create_session("session-1", "English title", "/tmp/project")
+            .await
+            .expect("create session 1");
+        repo.create_session("session-2", "Path title", "/Users/dengxsh/Downloads/Work")
+            .await
+            .expect("create session 2");
+
+        repo.save_message(NewMessageRecord {
+            id: "message-1",
+            session_id: "session-1",
+            role: "user",
+            content: "实现聊天记录搜索功能，展示 session 内容片段。",
+            tool_calls: None,
+            tool_call_id: None,
+            token_usage_json: None,
+            reasoning_content: None,
+            follow_up_suggestions_json: None,
+            turn_summary: None,
+        })
+        .await
+        .expect("save chinese message");
+
+        let message_trigram_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages_trigram_fts WHERE messages_trigram_fts MATCH ?",
+        )
+        .bind("\"聊天记录\"")
+        .fetch_one(&pool)
+        .await
+        .expect("query message trigram fts");
+        assert_eq!(message_trigram_count, 1);
+
+        let body_rows = repo
+            .search_sessions("聊天记录", 10)
+            .await
+            .expect("search chinese message through trigram fts");
+        assert_eq!(body_rows.len(), 1);
+        assert_eq!(body_rows[0].id, "session-1");
+
+        let session_trigram_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sessions_trigram_fts WHERE sessions_trigram_fts MATCH ?",
+        )
+        .bind("\"Downloads/Work\"")
+        .fetch_one(&pool)
+        .await
+        .expect("query session trigram fts");
+        assert_eq!(session_trigram_count, 1);
+
+        let path_rows = repo
+            .search_sessions("Downloads/Work", 10)
+            .await
+            .expect("search path through trigram fts");
+        assert_eq!(path_rows.len(), 1);
+        assert_eq!(path_rows[0].id, "session-2");
+    }
+
+    #[tokio::test]
+    async fn session_search_preserves_substring_semantics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("omiga-test.db");
+        let pool = init_db(&db_path).await.expect("init db");
+        let repo = SessionRepository::new(pool);
+
+        repo.create_session("session-1", "GitHub Connector", "/tmp/project")
+            .await
+            .expect("create session 1");
+        repo.create_session("session-2", "OpenAI Tools", "/tmp/project")
+            .await
+            .expect("create session 2");
+
+        let hub_rows = repo
+            .search_sessions("Hub", 10)
+            .await
+            .expect("search ascii substring");
+        assert_eq!(hub_rows.len(), 1);
+        assert_eq!(hub_rows[0].id, "session-1");
+
+        let short_rows = repo
+            .search_sessions("AI", 10)
+            .await
+            .expect("search short ascii substring");
+        assert_eq!(short_rows.len(), 1);
+        assert_eq!(short_rows[0].id, "session-2");
+    }
 }

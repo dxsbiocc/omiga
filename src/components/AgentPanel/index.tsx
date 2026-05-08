@@ -1,10 +1,9 @@
 /**
- * Agent Panel - 后台 Agent 任务管理面板
- * 
- * 显示所有后台运行的 Agent 任务，支持查看状态、结果和取消任务。
+ * Agent Panel - 后台 Agent 任务管理
+ * 在任务区右侧面板内，从文件夹组件上方向上滑出
  */
 
-import { useEffect, useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   useAgentStore,
   getAgentTypeDisplayName,
@@ -14,65 +13,112 @@ import {
   type BackgroundAgentTask,
 } from "../../state/agentStore";
 import { useSessionStore } from "../../state/sessionStore";
-import { X, Trash2, RefreshCw, ExternalLink } from "lucide-react";
+import { RefreshCw, ExternalLink, ChevronUp, StopCircle } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { zhCN, enUS } from "date-fns/locale";
 import { useLocaleStore } from "../../state/localeStore";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  Box,
+  Typography,
+  IconButton,
+  Chip,
+  Stack,
+  Paper,
+  Button,
+  CircularProgress,
+} from "@mui/material";
+import {
+  Close as CloseIcon,
+  DeleteOutline as TrashIcon,
+  Refresh as RefreshIcon,
+  DragHandle as DragHandleIcon,
+} from "@mui/icons-material";
 
+/**
+ * 嵌入右侧面板内部的抽屉，从底部（文件夹组件上方）向上滑出。
+ * 需要父容器有 `position: relative` 和 `overflow: hidden`。
+ */
 export function AgentPanel() {
-  const { showTaskPanel, initEventListeners } = useAgentStore();
-
-  // 初始化事件监听
-  useEffect(() => {
-    let cleanup: (() => void) | undefined;
-    initEventListeners().then((fn) => {
-      cleanup = fn;
-    });
-    return () => cleanup?.();
-  }, [initEventListeners]);
-
-  if (!showTaskPanel) return null;
+  const { showTaskPanel, setTaskPanelVisible } = useAgentStore();
 
   return (
-    <div className="fixed right-0 top-16 w-96 max-w-[calc(100vw-2rem)] h-[calc(100vh-4rem)] bg-white dark:bg-gray-900 border-l border-gray-200 dark:border-gray-700 shadow-xl z-50 flex flex-col">
+    <Box
+      sx={{
+        position: "absolute",
+        bottom: 0,
+        left: 0,
+        right: 0,
+        maxHeight: "62%",
+        bgcolor: "background.paper",
+        borderTop: 1,
+        borderColor: "divider",
+        boxShadow: showTaskPanel ? "0 -4px 20px rgba(0,0,0,0.12)" : "none",
+        transform: showTaskPanel ? "translateY(0)" : "translateY(100%)",
+        transition: "transform 0.22s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.22s",
+        display: "flex",
+        flexDirection: "column",
+        zIndex: 10,
+      }}
+    >
+      {/* 拖拽把手 */}
+      <Box
+        onClick={() => setTaskPanelVisible(false)}
+        sx={{
+          display: "flex",
+          justifyContent: "center",
+          py: 0.75,
+          cursor: "pointer",
+          "&:hover": { bgcolor: "action.hover" },
+        }}
+      >
+        <DragHandleIcon sx={{ color: "text.disabled", fontSize: 20 }} />
+      </Box>
+
       <AgentPanelHeader />
       <AgentTaskList />
-    </div>
+    </Box>
   );
 }
 
 function AgentPanelHeader() {
   const { setTaskPanelVisible, backgroundTasks } = useAgentStore();
   const hasCompleted = backgroundTasks.some(
-    (t) => t.status === "completed" || t.status === "failed" || t.status === "cancelled"
+    (t) =>
+      t.status === "completed" ||
+      t.status === "failed" ||
+      t.status === "cancelled",
   );
 
   return (
-    <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
-      <div>
-        <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+    <Stack
+      direction="row"
+      alignItems="center"
+      justifyContent="space-between"
+      sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider", flexShrink: 0 }}
+    >
+      <Box>
+        <Typography variant="subtitle2" fontWeight={600}>
           后台 Agent 任务
-        </h2>
+        </Typography>
         <TaskCountBadge />
-      </div>
-      <div className="flex items-center gap-2">
+      </Box>
+      <Stack direction="row" alignItems="center" spacing={0.5}>
         {hasCompleted && (
-          <button
+          <IconButton
+            size="small"
             onClick={() => useAgentStore.getState().cleanupCompleted()}
-            className="p-2 text-gray-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors"
             title="清理已完成任务"
+            color="error"
           >
-            <Trash2 size={18} />
-          </button>
+            <TrashIcon fontSize="small" />
+          </IconButton>
         )}
-        <button
-          onClick={() => setTaskPanelVisible(false)}
-          className="p-2 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
-        >
-          <X size={20} />
-        </button>
-      </div>
-    </div>
+        <IconButton size="small" onClick={() => setTaskPanelVisible(false)}>
+          <CloseIcon fontSize="small" />
+        </IconButton>
+      </Stack>
+    </Stack>
   );
 }
 
@@ -83,20 +129,22 @@ function TaskCountBadge() {
 
   if (totalCount === 0) {
     return (
-      <span className="text-xs text-gray-500">暂无任务</span>
+      <Typography variant="caption" color="text.secondary">
+        暂无任务
+      </Typography>
     );
   }
 
   return (
-    <span className="text-xs text-gray-500">
+    <Typography variant="caption" color="text.secondary">
       {runningCount > 0 && (
-        <span className="text-blue-500 font-medium">{runningCount} 运行中</span>
+        <Typography component="span" variant="caption" color="primary" fontWeight={600}>
+          {runningCount} 运行中
+        </Typography>
       )}
       {runningCount > 0 && totalCount > runningCount && " / "}
-      {totalCount > runningCount && (
-        <span>{totalCount - runningCount} 已完成</span>
-      )}
-    </span>
+      {totalCount > runningCount && `${totalCount - runningCount} 已完成`}
+    </Typography>
   );
 }
 
@@ -105,7 +153,6 @@ function AgentTaskList() {
   const { currentSession } = useSessionStore();
   const currentSessionId = currentSession?.id ?? null;
 
-  // 按会话筛选并排序（最新的在前）
   const tasks = useMemo(() => {
     return backgroundTasks
       .filter((t) => t.sessionId === currentSessionId)
@@ -114,21 +161,27 @@ function AgentTaskList() {
 
   if (tasks.length === 0) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center text-gray-500 p-8">
-        <RefreshCw size={48} className="mb-4 opacity-20" />
-        <p className="text-center">
+      <Stack
+        flex={1}
+        alignItems="center"
+        justifyContent="center"
+        spacing={2}
+        sx={{ p: 3, color: "text.disabled" }}
+      >
+        <RefreshIcon sx={{ fontSize: 36, opacity: 0.2 }} />
+        <Typography variant="body2" align="center" color="text.secondary">
           暂无后台 Agent 任务
           <br />
-          <span className="text-sm opacity-70">
-            使用 verification 类型的 Agent 将在后台运行
-          </span>
-        </p>
-      </div>
+          <Typography component="span" variant="caption" sx={{ opacity: 0.7 }}>
+            可在设置 → Agents 中启动编排任务
+          </Typography>
+        </Typography>
+      </Stack>
     );
   }
 
   return (
-    <div className="flex-1 overflow-y-auto">
+    <Box sx={{ flex: 1, overflowY: "auto" }}>
       {tasks.map((task) => (
         <TaskItem
           key={task.taskId}
@@ -137,7 +190,7 @@ function AgentTaskList() {
           onClick={() => setSelectedTask(task.taskId)}
         />
       ))}
-    </div>
+    </Box>
   );
 }
 
@@ -153,136 +206,256 @@ function TaskItem({ task, isSelected, onClick }: TaskItemProps) {
 
   const timeText = useMemo(() => {
     if (task.completedAt) {
-      return formatDistanceToNow(task.completedAt, {
-        addSuffix: true,
-        locale: dateLocale,
-      });
+      return formatDistanceToNow(task.completedAt, { addSuffix: true, locale: dateLocale });
     }
-    return formatDistanceToNow(task.createdAt, {
-      addSuffix: true,
-      locale: dateLocale,
-    });
+    return formatDistanceToNow(task.createdAt, { addSuffix: true, locale: dateLocale });
   }, [task.completedAt, task.createdAt, dateLocale]);
 
   return (
-    <div
+    <Box
       onClick={onClick}
-      className={`
-        p-4 border-b border-gray-100 dark:border-gray-800 cursor-pointer
-        transition-colors hover:bg-gray-50 dark:hover:bg-gray-800/50
-        ${isSelected ? "bg-blue-50 dark:bg-blue-900/20 border-l-4 border-l-blue-500" : "border-l-4 border-l-transparent"}
-      `}
+      sx={{
+        px: 2,
+        py: 1.5,
+        borderBottom: 1,
+        borderColor: "divider",
+        borderLeft: 4,
+        borderLeftColor: isSelected ? "primary.main" : "transparent",
+        bgcolor: isSelected ? "action.selected" : "transparent",
+        cursor: "pointer",
+        "&:hover": { bgcolor: "action.hover" },
+        transition: "background-color 0.15s",
+      }}
     >
-      <div className="flex items-start gap-3">
-        <span className="text-lg" title={STATUS_LABELS[task.status]}>
+      <Stack direction="row" spacing={1.5} alignItems="flex-start">
+        <Box sx={{ fontSize: 18, lineHeight: 1, mt: 0.25 }} title={STATUS_LABELS[task.status]}>
           {STATUS_ICONS[task.status]}
-        </span>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-medium px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
-              {getAgentTypeDisplayName(task.agentType)}
-            </span>
-            <span className={`text-xs ${STATUS_COLORS[task.status]}`}>
+        </Box>
+        <Box flex={1} minWidth={0}>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Chip
+              label={getAgentTypeDisplayName(task.agentType)}
+              size="small"
+              sx={{ height: 18, fontSize: 10, fontWeight: 600 }}
+            />
+            <Typography variant="caption" sx={{ color: STATUS_COLORS[task.status] }}>
               {STATUS_LABELS[task.status]}
-            </span>
-          </div>
-          <p className="mt-1 text-sm text-gray-900 dark:text-gray-100 font-medium truncate">
+            </Typography>
+          </Stack>
+          <Typography variant="body2" fontWeight={500} noWrap sx={{ mt: 0.5 }}>
             {task.description}
-          </p>
-          <p className="text-xs text-gray-500 mt-1">{timeText}</p>
-          
+          </Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ mt: 0.25, display: "block" }}>
+            {timeText}
+          </Typography>
           {isSelected && <TaskDetails task={task} />}
-        </div>
-      </div>
-    </div>
+        </Box>
+      </Stack>
+    </Box>
   );
 }
 
 function TaskDetails({ task }: { task: BackgroundAgentTask }) {
   const { removeTask } = useAgentStore();
+  const [fullOutput, setFullOutput] = useState<string | null>(null);
+  const [loadingOutput, setLoadingOutput] = useState(false);
+  const [outputExpanded, setOutputExpanded] = useState(false);
+
+  const loadFullOutput = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (fullOutput !== null) {
+      setOutputExpanded((v) => !v);
+      return;
+    }
+    if (!task.outputPath) return;
+    setLoadingOutput(true);
+    try {
+      const res = await invoke<{ content: string }>("read_file", {
+        path: task.outputPath,
+        offset: 0,
+        limit: 5000,
+      });
+      setFullOutput(res.content);
+      setOutputExpanded(true);
+    } catch (err) {
+      setFullOutput(`读取失败: ${err}`);
+      setOutputExpanded(true);
+    } finally {
+      setLoadingOutput(false);
+    }
+  };
 
   return (
-    <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
-      <div className="space-y-2">
-        <div className="text-xs text-gray-500">
-          <span className="font-medium">任务 ID:</span> {task.taskId.slice(0, 8)}...
-        </div>
-        
+    <Box sx={{ mt: 1.5, pt: 1.5, borderTop: 1, borderColor: "divider" }}>
+      <Stack spacing={1}>
+        <Typography variant="caption" color="text.secondary">
+          <strong>任务 ID:</strong> {task.taskId.slice(0, 8)}...
+        </Typography>
+
         {task.resultSummary && (
-          <div className="text-sm text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 p-2 rounded max-h-32 overflow-y-auto">
-            <pre className="whitespace-pre-wrap break-words text-xs">
+          <Paper
+            variant="outlined"
+            sx={{ p: 1, maxHeight: 100, overflowY: "auto", bgcolor: "action.hover" }}
+          >
+            <Typography
+              component="pre"
+              variant="caption"
+              sx={{ m: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+            >
               {task.resultSummary.slice(0, 500)}
               {task.resultSummary.length > 500 && "..."}
-            </pre>
-          </div>
+            </Typography>
+          </Paper>
         )}
-        
-        {task.errorMessage && (
-          <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 p-2 rounded">
-            {task.errorMessage}
-          </div>
-        )}
-        
-        <div className="flex items-center gap-2 pt-2">
-          {task.outputPath && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                // TODO: 打开输出文件
-              }}
-              className="flex items-center gap-1 text-xs text-blue-500 hover:text-blue-600 px-2 py-1 rounded hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
+
+        {outputExpanded && fullOutput !== null && (
+          <Paper
+            variant="outlined"
+            sx={{ p: 1, maxHeight: 160, overflowY: "auto", bgcolor: "action.hover" }}
+          >
+            <Typography
+              component="pre"
+              variant="caption"
+              sx={{ m: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}
             >
-              <ExternalLink size={12} />
-              查看完整输出
-            </button>
+              {fullOutput}
+            </Typography>
+          </Paper>
+        )}
+
+        {task.errorMessage && (
+          <Paper variant="outlined" sx={{ p: 1, bgcolor: "error.light", borderColor: "error.main" }}>
+            <Typography variant="caption" color="error.contrastText">
+              {task.errorMessage}
+            </Typography>
+          </Paper>
+        )}
+
+        <Stack direction="row" spacing={1} sx={{ pt: 0.5 }}>
+          {task.outputPath && (
+            <Button
+              size="small"
+              variant="text"
+              disabled={loadingOutput}
+              onClick={loadFullOutput}
+              startIcon={
+                loadingOutput ? (
+                  <CircularProgress size={12} />
+                ) : outputExpanded ? (
+                  <ChevronUp size={12} />
+                ) : (
+                  <ExternalLink size={12} />
+                )
+              }
+              sx={{ fontSize: 11, py: 0.25 }}
+            >
+              {outputExpanded ? "收起输出" : "查看完整输出"}
+            </Button>
           )}
-          
+
+          {(task.status === "pending" || task.status === "running") && (
+            <CancelOrchestrationButton sessionId={task.sessionId} />
+          )}
+
           {(task.status === "completed" || task.status === "failed" || task.status === "cancelled") && (
-            <button
+            <Button
+              size="small"
+              variant="text"
+              color="error"
+              startIcon={<TrashIcon sx={{ fontSize: 12 }} />}
               onClick={(e) => {
                 e.stopPropagation();
                 removeTask(task.taskId);
               }}
-              className="flex items-center gap-1 text-xs text-red-500 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+              sx={{ fontSize: 11, py: 0.25 }}
             >
-              <Trash2 size={12} />
               删除
-            </button>
+            </Button>
           )}
-        </div>
-      </div>
-    </div>
+        </Stack>
+      </Stack>
+    </Box>
   );
 }
 
-/** Agent 面板触发按钮 */
+function CancelOrchestrationButton({ sessionId }: { sessionId: string }) {
+  const [cancelling, setCancelling] = useState(false);
+
+  const handleCancel = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCancelling(true);
+    try {
+      await invoke("cancel_agent_schedule", { sessionId });
+    } catch (err) {
+      console.error("cancel_agent_schedule failed:", err);
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  return (
+    <Button
+      size="small"
+      variant="text"
+      color="warning"
+      disabled={cancelling}
+      onClick={handleCancel}
+      startIcon={cancelling ? <CircularProgress size={12} /> : <StopCircle size={12} />}
+      sx={{ fontSize: 11, py: 0.25 }}
+    >
+      取消编排
+    </Button>
+  );
+}
+
+/** Agent 面板触发按钮 — 嵌入任务区顶部 */
 export function AgentPanelButton() {
-  const { showTaskPanel, toggleTaskPanel, getRunningTasks, backgroundTasks } = useAgentStore();
-  const runningCount = getRunningTasks().length;
+  const showTaskPanel = useAgentStore((s) => s.showTaskPanel);
+  const toggleTaskPanel = useAgentStore((s) => s.toggleTaskPanel);
+  const backgroundTasks = useAgentStore((s) => s.backgroundTasks);
+  const runningCount = backgroundTasks.filter(
+    (t) => t.status === "pending" || t.status === "running",
+  ).length;
   const totalCount = backgroundTasks.length;
 
   return (
     <button
       onClick={toggleTaskPanel}
-      className={`
-        relative flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium
-        transition-colors
-        ${showTaskPanel
-          ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
-          : "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
-        }
-      `}
+      title="后台 Agent 任务"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 4,
+        padding: "2px 8px",
+        borderRadius: 6,
+        fontSize: 11,
+        fontWeight: 600,
+        border: "none",
+        cursor: "pointer",
+        background: showTaskPanel ? "rgba(99,102,241,0.12)" : "transparent",
+        color: showTaskPanel ? "#6366f1" : "inherit",
+      }}
     >
-      <RefreshCw size={16} className={runningCount > 0 ? "animate-spin" : ""} />
-      <span>Agent 任务</span>
+      <RefreshCw
+        size={13}
+        style={{ animation: runningCount > 0 ? "spin 1.5s linear infinite" : "none" }}
+      />
+      <span>Agent</span>
       {totalCount > 0 && (
-        <span className={`
-          min-w-[1.25rem] h-5 px-1 rounded-full text-xs flex items-center justify-center
-          ${runningCount > 0
-            ? "bg-blue-500 text-white"
-            : "bg-gray-400 text-white dark:bg-gray-600"
-          }
-        `}>
+        <span
+          style={{
+            minWidth: 16,
+            height: 16,
+            padding: "0 4px",
+            borderRadius: 8,
+            fontSize: 9,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: runningCount > 0 ? "#6366f1" : "#9ca3af",
+            color: "#fff",
+          }}
+        >
           {totalCount}
         </span>
       )}

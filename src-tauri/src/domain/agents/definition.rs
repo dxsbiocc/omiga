@@ -5,6 +5,36 @@
 use crate::domain::tools::ToolContext;
 use serde::{Deserialize, Serialize};
 
+/// Three-tier model routing for sub-agents.
+///
+/// Maps to provider-specific model aliases resolved by `resolve_subagent_model`:
+///
+/// | Tier     | Alias    | Anthropic model     | Use case                            |
+/// |----------|----------|---------------------|-------------------------------------|
+/// | Frontier | "opus"   | claude-opus-4-*     | Deep reasoning, Architect/Reviewer  |
+/// | Standard | "sonnet" | claude-sonnet-4-*   | Execution, coding, orchestration    |
+/// | Spark    | "haiku"  | claude-haiku-4-*    | Fast searches, lightweight queries  |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTier {
+    /// Highest capability — Opus. For complex reasoning and verification.
+    Frontier,
+    /// Balanced — Sonnet. For most execution and coding work.
+    Standard,
+    /// Fastest/cheapest — Haiku. For quick searches and lightweight tasks.
+    Spark,
+}
+
+impl ModelTier {
+    /// Return the model alias string passed to `resolve_subagent_model`.
+    pub fn alias(self) -> &'static str {
+        match self {
+            ModelTier::Frontier => "opus",
+            ModelTier::Standard => "sonnet",
+            ModelTier::Spark => "haiku",
+        }
+    }
+}
+
 /// Agent 权限模式
 #[derive(Debug, Clone, Copy)]
 pub enum PermissionMode {
@@ -63,7 +93,15 @@ pub trait AgentDefinition: Send + Sync {
         None
     }
 
-    /// 指定模型（None = 继承父会话模型，"inherit" = 同上）
+    /// Model tier for this agent. Determines default model selection.
+    /// Override this instead of `model()` whenever possible.
+    /// `model()` falls back to the tier alias when not explicitly overridden.
+    fn model_tier(&self) -> ModelTier {
+        ModelTier::Standard
+    }
+
+    /// Explicit model override (None = use `model_tier()`, "inherit" = parent model).
+    /// Most agents should leave this as None and implement `model_tier()` instead.
     fn model(&self) -> Option<&str> {
         None
     }
@@ -106,6 +144,13 @@ pub trait AgentDefinition: Send + Sync {
     /// 初始提示词（添加到第一个用户消息）
     fn initial_prompt(&self) -> Option<&str> {
         None
+    }
+
+    /// 是否对用户可见（出现在 @ 选择器中）
+    ///
+    /// 返回 `false` 的 Agent 由编排器（leader）内部调用，不暴露给用户。
+    fn user_facing(&self) -> bool {
+        true
     }
 
     /// 隔离模式

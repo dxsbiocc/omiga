@@ -155,4 +155,37 @@ mod tests {
         }
         assert!(buf.contains("bash"));
     }
+
+    #[tokio::test]
+    async fn tool_search_does_not_advertise_legacy_web_aliases() {
+        let ctx = ToolContext::new("/tmp");
+        let args = ToolSearchArgs {
+            query: "select:web_search".to_string(),
+            max_results: 5,
+        };
+        let mut stream = ToolSearchTool::execute(&ctx, args).await.unwrap();
+        use futures::StreamExt;
+        let mut buf = String::new();
+        while let Some(i) = stream.next().await {
+            if let StreamOutputItem::Content(c) = i {
+                buf.push_str(&c);
+            }
+        }
+        let value: serde_json::Value = serde_json::from_str(&buf).unwrap();
+        assert_eq!(value["matches"], serde_json::json!([]));
+
+        let args = ToolSearchArgs {
+            query: "select:search".to_string(),
+            max_results: 5,
+        };
+        let mut stream = ToolSearchTool::execute(&ctx, args).await.unwrap();
+        let mut buf = String::new();
+        while let Some(i) = stream.next().await {
+            if let StreamOutputItem::Content(c) = i {
+                buf.push_str(&c);
+            }
+        }
+        let value: serde_json::Value = serde_json::from_str(&buf).unwrap();
+        assert_eq!(value["matches"], serde_json::json!(["search"]));
+    }
 }

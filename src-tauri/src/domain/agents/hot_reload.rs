@@ -421,8 +421,7 @@ async fn load_agent_file(
 /// 解析 markdown 文件为 Agent
 fn parse_agent_from_markdown(content: &str, path: &Path) -> Result<DynamicAgent, String> {
     // 解析 frontmatter
-    let (frontmatter_str, body) = if content.starts_with("---\n") {
-        let rest = &content[4..];
+    let (frontmatter_str, body) = if let Some(rest) = content.strip_prefix("---\n") {
         if let Some(end_idx) = rest.find("---\n") {
             let frontmatter = &rest[..end_idx];
             let body = &rest[end_idx + 4..];
@@ -430,8 +429,7 @@ fn parse_agent_from_markdown(content: &str, path: &Path) -> Result<DynamicAgent,
         } else {
             ("", content.trim())
         }
-    } else if content.starts_with("---\r\n") {
-        let rest = &content[5..];
+    } else if let Some(rest) = content.strip_prefix("---\r\n") {
         if let Some(end_idx) = rest.find("---\r\n") {
             let frontmatter = &rest[..end_idx];
             let body = &rest[end_idx + 5..];

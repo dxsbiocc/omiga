@@ -10,7 +10,7 @@
 //! - 默认挂载 $HOME 和 /tmp
 
 use super::base::{generate_session_id, BaseEnvironment};
-use super::types::{ExecResult, ExecutionError, ProcessHandle};
+use super::types::{ExecResult, ExecutionError, ExternalTerminalCommand, ProcessHandle};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -280,6 +280,66 @@ impl BaseEnvironment for SingularityEnvironment {
 
     fn snapshot_timeout_secs(&self) -> u64 {
         30 // Singularity 冷启动比 Docker 快
+    }
+
+    fn external_terminal_command(&self) -> Option<ExternalTerminalCommand> {
+        let mut args = vec!["shell".to_string()];
+        args.extend(singularity_security_args().into_iter().map(String::from));
+        for vol in &self.volumes {
+            args.push("--bind".to_string());
+            args.push(vol.clone());
+        }
+        if !self.network {
+            args.push("--net".to_string());
+            args.push("--network".to_string());
+            args.push("none".to_string());
+        }
+        args.push("--pwd".to_string());
+        args.push(self.cwd.clone());
+        for (key, value) in &self.env {
+            args.push("--env".to_string());
+            args.push(format!("{}={}", key, value));
+        }
+        args.push(self.image.clone());
+
+        Some(ExternalTerminalCommand::new(
+            self.singularity_exe.clone(),
+            args,
+            "Singularity 容器",
+        ))
+    }
+
+    fn embedded_terminal_command(&self, shell: &str) -> Option<ExternalTerminalCommand> {
+        if !matches!(shell, "bash" | "zsh") {
+            return None;
+        }
+        let mut args = vec!["exec".to_string()];
+        args.extend(singularity_security_args().into_iter().map(String::from));
+        for vol in &self.volumes {
+            args.push("--bind".to_string());
+            args.push(vol.clone());
+        }
+        if !self.network {
+            args.push("--net".to_string());
+            args.push("--network".to_string());
+            args.push("none".to_string());
+        }
+        args.push("--pwd".to_string());
+        args.push(self.cwd.clone());
+        for (key, value) in &self.env {
+            args.push("--env".to_string());
+            args.push(format!("{}={}", key, value));
+        }
+        args.push(self.image.clone());
+        args.push(shell.to_string());
+        args.push("-lc".to_string());
+        args.push(format!("exec {shell} -l"));
+
+        Some(ExternalTerminalCommand::new(
+            self.singularity_exe.clone(),
+            args,
+            "Singularity 容器",
+        ))
     }
 
     /// Singularity 使用无状态容器（--contain），快照无法在运行间持久化，跳过 init_session

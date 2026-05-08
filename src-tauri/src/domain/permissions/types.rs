@@ -251,6 +251,8 @@ pub struct PermissionContext {
     pub session_id: String,
     pub file_paths: Option<Vec<std::path::PathBuf>>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// The project working directory — used to flag out-of-root path access.
+    pub project_root: Option<std::path::PathBuf>,
 }
 
 /// 权限请求
@@ -301,7 +303,7 @@ pub enum ComposerPermissionStance {
 pub enum PermissionDecision {
     Allow,
     Deny(String),
-    RequireApproval(PermissionRequest),
+    RequireApproval(Box<PermissionRequest>),
 }
 
 /// 拒绝记录

@@ -13,7 +13,7 @@ export type ChatTokenSet = {
   userBubbleText: string;
   /** Hairline edge so translucent bubble stays readable on any thread bg */
   userBubbleBorder: string;
-  /** User bubble chips (Agent / @file) — opaque-ish plate so they don’t vanish on `userGrad` */
+  /** User bubble chips (Agent / #plugin / @file) — opaque-ish plate so they don’t vanish on `userGrad` */
   userChipBg: string;
   /** Distinct edge against both gradient and chip fill */
   userChipBorder: string;

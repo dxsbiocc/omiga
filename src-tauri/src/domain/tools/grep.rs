@@ -73,7 +73,7 @@ impl super::ToolImpl for GrepTool {
         ctx: &ToolContext,
         args: Self::Args,
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
-        let max_results = args.max_results.min(5000).max(1);
+        let max_results = args.max_results.clamp(1, 5000);
 
         // Remote/SSH/sandbox: use shell-based grep through the cached environment
         if ctx.execution_environment != "local" {
@@ -386,11 +386,9 @@ fn search_file(path: &std::path::Path, regex: &Regex) -> Result<Vec<FileMatch>, 
     let f = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(f);
     let mut matches = Vec::new();
-    let mut line_num = 0usize;
-
-    for line in reader.lines() {
+    for (line_index, line) in reader.lines().enumerate() {
         let line = line?;
-        line_num += 1;
+        let line_num = line_index + 1;
         for mat in regex.find_iter(&line) {
             matches.push(FileMatch {
                 line: line_num,

@@ -38,18 +38,30 @@ pub struct BackgroundShellCompletePayload {
 
 pub const BACKGROUND_COMPLETE_EVENT: &str = "background-shell-complete";
 
+pub struct BackgroundBashTask {
+    pub handle: BackgroundShellHandle,
+    pub cwd: PathBuf,
+    pub command: String,
+    pub timeout_ms: u64,
+    pub output_path: PathBuf,
+    pub task_id: String,
+    pub description: String,
+    pub cancel: tokio_util::sync::CancellationToken,
+}
+
 /// Spawn a detached task that runs `bash -l -c` like `spawnShellTask` + `shellCommand.background()`.
 /// Uses the same [`tokio_util::sync::CancellationToken`] as foreground `bash` so `cancel_stream` stops it.
-pub fn spawn_background_bash_task(
-    handle: BackgroundShellHandle,
-    cwd: PathBuf,
-    command: String,
-    timeout_ms: u64,
-    output_path: PathBuf,
-    task_id: String,
-    description: String,
-    cancel: tokio_util::sync::CancellationToken,
-) {
+pub fn spawn_background_bash_task(task: BackgroundBashTask) {
+    let BackgroundBashTask {
+        handle,
+        cwd,
+        command,
+        timeout_ms,
+        output_path,
+        task_id,
+        description,
+        cancel,
+    } = task;
     let app = handle.app.clone();
     let stream_event = handle.chat_stream_event.clone();
     let session_id = handle.session_id.clone();
@@ -69,11 +81,7 @@ pub fn spawn_background_bash_task(
             ),
             Err(e) => {
                 let msg = e.to_string();
-                let code = if msg.contains("timed out") || msg.contains("Timeout") {
-                    -1
-                } else {
-                    -1
-                };
+                let code = -1;
                 (
                     code,
                     String::new(),
@@ -88,12 +96,10 @@ pub fn spawn_background_bash_task(
             stdout,
             if stderr.is_empty() {
                 String::new()
+            } else if !stdout.is_empty() && !stdout.ends_with('\n') {
+                format!("\n{}", stderr)
             } else {
-                if !stdout.is_empty() && !stdout.ends_with('\n') {
-                    format!("\n{}", stderr)
-                } else {
-                    stderr
-                }
+                stderr
             }
         );
 

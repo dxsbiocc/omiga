@@ -5,7 +5,9 @@
 //! 会话快照在初始化时捕获一次，每个命令前重新加载
 //! CWD 通过 stdout 标记或临时文件持久化
 
-use super::types::{ExecOptions, ExecResult, ExecutionError, ProcessHandle};
+use super::types::{
+    ExecOptions, ExecResult, ExecutionError, ExternalTerminalCommand, ProcessHandle,
+};
 use async_trait::async_trait;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
@@ -65,6 +67,22 @@ pub trait BaseEnvironment: Send + Sync {
     /// 是否在本地文件系统执行（决定是否读取本地 cwd 文件）
     fn is_local_filesystem(&self) -> bool {
         false
+    }
+
+    /// Optional interactive command for opening this environment in the user's system terminal.
+    ///
+    /// Most environments execute commands through non-interactive APIs; those should return
+    /// `None` until there is a real CLI/session that can attach to the same backend.
+    fn external_terminal_command(&self) -> Option<ExternalTerminalCommand> {
+        None
+    }
+
+    /// Optional non-PTY command for the embedded Terminal tab.
+    ///
+    /// This command is spawned by the Tauri backend with piped stdin/stdout/stderr and
+    /// rendered inside Omiga. It must not require a real desktop terminal or TTY.
+    fn embedded_terminal_command(&self, _shell: &str) -> Option<ExternalTerminalCommand> {
+        None
     }
 
     /// 执行 bash 命令 - 子类必须实现
@@ -296,13 +314,17 @@ pub trait BaseEnvironment: Send + Sync {
         let effective_cwd = options.cwd.unwrap_or_else(|| self.cwd().to_string());
 
         // 准备命令
-        let (exec_command, effective_stdin): (String, Option<String>) =
-            if options.stdin_data.is_some() && self.stdin_mode() == "heredoc" {
-                let cmd = self.embed_stdin_heredoc(command, options.stdin_data.as_ref().unwrap());
-                (cmd, None)
-            } else {
-                (command.to_string(), options.stdin_data)
-            };
+        let (exec_command, effective_stdin): (String, Option<String>) = if let Some(stdin_data) =
+            options
+                .stdin_data
+                .as_ref()
+                .filter(|_| self.stdin_mode() == "heredoc")
+        {
+            let cmd = self.embed_stdin_heredoc(command, stdin_data);
+            (cmd, None)
+        } else {
+            (command.to_string(), options.stdin_data)
+        };
 
         let wrapped = self.wrap_command(&exec_command, &effective_cwd);
         let login = !self.snapshot_ready();
@@ -385,7 +407,7 @@ where
 {
     use tokio::io::AsyncReadExt;
     let mut buffer = Vec::new();
-    if let Ok(_) = reader.read_to_end(&mut buffer).await {
+    if reader.read_to_end(&mut buffer).await.is_ok() {
         let _ = tx.send(buffer).await;
     }
 }

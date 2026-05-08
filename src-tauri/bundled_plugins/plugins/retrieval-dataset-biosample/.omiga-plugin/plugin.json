@@ -1,0 +1,82 @@
+{
+  "name": "retrieval-dataset-biosample",
+  "version": "0.1.0",
+  "description": "Runs NCBI BioSample search/query/fetch through Omiga local subprocess routing.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./bin/retrieval_dataset_biosample.py",
+      "args": [],
+      "env": {
+        "OMIGA_RETRIEVAL_SOURCE_IDS": "biosample",
+        "OMIGA_RETRIEVAL_PLUGIN_NAME": "retrieval-dataset-biosample"
+      },
+      "cwd": ".",
+      "idleTtlMs": 60000,
+      "requestTimeoutMs": 30000,
+      "cancelGraceMs": 750,
+      "concurrency": 1
+    },
+    "sources": [
+      {
+        "id": "biosample",
+        "category": "dataset",
+        "label": "NCBI BioSample",
+        "description": "Sample metadata via NCBI E-utilities and Datasets BioSample report APIs.",
+        "aliases": [
+          "bio_sample",
+          "biosamples",
+          "ncbi_biosample",
+          "sample_metadata"
+        ],
+        "subcategories": [
+          "sample_metadata"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [
+          "pubmed_api_key",
+          "pubmed_email",
+          "pubmed_tool_name"
+        ],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public NCBI APIs; optional NCBI credentials are projected only when configured."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "retmax",
+            "type": "number",
+            "description": "Maximum BioSample records to request from ESearch."
+          }
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "BioSample Retrieval Source",
+    "shortDescription": "NCBI BioSample as a local retrieval plugin",
+    "longDescription": "Runs NCBI BioSample search/query/fetch through Omiga local subprocess routing.",
+    "developerName": "Omiga",
+    "category": "Retrieval",
+    "capabilities": [
+      "Dataset",
+      "Retrieval",
+      "Local Subprocess",
+      "Search",
+      "Query",
+      "Fetch"
+    ],
+    "brandColor": "#1D4ED8",
+    "defaultPrompt": [
+      "Search BioSample for human liver samples.",
+      "Fetch a SAMN accession through the BioSample plugin."
+    ]
+  }
+}

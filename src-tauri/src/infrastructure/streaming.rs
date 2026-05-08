@@ -81,12 +81,18 @@ pub enum StreamOutputItem {
     /// Optional short recap after the turn (independent LLM; omitted when model skips)
     #[serde(rename = "turn_summary")]
     TurnSummary { text: Option<String> },
-    /// Suggested follow-up prompts for the composer (independent LLM; emitted before [`Complete`] when generation succeeds)
+    /// Suggested follow-up prompts for the composer (independent LLM; may be emitted after [`Complete`] by background post-turn work)
     #[serde(rename = "follow_up_suggestions")]
     FollowUpSuggestions(Vec<FollowUpSuggestion>),
     /// Indicator that follow-up suggestions are being generated in the background
     #[serde(rename = "suggestions_generating")]
     SuggestionsGenerating,
+    /// Follow-up suggestions generation has finished, whether or not any suggestions were produced
+    #[serde(rename = "suggestions_complete")]
+    SuggestionsComplete {
+        generated: bool,
+        error: Option<String>,
+    },
     /// Aggregated LLM token usage for this user turn (main agent only; excludes post-turn summary / follow-up LLM calls)
     #[serde(rename = "token_usage")]
     TokenUsage {

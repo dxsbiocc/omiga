@@ -1,6 +1,9 @@
-//! General-Purpose Agent - 通用任务 Agent
+//! Commander Agent — 主指挥官 Agent
 //!
-//! 默认 Agent，用于研究复杂问题和执行多步骤任务。
+//! 取代原 general-purpose。分析任务复杂度，决定执行模式：
+//!   Solo   — 直接处理简单/单步任务
+//!   Ralph  — 持久循环直到完成（复杂分析、流水线、"必须跑完"类任务）
+//!   Team   — 并行协作（大规模任务、多组样本同时处理）
 
 use crate::domain::agents::definition::{AgentDefinition, AgentSource};
 use crate::domain::tools::ToolContext;
@@ -13,39 +16,13 @@ impl AgentDefinition for GeneralPurposeAgent {
     }
 
     fn when_to_use(&self) -> &str {
-        "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you."
+        "General / main scheduler. Handles simple tasks directly, turns complex default \
+         requests into reviewable project plans, and reports final executor-supervised results \
+         to users."
     }
 
-    fn system_prompt(&self, _ctx: &ToolContext) -> String {
-        format!(
-            r#"You are an agent for Omiga, an AI-powered code editor. Given the user's message, you should use the tools available to complete the task. Complete the task fully—don't gold-plate, but don't leave it half-done. When you complete the task, respond with a concise report covering what was done and any key findings — the caller will relay this to the user, so it only needs the essentials.
-
-Your strengths:
-- Searching for code, configurations, and patterns across large codebases
-- Analyzing multiple files to understand system architecture
-- Investigating complex questions that require exploring many files
-- Performing multi-step research tasks
-
-Guidelines:
-- For file searches: search broadly when you don't know where something lives. Use Read when you know the specific file path.
-- For analysis: Start broad and narrow down. Use multiple search strategies if the first doesn't yield results.
-- Be thorough: Check multiple locations, consider different naming conventions, look for related files.
-- Facts beat rhetoric: do not answer from intuition when the codebase, memory, or tools can provide evidence. Investigate first, then conclude.
-- Think before you answer or act. Review what is known, what is missing, and whether a hidden assumption is driving the current plan.
-- Be honest and practical about uncertainty. Do not invent certainty, and do not present a guess as a fact.
-- If a material ambiguity or missing requirement could change the work, ask the user instead of silently choosing the most convenient assumption.
-- Before taking non-trivial action, prefer discovering the relevant workflow via the skills tools instead of improvising.
-- When the user asks how to do something, do not default to dumping large code blocks as documentation. Prefer evidence-backed explanation, references, and only the code that is actually helpful.
-- NEVER create files unless they're absolutely necessary for achieving your goal. ALWAYS prefer editing an existing file to creating a new one.
-- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested.
-- Avoid flooding the caller with oversized text. If the useful output is long, put the full content in a file or artifact when possible and keep the final report concise.
-
-Notes:
-- Agent threads always have their cwd reset between bash calls, as a result please only use absolute file paths.
-- In your final response, share file paths (always absolute, never relative) that are relevant to the task. Include code snippets only when the exact text is load-bearing (e.g., a bug you found, a function signature the caller asked for) — do not recap code you merely read.
-- For clear communication with the user the assistant MUST avoid using emojis.
-- Do not use a colon before tool calls. Text like "Let me read the file:" followed by a read tool call should just be "Let me read the file." with a period."#
-        )
+    fn system_prompt(&self, ctx: &ToolContext) -> String {
+        crate::domain::agents::prompt_loader::resolve(self.agent_type(), &ctx.project_root)
     }
 
     fn source(&self) -> AgentSource {
@@ -53,18 +30,10 @@ Notes:
     }
 
     fn allowed_tools(&self) -> Option<Vec<String>> {
-        // General-purpose 可以使用所有工具（除了 Agent，防止无限递归）
-        None // None 表示允许所有
+        None
     }
 
     fn model(&self) -> Option<&str> {
-        // 使用默认策略（继承或系统默认）
         None
     }
-}
-
-/// General-purpose 的 disallowed_tools 返回空
-/// 但会在运行时通过子 Agent 过滤器阻止 Agent 工具
-pub fn get_disallowed_tools() -> Vec<String> {
-    vec!["Agent".to_string()] // 阻止嵌套 Agent 调用防止无限递归
 }

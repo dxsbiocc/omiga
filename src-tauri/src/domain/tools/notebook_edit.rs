@@ -237,9 +237,7 @@ impl super::ToolImpl for NotebookEditTool {
                 message: format!("Failed to rename temp file: {}", e),
             })?;
 
-        let report_cell_id = new_cell_id_report
-            .as_deref()
-            .or_else(|| args.cell_id.as_deref());
+        let report_cell_id = new_cell_id_report.as_deref().or(args.cell_id.as_deref());
         let summary = summarize_result(
             &edit_mode,
             cell_type_opt.as_deref().unwrap_or("code"),

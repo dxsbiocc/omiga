@@ -30,7 +30,7 @@ pub async fn grep_files(
     case_insensitive: Option<bool>,
     max_results: Option<usize>,
 ) -> CommandResult<GrepResponse> {
-    let max = max_results.unwrap_or(DEFAULT_MAX_GREP).min(5000).max(1);
+    let max = max_results.unwrap_or(DEFAULT_MAX_GREP).clamp(1, 5000);
     let ci = case_insensitive.unwrap_or(false);
     let root = project_root.clone();
     let pp = path_pattern.clone();
@@ -39,7 +39,7 @@ pub async fn grep_files(
         tokio::task::spawn_blocking(move || run_grep(&root, &pattern, pp.as_deref(), ci, max))
             .await
             .map_err(|e| AppError::Unknown(format!("grep task error: {}", e)))?
-            .map_err(|e| AppError::Unknown(e))?;
+            .map_err(AppError::Unknown)?;
 
     Ok(result)
 }
@@ -179,14 +179,14 @@ pub async fn glob_files(
     max_results: Option<usize>,
     include_hidden: Option<bool>,
 ) -> CommandResult<GlobResponse> {
-    let max = max_results.unwrap_or(DEFAULT_MAX_GLOB).min(10_000).max(1);
+    let max = max_results.unwrap_or(DEFAULT_MAX_GLOB).clamp(1, 10_000);
     let hidden = include_hidden.unwrap_or(false);
 
     let result =
         tokio::task::spawn_blocking(move || run_glob(&project_root, &pattern, max, hidden))
             .await
             .map_err(|e| AppError::Unknown(format!("glob task error: {}", e)))?
-            .map_err(|e| AppError::Unknown(e))?;
+            .map_err(AppError::Unknown)?;
 
     Ok(result)
 }

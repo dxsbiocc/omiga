@@ -1,6 +1,7 @@
 import {
   memo,
   useEffect,
+  useLayoutEffect,
   useState,
   useMemo,
   useRef,
@@ -37,6 +38,7 @@ import {
   Chip,
   Popover,
   List,
+  ListSubheader,
   ListItemButton,
   CircularProgress,
   alpha,
@@ -49,14 +51,16 @@ import {
   Mic,
   Square,
   SmartToy,
+  Route as RouteIcon,
+  AutoAwesome,
   ForumOutlined,
   Close,
-  ArticleOutlined,
   InsertDriveFile,
   Edit,
   ArrowUpward,
   DeleteOutline,
   HourglassEmpty,
+  Extension,
 } from "@mui/icons-material";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -83,14 +87,42 @@ import {
 import {
   useUiStore,
   useChatComposerStore,
+  usePluginStore,
   type PermissionMode,
   type SandboxBackend,
   type LocalVenvType,
 } from "../../state";
+import { normalizeAgentDisplayName } from "../../state/agentStore";
+import {
+  flattenMarketplacePlugins,
+  type PluginSummary,
+} from "../../state/pluginStore";
+import {
+  parseGoalCommand,
+  parseResearchCommand,
+  WORKFLOW_SLASH_COMMANDS,
+  type SlashCommandId,
+  type WorkflowSlashCommandDefinition,
+} from "../../utils/workflowCommands";
 import {
   RSYNC_INSTALL_HELP_URL,
   RSYNC_SSH_WARN_STORAGE_KEY,
 } from "../../lib/rsyncSsh";
+import {
+  buildComposerMentionChildPath,
+  filterComposerMentionRows,
+  joinWorkspaceMentionDirectory,
+  normalizeComposerMentionPath,
+  parentComposerMentionDirectory,
+  parseComposerFileMentionInput,
+  sortComposerMentionRows,
+  type ComposerMentionRow,
+} from "./composerPathMentions";
+import {
+  EDITABLE_EMPTY_SENTINEL,
+  getEditableInputUpdate,
+  normalizeEditableText,
+} from "./editableText";
 
 const SANDBOX_BACKENDS: { id: SandboxBackend; label: string }[] = [
   { id: "docker", label: "Docker" },
@@ -160,7 +192,6 @@ import { ProviderSwitcher } from "./ProviderSwitcher";
 import type { BackgroundAgentTask } from "./backgroundAgentTypes";
 import {
   canSendFollowUpToTask,
-  shortBgTaskLabel,
 } from "./backgroundAgentTypes";
 import { PermissionPromptBar } from "../permissions/PermissionPromptBar";
 import {
@@ -260,7 +291,47 @@ function permissionModeAccent(theme: Theme, mode: PermissionMode): string {
   }
 }
 
-type AvailableAgentRow = { agentType: string; description: string };
+type AvailableAgentRow = { agentType: string; description: string; background: boolean };
+type AvailableSkillRow = {
+  name: string;
+  description: string;
+  source: "claudeUser" | "omigaUser" | "omigaProject" | "omigaPlugin";
+  tags: string[];
+};
+type AvailablePluginRow = {
+  id: string;
+  label: string;
+  description: string;
+  capabilities: string[];
+};
+type SlashPickerOption =
+  | { kind: "command"; command: WorkflowSlashCommandDefinition }
+  | { kind: "agent"; agent: AvailableAgentRow }
+  | { kind: "skill"; skill: AvailableSkillRow };
+type ComposerMentionPickerRow =
+  | { kind: "plugin"; plugin: AvailablePluginRow }
+  | { kind: "file"; row: ComposerMentionRow };
+
+function pluginDisplayLabel(plugin: PluginSummary): string {
+  return (
+    plugin.interface?.displayName?.trim() ||
+    plugin.interface?.shortDescription?.trim() ||
+    plugin.name
+  );
+}
+
+function pluginDescription(plugin: PluginSummary): string {
+  return (
+    plugin.interface?.shortDescription?.trim() ||
+    plugin.interface?.longDescription?.trim() ||
+    `${plugin.name}@${plugin.marketplaceName}`
+  );
+}
+
+function pluginCapabilities(plugin: PluginSummary): string[] {
+  const caps = plugin.interface?.capabilities ?? [];
+  return caps.map((cap) => cap.trim()).filter(Boolean).slice(0, 4);
+}
 
 function normalizeFsPath(p: string): string {
   return p.replace(/\\/g, "/");
@@ -281,9 +352,10 @@ function ComposerFilePickerRowIcon({
   path: string;
   isFile: boolean;
 }) {
-  const pen = usePencilPalette();
   const theme = useTheme();
-  const iconColor = theme.palette.text.secondary;
+  const iconColor = isFile
+    ? theme.palette.info.main
+    : theme.palette.warning.main;
   const name = filePickerBasename(path);
   return (
     <Box
@@ -294,9 +366,9 @@ function ComposerFilePickerRowIcon({
         width: 28,
         height: 28,
         borderRadius: "8px",
-        bgcolor: pen.iconChipBg,
+        bgcolor: alpha(iconColor, theme.palette.mode === "dark" ? 0.16 : 0.1),
         flexShrink: 0,
-        border: `1px solid ${pen.borderSubtle}`,
+        border: `1px solid ${alpha(iconColor, theme.palette.mode === "dark" ? 0.52 : 0.34)}`,
         color: iconColor,
         lineHeight: 0,
         "& svg": { display: "block" },
@@ -319,22 +391,94 @@ function formatBytesShort(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** Matches `glob_files` / `GlobMatch` from Tauri */
-interface GlobMatchRow {
-  path: string;
-  is_file: boolean;
-  size: number;
-}
-
 function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
   if (ref == null) return;
   if (typeof ref === "function") ref(value);
   else (ref as MutableRefObject<T | null>).current = value;
 }
 
+function ensureEditableTextNode(el: HTMLElement): Text {
+  const doc = el.ownerDocument;
+  const first = el.firstChild;
+  if (first?.nodeType === Node.TEXT_NODE) {
+    return first as Text;
+  }
+  const textNode = doc.createTextNode(el.textContent ?? "");
+  el.textContent = "";
+  el.appendChild(textNode);
+  return textNode;
+}
+
+function setEditableDomText(el: HTMLElement, value: string, focused: boolean) {
+  el.textContent = value || (focused ? EDITABLE_EMPTY_SENTINEL : "");
+}
+
+function setEditableTextSelection(
+  el: HTMLElement,
+  start: number,
+  end = start,
+) {
+  const doc = el.ownerDocument;
+  const selection = doc.defaultView?.getSelection();
+  if (!selection) return;
+  if (normalizeEditableText(el.textContent ?? "") === "") {
+    setEditableDomText(el, "", true);
+  }
+  const textNode = ensureEditableTextNode(el);
+  const raw = textNode.textContent ?? "";
+  const isSentinel = raw === EDITABLE_EMPTY_SENTINEL;
+  const len = isSentinel ? 0 : raw.length;
+  const toDomOffset = (value: number) =>
+    isSentinel ? 1 : Math.max(0, Math.min(value, len));
+  const range = doc.createRange();
+  range.setStart(textNode, toDomOffset(start));
+  range.setEnd(textNode, toDomOffset(end));
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function insertTextAtEditableSelection(el: HTMLElement, text: string): string {
+  if (normalizeEditableText(el.textContent ?? "") === "") {
+    el.textContent = text;
+    setEditableTextSelection(el, text.length);
+    return text;
+  }
+  const doc = el.ownerDocument;
+  const selection = doc.defaultView?.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    const next = `${normalizeEditableText(el.textContent ?? "")}${text}`;
+    el.textContent = next;
+    setEditableTextSelection(el, next.length);
+    return next;
+  }
+  const range = selection.getRangeAt(0);
+  if (!el.contains(range.commonAncestorContainer)) {
+    const next = `${normalizeEditableText(el.textContent ?? "")}${text}`;
+    el.textContent = next;
+    setEditableTextSelection(el, next.length);
+    return next;
+  }
+  range.deleteContents();
+  const node = doc.createTextNode(text);
+  range.insertNode(node);
+  range.setStartAfter(node);
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  const next = normalizeEditableText(el.textContent ?? "");
+  if (next !== el.textContent) {
+    const caret = next.length;
+    el.textContent = next;
+    setEditableTextSelection(el, caret);
+  }
+  return next;
+}
+
 export interface ChatComposerRef {
   getValue: () => string;
   setValue: (value: string) => void;
+  /** Append text to the current input, with a newline separator when input is non-empty. */
+  appendValue: (text: string) => void;
   focus: () => void;
 }
 
@@ -347,8 +491,8 @@ export interface ChatComposerProps {
   /** Optional controlled initial value; use composerRef for programmatic updates. */
   input?: string;
   onInputChange?: (v: string) => void;
-  onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
-  inputRef?: React.Ref<HTMLTextAreaElement>;
+  onKeyDown: (e: React.KeyboardEvent<HTMLElement>) => void;
+  inputRef?: React.Ref<HTMLElement>;
   composerRef?: React.Ref<ChatComposerRef>;
   isStreaming: boolean;
   isConnecting: boolean;
@@ -379,6 +523,8 @@ export interface ChatComposerProps {
   onCancelBackgroundTask?: (taskId: string) => void;
   /** Open sidechain transcript drawer (`load_background_agent_transcript`). */
   onOpenBackgroundTranscript?: (taskId: string) => void;
+  /** Close sidechain transcript drawer (used when switching back to main session). */
+  onCloseBackgroundTranscript?: () => void;
   /** Blocked `ask_user_question` — wizard above permission bar, same band as permission prompt. */
   askUserQuestion?: ChatComposerAskUserQuestion | null;
 }
@@ -408,30 +554,131 @@ export const ChatComposer = memo(function ChatComposer({
   onEditQueuedAt,
   onCancelBackgroundTask,
   onOpenBackgroundTranscript,
+  onCloseBackgroundTranscript,
   askUserQuestion = null,
 }: ChatComposerProps) {
   const [input, setInput] = useState(initialInput ?? "");
+  const [selectedSlashCommandId, setSelectedSlashCommandId] =
+    useState<SlashCommandId | null>(null);
+  const [selectedSkillCommandName, setSelectedSkillCommandName] =
+    useState<string | null>(null);
   const inputValueRef = useRef(input);
   inputValueRef.current = input;
+  const editableRef = useRef<HTMLSpanElement | null>(null);
+  const editableCompositionRef = useRef(false);
+  const normalizeCommandValue = useCallback(
+    (
+      rawValue: string,
+    ): { commandId: SlashCommandId | null; body: string } => {
+      const trimmed = rawValue.trim();
+      const research = parseResearchCommand(trimmed);
+      if (research) {
+        return { commandId: "research", body: research.body };
+      }
+      const goal = parseGoalCommand(trimmed);
+      if (goal) {
+        return { commandId: "goal", body: goal.body };
+      }
+      const workflow = WORKFLOW_SLASH_COMMANDS.find((command) => {
+        const label = command.label;
+        return trimmed === label || trimmed.startsWith(`${label} `);
+      });
+      if (workflow) {
+        const body =
+          trimmed === workflow.label
+            ? ""
+            : trimmed.slice(workflow.label.length).trimStart();
+        return { commandId: workflow.id, body };
+      }
+      return { commandId: null, body: rawValue };
+    },
+    [],
+  );
   const setInputValue = useCallback(
     (v: string) => {
-      setInput(v);
-      onInputChange?.(v);
+      const normalized = normalizeCommandValue(v);
+      setSelectedSlashCommandId(normalized.commandId);
+      setSelectedSkillCommandName(null);
+      setInput(normalized.body);
+      const outgoing = normalized.commandId
+        ? normalized.body.trim().length > 0
+          ? `/${normalized.commandId} ${normalized.body}`
+          : `/${normalized.commandId}`
+        : normalized.body;
+      onInputChange?.(outgoing);
     },
-    [onInputChange],
+    [normalizeCommandValue, onInputChange],
   );
+  const commitEditableInput = useCallback(
+    (nextValue: string) => {
+      if (selectedSlashCommandId) {
+        setInput(nextValue);
+        onInputChange?.(
+          nextValue.trim().length > 0
+            ? `/${selectedSlashCommandId} ${nextValue}`
+            : `/${selectedSlashCommandId}`,
+        );
+        return;
+      }
+      if (selectedSkillCommandName) {
+        setInput(nextValue);
+        onInputChange?.(
+          nextValue.trim().length > 0
+            ? `$${selectedSkillCommandName} ${nextValue}`
+            : `$${selectedSkillCommandName}`,
+        );
+        return;
+      }
+      setInputValue(nextValue);
+    },
+    [
+      onInputChange,
+      selectedSkillCommandName,
+      selectedSlashCommandId,
+      setInputValue,
+    ],
+  );
+  const focusEditableEnd = useCallback(() => {
+    const el = editableRef.current;
+    if (!el) return;
+    el.focus();
+    setEditableTextSelection(el, normalizeEditableText(el.textContent ?? "").length);
+  }, []);
   useImperativeHandle(
     composerRef,
     () => ({
-      getValue: () => inputValueRef.current,
+      getValue: () =>
+        selectedSlashCommandId
+          ? inputValueRef.current.trim().length > 0
+            ? `/${selectedSlashCommandId} ${inputValueRef.current}`
+            : `/${selectedSlashCommandId}`
+          : selectedSkillCommandName
+            ? inputValueRef.current.trim().length > 0
+              ? `$${selectedSkillCommandName} ${inputValueRef.current}`
+              : `$${selectedSkillCommandName}`
+          : inputValueRef.current,
       setValue: (v: string) => setInputValue(v),
-      focus: () => textareaRef.current?.focus(),
+      appendValue: (text: string) => {
+        const cur = inputValueRef.current;
+        setInputValue(cur ? `${cur}\n${text}` : text);
+      },
+      focus: () => focusEditableEnd(),
     }),
-    [setInputValue],
+    [
+      selectedSkillCommandName,
+      selectedSlashCommandId,
+      setInputValue,
+      focusEditableEnd,
+    ],
   );
   const theme = useTheme();
   const pen = usePencilPalette();
   const accent = theme.palette.primary.main;
+  const commandTone = theme.palette.success.main;
+  const skillTone = theme.palette.secondary.main;
+  const fileTone = theme.palette.info.main;
+  const pluginTone = theme.palette.warning.main;
+  const agentTone = accent;
   const paper = theme.palette.background.paper;
   const def = theme.palette.background.default;
   const ink = theme.palette.text.primary;
@@ -452,17 +699,29 @@ export const ChatComposer = memo(function ChatComposer({
   const COMPOSER_INLINE_CHIP_PX = 28;
   /** 与 `--composer-fs` / `--composer-lh` 一致，用于首行与 Chip 垂直对齐 */
   const COMPOSER_FS_PX = 15;
-  const COMPOSER_LH = 1.55;
-  const COMPOSER_LINE_BOX_PX = COMPOSER_FS_PX * COMPOSER_LH;
-  /** 使 textarea 首行与 28px Chip 垂直居中对齐（flex-start 时补偿行高差） */
-  const COMPOSER_TEXTAREA_PAD_TOP_WITH_CHIPS =
-    (COMPOSER_INLINE_CHIP_PX - COMPOSER_LINE_BOX_PX) / 2;
+  const COMPOSER_LH = 1.72;
   /** 主会话一轮进行中：连接中 / 首包前等待 / 流式输出 — 与输入区「取消任务」按钮一致 */
   const agentTurnActive =
     isStreaming || isConnecting || waitingFirstChunk;
   /** Hairline border / shadow tint — theme-aware */
   const edge = (a: number) =>
     alpha(isDark ? theme.palette.common.white : theme.palette.common.black, a);
+  const semanticChipSurface = (tone: string) => ({
+    bgcolor: alpha(tone, isDark ? 0.2 : 0.11),
+    borderColor: alpha(tone, isDark ? 0.62 : 0.45),
+    color: tone,
+    boxShadow: `0 1px 2px ${alpha(tone, isDark ? 0.2 : 0.14)}`,
+    "& .MuiChip-label": {
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      color: tone,
+    },
+    "& .MuiChip-icon": {
+      color: tone,
+      marginTop: 0,
+      marginBottom: 0,
+    },
+  } as const);
   /** Input card — closer to solid paper so the typing area reads lighter */
   const composerBg = alpha(paper, isDark ? 0.97 : 0.99);
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
@@ -479,6 +738,9 @@ export const ChatComposer = memo(function ChatComposer({
     composerAttachedPaths,
     addComposerAttachedPath,
     popComposerAttachedPath,
+    composerSelectedPluginIds,
+    addComposerSelectedPluginId,
+    popComposerSelectedPluginId,
     useWorktree,
     setUseWorktree,
     environment,
@@ -493,6 +755,8 @@ export const ChatComposer = memo(function ChatComposer({
     selectedBranchByRoot,
     setBranchForRoot,
   } = useChatComposerStore();
+  const pluginMarketplaces = usePluginStore((s) => s.marketplaces);
+  const loadPlugins = usePluginStore((s) => s.loadPlugins);
 
   const permissionAccent = permissionModeAccent(theme, permissionMode);
 
@@ -705,6 +969,9 @@ export const ChatComposer = memo(function ChatComposer({
   const [availableAgents, setAvailableAgents] = useState<AvailableAgentRow[]>(
     [],
   );
+  const [availableSkills, setAvailableSkills] = useState<AvailableSkillRow[]>(
+    [],
+  );
   const [queuedPanelExpanded, setQueuedPanelExpanded] = useState(true);
 
   useEffect(() => {
@@ -724,6 +991,27 @@ export const ChatComposer = memo(function ChatComposer({
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<AvailableSkillRow[]>("list_available_skills", {
+      projectRoot: workspacePath || ".",
+    })
+      .then((rows) => {
+        if (!cancelled) setAvailableSkills(rows ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setAvailableSkills([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspacePath]);
+
+  useEffect(() => {
+    if (!workspacePath || needsWorkspacePath) return;
+    void loadPlugins(workspacePath);
+  }, [loadPlugins, needsWorkspacePath, workspacePath]);
 
   useEffect(() => {
     if (!workspacePath || needsWorkspacePath) {
@@ -759,43 +1047,240 @@ export const ChatComposer = memo(function ChatComposer({
     return row?.description ?? "";
   }, [availableAgents, composerAgentType]);
 
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerInputAnchorRef = useRef<HTMLDivElement | null>(null);
+  const [composerPopoverWidth, setComposerPopoverWidth] = useState<number | null>(
+    null,
+  );
 
-  /** `/`：选择 Agent（整段输入仅为 `/` 或 `/query`） */
+  useLayoutEffect(() => {
+    const el = composerInputAnchorRef.current;
+    if (!el) return;
+    const updateWidth = () => {
+      const next = Math.round(el.getBoundingClientRect().width);
+      setComposerPopoverWidth(next > 0 ? next : null);
+    };
+    updateWidth();
+    const resizeObserver =
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(updateWidth)
+        : null;
+    resizeObserver?.observe(el);
+    if (typeof window !== "undefined") {
+      window.addEventListener("resize", updateWidth);
+    }
+    return () => {
+      resizeObserver?.disconnect();
+      if (typeof window !== "undefined") {
+        window.removeEventListener("resize", updateWidth);
+      }
+    };
+  }, []);
+
+  /** `/`：工作流命令或 Agent 选择（整段输入仅为 `/` 或 `/query`） */
   const slashParse = useMemo(() => {
+    if (selectedSlashCommandId || selectedSkillCommandName) {
+      return { active: false as const, query: "" };
+    }
     const t = input;
     if (!/^\/[^\s]*$/u.test(t)) return { active: false as const, query: "" };
     return { active: true as const, query: t.slice(1) };
+  }, [input, selectedSkillCommandName, selectedSlashCommandId]);
+
+  /** `$`：Skill 选择（整段输入仅为 `$` 或 `$query`） */
+  const skillParse = useMemo(() => {
+    if (selectedSlashCommandId || selectedSkillCommandName) {
+      return { active: false as const, query: "" };
+    }
+    const t = input;
+    if (!/^\$[^\s]*$/u.test(t)) return { active: false as const, query: "" };
+    return { active: true as const, query: t.slice(1) };
+  }, [input, selectedSkillCommandName, selectedSlashCommandId]);
+
+  /** `@`：工作区相对路径选择；`#`：Omiga 插件选择。 */
+  const fileParse = useMemo(() => {
+    return parseComposerFileMentionInput(input);
   }, [input]);
 
-  /** `@`：仅工作区根目录下一层文件/文件夹（整段输入仅为 `@` 或 `@query`） */
-  const fileParse = useMemo(() => {
-    const t = input;
-    if (!/^@[^\s]*$/u.test(t)) return { active: false as const, query: "" };
-    return { active: true as const, query: t.slice(1) };
-  }, [input]);
+  // Agents selectable via slash-picker: exclude defaults and background-only agents.
+  const selectableAgents = useMemo(
+    () =>
+      availableAgents.filter(
+        (a) =>
+          a.agentType !== "auto" &&
+          a.agentType !== "general-purpose" &&
+          !a.background,
+      ),
+    [availableAgents],
+  );
 
   const filteredAtAgents = useMemo(() => {
     if (!slashParse.active) return [];
     const q = slashParse.query.toLowerCase();
-    return availableAgents.filter((a) => {
+    return selectableAgents.filter((a) => {
       const id = a.agentType.toLowerCase();
-      return !q || id.startsWith(q) || id.includes(q);
+      const displayName = normalizeAgentDisplayName(a.agentType).toLowerCase();
+      return !q || id.startsWith(q) || id.includes(q) || displayName.includes(q);
     });
-  }, [availableAgents, slashParse]);
+  }, [selectableAgents, slashParse]);
 
-  const slashFilterKey = useMemo(
-    () => filteredAtAgents.map((a) => a.agentType).join("\u0001"),
-    [filteredAtAgents],
+  const filteredWorkflowCommands = useMemo(() => {
+    if (!slashParse.active) return [];
+    const q = slashParse.query.toLowerCase();
+    return WORKFLOW_SLASH_COMMANDS.filter((command) => {
+      const id = command.id.toLowerCase();
+      const label = command.label.toLowerCase();
+      const desc = command.description.toLowerCase();
+      return !q || id.startsWith(q) || label.includes(q) || desc.includes(q);
+    });
+  }, [slashParse]);
+
+  const filteredSkillCommands = useMemo(() => {
+    if (!skillParse.active) return [];
+    const q = skillParse.query.toLowerCase();
+    return availableSkills.filter((skill) => {
+      const name = skill.name.toLowerCase();
+      const desc = skill.description.toLowerCase();
+      const tags = (skill.tags ?? []).join(" ").toLowerCase();
+      return !q || name.includes(q) || desc.includes(q) || tags.includes(q);
+    });
+  }, [availableSkills, skillParse]);
+
+  const availablePlugins = useMemo<AvailablePluginRow[]>(() => {
+    return flattenMarketplacePlugins(pluginMarketplaces)
+      .filter((plugin) => plugin.installed && plugin.enabled)
+      .map((plugin) => ({
+        id: plugin.id,
+        label: pluginDisplayLabel(plugin),
+        description: pluginDescription(plugin),
+        capabilities: pluginCapabilities(plugin),
+      }));
+  }, [pluginMarketplaces]);
+
+  const selectedPluginRows = useMemo(() => {
+    const byId = new Map(availablePlugins.map((plugin) => [plugin.id, plugin]));
+    return composerSelectedPluginIds.map(
+      (id) =>
+        byId.get(id) ?? {
+          id,
+          label: id,
+          description: "已选择的插件",
+          capabilities: [],
+        },
+    );
+  }, [availablePlugins, composerSelectedPluginIds]);
+
+  const filteredPluginMentions = useMemo(() => {
+    if (!fileParse.active || fileParse.kind !== "plugin") return [];
+    const q = fileParse.filter.toLowerCase().trim();
+    return availablePlugins
+      .filter((plugin) => !composerSelectedPluginIds.includes(plugin.id))
+      .filter((plugin) => {
+        const haystack = [
+          plugin.id,
+          plugin.label,
+          plugin.description,
+          ...plugin.capabilities,
+        ]
+          .join(" ")
+          .toLowerCase();
+        return !q || haystack.includes(q);
+      })
+      .slice(0, 20);
+  }, [
+    availablePlugins,
+    composerSelectedPluginIds,
+    fileParse.active,
+    fileParse.directory,
+    fileParse.filter,
+    fileParse.kind,
+  ]);
+
+  const filteredSlashOptions = useMemo<SlashPickerOption[]>(
+    () =>
+      skillParse.active
+        ? filteredSkillCommands.map((skill) => ({
+            kind: "skill" as const,
+            skill,
+          }))
+        : [
+            ...filteredWorkflowCommands.map((command) => ({
+              kind: "command" as const,
+              command,
+            })),
+            ...filteredAtAgents.map((agent) => ({
+              kind: "agent" as const,
+              agent,
+            })),
+          ],
+    [
+      filteredAtAgents,
+      filteredSkillCommands,
+      filteredWorkflowCommands,
+      skillParse.active,
+    ],
   );
 
-  const [slashHighlightIndex, setSlashHighlightIndex] = useState(0);
-  const slashHighlightIndexRef = useRef(0);
+  const explicitSlashCommandId = useMemo(() => {
+    return selectedSlashCommandId;
+  }, [selectedSlashCommandId]);
+  const explicitSlashCommandBody = explicitSlashCommandId ? input : null;
+
+  const slashFilterKey = useMemo(
+    () =>
+      filteredSlashOptions
+        .map((item) =>
+          item.kind === "command"
+            ? `cmd:${item.command.id}`
+            : item.kind === "agent"
+              ? `agent:${item.agent.agentType}`
+              : `skill:${item.skill.name}`,
+        )
+        .join("\u0001"),
+    [filteredSlashOptions],
+  );
+
+  const [slashHighlightIndex, setSlashHighlightIndex] = useState(-1);
+  const slashHighlightIndexRef = useRef(-1);
   const slashListRef = useRef<HTMLUListElement>(null);
   /** User clicked outside the / picker; hide until input changes or textarea refocuses. */
   const [slashPickerDismissed, setSlashPickerDismissed] = useState(false);
 
-  const [fileGlobMatches, setFileGlobMatches] = useState<GlobMatchRow[]>([]);
+  const highlightedSlashCommand = useMemo(() => {
+    if (explicitSlashCommandId) {
+      return (
+        WORKFLOW_SLASH_COMMANDS.find(
+          (command) => command.id === explicitSlashCommandId,
+        ) ?? null
+      );
+    }
+    return null;
+  }, [
+    explicitSlashCommandId,
+  ]);
+
+  const highlightedSkillCommand = useMemo(() => {
+    if (selectedSkillCommandName) {
+      return (
+        availableSkills.find(
+          (skill) =>
+            skill.name.toLowerCase() === selectedSkillCommandName.toLowerCase(),
+        ) ?? {
+          name: selectedSkillCommandName,
+          description: "直接使用该 Skill",
+          source: "omigaProject" as const,
+          tags: [],
+        }
+      );
+    }
+    return null;
+  }, [
+    availableSkills,
+    selectedSkillCommandName,
+  ]);
+
+  const [fileGlobMatches, setFileGlobMatches] = useState<
+    ComposerMentionRow[]
+  >([]);
   const [fileGlobLoading, setFileGlobLoading] = useState(false);
   const [fileHighlightIndex, setFileHighlightIndex] = useState(0);
   const fileHighlightIndexRef = useRef(0);
@@ -808,22 +1293,44 @@ export const ChatComposer = memo(function ChatComposer({
   }, [input]);
 
   useEffect(() => {
-    slashHighlightIndexRef.current = 0;
-    setSlashHighlightIndex(0);
+    slashHighlightIndexRef.current = -1;
+    setSlashHighlightIndex(-1);
   }, [slashFilterKey]);
 
   useEffect(() => {
-    if (!fileParse.active || needsWorkspacePath || !workspacePath.trim()) {
+    if (
+      !fileParse.active ||
+      fileParse.kind === "plugin" ||
+      needsWorkspacePath ||
+      !workspacePath.trim()
+    ) {
       setFileGlobMatches([]);
+      setFileGlobLoading(false);
       return;
     }
-    if (environment === "ssh" && !sshServer?.trim()) {
+    const useSsh = environment === "ssh" && Boolean(sshServer?.trim());
+    const useSandbox = environment === "sandbox" && Boolean(sandboxBackend?.trim());
+    if (environment === "ssh" && !useSsh) {
       setFileGlobMatches([]);
+      setFileGlobLoading(false);
+      return;
+    }
+    if (environment === "sandbox" && (!useSandbox || !sessionId)) {
+      setFileGlobMatches([]);
+      setFileGlobLoading(false);
+      return;
+    }
+    if (environment === "local" && !sessionId) {
+      setFileGlobMatches([]);
+      setFileGlobLoading(false);
       return;
     }
     let cancelled = false;
     setFileGlobLoading(true);
-    const useSsh = environment === "ssh" && Boolean(sshServer?.trim());
+    const directoryPath = joinWorkspaceMentionDirectory(
+      workspacePath,
+      fileParse.directory,
+    );
     const listPromise = useSsh
       ? invoke<{
           entries: Array<{
@@ -834,28 +1341,39 @@ export const ChatComposer = memo(function ChatComposer({
           }>;
         }>("ssh_list_directory", {
           sshProfileName: sshServer!.trim(),
-          path: workspacePath,
+          path: directoryPath,
         })
-      : invoke<{
-          entries: Array<{
-            name: string;
-            path: string;
-            is_directory: boolean;
-            size?: number | null;
-          }>;
-        }>("list_directory", { path: workspacePath });
+      : useSandbox
+        ? invoke<{
+            entries: Array<{
+              name: string;
+              path: string;
+              is_directory: boolean;
+              size?: number | null;
+            }>;
+          }>("sandbox_list_directory", {
+            sessionId,
+            sandboxBackend: sandboxBackend!.trim(),
+            path: directoryPath,
+          })
+        : invoke<{
+            entries: Array<{
+              name: string;
+              path: string;
+              is_directory: boolean;
+              size?: number | null;
+            }>;
+          }>("list_directory", { path: directoryPath, sessionId });
     listPromise
       .then((res) => {
         if (cancelled) return;
-        const list: GlobMatchRow[] = (res.entries ?? []).map((e) => ({
-          path: e.name,
-          is_file: !e.is_directory,
-          size: typeof e.size === "number" ? e.size : 0,
-        }));
-        list.sort((a, b) => {
-          if (a.is_file !== b.is_file) return a.is_file ? 1 : -1;
-          return normalizeFsPath(a.path).localeCompare(normalizeFsPath(b.path));
-        });
+        const list: ComposerMentionRow[] = sortComposerMentionRows(
+          (res.entries ?? []).map((e) => ({
+            path: buildComposerMentionChildPath(fileParse.directory, e.name),
+            is_file: !e.is_directory,
+            size: typeof e.size === "number" ? e.size : 0,
+          })),
+        );
         setFileGlobMatches(list);
       })
       .catch(() => {
@@ -869,31 +1387,42 @@ export const ChatComposer = memo(function ChatComposer({
     };
   }, [
     fileParse.active,
+    fileParse.kind,
     needsWorkspacePath,
     workspacePath,
+    fileParse.directory,
+    sessionId,
     environment,
     sshServer,
+    sandboxBackend,
   ]);
 
   const filteredFilePaths = useMemo(() => {
-    if (!fileParse.active) return [];
-    const q = fileParse.query.toLowerCase().trim();
-    let rows = fileGlobMatches;
-    if (q) {
-      rows = rows.filter((m) => {
-        const name = normalizeFsPath(m.path).toLowerCase();
-        return name.includes(q) || name.startsWith(q);
-      });
-    }
-    return rows.slice(0, 200);
+    if (!fileParse.active || fileParse.kind === "plugin") return [];
+    return filterComposerMentionRows(fileGlobMatches, fileParse.filter);
   }, [fileParse, fileGlobMatches]);
+
+  const filteredMentionRows = useMemo<ComposerMentionPickerRow[]>(
+    () => [
+      ...filteredPluginMentions.map((plugin) => ({
+        kind: "plugin" as const,
+        plugin,
+      })),
+      ...filteredFilePaths.map((row) => ({ kind: "file" as const, row })),
+    ],
+    [filteredFilePaths, filteredPluginMentions],
+  );
 
   const fileFilterKey = useMemo(
     () =>
-      filteredFilePaths
-        .map((m) => `${m.is_file ? "f" : "d"}:${m.path}`)
+      filteredMentionRows
+        .map((m) =>
+          m.kind === "plugin"
+            ? `p:${m.plugin.id}`
+            : `${m.row.is_file ? "f" : "d"}:${m.row.path}`,
+        )
         .join("\u0001"),
-    [filteredFilePaths],
+    [filteredMentionRows],
   );
 
   useEffect(() => {
@@ -902,7 +1431,13 @@ export const ChatComposer = memo(function ChatComposer({
   }, [fileFilterKey]);
 
   useEffect(() => {
-    if (!slashParse.active || filteredAtAgents.length === 0) return;
+    if (
+      !(slashParse.active || skillParse.active) ||
+      filteredSlashOptions.length === 0 ||
+      slashHighlightIndex < 0
+    ) {
+      return;
+    }
     const el = slashListRef.current?.querySelector(
       `[data-slash-index="${slashHighlightIndex}"]`,
     );
@@ -910,12 +1445,13 @@ export const ChatComposer = memo(function ChatComposer({
   }, [
     slashHighlightIndex,
     slashParse.active,
-    filteredAtAgents.length,
+    skillParse.active,
+    filteredSlashOptions.length,
     slashFilterKey,
   ]);
 
   useEffect(() => {
-    if (!fileParse.active || filteredFilePaths.length === 0) return;
+    if (!fileParse.active || filteredMentionRows.length === 0) return;
     const el = fileListRef.current?.querySelector(
       `[data-file-index="${fileHighlightIndex}"]`,
     );
@@ -923,7 +1459,7 @@ export const ChatComposer = memo(function ChatComposer({
   }, [
     fileHighlightIndex,
     fileParse.active,
-    filteredFilePaths.length,
+    filteredMentionRows.length,
     fileFilterKey,
   ]);
 
@@ -931,30 +1467,110 @@ export const ChatComposer = memo(function ChatComposer({
     (agentType: string) => {
       setComposerAgentType(agentType);
       setInputValue("");
+      queueMicrotask(() => focusEditableEnd());
     },
-    [setComposerAgentType, setInputValue],
+    [focusEditableEnd, setComposerAgentType, setInputValue],
+  );
+
+  const pickWorkflowCommand = useCallback(
+    (commandId: WorkflowSlashCommandDefinition["id"]) => {
+      setSelectedSlashCommandId(commandId);
+      setSelectedSkillCommandName(null);
+      setComposerAgentType("auto");
+      setInput("");
+      onInputChange?.(`/${commandId}`);
+      queueMicrotask(() => focusEditableEnd());
+    },
+    [focusEditableEnd, onInputChange, setComposerAgentType],
+  );
+
+  const pickSkillCommand = useCallback(
+    (skillName: string) => {
+      setSelectedSlashCommandId(null);
+      setSelectedSkillCommandName(skillName);
+      setComposerAgentType("auto");
+      setInput("");
+      onInputChange?.(`$${skillName}`);
+      queueMicrotask(() => focusEditableEnd());
+    },
+    [focusEditableEnd, onInputChange, setComposerAgentType],
   );
 
   const pickFilePath = useCallback(
     (relPath: string) => {
-      const safe = normalizeFsPath(relPath).replace(/^\//u, "");
+      const safe = normalizeComposerMentionPath(relPath);
       if (!safe) return;
       addComposerAttachedPath(safe);
       setInputValue("");
+      queueMicrotask(() => focusEditableEnd());
     },
-    [addComposerAttachedPath, setInputValue],
+    [addComposerAttachedPath, focusEditableEnd, setInputValue],
   );
 
-  const mergedTextareaRef = useCallback(
-    (el: HTMLTextAreaElement | null) => {
-      textareaRef.current = el;
+  const pickPluginMention = useCallback(
+    (pluginId: string) => {
+      const safe = pluginId.trim();
+      if (!safe) return;
+      addComposerSelectedPluginId(safe);
+      setInputValue("");
+      queueMicrotask(() => focusEditableEnd());
+    },
+    [addComposerSelectedPluginId, focusEditableEnd, setInputValue],
+  );
+
+  const enterFileDirectory = useCallback(
+    (relPath: string) => {
+      const safe = normalizeComposerMentionPath(relPath);
+      if (!safe) return;
+      const prefix = fileParse.prefix === "file" ? "@file:" : "@";
+      setInputValue(`${prefix}${safe}/`);
+      queueMicrotask(() => focusEditableEnd());
+    },
+    [fileParse.prefix, focusEditableEnd, setInputValue],
+  );
+
+  const goUpFileDirectory = useCallback(() => {
+    if (!fileParse.active) return;
+    const parent = parentComposerMentionDirectory(fileParse.directory);
+    const prefix = fileParse.prefix === "file" ? "@file:" : "@";
+    setInputValue(parent ? `${prefix}${parent}/` : prefix);
+    queueMicrotask(() => focusEditableEnd());
+  }, [
+    fileParse.active,
+    fileParse.directory,
+    fileParse.prefix,
+    focusEditableEnd,
+    setInputValue,
+  ]);
+
+  const mergedEditableRef = useCallback(
+    (el: HTMLSpanElement | null) => {
+      editableRef.current = el;
       assignRef(inputRef, el);
     },
     [inputRef],
   );
 
+  useLayoutEffect(() => {
+    const el = editableRef.current;
+    if (!el) {
+      return;
+    }
+    if (editableCompositionRef.current) {
+      return;
+    }
+    const isFocused = el.ownerDocument.activeElement === el;
+    if (normalizeEditableText(el.textContent ?? "") === input) {
+      if (input === "" && (el.textContent ?? "") !== "") {
+        setEditableDomText(el, "", isFocused);
+      }
+      return;
+    }
+    setEditableDomText(el, input, isFocused);
+  }, [input]);
+
   const handleComposerKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    (e: KeyboardEvent<HTMLElement>) => {
       const ne = e.nativeEvent;
       if (ne.isComposing || ne.keyCode === 229) {
         onKeyDown(e);
@@ -968,20 +1584,24 @@ export const ChatComposer = memo(function ChatComposer({
         !e.altKey
       ) {
         e.preventDefault();
-        const el = e.currentTarget;
-        const len = el.value.length;
-        const a = el.selectionStart ?? 0;
-        const b = el.selectionEnd ?? 0;
+        const el = editableRef.current ?? e.currentTarget;
+        const len = el.textContent?.length ?? 0;
+        const selection = el.ownerDocument.defaultView?.getSelection();
+        const range =
+          selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+        const a =
+          range && el.contains(range.startContainer) ? range.startOffset : 0;
+        const b = range && el.contains(range.endContainer) ? range.endOffset : a;
         if (e.key === "Home") {
           if (e.shiftKey) {
-            el.setSelectionRange(0, Math.max(a, b));
+            setEditableTextSelection(el, 0, Math.max(a, b));
           } else {
-            el.setSelectionRange(0, 0);
+            setEditableTextSelection(el, 0);
           }
         } else if (e.shiftKey) {
-          el.setSelectionRange(Math.min(a, b), len);
+          setEditableTextSelection(el, Math.min(a, b), len);
         } else {
-          el.setSelectionRange(len, len);
+          setEditableTextSelection(el, len);
         }
         onKeyDown(e);
         return;
@@ -996,9 +1616,49 @@ export const ChatComposer = memo(function ChatComposer({
           popComposerAttachedPath();
           return;
         }
+        if (composerSelectedPluginIds.length > 0) {
+          e.preventDefault();
+          popComposerSelectedPluginId();
+          return;
+        }
         if (composerAgentType !== "auto") {
           e.preventDefault();
           setComposerAgentType("auto");
+          return;
+        }
+      }
+      if (
+        explicitSlashCommandId &&
+        (e.key === "Backspace" || e.key === "Delete") &&
+        !explicitSlashCommandBody
+      ) {
+        e.preventDefault();
+        setSelectedSlashCommandId(null);
+        setInputValue("");
+        return;
+      }
+      if (
+        selectedSkillCommandName &&
+        (e.key === "Backspace" || e.key === "Delete") &&
+        input.trim() === ""
+      ) {
+        e.preventDefault();
+        setSelectedSkillCommandName(null);
+        setInputValue("");
+        return;
+      }
+      if (
+        e.key === "Enter" &&
+        e.shiftKey &&
+        !fileParse.active &&
+        !slashParse.active &&
+        !skillParse.active
+      ) {
+        const el = editableRef.current;
+        if (el) {
+          e.preventDefault();
+          const nextValue = insertTextAtEditableSelection(el, "\n");
+          commitEditableInput(nextValue);
           return;
         }
       }
@@ -1008,11 +1668,18 @@ export const ChatComposer = memo(function ChatComposer({
           e.preventDefault();
           return;
         }
-        if (filteredFilePaths.length > 0 && !fileGlobLoading) {
+        if (filteredMentionRows.length > 0 && !fileGlobLoading) {
+          const highlightedMentionRow =
+            filteredMentionRows[fileHighlightIndexRef.current] ??
+            filteredMentionRows[0];
+          const highlightedFileRow =
+            highlightedMentionRow?.kind === "file"
+              ? highlightedMentionRow.row
+              : null;
           if (e.key === "ArrowDown") {
             e.preventDefault();
             setFileHighlightIndex((i) => {
-              const next = (i + 1) % filteredFilePaths.length;
+              const next = (i + 1) % filteredMentionRows.length;
               fileHighlightIndexRef.current = next;
               return next;
             });
@@ -1022,39 +1689,61 @@ export const ChatComposer = memo(function ChatComposer({
             e.preventDefault();
             setFileHighlightIndex((i) => {
               const next =
-                (i - 1 + filteredFilePaths.length) % filteredFilePaths.length;
+                (i - 1 + filteredMentionRows.length) % filteredMentionRows.length;
               fileHighlightIndexRef.current = next;
               return next;
             });
             return;
           }
+          if (e.key === "ArrowRight" && highlightedFileRow?.is_file === false) {
+            e.preventDefault();
+            enterFileDirectory(highlightedFileRow.path);
+            return;
+          }
+          if (e.key === "ArrowLeft" && fileParse.directory) {
+            e.preventDefault();
+            goUpFileDirectory();
+            return;
+          }
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            const idx = fileHighlightIndexRef.current;
-            const row = filteredFilePaths[idx] ?? filteredFilePaths[0];
-            if (row) pickFilePath(row.path);
+            if (highlightedMentionRow?.kind === "plugin") {
+              pickPluginMention(highlightedMentionRow.plugin.id);
+            } else if (
+              highlightedFileRow?.is_file === false &&
+              !e.metaKey &&
+              !e.ctrlKey
+            ) {
+              enterFileDirectory(highlightedFileRow.path);
+            } else if (highlightedFileRow) {
+              pickFilePath(highlightedFileRow.path);
+            }
             return;
           }
           if (e.key === "Tab" && !e.shiftKey) {
             e.preventDefault();
-            const idx = fileHighlightIndexRef.current;
-            const row = filteredFilePaths[idx] ?? filteredFilePaths[0];
-            if (row) pickFilePath(row.path);
+            if (highlightedMentionRow?.kind === "plugin") {
+              pickPluginMention(highlightedMentionRow.plugin.id);
+            } else if (highlightedFileRow?.is_file === false) {
+              enterFileDirectory(highlightedFileRow.path);
+            } else if (highlightedFileRow) {
+              pickFilePath(highlightedFileRow.path);
+            }
             return;
           }
         }
       }
-      if (slashParse.active) {
+      if (slashParse.active || skillParse.active) {
         if (e.key === "Escape") {
           setInputValue("");
           e.preventDefault();
           return;
         }
-        if (filteredAtAgents.length > 0) {
+        if (filteredSlashOptions.length > 0) {
           if (e.key === "ArrowDown") {
             e.preventDefault();
             setSlashHighlightIndex((i) => {
-              const next = (i + 1) % filteredAtAgents.length;
+              const next = i < 0 ? 0 : (i + 1) % filteredSlashOptions.length;
               slashHighlightIndexRef.current = next;
               return next;
             });
@@ -1064,7 +1753,10 @@ export const ChatComposer = memo(function ChatComposer({
             e.preventDefault();
             setSlashHighlightIndex((i) => {
               const next =
-                (i - 1 + filteredAtAgents.length) % filteredAtAgents.length;
+                i < 0
+                  ? filteredSlashOptions.length - 1
+                  : (i - 1 + filteredSlashOptions.length) %
+                    filteredSlashOptions.length;
               slashHighlightIndexRef.current = next;
               return next;
             });
@@ -1073,15 +1765,19 @@ export const ChatComposer = memo(function ChatComposer({
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             const idx = slashHighlightIndexRef.current;
-            const pick = filteredAtAgents[idx] ?? filteredAtAgents[0];
-            if (pick) pickAtAgent(pick.agentType);
+            const pick = filteredSlashOptions[idx] ?? filteredSlashOptions[0];
+            if (pick?.kind === "command") pickWorkflowCommand(pick.command.id);
+            if (pick?.kind === "agent") pickAtAgent(pick.agent.agentType);
+            if (pick?.kind === "skill") pickSkillCommand(pick.skill.name);
             return;
           }
           if (e.key === "Tab" && !e.shiftKey) {
             e.preventDefault();
             const idx = slashHighlightIndexRef.current;
-            const pick = filteredAtAgents[idx] ?? filteredAtAgents[0];
-            if (pick) pickAtAgent(pick.agentType);
+            const pick = filteredSlashOptions[idx] ?? filteredSlashOptions[0];
+            if (pick?.kind === "command") pickWorkflowCommand(pick.command.id);
+            if (pick?.kind === "agent") pickAtAgent(pick.agent.agentType);
+            if (pick?.kind === "skill") pickSkillCommand(pick.skill.name);
             return;
           }
         }
@@ -1090,18 +1786,31 @@ export const ChatComposer = memo(function ChatComposer({
     },
     [
       slashParse.active,
+      skillParse.active,
       fileParse.active,
+      fileParse.directory,
+      explicitSlashCommandBody,
+      explicitSlashCommandId,
+      selectedSkillCommandName,
       composerAgentType,
       composerAttachedPaths,
-      filteredAtAgents,
-      filteredFilePaths,
+      composerSelectedPluginIds,
+      filteredSlashOptions,
+      filteredMentionRows,
       fileGlobLoading,
       input,
       setInputValue,
+      commitEditableInput,
       onKeyDown,
       pickAtAgent,
+      pickWorkflowCommand,
+      pickSkillCommand,
       pickFilePath,
+      pickPluginMention,
+      enterFileDirectory,
+      goUpFileDirectory,
       popComposerAttachedPath,
+      popComposerSelectedPluginId,
       setComposerAgentType,
     ],
   );
@@ -1120,7 +1829,7 @@ export const ChatComposer = memo(function ChatComposer({
       ? "请先选择工作目录后再发送消息…"
       : followUpTaskId
         ? "追加说明将进入该后台 Agent 的下一轮工具循环…"
-        : "输入 / 选择 Agent；输入 @ 从当前工作目录选择…";
+        : "输入 / 选择工作流命令或 Agent；输入 $ 选择 Skill；输入 # 选择插件；输入 @ 选择文件…";
 
   /** 允许排队时：连接中 / 流式中均可继续输入；否则与旧行为一致（等待响应或生成时禁用）。 */
   const inputDisabled =
@@ -1128,10 +1837,12 @@ export const ChatComposer = memo(function ChatComposer({
     askUserBlocksInput;
 
   const showSlashPopover =
-    slashParse.active &&
+    (slashParse.active || skillParse.active) &&
     !slashPickerDismissed &&
     !inputDisabled &&
-    availableAgents.length > 0;
+    (skillParse.active ||
+      availableAgents.length > 0 ||
+      WORKFLOW_SLASH_COMMANDS.length > 0);
 
   const showFilePopover =
     fileParse.active &&
@@ -1140,16 +1851,80 @@ export const ChatComposer = memo(function ChatComposer({
     !needsWorkspacePath &&
     Boolean(workspacePath.trim());
 
+  const fileMentionPrefixLabel =
+    fileParse.prefix === "plugin"
+      ? "#"
+      : fileParse.prefix === "file"
+        ? "@file:"
+        : "@";
+  const filePickerDirectoryLabel =
+    fileParse.active && fileParse.directory
+      ? `${fileMentionPrefixLabel}${fileParse.directory}/`
+    : fileParse.prefix === "plugin"
+        ? "#"
+        : fileParse.prefix === "file"
+          ? "@file:/"
+          : "@/";
+  const filePickerTitle =
+    fileParse.kind === "plugin"
+      ? "Omiga 插件"
+      : "工作区文件";
+  const filePickerHelpText =
+    fileParse.kind === "plugin"
+      ? "当前 # · Enter 选择插件 · Esc 取消"
+      : `当前 ${filePickerDirectoryLabel} · Enter 进入文件夹 · 选择文件会注入精确路径`;
+  const filePickerEmptyPrimary =
+    fileParse.kind === "plugin"
+      ? "没有匹配插件"
+      : fileParse.kind === "file"
+        ? "当前目录下无匹配文件"
+        : "当前没有匹配项";
+
+  const isBackgroundAgent = useMemo(
+    () => availableAgents.find((a) => a.agentType === composerAgentType)?.background ?? false,
+    [availableAgents, composerAgentType],
+  );
   const showComposerAgentChip =
-    composerAgentType !== "general-purpose" && composerAgentType !== "auto";
+    composerAgentType !== "general-purpose" &&
+    composerAgentType !== "auto" &&
+    !isBackgroundAgent &&
+    !highlightedSlashCommand &&
+    !highlightedSkillCommand;
   const hasInlineComposerChips =
-    showComposerAgentChip || composerAttachedPaths.length > 0;
+    Boolean(highlightedSlashCommand) ||
+    Boolean(highlightedSkillCommand) ||
+    showComposerAgentChip ||
+    composerSelectedPluginIds.length > 0 ||
+    composerAttachedPaths.length > 0;
 
   const showBgRouting =
     Boolean(sessionId) &&
     !needsWorkspacePath &&
-    backgroundTasks.length > 0 &&
+    backgroundTasks.some((task) => canSendFollowUpToTask(task.status)) &&
     typeof onFollowUpTaskIdChange === "function";
+
+  const followUpTargets = useMemo(() => {
+    const list = backgroundTasks.filter((task) => canSendFollowUpToTask(task.status));
+    const totalByRole = new Map<string, number>();
+    for (const task of list) {
+      const role = normalizeAgentDisplayName(task.agent_type);
+      totalByRole.set(role, (totalByRole.get(role) ?? 0) + 1);
+    }
+    const seenByRole = new Map<string, number>();
+    return list.map((task) => {
+      const role = normalizeAgentDisplayName(task.agent_type);
+      const idx = (seenByRole.get(role) ?? 0) + 1;
+      seenByRole.set(role, idx);
+      const total = totalByRole.get(role) ?? 1;
+      return {
+        task,
+        chipLabel: total > 1 ? `${role} #${idx}` : role,
+        tooltip: `${role} · ${task.description.slice(0, 200)}${
+          task.description.length > 200 ? "…" : ""
+        }`,
+      };
+    });
+  }, [backgroundTasks]);
 
   return (
     <Stack spacing={0.75}>
@@ -1448,10 +2223,13 @@ export const ChatComposer = memo(function ChatComposer({
             label="主会话"
             color={followUpTaskId ? "default" : "primary"}
             variant={followUpTaskId ? "outlined" : "filled"}
-            onClick={() => onFollowUpTaskIdChange?.(null)}
+            onClick={() => {
+              onFollowUpTaskIdChange?.(null);
+              onCloseBackgroundTranscript?.();
+            }}
             sx={{ fontWeight: followUpTaskId ? 400 : 600 }}
           />
-          {backgroundTasks.map((t) => {
+          {followUpTargets.map(({ task: t, chipLabel, tooltip }) => {
             const ok = canSendFollowUpToTask(t.status);
             const selected = followUpTaskId === t.task_id;
             return (
@@ -1461,36 +2239,30 @@ export const ChatComposer = memo(function ChatComposer({
                 alignItems="center"
                 spacing={0.25}
               >
-                <Tooltip
-                  title={`${t.agent_type} · ${t.description.slice(0, 200)}${t.description.length > 200 ? "…" : ""}`}
-                >
+                <Tooltip title={tooltip}>
                   <span>
                     <Chip
                       size="small"
                       icon={<SmartToy sx={{ fontSize: 16 }} />}
-                      label={`${t.agent_type}: ${shortBgTaskLabel(t, 28)}`}
+                      label={chipLabel}
                       color={selected ? "secondary" : "default"}
                       variant={selected ? "filled" : "outlined"}
                       disabled={!ok}
-                      onClick={() => ok && onFollowUpTaskIdChange?.(t.task_id)}
+                      onClick={() => {
+                        if (!ok) return;
+                        onFollowUpTaskIdChange?.(t.task_id);
+                        onOpenBackgroundTranscript?.(t.task_id);
+                      }}
+                      sx={{
+                        maxWidth: 156,
+                        "& .MuiChip-label": {
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        },
+                      }}
                     />
                   </span>
                 </Tooltip>
-                {onOpenBackgroundTranscript ? (
-                  <Tooltip title="队友记录">
-                    <IconButton
-                      size="small"
-                      aria-label="Background teammate transcript"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onOpenBackgroundTranscript(t.task_id);
-                      }}
-                      sx={{ p: 0.25 }}
-                    >
-                      <ArticleOutlined sx={{ fontSize: 16 }} />
-                    </IconButton>
-                  </Tooltip>
-                ) : null}
                 {ok && onCancelBackgroundTask ? (
                   <Tooltip title="取消后台任务">
                     <IconButton
@@ -1553,20 +2325,120 @@ export const ChatComposer = memo(function ChatComposer({
         ) : null}
         <PermissionPromptBar />
         <Box
+          ref={composerInputAnchorRef}
+          onMouseDown={(event) => {
+            if (event.target !== event.currentTarget || inputDisabled) return;
+            event.preventDefault();
+            focusEditableEnd();
+          }}
           sx={{
             position: "relative",
-            display: "flex",
-            flexDirection: "row",
-            alignItems: "flex-start",
-            gap: 0.75,
+            display: "block",
+            minHeight: 56,
+            maxHeight: 280,
+            overflowY: "auto",
+            boxSizing: "content-box",
+            cursor: inputDisabled ? "not-allowed" : "text",
             px: 1.75,
             py: 1.15,
-            /* 与下方 textarea 首行一致，用于 Agent Chip 与光标垂直对齐 */
+            /* 与输入首行一致，用于 Agent Chip 与光标垂直对齐 */
             "--composer-fs": `${COMPOSER_FS_PX}px`,
             "--composer-lh": COMPOSER_LH,
             "--composer-chip-h": `${COMPOSER_INLINE_CHIP_PX}px`,
+            fontSize: "var(--composer-fs)",
+            lineHeight: "var(--composer-lh)",
           }}
-        >
+          >
+            {hasInlineComposerChips ? (
+              <Box
+                component="span"
+                sx={{
+                  verticalAlign: "middle",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 0.75,
+                  flexWrap: "wrap",
+                  maxWidth: "100%",
+                  mr: 0.9,
+                  rowGap: 0.45,
+                  pointerEvents: "auto",
+                }}
+              >
+            {highlightedSlashCommand ? (
+            <Tooltip
+              placement="top"
+              enterDelay={180}
+              title={highlightedSlashCommand.description}
+            >
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  alignSelf: "center",
+                  flexShrink: 0,
+                  height: "var(--composer-chip-h)",
+                  fontSize: "var(--composer-fs)",
+                  lineHeight: "var(--composer-lh)",
+                }}
+              >
+                <Chip
+                  className="composer-command-chip"
+                  size="small"
+                  variant="outlined"
+                  icon={<RouteIcon sx={{ fontSize: 16 }} />}
+                  label={highlightedSlashCommand.label}
+                  sx={{
+                    ...semanticChipSurface(commandTone),
+                    flexShrink: 0,
+                    height: "var(--composer-chip-h)",
+                    maxHeight: "var(--composer-chip-h)",
+                    fontWeight: 700,
+                    maxWidth: { xs: 160, sm: 220 },
+                  }}
+                />
+              </Box>
+            </Tooltip>
+          ) : null}
+          {highlightedSkillCommand ? (
+            <Tooltip
+              placement="top"
+              enterDelay={180}
+              title={
+                highlightedSkillCommand.description ||
+                "直接使用该 Skill"
+              }
+            >
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  alignSelf: "center",
+                  flexShrink: 0,
+                  height: "var(--composer-chip-h)",
+                  fontSize: "var(--composer-fs)",
+                  lineHeight: "var(--composer-lh)",
+                }}
+              >
+                <Chip
+                  className="composer-skill-chip"
+                  size="small"
+                  variant="outlined"
+                  icon={<AutoAwesome sx={{ fontSize: 16 }} />}
+                  label={`$${highlightedSkillCommand.name}`}
+                  sx={{
+                    ...semanticChipSurface(skillTone),
+                    flexShrink: 0,
+                    height: "var(--composer-chip-h)",
+                    maxHeight: "var(--composer-chip-h)",
+                    fontWeight: 700,
+                    maxWidth: { xs: 170, sm: 240 },
+                  }}
+                />
+              </Box>
+            </Tooltip>
+          ) : null}
           {showComposerAgentChip ? (
             <Tooltip
               placement="top"
@@ -1581,7 +2453,7 @@ export const ChatComposer = memo(function ChatComposer({
                       display="block"
                       sx={{ mb: 0.5 }}
                     >
-                      /{composerAgentType}
+                      {normalizeAgentDisplayName(composerAgentType)}
                     </Typography>
                     <Typography
                       variant="caption"
@@ -1592,7 +2464,7 @@ export const ChatComposer = memo(function ChatComposer({
                     </Typography>
                   </Box>
                 ) : (
-                  `/${composerAgentType}`
+                  normalizeAgentDisplayName(composerAgentType)
                 )
               }
             >
@@ -1601,7 +2473,7 @@ export const ChatComposer = memo(function ChatComposer({
                 sx={{
                   display: "inline-flex",
                   alignItems: "center",
-                  alignSelf: "flex-start",
+                  alignSelf: "center",
                   flexShrink: 0,
                   height: "var(--composer-chip-h)",
                   fontSize: "var(--composer-fs)",
@@ -1609,32 +2481,60 @@ export const ChatComposer = memo(function ChatComposer({
                 }}
               >
                 <Chip
+                  className="composer-agent-chip"
                   size="small"
                   variant="outlined"
-                  icon={<SmartToy sx={{ fontSize: 16, color: accent }} />}
-                  label={`/${composerAgentType}`}
+                  icon={<SmartToy sx={{ fontSize: 16 }} />}
+                  label={normalizeAgentDisplayName(composerAgentType)}
                   sx={{
+                    ...semanticChipSurface(agentTone),
                     flexShrink: 0,
                     height: "var(--composer-chip-h)",
                     maxHeight: "var(--composer-chip-h)",
                     fontWeight: 700,
-                    bgcolor: alpha(accent, isDark ? 0.3 : 0.4),
-                    borderColor: alpha(accent, 0.58),
-                    color: ink,
                     maxWidth: { xs: 140, sm: 220 },
-                    boxShadow: `0 1px 2px ${edge(0.12)}`,
-                    "& .MuiChip-label": {
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    },
-                    "& .MuiChip-icon": {
-                      marginTop: 0,
-                      marginBottom: 0,
-                    },
                   }}
                 />
               </Box>
             </Tooltip>
+          ) : null}
+          {selectedPluginRows.length > 0 ? (
+            <Box
+              sx={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                alignContent: "center",
+                alignSelf: "center",
+                gap: 0.25,
+                maxWidth: { xs: "100%", sm: 420 },
+                minHeight: "var(--composer-chip-h)",
+              }}
+            >
+              {selectedPluginRows.map((plugin) => (
+                <Tooltip
+                  key={plugin.id}
+                  title={`${plugin.label} · ${plugin.id}`}
+                  placement="top"
+                >
+                  <Chip
+                    className="composer-plugin-chip"
+                    size="small"
+                    variant="outlined"
+                    icon={<Extension sx={{ fontSize: 16 }} />}
+                    label={`#${plugin.label}`}
+                    sx={{
+                      ...semanticChipSurface(pluginTone),
+                      flexShrink: 0,
+                      height: "var(--composer-chip-h)",
+                      maxHeight: "var(--composer-chip-h)",
+                      maxWidth: 220,
+                      fontWeight: 700,
+                    }}
+                  />
+                </Tooltip>
+              ))}
+            </Box>
           ) : null}
           {composerAttachedPaths.length > 0 ? (
             <Box
@@ -1642,8 +2542,8 @@ export const ChatComposer = memo(function ChatComposer({
                 display: "flex",
                 flexWrap: "wrap",
                 alignItems: "center",
-                alignContent: "flex-start",
-                alignSelf: "flex-start",
+                alignContent: "center",
+                alignSelf: "center",
                 gap: 0.25,
                 maxWidth: { xs: "100%", sm: 420 },
                 minHeight: "var(--composer-chip-h)",
@@ -1652,92 +2552,152 @@ export const ChatComposer = memo(function ChatComposer({
               {composerAttachedPaths.map((p) => (
                 <Tooltip key={p} title={p} placement="top">
                   <Chip
+                    className="composer-file-chip"
                     size="small"
                     variant="outlined"
                     icon={
-                      <InsertDriveFile sx={{ fontSize: 16, color: accent }} />
+                      <InsertDriveFile sx={{ fontSize: 16 }} />
                     }
                     label={`@${p}`}
                     sx={{
+                      ...semanticChipSurface(fileTone),
                       flexShrink: 0,
                       height: "var(--composer-chip-h)",
                       maxHeight: "var(--composer-chip-h)",
                       maxWidth: 200,
                       fontWeight: 600,
-                      bgcolor: alpha(accent, isDark ? 0.3 : 0.4),
-                      borderColor: alpha(accent, 0.58),
-                      color: ink,
-                      boxShadow: `0 1px 2px ${edge(0.12)}`,
-                      "& .MuiChip-label": {
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                      },
-                      "& .MuiChip-icon": {
-                        marginTop: 0,
-                        marginBottom: 0,
-                      },
                     }}
                   />
                 </Tooltip>
-              ))}
-            </Box>
-          ) : null}
+                ))}
+              </Box>
+            ) : null}
+              </Box>
+            ) : null}
           <Box
-            component="textarea"
-            ref={mergedTextareaRef}
-            value={input}
-            onChange={(e) => setInputValue(e.target.value)}
+            component="span"
+            ref={mergedEditableRef}
+            contentEditable={!inputDisabled}
+            suppressContentEditableWarning
+            role="textbox"
+            aria-label="消息输入"
+            aria-multiline="true"
+            aria-autocomplete="list"
+            aria-disabled={inputDisabled || undefined}
+            aria-expanded={
+              (showSlashPopover && filteredSlashOptions.length > 0) ||
+              (showFilePopover &&
+                (fileGlobLoading || filteredMentionRows.length > 0))
+            }
+            data-placeholder={!hasInlineComposerChips ? placeholder : ""}
+            data-empty={input === "" ? "true" : undefined}
+            onMouseDown={(e) => {
+              if (
+                inputDisabled ||
+                normalizeEditableText(e.currentTarget.textContent ?? "") !== ""
+              ) {
+                return;
+              }
+              e.preventDefault();
+              focusEditableEnd();
+            }}
+            onInput={(e) => {
+              const rawValue = e.currentTarget.textContent ?? "";
+              const nativeEvent = e.nativeEvent as InputEvent;
+              const update = getEditableInputUpdate(
+                rawValue,
+                editableCompositionRef.current ||
+                  nativeEvent.isComposing === true,
+              );
+              if (update.shouldNormalizeDom) {
+                setEditableDomText(e.currentTarget, update.nextValue, true);
+                setEditableTextSelection(e.currentTarget, update.nextValue.length);
+              }
+              if (update.shouldCommit) {
+                commitEditableInput(update.nextValue);
+              }
+            }}
+            onCompositionStart={() => {
+              editableCompositionRef.current = true;
+            }}
+            onCompositionEnd={(e) => {
+              editableCompositionRef.current = false;
+              const rawValue = e.currentTarget.textContent ?? "";
+              const update = getEditableInputUpdate(rawValue, false);
+              if (update.shouldNormalizeDom) {
+                setEditableDomText(e.currentTarget, update.nextValue, true);
+                setEditableTextSelection(e.currentTarget, update.nextValue.length);
+              }
+              commitEditableInput(update.nextValue);
+            }}
+            onPaste={(e) => {
+              e.preventDefault();
+              const text = e.clipboardData.getData("text/plain");
+              const el = editableRef.current;
+              if (!el) return;
+              const nextValue = insertTextAtEditableSelection(el, text);
+              commitEditableInput(nextValue);
+            }}
             onFocus={() => {
-              if (slashParse.active) setSlashPickerDismissed(false);
+              if (slashParse.active || skillParse.active) {
+                setSlashPickerDismissed(false);
+              }
               if (fileParse.active) setFilePickerDismissed(false);
+              if (
+                normalizeEditableText(editableRef.current?.textContent ?? "") ===
+                ""
+              ) {
+                queueMicrotask(() => {
+                  const el = editableRef.current;
+                  if (el && el.ownerDocument.activeElement === el) {
+                    focusEditableEnd();
+                  }
+                });
+              }
+            }}
+            onBlur={(e) => {
+              if (
+                normalizeEditableText(e.currentTarget.textContent ?? "") === ""
+              ) {
+                setEditableDomText(e.currentTarget, "", false);
+              }
             }}
             onKeyDown={handleComposerKeyDown}
-            disabled={inputDisabled}
-            placeholder={placeholder}
-            rows={2}
-            aria-label="消息输入"
-            aria-autocomplete="list"
-            aria-expanded={
-              (showSlashPopover && filteredAtAgents.length > 0) ||
-              (showFilePopover &&
-                (fileGlobLoading || filteredFilePaths.length > 0))
-            }
             sx={{
-              flex: 1,
-              minWidth: 0,
-              width: 0,
+              display: input === "" ? "inline-block" : "inline",
+              verticalAlign: "middle",
+              minWidth:
+                input === ""
+                  ? hasInlineComposerChips
+                    ? "1ch"
+                    : "100%"
+                  : hasInlineComposerChips
+                    ? 2
+                    : "100%",
               boxSizing: "border-box",
               border: "none",
-              resize: "none",
-              minHeight: 56,
-              maxHeight: 280,
-              px: 0,
-              py: 0,
-              paddingTop: hasInlineComposerChips
-                ? `${COMPOSER_TEXTAREA_PAD_TOP_WITH_CHIPS}px`
-                : 0,
+              outline: "none",
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+              wordBreak: "break-word",
               fontSize: "var(--composer-fs)",
               fontFamily: "inherit",
               lineHeight: "var(--composer-lh)",
               letterSpacing: "-0.01em",
-              color: ink,
-              bgcolor: "transparent",
-              outline: "none",
+              color: inputDisabled ? alpha(ink, 0.38) : ink,
               caretColor: accent,
+              cursor: inputDisabled ? "not-allowed" : "text",
               transition: "color 0.15s ease",
-              "&::placeholder": {
+              "&[data-empty='true']:not(:focus)::before": {
+                content: "attr(data-placeholder)",
                 color: alpha(mut, 0.65),
-                opacity: 1,
-              },
-              "&:disabled": {
-                color: alpha(ink, 0.38),
-                cursor: "not-allowed",
+                pointerEvents: "none",
               },
             }}
           />
           <Popover
             open={showSlashPopover}
-            anchorEl={textareaRef.current}
+            anchorEl={composerInputAnchorRef.current}
             anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
             transformOrigin={{ vertical: "top", horizontal: "left" }}
             disableAutoFocus
@@ -1752,7 +2712,7 @@ export const ChatComposer = memo(function ChatComposer({
                 sx: {
                   mt: 0.5,
                   maxHeight: 280,
-                  width: 320,
+                  width: composerPopoverWidth ?? 320,
                   borderRadius: 2,
                   overflow: "hidden",
                 },
@@ -1764,30 +2724,119 @@ export const ChatComposer = memo(function ChatComposer({
               dense
               sx={{ py: 0, maxHeight: 260, overflow: "auto" }}
             >
-              {filteredAtAgents.length === 0 ? (
+              {filteredSlashOptions.length === 0 ? (
                 <ListItemButton disabled>
                   <ListItemText
-                    primary="无匹配 Agent"
-                    secondary="继续输入或按 Esc 取消"
+                    primary={
+                      skillParse.active ? "无匹配 Skill" : "无匹配命令或 Agent"
+                    }
+                    secondary={
+                      skillParse.active
+                        ? "输入 $skill 参数，或按 Esc 取消"
+                        : "继续输入或按 Esc 取消"
+                    }
                   />
                 </ListItemButton>
               ) : (
-                filteredAtAgents.map((a, i) => (
+                filteredSlashOptions.map((item, i) => (
                   <Tooltip
-                    key={a.agentType}
-                    title={a.description}
+                    key={
+                      item.kind === "command"
+                        ? `cmd-${item.command.id}`
+                        : item.kind === "agent"
+                          ? `agent-${item.agent.agentType}`
+                          : `skill-${item.skill.name}`
+                    }
+                    title={
+                      item.kind === "command"
+                        ? item.command.description
+                        : item.kind === "agent"
+                          ? item.agent.description
+                          : item.skill.description
+                    }
                     placement="right"
                     enterDelay={200}
                   >
                     <ListItemButton
                       data-slash-index={i}
                       selected={i === slashHighlightIndex}
-                      onClick={() => pickAtAgent(a.agentType)}
+                      onClick={() => {
+                        if (item.kind === "command") {
+                          pickWorkflowCommand(item.command.id);
+                        } else if (item.kind === "agent") {
+                          pickAtAgent(item.agent.agentType);
+                        } else {
+                          pickSkillCommand(item.skill.name);
+                        }
+                      }}
                     >
-                      <ListItemIcon sx={{ minWidth: 36 }}>
-                        <SmartToy fontSize="small" />
+                      <ListItemIcon
+                        sx={{
+                          minWidth: 36,
+                          color:
+                            item.kind === "command"
+                              ? commandTone
+                              : item.kind === "agent"
+                                ? agentTone
+                                : skillTone,
+                        }}
+                      >
+                        {item.kind === "command" ? (
+                          <RouteIcon fontSize="small" />
+                        ) : item.kind === "agent" ? (
+                          <SmartToy fontSize="small" />
+                        ) : (
+                          <AutoAwesome fontSize="small" />
+                        )}
                       </ListItemIcon>
-                      <ListItemText primary={`/${a.agentType}`} />
+                      <ListItemText
+                        sx={{ minWidth: 0 }}
+                        primary={
+                          item.kind === "command"
+                            ? item.command.label
+                            : item.kind === "agent"
+                              ? normalizeAgentDisplayName(item.agent.agentType)
+                              : `$${item.skill.name}`
+                        }
+                        secondary={
+                          item.kind === "command"
+                            ? item.command.description
+                            : item.kind === "agent"
+                              ? "设置当前输入框角色"
+                              : item.skill.description || "直接使用该 Skill"
+                        }
+                        primaryTypographyProps={{
+                          sx: {
+                            color:
+                              item.kind === "command"
+                                ? commandTone
+                                : item.kind === "agent"
+                                  ? agentTone
+                                  : skillTone,
+                            fontWeight: 700,
+                          },
+                        }}
+                        secondaryTypographyProps={{
+                          sx: {
+                            color: alpha(
+                              item.kind === "command"
+                                ? commandTone
+                                : item.kind === "agent"
+                                  ? agentTone
+                                  : skillTone,
+                              0.76,
+                            ),
+                            ...(item.kind === "skill"
+                              ? {
+                                  display: "block",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }
+                              : null),
+                          },
+                        }}
+                      />
                     </ListItemButton>
                   </Tooltip>
                 ))
@@ -1796,7 +2845,7 @@ export const ChatComposer = memo(function ChatComposer({
           </Popover>
           <Popover
             open={showFilePopover}
-            anchorEl={textareaRef.current}
+            anchorEl={composerInputAnchorRef.current}
             anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
             transformOrigin={{ vertical: "top", horizontal: "left" }}
             disableAutoFocus
@@ -1811,7 +2860,7 @@ export const ChatComposer = memo(function ChatComposer({
                 sx: {
                   mt: 0.75,
                   maxHeight: 300,
-                  width: 380,
+                  width: composerPopoverWidth ?? 380,
                   borderRadius: 2.5,
                   overflow: "hidden",
                   bgcolor: alpha(paper, isDark ? 0.98 : 1),
@@ -1834,18 +2883,38 @@ export const ChatComposer = memo(function ChatComposer({
                 bgcolor: alpha(def, isDark ? 0.5 : 0.65),
               }}
             >
-              <Typography
-                variant="caption"
-                sx={{
-                  fontWeight: 700,
-                  letterSpacing: "0.04em",
-                  textTransform: "uppercase",
-                  color: pen.textHeader,
-                  fontSize: 10,
-                }}
-              >
-                工作区文件
-              </Typography>
+              <Stack direction="row" alignItems="center" spacing={0.75}>
+                <Typography
+                  variant="caption"
+                  sx={{
+                    fontWeight: 700,
+                    letterSpacing: "0.04em",
+                    textTransform: "uppercase",
+                    color: pen.textHeader,
+                    fontSize: 10,
+                    flex: 1,
+                    minWidth: 0,
+                  }}
+                >
+                  {filePickerTitle}
+                </Typography>
+                {fileParse.kind !== "plugin" && fileParse.directory ? (
+                  <Button
+                    size="small"
+                    variant="text"
+                    onClick={goUpFileDirectory}
+                    sx={{
+                      minWidth: 0,
+                      px: 0.75,
+                      py: 0,
+                      fontSize: 11,
+                      color: pen.textPath,
+                    }}
+                  >
+                    上一级
+                  </Button>
+                ) : null}
+              </Stack>
               <Typography
                 variant="caption"
                 component="div"
@@ -1856,7 +2925,7 @@ export const ChatComposer = memo(function ChatComposer({
                   lineHeight: 1.35,
                 }}
               >
-                根目录下一层 · 与侧栏文件列表相同图标
+                {filePickerHelpText}
               </Typography>
             </Box>
             <List
@@ -1889,6 +2958,24 @@ export const ChatComposer = memo(function ChatComposer({
                 },
               }}
             >
+              {!fileGlobLoading && filteredPluginMentions.length > 0 ? (
+                <ListSubheader
+                  disableSticky
+                  sx={{
+                    lineHeight: 1,
+                    py: 0.75,
+                    px: 1,
+                    bgcolor: "transparent",
+                    color: pen.textHeader,
+                    fontSize: 10,
+                    fontWeight: 800,
+                    letterSpacing: "0.05em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  {fileParse.kind === "plugin" ? "Matching plugins" : "Omiga plugins"}
+                </ListSubheader>
+              ) : null}
               {fileGlobLoading ? (
                 <ListItemButton
                   disabled
@@ -1900,7 +2987,7 @@ export const ChatComposer = memo(function ChatComposer({
                   />
                   <ListItemText
                     primary="正在加载当前目录…"
-                    secondary="仅显示工作区根目录下的文件与文件夹"
+                    secondary={filePickerDirectoryLabel}
                     primaryTypographyProps={{
                       sx: { fontWeight: 600, color: pen.textFilename },
                     }}
@@ -1909,11 +2996,11 @@ export const ChatComposer = memo(function ChatComposer({
                     }}
                   />
                 </ListItemButton>
-              ) : filteredFilePaths.length === 0 ? (
+              ) : filteredMentionRows.length === 0 ? (
                 <ListItemButton disabled sx={{ py: 1.5, px: 1 }}>
                   <ListItemText
-                    primary="当前目录下无匹配项"
-                    secondary="继续输入或按 Esc 取消"
+                    primary={filePickerEmptyPrimary}
+                    secondary={`${filePickerDirectoryLabel} · 继续输入或按 Esc 取消`}
                     primaryTypographyProps={{
                       sx: { fontWeight: 600, color: pen.textFilename },
                     }}
@@ -1923,13 +3010,125 @@ export const ChatComposer = memo(function ChatComposer({
                   />
                 </ListItemButton>
               ) : (
-                filteredFilePaths.map((row, i) => (
+                filteredMentionRows.map((item, i) =>
+                  item.kind === "plugin" ? (
+                    <ListItemButton
+                      key={`p:${item.plugin.id}`}
+                      data-file-index={i}
+                      selected={i === fileHighlightIndex}
+                      alignItems="center"
+                      onClick={() => pickPluginMention(item.plugin.id)}
+                      sx={{
+                        mx: 0.5,
+                        my: 0.25,
+                        minHeight: 48,
+                        border: `1px solid ${alpha(pluginTone, isDark ? 0.28 : 0.18)}`,
+                        bgcolor: alpha(pluginTone, isDark ? 0.13 : 0.07),
+                        "&.Mui-selected": {
+                          bgcolor: alpha(pluginTone, isDark ? 0.22 : 0.12),
+                        },
+                        "&.Mui-selected:hover": {
+                          bgcolor: alpha(pluginTone, isDark ? 0.26 : 0.16),
+                        },
+                      }}
+                    >
+                      <ListItemIcon
+                        sx={{
+                          minWidth: 34,
+                          mr: 0.25,
+                          py: 0,
+                          alignSelf: "center",
+                          color: pluginTone,
+                        }}
+                      >
+                        <Extension sx={{ fontSize: 22 }} />
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={
+                          <Stack direction="row" alignItems="center" spacing={0.75} sx={{ minWidth: 0 }}>
+                            <Typography
+                              component="span"
+                              sx={{
+                                minWidth: 0,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                fontSize: 12,
+                                fontWeight: 800,
+                                color: pluginTone,
+                              }}
+                            >
+                              {item.plugin.label}
+                            </Typography>
+                            <Chip
+                              size="small"
+                              variant="outlined"
+                              label="Plugin"
+                              sx={{
+                                height: 18,
+                                fontSize: 10,
+                                fontWeight: 700,
+                                color: pluginTone,
+                                borderColor: alpha(pluginTone, 0.35),
+                                "& .MuiChip-label": { px: 0.5 },
+                              }}
+                            />
+                          </Stack>
+                        }
+                        secondary={
+                          item.plugin.capabilities.length > 0
+                            ? `${item.plugin.id} · ${item.plugin.capabilities.join(" · ")}`
+                            : item.plugin.description
+                        }
+                        sx={{ m: 0 }}
+                        primaryTypographyProps={{
+                          component: "div",
+                          sx: { lineHeight: 1.35 },
+                        }}
+                        secondaryTypographyProps={{
+                          sx: {
+                            fontSize: 11,
+                            color: pen.textPath,
+                            mt: 0.1,
+                            lineHeight: 1.25,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          },
+                        }}
+                      />
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        sx={{
+                          minWidth: 0,
+                          ml: 0.75,
+                          px: 0.75,
+                          py: 0,
+                          fontSize: 11,
+                          lineHeight: 1.6,
+                          flexShrink: 0,
+                        }}
+                      >
+                        选择
+                      </Button>
+                    </ListItemButton>
+                  ) : (
+                  (() => {
+                    const row = item.row;
+                    return (
                   <ListItemButton
                     key={`${row.is_file ? "f" : "d"}:${row.path}`}
                     data-file-index={i}
                     selected={i === fileHighlightIndex}
                     alignItems="center"
-                    onClick={() => pickFilePath(row.path)}
+                    onClick={() => {
+                      if (row.is_file) {
+                        pickFilePath(row.path);
+                      } else {
+                        enterFileDirectory(row.path);
+                      }
+                    }}
                   >
                     <ListItemIcon
                       sx={{
@@ -1947,7 +3146,9 @@ export const ChatComposer = memo(function ChatComposer({
                     <ListItemText
                       primary={normalizeFsPath(row.path)}
                       secondary={
-                        row.is_file ? formatBytesShort(row.size) : "文件夹"
+                        row.is_file
+                          ? formatBytesShort(row.size)
+                          : "文件夹 · 点击进入"
                       }
                       sx={{ m: 0 }}
                       primaryTypographyProps={{
@@ -1956,7 +3157,7 @@ export const ChatComposer = memo(function ChatComposer({
                             "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
                           fontSize: 12,
                           fontWeight: 500,
-                          color: pen.textFilename,
+                          color: row.is_file ? fileTone : pen.textFilename,
                           wordBreak: "break-all",
                           lineHeight: 1.35,
                         },
@@ -1970,8 +3171,42 @@ export const ChatComposer = memo(function ChatComposer({
                         },
                       }}
                     />
+                    {row.is_file ? null : (
+                      <Stack
+                        direction="row"
+                        alignItems="center"
+                        spacing={0.5}
+                        sx={{ ml: 0.75, flexShrink: 0 }}
+                      >
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            pickFilePath(row.path);
+                          }}
+                          sx={{
+                            minWidth: 0,
+                            px: 0.75,
+                            py: 0,
+                            fontSize: 11,
+                            lineHeight: 1.6,
+                          }}
+                        >
+                          选择
+                        </Button>
+                        <ChevronRight
+                          size={16}
+                          strokeWidth={2}
+                          color={pen.textPath}
+                        />
+                      </Stack>
+                    )}
                   </ListItemButton>
-                ))
+                    );
+                  })()
+                  ),
+                )
               )}
             </List>
           </Popover>

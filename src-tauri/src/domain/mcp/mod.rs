@@ -15,6 +15,7 @@ pub mod config;
 pub mod connection_manager;
 pub mod discovery;
 pub mod names;
+pub mod oauth;
 pub mod resource_output;
 pub mod tool_dispatch;
 pub mod tool_pool;
@@ -23,7 +24,7 @@ pub mod tool_pool;
 pub use client::{
     connect_mcp_server, connect_mcp_server_legacy, McpConnectionType, McpLiveConnection,
 };
-pub use config::{merged_mcp_servers, McpServerConfig};
+pub use config::{merged_mcp_servers, merged_mcp_servers_signature, McpServerConfig};
 pub use connection_manager::{ConnectionStats, GlobalMcpManager, McpConnectionManager};
 pub use discovery::collect_mcp_server_names;
 pub use names::{normalize_name_for_mcp, parse_mcp_tool_name};

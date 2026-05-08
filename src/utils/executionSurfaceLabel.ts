@@ -6,9 +6,9 @@ import type { ExecutionStep } from "../state/activityStore";
 export function toolCategoryLabel(toolName: string): string {
   const n = (toolName || "").toLowerCase();
   if (!n) return "调用工具";
-  if (n.includes("web_search")) return "搜索内容";
-  if (n.includes("web_fetch") || (n.includes("fetch") && n.includes("web")))
-    return "获取网页";
+  if (n === "search") return "搜索内容";
+  if (n === "query") return "查询数据库";
+  if (n === "fetch") return "获取网页";
   if (n === "taskcreate" || n.includes("task_create")) return "创建任务";
   if (n.includes("taskstop") || n.includes("taskoutput")) return "任务输出";
   if (
@@ -68,15 +68,43 @@ export type ExecutionSurfaceKind =
   | "generating"
   | "tool";
 
+function normalizedToolName(value: string | undefined | null): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function isCompletedToolHint(
+  steps: ExecutionStep[],
+  toolHintFallback: string | null,
+): boolean {
+  const hint = normalizedToolName(toolHintFallback);
+  if (!hint) return false;
+  return steps.some((step) => {
+    if (!step.id.startsWith("tool-") || step.status !== "done") return false;
+    const toolName = normalizedToolName(step.toolName);
+    const title = normalizedToolName(step.title);
+    return toolName === hint || (!toolName && title === hint);
+  });
+}
+
 export function getExecutionSurfaceView(
   steps: ExecutionStep[],
   ctx: ExecutionSurfaceContext,
 ): { label: string; kind: ExecutionSurfaceKind; toolName: string | null } {
+  const streamActive = ctx.isConnecting || ctx.isStreaming || ctx.waitingFirstChunk;
   if (ctx.isConnecting) {
-    return { label: "等待响应", kind: "waiting", toolName: null };
+    const connectStep = steps.find(
+      (step) => step.id === "connect" && step.status === "running",
+    );
+    return {
+      label: connectStep?.title || "等待响应",
+      kind: "waiting",
+      toolName: null,
+    };
   }
 
-  const run = steps.find((s) => s.status === "running");
+  const run = steps.find(
+    (s) => s.status === "running" && (streamActive || !s.id.startsWith("tool-")),
+  );
   if (run) {
     if (run.id === "connect") {
       // Stream is live but the connect row was not cleared (e.g. `Start` event not handled).
@@ -102,7 +130,11 @@ export function getExecutionSurfaceView(
   if (ctx.isStreaming && ctx.waitingFirstChunk) {
     return { label: "推理中", kind: "thinking", toolName: null };
   }
-  if (ctx.isStreaming && ctx.toolHintFallback) {
+  if (
+    ctx.isStreaming &&
+    ctx.toolHintFallback &&
+    !isCompletedToolHint(steps, ctx.toolHintFallback)
+  ) {
     const tn = ctx.toolHintFallback.trim();
     return {
       label: formatToolDisplayName(tn),
@@ -114,7 +146,14 @@ export function getExecutionSurfaceView(
     return { label: "解析输出", kind: "generating", toolName: null };
   }
 
-  if (steps.length > 0 && steps.every((s) => s.status === "done")) {
+  if (
+    steps.length > 0 &&
+    steps.every(
+      (s) =>
+        s.status === "done" ||
+        (!streamActive && s.status === "running" && s.id.startsWith("tool-")),
+    )
+  ) {
     return { label: "已完成", kind: "finished", toolName: null };
   }
 

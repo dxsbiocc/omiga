@@ -4,7 +4,8 @@
 //! 在 Docker 容器中执行命令，提供隔离的执行环境
 
 use super::base::{generate_session_id, BaseEnvironment};
-use super::types::{ExecResult, ExecutionError, ProcessHandle};
+use super::types::{ExecResult, ExecutionError, ExternalTerminalCommand, ProcessHandle};
+use crate::utils::shell::shell_single_quote;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -66,24 +67,26 @@ pub struct DockerEnvironment {
     task_id: String,
 }
 
+pub struct DockerEnvironmentConfig {
+    pub image: String,
+    pub cwd: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub cpu: Option<f64>,
+    pub memory: Option<u64>,
+    pub disk: Option<u64>,
+    pub persistent: bool,
+    pub task_id: String,
+    pub volumes: Vec<String>,
+    pub forward_env: Vec<String>,
+    pub env_vars: HashMap<String, String>,
+    pub network: bool,
+}
+
 impl DockerEnvironment {
     /// 创建新的 Docker 执行环境
-    pub async fn new(
-        image: String,
-        cwd: Option<String>,
-        timeout_ms: Option<u64>,
-        cpu: Option<f64>,
-        memory: Option<u64>,
-        disk: Option<u64>,
-        persistent: bool,
-        task_id: String,
-        volumes: Vec<String>,
-        forward_env: Vec<String>,
-        env_vars: HashMap<String, String>,
-        network: bool,
-    ) -> Result<Self, ExecutionError> {
+    pub async fn new(config: DockerEnvironmentConfig) -> Result<Self, ExecutionError> {
         let docker_exe = Self::find_docker().await?;
-        let cwd = cwd.unwrap_or_else(|| "/root".to_string());
+        let cwd = config.cwd.unwrap_or_else(|| "/root".to_string());
 
         // 验证 Docker 可用
         Self::ensure_docker_available(&docker_exe).await?;
@@ -95,27 +98,34 @@ impl DockerEnvironment {
 
         let mut me = Self {
             cwd,
-            timeout_ms: timeout_ms.unwrap_or(60_000),
-            env: env_vars.clone(),
+            timeout_ms: config.timeout_ms.unwrap_or(60_000),
+            env: config.env_vars.clone(),
             session_id,
             snapshot_path,
             cwd_file,
             cwd_marker,
             snapshot_ready: false,
             last_sync_time: None,
-            image,
+            image: config.image,
             container_id: None,
             docker_exe,
             workspace_dir: None,
             home_dir: None,
             init_env_args: Vec::new(),
-            persistent,
-            task_id,
+            persistent: config.persistent,
+            task_id: config.task_id,
         };
 
         // 初始化容器
-        me.init_container(cpu, memory, disk, &volumes, &forward_env, network)
-            .await?;
+        me.init_container(
+            config.cpu,
+            config.memory,
+            config.disk,
+            &config.volumes,
+            &config.forward_env,
+            config.network,
+        )
+        .await?;
 
         // 初始化会话快照
         me.init_session().await?;
@@ -456,6 +466,43 @@ impl BaseEnvironment for DockerEnvironment {
         60 // Docker 冷启动可能较慢
     }
 
+    fn external_terminal_command(&self) -> Option<ExternalTerminalCommand> {
+        let container_id = self.container_id.as_ref()?;
+        let cwd = shell_single_quote(&self.cwd);
+        Some(ExternalTerminalCommand::new(
+            self.docker_exe.clone(),
+            vec![
+                "exec".to_string(),
+                "-it".to_string(),
+                container_id.clone(),
+                "bash".to_string(),
+                "-lc".to_string(),
+                format!("cd {cwd} || exit 126; exec bash -l"),
+            ],
+            "Docker 容器",
+        ))
+    }
+
+    fn embedded_terminal_command(&self, shell: &str) -> Option<ExternalTerminalCommand> {
+        if !matches!(shell, "bash" | "zsh") {
+            return None;
+        }
+        let container_id = self.container_id.as_ref()?;
+        let cwd = shell_single_quote(&self.cwd);
+        Some(ExternalTerminalCommand::new(
+            self.docker_exe.clone(),
+            vec![
+                "exec".to_string(),
+                "-it".to_string(),
+                container_id.clone(),
+                shell.to_string(),
+                "-lc".to_string(),
+                format!("cd {cwd} || exit 126; exec {shell} -l"),
+            ],
+            "Docker 容器",
+        ))
+    }
+
     async fn run_bash(
         &self,
         _cmd_string: &str,
@@ -481,8 +528,8 @@ impl BaseEnvironment for DockerEnvironment {
         let effective_cwd = options.cwd.unwrap_or_else(|| self.cwd.clone());
 
         // 准备命令：heredoc 模式将 stdin 嵌入命令，pipe 模式暂不支持（exec 不接受 stdin）
-        let exec_command = if options.stdin_data.is_some() {
-            self.embed_stdin_heredoc(command, options.stdin_data.as_ref().unwrap())
+        let exec_command = if let Some(stdin_data) = options.stdin_data.as_ref() {
+            self.embed_stdin_heredoc(command, stdin_data)
         } else {
             command.to_string()
         };
@@ -508,14 +555,14 @@ impl BaseEnvironment for DockerEnvironment {
 
             // 停止容器
             let _ = Command::new(&self.docker_exe)
-                .args(&["stop", "-t", "60", container_id])
+                .args(["stop", "-t", "60", container_id])
                 .output()
                 .await;
 
             if !self.persistent {
                 // 删除容器
                 let _ = Command::new(&self.docker_exe)
-                    .args(&["rm", "-f", container_id])
+                    .args(["rm", "-f", container_id])
                     .output()
                     .await;
 
@@ -591,7 +638,8 @@ mod tests {
 
         let config = EnvironmentConfig {
             r#type: super::super::EnvironmentType::Docker,
-            image: Some("alpine:latest".to_string()),
+            // DockerEnvironment executes commands through `bash -c`.
+            image: Some("bash:5.2-alpine".to_string()),
             cwd: "/root".to_string(),
             timeout: 60_000,
             ..Default::default()

@@ -22,6 +22,7 @@ export interface PlanTodoItem {
 interface PlanTodoListProps {
   items: PlanTodoItem[];
   compact?: boolean;
+  onItemClick?: (item: PlanTodoItem) => void;
 }
 
 /**
@@ -31,7 +32,11 @@ interface PlanTodoListProps {
  * - pending: 待办项
  * - error: 错误项
  */
-export function PlanTodoList({ items, compact = false }: PlanTodoListProps) {
+export function PlanTodoList({
+  items,
+  compact = false,
+  onItemClick,
+}: PlanTodoListProps) {
   if (items.length === 0) {
     return (
       <Typography variant="body2" color="text.secondary" sx={{ fontSize: 12, py: 0.5 }}>
@@ -46,10 +51,24 @@ export function PlanTodoList({ items, compact = false }: PlanTodoListProps) {
         const isDone = item.status === "completed";
         const isRun = item.status === "running";
         const isErr = item.status === "error";
+        const clickable = Boolean(onItemClick);
         
         return (
           <ListItem
             key={item.id}
+            onClick={clickable ? () => onItemClick?.(item) : undefined}
+            onKeyDown={
+              clickable
+                ? (event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onItemClick?.(item);
+                    }
+                  }
+                : undefined
+            }
+            role={clickable ? "button" : undefined}
+            tabIndex={clickable ? 0 : undefined}
             sx={{
               alignItems: "flex-start",
               py: compact ? 0.5 : 0.75,
@@ -57,6 +76,15 @@ export function PlanTodoList({ items, compact = false }: PlanTodoListProps) {
               borderRadius: 1,
               bgcolor: isRun ? alpha("#6366f1", 0.06) : "transparent",
               opacity: isDone ? 0.7 : 1,
+              cursor: clickable ? "pointer" : "default",
+              transition: "background-color 0.18s ease, border-color 0.18s ease",
+              "&:hover": clickable
+                ? {
+                    bgcolor: isRun
+                      ? alpha("#6366f1", 0.08)
+                      : alpha("#6366f1", 0.035),
+                  }
+                : undefined,
             }}
           >
             <ListItemIcon sx={{ minWidth: compact ? 24 : 28, mt: compact ? 0.1 : 0.15 }}>

@@ -6,7 +6,7 @@
  * - Implicit Memory (PageIndex): Auto-indexed chat history
  */
 
-import { useState } from "react";
+import React, { useState } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   Box,
@@ -20,7 +20,6 @@ import {
   TextField,
   Paper,
   Tooltip,
-  Snackbar,
   LinearProgress,
   Tabs,
   Tab,
@@ -36,6 +35,7 @@ import {
   useTheme,
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
+import { NotificationToast } from "../NotificationToast";
 import {
   Storage as MemoryIcon,
   Search as SearchIcon,
@@ -53,7 +53,15 @@ import {
   FileUpload as UploadIcon,
   TextFields as TextIcon,
   Folder as FolderUploadIcon,
+  Psychology as LongTermIcon,
+  HealthAndSafety as HealthIcon,
+  Warning as WarnIcon,
+  Language as SourceIcon,
+  Archive as ArchiveIcon,
+  Delete as DeleteIcon,
+  CleaningServices as PruneIcon,
 } from "@mui/icons-material";
+import type { LongTermEntryDto } from "../../hooks/useUnifiedMemory";
 import { useUnifiedMemory } from "../../hooks/useUnifiedMemory";
 
 interface UnifiedMemoryTabProps {
@@ -234,7 +242,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
               Knowledge · 统一记忆
             </Typography>
             <Typography variant="body2" color="text.primary" sx={{ lineHeight: 1.65 }}>
-              <strong>知识库（显性记忆）</strong>是用户级全局存储，保存在{" "}
+              <strong>全局知识库</strong>是用户级全局存储，保存在{" "}
               <strong>~/.omiga/memory/permanent/wiki</strong>，跨所有项目可用。
               <strong>隐性记忆</strong>（PageIndex）自动索引聊天历史，按项目存储在{" "}
               <strong>~/.omiga/memory/projects/&lt;项目键&gt;/</strong>。
@@ -331,7 +339,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                       {memory.status.explicit.enabled ? memory.status.explicit.document_count : "—"}
                     </Typography>
                     <Typography variant="caption" color="text.secondary">
-                      Wiki 页面数
+                      知识库页面数
                     </Typography>
                   </CardContent>
                 </Card>
@@ -376,6 +384,135 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                     </Typography>
                   </CardContent>
                 </Card>
+              </Grid>
+
+              {/* Long-term memory card */}
+              <Grid item xs={12} sm={6}>
+                <Card
+                  elevation={0}
+                  sx={{
+                    height: "100%",
+                    borderRadius: 2,
+                    border: `1px solid ${alpha(theme.palette.info.main, 0.22)}`,
+                    bgcolor: alpha(theme.palette.info.main, 0.04),
+                    transition: "transform 0.2s ease, box-shadow 0.2s ease",
+                    "&:hover": {
+                      boxShadow: `0 8px 24px ${alpha(theme.palette.info.main, 0.12)}`,
+                    },
+                  }}
+                >
+                  <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
+                    <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+                      <Stack direction="row" alignItems="center" spacing={1}>
+                        <LongTermIcon sx={{ color: "info.main", fontSize: 22 }} />
+                        <Typography variant="subtitle2" fontWeight={700}>
+                          长期记忆
+                        </Typography>
+                      </Stack>
+                      {(memory.status.long_term.project_entry_count + memory.status.long_term.global_entry_count) > 0 ? (
+                        <Chip size="small" icon={<OkIcon />} label="已积累" color="info" variant="outlined" />
+                      ) : (
+                        <Chip size="small" icon={<MissingIcon />} label="空" variant="outlined" />
+                      )}
+                    </Stack>
+                    <Typography variant="h4" fontWeight={800} sx={{ fontFeatureSettings: '"tnum"', color: "text.primary" }}>
+                      {memory.status.long_term.project_entry_count + memory.status.long_term.global_entry_count || "—"}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" display="block">
+                      {`项目 ${memory.status.long_term.project_entry_count} · 全局 ${memory.status.long_term.global_entry_count}`}
+                    </Typography>
+                  </CardContent>
+                </Card>
+              </Grid>
+
+              {/* Source Registry card */}
+              <Grid item xs={12} sm={6}>
+                <Card
+                  elevation={0}
+                  sx={{
+                    height: "100%",
+                    borderRadius: 2,
+                    border: `1px solid ${alpha(theme.palette.primary.main, 0.18)}`,
+                    bgcolor: alpha(theme.palette.primary.main, 0.03),
+                    transition: "transform 0.2s ease, box-shadow 0.2s ease",
+                    "&:hover": {
+                      boxShadow: `0 8px 24px ${alpha(theme.palette.primary.main, 0.10)}`,
+                    },
+                  }}
+                >
+                  <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
+                    <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+                      <Stack direction="row" alignItems="center" spacing={1}>
+                        <SourceIcon sx={{ color: "primary.main", fontSize: 22 }} />
+                        <Typography variant="subtitle2" fontWeight={700}>
+                          来源记录
+                        </Typography>
+                      </Stack>
+                      {(memory.status.source_registry?.entry_count ?? 0) > 0 ? (
+                        <Chip size="small" icon={<OkIcon />} label="有记录" color="primary" variant="outlined" />
+                      ) : (
+                        <Chip size="small" icon={<MissingIcon />} label="空" variant="outlined" />
+                      )}
+                    </Stack>
+                    <Typography variant="h4" fontWeight={800} sx={{ fontFeatureSettings: '"tnum"', color: "text.primary" }}>
+                      {(memory.status.source_registry?.entry_count ?? 0) || "—"}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" display="block">
+                      已登记的网页 / 论文来源，可用 recall scope=sources 检索
+                    </Typography>
+                  </CardContent>
+                </Card>
+              </Grid>
+
+              {/* Memory health card */}
+              <Grid item xs={12} sm={6}>
+                {(() => {
+                  const stale = memory.status.long_term.stale_entry_count ?? 0;
+                  const total = memory.status.long_term.project_entry_count + memory.status.long_term.global_entry_count;
+                  const isHealthy = stale === 0;
+                  const stalePct = total > 0 ? Math.round((stale / total) * 100) : 0;
+                  return (
+                    <Card
+                      elevation={0}
+                      sx={{
+                        height: "100%",
+                        borderRadius: 2,
+                        border: `1px solid ${alpha(isHealthy ? theme.palette.success.main : theme.palette.warning.main, 0.28)}`,
+                        bgcolor: alpha(isHealthy ? theme.palette.success.main : theme.palette.warning.main, 0.04),
+                        transition: "transform 0.2s ease, box-shadow 0.2s ease",
+                        "&:hover": {
+                          boxShadow: `0 8px 24px ${alpha(isHealthy ? theme.palette.success.main : theme.palette.warning.main, 0.12)}`,
+                        },
+                      }}
+                    >
+                      <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
+                        <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+                          <Stack direction="row" alignItems="center" spacing={1}>
+                            <HealthIcon sx={{ color: isHealthy ? "success.main" : "warning.main", fontSize: 22 }} />
+                            <Typography variant="subtitle2" fontWeight={700}>
+                              记忆健康
+                            </Typography>
+                          </Stack>
+                          <Chip
+                            size="small"
+                            icon={isHealthy ? <OkIcon /> : <WarnIcon />}
+                            label={isHealthy ? "健康" : `${stalePct}% 陈旧`}
+                            color={isHealthy ? "success" : "warning"}
+                            variant="outlined"
+                          />
+                        </Stack>
+                        <Typography variant="h4" fontWeight={800} sx={{ fontFeatureSettings: '"tnum"', color: isHealthy ? "success.main" : "warning.main" }}>
+                          {stale === 0 ? "良好" : stale}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" display="block">
+                          {isHealthy
+                            ? "长期记忆无陈旧条目"
+                            : `${stale} 条 90 天未访问且稳定性低，下次启动自动清理`}
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  );
+                })()}
               </Grid>
             </Grid>
 
@@ -456,6 +593,9 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
         <Tab value="overview" label="概览" />
         <Tab value="knowledge" label="知识库" icon={<WikiIcon />} iconPosition="start" />
         <Tab value="implicit" label="隐性记忆" icon={<ImplicitIcon />} iconPosition="start" />
+        <Tab value="long_term" label="长期记忆" icon={<LongTermIcon />} iconPosition="start" />
+        <Tab value="sources" label="来源" icon={<SourceIcon />} iconPosition="start" />
+        <Tab value="dossier" label="项目简报" icon={<HealthIcon />} iconPosition="start" />
         <Tab value="config" label="配置" icon={<ConfigIcon />} iconPosition="start" />
       </Tabs>
 
@@ -489,14 +629,26 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
               }}
             >
               <li>
-                <strong>知识库（显性记忆）</strong>：用户级全局知识库（PDF、MD、TXT 等），位于{" "}
+                <strong>全局知识库</strong>：用户级全局知识库（PDF、MD、TXT 等），位于{" "}
                 <code>{memory.status?.paths.permanent_wiki || "~/.omiga/memory/permanent/wiki"}</code>
+              </li>
+              <li>
+                <strong>长期记忆</strong>：项目级与全局级可召回总结，位于{" "}
+                <code>{memory.status?.paths.long_term || "~/.omiga/memory/projects/<key>/long_term"}</code> /{" "}
+                <code>{memory.status?.paths.permanent_long_term || "~/.omiga/memory/permanent/long_term"}</code>
+              </li>
+              <li>
+                <strong>工作记忆</strong>：session scratchpad，保存在 SQLite，每轮自动提炼，每 15 轮归档一次会话摘要
               </li>
               <li>
                 <strong>隐性记忆</strong>：自动索引的聊天历史，每次对话后更新
               </li>
-              <li>每次对话前自动检索相关上下文</li>
-              <li>显性记忆优先于隐性记忆</li>
+              <li>每次对话前自动检索相关上下文（working memory 主题词同步用于增强长期记忆召回）</li>
+              <li>优先级：工作记忆 &gt; 长期项目 &gt; 长期全局 &gt; 知识库 &gt; 隐性记忆</li>
+              <li>陈旧的长期条目（90 天未访问 + 稳定性低）在下次启动时概率性自动清理</li>
+              <li>
+                <strong>来源登记（Source Registry）</strong>：每次 <code>fetch</code> / <code>search</code> 成功后自动记录 URL、标题、摘要，可通过 <code>recall scope=sources</code> 检索历史来源，避免重复抓取
+              </li>
             </Box>
 
             <Divider sx={{ my: 2 }} />
@@ -559,7 +711,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                 bgcolor: alpha(theme.palette.info.main, 0.06),
               }}
             >
-              知识库（显性记忆）是<strong>用户级全局存储</strong>，跨所有项目可用。导入的文档将保存到{" "}
+              全局知识库是<strong>用户级全局存储</strong>，跨所有项目可用。导入的文档将保存到{" "}
               <strong>~/.omiga/memory/permanent/wiki</strong>，对话时自动检索提供上下文。
             </Alert>
 
@@ -571,7 +723,7 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                     全局知识库路径
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
-                    跨项目共享 · {memory.status?.explicit.document_count ?? 0} 个页面
+                    跨项目共享 · {memory.status?.knowledge_base.global_page_count ?? memory.status?.explicit.document_count ?? 0} 个页面
                   </Typography>
                 </Box>
               </Stack>
@@ -832,7 +984,11 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
                           <Typography variant="caption" fontWeight={700} color="text.primary">
                             {result.title}
                           </Typography>
-                          <Chip label={result.match_type} size="small" sx={{ fontWeight: 600 }} />
+                          <Chip
+                            label={`${result.source_type} · ${result.match_type}`}
+                            size="small"
+                            sx={{ fontWeight: 600 }}
+                          />
                         </Stack>
                         <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
                           {result.path}
@@ -891,6 +1047,21 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
           </Stack>
         )}
 
+
+        {/* Long-term Memory */}
+        {memory.activeTab === "long_term" && (
+          <LongTermTab memory={memory} theme={theme} glassSurface={glassSurface} alpha={alpha} setToast={setToast} />
+        )}
+
+        {/* Sources */}
+        {memory.activeTab === "sources" && (
+          <SourcesTab memory={memory} theme={theme} glassSurface={glassSurface} alpha={alpha} setToast={setToast} />
+        )}
+
+        {/* Dossier */}
+        {memory.activeTab === "dossier" && (
+          <DossierTab memory={memory} theme={theme} glassSurface={glassSurface} alpha={alpha} setToast={setToast} />
+        )}
 
         {/* Config */}
         {memory.activeTab === "config" && (
@@ -1225,13 +1396,655 @@ export function UnifiedMemoryTab({ projectPath }: UnifiedMemoryTabProps) {
         </Alert>
       )}
 
-      <Snackbar
+      <NotificationToast
         open={!!toast}
         autoHideDuration={4000}
         onClose={() => setToast(null)}
         message={toast}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+        severity={toast?.includes("失败") ? "error" : "success"}
+        title={toast?.includes("失败") ? "内存操作失败" : "内存设置已更新"}
       />
     </Box>
+  );
+}
+
+// ── Long-term Memory Tab ────────────────────────────────────────────────────
+
+interface LongTermTabProps {
+  memory: ReturnType<typeof import("../../hooks/useUnifiedMemory").useUnifiedMemory>;
+  theme: import("@mui/material/styles").Theme;
+  glassSurface: object;
+  alpha: (color: string, opacity: number) => string;
+  setToast: (msg: string | null) => void;
+}
+
+function LongTermTab({ memory, theme, glassSurface, alpha, setToast }: LongTermTabProps) {
+  const [filter, setFilter] = React.useState<"all" | "active" | "archived" | "superseded">("active");
+  const [pruning, setPruning] = React.useState(false);
+
+  React.useEffect(() => {
+    memory.loadLongTermEntries();
+  }, [memory.longTermScope]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handlePrune = async () => {
+    setPruning(true);
+    const removed = await memory.pruneStale();
+    setPruning(false);
+    setToast(removed > 0 ? `已清理 ${removed} 条陈旧记忆` : "没有需要清理的陈旧记忆");
+  };
+
+  const handleArchive = async (entry: LongTermEntryDto) => {
+    await memory.archiveLongTermEntry(entry.path);
+    setToast("已归档");
+  };
+
+  const handleDelete = async (entry: LongTermEntryDto) => {
+    await memory.deleteLongTermEntry(entry.path);
+    setToast("已删除");
+  };
+
+  const filtered = memory.longTermEntries.filter(e => {
+    if (filter === "all") return true;
+    return e.status.toLowerCase() === filter;
+  });
+
+  const kindColor = (kind: string) => {
+    if (kind === "research_insight") return "info";
+    if (kind === "project_experience") return "success";
+    if (kind === "session_summary") return "default";
+    if (kind === "method_lesson") return "warning";
+    return "default";
+  };
+
+  const statusColor = (status: string) => {
+    if (status === "Active") return "success";
+    if (status === "Archived") return "default";
+    if (status === "Superseded") return "warning";
+    return "default";
+  };
+
+  return (
+    <Stack spacing={2}>
+      {/* Header toolbar */}
+      <Paper elevation={0} sx={{ p: 2, ...glassSurface }}>
+        <Stack direction={{ xs: "column", sm: "row" }} alignItems={{ sm: "center" }} justifyContent="space-between" spacing={1.5}>
+          <Box>
+            <Typography variant="subtitle1" fontWeight={700}>
+              长期记忆条目
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              已提炼的决策、洞察和项目经验 · 共 {memory.longTermEntries.length} 条
+            </Typography>
+          </Box>
+          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+            {/* Scope selector */}
+            {(["all", "project", "global"] as const).map(s => (
+              <Chip
+                key={s}
+                label={{ all: "全部", project: "项目", global: "全局" }[s]}
+                size="small"
+                variant={memory.longTermScope === s ? "filled" : "outlined"}
+                color={memory.longTermScope === s ? "primary" : "default"}
+                onClick={() => {
+                  memory.setLongTermScope(s);
+                  memory.loadLongTermEntries(s);
+                }}
+              />
+            ))}
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={memory.longTermLoading ? <CircularProgress size={14} /> : <RefreshIcon />}
+              onClick={() => memory.loadLongTermEntries()}
+              disabled={memory.longTermLoading}
+              sx={{ borderRadius: 2, textTransform: "none", fontWeight: 600 }}
+            >
+              刷新
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              color="warning"
+              startIcon={pruning ? <CircularProgress size={14} /> : <PruneIcon />}
+              onClick={handlePrune}
+              disabled={pruning}
+              sx={{ borderRadius: 2, textTransform: "none", fontWeight: 600 }}
+            >
+              清理陈旧 ({memory.status?.long_term.stale_entry_count ?? 0})
+            </Button>
+          </Stack>
+        </Stack>
+
+        {/* Status filter */}
+        <Stack direction="row" spacing={0.75} mt={1.5} flexWrap="wrap" useFlexGap>
+          {(["all", "active", "archived", "superseded"] as const).map(f => (
+            <Chip
+              key={f}
+              label={{ all: "全部", active: "活跃", archived: "已归档", superseded: "已替代" }[f]}
+              size="small"
+              variant={filter === f ? "filled" : "outlined"}
+              color={filter === f ? "secondary" : "default"}
+              onClick={() => setFilter(f)}
+              sx={{ fontWeight: 600 }}
+            />
+          ))}
+        </Stack>
+      </Paper>
+
+      {/* Entry list */}
+      {memory.longTermLoading ? (
+        <Stack alignItems="center" py={4}>
+          <CircularProgress size={28} />
+        </Stack>
+      ) : filtered.length === 0 ? (
+        <Paper elevation={0} sx={{ p: 3, ...glassSurface, textAlign: "center" }}>
+          <Typography variant="body2" color="text.secondary">
+            {memory.longTermEntries.length === 0
+              ? "暂无长期记忆条目。在对话中提炼关键决策后会自动归档。"
+              : "该筛选条件下没有条目"}
+          </Typography>
+        </Paper>
+      ) : (
+        <Stack spacing={1}>
+          {filtered.map(entry => (
+            <Paper
+              key={entry.path}
+              elevation={0}
+              sx={{
+                p: 1.75,
+                ...glassSurface,
+                border: `1px solid ${alpha(
+                  entry.status === "Active" ? theme.palette.success.main :
+                  entry.status === "Archived" ? theme.palette.divider :
+                  theme.palette.warning.main,
+                  entry.status === "Active" ? 0.2 : 0.3
+                )}`,
+                opacity: entry.status !== "Active" ? 0.65 : 1,
+                transition: "opacity 0.2s",
+              }}
+            >
+              <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1}>
+                <Box sx={{ minWidth: 0, flex: 1 }}>
+                  <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap mb={0.5}>
+                    <Typography variant="subtitle2" fontWeight={700} noWrap sx={{ maxWidth: 300 }}>
+                      {entry.topic}
+                    </Typography>
+                    <Chip size="small" label={entry.kind} color={kindColor(entry.kind) as "info" | "success" | "default" | "warning"} variant="outlined" sx={{ fontWeight: 600, fontSize: "0.7rem" }} />
+                    <Chip size="small" label={entry.status} color={statusColor(entry.status) as "success" | "default" | "warning"} variant="outlined" sx={{ fontWeight: 600, fontSize: "0.7rem" }} />
+                    {entry.global && <Chip size="small" label="全局" variant="outlined" sx={{ fontWeight: 600, fontSize: "0.7rem" }} />}
+                  </Stack>
+                  <Typography variant="body2" color="text.secondary" sx={{ fontSize: "0.8rem", lineHeight: 1.5 }}>
+                    {entry.summary.length > 180 ? entry.summary.slice(0, 180) + "…" : entry.summary}
+                  </Typography>
+                  <Stack direction="row" spacing={1.5} mt={0.75} flexWrap="wrap" useFlexGap>
+                    <Typography variant="caption" color="text.disabled">
+                      置信度 {(entry.confidence * 100).toFixed(0)}%
+                    </Typography>
+                    <Typography variant="caption" color="text.disabled">
+                      稳定性 {(entry.stability * 100).toFixed(0)}%
+                    </Typography>
+                    {entry.last_reused_at && (
+                      <Typography variant="caption" color="text.disabled">
+                        最近使用 {entry.last_reused_at.slice(0, 10)}
+                      </Typography>
+                    )}
+                    {entry.expires_at && (
+                      <Typography variant="caption" color="warning.main">
+                        过期 {entry.expires_at.slice(0, 10)}
+                      </Typography>
+                    )}
+                  </Stack>
+                </Box>
+                <Stack direction="row" spacing={0.5} flexShrink={0}>
+                  {entry.status === "Active" && (
+                    <Tooltip title="归档（隐藏但保留）">
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="inherit"
+                        sx={{ minWidth: 36, p: 0.5, borderRadius: 1.5 }}
+                        onClick={() => handleArchive(entry)}
+                      >
+                        <ArchiveIcon fontSize="small" />
+                      </Button>
+                    </Tooltip>
+                  )}
+                  <Tooltip title="永久删除">
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color="error"
+                      sx={{ minWidth: 36, p: 0.5, borderRadius: 1.5 }}
+                      onClick={() => handleDelete(entry)}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </Button>
+                  </Tooltip>
+                </Stack>
+              </Stack>
+            </Paper>
+          ))}
+        </Stack>
+      )}
+    </Stack>
+  );
+}
+
+// ── Sources Tab ─────────────────────────────────────────────────────────────
+
+interface SourcesTabProps {
+  memory: ReturnType<typeof import("../../hooks/useUnifiedMemory").useUnifiedMemory>;
+  theme: import("@mui/material/styles").Theme;
+  glassSurface: object;
+  alpha: (color: string, opacity: number) => string;
+  setToast: (msg: string | null) => void;
+}
+
+function SourcesTab({ memory, theme, glassSurface, alpha, setToast }: SourcesTabProps) {
+  const [pruning, setPruning] = React.useState(false);
+  const [searchText, setSearchText] = React.useState("");
+
+  React.useEffect(() => {
+    memory.loadSourceEntries();
+  }, [memory.loadSourceEntries]);
+
+  const filtered = memory.sourceEntries.filter(e => {
+    if (!searchText.trim()) return true;
+    const q = searchText.toLowerCase();
+    return (
+      e.url.toLowerCase().includes(q) ||
+      (e.title ?? "").toLowerCase().includes(q) ||
+      (e.gist ?? "").toLowerCase().includes(q) ||
+      e.domain.toLowerCase().includes(q)
+    );
+  });
+
+  const handleDelete = async (path: string, url: string) => {
+    try {
+      await memory.deleteSourceEntry(path);
+      setToast(`已删除来源：${url}`);
+    } catch {
+      setToast("删除失败");
+    }
+  };
+
+  const handlePrune = async () => {
+    setPruning(true);
+    try {
+      const removed = await memory.pruneStale();
+      setToast(removed > 0 ? `已清理 ${removed} 条陈旧记录` : "无需清理");
+    } catch {
+      setToast("清理失败");
+    } finally {
+      setPruning(false);
+    }
+  };
+
+  const staleCount = memory.status?.source_registry?.stale_count ?? 0;
+
+  return (
+    <Stack spacing={2}>
+      {/* Toolbar */}
+      <Paper elevation={0} sx={{ p: 1.5, ...glassSurface }}>
+        <Stack direction="row" alignItems="center" spacing={1.5} flexWrap="wrap" gap={1}>
+          <TextField
+            size="small"
+            placeholder="搜索 URL / 标题 / 摘要…"
+            value={searchText}
+            onChange={e => setSearchText(e.target.value)}
+            sx={{ flex: 1, minWidth: 200 }}
+            InputProps={{ startAdornment: <SearchIcon fontSize="small" sx={{ mr: 0.5, color: "text.disabled" }} /> }}
+          />
+          <Tooltip title={`刷新来源列表（当前 ${memory.sourceEntries.length} 条）`}>
+            <span>
+              <Button
+                size="small"
+                startIcon={<RefreshIcon />}
+                onClick={() => memory.loadSourceEntries()}
+                disabled={memory.sourcesLoading}
+              >
+                刷新
+              </Button>
+            </span>
+          </Tooltip>
+          <Tooltip title={staleCount > 0 ? `清理 ${staleCount} 条已过期来源` : "无过期来源"}>
+            <span>
+              <Button
+                size="small"
+                color="warning"
+                startIcon={pruning ? <CircularProgress size={14} /> : <PruneIcon />}
+                onClick={handlePrune}
+                disabled={pruning || staleCount === 0}
+              >
+                清理陈旧 ({staleCount})
+              </Button>
+            </span>
+          </Tooltip>
+        </Stack>
+      </Paper>
+
+      {/* Summary */}
+      <Stack direction="row" spacing={1} alignItems="center">
+        <Chip
+          size="small"
+          icon={<SourceIcon />}
+          label={`${memory.sourceEntries.length} 条活跃来源`}
+          sx={{ fontSize: 11 }}
+        />
+        {staleCount > 0 && (
+          <Chip
+            size="small"
+            color="warning"
+            icon={<WarnIcon />}
+            label={`${staleCount} 条已过期`}
+            sx={{ fontSize: 11 }}
+          />
+        )}
+        {filtered.length !== memory.sourceEntries.length && (
+          <Chip
+            size="small"
+            label={`筛选后 ${filtered.length} 条`}
+            sx={{ fontSize: 11 }}
+          />
+        )}
+      </Stack>
+
+      {memory.sourcesLoading && <LinearProgress />}
+
+      {!memory.sourcesLoading && filtered.length === 0 && (
+        <Paper elevation={0} sx={{ p: 3, textAlign: "center", ...glassSurface }}>
+          <SourceIcon sx={{ fontSize: 36, color: "text.disabled", mb: 1 }} />
+          <Typography color="text.secondary" variant="body2">
+            {searchText ? "无匹配来源" : "暂无来源记录。发起 fetch / search 后自动登记。"}
+          </Typography>
+        </Paper>
+      )}
+
+      {/* Source list */}
+      {filtered.map(entry => {
+        const sessions = entry.sessions ?? [];
+        const queryContext = entry.query_context ?? [];
+
+        return (
+          <Paper
+            key={entry.canonical_url}
+            elevation={0}
+            sx={{ p: 1.75, ...glassSurface, "&:hover": { bgcolor: alpha(theme.palette.primary.main, 0.03) } }}
+          >
+            <Stack spacing={0.5}>
+              <Stack direction="row" alignItems="flex-start" justifyContent="space-between" spacing={1}>
+                <Stack spacing={0.25} flex={1} minWidth={0}>
+                  <Typography variant="subtitle2" fontWeight={600} noWrap title={entry.url}>
+                    {entry.title ?? entry.domain}
+                  </Typography>
+                  <Typography
+                    variant="caption"
+                    color="primary.main"
+                    sx={{ wordBreak: "break-all", cursor: "pointer" }}
+                    onClick={() => { try { window.open(entry.url, "_blank"); } catch {} }}
+                    title={entry.url}
+                  >
+                    {entry.url.length > 80 ? entry.url.slice(0, 80) + "…" : entry.url}
+                  </Typography>
+                </Stack>
+                <Tooltip title="删除来源记录">
+                  <span>
+                    <Button
+                      size="small"
+                      color="error"
+                      sx={{ minWidth: 0, px: 0.75 }}
+                      onClick={() => handleDelete(entry.path, entry.url)}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </Button>
+                  </span>
+                </Tooltip>
+              </Stack>
+
+              {entry.gist && (
+                <Typography variant="caption" color="text.secondary" sx={{ fontStyle: "italic" }}>
+                  {entry.gist}
+                </Typography>
+              )}
+
+              <Stack direction="row" spacing={1} flexWrap="wrap" gap={0.5} mt={0.25}>
+                <Chip size="small" label={entry.domain} sx={{ fontSize: 10, height: 18 }} />
+                <Chip size="small" label={`访问 ${entry.use_count} 次`} sx={{ fontSize: 10, height: 18 }} />
+                {sessions.length > 0 && (
+                  <Chip size="small" label={`${sessions.length} 个会话`} sx={{ fontSize: 10, height: 18 }} />
+                )}
+                <Chip
+                  size="small"
+                  label={`最近使用 ${new Date(entry.last_used_at).toLocaleDateString("zh-CN")}`}
+                  sx={{ fontSize: 10, height: 18 }}
+                />
+                {entry.expires_at && (
+                  <Chip
+                    size="small"
+                    label={`过期 ${new Date(entry.expires_at).toLocaleDateString("zh-CN")}`}
+                    sx={{ fontSize: 10, height: 18, color: "text.disabled" }}
+                  />
+                )}
+              </Stack>
+
+              {queryContext.length > 0 && (
+                <Typography variant="caption" color="text.disabled">
+                  关联查询：{queryContext.slice(0, 3).join(" · ")}
+                </Typography>
+              )}
+            </Stack>
+          </Paper>
+        );
+      })}
+    </Stack>
+  );
+}
+
+// ── Dossier Tab ──────────────────────────────────────────────────────────────
+
+interface DossierTabProps {
+  memory: ReturnType<typeof import("../../hooks/useUnifiedMemory").useUnifiedMemory>;
+  theme: import("@mui/material/styles").Theme;
+  glassSurface: object;
+  alpha: (color: string, opacity: number) => string;
+  setToast: (msg: string | null) => void;
+}
+
+function DossierTab({ memory, theme, glassSurface, alpha, setToast }: DossierTabProps) {
+  const [editing, setEditing] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+
+  // Editable fields — plain textarea-friendly: one item per line
+  const [editTitle, setEditTitle] = React.useState("");
+  const [editBrief, setEditBrief] = React.useState("");
+  const [editBeliefs, setEditBeliefs] = React.useState("");
+  const [editDecisions, setEditDecisions] = React.useState("");
+  const [editQuestions, setEditQuestions] = React.useState("");
+  const [editNextSteps, setEditNextSteps] = React.useState("");
+
+  React.useEffect(() => {
+    memory.loadDossier();
+  }, [memory.loadDossier]);
+
+  const startEdit = () => {
+    const d = memory.dossier;
+    if (!d) return;
+    setEditTitle(d.title);
+    setEditBrief(d.brief);
+    setEditBeliefs(d.currentBeliefs.join("\n"));
+    setEditDecisions(d.decisions.join("\n"));
+    setEditQuestions(d.openQuestions.join("\n"));
+    setEditNextSteps(d.nextSteps.join("\n"));
+    setEditing(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await memory.saveDossier({
+        slug: memory.dossier?.slug ?? "",
+        title: editTitle.trim(),
+        brief: editBrief.trim(),
+        currentBeliefs: editBeliefs.split("\n").map(s => s.trim()).filter(Boolean),
+        decisions: editDecisions.split("\n").map(s => s.trim()).filter(Boolean),
+        openQuestions: editQuestions.split("\n").map(s => s.trim()).filter(Boolean),
+        nextSteps: editNextSteps.split("\n").map(s => s.trim()).filter(Boolean),
+      });
+      setEditing(false);
+      setToast("项目简报已保存");
+    } catch {
+      setToast("保存失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const d = memory.dossier;
+  const isEmpty = !d || (!d.title && !d.brief && d.currentBeliefs.length === 0 && d.decisions.length === 0);
+
+  return (
+    <Stack spacing={2}>
+      {/* Header toolbar */}
+      <Paper elevation={0} sx={{ p: 1.5, ...glassSurface }}>
+        <Stack direction="row" alignItems="center" justifyContent="space-between">
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <HealthIcon color="primary" />
+            <Typography variant="subtitle2" fontWeight={700}>
+              项目简报（Dossier）
+            </Typography>
+            {d?.updatedAt && (
+              <Typography variant="caption" color="text.secondary">
+                更新于 {new Date(d.updatedAt).toLocaleString("zh-CN")}
+              </Typography>
+            )}
+          </Stack>
+          <Stack direction="row" spacing={1}>
+            {!editing && (
+              <Tooltip title="刷新简报">
+                <span>
+                  <Button size="small" startIcon={<RefreshIcon />} onClick={() => memory.loadDossier()} disabled={memory.dossierLoading}>
+                    刷新
+                  </Button>
+                </span>
+              </Tooltip>
+            )}
+            {!editing ? (
+              <Button size="small" variant="outlined" startIcon={<BuildIcon />} onClick={startEdit} disabled={memory.dossierLoading}>
+                编辑
+              </Button>
+            ) : (
+              <>
+                <Button size="small" onClick={() => setEditing(false)} disabled={saving}>取消</Button>
+                <Button size="small" variant="contained" onClick={handleSave} disabled={saving}>
+                  {saving ? <CircularProgress size={14} /> : "保存"}
+                </Button>
+              </>
+            )}
+          </Stack>
+        </Stack>
+      </Paper>
+
+      {memory.dossierLoading && <LinearProgress />}
+
+      {!editing && isEmpty && !memory.dossierLoading && (
+        <Paper elevation={0} sx={{ p: 3, textAlign: "center", ...glassSurface }}>
+          <HealthIcon sx={{ fontSize: 36, color: "text.disabled", mb: 1 }} />
+          <Typography color="text.secondary" variant="body2" sx={{ mb: 1 }}>
+            暂无项目简报。Agent 完成会话摘要后自动更新，或点击"编辑"手动填写。
+          </Typography>
+          <Button size="small" variant="outlined" startIcon={<BuildIcon />} onClick={startEdit}>
+            手动创建
+          </Button>
+        </Paper>
+      )}
+
+      {/* Read-only view */}
+      {!editing && !isEmpty && d && (
+        <Stack spacing={1.5}>
+          <Paper elevation={0} sx={{ p: 2, ...glassSurface }}>
+            <Typography variant="h6" fontWeight={700}>{d.title || "(无标题)"}</Typography>
+            {d.brief && <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>{d.brief}</Typography>}
+          </Paper>
+
+          {d.currentBeliefs.length > 0 && (
+            <Paper elevation={0} sx={{ p: 1.75, ...glassSurface }}>
+              <Typography variant="overline" color="text.secondary" fontWeight={700} sx={{ letterSpacing: 0.1 }}>
+                当前信念
+              </Typography>
+              <Stack spacing={0.5} mt={0.5}>
+                {d.currentBeliefs.map((b, i) => (
+                  <Typography key={i} variant="body2">• {b}</Typography>
+                ))}
+              </Stack>
+            </Paper>
+          )}
+
+          {d.decisions.length > 0 && (
+            <Paper elevation={0} sx={{ p: 1.75, ...glassSurface }}>
+              <Typography variant="overline" color="text.secondary" fontWeight={700} sx={{ letterSpacing: 0.1 }}>
+                已做决策
+              </Typography>
+              <Stack spacing={0.5} mt={0.5}>
+                {d.decisions.map((dec, i) => (
+                  <Typography key={i} variant="body2">• {dec}</Typography>
+                ))}
+              </Stack>
+            </Paper>
+          )}
+
+          {d.openQuestions.length > 0 && (
+            <Paper elevation={0} sx={{ p: 1.75, ...glassSurface }}>
+              <Typography variant="overline" color="text.secondary" fontWeight={700} sx={{ letterSpacing: 0.1 }}>
+                待解问题
+              </Typography>
+              <Stack spacing={0.5} mt={0.5}>
+                {d.openQuestions.map((q, i) => (
+                  <Typography key={i} variant="body2" color="warning.main">? {q}</Typography>
+                ))}
+              </Stack>
+            </Paper>
+          )}
+
+          {d.nextSteps.length > 0 && (
+            <Paper elevation={0} sx={{ p: 1.75, ...glassSurface }}>
+              <Typography variant="overline" color="text.secondary" fontWeight={700} sx={{ letterSpacing: 0.1 }}>
+                后续行动
+              </Typography>
+              <Stack spacing={0.5} mt={0.5}>
+                {d.nextSteps.map((s, i) => (
+                  <Typography key={i} variant="body2" color="success.main">→ {s}</Typography>
+                ))}
+              </Stack>
+            </Paper>
+          )}
+
+          {/* Rendered preview — what Agent sees */}
+          <Paper elevation={0} sx={{ p: 1.75, bgcolor: alpha(theme.palette.info.main, 0.05), border: `1px solid ${alpha(theme.palette.info.main, 0.2)}`, borderRadius: 1 }}>
+            <Typography variant="caption" color="info.main" fontWeight={700} display="block" gutterBottom>
+              注入预览（Agent 实际看到的内容）
+            </Typography>
+            <Typography variant="caption" component="pre" sx={{ whiteSpace: "pre-wrap", fontFamily: "monospace", color: "text.secondary" }}>
+              {d.rendered || "(空)"}
+            </Typography>
+          </Paper>
+        </Stack>
+      )}
+
+      {/* Edit form */}
+      {editing && (
+        <Stack spacing={1.5}>
+          <Paper elevation={0} sx={{ p: 2, ...glassSurface }}>
+            <Stack spacing={1.5}>
+              <TextField size="small" label="项目标题" value={editTitle} onChange={e => setEditTitle(e.target.value)} fullWidth />
+              <TextField size="small" label="项目描述 (brief)" value={editBrief} onChange={e => setEditBrief(e.target.value)} fullWidth multiline rows={2} />
+              <TextField size="small" label="当前信念（每行一条）" value={editBeliefs} onChange={e => setEditBeliefs(e.target.value)} fullWidth multiline rows={4} placeholder="Rust 是正确的后端选择&#10;记忆系统需要分层设计" />
+              <TextField size="small" label="已做决策（每行一条）" value={editDecisions} onChange={e => setEditDecisions(e.target.value)} fullWidth multiline rows={4} placeholder="使用 Tauri 桌面框架&#10;采用 TF-IDF 召回" />
+              <TextField size="small" label="待解问题（每行一条）" value={editQuestions} onChange={e => setEditQuestions(e.target.value)} fullWidth multiline rows={3} placeholder="如何控制 Dossier token 预算?" />
+              <TextField size="small" label="后续行动（每行一条）" value={editNextSteps} onChange={e => setEditNextSteps(e.target.value)} fullWidth multiline rows={3} placeholder="补充前端测试&#10;合并到 main" />
+            </Stack>
+          </Paper>
+        </Stack>
+      )}
+    </Stack>
   );
 }

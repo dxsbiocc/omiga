@@ -25,6 +25,7 @@ import {
   InputAdornment,
   FormControlLabel,
   Switch,
+  Autocomplete,
   alpha,
   useTheme,
 } from "@mui/material";
@@ -48,6 +49,7 @@ import { notifyProviderChanged } from "../../utils/providerEvents";
 type ProviderInfo = {
   name: string;
   defaultModel: string;
+  models: string[];
   placeholder: string;
   docsUrl: string;
   modelHelper?: string;
@@ -57,62 +59,88 @@ const PROVIDER_INFO: Record<string, ProviderInfo> = {
   anthropic: {
     name: "Anthropic (Claude)",
     defaultModel: "claude-3-5-sonnet-20241022",
+    models: [
+      "claude-opus-4-7",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5-20251001",
+      "claude-3-5-sonnet-20241022",
+      "claude-3-5-haiku-20241022",
+      "claude-3-opus-20240229",
+    ],
     placeholder: "sk-ant-api03-...",
     docsUrl: "https://console.anthropic.com/settings/keys",
   },
   openai: {
     name: "OpenAI (GPT)",
     defaultModel: "gpt-4o",
+    models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1", "o1-mini", "o3", "o3-mini", "o4-mini"],
     placeholder: "sk-...",
     docsUrl: "https://platform.openai.com/api-keys",
   },
   azure: {
     name: "Azure OpenAI",
     defaultModel: "gpt-4",
+    models: ["gpt-4", "gpt-4o", "gpt-4-turbo", "gpt-35-turbo"],
     placeholder: "https://{resource}.openai.azure.com/",
     docsUrl: "https://portal.azure.com/",
   },
   google: {
     name: "Google (Gemini)",
     defaultModel: "gemini-1.5-pro",
+    models: [
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+      "gemini-2.0-flash",
+      "gemini-1.5-pro",
+      "gemini-1.5-flash",
+    ],
     placeholder: "AIzaSy...",
     docsUrl: "https://aistudio.google.com/app/apikey",
   },
   minimax: {
     name: "MiniMax",
     defaultModel: "abab6.5-chat",
+    models: ["abab6.5-chat", "abab6.5s-chat", "abab5.5-chat"],
     placeholder: "Enter MiniMax API Key",
     docsUrl: "https://www.minimaxi.com/user-center/basic-information/interface-key",
   },
   alibaba: {
     name: "Alibaba (通义千问/Qwen)",
     defaultModel: "qwen-max",
+    models: ["qwen-max", "qwen-plus", "qwen-turbo", "qwen-long", "qwen3-235b-a22b"],
     placeholder: "sk-...",
     docsUrl: "https://dashscope.console.aliyun.com/apiKey",
   },
   deepseek: {
     name: "DeepSeek",
-    defaultModel: "deepseek-chat",
+    defaultModel: "deepseek-v4-flash",
+    models: ["deepseek-v4-flash", "deepseek-v4-pro"],
     placeholder: "sk-...",
     docsUrl: "https://platform.deepseek.com/api_keys",
+    modelHelper:
+      "推荐模型：deepseek-v4-flash（快速，支持思考模式）或 deepseek-v4-pro（高性能，支持思考模式）。" +
+      "旧模型 deepseek-chat / deepseek-reasoner 已于 2026/07/24 弃用。",
   },
   zhipu: {
     name: "Zhipu (ChatGLM)",
     defaultModel: "glm-4",
+    models: ["glm-4", "glm-4-flash", "glm-4-air", "glm-4-airx", "glm-z1"],
     placeholder: "Enter API Key",
     docsUrl: "https://open.bigmodel.cn/usercenter/apikey",
   },
   moonshot: {
     name: "Moonshot (Kimi/月之暗面)",
     defaultModel: "kimi-k2-0905-preview",
+    models: ["kimi-k2-0905-preview", "kimi-k2.5", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
     placeholder: "sk-...",
     docsUrl: "https://platform.moonshot.ai/docs/overview",
     modelHelper:
-      "Do not use “Kimi For Coding” / coding-only model ids or the coding API base — they only work in Kimi CLI, Claude Code, Roo Code, etc. Use general models: kimi-k2-0905-preview, kimi-k2.5, or moonshot-v1-8k.",
+      "Do not use 'Kimi For Coding' / coding-only model ids or the coding API base — they only work in Kimi CLI, Claude Code, Roo Code, etc. Use general models: kimi-k2-0905-preview, kimi-k2.5, or moonshot-v1-8k.",
   },
   custom: {
     name: "Custom (OpenAI-compatible)",
     defaultModel: "",
+    models: [],
     placeholder: "Enter API Key",
     docsUrl: "",
   },
@@ -124,8 +152,10 @@ interface ProviderConfigEntry {
   model: string;
   apiKeyPreview: string;
   baseUrl: string | null;
-  /** Moonshot / Custom：是否启用 `thinking` + `reasoning_content` */
+  /** Moonshot / Custom / DeepSeek：是否启用 `thinking` + `reasoning_content` */
   thinking?: boolean | null;
+  /** DeepSeek only: "high" or "max" */
+  reasoningEffort?: string | null;
   enabled: boolean;
   isSessionActive: boolean;
   isDefault: boolean;
@@ -168,12 +198,13 @@ export function ProviderManager({
   const [formApiKey, setFormApiKey] = useState("");
   const [formModel, setFormModel] = useState("");
   const [formBaseUrl, setFormBaseUrl] = useState("");
-  const [formThinking, setFormThinking] = useState(false);
+  const [formThinking, setFormThinking] = useState(true);
+  const [formReasoningEffort, setFormReasoningEffort] = useState<"high" | "max">("high");
   const [showApiKey, setShowApiKey] = useState(false);
   const [formSetAsDefault, setFormSetAsDefault] = useState(true);
 
   const providerSupportsThinking = (providerType: string) =>
-    providerType === "moonshot" || providerType === "custom";
+    providerType === "moonshot" || providerType === "custom" || providerType === "deepseek";
 
   // Load providers on mount
   const loadProviders = useCallback(async () => {
@@ -257,7 +288,8 @@ export function ProviderManager({
     setFormApiKey("");
     setFormModel(PROVIDER_INFO["deepseek"].defaultModel);
     setFormBaseUrl("");
-    setFormThinking(false);
+    setFormThinking(true);
+    setFormReasoningEffort("high");
     setFormSetAsDefault(true);
     setDialogError(null);
     setDialogOpen(true);
@@ -273,6 +305,9 @@ export function ProviderManager({
     setFormModel(provider.model);
     setFormBaseUrl(provider.baseUrl || "");
     setFormThinking(provider.thinking === true);
+    setFormReasoningEffort(
+      provider.reasoningEffort === "max" ? "max" : "high",
+    );
     setFormSetAsDefault(false);
     setDialogError(null);
     setDialogOpen(true);
@@ -320,13 +355,19 @@ export function ProviderManager({
       // Tauri maps camelCase keys to Rust snake_case. Pass explicit booleans for Moonshot/Custom so
       // `thinking` is never omitted when false (Some(false) in Rust).
       await invoke("save_provider_config", {
-        name: formName.trim(),
-        providerType: formProviderType,
-        apiKey: apiKeyToSave,
-        model: formModel.trim(),
-        baseUrl: formBaseUrl.trim() || undefined,
-        setAsDefault: formSetAsDefault,
-        thinking: providerSupportsThinking(formProviderType) ? formThinking : null,
+        request: {
+          name: formName.trim(),
+          providerType: formProviderType,
+          apiKey: apiKeyToSave,
+          model: formModel.trim(),
+          baseUrl: formBaseUrl.trim() || undefined,
+          setAsDefault: formSetAsDefault,
+          thinking: providerSupportsThinking(formProviderType) ? formThinking : null,
+          reasoningEffort:
+            formProviderType === "deepseek" && formThinking
+              ? formReasoningEffort
+              : null,
+        },
       });
 
       await loadProviders();
@@ -688,6 +729,11 @@ export function ProviderManager({
                   setFormModel(PROVIDER_INFO[v]?.defaultModel || "");
                   if (!providerSupportsThinking(v)) {
                     setFormThinking(false);
+                  } else {
+                    setFormThinking(v === "deepseek");
+                  }
+                  if (v !== "deepseek") {
+                    setFormReasoningEffort("high");
                   }
                 }}
               >
@@ -732,18 +778,29 @@ export function ProviderManager({
               }}
             />
 
-            <TextField
-              label="Model *"
+            <Autocomplete
+              freeSolo
+              options={PROVIDER_INFO[formProviderType]?.models ?? []}
               value={formModel}
-              onChange={(e) => setFormModel(e.target.value)}
-              placeholder={PROVIDER_INFO[formProviderType]?.defaultModel}
-              helperText={
-                (PROVIDER_INFO[formProviderType]?.modelHelper
-                  ? `${PROVIDER_INFO[formProviderType].modelHelper} `
-                  : "") +
-                `Exact model ID for ${PROVIDER_INFO[formProviderType]?.name || formProviderType}.`
-              }
-              fullWidth
+              inputValue={formModel}
+              onInputChange={(_, value) => setFormModel(value)}
+              onChange={(_, value) => {
+                if (typeof value === "string") setFormModel(value);
+              }}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="Model *"
+                  placeholder={PROVIDER_INFO[formProviderType]?.defaultModel}
+                  helperText={
+                    (PROVIDER_INFO[formProviderType]?.modelHelper
+                      ? `${PROVIDER_INFO[formProviderType].modelHelper} `
+                      : "") +
+                    `Exact model ID for ${PROVIDER_INFO[formProviderType]?.name || formProviderType}.`
+                  }
+                  fullWidth
+                />
+              )}
             />
 
             {/* Base URL (optional) */}
@@ -758,28 +815,6 @@ export function ProviderManager({
 
             {providerSupportsThinking(formProviderType) && (
               <>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ display: "block", fontWeight: 600 }}
-                >
-                  Thinking（本配置专用）
-                </Typography>
-                <Typography
-                  variant="caption"
-                  color="text.disabled"
-                  sx={{ display: "block", mb: 0.5, lineHeight: 1.5 }}
-                >
-                  仅对模型 ID 含{" "}
-                  <Typography component="span" fontFamily="monospace" fontSize="0.7rem">
-                    kimi-k2.5
-                  </Typography>{" "}
-                  的 Kimi 请求生效：接口要求 thinking 为对象 type 为 enabled/disabled（不能传布尔）。流式字段{" "}
-                  <Typography component="span" fontFamily="monospace" fontSize="0.7rem">
-                    reasoning_content
-                  </Typography>
-                  。自定义 Base 需为 Moonshot 域名时才会附带。
-                </Typography>
                 <FormControlLabel
                   control={
                     <Switch
@@ -790,21 +825,32 @@ export function ProviderManager({
                     />
                   }
                   label={
-                    <Box>
-                      <Typography variant="body2" fontWeight={600}>
-                        启用 Thinking
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        关闭时请求传 thinking: false（仅 Moonshot / 自定义；DeepSeek 无此项）
-                      </Typography>
-                    </Box>
+                    <Typography variant="body2" fontWeight={600}>
+                      启用 Thinking
+                    </Typography>
                   }
-                  sx={{
-                    alignItems: "flex-start",
-                    ml: 0,
-                    "& .MuiFormControlLabel-label": { mt: 0.25 },
-                  }}
+                  sx={{ ml: 0 }}
                 />
+                {formProviderType === "deepseek" && formThinking && (
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Reasoning Effort</InputLabel>
+                    <Select
+                      value={formReasoningEffort}
+                      label="Reasoning Effort"
+                      onChange={(e) =>
+                        setFormReasoningEffort(e.target.value as "high" | "max")
+                      }
+                      disabled={loading}
+                    >
+                      <MenuItem value="high">
+                        high — 标准推理（适合大多数场景）
+                      </MenuItem>
+                      <MenuItem value="max">
+                        max — 深度推理（适合复杂 Agent 任务）
+                      </MenuItem>
+                    </Select>
+                  </FormControl>
+                )}
               </>
             )}
 

@@ -644,7 +644,7 @@ impl BaseEnvironment for SshEnvironment {
         // 关闭 SSH 控制连接
         if self.control_socket.exists() {
             let _ = Command::new("ssh")
-                .args(&[
+                .args([
                     "-o",
                     &format!("ControlPath={}", self.control_socket.display()),
                     "-O",

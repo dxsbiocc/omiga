@@ -15,17 +15,23 @@ use serde::{Deserialize, Serialize};
 
 pub const DESCRIPTION: &str = r#"Search the local knowledge base (wiki + session memory) for relevant information.
 
-Use this tool BEFORE web_search whenever you need to find information about:
+Use this tool BEFORE search whenever you need to find information about:
 - Past conversations, decisions, or results
 - Project-specific knowledge or notes
 - Prior analyses, findings, or summaries
 - Any information the user may have shared in previous sessions
+- Previously accessed web pages or papers (scope="sources")
 
 Arguments:
 - `query`: natural-language query or keyword phrase
 - `limit`: max results to return (default 5, max 20)
-- `scope`: which stores to search — "implicit" (session history), "wiki" (explicit pages),
-           "permanent" (cross-project wiki), or "all" (default)
+- `scope`: which stores to search —
+    "implicit"   — auto-indexed session history
+    "wiki"       — project wiki pages
+    "long_term"  — promoted decisions/insights (project + global)
+    "permanent"  — cross-project wiki + global long-term
+    "sources"    — web pages and papers previously fetched in this project
+    "all"        — everything (default)
 
 Returns a formatted excerpt of matching content with source paths."#;
 
@@ -61,7 +67,7 @@ impl StreamOutput for RecallOutput {
             format!(
                 "No knowledge base results found for query: \"{}\"\n\n\
                  The knowledge base is empty or does not contain relevant content.\n\
-                 Proceed with web_search or other sources.",
+                 Proceed with search or other sources.",
                 self.query
             )
         } else {
@@ -95,48 +101,56 @@ impl super::ToolImpl for RecallTool {
             });
         }
 
-        let search_implicit = scope == "all" || scope == "implicit";
-        let search_wiki = scope == "all" || scope == "wiki";
-        let search_permanent = scope == "all" || scope == "permanent";
+        let mem_cfg = crate::domain::memory::load_resolved_config(project_root)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("failed to load memory config: {}", e),
+            })?;
+        let memory = crate::domain::memory::MemorySystem::with_config(project_root, mem_cfg);
 
-        let mut sections: Vec<String> = Vec::new();
-        let mut total_results = 0usize;
-
-        // ── 1. Implicit memory (PageIndex over session history) ──────────────────
-        if search_implicit {
-            if let Some(implicit_text) =
-                query_implicit_memory(project_root, &query, limit).await
-            {
-                total_results += 1;
-                sections.push(implicit_text);
-            }
+        // "sources" scope: query the source registry directly.
+        if scope == "sources" {
+            let lt_root = memory.long_term_path();
+            let matches =
+                crate::domain::memory::source_registry::search_sources(&lt_root, &query, limit)
+                    .await;
+            let content = format_source_results(&matches);
+            let out = RecallOutput {
+                query,
+                results_found: matches.len(),
+                content,
+            };
+            return Ok(out.into_stream());
         }
 
-        // ── 2. Wiki pages (explicit memory) ─────────────────────────────────────
-        if search_wiki {
-            if let Some(wiki_text) =
-                search_wiki_pages(project_root, &query, limit, false).await
-            {
-                total_results += 1;
-                sections.push(wiki_text);
-            }
-        }
+        let mut unified = memory
+            .query_with_session(ctx.working_memory_context.as_deref(), &query, limit)
+            .await;
 
-        // ── 3. Permanent (cross-project) wiki ────────────────────────────────────
-        if search_permanent {
-            if let Some(perm_text) =
-                search_permanent_wiki(&query, limit).await
-            {
-                total_results += 1;
-                sections.push(perm_text);
-            }
-        }
-
-        let content = if sections.is_empty() {
-            String::new()
-        } else {
-            sections.join("\n\n")
-        };
+        unified.results.retain(|result| match scope.as_str() {
+            "implicit" => matches!(
+                result.source_type,
+                crate::domain::memory::MemorySourceType::Implicit
+            ),
+            "wiki" => matches!(
+                result.source_type,
+                crate::domain::memory::MemorySourceType::KnowledgeBaseProject
+                    | crate::domain::memory::MemorySourceType::KnowledgeBaseGlobal
+            ),
+            "long_term" => matches!(
+                result.source_type,
+                crate::domain::memory::MemorySourceType::LongTermProject
+                    | crate::domain::memory::MemorySourceType::LongTermGlobal
+            ),
+            "permanent" => matches!(
+                result.source_type,
+                crate::domain::memory::MemorySourceType::LongTermGlobal
+                    | crate::domain::memory::MemorySourceType::KnowledgeBaseGlobal
+            ),
+            _ => true,
+        });
+        let total_results = unified.results.len();
+        let content = format_unified_results(&unified.results);
 
         let out = RecallOutput {
             query,
@@ -147,161 +161,41 @@ impl super::ToolImpl for RecallTool {
     }
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Query the pageindex (implicit / session memory).
-async fn query_implicit_memory(
-    project_root: &std::path::Path,
-    query: &str,
-    limit: usize,
-) -> Option<String> {
-    use crate::domain::memory::load_resolved_config;
-    use crate::domain::pageindex::{IndexConfig, PageIndex, QueryEngine};
-
-    let mem_cfg = load_resolved_config(project_root).await.ok()?;
-    let implicit = mem_cfg.implicit_path(project_root);
-    let mut pageindex = PageIndex::with_memory_dir(project_root, &implicit, IndexConfig::default());
-
-    match pageindex.load_tree().await {
-        Ok(Some(tree)) => *pageindex.tree_mut() = tree,
-        Ok(None) => return None,
-        Err(e) => {
-            tracing::debug!(target: "omiga::recall", "implicit memory load failed: {e}");
-            return None;
-        }
+fn format_source_results(
+    matches: &[crate::domain::memory::source_registry::SourceMatch],
+) -> String {
+    if matches.is_empty() {
+        return String::new();
     }
-
-    let results = pageindex.query(query, limit).await.ok()?;
-    if results.is_empty() {
-        return None;
-    }
-
-    let formatted = QueryEngine::new().format_results_as_context(&results);
-    Some(format!("### Implicit memory (session history)\n\n{formatted}"))
-}
-
-/// Keyword search in wiki markdown pages under the project memory directory.
-async fn search_wiki_pages(
-    project_root: &std::path::Path,
-    query: &str,
-    limit: usize,
-    permanent: bool,
-) -> Option<String> {
-    use crate::domain::memory::load_resolved_config;
-    use tokio::fs;
-
-    let wiki_dir = if permanent {
-        crate::domain::memory::config::permanent_wiki_path()
-    } else {
-        let mem_cfg = load_resolved_config(project_root).await.ok()?;
-        mem_cfg.wiki_path(project_root)
-    };
-
-    if !wiki_dir.is_dir() {
-        return None;
-    }
-
-    let mut read_dir = fs::read_dir(&wiki_dir).await.ok()?;
-    let mut pages: Vec<(String, String)> = Vec::new(); // (filename, content)
-    while let Ok(Some(entry)) = read_dir.next_entry().await {
-        let path = entry.path();
-        if path.extension().map_or(false, |e| e.eq_ignore_ascii_case("md")) {
-            if let Ok(content) = fs::read_to_string(&path).await {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                pages.push((name, content));
-            }
-        }
-    }
-
-    if pages.is_empty() {
-        return None;
-    }
-
-    // Simple case-insensitive keyword match — score by number of query-term hits.
-    let keywords: Vec<String> = query
-        .split_whitespace()
-        .filter(|w| w.len() > 2)
-        .map(|w| w.to_lowercase())
-        .collect();
-
-    let mut scored: Vec<(usize, String, String)> = pages
-        .into_iter()
-        .filter_map(|(name, content)| {
-            let lc = content.to_lowercase();
-            let score: usize = keywords.iter().map(|kw| lc.matches(kw.as_str()).count()).sum();
-            if score == 0 {
-                None
-            } else {
-                Some((score, name, content))
-            }
-        })
-        .collect();
-
-    if scored.is_empty() {
-        return None;
-    }
-
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
-    scored.truncate(limit);
-
-    let label = if permanent {
-        "Permanent (cross-project) wiki"
-    } else {
-        "Project wiki (explicit memory)"
-    };
-
-    let mut out = format!("### {label}\n\n");
-    for (_, name, content) in &scored {
-        let excerpt = excerpt_around_keywords(&content, &keywords, 400);
+    let mut out = String::new();
+    for m in matches {
         out.push_str(&format!(
-            "**`{name}`**\n\n{excerpt}\n\n---\n\n"
+            "### {} [SourceRegistry]\n\n*URL: `{}`*  *Domain: {}*\n\n{}\n\n---\n\n",
+            m.title.as_deref().unwrap_or(&m.url),
+            m.url,
+            m.domain,
+            m.gist.as_deref().unwrap_or("(no summary available)"),
         ));
     }
-    Some(out)
+    out
 }
 
-/// Search the permanent cross-project wiki.
-async fn search_permanent_wiki(query: &str, limit: usize) -> Option<String> {
-    search_wiki_pages(std::path::Path::new(""), query, limit, true).await
-}
-
-/// Return up to `max_chars` of content centred on the first keyword hit.
-fn excerpt_around_keywords(content: &str, keywords: &[String], max_chars: usize) -> String {
-    let lc = content.to_lowercase();
-    let hit_pos = keywords
-        .iter()
-        .filter_map(|kw| lc.find(kw.as_str()))
-        .min()
-        .unwrap_or(0);
-
-    let half = max_chars / 2;
-    let start = hit_pos.saturating_sub(half);
-    // Align to a char boundary.
-    let start = content
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i >= start)
-        .next()
-        .unwrap_or(0);
-    let end = (start + max_chars).min(content.len());
-    let end = content
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i >= end)
-        .next()
-        .unwrap_or(content.len());
-
-    let mut excerpt = content[start..end].to_string();
-    if start > 0 {
-        excerpt = format!("…{excerpt}");
+fn format_unified_results(results: &[crate::domain::memory::MemoryQueryMatch]) -> String {
+    if results.is_empty() {
+        return String::new();
     }
-    if end < content.len() {
-        excerpt.push('…');
+
+    let mut out = String::new();
+    for result in results {
+        out.push_str(&format!(
+            "### {} [{}]\n\n*Source: `{}`*\n\n{}\n\n---\n\n",
+            result.title,
+            result.source_type.label(),
+            result.path,
+            result.excerpt
+        ));
     }
-    excerpt
+    out
 }
 
 pub fn schema() -> ToolSchema {
@@ -323,8 +217,8 @@ pub fn schema() -> ToolSchema {
                 },
                 "scope": {
                     "type": "string",
-                    "description": "Which memory stores to search: \"implicit\" (session history), \"wiki\" (project wiki), \"permanent\" (cross-project wiki), or \"all\" (default)",
-                    "enum": ["all", "implicit", "wiki", "permanent"]
+                    "description": "Which memory stores to search: \"implicit\" (session history), \"wiki\" (project wiki), \"long_term\" (promoted decisions+insights), \"permanent\" (cross-project wiki+long-term), \"sources\" (previously fetched web pages/papers), or \"all\" (default)",
+                    "enum": ["all", "implicit", "wiki", "long_term", "permanent", "sources"]
                 }
             },
             "required": ["query"]

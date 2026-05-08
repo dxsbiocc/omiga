@@ -17,6 +17,7 @@ use super::{ToolContext, ToolError};
 use crate::execution::{create_environment, BaseEnvironment, EnvironmentConfig, EnvironmentType};
 use crate::llm::config::{load_config_file, merged_ssh_configs};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -34,6 +35,12 @@ impl std::fmt::Debug for EnvStore {
 
 struct StoreInner {
     envs: Mutex<HashMap<String, Arc<Mutex<dyn BaseEnvironment>>>>,
+}
+
+impl Default for EnvStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EnvStore {
@@ -107,17 +114,43 @@ impl EnvStore {
 /// Rules (mirrors `bash.rs::ssh_remote_cwd`):
 /// - Absolute paths (`/…` or `~/…`) are used verbatim.
 /// - Relative paths are prefixed with:
-///   - `OMIGA_SSH_REMOTE_ROOT` (default `~`) for SSH
+///   - the active session project root for SSH
 ///   - `/workspace` for sandbox environments
 pub fn remote_path(ctx: &ToolContext, path: &str) -> String {
+    let path = path.trim();
     if path.starts_with('/') || path.starts_with("~/") {
         return path.to_string();
     }
     let root = match ctx.execution_environment.as_str() {
-        "ssh" => std::env::var("OMIGA_SSH_REMOTE_ROOT").unwrap_or_else(|_| "~".to_string()),
+        "ssh" => ssh_remote_root_for_project(&ctx.project_root),
         _ => "/workspace".to_string(),
     };
-    format!("{}/{}", root.trim_end_matches('/'), path)
+    let mut rel = path;
+    while let Some(rest) = rel.strip_prefix("./") {
+        rel = rest;
+    }
+    if rel.is_empty() || rel == "." {
+        root
+    } else {
+        format!("{}/{}", root.trim_end_matches('/'), rel)
+    }
+}
+
+/// Remote project root for SSH sessions.
+///
+/// SSH session project paths are remote POSIX paths selected by the user in the
+/// workspace picker. Falling back to `~` makes large operator results accumulate
+/// in the user's home directory, so the session path is authoritative whenever
+/// it is set. `OMIGA_SSH_REMOTE_ROOT` remains only as a compatibility fallback
+/// for legacy callers that have no usable project path.
+pub fn ssh_remote_root_for_project(project_root: &Path) -> String {
+    let root = project_root.to_string_lossy().replace('\\', "/");
+    let root = root.trim().trim_end_matches('/');
+    if root.is_empty() || root == "." {
+        std::env::var("OMIGA_SSH_REMOTE_ROOT").unwrap_or_else(|_| "~".to_string())
+    } else {
+        root.to_string()
+    }
 }
 
 // ─── Config builder ───────────────────────────────────────────────────────────
@@ -160,7 +193,7 @@ fn build_ssh_config(ctx: &ToolContext, timeout_ms: u64) -> Result<EnvironmentCon
             message: "SSH: 配置缺少 User".to_string(),
         })?;
 
-    let remote_root = std::env::var("OMIGA_SSH_REMOTE_ROOT").unwrap_or_else(|_| "~".to_string());
+    let remote_root = ssh_remote_root_for_project(&ctx.project_root);
     let remote_cwd = if let Ok(rel) = ctx.cwd.strip_prefix(&ctx.project_root) {
         let r = rel.to_string_lossy().replace('\\', "/");
         let r = r.trim_start_matches('/');
@@ -261,5 +294,41 @@ fn build_sandbox_config(
                 backend
             ),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_remote_path_uses_session_project_root() {
+        let ctx = ToolContext::new("/remote/work/data/query")
+            .with_execution_environment("ssh")
+            .with_ssh_server(Some("gpu".to_string()));
+
+        assert_eq!(remote_path(&ctx, "."), "/remote/work/data/query");
+        assert_eq!(
+            remote_path(&ctx, ".omiga/runs/oprun_123"),
+            "/remote/work/data/query/.omiga/runs/oprun_123"
+        );
+        assert_eq!(
+            remote_path(&ctx, "./nested/file.txt"),
+            "/remote/work/data/query/nested/file.txt"
+        );
+        assert_eq!(remote_path(&ctx, "/tmp/file.txt"), "/tmp/file.txt");
+    }
+
+    #[test]
+    fn sandbox_remote_path_keeps_workspace_root() {
+        let ctx = ToolContext::new("/local/project")
+            .with_execution_environment("sandbox")
+            .with_sandbox_backend("docker");
+
+        assert_eq!(remote_path(&ctx, "."), "/workspace");
+        assert_eq!(
+            remote_path(&ctx, ".omiga/runs/oprun_123"),
+            "/workspace/.omiga/runs/oprun_123"
+        );
     }
 }

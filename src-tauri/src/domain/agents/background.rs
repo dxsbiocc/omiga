@@ -60,6 +60,10 @@ pub struct BackgroundAgentTask {
     pub session_id: String,
     /// 消息 ID
     pub message_id: String,
+    /// 调度 round ID（可选）
+    pub round_id: Option<String>,
+    /// 调度 plan ID（可选）
+    pub plan_id: Option<String>,
 }
 
 /// 后台 Agent 管理器
@@ -124,6 +128,8 @@ impl BackgroundAgentManager {
         description: String,
         session_id: String,
         message_id: String,
+        round_id: Option<String>,
+        plan_id: Option<String>,
     ) -> String {
         let task_id = Uuid::new_v4().to_string();
         let task = BackgroundAgentTask {
@@ -139,6 +145,8 @@ impl BackgroundAgentManager {
             output_path: None,
             session_id,
             message_id,
+            round_id,
+            plan_id,
         };
 
         let mut tasks = self.tasks.write().await;
@@ -260,6 +268,30 @@ impl BackgroundAgentManager {
             .unwrap()
             .insert(task_id.to_string(), token.clone());
         token
+    }
+
+    /// 取消所有 Running/Pending 状态的任务，返回取消的任务数量。
+    pub async fn cancel_all_running(&self) -> usize {
+        // Collect IDs first to avoid holding the async read lock while cancelling.
+        let running_ids: Vec<String> = {
+            let tasks = self.tasks.read().await;
+            tasks
+                .iter()
+                .filter(|(_, t)| {
+                    matches!(
+                        t.status,
+                        BackgroundAgentStatus::Running | BackgroundAgentStatus::Pending
+                    )
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+
+        let count = running_ids.len();
+        for id in running_ids {
+            self.cancel_task(&id).await;
+        }
+        count
     }
 
     /// 清理已完成/失败的旧任务

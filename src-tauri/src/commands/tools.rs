@@ -137,7 +137,14 @@ pub async fn execute_tool(
 
     // 构建工具上下文，注入取消令牌
     let web_keys = state.chat.web_search_api_keys.lock().await.clone();
-    let mut ctx = ToolContext::new(&project_root).with_web_search_api_keys(web_keys);
+    let web_use_proxy = crate::llm::config::load_web_use_proxy_setting();
+    let web_search_engine = crate::llm::config::load_web_search_engine_setting();
+    let web_search_methods = crate::llm::config::load_web_search_methods_setting();
+    let mut ctx = ToolContext::new(&project_root)
+        .with_web_search_api_keys(web_keys)
+        .with_web_use_proxy(web_use_proxy)
+        .with_web_search_engine(web_search_engine)
+        .with_web_search_methods(web_search_methods);
     ctx.cancel = cancel_token.clone();
 
     // 执行工具，获取流

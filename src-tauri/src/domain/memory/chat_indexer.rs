@@ -297,7 +297,7 @@ fn format_single_message(msg: &ChatMessage) -> String {
         ChatRole::Tool => ("Tool", "🔧"),
     };
 
-    let mut formatted = format!("## {} {} ({}\n\n", role_emoji, role_label, timestamp);
+    let mut formatted = format!("## {} {} ({})\n\n", role_emoji, role_label, timestamp);
 
     // Add content
     formatted.push_str(&msg.content);
@@ -310,7 +310,7 @@ fn format_single_message(msg: &ChatMessage) -> String {
             for call in calls {
                 formatted.push_str(&format!("- `{}` ({}\n", call.name, call.id));
             }
-            formatted.push_str("\n");
+            formatted.push('\n');
         }
     }
 

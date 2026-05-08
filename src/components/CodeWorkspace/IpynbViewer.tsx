@@ -1,7 +1,15 @@
-import { useCallback, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { useNotebookViewerStore, useUiStore } from "../../state";
-import SettingsIcon from "@mui/icons-material/Settings";
+import "../../lib/monacoWorkers";
+import {
+  useCallback,
+  useEffect,
+  memo,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
+import { useNotebookViewerStore } from "../../state";
 import Editor from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import ReactMarkdown from "react-markdown";
@@ -9,24 +17,59 @@ import remarkGfm from "remark-gfm";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { alpha } from "@mui/material/styles";
 import {
+  Alert,
   Box,
-  Button,
-  Chip,
   CircularProgress,
   Divider,
   IconButton,
+  Menu,
+  MenuItem,
+  Select,
   Stack,
   Tooltip,
   Typography,
   useTheme,
 } from "@mui/material";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
-import PlayCircleOutlineIcon from "@mui/icons-material/PlayCircleOutline";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
-import AddIcon from "@mui/icons-material/Add";
 import ClearAllIcon from "@mui/icons-material/ClearAll";
-import VerticalAlignTopIcon from "@mui/icons-material/VerticalAlignTop";
-import VerticalAlignBottomIcon from "@mui/icons-material/VerticalAlignBottom";
+import {
+  nextCellTargetAfterRun,
+  resolveNotebookEditorCommand,
+  type NotebookEditorCommand,
+  type NotebookEditorKey,
+} from "../../lib/notebookEvents";
+import {
+  NotebookExecutionController,
+  type NotebookExecutionControllerHost,
+  type NotebookExecutionStatus,
+} from "../../lib/notebookExecution";
+import { createTauriNotebookRuntimeAdapter } from "../../lib/notebookRuntimeAdapter";
+import {
+  registerWorkspaceContentProvider,
+  useWorkspaceStore,
+} from "../../state/workspaceStore";
+import {
+  NOTEBOOK_EXECUTABLE_KERNEL_OPTIONS,
+  OMIGA_NOTEBOOK_PLUGIN,
+  createEmptyNotebook,
+  createNotebookCell,
+  executionLanguageForNotebook,
+  getCellSource,
+  monacoLanguageForNotebook,
+  notebookKernelLanguage,
+  notebookKernelName,
+  parseNotebookContent,
+  renderableNotebookOutput,
+  serializeNotebook,
+  setCellSource,
+  setNotebookCellType,
+  setNotebookKernelLanguage,
+  type NotebookCell,
+  type NotebookDocument,
+  type NotebookOutput,
+  type NotebookParseResult,
+} from "../../lib/notebookPlugin";
 
 interface IpynbViewerProps {
   filePath: string;
@@ -34,139 +77,234 @@ interface IpynbViewerProps {
   onChange?: (value: string) => void;
 }
 
-interface NbCell {
-  cell_type: string;
-  source: string | string[];
-  metadata?: Record<string, unknown>;
-  outputs?: unknown[];
-  execution_count?: number | null;
+interface NotebookToolbarButtonProps {
+  title: string;
+  icon: ReactNode;
+  label?: string;
+  disabled?: boolean;
+  onClick?: () => void;
 }
 
-interface NotebookDoc {
-  cells: NbCell[];
-  metadata?: Record<string, unknown>;
-  nbformat?: number;
-  nbformat_minor?: number;
+function NotebookTooltip({
+  title,
+  children,
+}: {
+  title: ReactNode;
+  children: ReactElement;
+}) {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+  const tooltipBg = isDark
+    ? alpha(theme.palette.background.paper, 0.98)
+    : theme.palette.background.paper;
+
+  return (
+    <Tooltip
+      title={title}
+      arrow
+      enterDelay={650}
+      enterNextDelay={650}
+      leaveDelay={80}
+      componentsProps={{
+        tooltip: {
+          sx: {
+            bgcolor: tooltipBg,
+            color: "text.primary",
+            border: 1,
+            borderColor: "divider",
+            boxShadow: theme.shadows[4],
+            fontSize: 12,
+            fontWeight: 500,
+            px: 1,
+            py: 0.65,
+          },
+        },
+        arrow: {
+          sx: {
+            color: tooltipBg,
+            "&::before": {
+              border: 1,
+              borderColor: "divider",
+            },
+          },
+        },
+      }}
+    >
+      {children}
+    </Tooltip>
+  );
 }
 
-function getCellSource(cell: NbCell): string {
-  const s = cell.source;
-  if (typeof s === "string") return s;
-  if (Array.isArray(s)) return s.join("");
-  return "";
+function NotebookToolbarButton({
+  title,
+  icon,
+  label,
+  disabled = false,
+  onClick,
+}: NotebookToolbarButtonProps) {
+  return (
+    <NotebookTooltip title={title}>
+      <Box
+        component="button"
+        type="button"
+        disabled={disabled}
+        onClick={disabled ? undefined : onClick}
+        sx={(theme) => ({
+          appearance: "none",
+          border: 0,
+          bgcolor: "transparent",
+          color: disabled ? "text.disabled" : "text.secondary",
+          height: 32,
+          px: 0.75,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 0.7,
+          flexShrink: 0,
+          whiteSpace: "nowrap",
+          font: "inherit",
+          fontSize: 12,
+          fontWeight: 500,
+          cursor: disabled ? "not-allowed" : "pointer",
+          opacity: disabled ? 0.58 : 1,
+          borderRadius: 0.75,
+          userSelect: "none",
+	          "&:hover": disabled
+	            ? {}
+	            : {
+	                bgcolor: alpha(
+	                  theme.palette.primary.main,
+	                  theme.palette.mode === "dark" ? 0.18 : 0.08,
+	                ),
+	                color: "primary.main",
+	              },
+          "&:focus-visible": {
+            outline: `2px solid ${alpha(theme.palette.primary.main, 0.55)}`,
+            outlineOffset: -2,
+          },
+        })}
+      >
+        <Box
+          component="span"
+          sx={{
+            width: 16,
+            minWidth: 16,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            lineHeight: 1,
+          }}
+        >
+          {icon}
+        </Box>
+        {label ? (
+          <Box component="span" sx={{ display: "inline-block", lineHeight: "32px" }}>
+            {label}
+          </Box>
+        ) : null}
+      </Box>
+    </NotebookTooltip>
+  );
 }
 
-function setCellSource(cell: NbCell, text: string) {
-  cell.source = text;
+function NotebookInsertButtons({
+  onAddCode,
+  onAddMarkdown,
+}: {
+  onAddCode: () => void;
+  onAddMarkdown: () => void;
+}) {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
+  return (
+    <Stack
+      direction="row"
+      alignItems="center"
+      sx={{
+        bgcolor: isDark
+          ? alpha(theme.palette.background.paper, 0.96)
+          : alpha(theme.palette.background.paper, 0.98),
+        border: 1,
+        borderColor: "divider",
+        borderRadius: 1,
+        boxShadow: theme.shadows[3],
+        overflow: "hidden",
+      }}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <Box
+        component="button"
+        type="button"
+        onClick={onAddCode}
+        sx={(buttonTheme) => ({
+          appearance: "none",
+          border: 0,
+          bgcolor: "transparent",
+          color: "text.primary",
+          px: 1.25,
+          height: 30,
+          font: "inherit",
+          fontSize: 12,
+          fontWeight: 600,
+	          cursor: "pointer",
+	          "&:hover": {
+	            bgcolor: alpha(
+	              buttonTheme.palette.primary.main,
+	              buttonTheme.palette.mode === "dark" ? 0.18 : 0.08,
+	            ),
+	            color: "primary.main",
+	          },
+        })}
+      >
+        Add Code
+      </Box>
+      <Divider orientation="vertical" flexItem />
+      <Box
+        component="button"
+        type="button"
+        onClick={onAddMarkdown}
+        sx={(buttonTheme) => ({
+          appearance: "none",
+          border: 0,
+          bgcolor: "transparent",
+          color: "text.primary",
+          px: 1.25,
+          height: 30,
+          font: "inherit",
+          fontSize: 12,
+          fontWeight: 600,
+	          cursor: "pointer",
+	          "&:hover": {
+	            bgcolor: alpha(
+	              buttonTheme.palette.primary.main,
+	              buttonTheme.palette.mode === "dark" ? 0.18 : 0.08,
+	            ),
+	            color: "primary.main",
+	          },
+        })}
+      >
+        Add Markdown
+      </Box>
+    </Stack>
+  );
 }
 
-function serializeNotebook(nb: NotebookDoc): string {
-  return `${JSON.stringify(nb, null, 2)}\n`;
+function notebookEditorHeight(source: string, minHeight: number, maxHeight: number): number {
+  const lines = Math.max(1, source.split(/\r\n|\r|\n/).length);
+  return Math.min(maxHeight, Math.max(minHeight, lines * 20 + 14));
 }
 
-interface ExecuteResult {
-  stdout: string;
-  stderr: string;
-  exit_code: number;
+function cellLanguageLabel(cell: NotebookCell, kernelLang: string): string {
+  if (cell.cell_type === "markdown") return "Markdown";
+  if (cell.cell_type === "raw") return "Raw";
+  return monacoLanguageForNotebook(kernelLang).replace(/^\w/, (char) => char.toUpperCase());
 }
 
-function kernelLanguage(nb: NotebookDoc): string {
-  const ks = nb.metadata?.kernelspec as Record<string, unknown> | undefined;
-  const lang = ks?.language;
-  if (typeof lang === "string") return lang.trim().toLowerCase();
-  return "python";
-}
-
-function monacoLanguageForKernel(lang: string): string {
-  if (lang === "r" || lang === "ir") return "r";
-  return "python";
-}
-
-function nextGlobalExecutionCount(nb: NotebookDoc): number {
-  let m = 0;
-  for (const c of nb.cells) {
-    if (c.cell_type === "code" && typeof c.execution_count === "number" && !Number.isNaN(c.execution_count)) {
-      m = Math.max(m, c.execution_count);
-    }
-  }
-  return m + 1;
-}
-
-function buildOutputsFromRun(res: ExecuteResult): unknown[] {
-  const outs: unknown[] = [];
-  if (res.stdout) {
-    outs.push({ output_type: "stream", name: "stdout", text: res.stdout });
-  }
-  if (res.stderr) {
-    outs.push({ output_type: "stream", name: "stderr", text: res.stderr });
-  }
-  if (res.exit_code !== 0) {
-    outs.push({
-      output_type: "error",
-      ename: "ExitCode",
-      evalue: `Process exited with code ${res.exit_code}`,
-      traceback: [],
-    });
-  }
-  return outs;
-}
-
-function streamTextFromOutput(o: Record<string, unknown>): string {
-  const t = o.text;
-  if (typeof t === "string") return t;
-  if (Array.isArray(t)) return t.join("");
-  return "";
-}
-
-function textPlainFromData(data: Record<string, unknown>): string {
-  const v = data["text/plain"];
-  if (typeof v === "string") return v;
-  if (Array.isArray(v)) return v.join("");
-  return "";
-}
-
-function textHtmlFromData(data: Record<string, unknown>): string {
-  const v = data["text/html"];
-  if (typeof v === "string") return v;
-  if (Array.isArray(v)) return v.join("");
-  return "";
-}
-
-function jsonPrettyFromData(data: Record<string, unknown>): string | null {
-  const j = data["application/json"];
-  if (j === undefined) return null;
-  if (typeof j === "string") {
-    try {
-      return JSON.stringify(JSON.parse(j), null, 2);
-    } catch {
-      return j;
-    }
-  }
-  try {
-    return JSON.stringify(j, null, 2);
-  } catch {
-    return String(j);
-  }
-}
-
-function invokeLanguage(lang: string): string {
-  return lang === "r" || lang === "ir" ? "r" : "python";
-}
-
-function findNextCodeIndex(cells: NbCell[], from: number): number {
-  for (let i = from + 1; i < cells.length; i++) {
-    if (cells[i].cell_type === "code") return i;
-  }
-  return -1;
-}
-
-function OutputBlock({ output }: { output: Record<string, unknown> }) {
+function OutputBlock({ output }: { output: NotebookOutput }) {
   const theme = useTheme();
   const htmlSandboxAllowScripts = useNotebookViewerStore((s) => s.htmlSandboxAllowScripts);
-  const ot = output.output_type;
-  if (ot === "stream") {
-    const name = output.name === "stderr" ? "stderr" : "stdout";
-    const isErr = name === "stderr";
+  const renderable = renderableNotebookOutput(output);
+  if (renderable.kind === "stream") {
+    const isErr = renderable.name === "stderr";
     return (
       <Box
         component="pre"
@@ -185,21 +323,17 @@ function OutputBlock({ output }: { output: Record<string, unknown> }) {
           borderColor: isErr ? "error.dark" : "divider",
         }}
       >
-        {streamTextFromOutput(output)}
+        {renderable.text}
       </Box>
     );
   }
-  if (ot === "error") {
-    const ename = String(output.ename ?? "Error");
-    const evalue = String(output.evalue ?? "");
-    const tb = output.traceback;
-    const tbStr = Array.isArray(tb) ? tb.join("\n") : typeof tb === "string" ? tb : "";
+  if (renderable.kind === "error") {
     return (
       <Box sx={{ mt: 0.5 }}>
         <Typography variant="caption" color="error" component="div" sx={{ fontWeight: 600 }}>
-          {ename}: {evalue}
+          {renderable.ename}: {renderable.evalue}
         </Typography>
-        {tbStr ? (
+        {renderable.traceback ? (
           <Box
             component="pre"
             sx={{
@@ -214,442 +348,721 @@ function OutputBlock({ output }: { output: Record<string, unknown> }) {
               whiteSpace: "pre-wrap",
             }}
           >
-            {tbStr}
+            {renderable.traceback}
           </Box>
         ) : null}
       </Box>
     );
   }
-  if (ot === "display_data" || ot === "execute_result") {
-    const data = output.data as Record<string, unknown> | undefined;
-    if (!data) {
-      return (
-        <Typography variant="caption" color="text.secondary">
-          [空 display_data]
-        </Typography>
-      );
-    }
-
-    const png = data["image/png"];
-    if (typeof png === "string" && png.length > 0) {
-      return (
-        <Box sx={{ mt: 0.5, maxWidth: "100%" }}>
-          <Box
-            component="img"
-            src={`data:image/png;base64,${png}`}
-            alt=""
-            sx={{ maxWidth: "100%", height: "auto", borderRadius: 0.5 }}
-          />
-        </Box>
-      );
-    }
-
-    const jpeg = data["image/jpeg"];
-    if (typeof jpeg === "string" && jpeg.length > 0) {
-      return (
-        <Box sx={{ mt: 0.5, maxWidth: "100%" }}>
-          <Box
-            component="img"
-            src={`data:image/jpeg;base64,${jpeg}`}
-            alt=""
-            sx={{ maxWidth: "100%", height: "auto", borderRadius: 0.5 }}
-          />
-        </Box>
-      );
-    }
-
-    const svgRaw = data["image/svg+xml"];
-    if (typeof svgRaw === "string" && svgRaw.length > 0) {
-      const t = svgRaw.trim();
-      if (t.startsWith("<")) {
-        return (
-          <Box
-            sx={{ mt: 0.5, maxWidth: "100%", "& svg": { maxWidth: "100%", height: "auto" } }}
-            dangerouslySetInnerHTML={{ __html: svgRaw }}
-          />
-        );
-      }
-      return (
-        <Box sx={{ mt: 0.5, maxWidth: "100%" }}>
-          <Box
-            component="img"
-            src={`data:image/svg+xml;base64,${svgRaw}`}
-            alt=""
-            sx={{ maxWidth: "100%", height: "auto", borderRadius: 0.5 }}
-          />
-        </Box>
-      );
-    }
-
-    const html = textHtmlFromData(data);
-    if (html.length > 0) {
-      const iframeSandbox = htmlSandboxAllowScripts
-        ? "allow-scripts allow-same-origin allow-downloads"
-        : "allow-downloads allow-same-origin";
-      return (
-        <Box sx={{ mt: 0.5, width: "100%", maxWidth: "100%" }}>
-          <Box
-            component="iframe"
-            title="HTML output"
-            sandbox={iframeSandbox}
-            srcDoc={html}
-            sx={{
-              width: "100%",
-              minHeight: 120,
-              maxHeight: 480,
-              border: 1,
-              borderColor: "divider",
-              borderRadius: 0.5,
-              bgcolor: "background.default",
-            }}
-          />
-        </Box>
-      );
-    }
-
-    const jsonStr = jsonPrettyFromData(data);
-    if (jsonStr) {
-      return (
-        <Box
-          component="pre"
-          sx={{
-            m: 0,
-            mt: 0.5,
-            p: 1,
-            bgcolor: "action.hover",
-            borderRadius: 0.5,
-            fontSize: 11,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            fontFamily: "JetBrains Mono, Monaco, Consolas, monospace",
-            maxHeight: 360,
-            overflow: "auto",
-          }}
-        >
-          {jsonStr}
-        </Box>
-      );
-    }
-
-    const md = data["text/markdown"];
-    if (typeof md === "string" && md.length > 0) {
-      return (
-        <Box
-          className="ipynb-md-preview"
-          sx={{
-            mt: 0.5,
-            p: 1,
-            bgcolor: "action.hover",
-            borderRadius: 0.5,
-            fontSize: 12,
-            maxHeight: 400,
-            overflow: "auto",
-            "& pre": { overflow: "auto", p: 1, bgcolor: "background.paper", borderRadius: 1 },
-          }}
-        >
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
-        </Box>
-      );
-    }
-
-    const plain = textPlainFromData(data);
-    if (plain) {
-      return (
-        <Box
-          component="pre"
-          sx={{
-            m: 0,
-            mt: 0.5,
-            p: 1,
-            bgcolor: "action.hover",
-            borderRadius: 0.5,
-            fontSize: 11,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            fontFamily: "JetBrains Mono, Monaco, Consolas, monospace",
-          }}
-        >
-          {plain}
-        </Box>
-      );
-    }
-
+  if (renderable.kind === "image") {
     return (
-      <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
-        [display_data — 无可识别 MIME]
-      </Typography>
+      <Box sx={{ mt: 0.5, maxWidth: "100%" }}>
+        <Box
+          component="img"
+          src={renderable.src}
+          alt=""
+          sx={{ maxWidth: "100%", height: "auto", borderRadius: 0.5 }}
+        />
+      </Box>
+    );
+  }
+  if (renderable.kind === "html") {
+    const iframeSandbox = htmlSandboxAllowScripts
+      ? "allow-scripts allow-same-origin allow-downloads"
+      : "allow-downloads allow-same-origin";
+    return (
+      <Box sx={{ mt: 0.5, width: "100%", maxWidth: "100%" }}>
+        <Box
+          component="iframe"
+          title="HTML output"
+          sandbox={iframeSandbox}
+          srcDoc={renderable.html}
+          sx={{
+            width: "100%",
+            minHeight: 120,
+            maxHeight: 480,
+            border: 1,
+            borderColor: "divider",
+            borderRadius: 0.5,
+            bgcolor: "background.default",
+          }}
+        />
+      </Box>
+    );
+  }
+  if (renderable.kind === "json" || renderable.kind === "text") {
+    return (
+      <Box
+        component="pre"
+        sx={{
+          m: 0,
+          mt: 0.5,
+          p: 1,
+          bgcolor: "action.hover",
+          borderRadius: 0.5,
+          fontSize: 11,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          fontFamily: "JetBrains Mono, Monaco, Consolas, monospace",
+          maxHeight: renderable.kind === "json" ? 360 : undefined,
+          overflow: renderable.kind === "json" ? "auto" : undefined,
+        }}
+      >
+        {renderable.text}
+      </Box>
+    );
+  }
+  if (renderable.kind === "markdown") {
+    return (
+      <Box
+        className="ipynb-md-preview"
+        sx={{
+          mt: 0.5,
+          p: 1,
+          bgcolor: "action.hover",
+          borderRadius: 0.5,
+          fontSize: 12,
+          maxHeight: 400,
+          overflow: "auto",
+          "& pre": { overflow: "auto", p: 1, bgcolor: "background.paper", borderRadius: 1 },
+        }}
+      >
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{renderable.markdown}</ReactMarkdown>
+      </Box>
+    );
+  }
+  if (renderable.kind === "widget") {
+    return (
+      <Alert severity="info" variant="outlined" sx={{ mt: 0.5, py: 0.5 }}>
+        <Typography variant="caption">{renderable.text}</Typography>
+      </Alert>
     );
   }
   return (
     <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
-      [{String(ot)}]
+      [{renderable.outputType || "display_data — 无可识别 MIME"}]
     </Typography>
   );
 }
 
 interface NotebookCellBodyProps {
   index: number;
-  nb: NotebookDoc;
+  cell: NotebookCell;
+  cellSignature: string;
   kernelLang: string;
-  runningIdx: number | null;
+  isActive: boolean;
+  isRunning: boolean;
   runningAll: boolean;
+  setActiveCellIndex: (index: number) => void;
   updateCellSource: (index: number, text: string) => void;
+  updateCellType: (index: number, type: "code" | "markdown" | "raw") => void;
   insertCell: (index: number, type: "code" | "markdown", position: "before" | "after") => void;
-  runCell: (index: number) => void;
+  runCell: (index: number) => Promise<boolean>;
   clearOneOutput: (index: number) => void;
   deleteCell: (index: number) => void;
-  attachCodeEditorKeys: (
+  attachCellEditorKeys: (
     index: number,
     editorInst: editor.IStandaloneCodeEditor,
     monaco: typeof import("monaco-editor"),
   ) => () => void;
 }
 
-function NotebookCellBody({
+function notebookCellOutputSignature(cell: NotebookCell): string {
+  if (!Array.isArray(cell.outputs) || cell.outputs.length === 0) return "";
+  try {
+    return JSON.stringify(cell.outputs);
+  } catch {
+    return String(cell.outputs.length);
+  }
+}
+
+function notebookCellRenderSignature(cell: NotebookCell): string {
+  return [
+    cell.id ?? "",
+    cell.cell_type,
+    getCellSource(cell),
+    cell.execution_count ?? "",
+    notebookCellOutputSignature(cell),
+  ].join("\u001f");
+}
+
+function cloneNotebookForCellEdit(
+  nb: NotebookDocument,
+  index: number,
+): { nb: NotebookDocument; cell: NotebookCell } | null {
+  const originalCell = nb.cells[index];
+  if (!originalCell) return null;
+  const cells = nb.cells.slice();
+  const cell = { ...originalCell };
+  cells[index] = cell;
+  return {
+    nb: {
+      ...nb,
+      cells,
+    },
+    cell,
+  };
+}
+
+function notebookEditorKeyFromMonaco(
+  keyCode: number,
+  keyCodes: typeof import("monaco-editor").KeyCode,
+): NotebookEditorKey {
+  if (keyCode === keyCodes.Enter) return "Enter";
+  if (keyCode === keyCodes.UpArrow) return "ArrowUp";
+  if (keyCode === keyCodes.DownArrow) return "ArrowDown";
+  return "Other";
+}
+
+const NotebookCellBody = memo(function NotebookCellBody({
   index,
-  nb,
+  cell,
+  cellSignature: _cellSignature,
   kernelLang,
-  runningIdx,
+  isActive,
+  isRunning,
   runningAll,
+  setActiveCellIndex,
   updateCellSource,
+  updateCellType,
   insertCell,
   runCell,
   clearOneOutput,
   deleteCell,
-  attachCodeEditorKeys,
+  attachCellEditorKeys,
 }: NotebookCellBodyProps) {
   const theme = useTheme();
-  const cell = nb.cells[index];
   const isMd = cell.cell_type === "markdown";
   const isCode = cell.cell_type === "code";
-  const isRaw = cell.cell_type === "raw";
+  const selectedCellType =
+    cell.cell_type === "code" || cell.cell_type === "markdown" || cell.cell_type === "raw"
+      ? cell.cell_type
+      : "raw";
   const source = getCellSource(cell);
+  const editorTheme = theme.palette.mode === "dark" ? "vs-dark" : "vs";
+  const isDark = theme.palette.mode === "dark";
+  const notebookBg = isDark ? "#1e1e1e" : theme.palette.background.default;
+  const editorBg = isDark ? "#252526" : theme.palette.background.paper;
+  const cellBorder = isActive ? theme.palette.primary.main : "transparent";
+  const disabled = isRunning || runningAll;
+  const languageLabel = cellLanguageLabel(cell, kernelLang);
+  const cellTypeLabel =
+    selectedCellType === "markdown" ? "Md" : selectedCellType === "raw" ? "Raw" : "Code";
+  const editorHeight = notebookEditorHeight(source, isCode ? 44 : isMd ? 72 : 54, isCode ? 220 : 180);
+  const cellActionHoverBg = alpha(
+    theme.palette.primary.main,
+    isDark ? 0.18 : 0.08,
+  );
+  const cellActionButtonSx = {
+    width: 28,
+    height: 28,
+    borderRadius: 0,
+    color: "text.secondary",
+    "&:hover": {
+      color: "primary.main",
+      bgcolor: cellActionHoverBg,
+    },
+    "&.Mui-disabled": {
+      color: "text.disabled",
+    },
+  };
+  const [moreAnchorEl, setMoreAnchorEl] = useState<HTMLElement | null>(null);
+  const closeMoreMenu = () => setMoreAnchorEl(null);
+
   return (
     <Box
+      onClick={() => setActiveCellIndex(index)}
       sx={{
-        border: 1,
-        borderColor: "divider",
-        borderRadius: 1,
-        overflow: "hidden",
-        bgcolor: "background.paper",
+        position: "relative",
+        display: "grid",
+        gridTemplateColumns: "46px minmax(0, 1fr)",
+        columnGap: 0.5,
+        bgcolor: notebookBg,
+        pt: 0.5,
+        pb: 0.5,
+        "&:hover .ipynb-cell-actions, &:focus-within .ipynb-cell-actions": {
+          opacity: 1,
+          pointerEvents: "auto",
+        },
+        "&:hover .ipynb-insert-below, &:focus-within .ipynb-insert-below": {
+          opacity: 1,
+          pointerEvents: "auto",
+        },
       }}
     >
       <Stack
-        direction="row"
         alignItems="center"
-        justifyContent="space-between"
-        flexWrap="wrap"
         gap={0.5}
         sx={{
-          px: 1,
-          py: 0.5,
-          bgcolor: "action.hover",
-          borderBottom: 1,
-          borderColor: "divider",
+          pt: 0.75,
+          color: "text.secondary",
+          fontFamily: "JetBrains Mono, Monaco, Consolas, monospace",
         }}
       >
-        <Typography variant="caption" fontWeight={600} color="text.secondary">
-          {isCode ? "Code" : isMd ? "Markdown" : isRaw ? "Raw" : cell.cell_type} · #{index}
-          {isCode && cell.execution_count != null && (
-            <span> · In [{cell.execution_count}]</span>
-          )}
+        {isCode ? (
+          <NotebookTooltip title="运行此单元（Shift+Enter 运行并跳到下一格；Ctrl/Cmd+Enter 仅运行）">
+            <span>
+              <IconButton
+                size="small"
+                disabled={disabled}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void runCell(index);
+                }}
+                aria-label="run notebook cell"
+                sx={{
+                  width: 28,
+                  height: 28,
+                  color: isActive ? "primary.main" : "text.secondary",
+                  "&:hover": {
+                    color: "primary.main",
+                    bgcolor: alpha(theme.palette.primary.main, 0.08),
+                  },
+                }}
+              >
+                {isRunning ? (
+	                  <CircularProgress size={16} />
+	                ) : (
+                  <PlayArrowRoundedIcon sx={{ fontSize: 20 }} />
+                )}
+              </IconButton>
+            </span>
+          </NotebookTooltip>
+        ) : (
+          <Box sx={{ width: 28, height: 28 }} />
+        )}
+        <Typography variant="caption" sx={{ fontSize: 11, lineHeight: 1, color: "text.secondary" }}>
+          {isCode ? `[${cell.execution_count ?? " "}]` : ""}
         </Typography>
-        <Stack direction="row" alignItems="center" spacing={0.25}>
-          <Tooltip title="在上方插入代码单元">
-            <IconButton size="small" onClick={() => insertCell(index, "code", "before")} aria-label="insert code before">
-              <VerticalAlignTopIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-          <Tooltip title="在下方插入 Markdown 单元">
-            <IconButton size="small" onClick={() => insertCell(index, "markdown", "after")} aria-label="insert md after">
-              <VerticalAlignBottomIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-          {isCode && (
-            <>
-              <Tooltip title="运行此单元（Shift+Enter 运行并下一格）">
-                <span>
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    disabled={runningIdx !== null || runningAll}
-                    onClick={() => void runCell(index)}
-                    startIcon={
-                      runningIdx === index ? (
-                        <CircularProgress size={14} />
-                      ) : (
-                        <PlayArrowRoundedIcon sx={{ fontSize: 18 }} />
-                      )
-                    }
-                    sx={{ textTransform: "none", fontSize: 11, minHeight: 28 }}
-                  >
-                    运行
-                  </Button>
-                </span>
-              </Tooltip>
-              <Tooltip title="清除此单元输出">
-                <IconButton size="small" onClick={() => clearOneOutput(index)} aria-label="clear output">
-                  <ClearAllIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            </>
-          )}
-          <Tooltip title="删除单元">
-            <IconButton size="small" color="error" onClick={() => deleteCell(index)} aria-label="delete cell">
-              <DeleteOutlineIcon fontSize="small" />
-            </IconButton>
-          </Tooltip>
-        </Stack>
       </Stack>
 
-      <Box sx={{ p: isMd ? 1.5 : 0 }}>
-        {isMd && (
-          <Box sx={{ mb: 1 }}>
-            <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: "block" }}>
-              预览
-            </Typography>
-            <Box
-              className="ipynb-md-preview"
-              sx={{
-                fontSize: 13,
-                "& pre": { overflow: "auto", p: 1, bgcolor: "action.hover", borderRadius: 1 },
-                "& code": { fontFamily: "JetBrains Mono, monospace", fontSize: 12 },
+      <Box sx={{ minWidth: 0, pr: 1.25 }}>
+        <Box
+          sx={{
+            position: "relative",
+            border: 1,
+            borderColor: cellBorder,
+            bgcolor: editorBg,
+            boxShadow: isActive
+              ? `inset 3px 0 0 ${theme.palette.primary.main}`
+              : `inset 3px 0 0 transparent`,
+            transition: "border-color 140ms ease, box-shadow 140ms ease",
+            "&:hover": {
+              borderColor: isActive
+                ? theme.palette.primary.main
+                : alpha(theme.palette.primary.main, 0.55),
+            },
+          }}
+        >
+          <Stack
+            className="ipynb-cell-actions"
+            direction="row"
+            alignItems="center"
+            spacing={0.25}
+            sx={{
+              position: "absolute",
+              top: -1,
+              right: 10,
+              zIndex: 2,
+              opacity: isActive ? 1 : 0,
+              pointerEvents: isActive ? "auto" : "none",
+              height: 28,
+              bgcolor: isDark
+                ? alpha(theme.palette.background.paper, 0.94)
+                : alpha(theme.palette.background.paper, 0.98),
+              border: 1,
+              borderColor: isDark
+                ? alpha(theme.palette.common.white, 0.18)
+                : alpha(theme.palette.common.black, 0.14),
+              boxShadow: isDark
+                ? `0 8px 22px ${alpha(theme.palette.common.black, 0.28)}`
+                : `0 8px 20px ${alpha(theme.palette.common.black, 0.1)}`,
+              backdropFilter: "blur(10px)",
+              WebkitBackdropFilter: "blur(10px)",
+              overflow: "hidden",
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <NotebookTooltip title="更改单元格类型">
+              <Select
+                size="small"
+                value={selectedCellType}
+                onChange={(event) => {
+                  updateCellType(index, event.target.value as "code" | "markdown" | "raw");
+                }}
+                renderValue={() => cellTypeLabel}
+                aria-label="更改单元格类型"
+                sx={{
+                  height: 28,
+                  minWidth: 62,
+                  flexShrink: 0,
+                  borderRadius: 0,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: "text.secondary",
+                  "& .MuiSelect-select": {
+                    py: 0,
+                    pl: 0.75,
+                    pr: "20px !important",
+                    display: "flex",
+                    alignItems: "center",
+                    height: 28,
+                    lineHeight: "28px",
+                  },
+                  "& .MuiSvgIcon-root": {
+                    right: 2,
+                    fontSize: 16,
+                    color: "text.secondary",
+                  },
+                  "& fieldset": { borderColor: "transparent" },
+                  "&:hover": {
+                    bgcolor: cellActionHoverBg,
+                    color: "primary.main",
+                  },
+                  "&:hover fieldset": { borderColor: "transparent" },
+                }}
+              >
+                <MenuItem value="code">Code</MenuItem>
+                <MenuItem value="markdown">Markdown</MenuItem>
+                <MenuItem value="raw">Raw</MenuItem>
+              </Select>
+            </NotebookTooltip>
+            <NotebookTooltip title={languageLabel}>
+              <IconButton
+                size="small"
+                aria-label="more notebook cell actions"
+                onClick={(event) => setMoreAnchorEl(event.currentTarget)}
+                sx={cellActionButtonSx}
+              >
+                <Box
+                  component="span"
+                  sx={{
+                    width: "100%",
+                    height: "100%",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: 18,
+                    lineHeight: 1,
+                    transform: "translateY(-1px)",
+                  }}
+                >
+                  …
+                </Box>
+              </IconButton>
+            </NotebookTooltip>
+            <NotebookTooltip title="删除单元">
+              <IconButton
+                size="small"
+                color="error"
+                onClick={() => deleteCell(index)}
+                aria-label="delete cell"
+                sx={{
+                  ...cellActionButtonSx,
+                  color: "error.main",
+                  "&:hover": {
+                    color: "error.main",
+                    bgcolor: alpha(theme.palette.error.main, isDark ? 0.2 : 0.08),
+                  },
+                }}
+              >
+                <DeleteOutlineIcon sx={{ fontSize: 16 }} />
+              </IconButton>
+            </NotebookTooltip>
+          </Stack>
+          <Menu
+            anchorEl={moreAnchorEl}
+            open={Boolean(moreAnchorEl)}
+            onClose={closeMoreMenu}
+            anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+            transformOrigin={{ vertical: "top", horizontal: "right" }}
+            MenuListProps={{ dense: true }}
+          >
+            <MenuItem
+              selected={selectedCellType === "code"}
+              onClick={() => {
+                updateCellType(index, "code");
+                closeMoreMenu();
               }}
             >
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{source || " "}</ReactMarkdown>
-            </Box>
-          </Box>
-        )}
-        {isMd && (
-          <Box sx={{ minHeight: 120 }}>
-            <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: "block" }}>
-              编辑
-            </Typography>
-            <Editor
-              height="140px"
-              language="markdown"
-              theme={theme.palette.mode === "dark" ? "vs-dark" : "vs"}
-              value={source}
-              onChange={(v) => updateCellSource(index, v ?? "")}
-              options={{
-                minimap: { enabled: false },
-                fontSize: 12,
-                scrollBeyondLastLine: false,
-                wordWrap: "on",
-                automaticLayout: true,
+              Change Cell to Code
+            </MenuItem>
+            <MenuItem
+              selected={selectedCellType === "markdown"}
+              onClick={() => {
+                updateCellType(index, "markdown");
+                closeMoreMenu();
               }}
-            />
-          </Box>
-        )}
-        {isCode && (
+            >
+              Change Cell to Markdown
+            </MenuItem>
+            <MenuItem
+              selected={selectedCellType === "raw"}
+              onClick={() => {
+                updateCellType(index, "raw");
+                closeMoreMenu();
+              }}
+            >
+              Change Cell to Raw
+            </MenuItem>
+            {isCode && (
+              <MenuItem
+                onClick={() => {
+                  clearOneOutput(index);
+                  closeMoreMenu();
+                }}
+              >
+                Clear Outputs
+              </MenuItem>
+            )}
+            <MenuItem
+              onClick={() => {
+                deleteCell(index);
+                closeMoreMenu();
+              }}
+              sx={{ color: "error.main" }}
+            >
+              Delete Cell
+            </MenuItem>
+          </Menu>
+
+          {isMd && (
+            <Box sx={{ p: 1.25, pb: 0 }}>
+              <Box
+                className="ipynb-md-preview"
+                sx={{
+                  color: "text.primary",
+                  fontSize: 13,
+                  minHeight: 28,
+                  "& > :first-of-type": { mt: 0 },
+                  "& > :last-child": { mb: 0 },
+                  "& pre": { overflow: "auto", p: 1, bgcolor: "action.hover", borderRadius: 1 },
+                  "& code": { fontFamily: "JetBrains Mono, monospace", fontSize: 12 },
+                }}
+              >
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{source || " "}</ReactMarkdown>
+              </Box>
+              <Divider sx={{ my: 1, opacity: 0.6 }} />
+            </Box>
+          )}
+
           <Editor
-            height="180px"
-            language={monacoLanguageForKernel(kernelLang)}
-            theme={theme.palette.mode === "dark" ? "vs-dark" : "vs"}
+            height={`${editorHeight}px`}
+            language={
+              isCode
+                ? monacoLanguageForNotebook(kernelLang)
+                : isMd
+                  ? "markdown"
+                  : "plaintext"
+            }
+            theme={editorTheme}
             value={source}
             onChange={(v) => updateCellSource(index, v ?? "")}
             onMount={(ed, monaco) => {
-              const cleanup = attachCodeEditorKeys(index, ed, monaco);
-              return cleanup;
+              const focusSubscription = ed.onDidFocusEditorWidget(() => setActiveCellIndex(index));
+              const cleanupKeys = attachCellEditorKeys(index, ed, monaco);
+              return () => {
+                focusSubscription.dispose();
+                cleanupKeys();
+              };
             }}
             options={{
               minimap: { enabled: false },
-              fontSize: 12,
+              fontSize: 13,
+              lineHeight: 20,
+              padding: { top: 8, bottom: 8 },
               scrollBeyondLastLine: false,
-              wordWrap: "off",
+              wordWrap: isCode ? "off" : "on",
               automaticLayout: true,
+              glyphMargin: false,
+              folding: false,
+              lineNumbers: isCode ? "on" : "off",
+              renderLineHighlight: "none",
+              overviewRulerBorder: false,
+              hideCursorInOverviewRuler: true,
             }}
           />
-        )}
-        {isRaw && (
-          <Box sx={{ p: 1.5 }}>
-            <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: "block" }}>
-              Raw（纯文本）
-            </Typography>
-            <Editor
-              height="100px"
-              language="plaintext"
-              theme={theme.palette.mode === "dark" ? "vs-dark" : "vs"}
-              value={source}
-              onChange={(v) => updateCellSource(index, v ?? "")}
-              options={{
-                minimap: { enabled: false },
-                fontSize: 12,
-                automaticLayout: true,
-              }}
-            />
+        </Box>
+
+        {isCode && cell.outputs && cell.outputs.length > 0 && (
+          <Box
+            sx={{
+              px: 1.5,
+              py: 1,
+              borderLeft: 1,
+              borderRight: 1,
+              borderBottom: 1,
+              borderColor: "divider",
+              bgcolor: isDark ? "#1e1e1e" : "background.paper",
+            }}
+          >
+            {cell.outputs.map((out, oi) => (
+              <OutputBlock key={oi} output={out} />
+            ))}
           </Box>
         )}
-        {!isMd && !isCode && !isRaw && (
-          <Editor
-            height="120px"
-            language="plaintext"
-            theme={theme.palette.mode === "dark" ? "vs-dark" : "vs"}
-            value={source}
-            onChange={(v) => updateCellSource(index, v ?? "")}
-            options={{
-              minimap: { enabled: false },
-              fontSize: 12,
-              automaticLayout: true,
-            }}
-          />
-        )}
       </Box>
-
-      {isCode && cell.outputs && cell.outputs.length > 0 && (
-        <Box sx={{ px: 1, pb: 1, pt: 0 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: "block" }}>
-            输出
-          </Typography>
-          {cell.outputs.map((out, oi) => (
-            <OutputBlock key={oi} output={out as Record<string, unknown>} />
-          ))}
-        </Box>
-      )}
+      <Stack
+        className="ipynb-insert-below"
+        alignItems="center"
+        sx={{
+          gridColumn: "2 / 3",
+          mt: "3px",
+          height: 30,
+          opacity: 0,
+          pointerEvents: "none",
+          transition: "opacity 120ms ease",
+        }}
+      >
+        <NotebookInsertButtons
+          onAddCode={() => insertCell(index, "code", "after")}
+          onAddMarkdown={() => insertCell(index, "markdown", "after")}
+        />
+      </Stack>
     </Box>
   );
-}
+}, (prev, next) =>
+  prev.index === next.index &&
+  prev.cellSignature === next.cellSignature &&
+  prev.kernelLang === next.kernelLang &&
+  prev.isActive === next.isActive &&
+  prev.isRunning === next.isRunning &&
+  prev.runningAll === next.runningAll &&
+  prev.setActiveCellIndex === next.setActiveCellIndex &&
+  prev.updateCellSource === next.updateCellSource &&
+  prev.updateCellType === next.updateCellType &&
+  prev.insertCell === next.insertCell &&
+  prev.runCell === next.runCell &&
+  prev.clearOneOutput === next.clearOneOutput &&
+  prev.deleteCell === next.deleteCell &&
+  prev.attachCellEditorKeys === next.attachCellEditorKeys
+);
 
 const ESTIMATE_CELL_H = 320;
+const NOTEBOOK_DRAFT_EMIT_DELAY_MS = 140;
+type NotebookCommitMode = "immediate" | "deferred";
 
 export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === "dark";
   const [runningIdx, setRunningIdx] = useState<number | null>(null);
   const [runningAll, setRunningAll] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
+  const [activeCellIndex, setActiveCellIndex] = useState<number | null>(0);
 
   const virtualizeCells = useNotebookViewerStore((s) => s.virtualizeCells);
-  const enableNotebookShortcuts = useNotebookViewerStore((s) => s.enableNotebookShortcuts);
-  const enablePythonShellMagicHint = useNotebookViewerStore((s) => s.enablePythonShellMagic);
-  const setSettingsTabIndex = useUiStore((s) => s.setSettingsTabIndex);
-  const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
-  const setRightPanelMode = useUiStore((s) => s.setRightPanelMode);
 
-  const parsed = useMemo(() => {
-    try {
-      const nb = JSON.parse(content) as NotebookDoc;
-      if (!nb.cells || !Array.isArray(nb.cells)) {
-        return { ok: false as const, error: "无效的 .ipynb：缺少 cells 数组" };
+  const isEmptyNotebookFile = content.trim().length === 0;
+  const autoInitializedEmptyFileRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isEmptyNotebookFile) {
+      if (autoInitializedEmptyFileRef.current === filePath) {
+        autoInitializedEmptyFileRef.current = null;
       }
-      return { ok: true as const, nb };
-    } catch {
-      return { ok: false as const, error: "无法解析 JSON" };
+      return;
     }
+    if (!onChange || autoInitializedEmptyFileRef.current === filePath) return;
+    autoInitializedEmptyFileRef.current = filePath;
+    onChange(serializeNotebook(createEmptyNotebook()));
+  }, [filePath, isEmptyNotebookFile, onChange]);
+
+  const [parsed, setParsed] = useState<NotebookParseResult>(() =>
+    parseNotebookContent(content),
+  );
+  const latestContentPropRef = useRef(content);
+  const lastEmittedContentRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (latestContentPropRef.current === content) return;
+    latestContentPropRef.current = content;
+    if (lastEmittedContentRef.current === content) return;
+    setParsed(parseNotebookContent(content));
   }, [content]);
 
-  const pushNotebook = useCallback(
-    (nb: NotebookDoc) => {
-      onChange?.(serializeNotebook(nb));
+  const kernelLang = parsed.ok ? notebookKernelLanguage(parsed.nb) : "python";
+  const langArg = executionLanguageForNotebook(kernelLang);
+
+  const nbRef = useRef(parsed.ok ? parsed.nb : null);
+  if (parsed.ok) nbRef.current = parsed.nb;
+  useEffect(
+    () =>
+      registerWorkspaceContentProvider(filePath, () => {
+        const nb = nbRef.current;
+        return nb ? serializeNotebook(nb) : content;
+      }),
+    [content, filePath],
+  );
+  const runningIdxRef = useRef(runningIdx);
+  const runningAllRef = useRef(runningAll);
+  runningIdxRef.current = runningIdx;
+  runningAllRef.current = runningAll;
+
+  const pendingEmitNbRef = useRef<NotebookDocument | null>(null);
+  const emitTimerRef = useRef<number | null>(null);
+
+  const emitNotebookContent = useCallback(
+    (nb: NotebookDocument) => {
+      const serialized = serializeNotebook(nb);
+      lastEmittedContentRef.current = serialized;
+      latestContentPropRef.current = serialized;
+      onChange?.(serialized);
     },
     [onChange],
   );
 
-  const cloneNb = useCallback((nb: NotebookDoc) => JSON.parse(JSON.stringify(nb)) as NotebookDoc, []);
+  const flushPendingNotebookEmit = useCallback(() => {
+    if (emitTimerRef.current !== null) {
+      window.clearTimeout(emitTimerRef.current);
+      emitTimerRef.current = null;
+    }
+    const pending = pendingEmitNbRef.current;
+    pendingEmitNbRef.current = null;
+    if (pending) emitNotebookContent(pending);
+  }, [emitNotebookContent]);
 
-  const kernelLang = parsed.ok ? kernelLanguage(parsed.nb) : "python";
-  const langArg = invokeLanguage(kernelLang);
+  const scheduleNotebookEmit = useCallback(
+    (nb: NotebookDocument) => {
+      pendingEmitNbRef.current = nb;
+      useWorkspaceStore.getState().markContentDirty(filePath);
+      if (emitTimerRef.current !== null) {
+        window.clearTimeout(emitTimerRef.current);
+      }
+      emitTimerRef.current = window.setTimeout(() => {
+        flushPendingNotebookEmit();
+      }, NOTEBOOK_DRAFT_EMIT_DELAY_MS);
+    },
+    [filePath, flushPendingNotebookEmit],
+  );
 
-  const nbRef = useRef(parsed.ok ? parsed.nb : null);
-  if (parsed.ok) nbRef.current = parsed.nb;
+  useEffect(
+    () => () => {
+      if (emitTimerRef.current !== null) {
+        window.clearTimeout(emitTimerRef.current);
+        emitTimerRef.current = null;
+      }
+      pendingEmitNbRef.current = null;
+    },
+    [],
+  );
+
+  const pushNotebook = useCallback(
+    (nb: NotebookDocument, mode: NotebookCommitMode = "immediate") => {
+      nbRef.current = nb;
+      setParsed({ ok: true, nb, initialized: false, warnings: [] });
+      if (mode === "deferred") {
+        scheduleNotebookEmit(nb);
+        return;
+      }
+      if (emitTimerRef.current !== null) {
+        window.clearTimeout(emitTimerRef.current);
+        emitTimerRef.current = null;
+      }
+      pendingEmitNbRef.current = null;
+      emitNotebookContent(nb);
+    },
+    [emitNotebookContent, scheduleNotebookEmit],
+  );
 
   const scrollParentRef = useRef<HTMLDivElement | null>(null);
   const codeEditorRefs = useRef<Map<number, editor.IStandaloneCodeEditor>>(new Map());
@@ -669,227 +1082,324 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
 
   const updateCellSource = useCallback(
     (index: number, text: string) => {
-      if (!parsed.ok) return;
-      const nb = cloneNb(parsed.nb);
-      const cell = nb.cells[index];
-      if (!cell) return;
-      setCellSource(cell, text);
-      pushNotebook(nb);
+      const current = nbRef.current;
+      if (!current) return;
+      const edit = cloneNotebookForCellEdit(current, index);
+      if (!edit) return;
+      setCellSource(edit.cell, text);
+      pushNotebook(edit.nb, "deferred");
     },
-    [parsed, cloneNb, pushNotebook],
+    [pushNotebook],
   );
 
-  const runCell = useCallback(
-    async (index: number) => {
-      if (!parsed.ok) return;
-      const cell = parsed.nb.cells[index];
-      if (!cell || cell.cell_type !== "code") return;
-      setRunError(null);
-      setRunningIdx(index);
-      try {
-        const nb = cloneNb(parsed.nb);
-        const c = nb.cells[index];
-        if (!c || c.cell_type !== "code") return;
-        const res = await invoke<ExecuteResult>("execute_ipynb_cell", {
-          notebookPath: filePath,
-          cellIndex: index,
-          source: getCellSource(c),
-          language: langArg,
-          shellMagic: useNotebookViewerStore.getState().enablePythonShellMagic,
-        });
-        c.outputs = buildOutputsFromRun(res);
-        c.execution_count = nextGlobalExecutionCount(nb);
-        pushNotebook(nb);
-      } catch (e) {
-        setRunError(String(e));
-      } finally {
-        setRunningIdx(null);
-      }
+  const focusNotebookCell = useCallback(
+    (index: number, placement: "start" | "end" = "start") => {
+      const cells = nbRef.current?.cells;
+      if (!cells || cells.length === 0) return;
+      const target = Math.max(0, Math.min(index, cells.length - 1));
+      setActiveCellIndex(target);
+      virtualizerRef.current?.scrollToIndex(target, { align: "auto" });
+
+      let attempts = 0;
+      const tryFocus = () => {
+        virtualizerRef.current?.scrollToIndex(target, { align: "auto" });
+        const editorInst = codeEditorRefs.current.get(target);
+        if (editorInst) {
+          const model = editorInst.getModel();
+          editorInst.focus();
+          if (model) {
+            const lineNumber = placement === "end" ? model.getLineCount() : 1;
+            const column = placement === "end" ? model.getLineMaxColumn(lineNumber) : 1;
+            const position = { lineNumber, column };
+            editorInst.setPosition(position);
+            editorInst.revealPositionInCenterIfOutsideViewport(position);
+          }
+          return;
+        }
+        attempts += 1;
+        if (attempts <= 12) {
+          window.setTimeout(tryFocus, attempts <= 2 ? 0 : 25);
+        }
+      };
+
+      window.setTimeout(tryFocus, 0);
     },
-    [parsed, cloneNb, pushNotebook, filePath, langArg],
+    [],
   );
+
+  const updateCellType = useCallback(
+    (index: number, type: "code" | "markdown" | "raw") => {
+      const current = nbRef.current;
+      if (!current) return;
+      const edit = cloneNotebookForCellEdit(current, index);
+      if (!edit) return;
+      setNotebookCellType(edit.cell, type);
+      setActiveCellIndex(index);
+      pushNotebook(edit.nb);
+    },
+    [pushNotebook],
+  );
+
+  const runtimeAdapter = useMemo(() => createTauriNotebookRuntimeAdapter(), []);
+
+  const notebookExecutionOptions = useCallback(
+    () => ({
+      notebookPath: filePath,
+      language: langArg,
+      shellMagic: useNotebookViewerStore.getState().enablePythonShellMagic,
+    }),
+    [filePath, langArg],
+  );
+
+  const updateExecutionStatus = useCallback((status: NotebookExecutionStatus) => {
+    runningIdxRef.current = status.runningCellIndex;
+    runningAllRef.current = status.runningAll;
+    setRunningIdx(status.runningCellIndex);
+    setRunningAll(status.runningAll);
+    setRunError(status.error);
+  }, []);
+
+  const executionHostRef = useRef<NotebookExecutionControllerHost | null>(null);
+  executionHostRef.current = {
+    getNotebook: () => nbRef.current,
+    getOptions: notebookExecutionOptions,
+    execute: runtimeAdapter.executeCell,
+    commit: pushNotebook,
+    onStatus: updateExecutionStatus,
+    formatError: (error) => String(error),
+  };
+
+  const executionControllerRef = useRef<NotebookExecutionController | null>(null);
+  if (!executionControllerRef.current) {
+    executionControllerRef.current = new NotebookExecutionController({
+      getNotebook: () => executionHostRef.current?.getNotebook() ?? null,
+      getOptions: () => {
+        const host = executionHostRef.current;
+        if (!host) return { notebookPath: filePath, language: langArg, shellMagic: true };
+        return host.getOptions();
+      },
+      execute: (request) => {
+        const host = executionHostRef.current;
+        if (!host) return Promise.reject(new Error("Notebook execution host not ready"));
+        return host.execute(request);
+      },
+      commit: (nb) => executionHostRef.current?.commit(nb),
+      onStatus: (status) => executionHostRef.current?.onStatus(status),
+      formatError: (error) => executionHostRef.current?.formatError?.(error) ?? String(error),
+    });
+  }
+
+  const runCell = useCallback(async (index: number) => {
+    const controller = executionControllerRef.current;
+    if (!controller) return false;
+    return controller.runCell(index);
+  }, []);
 
   const runCellRef = useRef(runCell);
   runCellRef.current = runCell;
 
   const runAll = useCallback(async () => {
-    if (!parsed.ok) return;
-    setRunError(null);
-    setRunningAll(true);
-    try {
-      const nb = cloneNb(parsed.nb);
-      let seq = 1;
-      for (let i = 0; i < nb.cells.length; i++) {
-        if (nb.cells[i].cell_type !== "code") continue;
-        setRunningIdx(i);
-        const c = nb.cells[i];
-        const res = await invoke<ExecuteResult>("execute_ipynb_cell", {
-          notebookPath: filePath,
-          cellIndex: i,
-          source: getCellSource(c),
-          language: langArg,
-          shellMagic: useNotebookViewerStore.getState().enablePythonShellMagic,
-        });
-        c.outputs = buildOutputsFromRun(res);
-        c.execution_count = seq;
-        seq += 1;
-        pushNotebook(cloneNb(nb));
-      }
-    } catch (e) {
-      setRunError(String(e));
-    } finally {
-      setRunningIdx(null);
-      setRunningAll(false);
-    }
-  }, [parsed, cloneNb, pushNotebook, filePath, langArg]);
+    const controller = executionControllerRef.current;
+    if (!controller) return false;
+    return controller.runAll();
+  }, []);
 
   const clearAllOutputs = useCallback(() => {
-    if (!parsed.ok) return;
-    const nb = cloneNb(parsed.nb);
-    for (const c of nb.cells) {
+    const current = nbRef.current;
+    if (!current) return;
+    let changed = false;
+    const cells = current.cells.map((c) => {
       if (c.cell_type === "code") {
-        c.outputs = [];
-        c.execution_count = null;
+        const hasOutputs = Array.isArray(c.outputs) && c.outputs.length > 0;
+        const hasExecutionCount = c.execution_count !== null && c.execution_count !== undefined;
+        if (hasOutputs || hasExecutionCount) {
+          changed = true;
+          return { ...c, outputs: [], execution_count: null };
+        }
       }
-    }
-    pushNotebook(nb);
-  }, [parsed, cloneNb, pushNotebook]);
+      return c;
+    });
+    if (changed) pushNotebook({ ...current, cells });
+  }, [pushNotebook]);
 
   const clearOneOutput = useCallback(
     (index: number) => {
-      if (!parsed.ok) return;
-      const nb = cloneNb(parsed.nb);
-      const c = nb.cells[index];
-      if (c?.cell_type === "code") {
-        c.outputs = [];
-        c.execution_count = null;
-      }
-      pushNotebook(nb);
+      const current = nbRef.current;
+      if (!current) return;
+      const edit = cloneNotebookForCellEdit(current, index);
+      if (!edit || edit.cell.cell_type !== "code") return;
+      edit.cell.outputs = [];
+      edit.cell.execution_count = null;
+      pushNotebook(edit.nb);
     },
-    [parsed, cloneNb, pushNotebook],
+    [pushNotebook],
   );
 
   const deleteCell = useCallback(
     (index: number) => {
-      if (!parsed.ok) return;
-      const nb = cloneNb(parsed.nb);
-      nb.cells.splice(index, 1);
+      const current = nbRef.current;
+      if (!current) return;
+      const cells = current.cells.slice();
+      cells.splice(index, 1);
+      const nb = { ...current, cells };
+      setActiveCellIndex((current) => {
+        if (nb.cells.length === 0) return null;
+        if (current === null) return nb.cells.length > 0 ? 0 : null;
+        if (current === index) return Math.min(index, Math.max(0, nb.cells.length - 1));
+        if (current > index) return current - 1;
+        return current;
+      });
       pushNotebook(nb);
     },
-    [parsed, cloneNb, pushNotebook],
+    [pushNotebook],
   );
 
   const insertCell = useCallback(
     (index: number, type: "code" | "markdown", position: "before" | "after") => {
-      if (!parsed.ok) return;
-      const nb = cloneNb(parsed.nb);
-      const newCell: NbCell =
-        type === "code"
-          ? {
-              cell_type: "code",
-              execution_count: null,
-              metadata: {},
-              outputs: [],
-              source: "",
-            }
-          : {
-              cell_type: "markdown",
-              metadata: {},
-              source: "",
-            };
+      const current = nbRef.current;
+      if (!current) return;
+      const cells = current.cells.slice();
+      const newCell: NotebookCell = createNotebookCell(type);
       const at = position === "before" ? index : index + 1;
-      nb.cells.splice(at, 0, newCell);
+      cells.splice(at, 0, newCell);
+      const nb = { ...current, cells };
+      setActiveCellIndex(at);
       pushNotebook(nb);
     },
-    [parsed, cloneNb, pushNotebook],
+    [pushNotebook],
   );
 
   const addCellAtEnd = useCallback(
     (type: "code" | "markdown") => {
-      if (!parsed.ok) return;
-      const nb = cloneNb(parsed.nb);
-      const newCell: NbCell =
-        type === "code"
-          ? {
-              cell_type: "code",
-              execution_count: null,
-              metadata: {},
-              outputs: [],
-              source: "",
-            }
-          : {
-              cell_type: "markdown",
-              metadata: {},
-              source: "",
-            };
-      nb.cells.push(newCell);
+      const current = nbRef.current;
+      if (!current) return;
+      const newCell: NotebookCell = createNotebookCell(type);
+      const cells = [...current.cells, newCell];
+      const nb = { ...current, cells };
+      setActiveCellIndex(nb.cells.length - 1);
       pushNotebook(nb);
     },
-    [parsed, cloneNb, pushNotebook],
+    [pushNotebook],
   );
 
-  const runningIdxRef = useRef(runningIdx);
-  const runningAllRef = useRef(runningAll);
-  runningIdxRef.current = runningIdx;
-  runningAllRef.current = runningAll;
+  const updateKernelLanguage = useCallback(
+    (language: string) => {
+      const current = nbRef.current;
+      if (!current) return;
+      const nb = { ...current, cells: current.cells };
+      setNotebookKernelLanguage(nb, language);
+      pushNotebook(nb);
+    },
+    [pushNotebook],
+  );
 
-  const attachCodeEditorKeys = useCallback(
+  const executeNotebookEditorCommand = useCallback(
+    async (command: NotebookEditorCommand) => {
+      switch (command.type) {
+        case "none":
+        case "blocked":
+          return;
+        case "run-cell":
+          await runCellRef.current(command.cellIndex);
+          return;
+        case "focus-relative-cell":
+          focusNotebookCell(command.fromIndex + command.offset, command.placement);
+          return;
+        case "run-and-focus-next": {
+          const current = nbRef.current;
+          if (!current) return;
+          if (current.cells[command.cellIndex]?.cell_type === "code") {
+            await runCellRef.current(command.cellIndex);
+          }
+
+          const latest = nbRef.current;
+          if (!latest) return;
+          const target = nextCellTargetAfterRun(command.cellIndex, latest.cells.length);
+          if (!target.createCodeCell) {
+            focusNotebookCell(target.targetIndex, "start");
+            return;
+          }
+
+          const cells = latest.cells.slice();
+          cells.splice(target.targetIndex, 0, createNotebookCell("code"));
+          pushNotebook({ ...latest, cells });
+          focusNotebookCell(target.targetIndex, "start");
+        }
+      }
+    },
+    [focusNotebookCell, pushNotebook],
+  );
+
+  const attachCellEditorKeys = useCallback(
     (index: number, editorInst: editor.IStandaloneCodeEditor, monaco: typeof import("monaco-editor")) => {
       codeEditorRefs.current.set(index, editorInst);
-      const runOnly = () => {
-        if (runningIdxRef.current !== null || runningAllRef.current) return;
-        void runCellRef.current(index);
-      };
-      const runAndNext = () => {
-        if (runningIdxRef.current !== null || runningAllRef.current) return;
-        void runCellRef.current(index).then(() => {
-          const cells = nbRef.current?.cells;
-          if (!cells) return;
-          const next = findNextCodeIndex(cells, index);
-          if (next < 0) return;
-          virtualizerRef.current?.scrollToIndex(next, { align: "start" });
-          window.setTimeout(() => {
-            codeEditorRefs.current.get(next)?.focus();
-          }, 80);
-        });
-      };
       const sub = editorInst.onKeyDown((e) => {
-        if (!useNotebookViewerStore.getState().enableNotebookShortcuts) return;
-        if (e.keyCode !== monaco.KeyCode.Enter) return;
-        if (e.shiftKey) {
-          e.preventDefault();
-          e.stopPropagation();
-          runAndNext();
-          return;
-        }
-        if (e.ctrlKey || e.metaKey) {
-          e.preventDefault();
-          e.stopPropagation();
-          runOnly();
-        }
+        const model = editorInst.getModel();
+        const position = editorInst.getPosition();
+        const cells = nbRef.current?.cells ?? [];
+        const cell = cells[index];
+        const command = resolveNotebookEditorCommand(
+          {
+            key: notebookEditorKeyFromMonaco(e.keyCode, monaco.KeyCode),
+            shiftKey: e.shiftKey,
+            ctrlKey: e.ctrlKey,
+            metaKey: e.metaKey,
+            altKey: e.altKey,
+          },
+          {
+            shortcutsEnabled: useNotebookViewerStore.getState().enableNotebookShortcuts,
+            isBusy: runningIdxRef.current !== null || runningAllRef.current,
+            cellIndex: index,
+            cellCount: cells.length,
+            cellType: cell?.cell_type ?? "raw",
+            cursorLineNumber: position?.lineNumber ?? 1,
+            lineCount: model?.getLineCount() ?? 1,
+          },
+        );
+        if (!command.consume) return;
+        e.preventDefault();
+        e.stopPropagation();
+        void executeNotebookEditorCommand(command);
       });
       return () => {
         sub.dispose();
         codeEditorRefs.current.delete(index);
       };
     },
-    [],
+    [executeNotebookEditorCommand],
   );
 
   if (!parsed.ok) {
     return (
       <Box sx={{ p: 2 }}>
-        <Typography color="error" variant="body2">
-          {parsed.error}
-        </Typography>
+        <Alert severity="error" sx={{ borderRadius: 2 }}>
+          <Typography variant="body2" fontWeight={600}>
+            {parsed.error}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            {OMIGA_NOTEBOOK_PLUGIN.displayName} 插件需要有效 .ipynb JSON。空
+            notebook 会自动初始化；若仍看到此错误说明文件内容不是合法 JSON。
+          </Typography>
+        </Alert>
       </Box>
     );
   }
 
   const { nb } = parsed;
-  const ks = nb.metadata?.kernelspec as Record<string, unknown> | undefined;
-  const kernelName = typeof ks?.name === "string" ? ks.name : kernelLang;
-
+  const kernelName = notebookKernelName(nb);
+  const selectedKernelLanguage = kernelLang === "r" ? "r" : "python";
+  const selectedKernelLabel =
+    NOTEBOOK_EXECUTABLE_KERNEL_OPTIONS.find((option) => option.language === selectedKernelLanguage)
+      ?.label ?? kernelName;
+  const isBusy = runningIdx !== null || runningAll;
+  const activeNotebookCell =
+    activeCellIndex !== null ? nb.cells[activeCellIndex] : nb.cells[0];
+  const activeCellType =
+    activeNotebookCell?.cell_type === "code" ||
+    activeNotebookCell?.cell_type === "markdown" ||
+    activeNotebookCell?.cell_type === "raw"
+      ? activeNotebookCell.cell_type
+      : "raw";
   const virtualItems = rowVirtualizer.getVirtualItems();
   const totalVirtH = rowVirtualizer.getTotalSize();
 
@@ -901,104 +1411,139 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
         overflow: "hidden",
         display: "flex",
         flexDirection: "column",
+        bgcolor: isDark ? "#1e1e1e" : "background.default",
       }}
     >
       <Stack
         direction="row"
         alignItems="center"
-        flexWrap="wrap"
-        gap={0.75}
+        gap={0}
         sx={{
-          px: 1.5,
-          py: 1,
+          minHeight: 34,
+          px: 0.5,
           borderBottom: 1,
-          borderColor: "divider",
-          bgcolor: "action.hover",
+          borderColor: isDark ? alpha(theme.palette.common.white, 0.12) : "divider",
+          bgcolor: isDark ? "#252526" : alpha(theme.palette.background.paper, 0.98),
+          color: "text.secondary",
+          overflow: "hidden",
+          overflowY: "hidden",
+          whiteSpace: "nowrap",
         }}
       >
-        <Chip size="small" label={`Kernel: ${kernelName}`} variant="outlined" />
-        <Chip size="small" label={`Lang: ${kernelLang}`} variant="outlined" />
-        <Typography variant="caption" color="text.secondary" sx={{ display: { xs: "none", md: "block" } }}>
-          {enableNotebookShortcuts ? "Shift+Enter / Ctrl+Enter · " : "快捷键已关 · "}
-          {enablePythonShellMagicHint ? "Python「!」shell · " : "「!」魔法已关 · "}
-          Settings → Notebook
-        </Typography>
-        <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-        <Tooltip title="从上到下依次运行所有代码单元（In [1]… 顺序编号）">
-          <span>
-            <Button
-              size="small"
-              variant="contained"
-              disabled={runningIdx !== null || runningAll}
-              onClick={() => void runAll()}
-              startIcon={runningAll ? <CircularProgress size={14} color="inherit" /> : <PlayCircleOutlineIcon />}
-              sx={{ textTransform: "none", fontSize: 12 }}
-            >
-              全部运行
-            </Button>
-          </span>
-        </Tooltip>
-        <Tooltip title="清空所有代码单元的输出">
-          <Button
+        <NotebookToolbarButton
+          title="从上到下依次运行所有代码单元（In [1]… 顺序编号）"
+          disabled={isBusy}
+          onClick={() => void runAll()}
+          icon={
+            runningAll ? (
+              <CircularProgress size={13} color="inherit" />
+            ) : (
+              <PlayArrowRoundedIcon sx={{ fontSize: 16 }} />
+            )
+          }
+          label="Run All"
+        />
+        <NotebookToolbarButton
+          title="清空所有代码单元的输出"
+          disabled={isBusy}
+          onClick={clearAllOutputs}
+          icon={<ClearAllIcon sx={{ fontSize: 16 }} />}
+          label="Clear Outputs"
+        />
+        <Box sx={{ flex: 1, minWidth: 8 }} />
+        <NotebookTooltip title="更改当前选中单元格类型">
+          <Select
             size="small"
-            variant="outlined"
-            disabled={runningIdx !== null || runningAll}
-            onClick={clearAllOutputs}
-            startIcon={<ClearAllIcon />}
-            sx={{ textTransform: "none", fontSize: 12 }}
-          >
-            清空输出
-          </Button>
-        </Tooltip>
-        <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-        <Button
-          size="small"
-          variant="outlined"
-          onClick={() => addCellAtEnd("code")}
-          startIcon={<AddIcon />}
-          sx={{ textTransform: "none", fontSize: 12 }}
-        >
-          代码单元
-        </Button>
-        <Button
-          size="small"
-          variant="outlined"
-          onClick={() => addCellAtEnd("markdown")}
-          startIcon={<AddIcon />}
-          sx={{ textTransform: "none", fontSize: 12 }}
-        >
-          Markdown
-        </Button>
-        <Tooltip title="打开 Settings → Notebook，调整虚拟滚动、HTML 沙箱、快捷键与 ! shell">
-          <Button
-            size="small"
-            variant="text"
-            onClick={() => {
-              setSettingsTabIndex(7);
-              setSettingsOpen(true);
-              setRightPanelMode("settings");
+            value={activeCellType}
+            disabled={!activeNotebookCell || isBusy}
+            onChange={(event) => {
+              const index = activeCellIndex ?? 0;
+              updateCellType(index, event.target.value as "code" | "markdown" | "raw");
             }}
-            startIcon={<SettingsIcon />}
-            sx={{ textTransform: "none", fontSize: 12 }}
+            renderValue={(value) =>
+              value === "markdown" ? "Markdown" : value === "raw" ? "Raw" : "Code"
+            }
+            aria-label="更改当前单元格类型"
+            sx={{
+              mx: 0.25,
+              minWidth: 86,
+              maxWidth: 120,
+              flexShrink: 0,
+              height: 28,
+              fontSize: 12,
+              color: "text.secondary",
+              bgcolor: alpha(theme.palette.background.paper, isDark ? 0.35 : 0.72),
+              "& .MuiSelect-select": { py: 0.25, pl: 1 },
+              "& fieldset": { borderColor: "transparent" },
+              "&:hover fieldset": { borderColor: "divider" },
+            }}
           >
-            Notebook 设置
-          </Button>
-        </Tooltip>
+            <MenuItem value="code">Code</MenuItem>
+            <MenuItem value="markdown">Markdown</MenuItem>
+            <MenuItem value="raw">Raw</MenuItem>
+          </Select>
+        </NotebookTooltip>
+        <NotebookTooltip title={`Kernel: ${kernelName}`}>
+          <Select
+            size="small"
+            value={selectedKernelLanguage}
+            onChange={(event) => updateKernelLanguage(event.target.value)}
+            renderValue={() => selectedKernelLabel}
+            aria-label="选择 notebook kernel"
+            sx={{
+              minWidth: 104,
+              maxWidth: 132,
+              flexShrink: 0,
+              height: 28,
+              fontSize: 12,
+              color: "text.secondary",
+              bgcolor: alpha(theme.palette.background.paper, isDark ? 0.35 : 0.72),
+              "& .MuiSelect-select": { py: 0.35, pl: 1 },
+              "& fieldset": { borderColor: "transparent" },
+              "&:hover fieldset": { borderColor: "divider" },
+            }}
+          >
+            {NOTEBOOK_EXECUTABLE_KERNEL_OPTIONS.map((option) => (
+              <MenuItem key={option.language} value={option.language}>
+                {option.label}
+              </MenuItem>
+            ))}
+          </Select>
+        </NotebookTooltip>
       </Stack>
 
-      <Box ref={scrollParentRef} sx={{ flex: 1, minHeight: 0, overflow: "auto", py: 1, px: 1.5 }}>
+      <Box
+        ref={scrollParentRef}
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          overflow: "auto",
+          py: 0.5,
+          bgcolor: isDark ? "#1e1e1e" : "background.default",
+        }}
+      >
         {runError && (
           <Typography color="error" variant="caption" sx={{ display: "block", mb: 1 }}>
             {runError}
           </Typography>
         )}
-        {virtualizeCells ? (
+        {nb.cells.length === 0 ? (
+          <Stack
+            alignItems="center"
+            justifyContent="flex-start"
+            sx={{ pt: 2.5, minHeight: 140 }}
+          >
+            <NotebookInsertButtons
+              onAddCode={() => addCellAtEnd("code")}
+              onAddMarkdown={() => addCellAtEnd("markdown")}
+            />
+          </Stack>
+        ) : virtualizeCells ? (
           <Box sx={{ position: "relative", width: "100%", height: totalVirtH }}>
             {virtualItems.map((virtualRow) => {
               const index = virtualRow.index;
               const c = nb.cells[index];
-              const cellId =
-                typeof c.metadata?.id === "string" ? c.metadata.id : `cell-${index}`;
+              const cellId = c.id ?? `cell-${index}`;
               return (
                 <Box
                   key={cellId}
@@ -1010,46 +1555,53 @@ export function IpynbViewer({ filePath, content, onChange }: IpynbViewerProps) {
                     left: 0,
                     width: "100%",
                     transform: `translateY(${virtualRow.start}px)`,
-                    pb: 2,
+                    pb: 0,
                   }}
                 >
                   <NotebookCellBody
                     index={index}
-                    nb={nb}
+                    cell={c}
+                    cellSignature={notebookCellRenderSignature(c)}
                     kernelLang={kernelLang}
-                    runningIdx={runningIdx}
+                    isActive={activeCellIndex === index}
+                    isRunning={runningIdx === index}
                     runningAll={runningAll}
+                    setActiveCellIndex={setActiveCellIndex}
                     updateCellSource={updateCellSource}
+                    updateCellType={updateCellType}
                     insertCell={insertCell}
                     runCell={runCell}
                     clearOneOutput={clearOneOutput}
                     deleteCell={deleteCell}
-                    attachCodeEditorKeys={attachCodeEditorKeys}
+                    attachCellEditorKeys={attachCellEditorKeys}
                   />
                 </Box>
               );
             })}
           </Box>
         ) : (
-          <Stack spacing={2}>
+          <Stack spacing={0}>
             {nb.cells.map((_, index) => {
               const c = nb.cells[index];
-              const cellId =
-                typeof c.metadata?.id === "string" ? c.metadata.id : `cell-${index}`;
+              const cellId = c.id ?? `cell-${index}`;
               return (
                 <Box key={cellId}>
                   <NotebookCellBody
                     index={index}
-                    nb={nb}
+                    cell={c}
+                    cellSignature={notebookCellRenderSignature(c)}
                     kernelLang={kernelLang}
-                    runningIdx={runningIdx}
+                    isActive={activeCellIndex === index}
+                    isRunning={runningIdx === index}
                     runningAll={runningAll}
+                    setActiveCellIndex={setActiveCellIndex}
                     updateCellSource={updateCellSource}
+                    updateCellType={updateCellType}
                     insertCell={insertCell}
                     runCell={runCell}
                     clearOneOutput={clearOneOutput}
                     deleteCell={deleteCell}
-                    attachCodeEditorKeys={attachCodeEditorKeys}
+                    attachCellEditorKeys={attachCellEditorKeys}
                   />
                 </Box>
               );

@@ -20,21 +20,12 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RuntimeConstraintRuleConfig {
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
     pub severity: Option<ConstraintSeverity>,
-}
-
-impl Default for RuntimeConstraintRuleConfig {
-    fn default() -> Self {
-        Self {
-            enabled: None,
-            severity: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,8 +140,10 @@ impl RuntimeConstraintState {
                     | "grep"
                     | "ripgrep"
                     | "file_read"
-                    | "web_fetch"
-                    | "web_search"
+                    | "connector"
+                    | "fetch"
+                    | "query"
+                    | "search"
                     | "list_skills"
                     | "skills_list"
                     | "skill_view"
@@ -246,6 +239,14 @@ pub trait RuntimeConstraint: Send + Sync {
     fn tool_gate(
         &self,
         _ctx: &ToolConstraintContext<'_>,
+        _state: &RuntimeConstraintState,
+    ) -> Option<ConstraintToolBlock> {
+        None
+    }
+
+    fn post_response_block(
+        &self,
+        _ctx: &PostResponseConstraintContext<'_>,
         _state: &RuntimeConstraintState,
     ) -> Option<ConstraintToolBlock> {
         None
@@ -372,6 +373,20 @@ impl RuntimeConstraintHarness {
                 }
                 Some(action)
             })
+    }
+
+    pub fn post_response_block(
+        &self,
+        ctx: &PostResponseConstraintContext<'_>,
+        state: &RuntimeConstraintState,
+    ) -> Option<ConstraintToolBlock> {
+        if !self.resolved_config.enabled {
+            return None;
+        }
+        self.constraints
+            .iter()
+            .filter(|registration| registration.metadata.enabled)
+            .find_map(|registration| registration.implementation.post_response_block(ctx, state))
     }
 }
 
@@ -578,8 +593,9 @@ impl RuntimeConstraint for ClarificationFirstConstraint {
             id: self.metadata().id,
             text: "## Runtime constraint: clarify before acting\n\
                    The current request appears materially ambiguous. Do not guess. \
-                   Ask the user to clarify scope, target files/modules, or success criteria \
-                   before taking side-effectful action."
+                   Call `ask_user_question` to clarify scope, target files/modules, or \
+                   success criteria before taking side-effectful action; do not ask the \
+                   clarification only in plain assistant text."
                 .to_string(),
         })
     }
@@ -600,62 +616,31 @@ impl RuntimeConstraint for ClarificationFirstConstraint {
             return None;
         }
 
-        let scope_hint = if has_specific_anchor(ctx.request_text) {
-            "the exact requirement or acceptance criteria"
-        } else {
-            "the target scope (files/modules/behavior) and desired outcome"
-        };
-        let assistant_response = format!(
-            "I need one clarification before I make changes: the current request is broad enough \
-             that different implementations could produce different results. Please specify {}, \
-             and then I can continue.",
-            scope_hint
-        );
-        let structured_question = ask_user_question::AskUserQuestionArgs {
-            questions: vec![ask_user_question::QuestionItem {
-                question: "Which missing detail should we pin down first before making changes?"
-                    .to_string(),
-                header: "Clarify".to_string(),
-                multi_select: false,
-                options: vec![
-                    ask_user_question::QuestionOption {
-                        label: "Scope".to_string(),
-                        description: "Clarify the exact file, module, component, or surface that should change.".to_string(),
-                        preview: None,
-                    },
-                    ask_user_question::QuestionOption {
-                        label: "Outcome".to_string(),
-                        description: "Clarify the exact behavior or result you want after the change.".to_string(),
-                        preview: None,
-                    },
-                    ask_user_question::QuestionOption {
-                        label: "Guardrails".to_string(),
-                        description: "Clarify constraints, risks, or what must not change.".to_string(),
-                        preview: None,
-                    },
-                ],
-            }],
-            answers: None,
-            annotations: None,
-            metadata: Some(serde_json::json!({
-                "source": "runtime_constraint",
-                "constraint_id": self.metadata().id,
-            })),
-        };
+        Some(build_clarification_first_block(
+            ctx.request_text,
+            "Blocked by runtime constraint `clarification_first`: the request is materially ambiguous, so side-effectful tools cannot run until the user clarifies the scope."
+                .to_string(),
+        ))
+    }
 
-        Some(ConstraintToolBlock {
-            id: self.metadata().id,
-            tool_result_message:
-                "Blocked by runtime constraint `clarification_first`: the request is materially ambiguous, so side-effectful tools cannot run until the user clarifies the scope."
-                    .to_string(),
-            assistant_response,
-            interactive_question: Some(structured_question),
-            post_answer_response: Some(
-                "Thanks — now please reply in free text with the concrete detail you selected. \
-                 Include exact file/module names, desired behavior, and any constraints that matter."
-                    .to_string(),
-            ),
-        })
+    fn post_response_block(
+        &self,
+        ctx: &PostResponseConstraintContext<'_>,
+        state: &RuntimeConstraintState,
+    ) -> Option<ConstraintToolBlock> {
+        if ctx.is_subagent
+            || state.clarification_requested()
+            || !looks_like_materially_ambiguous(ctx.request_text)
+            || !ctx.pending_tool_names.is_empty()
+        {
+            return None;
+        }
+
+        Some(build_clarification_first_block(
+            ctx.request_text,
+            "Blocked by runtime constraint `clarification_first`: the request is materially ambiguous, so the assistant must use `ask_user_question` instead of asking for clarification in plain text."
+                .to_string(),
+        ))
     }
 
     fn post_response_action(
@@ -680,6 +665,69 @@ impl RuntimeConstraint for ClarificationFirstConstraint {
                     .to_string(),
             max_attempts: 1,
         })
+    }
+}
+
+fn build_clarification_first_block(
+    request_text: &str,
+    tool_result_message: String,
+) -> ConstraintToolBlock {
+    let scope_hint = if has_specific_anchor(request_text) {
+        "the exact requirement or acceptance criteria"
+    } else {
+        "the target scope (files/modules/behavior) and desired outcome"
+    };
+    let assistant_response = format!(
+        "I need one clarification before I make changes: the current request is broad enough \
+         that different implementations could produce different results. Please specify {}, \
+         and then I can continue.",
+        scope_hint
+    );
+    let structured_question = ask_user_question::AskUserQuestionArgs {
+        questions: vec![ask_user_question::QuestionItem {
+            question: "Which missing detail should we pin down first before making changes?"
+                .to_string(),
+            header: "Clarify".to_string(),
+            multi_select: false,
+            options: vec![
+                ask_user_question::QuestionOption {
+                    label: "Scope".to_string(),
+                    description:
+                        "Clarify the exact file, module, component, or surface that should change."
+                            .to_string(),
+                    preview: None,
+                },
+                ask_user_question::QuestionOption {
+                    label: "Outcome".to_string(),
+                    description: "Clarify the exact behavior or result you want after the change."
+                        .to_string(),
+                    preview: None,
+                },
+                ask_user_question::QuestionOption {
+                    label: "Guardrails".to_string(),
+                    description: "Clarify constraints, risks, or what must not change.".to_string(),
+                    preview: None,
+                },
+            ],
+        }],
+        answers: None,
+        annotations: None,
+        metadata: Some(serde_json::json!({
+            "source": "runtime_constraint",
+            "constraint_id": "clarification_first",
+        })),
+    };
+
+    ConstraintToolBlock {
+        id: "clarification_first",
+        tool_result_message,
+        assistant_response,
+        interactive_question: Some(structured_question),
+        post_answer_response: Some(
+            "Thanks — now please reply in free text with the concrete detail you selected. \
+             Include exact file/module names, desired behavior, and any constraints that matter."
+                .to_string(),
+        ),
     }
 }
 
@@ -1010,6 +1058,48 @@ mod tests {
     }
 
     #[test]
+    fn clarification_post_response_prefers_interactive_ask_over_plain_text() {
+        let harness = RuntimeConstraintHarness::default();
+        let state = RuntimeConstraintState::default();
+        let pending = Vec::<String>::new();
+
+        let block = harness.post_response_block(
+            &PostResponseConstraintContext {
+                request_text: "Please improve this.",
+                assistant_text: "Which file or module should I improve first?",
+                pending_tool_names: &pending,
+                is_subagent: false,
+            },
+            &state,
+        );
+
+        assert!(block.is_some());
+        let block = block.unwrap();
+        assert_eq!(block.id, "clarification_first");
+        assert!(block.tool_result_message.contains("ask_user_question"));
+        assert!(block.interactive_question.is_some());
+    }
+
+    #[test]
+    fn clarification_post_response_does_not_block_subagents() {
+        let harness = RuntimeConstraintHarness::default();
+        let state = RuntimeConstraintState::default();
+        let pending = Vec::<String>::new();
+
+        let block = harness.post_response_block(
+            &PostResponseConstraintContext {
+                request_text: "Please improve this.",
+                assistant_text: "Which file or module should I improve first?",
+                pending_tool_names: &pending,
+                is_subagent: true,
+            },
+            &state,
+        );
+
+        assert!(block.is_none());
+    }
+
+    #[test]
     fn clarification_gate_allows_specific_request() {
         let harness = RuntimeConstraintHarness::default();
         let state = RuntimeConstraintState::default();
@@ -1083,8 +1173,10 @@ mod tests {
 
     #[test]
     fn harness_applies_config_overrides() {
-        let mut cfg = ResolvedRuntimeConstraintConfig::default();
-        cfg.buffer_responses = false;
+        let mut cfg = ResolvedRuntimeConstraintConfig {
+            buffer_responses: false,
+            ..Default::default()
+        };
         cfg.rules.insert(
             "clarification_first".to_string(),
             RuntimeConstraintRuleConfig {

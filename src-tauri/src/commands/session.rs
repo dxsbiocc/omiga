@@ -20,6 +20,7 @@ pub type AppState = OmigaAppState;
 
 fn message_record_to_api(rec: MessageRecord) -> Message {
     let id = Some(rec.id.clone());
+    let created_at = Some(rec.created_at.clone());
     match rec.role.as_str() {
         "assistant" => {
             let tool_calls = rec
@@ -38,19 +39,27 @@ fn message_record_to_api(rec: MessageRecord) -> Message {
                 token_usage,
                 reasoning_content: rec.reasoning_content,
                 follow_up_suggestions,
+                turn_summary: rec.turn_summary,
                 id,
+                created_at,
             }
         }
         "tool" => Message::Tool {
             tool_call_id: rec.tool_call_id.unwrap_or_default(),
             output: rec.content,
             id,
+            created_at,
         },
         _ => Message::User {
             content: rec.content,
             id,
+            created_at,
         },
     }
+}
+
+fn clean_session_search_snippet(snippet: String) -> String {
+    snippet.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// List all sessions
@@ -71,6 +80,37 @@ pub async fn list_sessions(state: State<'_, OmigaAppState>) -> CommandResult<Vec
             project_path: s.project_path,
             message_count: s.message_count as usize,
             updated_at: s.updated_at,
+        })
+        .collect())
+}
+
+/// Search sessions by title, project path, or message body.
+#[tauri::command]
+pub async fn search_sessions(
+    state: State<'_, OmigaAppState>,
+    query: String,
+    limit: Option<i64>,
+) -> CommandResult<Vec<SessionSearchSummary>> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let repo = &*state.repo;
+    let sessions = repo
+        .search_sessions(q, limit.unwrap_or(50))
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to search sessions: {}", e)))?;
+
+    Ok(sessions
+        .into_iter()
+        .map(|s| SessionSearchSummary {
+            id: s.id,
+            name: s.name,
+            project_path: s.project_path,
+            message_count: s.message_count as usize,
+            updated_at: s.updated_at,
+            match_snippet: s.match_snippet.map(clean_session_search_snippet),
         })
         .collect())
 }
@@ -99,11 +139,15 @@ pub async fn load_session(
     let repo = &*state.repo;
     let page = limit.unwrap_or(DEFAULT_MSG_PAGE_SIZE).max(1);
 
-    // Run session meta and message queries in parallel — both are independent reads.
-    // WAL mode + pool of 4 connections supports concurrent reads without contention.
-    let (session_result, raw_messages_result) = tokio::join!(
+    // Run all three reads in parallel:
+    //   • session meta (DB)
+    //   • message rows (DB, WAL + pool supports concurrent reads)
+    //   • session config YAML (blocking file I/O via spawn_blocking)
+    let sid_for_cfg = session_id.clone();
+    let (session_result, raw_messages_result, config_result) = tokio::join!(
         repo.get_session_meta(&session_id),
-        repo.get_session_messages_paged(&session_id, page + 1, 0)
+        repo.get_session_messages_paged(&session_id, page + 1, 0),
+        tokio::task::spawn_blocking(move || load_session_config(&sid_for_cfg))
     );
 
     let session = session_result
@@ -142,7 +186,8 @@ pub async fn load_session(
         .map(message_record_to_api)
         .collect();
 
-    let session_config = load_session_config(&session_id);
+    // spawn_blocking only fails if the thread panicked — fall back to defaults.
+    let session_config = config_result.unwrap_or_else(|_| load_session_config(&session_id));
     let config_response = SessionConfigResponse::from(session_config);
 
     let total = start.elapsed();
@@ -226,6 +271,8 @@ pub async fn save_session(state: State<'_, AppState>, session: SessionData) -> C
                 tool_calls,
                 token_usage,
                 reasoning_content,
+                follow_up_suggestions,
+                turn_summary,
                 ..
             } => DomainMessage::Assistant {
                 content: content.clone(),
@@ -240,7 +287,16 @@ pub async fn save_session(state: State<'_, AppState>, session: SessionData) -> C
                 }),
                 token_usage: token_usage.clone(),
                 reasoning_content: reasoning_content.clone(),
-                follow_up_suggestions: None, // Not used in this path
+                follow_up_suggestions: follow_up_suggestions.as_ref().map(|items| {
+                    items
+                        .iter()
+                        .map(|item| crate::domain::session::FollowUpSuggestion {
+                            label: item.label.clone(),
+                            prompt: item.prompt.clone(),
+                        })
+                        .collect()
+                }),
+                turn_summary: turn_summary.clone(),
             },
             Message::Tool {
                 tool_call_id,
@@ -253,31 +309,11 @@ pub async fn save_session(state: State<'_, AppState>, session: SessionData) -> C
         };
 
         // Use SessionCodec for serialization (single source of truth)
-        let (
-            id,
-            session_id,
-            role,
-            content,
-            tool_calls,
-            tool_call_id,
-            token_usage_json,
-            reasoning_content,
-            follow_up_suggestions_json,
-        ) = SessionCodec::message_to_record(&domain_msg, &msg_id, &session.id);
+        let record = SessionCodec::message_to_record(&domain_msg, &msg_id, &session.id);
 
-        repo.save_message(
-            &id,
-            &session_id,
-            &role,
-            &content,
-            tool_calls.as_deref(),
-            tool_call_id.as_deref(),
-            token_usage_json.as_deref(),
-            reasoning_content.as_deref(),
-            follow_up_suggestions_json.as_deref(),
-        )
-        .await
-        .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
+        repo.save_message(record.as_insert())
+            .await
+            .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
     }
 
     Ok(())
@@ -386,6 +422,8 @@ pub async fn save_message(
             tool_calls,
             token_usage,
             reasoning_content,
+            follow_up_suggestions,
+            turn_summary,
             ..
         } => DomainMessage::Assistant {
             content,
@@ -400,7 +438,16 @@ pub async fn save_message(
             }),
             token_usage,
             reasoning_content,
-            follow_up_suggestions: None, // Not used in this path
+            follow_up_suggestions: follow_up_suggestions.map(|items| {
+                items
+                    .into_iter()
+                    .map(|item| crate::domain::session::FollowUpSuggestion {
+                        label: item.label,
+                        prompt: item.prompt,
+                    })
+                    .collect()
+            }),
+            turn_summary,
         },
         Message::Tool {
             tool_call_id,
@@ -413,31 +460,11 @@ pub async fn save_message(
     };
 
     // Use SessionCodec for serialization (single source of truth)
-    let (
-        id,
-        sid,
-        role,
-        content,
-        tool_calls,
-        tool_call_id,
-        token_usage_json,
-        reasoning_content,
-        follow_up_suggestions_json,
-    ) = SessionCodec::message_to_record(&domain_msg, &msg_id, &session_id);
+    let record = SessionCodec::message_to_record(&domain_msg, &msg_id, &session_id);
 
-    repo.save_message(
-        &id,
-        &sid,
-        &role,
-        &content,
-        tool_calls.as_deref(),
-        tool_call_id.as_deref(),
-        token_usage_json.as_deref(),
-        reasoning_content.as_deref(),
-        follow_up_suggestions_json.as_deref(),
-    )
-    .await
-    .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
+    repo.save_message(record.as_insert())
+        .await
+        .map_err(|e| OmigaError::Persistence(format!("Failed to save message: {}", e)))?;
 
     // Update session timestamp
     repo.touch_session(&session_id)
@@ -948,17 +975,17 @@ pub async fn prewarm_session(
             drop(current);
             if !already_active {
                 if let Err(e) =
-                    crate::commands::chat::apply_named_provider_runtime(&*state, name).await
+                    crate::commands::chat::apply_named_provider_runtime(&state, name).await
                 {
                     tracing::debug!(target: "omiga::prewarm", "provider warm skipped: {}", e);
                 }
             } else {
                 // Provider already matches — still warm the config file cache.
-                let _ = crate::commands::chat::get_config_file(&*state).await;
+                let _ = crate::commands::chat::get_config_file(&state).await;
             }
         }
     } else {
-        let _ = crate::commands::chat::get_config_file(&*state).await;
+        let _ = crate::commands::chat::get_config_file(&state).await;
     }
 
     // 2. Pre-warm integrations config cache (file read, synchronous but fast).
@@ -1015,13 +1042,18 @@ pub async fn prewarm_session(
     //    when stdio servers start cold.  We spawn and forget; send_message will reuse the
     //    warm cache if it completes in time, or re-discover if not.
     {
+        let current_mcp_config_signature =
+            crate::domain::mcp::merged_mcp_servers_signature(&project_root);
         let hit = state
             .chat
             .mcp_tool_cache
             .lock()
             .await
             .get(&project_root)
-            .filter(|c| c.cached_at.elapsed() < MCP_TOOL_CACHE_TTL)
+            .filter(|c| {
+                c.cached_at.elapsed() < MCP_TOOL_CACHE_TTL
+                    && c.config_signature == current_mcp_config_signature
+            })
             .is_some();
 
         if !hit {
@@ -1029,6 +1061,7 @@ pub async fn prewarm_session(
             let root = project_root.clone();
             tokio::spawn(async move {
                 let mcp_timeout = std::time::Duration::from_secs(10);
+                let config_signature = crate::domain::mcp::merged_mcp_servers_signature(&root);
                 let schemas =
                     crate::domain::mcp::tool_pool::discover_mcp_tool_schemas(&root, mcp_timeout)
                         .await;
@@ -1037,6 +1070,7 @@ pub async fn prewarm_session(
                     McpToolCache {
                         schemas,
                         cached_at: std::time::Instant::now(),
+                        config_signature,
                     },
                 );
             });
@@ -1057,6 +1091,17 @@ pub struct SessionSummary {
     pub updated_at: String,
 }
 
+/// Session search summary (for search modal)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionSearchSummary {
+    pub id: String,
+    pub name: String,
+    pub project_path: String,
+    pub message_count: usize,
+    pub updated_at: String,
+    pub match_snippet: Option<String>,
+}
+
 /// A chat message
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "role")]
@@ -1067,6 +1112,9 @@ pub enum Message {
         /// SQLite `messages.id` when loaded from DB; omitted for legacy JSON.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        /// RFC3339 creation timestamp from DB; used by frontend for elapsed-time display.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
     },
     #[serde(rename = "assistant")]
     Assistant {
@@ -1079,7 +1127,12 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         follow_up_suggestions: Option<Vec<FollowUpSuggestion>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        /// RFC3339 creation timestamp from DB; used by frontend for elapsed-time display.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
     },
     #[serde(rename = "tool")]
     Tool {
@@ -1087,6 +1140,9 @@ pub enum Message {
         output: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        /// RFC3339 creation timestamp from DB; used by frontend for elapsed-time display.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_at: Option<String>,
     },
 }
 

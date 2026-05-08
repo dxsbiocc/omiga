@@ -89,6 +89,35 @@ impl AgentRouter {
             .collect()
     }
 
+    /// 列出所有 Agent 及其描述和后台标志
+    pub fn list_agents_full(&self) -> Vec<(&str, &str, bool)> {
+        self.agents
+            .values()
+            .map(|e| {
+                (
+                    e.inner.agent_type(),
+                    e.inner.when_to_use(),
+                    e.inner.background(),
+                )
+            })
+            .collect()
+    }
+
+    /// 列出面向用户的 Agent（user_facing() == true），用于 UI 选择器
+    pub fn list_user_facing_agents(&self) -> Vec<(&str, &str, bool)> {
+        self.agents
+            .values()
+            .filter(|e| e.inner.user_facing())
+            .map(|e| {
+                (
+                    e.inner.agent_type(),
+                    e.inner.when_to_use(),
+                    e.inner.background(),
+                )
+            })
+            .collect()
+    }
+
     /// 设置默认 Agent
     pub fn set_default_agent(&mut self, agent_type: &str) {
         if self.agents.contains_key(agent_type) {

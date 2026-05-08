@@ -6,6 +6,7 @@ use crate::commands::integrations_settings;
 use crate::errors::{AppError, FsError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tauri::State;
 
@@ -20,6 +21,16 @@ fn validate_skill_directory_name(name: &str) -> CommandResult<&str> {
     if t.is_empty() || t.contains('/') || t.contains('\\') || t.contains("..") || t.contains('\0') {
         return Err(AppError::Config(
             "Invalid skill directory name (no path separators).".to_string(),
+        ));
+    }
+    Ok(t)
+}
+
+fn validate_mcp_server_name(name: &str) -> CommandResult<&str> {
+    let t = name.trim();
+    if t.is_empty() || t.contains('/') || t.contains('\\') || t.contains("..") || t.contains('\0') {
+        return Err(AppError::Config(
+            "Invalid MCP server name (no path separators).".to_string(),
         ));
     }
     Ok(t)
@@ -47,6 +58,14 @@ fn read_json_file(path: &Path) -> CommandResult<Value> {
         .map_err(|e| AppError::Config(format!("Invalid JSON in {}: {}", path.display(), e)))
 }
 
+fn read_json_object_if_exists(path: &Path) -> CommandResult<serde_json::Map<String, Value>> {
+    if !path.exists() {
+        return Ok(serde_json::Map::new());
+    }
+    let existing = read_json_file(path)?;
+    Ok(existing.as_object().cloned().unwrap_or_default())
+}
+
 /// Merge `mcpServers` from `incoming` into `base` (incoming keys overwrite).
 fn merge_mcp_servers_objects(base: Option<&Value>, incoming: &Value) -> Value {
     let mut merged = serde_json::Map::new();
@@ -70,6 +89,163 @@ fn merge_mcp_servers_objects(base: Option<&Value>, incoming: &Value) -> Value {
 pub struct ImportMcpMergeResult {
     pub wrote_path: String,
     pub server_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMcpServerInput {
+    pub name: String,
+    pub kind: String,
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub env: Option<HashMap<String, String>>,
+    pub headers: Option<HashMap<String, String>>,
+    pub url: Option<String>,
+    pub cwd: Option<String>,
+}
+
+fn string_map_to_json_object(map: HashMap<String, String>) -> serde_json::Map<String, Value> {
+    map.into_iter()
+        .filter_map(|(k, v)| {
+            let key = k.trim();
+            if key.is_empty() {
+                None
+            } else {
+                Some((key.to_string(), Value::String(v)))
+            }
+        })
+        .collect()
+}
+
+fn project_mcp_config_value(server: ProjectMcpServerInput) -> CommandResult<(String, Value)> {
+    let name = validate_mcp_server_name(&server.name)?.to_string();
+    let kind = server.kind.trim().to_ascii_lowercase();
+    let mut cfg = serde_json::Map::new();
+
+    match kind.as_str() {
+        "stdio" => {
+            let command = server.command.unwrap_or_default().trim().to_string();
+            if command.is_empty() {
+                return Err(AppError::Config(
+                    "MCP stdio server requires a launch command.".to_string(),
+                ));
+            }
+            cfg.insert("command".to_string(), Value::String(command));
+
+            let args = server.args.unwrap_or_default();
+            cfg.insert(
+                "args".to_string(),
+                Value::Array(args.into_iter().map(Value::String).collect()),
+            );
+
+            let env_obj = string_map_to_json_object(server.env.unwrap_or_default());
+            if !env_obj.is_empty() {
+                cfg.insert("env".to_string(), Value::Object(env_obj));
+            }
+
+            if let Some(cwd) = server.cwd {
+                let trimmed = cwd.trim();
+                if !trimmed.is_empty() {
+                    cfg.insert("cwd".to_string(), Value::String(trimmed.to_string()));
+                }
+            }
+        }
+        "http" | "url" | "streamable_http" | "streamable-http" => {
+            let url = server.url.unwrap_or_default().trim().to_string();
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err(AppError::Config(
+                    "MCP HTTP server URL must start with http:// or https://.".to_string(),
+                ));
+            }
+            cfg.insert("url".to_string(), Value::String(url));
+
+            let headers_obj = string_map_to_json_object(server.headers.unwrap_or_default());
+            if !headers_obj.is_empty() {
+                cfg.insert("headers".to_string(), Value::Object(headers_obj));
+            }
+        }
+        _ => {
+            return Err(AppError::Config(
+                "MCP server kind must be \"stdio\" or \"http\".".to_string(),
+            ));
+        }
+    }
+
+    Ok((name, Value::Object(cfg)))
+}
+
+fn project_mcp_tombstone_value(name: &str) -> CommandResult<(String, Value)> {
+    let name = validate_mcp_server_name(name)?.to_string();
+    Ok((name, serde_json::json!({ "disabled": true })))
+}
+
+async fn write_project_mcp_servers(
+    app_state: &OmigaAppState,
+    project_root: &str,
+    server_patch: serde_json::Map<String, Value>,
+) -> CommandResult<ImportMcpMergeResult> {
+    let root = resolve_project_root(project_root)?;
+    let dest = root.join(".omiga").join("mcp.json");
+    let parent = dest.parent().ok_or_else(|| {
+        AppError::Config("Could not determine parent directory for .omiga/mcp.json.".to_string())
+    })?;
+    tokio::fs::create_dir_all(parent).await.map_err(io_err)?;
+
+    let mut out_obj = read_json_object_if_exists(&dest)?;
+    let existing_servers = out_obj.get("mcpServers").cloned();
+    let incoming_servers = Value::Object(server_patch);
+    let merged_servers = merge_mcp_servers_objects(existing_servers.as_ref(), &incoming_servers);
+    let n = merged_servers.as_object().map(|o| o.len()).unwrap_or(0);
+    out_obj.insert("mcpServers".to_string(), merged_servers);
+
+    let out = Value::Object(out_obj);
+    let pretty = serde_json::to_string_pretty(&out)
+        .map_err(|e| AppError::Config(format!("serialize project MCP JSON: {}", e)))?;
+
+    tokio::fs::write(&dest, pretty.as_bytes())
+        .await
+        .map_err(io_err)?;
+
+    if let Ok(cache_key) = integrations_settings::resolve_project_root(project_root) {
+        integrations_settings::invalidate_integrations_catalog_cache(app_state, &cache_key);
+    }
+
+    Ok(ImportMcpMergeResult {
+        wrote_path: dest.display().to_string(),
+        server_count: n,
+    })
+}
+
+/// Add or update one MCP server in `<project_root>/.omiga/mcp.json`.
+///
+/// Project-level entries intentionally override bundled/user/plugin entries with the same server
+/// name, matching the normal Omiga MCP merge order.
+#[tauri::command]
+pub async fn upsert_project_mcp_server(
+    app_state: State<'_, OmigaAppState>,
+    project_root: String,
+    server: ProjectMcpServerInput,
+) -> CommandResult<ImportMcpMergeResult> {
+    let (name, cfg) = project_mcp_config_value(server)?;
+    let mut patch = serde_json::Map::new();
+    patch.insert(name, cfg);
+    write_project_mcp_servers(&app_state, &project_root, patch).await
+}
+
+/// Hide/remove one MCP server for the current project by writing a project-level tombstone.
+///
+/// This removes project-owned servers and also lets a project hide bundled/user/plugin servers
+/// without mutating global files.
+#[tauri::command]
+pub async fn delete_project_mcp_server(
+    app_state: State<'_, OmigaAppState>,
+    project_root: String,
+    name: String,
+) -> CommandResult<ImportMcpMergeResult> {
+    let (name, tombstone) = project_mcp_tombstone_value(&name)?;
+    let mut patch = serde_json::Map::new();
+    patch.insert(name, tombstone);
+    write_project_mcp_servers(&app_state, &project_root, patch).await
 }
 
 /// Merge `mcpServers` from `source_path` (Claude Code / Cursor `mcp.json` shape) into
@@ -434,5 +610,55 @@ mod tests {
         assert_eq!(m["a"], 1);
         assert_eq!(m["b"], 9);
         assert_eq!(m["c"], 3);
+    }
+
+    #[test]
+    fn project_mcp_config_value_builds_stdio_and_http() {
+        let mut env = std::collections::HashMap::new();
+        env.insert("API_KEY".to_string(), "secret".to_string());
+
+        let (name, stdio) = project_mcp_config_value(ProjectMcpServerInput {
+            name: "paperclip-local".to_string(),
+            kind: "stdio".to_string(),
+            command: Some("uvx".to_string()),
+            args: Some(vec!["paperclip-mcp".to_string()]),
+            env: Some(env),
+            headers: None,
+            url: None,
+            cwd: Some("./tools".to_string()),
+        })
+        .expect("stdio input");
+        assert_eq!(name, "paperclip-local");
+        assert_eq!(stdio["command"], "uvx");
+        assert_eq!(stdio["args"], json!(["paperclip-mcp"]));
+        assert_eq!(stdio["env"]["API_KEY"], "secret");
+        assert_eq!(stdio["cwd"], "./tools");
+
+        let (_, http) = project_mcp_config_value(ProjectMcpServerInput {
+            name: "paperclip".to_string(),
+            kind: "http".to_string(),
+            command: None,
+            args: None,
+            env: None,
+            headers: Some(HashMap::from([(
+                "Authorization".to_string(),
+                "Bearer ${PAPERCLIP_TOKEN}".to_string(),
+            )])),
+            url: Some("https://example.com/mcp".to_string()),
+            cwd: None,
+        })
+        .expect("http input");
+        assert_eq!(http["url"], "https://example.com/mcp");
+        assert_eq!(
+            http["headers"]["Authorization"],
+            "Bearer ${PAPERCLIP_TOKEN}"
+        );
+    }
+
+    #[test]
+    fn project_mcp_tombstone_value_marks_disabled() {
+        let (name, value) = project_mcp_tombstone_value("paperclip").expect("tombstone");
+        assert_eq!(name, "paperclip");
+        assert_eq!(value["disabled"], true);
     }
 }

@@ -3,12 +3,17 @@ import {
   Box,
   FormControlLabel,
   FormGroup,
+  Stack,
   Switch,
   Typography,
 } from "@mui/material";
 import { useNotebookViewerStore } from "../../state/notebookViewerStore";
 
-export function NotebookSettingsTab() {
+export function NotebookViewerSettingsPanel({
+  showIntro = true,
+}: {
+  showIntro?: boolean;
+}) {
   const virtualizeCells = useNotebookViewerStore((s) => s.virtualizeCells);
   const htmlSandboxAllowScripts = useNotebookViewerStore((s) => s.htmlSandboxAllowScripts);
   const enablePythonShellMagic = useNotebookViewerStore((s) => s.enablePythonShellMagic);
@@ -19,12 +24,14 @@ export function NotebookSettingsTab() {
   const setEnableNotebookShortcuts = useNotebookViewerStore((s) => s.setEnableNotebookShortcuts);
 
   return (
-    <Box>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        控制内置 .ipynb 查看器的行为。设置保存在本机浏览器存储中。
-      </Typography>
+    <Stack spacing={2}>
+      {showIntro && (
+        <Typography variant="body2" color="text.secondary">
+          控制内置 .ipynb 查看器的行为。设置保存在本机浏览器存储中。
+        </Typography>
+      )}
 
-      <Alert severity="warning" sx={{ mb: 2, borderRadius: 2 }}>
+      <Alert severity="warning" sx={{ borderRadius: 2 }}>
         若开启「HTML 内允许脚本」，仅打开你信任的 notebook；恶意 HTML 可能执行脚本。
       </Alert>
 
@@ -85,6 +92,14 @@ export function NotebookSettingsTab() {
           Shift+Enter 运行并跳到下一格；Ctrl/Cmd+Enter 仅运行。关闭后可用工具栏「运行」。
         </Typography>
       </FormGroup>
+    </Stack>
+  );
+}
+
+export function NotebookSettingsTab() {
+  return (
+    <Box>
+      <NotebookViewerSettingsPanel />
     </Box>
   );
 }

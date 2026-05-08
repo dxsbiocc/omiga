@@ -26,6 +26,8 @@ import { FileIcon, FolderIcon } from "react-material-icon-theme";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { materialIconFileExtension } from "../../utils/materialIconTheme";
+import { extractErrorMessage } from "../../utils/errorMessage";
+import { useSessionStore } from "../../state/sessionStore";
 
 export type SkillPreviewTarget = {
   name: string;
@@ -87,16 +89,22 @@ function expandAncestorsToFile(
   return next;
 }
 
-async function loadSkillFileTree(dirPath: string): Promise<TreeNode[]> {
+async function loadSkillFileTree(
+  dirPath: string,
+  skillRoot: string,
+  sessionId?: string,
+): Promise<TreeNode[]> {
   const res = await invoke<DirectoryListResponse>("list_directory", {
     path: dirPath,
     offset: null,
     limit: null,
+    sessionId,
+    workspaceRoot: skillRoot,
   });
   const nodes: TreeNode[] = [];
   for (const e of res.entries) {
     if (e.is_directory) {
-      const children = await loadSkillFileTree(e.path);
+      const children = await loadSkillFileTree(e.path, skillRoot, sessionId);
       nodes.push({
         name: e.name,
         path: e.path,
@@ -503,10 +511,22 @@ type Props = {
 };
 
 export function SkillPreviewDialog({ open, skill, onClose }: Props) {
+  const currentSession = useSessionStore((s) => s.currentSession);
   const skillRoot = useMemo(
     () => (skill ? dirnamePath(skill.skillMdPath) : ""),
     [skill],
   );
+  const previewSessionId = useMemo(() => {
+    const projectPath = currentSession?.projectPath?.trim();
+    if (!currentSession?.id || !projectPath || projectPath === "." || !skillRoot) {
+      return undefined;
+    }
+    const root = normPathKey(skillRoot);
+    const project = normPathKey(projectPath);
+    return root === project || root.startsWith(`${project}/`)
+      ? currentSession.id
+      : undefined;
+  }, [currentSession?.id, currentSession?.projectPath, skillRoot]);
 
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [treeLoading, setTreeLoading] = useState(false);
@@ -549,13 +569,13 @@ export function SkillPreviewDialog({ open, skill, onClose }: Props) {
     setCollapsedPaths(new Set());
     setSelectedPath(skill.skillMdPath);
 
-    void loadSkillFileTree(skillRoot)
+    void loadSkillFileTree(skillRoot, skillRoot, previewSessionId)
       .then((nodes) => {
         if (!cancelled) setTree(nodes);
       })
       .catch((e) => {
         if (!cancelled) {
-          setTreeError(e instanceof Error ? e.message : String(e));
+          setTreeError(extractErrorMessage(e));
           setTree([]);
         }
       })
@@ -566,7 +586,7 @@ export function SkillPreviewDialog({ open, skill, onClose }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [open, skill, skillRoot]);
+  }, [open, skill, previewSessionId, skillRoot]);
 
   const loadFile = useCallback(async (path: string) => {
     setFileLoading(true);
@@ -579,12 +599,12 @@ export function SkillPreviewDialog({ open, skill, onClose }: Props) {
       try {
         const res = await invoke<{ data: string; mime_type: string }>(
           "read_image_base64",
-          { path },
+          { path, sessionId: previewSessionId, workspaceRoot: skillRoot },
         );
         setImageDataUrl(`data:${res.mime_type};base64,${res.data}`);
         setPreviewKind("image");
       } catch (e) {
-        setFileError(e instanceof Error ? e.message : String(e));
+        setFileError(extractErrorMessage(e));
         setPreviewKind("empty");
       } finally {
         setFileLoading(false);
@@ -607,6 +627,8 @@ export function SkillPreviewDialog({ open, skill, onClose }: Props) {
         path,
         offset: null,
         limit: null,
+        sessionId: previewSessionId,
+        workspaceRoot: skillRoot,
       });
       const body = res.content;
       setTextContent(body);
@@ -625,13 +647,13 @@ export function SkillPreviewDialog({ open, skill, onClose }: Props) {
 
       setPreviewKind("text");
     } catch (e) {
-      setFileError(e instanceof Error ? e.message : String(e));
+      setFileError(extractErrorMessage(e));
       setPreviewKind("empty");
       setScriptLanguage(null);
     } finally {
       setFileLoading(false);
     }
-  }, []);
+  }, [previewSessionId, skillRoot]);
 
   useEffect(() => {
     if (!open || !selectedPath) {

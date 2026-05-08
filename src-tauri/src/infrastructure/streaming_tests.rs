@@ -2,5 +2,5 @@
 
 #[test]
 fn streaming_test_module_links() {
-    assert!(true);
+    let _ = module_path!();
 }

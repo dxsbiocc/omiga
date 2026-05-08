@@ -5,7 +5,8 @@
  */
 
 import { create } from "zustand";
-import { listen } from "@tauri-apps/api/event";
+import { listenTauriEvent } from "../utils/tauriEvents";
+import { useSessionStore } from "./sessionStore";
 
 /** 后台 Agent 任务状态 */
 export type BackgroundAgentStatus =
@@ -43,6 +44,56 @@ export interface BackgroundAgentTask {
   messageId: string;
 }
 
+/** 原始调度请求（供确认后重发） */
+export interface ScheduleRequest {
+  userRequest: string;
+  projectRoot: string;
+  sessionId: string;
+  maxAgents?: number;
+  autoDecompose?: boolean;
+  strategy?: string;
+  modeHint?: string;
+  skipConfirmation?: boolean;
+}
+
+/** 后端 TaskPlan 的 camelCase JSON 形态；用于确认后执行已批准计划，避免重新规划。 */
+export interface AgentScheduleTaskPlan {
+  planId: string;
+  originalRequest: string;
+  entryAgentType?: string;
+  executionSupervisorAgentType?: string;
+  subtasks: Array<{
+    id: string;
+    description: string;
+    agentType: string;
+    dependencies: string[];
+    critical: boolean;
+    estimatedSecs: number;
+    timeoutSecs?: number;
+    maxRetries?: number;
+    supervisorAgentType?: string;
+    stage?: string;
+    context: string;
+  }>;
+  executionOrder: string[];
+  allowParallel: boolean;
+  globalContext: string;
+}
+
+/** 确认请求载荷（来自 agent-schedule-confirmation-required 事件） */
+export interface ScheduleConfirmationPayload {
+  sessionId: string;
+  planId: string;
+  summary: string;
+  estimatedMinutes: number;
+  agents: string[];
+  plan: AgentScheduleTaskPlan;
+  projectRoot: string;
+  strategy?: string;
+  modeHint?: string;
+  originalRequest: ScheduleRequest;
+}
+
 /** 后台 Agent 完成事件载荷 */
 interface BackgroundAgentCompleteEvent {
   sessionId: string;
@@ -63,6 +114,10 @@ interface AgentState {
   selectedTaskId: string | null;
   /** 是否显示任务详情面板 */
   showTaskPanel: boolean;
+  /** 待确认的编排请求（非 null 时弹出确认对话框） */
+  pendingConfirmation: ScheduleConfirmationPayload | null;
+  /** 编排完成的会话 ID（非 null 时触发 Chat 滚动到底部，消费后置 null） */
+  scheduleCompleteSession: string | null;
 
   /** 添加或更新任务 */
   upsertTask: (task: BackgroundAgentTask) => void;
@@ -84,6 +139,10 @@ interface AgentState {
   toggleTaskPanel: () => void;
   /** 设置面板显示状态 */
   setTaskPanelVisible: (visible: boolean) => void;
+  /** 设置待确认请求 */
+  setPendingConfirmation: (payload: ScheduleConfirmationPayload | null) => void;
+  /** 设置编排完成会话（触发 Chat 滚到底部） */
+  setScheduleCompleteSession: (sessionId: string | null) => void;
   /** 获取会话的所有任务 */
   getSessionTasks: (sessionId: string) => BackgroundAgentTask[];
   /** 获取正在运行的任务 */
@@ -96,6 +155,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   backgroundTasks: [],
   selectedTaskId: null,
   showTaskPanel: false,
+  pendingConfirmation: null,
+  scheduleCompleteSession: null,
 
   upsertTask: (task) =>
     set((s) => {
@@ -149,6 +210,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setTaskPanelVisible: (visible) => set({ showTaskPanel: visible }),
 
+  setPendingConfirmation: (payload) => set({ pendingConfirmation: payload }),
+
+  setScheduleCompleteSession: (sessionId) => set({ scheduleCompleteSession: sessionId }),
+
   getSessionTasks: (sessionId) =>
     get().backgroundTasks.filter((t) => t.sessionId === sessionId),
 
@@ -161,7 +226,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     const { upsertTask, updateTaskStatus } = get();
 
     // 监听任务更新事件
-    const unlistenUpdate = await listen<BackgroundAgentTask>(
+    const unlistenUpdate = await listenTauriEvent<BackgroundAgentTask>(
       "background-agent-update",
       (event) => {
         upsertTask(event.payload);
@@ -169,7 +234,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     );
 
     // 监听任务完成事件
-    const unlistenComplete = await listen<BackgroundAgentCompleteEvent>(
+    const unlistenComplete = await listenTauriEvent<BackgroundAgentCompleteEvent>(
       "background-agent-complete",
       (event) => {
         const {
@@ -187,25 +252,78 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       },
     );
 
+    // 编排完成后刷新父会话并通知 Chat 滚动到底部
+    const unlistenSchedule = await listenTauriEvent<{ sessionId: string; messageId: string }>(
+      "agent-schedule-complete",
+      (event) => {
+        const { sessionId } = event.payload;
+        const current = useSessionStore.getState().currentSession;
+        if (current?.id === sessionId) {
+          void useSessionStore.getState().loadSession(sessionId, { silent: true }).then(() => {
+            get().setScheduleCompleteSession(sessionId);
+          });
+        }
+      },
+    );
+
+    // 编排计划需要确认时，存入 store 触发确认对话框
+    const unlistenConfirm = await listenTauriEvent<ScheduleConfirmationPayload>(
+      "agent-schedule-confirmation-required",
+      (event) => {
+        get().setPendingConfirmation(event.payload);
+      },
+    );
+
     // 返回清理函数
     return () => {
       unlistenUpdate();
       unlistenComplete();
+      unlistenSchedule();
+      unlistenConfirm();
     };
   },
 }));
 
-/** Agent 类型显示名称映射 */
+/** Agent 类型显示名称映射（显示层科研分析语义；后端 agent id 不变） */
 export const AGENT_TYPE_DISPLAY_NAMES: Record<string, string> = {
-  "general-purpose": "通用 Agent",
-  Explore: "探索 Agent",
-  Plan: "规划 Agent",
-  verification: "验证 Agent",
+  "auto": "Auto",
+  "general-purpose": "General / 主调度",
+  "Explore": "资料探索",
+  "Plan": "分析设计",
+  "verification": "证据核查",
+  "executor": "分析执行",
+  "architect": "科学审查",
+  "debugger": "问题排查",
+  "test-engineer": "论证检查",
+  "critic": "论证审查",
+  "code-reviewer": "完整性审查",
+  "security-reviewer": "风险审查",
+  "quality-reviewer": "质量审查",
+  "api-reviewer": "口径审查",
+  "performance-reviewer": "效率审查",
+  "literature-search": "文献检索",
+  "deep-research": "深度研究",
+  "researcher": "研究员",
+  "writer": "报告撰写",
+  "data-analysis": "数据分析",
+  "data-visual": "可视化",
+  "data-analyst": "数据分析",
+  "bioinformatics-analyst": "生信分析",
 };
 
-/** 获取 Agent 类型的显示名称 */
+/** 将 agent_type 字符串规范化为面向用户的显示名 */
+export function normalizeAgentDisplayName(agentType: string): string {
+  if (AGENT_TYPE_DISPLAY_NAMES[agentType]) return AGENT_TYPE_DISPLAY_NAMES[agentType];
+  // kebab-case → Title Case fallback: "my-agent" → "My Agent"
+  return agentType
+    .split("-")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+/** 获取 Agent 类型的显示名称（保留向后兼容） */
 export function getAgentTypeDisplayName(agentType: string): string {
-  return AGENT_TYPE_DISPLAY_NAMES[agentType] || agentType;
+  return normalizeAgentDisplayName(agentType);
 }
 
 /** 状态颜色映射 */

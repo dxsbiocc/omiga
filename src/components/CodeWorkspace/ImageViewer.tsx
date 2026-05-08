@@ -16,6 +16,7 @@ import ZoomInRoundedIcon from "@mui/icons-material/ZoomInRounded";
 import ZoomOutRoundedIcon from "@mui/icons-material/ZoomOutRounded";
 import FitScreenRoundedIcon from "@mui/icons-material/FitScreenRounded";
 import CropFreeRoundedIcon from "@mui/icons-material/CropFreeRounded";
+import { getLocalWorkspaceSessionId } from "../../utils/sshWorkspace";
 
 interface ImageReadResponse {
   data: string;
@@ -54,7 +55,14 @@ export function ImageViewer({ filePath }: ImageViewerProps) {
     setZoom(100);
     setFit("fit");
 
-    invoke<ImageReadResponse>("read_image_base64", { path: filePath })
+    const sessionId = getLocalWorkspaceSessionId();
+    if (!sessionId) {
+      setError("请先选择本地工作区后再读取图片");
+      setIsLoading(false);
+      return () => { cancelled = true; };
+    }
+
+    invoke<ImageReadResponse>("read_image_base64", { path: filePath, sessionId })
       .then((res) => {
         if (cancelled) return;
         setSrc(`data:${res.mime_type};base64,${res.data}`);

@@ -1,7 +1,7 @@
 //! Configuration file support for LLM providers
 //!
-//! Supports YAML, JSON, and TOML formats
-//! Default config file: `omiga.yaml` (or `omiga.json`, `omiga.toml`)
+//! Supports YAML, JSON, TOML, and simple dotenv-style `KEY=VALUE` files.
+//! Default config file: `omiga.yaml` (or `omiga.json`, `omiga.toml`).
 
 use super::{LlmConfig, LlmProvider};
 use crate::errors::ApiError;
@@ -172,9 +172,7 @@ impl SshExecConfig {
             // Parse other config options
             else if let Some(_host) = current_host.as_ref() {
                 // SSH config allows "Key Value", "Key=Value", and multiple spaces/tabs
-                let parts: Vec<&str> = line
-                    .splitn(2, |c: char| c == '=' || c == ' ' || c == '\t')
-                    .collect();
+                let parts: Vec<&str> = line.splitn(2, ['=', ' ', '\t']).collect();
                 if parts.len() == 2 {
                     let key = parts[0].trim();
                     let value = parts[1].trim().trim_start_matches('=').trim();
@@ -316,9 +314,12 @@ pub struct ProviderConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query_params: Option<HashMap<String, String>>,
 
-    /// Moonshot/Custom only: persisted `thinking` flag (request always sends true/false; default false).
+    /// Moonshot/Custom/DeepSeek: persisted `thinking` flag; request sends thinking object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
+    /// DeepSeek only: `reasoning_effort` ("high" or "max"), used when thinking is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 
     /// Whether this provider is enabled
     #[serde(default = "default_true")]
@@ -347,20 +348,58 @@ pub struct GlobalSettings {
     /// Whether to enable tools by default
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_tools: Option<bool>,
+
+    /// Whether web-access tools should honor system/env proxy settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_use_proxy: Option<bool>,
+
+    /// Preferred public search engine for `search(category="web")`: ddg, bing, or google.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_search_engine: Option<String>,
+
+    /// Ordered enabled methods for `search(category="web")`, e.g. ["tavily", "google", "ddg"].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_search_methods: Option<Vec<String>>,
+
+    /// Named provider entry used for `/goal` completion second-opinion audits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_second_opinion_provider_entry: Option<String>,
 }
 
 impl LlmConfigFile {
     /// Convert file config to runtime LlmConfig
     pub fn to_llm_config(&self) -> Option<LlmConfig> {
-        let default_name = self.default_provider.clone()?;
-        let providers = self.providers.clone()?;
-        let provider_config = providers.get(&default_name)?;
+        let default_name = self.default_provider.as_deref()?;
+        self.to_named_llm_config(default_name)
+    }
+
+    /// Convert a named provider entry to runtime LlmConfig.
+    pub fn to_named_llm_config(&self, provider_name: &str) -> Option<LlmConfig> {
+        self.named_llm_config(provider_name).ok()
+    }
+
+    /// Convert a named provider entry to runtime LlmConfig with validation details.
+    pub fn named_llm_config(&self, provider_name: &str) -> Result<LlmConfig, String> {
+        let provider_name = provider_name.trim();
+        if provider_name.is_empty() {
+            return Err("Provider entry name is empty".to_string());
+        }
+        let providers = self
+            .providers
+            .as_ref()
+            .ok_or_else(|| "No providers configured".to_string())?;
+        let provider_config = providers
+            .get(provider_name)
+            .ok_or_else(|| format!("Provider entry `{provider_name}` was not found"))?;
 
         if !provider_config.enabled {
-            return None;
+            return Err(format!("Provider entry `{provider_name}` is disabled"));
         }
 
-        let provider: LlmProvider = provider_config.provider_type.parse().ok()?;
+        let provider: LlmProvider = provider_config
+            .provider_type
+            .parse()
+            .map_err(|err| format!("Provider entry `{provider_name}` has invalid type: {err}"))?;
 
         // Get API key - support env var reference like ${ANTHROPIC_API_KEY}
         let api_key = provider_config
@@ -369,8 +408,10 @@ impl LlmConfigFile {
             .map(|key| expand_env_vars(key))
             .unwrap_or_default();
 
-        if api_key.is_empty() {
-            return None;
+        if api_key.trim().is_empty() {
+            return Err(format!(
+                "Provider entry `{provider_name}` has no usable API key"
+            ));
         }
 
         let mut config = LlmConfig::new(provider, api_key);
@@ -420,10 +461,15 @@ impl LlmConfigFile {
         if let Some(thinking) = provider_config.thinking {
             config.thinking = Some(thinking);
         }
-        if matches!(provider, LlmProvider::Moonshot | LlmProvider::Custom)
-            && config.thinking.is_none()
+        if matches!(
+            provider,
+            LlmProvider::Moonshot | LlmProvider::Custom | LlmProvider::Deepseek
+        ) && config.thinking.is_none()
         {
             config.thinking = Some(false);
+        }
+        if let Some(re) = &provider_config.reasoning_effort {
+            config.reasoning_effort = Some(re.clone());
         }
 
         // Apply global settings (provider settings take precedence)
@@ -443,7 +489,7 @@ impl LlmConfigFile {
             }
         }
 
-        Some(config)
+        Ok(config)
     }
 
     /// Create example config for a provider
@@ -487,9 +533,10 @@ impl LlmConfigFile {
             LlmProvider::Deepseek => ProviderConfig {
                 provider_type: "deepseek".to_string(),
                 api_key: Some("${DEEPSEEK_API_KEY}".to_string()),
-                model: Some("deepseek-chat".to_string()),
+                model: Some("deepseek-v4-flash".to_string()),
                 max_tokens: Some(4096),
                 temperature: Some(0.7),
+                thinking: Some(false),
                 ..Default::default()
             },
             LlmProvider::Zhipu => ProviderConfig {
@@ -518,6 +565,10 @@ impl LlmConfigFile {
                 temperature: Some(0.7),
                 timeout: Some(600),
                 enable_tools: Some(true),
+                web_use_proxy: Some(true),
+                web_search_engine: Some("ddg".to_string()),
+                web_search_methods: Some(default_web_search_methods()),
+                goal_second_opinion_provider_entry: None,
             }),
             execution_envs: None,
             terminal: None,
@@ -581,6 +632,10 @@ impl LlmConfigFile {
                 temperature: Some(0.7),
                 timeout: Some(600),
                 enable_tools: Some(true),
+                web_use_proxy: Some(true),
+                web_search_engine: Some("ddg".to_string()),
+                web_search_methods: Some(default_web_search_methods()),
+                goal_second_opinion_provider_entry: None,
             }),
             execution_envs: None,
             terminal: None,
@@ -659,6 +714,9 @@ settings:
   temperature: {}
   timeout: {}
   enable_tools: {}
+  web_use_proxy: {}
+  web_search_engine: {}
+  web_search_methods: [{}]
 "#,
             self.version,
             self.default_provider.as_deref().unwrap_or("anthropic"),
@@ -685,9 +743,107 @@ settings:
             self.settings
                 .as_ref()
                 .and_then(|s| s.enable_tools)
-                .unwrap_or(true)
+                .unwrap_or(true),
+            self.settings
+                .as_ref()
+                .and_then(|s| s.web_use_proxy)
+                .unwrap_or(true),
+            self.settings
+                .as_ref()
+                .and_then(|s| s.web_search_engine.as_deref())
+                .map(normalize_web_search_engine_name)
+                .unwrap_or_else(|| "ddg".to_string()),
+            self.settings
+                .as_ref()
+                .and_then(|s| s.web_search_methods.as_ref())
+                .map(|methods| normalize_web_search_methods(methods).join(", "))
+                .unwrap_or_else(|| default_web_search_methods().join(", "))
         )
     }
+}
+
+pub fn default_web_search_methods() -> Vec<String> {
+    ["ddg", "google", "bing"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn legacy_all_provider_web_search_methods() -> Vec<String> {
+    [
+        "tavily",
+        "exa",
+        "firecrawl",
+        "parallel",
+        "google",
+        "bing",
+        "ddg",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+fn normalize_web_search_engine_name(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "google" => "google".to_string(),
+        "bing" => "bing".to_string(),
+        "duckduckgo" | "duck-duck-go" | "ddg" => "ddg".to_string(),
+        _ => "ddg".to_string(),
+    }
+}
+
+fn normalize_web_search_method_name(value: &str) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "tavily" => Some("tavily".to_string()),
+        "exa" => Some("exa".to_string()),
+        "firecrawl" => Some("firecrawl".to_string()),
+        "parallel" => Some("parallel".to_string()),
+        "google" => Some("google".to_string()),
+        "bing" => Some("bing".to_string()),
+        "duckduckgo" | "duck-duck-go" | "ddg" => Some("ddg".to_string()),
+        _ => None,
+    }
+}
+
+pub fn normalize_web_search_methods(values: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in values {
+        let Some(method) = normalize_web_search_method_name(value) else {
+            continue;
+        };
+        if !out.contains(&method) {
+            out.push(method);
+        }
+    }
+    if out.is_empty() || out == legacy_all_provider_web_search_methods() {
+        default_web_search_methods()
+    } else {
+        out
+    }
+}
+
+pub fn load_web_use_proxy_setting() -> bool {
+    load_config_file()
+        .ok()
+        .and_then(|cfg| cfg.settings.and_then(|s| s.web_use_proxy))
+        .unwrap_or(true)
+}
+
+pub fn load_web_search_engine_setting() -> String {
+    load_config_file()
+        .ok()
+        .and_then(|cfg| cfg.settings.and_then(|s| s.web_search_engine))
+        .map(|s| normalize_web_search_engine_name(&s))
+        .unwrap_or_else(|| "ddg".to_string())
+}
+
+pub fn load_web_search_methods_setting() -> Vec<String> {
+    load_config_file()
+        .ok()
+        .and_then(|cfg| cfg.settings.and_then(|s| s.web_search_methods))
+        .map(|methods| normalize_web_search_methods(&methods))
+        .unwrap_or_else(default_web_search_methods)
 }
 
 fn format_provider_yaml(name: &str, cfg: &ProviderConfig) -> String {
@@ -721,8 +877,142 @@ fn format_provider_yaml(name: &str, cfg: &ProviderConfig) -> String {
     if let Some(t) = cfg.thinking {
         lines.push(format!("    thinking: {}", t));
     }
+    if let Some(re) = &cfg.reasoning_effort {
+        lines.push(format!("    reasoning_effort: {}", re));
+    }
 
     lines.join("\n")
+}
+
+fn parse_env_assignment_line(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+    let (key, value) = trimmed.split_once('=')?;
+    let key = key.trim();
+    if key.is_empty() || !key.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+        return None;
+    }
+
+    let mut value = value.trim().to_string();
+    if let Some(comment_start) = value.find(" #") {
+        value.truncate(comment_start);
+        value = value.trim_end().to_string();
+    }
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        let quoted = (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'');
+        if quoted {
+            value = value[1..value.len() - 1].to_string();
+        }
+    }
+    Some((key.to_string(), value))
+}
+
+fn env_value<'a>(vars: &'a HashMap<String, String>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .filter_map(|key| vars.get(*key).map(String::as_str))
+        .find(|value| !value.trim().is_empty())
+}
+
+fn provider_from_env_assignments(vars: &HashMap<String, String>) -> LlmProvider {
+    vars.get("LLM_PROVIDER")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| {
+            if vars.contains_key("ANTHROPIC_API_KEY") {
+                LlmProvider::Anthropic
+            } else if vars.contains_key("OPENAI_API_KEY") {
+                LlmProvider::OpenAi
+            } else if vars.contains_key("AZURE_OPENAI_KEY") {
+                LlmProvider::Azure
+            } else if vars.contains_key("MINIMAX_API_KEY") {
+                LlmProvider::Minimax
+            } else if vars.contains_key("DASHSCOPE_API_KEY") || vars.contains_key("ALIBABA_API_KEY")
+            {
+                LlmProvider::Alibaba
+            } else if vars.contains_key("DEEPSEEK_API_KEY") {
+                LlmProvider::Deepseek
+            } else if vars.contains_key("ZHIPU_API_KEY") {
+                LlmProvider::Zhipu
+            } else if vars.contains_key("MOONSHOT_API_KEY") {
+                LlmProvider::Moonshot
+            } else {
+                LlmProvider::Anthropic
+            }
+        })
+}
+
+fn model_from_env_assignments(vars: &HashMap<String, String>, provider: LlmProvider) -> String {
+    let provider_model_keys = match provider {
+        LlmProvider::Anthropic => &["ANTHROPIC_MODEL", "CLAUDE_MODEL"][..],
+        LlmProvider::OpenAi => &["OPENAI_MODEL"][..],
+        LlmProvider::Azure => &["AZURE_OPENAI_MODEL", "AZURE_MODEL"][..],
+        LlmProvider::Google => &["GOOGLE_MODEL", "GEMINI_MODEL"][..],
+        LlmProvider::Minimax => &["MINIMAX_MODEL"][..],
+        LlmProvider::Alibaba => &["DASHSCOPE_MODEL", "ALIBABA_MODEL"][..],
+        LlmProvider::Deepseek => &["DEEPSEEK_MODEL"][..],
+        LlmProvider::Zhipu => &["ZHIPU_MODEL"][..],
+        LlmProvider::Moonshot => &["MOONSHOT_MODEL"][..],
+        LlmProvider::Custom => &["CUSTOM_MODEL"][..],
+    };
+    env_value(vars, &["LLM_MODEL"])
+        .or_else(|| env_value(vars, provider_model_keys))
+        .map(str::to_string)
+        .unwrap_or_else(|| provider.default_model())
+}
+
+fn dotenv_config_from_str(content: &str) -> Option<LlmConfigFile> {
+    let vars: HashMap<String, String> = content
+        .lines()
+        .filter_map(parse_env_assignment_line)
+        .collect();
+    if vars.is_empty() {
+        return None;
+    }
+
+    let provider = provider_from_env_assignments(&vars);
+    let api_key = env_value(&vars, &provider.api_key_env())?.to_string();
+    let provider_name = provider.to_string();
+    let mut providers = HashMap::new();
+    providers.insert(
+        provider_name.clone(),
+        ProviderConfig {
+            provider_type: provider_name.clone(),
+            api_key: Some(api_key),
+            model: Some(model_from_env_assignments(&vars, provider)),
+            base_url: env_value(&vars, &["LLM_BASE_URL"])
+                .or_else(|| match provider {
+                    LlmProvider::Anthropic => env_value(&vars, &["ANTHROPIC_BASE_URL"]),
+                    LlmProvider::OpenAi => {
+                        env_value(&vars, &["OPENAI_BASE_URL", "OPENAI_API_BASE"])
+                    }
+                    LlmProvider::Azure => env_value(&vars, &["AZURE_OPENAI_ENDPOINT"]),
+                    LlmProvider::Deepseek => env_value(&vars, &["DEEPSEEK_BASE_URL"]),
+                    LlmProvider::Moonshot => env_value(&vars, &["MOONSHOT_BASE_URL"]),
+                    _ => None,
+                })
+                .map(str::to_string),
+            max_tokens: env_value(&vars, &["LLM_MAX_TOKENS"]).and_then(|value| value.parse().ok()),
+            temperature: env_value(&vars, &["LLM_TEMPERATURE"])
+                .and_then(|value| value.parse().ok()),
+            timeout: env_value(&vars, &["LLM_TIMEOUT", "LLM_TIMEOUT_SECS"])
+                .and_then(|value| value.parse().ok()),
+            enabled: true,
+            ..Default::default()
+        },
+    );
+
+    Some(LlmConfigFile {
+        version: "1.0".to_string(),
+        default_provider: Some(provider_name),
+        providers: Some(providers),
+        settings: None,
+        execution_envs: None,
+        terminal: None,
+    })
 }
 
 /// Expand environment variables in string
@@ -776,6 +1066,17 @@ pub fn find_config_file() -> Option<PathBuf> {
         }
     }
 
+    // Check legacy Omiga home used by local scripts and older setups.
+    if let Some(home) = dirs::home_dir() {
+        let omiga_home = home.join(".omiga");
+        for name in &possible_names {
+            let path = omiga_home.join(name);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
     None
 }
 
@@ -797,9 +1098,12 @@ pub fn load_config_file_at(path: &Path) -> Result<LlmConfigFile, ApiError> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     let config: LlmConfigFile = match ext {
-        "yaml" | "yml" => serde_yaml::from_str(&content).map_err(|e| ApiError::Config {
-            message: format!("Failed to parse YAML config: {}", e),
-        })?,
+        "yaml" | "yml" => match serde_yaml::from_str(&content) {
+            Ok(config) => config,
+            Err(yaml_err) => dotenv_config_from_str(&content).ok_or_else(|| ApiError::Config {
+                message: format!("Failed to parse YAML config: {}", yaml_err),
+            })?,
+        },
         "json" => serde_json::from_str(&content).map_err(|e| ApiError::Config {
             message: format!("Failed to parse JSON config: {}", e),
         })?,
@@ -807,12 +1111,16 @@ pub fn load_config_file_at(path: &Path) -> Result<LlmConfigFile, ApiError> {
             message: format!("Failed to parse TOML config: {}", e),
         })?,
         _ => {
-            // Try YAML first, then JSON
-            serde_yaml::from_str(&content)
-                .or_else(|_| serde_json::from_str(&content))
-                .map_err(|e| ApiError::Config {
-                    message: format!("Failed to parse config: {}", e),
-                })?
+            // Try YAML first, then JSON, then dotenv-style KEY=VALUE.
+            match serde_yaml::from_str(&content) {
+                Ok(config) => config,
+                Err(yaml_err) => match serde_json::from_str(&content) {
+                    Ok(config) => config,
+                    Err(_) => dotenv_config_from_str(&content).ok_or_else(|| ApiError::Config {
+                        message: format!("Failed to parse config: {}", yaml_err),
+                    })?,
+                },
+            }
         }
     };
 
@@ -857,4 +1165,144 @@ pub fn init_multi_provider_config(path: &Path) -> Result<(), ApiError> {
     let config = LlmConfigFile::multi_provider_example();
     save_config_file(&config, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_env_assignment_line_with_quotes_and_comments() {
+        assert_eq!(
+            parse_env_assignment_line("export LLM_MODEL='deepseek-v4-flash' # comment"),
+            Some(("LLM_MODEL".to_string(), "deepseek-v4-flash".to_string()))
+        );
+    }
+
+    #[test]
+    fn loads_dotenv_style_deepseek_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("omiga.yaml");
+        std::fs::write(
+            &path,
+            "DEEPSEEK_API_KEY=sk-test\nDEEPSEEK_MODEL=deepseek-v4-flash\n",
+        )
+        .expect("write config");
+
+        let config_file = load_config_file_at(&path).expect("load dotenv-style config");
+        let config = config_file.to_llm_config().expect("runtime config");
+        assert_eq!(config.provider, LlmProvider::Deepseek);
+        assert_eq!(config.api_key, "sk-test");
+        assert_eq!(config.model, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn converts_named_provider_entry_without_changing_default_provider() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "primary".to_string(),
+            ProviderConfig {
+                provider_type: "openai".to_string(),
+                api_key: Some("sk-primary".to_string()),
+                model: Some("gpt-primary".to_string()),
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        providers.insert(
+            "goal-second-opinion".to_string(),
+            ProviderConfig {
+                provider_type: "deepseek".to_string(),
+                api_key: Some("sk-second".to_string()),
+                model: Some("deepseek-v4-flash".to_string()),
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        let config_file = LlmConfigFile {
+            default_provider: Some("primary".to_string()),
+            providers: Some(providers),
+            ..Default::default()
+        };
+
+        let primary = config_file.to_llm_config().expect("primary runtime config");
+        let second = config_file
+            .to_named_llm_config("goal-second-opinion")
+            .expect("named second-opinion runtime config");
+        let validated = config_file
+            .named_llm_config(" goal-second-opinion ")
+            .expect("validated named second-opinion runtime config");
+
+        assert_eq!(primary.provider, LlmProvider::OpenAi);
+        assert_eq!(primary.model, "gpt-primary");
+        assert_eq!(second.provider, LlmProvider::Deepseek);
+        assert_eq!(second.api_key, "sk-second");
+        assert_eq!(second.model, "deepseek-v4-flash");
+        assert_eq!(validated.provider, LlmProvider::Deepseek);
+    }
+
+    #[test]
+    fn named_provider_validation_rejects_unusable_entries() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "disabled".to_string(),
+            ProviderConfig {
+                provider_type: "openai".to_string(),
+                api_key: Some("sk-disabled".to_string()),
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        providers.insert(
+            "missing-key".to_string(),
+            ProviderConfig {
+                provider_type: "deepseek".to_string(),
+                api_key: Some("".to_string()),
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        let config_file = LlmConfigFile {
+            providers: Some(providers),
+            ..Default::default()
+        };
+
+        assert!(config_file
+            .named_llm_config("missing")
+            .expect_err("missing entry should fail")
+            .contains("not found"));
+        assert!(config_file
+            .named_llm_config("disabled")
+            .expect_err("disabled entry should fail")
+            .contains("disabled"));
+        assert!(config_file
+            .named_llm_config("missing-key")
+            .expect_err("missing key entry should fail")
+            .contains("API key"));
+    }
+
+    #[test]
+    fn web_search_defaults_skip_api_key_providers() {
+        assert_eq!(
+            default_web_search_methods(),
+            vec!["ddg".to_string(), "google".to_string(), "bing".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_web_search_methods_migrates_legacy_all_provider_default() {
+        let legacy = vec![
+            "tavily".to_string(),
+            "exa".to_string(),
+            "firecrawl".to_string(),
+            "parallel".to_string(),
+            "google".to_string(),
+            "bing".to_string(),
+            "ddg".to_string(),
+        ];
+        assert_eq!(
+            normalize_web_search_methods(&legacy),
+            default_web_search_methods()
+        );
+    }
 }

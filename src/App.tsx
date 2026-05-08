@@ -1,25 +1,68 @@
-import { useEffect, useRef, useCallback } from "react";
+import { lazy, Suspense, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { Box, Paper, Stack, useTheme, alpha } from "@mui/material";
 import { Layout } from "./components/Layout";
 import { Chat } from "./components/Chat";
 import { FileTree } from "./components/FileTree";
 import { SessionList } from "./components/SessionList";
-import { Settings } from "./components/Settings";
 import { OPEN_SETTINGS_TAB_DETAIL } from "./components/Settings/openSettingsTabMap";
 import { TaskStatus } from "./components/TaskStatus";
-import { CodeWorkspace } from "./components/CodeWorkspace";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ResizeHandle } from "./components/ResizeHandle";
 import { OnboardingWizard } from "./components/Onboarding";
+import { ConfirmationDialog } from "./components/AgentSchedule/AgentScheduleLauncher";
+import { useAgentStore } from "./state/agentStore";
 import {
   useSessionStore,
   useWorkspaceStore,
   useUiStore,
   usePermissionStore,
+  useExtensionStore,
+  LAYOUT_LEFT_MIN,
+  LAYOUT_LEFT_MAX,
+  LAYOUT_RIGHT_MIN,
+  LAYOUT_RIGHT_MAX,
   LAYOUT_PANEL_MIN,
 } from "./state";
+import { listenTauriEvent } from "./utils/tauriEvents";
+import {
+  defaultWebSearchQuerySettings,
+  parseStoredWebSearchSettings,
+  WEB_SEARCH_KEYS_STORAGE,
+} from "./utils/webSearchSettings";
+
+const CodeWorkspace = lazy(() =>
+  import("./components/CodeWorkspace").then((mod) => ({
+    default: mod.CodeWorkspace,
+  })),
+);
+
+const Settings = lazy(() =>
+  import("./components/Settings").then((mod) => ({
+    default: mod.Settings,
+  })),
+);
+
+function clamp(n: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, n));
+}
+
+function PanelLoadingFallback({ label }: { label: string }) {
+  return (
+    <Box
+      sx={{
+        flex: 1,
+        minHeight: 0,
+        display: "grid",
+        placeItems: "center",
+        color: "text.secondary",
+        fontSize: 13,
+      }}
+    >
+      {label}
+    </Box>
+  );
+}
 
 export default function App() {
   const theme = useTheme();
@@ -38,14 +81,21 @@ export default function App() {
   const rightW = useUiStore((s) => s.rightPanelWidth);
   const codeH = useUiStore((s) => s.codePanelHeight);
   const tasksH = useUiStore((s) => s.tasksPanelHeight);
-  const resizeLeftBy = useUiStore((s) => s.resizeLeftBy);
-  const resizeRightBy = useUiStore((s) => s.resizeRightBy);
-  const resizeCodeBy = useUiStore((s) => s.resizeCodeBy);
-  const resizeTasksBy = useUiStore((s) => s.resizeTasksBy);
+  const setLeftWidth = useUiStore((s) => s.setLeftWidth);
+  const setRightWidth = useUiStore((s) => s.setRightWidth);
+  const setCodeHeight = useUiStore((s) => s.setCodeHeight);
+  const setTasksHeight = useUiStore((s) => s.setTasksHeight);
   const ensureCodePanelMin = useUiStore((s) => s.ensureCodePanelMin);
 
+  const leftRef = useRef<HTMLDivElement>(null);
   const centerRef = useRef<HTMLDivElement>(null);
   const rightRef = useRef<HTMLDivElement>(null);
+  const codePanelRef = useRef<HTMLDivElement>(null);
+  const tasksPanelRef = useRef<HTMLDivElement>(null);
+  const leftWidthRef = useRef(leftW);
+  const rightWidthRef = useRef(rightW);
+  const codeHeightRef = useRef(codeH);
+  const tasksHeightRef = useRef(tasksH);
 
   const clampCodeH = useCallback((h: number) => {
     const el = centerRef.current;
@@ -63,6 +113,78 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    leftWidthRef.current = leftW;
+    if (leftRef.current) leftRef.current.style.width = `${leftW}px`;
+  }, [leftW]);
+
+  useEffect(() => {
+    rightWidthRef.current = rightW;
+    if (rightRef.current) rightRef.current.style.width = `${rightW}px`;
+  }, [rightW]);
+
+  useEffect(() => {
+    codeHeightRef.current = codeH;
+    if (codePanelRef.current) codePanelRef.current.style.height = `${codeH}px`;
+  }, [codeH]);
+
+  useEffect(() => {
+    tasksHeightRef.current = tasksH;
+    if (tasksPanelRef.current) tasksPanelRef.current.style.height = `${tasksH}px`;
+  }, [tasksH]);
+
+  const previewLeftResize = useCallback((delta: number) => {
+    const next = clamp(
+      leftWidthRef.current + delta,
+      LAYOUT_LEFT_MIN,
+      LAYOUT_LEFT_MAX,
+    );
+    if (next === leftWidthRef.current) return;
+    leftWidthRef.current = next;
+    if (leftRef.current) leftRef.current.style.width = `${next}px`;
+  }, []);
+
+  const commitLeftResize = useCallback(() => {
+    setLeftWidth(leftWidthRef.current);
+  }, [setLeftWidth]);
+
+  const previewRightResize = useCallback((delta: number) => {
+    const next = clamp(
+      rightWidthRef.current - delta,
+      LAYOUT_RIGHT_MIN,
+      LAYOUT_RIGHT_MAX,
+    );
+    if (next === rightWidthRef.current) return;
+    rightWidthRef.current = next;
+    if (rightRef.current) rightRef.current.style.width = `${next}px`;
+  }, []);
+
+  const commitRightResize = useCallback(() => {
+    setRightWidth(rightWidthRef.current);
+  }, [setRightWidth]);
+
+  const previewCodeResize = useCallback((delta: number) => {
+    const next = clampCodeH(codeHeightRef.current + delta);
+    if (next === codeHeightRef.current) return;
+    codeHeightRef.current = next;
+    if (codePanelRef.current) codePanelRef.current.style.height = `${next}px`;
+  }, [clampCodeH]);
+
+  const commitCodeResize = useCallback(() => {
+    setCodeHeight(codeHeightRef.current);
+  }, [setCodeHeight]);
+
+  const previewTasksResize = useCallback((delta: number) => {
+    const next = clampTasksH(tasksHeightRef.current + delta);
+    if (next === tasksHeightRef.current) return;
+    tasksHeightRef.current = next;
+    if (tasksPanelRef.current) tasksPanelRef.current.style.height = `${next}px`;
+  }, [clampTasksH]);
+
+  const commitTasksResize = useCallback(() => {
+    setTasksHeight(tasksHeightRef.current);
+  }, [setTasksHeight]);
+
+  useEffect(() => {
     const onWinResize = () => {
       const {
         codePanelHeight,
@@ -76,6 +198,17 @@ export default function App() {
     window.addEventListener("resize", onWinResize);
     return () => window.removeEventListener("resize", onWinResize);
   }, [clampCodeH, clampTasksH]);
+
+  // Initialize agent event listeners at app level so background-agent-update,
+  // background-agent-complete, agent-schedule-complete, and
+  // agent-schedule-confirmation-required are always active regardless of panel visibility.
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    useAgentStore.getState().initEventListeners().then((fn) => {
+      cleanup = fn;
+    });
+    return () => cleanup?.();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -101,30 +234,14 @@ export default function App() {
   }, [loadSessions]);
 
   useEffect(() => {
-    const WEB_SEARCH_KEYS_STORAGE = "omiga_web_search_api_keys";
+    void useExtensionStore.getState().loadExtensions();
+  }, []);
+
+  useEffect(() => {
     const raw = localStorage.getItem(WEB_SEARCH_KEYS_STORAGE);
     if (raw) {
-      try {
-        const j = JSON.parse(raw) as Record<string, string>;
-        const payload = {
-          tavily: (j.tavily ?? "").trim(),
-          exa: (j.exa ?? "").trim(),
-          parallel: (j.parallel ?? "").trim(),
-          firecrawl: (j.firecrawl ?? "").trim(),
-          firecrawlUrl: (j.firecrawlUrl ?? "").trim(),
-        };
-        if (
-          payload.tavily ||
-          payload.exa ||
-          payload.parallel ||
-          payload.firecrawl ||
-          payload.firecrawlUrl
-        ) {
-          void invoke("set_web_search_api_keys", payload).catch(() => {});
-        }
-      } catch {
-        /* ignore */
-      }
+      const payload = parseStoredWebSearchSettings(raw);
+      if (payload) void invoke("set_web_search_api_keys", { ...payload }).catch(() => {});
       return;
     }
     const tavily = localStorage.getItem("omiga_tavily_search_api_key");
@@ -137,6 +254,13 @@ export default function App() {
         parallel: "",
         firecrawl: "",
         firecrawlUrl: "",
+        semanticScholarEnabled: false,
+        semanticScholarApiKey: "",
+        wechatSearchEnabled: false,
+        pubmedApiKey: "",
+        pubmedEmail: "omiga@example.invalid",
+        pubmedToolName: "omiga",
+        ...defaultWebSearchQuerySettings(),
       }).catch(() => {});
     }
   }, []);
@@ -172,12 +296,14 @@ export default function App() {
       }
       if (!parsed.provider || !parsed.apiKey?.trim()) return;
       void invoke("set_llm_config", {
-        provider: parsed.provider,
-        apiKey: parsed.apiKey.trim(),
-        secretKey: parsed.secretKey,
-        appId: parsed.appId,
-        model: parsed.model?.trim() || undefined,
-        baseUrl: parsed.baseUrl,
+        request: {
+          provider: parsed.provider,
+          apiKey: parsed.apiKey.trim(),
+          secretKey: parsed.secretKey,
+          appId: parsed.appId,
+          model: parsed.model?.trim() || undefined,
+          baseUrl: parsed.baseUrl,
+        },
       }).catch(() => {});
     })();
   }, []);
@@ -223,7 +349,7 @@ export default function App() {
   useEffect(() => {
     const setupListener = async () => {
       try {
-        const unlisten = await listen<{
+        const unlisten = await listenTauriEvent<{
           type: string;
           request_id: string;
           tool_name: string;
@@ -301,6 +427,8 @@ export default function App() {
       {!onboardingCompleted && (
         <OnboardingWizard onComplete={() => setOnboardingCompleted(true)} />
       )}
+      {/* Orchestration confirmation dialog — mounted at root so it shows regardless of projectRoot */}
+      <ConfirmationDialog />
       <Layout>
         <Stack
           direction="row"
@@ -313,6 +441,7 @@ export default function App() {
         >
           {/* Left: conversations */}
           <Paper
+            ref={leftRef}
             id="omiga-session-panel"
             component="aside"
             elevation={0}
@@ -341,7 +470,8 @@ export default function App() {
 
           <ResizeHandle
             direction="horizontal"
-            onResize={(d) => resizeLeftBy(d)}
+            onResize={previewLeftResize}
+            onResizeEnd={commitLeftResize}
           />
 
           {rightPanelMode === "settings" ? (
@@ -372,17 +502,19 @@ export default function App() {
                   overflow: "hidden",
                 }}
               >
-                <Settings
-                  open={true}
-                  initialTab={settingsTabIndex}
-                  initialExecutionSubTab={settingsExecutionSubTab}
-                  onClose={() => {
-                    setSettingsOpen(false);
-                    setRightPanelMode("default");
-                    setSettingsTabIndex(0);
-                    setSettingsExecutionSubTab(0);
-                  }}
-                />
+                <Suspense fallback={<PanelLoadingFallback label="正在加载设置…" />}>
+                  <Settings
+                    open={true}
+                    initialTab={settingsTabIndex}
+                    initialExecutionSubTab={settingsExecutionSubTab}
+                    onClose={() => {
+                      setSettingsOpen(false);
+                      setRightPanelMode("default");
+                      setSettingsTabIndex(0);
+                      setSettingsExecutionSubTab(0);
+                    }}
+                  />
+                </Suspense>
               </Box>
             </Paper>
           ) : (
@@ -408,6 +540,7 @@ export default function App() {
                 {hasCodeWorkspace && (
                   <>
                     <Box
+                      ref={codePanelRef}
                       sx={{
                         height: codeH,
                         minHeight: LAYOUT_PANEL_MIN,
@@ -417,19 +550,15 @@ export default function App() {
                         overflow: "hidden",
                       }}
                     >
-                      <CodeWorkspace />
+                      <Suspense fallback={<PanelLoadingFallback label="正在加载编辑器…" />}>
+                        <CodeWorkspace />
+                      </Suspense>
                     </Box>
 
                     <ResizeHandle
                       direction="vertical"
-                      onResize={(d) => {
-                        const el = centerRef.current;
-                        const codeMin = LAYOUT_PANEL_MIN;
-                        const max = el
-                          ? Math.max(codeMin, el.clientHeight - codeMin)
-                          : 600;
-                        resizeCodeBy(d, max);
-                      }}
+                      onResize={previewCodeResize}
+                      onResizeEnd={commitCodeResize}
                     />
                   </>
                 )}
@@ -452,7 +581,8 @@ export default function App() {
 
               <ResizeHandle
                 direction="horizontal"
-                onResize={(d) => resizeRightBy(d)}
+                onResize={previewRightResize}
+                onResizeEnd={commitRightResize}
               />
 
               <Paper
@@ -470,9 +600,11 @@ export default function App() {
                   borderLeft: 1,
                   borderColor: "divider",
                   bgcolor: "background.paper",
+                  position: "relative",
                 }}
               >
                 <Box
+                  ref={tasksPanelRef}
                   sx={{
                     height: tasksH,
                     minHeight: LAYOUT_PANEL_MIN,
@@ -487,16 +619,8 @@ export default function App() {
 
                 <ResizeHandle
                   direction="vertical"
-                  onResize={(d) => {
-                    const el = rightRef.current;
-                    const max = el
-                      ? Math.max(
-                          LAYOUT_PANEL_MIN,
-                          el.clientHeight - LAYOUT_PANEL_MIN,
-                        )
-                      : 500;
-                    resizeTasksBy(d, max);
-                  }}
+                  onResize={previewTasksResize}
+                  onResizeEnd={commitTasksResize}
                 />
 
                 <Box
@@ -509,6 +633,7 @@ export default function App() {
                 >
                   <FileTree />
                 </Box>
+
               </Paper>
             </>
           )}

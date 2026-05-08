@@ -4,6 +4,7 @@ import {
   OMIGA_PROVIDER_CHANGED_EVENT,
   notifyProviderChanged,
 } from "../../utils/providerEvents";
+import { invokeIfTauri } from "../../utils/tauriRuntime";
 import { useSessionStore } from "../../state/sessionStore";
 import type { SxProps, Theme } from "@mui/material/styles";
 import {
@@ -17,8 +18,6 @@ import {
   ListItemIcon,
   ListItemText,
   CircularProgress,
-  Snackbar,
-  Alert,
   alpha,
   useTheme,
 } from "@mui/material";
@@ -27,6 +26,7 @@ import {
   RadioButtonUnchecked,
   Settings,
 } from "@mui/icons-material";
+import { NotificationToast } from "../NotificationToast";
 
 interface ProviderConfigEntry {
   name: string;
@@ -80,19 +80,15 @@ export function ProviderSwitcher({
   const open = Boolean(anchorEl);
 
   const loadProviders = useCallback(async () => {
-    try {
-      const configs = await invoke<ProviderConfigEntry[]>("list_provider_configs");
-      if (configs && configs.length > 0) {
-        setProviders(configs);
-        const active = configs.find((p) => p.isSessionActive);
-        // Always sync: avoids stale "DeepSeek" chip after switching elsewhere (e.g. Settings).
-        setActiveProvider(active ?? null);
-      } else {
-        setProviders([]);
-        setActiveProvider(null);
-      }
-    } catch (err) {
-      console.error("Failed to load providers:", err);
+    const configs = await invokeIfTauri<ProviderConfigEntry[]>("list_provider_configs");
+    if (configs && configs.length > 0) {
+      setProviders(configs);
+      const active = configs.find((p) => p.isSessionActive);
+      // Always sync: avoids stale "DeepSeek" chip after switching elsewhere (e.g. Settings).
+      setActiveProvider(active ?? null);
+    } else {
+      setProviders([]);
+      setActiveProvider(null);
     }
   }, []);
 
@@ -374,29 +370,23 @@ export function ProviderSwitcher({
         </Box>
       </Menu>
 
-      {/* Error Snackbar */}
-      <Snackbar
+      <NotificationToast
         open={!!error}
         autoHideDuration={6000}
         onClose={() => setError(null)}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-      >
-        <Alert severity="error" onClose={() => setError(null)}>
-          {error}
-        </Alert>
-      </Snackbar>
+        severity="error"
+        title="切换失败"
+        message={error}
+      />
 
-      {/* Success Snackbar */}
-      <Snackbar
+      <NotificationToast
         open={!!success}
         autoHideDuration={3000}
         onClose={() => setSuccess(null)}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-      >
-        <Alert severity="success" onClose={() => setSuccess(null)}>
-          {success}
-        </Alert>
-      </Snackbar>
+        severity="success"
+        title="模型配置已切换"
+        message={success}
+      />
     </Box>
   );
 }

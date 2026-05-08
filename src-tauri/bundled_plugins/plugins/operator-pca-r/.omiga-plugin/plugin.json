@@ -1,0 +1,25 @@
+{
+  "name": "operator-pca-r",
+  "version": "0.1.0",
+  "description": "Built-in atomic operator plugin: PCA with grouped default plots powered by base R.",
+  "interface": {
+    "displayName": "PCA",
+    "shortDescription": "PCA with grouped default plots",
+    "longDescription": "Provides one atomic PCA operator for numeric expression/count matrices. Optional sample metadata colors the default PCA scatter; scree and group-summary artifacts are written under the operator run outdir.",
+    "developerName": "Omiga",
+    "category": "Operator",
+    "capabilities": [
+      "Operator",
+      "PCA",
+      "Rscript",
+      "Local Execution",
+      "SSH Execution",
+      "Default Plot",
+      "Grouped Samples"
+    ],
+    "brandColor": "#0F766E",
+    "defaultPrompt": [
+      "Expose the PCA plugin and run it on my expression matrix."
+    ]
+  }
+}

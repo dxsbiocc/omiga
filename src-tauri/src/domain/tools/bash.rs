@@ -270,7 +270,7 @@ impl BashArgs {
 }
 
 fn max_timeout_secs() -> u64 {
-    (max_timeout_ms() + 999) / 1000
+    max_timeout_ms().div_ceil(1000)
 }
 
 pub(crate) struct BashRawOutput {
@@ -279,10 +279,9 @@ pub(crate) struct BashRawOutput {
     pub(crate) stderr: Vec<String>,
 }
 
-/// Map local cwd under `project_root` to a path on the SSH host. Set `OMIGA_SSH_REMOTE_ROOT`
-/// to the directory on the server that corresponds to the project root (default `~`).
+/// Map local cwd under `project_root` to the active SSH session workspace.
 fn ssh_remote_cwd(project_root: &Path, local_cwd: &Path) -> String {
-    let root = std::env::var("OMIGA_SSH_REMOTE_ROOT").unwrap_or_else(|_| "~".to_string());
+    let root = crate::domain::tools::env_store::ssh_remote_root_for_project(project_root);
     let rel = match local_cwd.strip_prefix(project_root) {
         Ok(p) if p.as_os_str().is_empty() => {
             return root;
@@ -307,7 +306,7 @@ fn pick_ssh_profile(cfg: &LlmConfigFile) -> Option<(&String, &SshExecConfig)> {
         if let Some(c) = ssh_map.get(&name) {
             if c.enabled
                 && c.effective_hostname().is_some()
-                && c.user.as_ref().map_or(false, |u| !u.is_empty())
+                && c.user.as_ref().is_some_and(|u| !u.is_empty())
             {
                 return ssh_map.get_key_value(&name);
             }
@@ -316,7 +315,7 @@ fn pick_ssh_profile(cfg: &LlmConfigFile) -> Option<(&String, &SshExecConfig)> {
     let mut pairs: Vec<_> = ssh_map.iter().filter(|(_, c)| c.enabled).collect();
     pairs.sort_by(|a, b| a.0.cmp(b.0));
     for (name, c) in pairs {
-        if c.effective_hostname().is_some() && c.user.as_ref().map_or(false, |u| !u.is_empty()) {
+        if c.effective_hostname().is_some() && c.user.as_ref().is_some_and(|u| !u.is_empty()) {
             return Some((name, c));
         }
     }
@@ -367,7 +366,7 @@ fn pick_remote_backend(cfg: &LlmConfigFile, ctx: &ToolContext) -> Result<RemoteB
         "「远程」bash 需要可用的远端执行配置：在 omiga.yaml 的 execution_envs.ssh 下添加已启用且含 HostName/User 的主机；\
          或在沙箱菜单选择 SSH / Modal / Daytona / Docker / Singularity，\
          或设置 OMIGA_REMOTE_BACKEND=modal|daytona|docker|singularity 并配置对应环境。\
-         可选环境变量：OMIGA_SSH_REMOTE_ROOT（远端项目根目录，默认 ~）、OMIGA_SSH_PROFILE（指定 ssh 配置名）。"
+         可选环境变量：OMIGA_SSH_PROFILE（指定 ssh 配置名）。"
             .to_string(),
     )
 }
@@ -791,14 +790,16 @@ impl super::ToolImpl for BashTool {
                 .clone()
                 .unwrap_or_else(|| truncate_command_summary(&command));
             crate::domain::background_shell::spawn_background_bash_task(
-                bg,
-                cwd.clone(),
-                command.clone(),
-                timeout_ms,
-                output_path.clone(),
-                task_id.clone(),
-                desc_text,
-                ctx.cancel.clone(),
+                crate::domain::background_shell::BackgroundBashTask {
+                    handle: bg,
+                    cwd: cwd.clone(),
+                    command: command.clone(),
+                    timeout_ms,
+                    output_path: output_path.clone(),
+                    task_id: task_id.clone(),
+                    description: desc_text,
+                    cancel: ctx.cancel.clone(),
+                },
             );
             let msg = format!(
                 "Command running in background with task ID: {}\nOutput will be written to: {}\nYou will receive a notification when the command completes.",
@@ -837,7 +838,7 @@ impl super::ToolImpl for BashTool {
 
 /// Build the activation preamble for a local virtual environment.
 /// Returns the original command unchanged when no venv is configured.
-fn prepend_venv_activation(venv_type: &str, venv_name: &str, command: &str) -> String {
+pub(crate) fn prepend_venv_activation(venv_type: &str, venv_name: &str, command: &str) -> String {
     let name = venv_name.trim();
     if name.is_empty() || venv_type == "none" || venv_type.is_empty() {
         return command.to_string();
@@ -967,7 +968,7 @@ pub(crate) async fn run_bash_command(
 
     let work = async move { tokio::try_join!(read_out, read_err, wait_child) };
 
-    let timeout_secs = (timeout_ms + 999) / 1000;
+    let timeout_secs = timeout_ms.div_ceil(1000);
     let outcome = tokio::select! {
         _ = cancel.cancelled() => {
             if let Some(pid) = pid {

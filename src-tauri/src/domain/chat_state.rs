@@ -28,6 +28,7 @@ pub const PERMISSION_DENY_CACHE_TTL: Duration = Duration::from_secs(30);
 pub struct McpToolCache {
     pub schemas: Vec<ToolSchema>,
     pub cached_at: Instant,
+    pub config_signature: String,
 }
 
 /// TTL for MCP tool schema cache. MCP server tool lists rarely change during a session.
@@ -54,7 +55,7 @@ pub struct ChatState {
     /// `omiga.yaml` `providers` map key for the entry currently driving [`Self::llm_config`].
     /// Used so Settings only marks one row as "In use" when multiple entries share the same provider+model.
     pub active_provider_entry_name: Mutex<Option<String>>,
-    /// User-configured API keys for built-in `web_search` (Settings override env when set).
+    /// User-configured API keys for built-in `search` (Settings override env when set).
     pub web_search_api_keys: Mutex<WebSearchApiKeys>,
     /// In-memory session cache for O(1) lookup by session_id
     pub sessions: Arc<RwLock<HashMap<String, SessionRuntimeState>>>,
@@ -85,6 +86,11 @@ pub struct ChatState {
     /// switch that hits the provider-restore code path.  Cleared whenever the config
     /// file is written so callers never see stale data.
     pub cached_config_file: CachedConfigFile,
+    /// Active agent orchestrations keyed by session_id → map of (orch_id → CancellationToken).
+    /// One session may have multiple concurrent orchestrations; each gets its own entry.
+    /// Populated by `run_agent_schedule`, consumed by `cancel_agent_schedule`.
+    pub active_orchestrations:
+        Arc<Mutex<HashMap<String, HashMap<String, tokio_util::sync::CancellationToken>>>>,
 }
 
 /// Runtime state for an active session. Chat transcript is persisted via messages;
@@ -122,7 +128,7 @@ pub struct RoundCancellationState {
     pub message_id: String,
     pub session_id: String,
     pub cancelled: Arc<RwLock<bool>>,
-    /// Cancels in-flight tools (foreground/background bash, web_fetch, …) when the user stops the round.
+    /// Cancels in-flight tools (foreground/background bash, fetch, …) when the user stops the round.
     pub round_cancel: CancellationToken,
 }
 
@@ -130,6 +136,7 @@ pub struct RoundCancellationState {
 #[derive(Debug)]
 pub struct PendingToolCall {
     pub id: String,
+    pub original_name: String,
     pub name: String,
     pub arguments: Vec<String>,
 }
@@ -149,6 +156,7 @@ impl Default for ChatState {
             mcp_manager: Arc::new(GlobalMcpManager::new()),
             permission_deny_cache: Arc::new(Mutex::new(HashMap::new())),
             cached_config_file: Arc::new(Mutex::new(None)),
+            active_orchestrations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

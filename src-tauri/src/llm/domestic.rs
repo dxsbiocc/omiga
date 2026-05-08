@@ -309,7 +309,7 @@ impl LlmClient for AlibabaClient {
 
         let response = self
             .client
-            .post(&self.config.api_url())
+            .post(self.config.api_url())
             .headers(self.headers())
             .json(&request)
             .send()

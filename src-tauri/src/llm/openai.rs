@@ -13,10 +13,73 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
+const LARGE_REQUEST_WARN_BYTES: usize = 900_000;
+const VERY_LARGE_REQUEST_WARN_BYTES: usize = 2_500_000;
+
 /// OpenAI-compatible client
 pub struct OpenAiCompatibleClient {
     client: Client,
     config: LlmConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RequestDiagnostics {
+    body_bytes: usize,
+    message_count: usize,
+    tool_count: usize,
+}
+
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.2} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn request_size_advice(diag: RequestDiagnostics) -> String {
+    let severity = if diag.body_bytes >= VERY_LARGE_REQUEST_WARN_BYTES {
+        "很大"
+    } else if diag.body_bytes >= LARGE_REQUEST_WARN_BYTES {
+        "偏大"
+    } else {
+        "正常"
+    };
+    let mut text = format!(
+        "[Omiga] 本次 LLM 请求体：{}（{}），messages={}，tools={}。",
+        format_bytes(diag.body_bytes),
+        severity,
+        diag.message_count,
+        diag.tool_count
+    );
+    if diag.body_bytes >= LARGE_REQUEST_WARN_BYTES {
+        text.push_str(
+            "\n请求体偏大时，代理/网关可能在上传阶段断开连接，表现为 `error sending request`。\
+             建议先压缩/开启新会话，减少长工具输出、Trace、队友记录后再重试。",
+        );
+    }
+    text
+}
+
+fn request_diagnostics(body: &serde_json::Value) -> RequestDiagnostics {
+    let body_bytes = serde_json::to_vec(body).map(|v| v.len()).unwrap_or(0);
+    let message_count = body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let tool_count = body
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    RequestDiagnostics {
+        body_bytes,
+        message_count,
+        tool_count,
+    }
 }
 
 /// Moonshot returns 403 when the user selects a **Kimi For Coding** model or coding-only endpoint,
@@ -32,6 +95,37 @@ fn enrich_openai_compatible_http_error(status: u16, body: &str) -> String {
         );
     }
     body.to_string()
+}
+
+fn enrich_openai_compatible_network_error(
+    config: &LlmConfig,
+    url: &str,
+    diagnostics: RequestDiagnostics,
+    err: reqwest::Error,
+) -> ApiError {
+    let original = err.to_string();
+    let size_advice = request_size_advice(diagnostics);
+    let mut message = format!("{original}\n\n{size_advice}");
+
+    if matches!(config.provider, LlmProvider::Deepseek) {
+        message = format!(
+            "{message}\n\n\
+            [Omiga] 无法连接 DeepSeek API（{url}）。这通常是本机网络/DNS/TLS/代理问题，而不是模型返回错误。\n\
+            建议检查：\n\
+            1. 在同一台机器运行：curl -I https://api.deepseek.com\n\
+            2. 如在需要代理的网络中，确保启动 Omiga 的进程继承了 HTTPS_PROXY/HTTP_PROXY，或在终端设置代理后再启动应用。\n\
+            3. DeepSeek 官方 base_url 是 https://api.deepseek.com；OpenAI 兼容的 https://api.deepseek.com/v1 也可用。若在设置中填了 base_url，请不要填错域名。\n\
+            4. 如果浏览器可访问但桌面应用不可访问，请检查系统代理/防火墙是否允许 Omiga 访问 api.deepseek.com:443。"
+        );
+    }
+
+    if err.is_timeout() {
+        ApiError::Network {
+            message: format!("Request timeout while sending request. {message}"),
+        }
+    } else {
+        ApiError::Network { message }
+    }
 }
 
 /// Kimi OpenAPI (`KimiK25ChatRequest`): `thinking` must be an object `{"type":"enabled"|"disabled"}`,
@@ -76,6 +170,34 @@ fn maybe_attach_kimi_thinking_body(body: &mut serde_json::Value, config: &LlmCon
     }
 }
 
+/// Build the DeepSeek `thinking` object.
+/// When enabled, `reasoning_effort` ("high" or "max") is included; default is "high".
+fn deepseek_thinking_request_value(
+    enabled: bool,
+    reasoning_effort: Option<&str>,
+) -> serde_json::Value {
+    if enabled {
+        serde_json::json!({
+            "type": "enabled",
+            "reasoning_effort": reasoning_effort.unwrap_or("high")
+        })
+    } else {
+        serde_json::json!({ "type": "disabled" })
+    }
+}
+
+/// Attach DeepSeek `thinking` body only when thinking is explicitly enabled.
+///
+/// Omitting the field (thinking disabled / not configured) is equivalent to
+/// `{"type": "disabled"}` per the API default, and avoids breaking old configs
+/// or sessions that never used thinking mode.
+fn maybe_attach_deepseek_thinking_body(body: &mut serde_json::Value, config: &LlmConfig) {
+    if config.provider != LlmProvider::Deepseek || config.thinking != Some(true) {
+        return;
+    }
+    body["thinking"] = deepseek_thinking_request_value(true, config.reasoning_effort.as_deref());
+}
+
 impl OpenAiCompatibleClient {
     pub fn new(config: LlmConfig) -> Self {
         let client = Client::builder()
@@ -87,14 +209,34 @@ impl OpenAiCompatibleClient {
         Self { client, config }
     }
 
-    /// Moonshot/Kimi: when `thinking` is enabled, replay must include `reasoning_content` for
-    /// assistant turns that contain tool calls (empty string if missing).
+    /// Determine the `reasoning_content` to include in a replayed assistant message.
+    ///
+    /// DeepSeek (docs): "When tool calls occur, reasoning_content MUST be returned to the API
+    /// in all subsequent rounds — omitting it causes a 400 error."
+    /// Moonshot/Kimi: same requirement when thinking is enabled.
     fn assistant_reasoning_for_api(
         config: &LlmConfig,
         has_tool_calls: bool,
         stored: Option<String>,
     ) -> Option<String> {
-        if config.thinking != Some(true) {
+        let thinking_on = config.thinking == Some(true);
+
+        if matches!(config.provider, LlmProvider::Deepseek) {
+            if has_tool_calls {
+                if thinking_on {
+                    // Thinking enabled + tool calls: MUST include even when empty.
+                    return Some(stored.unwrap_or_default());
+                }
+                // Thinking disabled but stored value is non-empty (e.g. deepseek-reasoner
+                // produced reasoning before thinking was explicitly configured): pass it back.
+                return stored.filter(|s| !s.is_empty());
+            }
+            // No tool calls: API ignores reasoning_content; only include if non-empty.
+            return stored.filter(|s| !s.is_empty());
+        }
+
+        // Moonshot / Custom
+        if !thinking_on {
             return stored.filter(|s| !s.is_empty());
         }
         if has_tool_calls {
@@ -289,111 +431,71 @@ impl OpenAiCompatibleClient {
     }
 
     /// Validate message history to ensure OpenAI compatibility:
-    /// - Assistant messages with tool_calls must be followed by corresponding tool messages
+    /// - Assistant messages with tool_calls must be immediately followed by corresponding tool messages
     /// - Remove orphaned tool messages that don't have a matching assistant tool_call
+    ///
+    /// This intentionally enforces the stricter OpenAI Chat Completions invariant rather than
+    /// just "the matching tool result appears later". Cancelled/retried Omiga rounds can leave
+    /// persisted transcripts like `assistant(tool_calls) -> assistant(text) -> tool(result)`;
+    /// OpenAI rejects that with HTTP 400, so we strip the stale tool-use blocks and drop the
+    /// delayed orphan tool results before constructing the request body.
     fn validate_message_history(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
         use std::collections::HashSet;
 
-        // Collect all expected tool_call_ids from assistant messages
-        let mut expected_tool_ids: HashSet<String> = HashSet::new();
-        for msg in &messages {
-            if let LlmRole::Assistant = msg.role {
-                for content in &msg.content {
-                    if let LlmContent::ToolUse { id, .. } = content {
-                        expected_tool_ids.insert(id.clone());
-                    }
-                }
-            }
-        }
-
-        // Filter messages: remove orphaned tool results and extra tool results
         let mut result = Vec::new();
-        let mut pending_tool_ids: HashSet<String> = HashSet::new();
+        let mut i = 0usize;
 
-        for msg in messages {
-            match msg.role {
-                LlmRole::Assistant => {
-                    // Check if this assistant has tool_calls
-                    let has_tool_calls = msg
-                        .content
-                        .iter()
-                        .any(|c| matches!(c, LlmContent::ToolUse { .. }));
-                    if has_tool_calls {
-                        // Add tool_call_ids to pending set
-                        for content in &msg.content {
-                            if let LlmContent::ToolUse { id, .. } = content {
-                                pending_tool_ids.insert(id.clone());
-                            }
-                        }
+        while i < messages.len() {
+            let msg = &messages[i];
+            let tool_use_ids = assistant_tool_use_ids(msg);
+
+            if !tool_use_ids.is_empty() {
+                let mut needed: HashSet<String> = tool_use_ids.iter().cloned().collect();
+                let mut tool_messages = Vec::new();
+                let mut j = i + 1;
+
+                while j < messages.len() && is_tool_result_message(&messages[j]) {
+                    if let Some(filtered) =
+                        filter_tool_result_message_for_ids(&messages[j], &mut needed)
+                    {
+                        tool_messages.push(filtered);
                     }
-                    result.push(msg);
-                }
-                LlmRole::Tool => {
-                    // Only keep tool results that match a pending tool_call_id
-                    if let Some(LlmContent::ToolResult { tool_use_id, .. }) = msg.content.first() {
-                        if pending_tool_ids.contains(tool_use_id) {
-                            pending_tool_ids.remove(tool_use_id);
-                            result.push(msg);
+                    j += 1;
+                    if needed.is_empty() {
+                        while j < messages.len() && is_tool_result_message(&messages[j]) {
+                            j += 1;
                         }
-                        // Else: orphaned tool message, skip it
+                        break;
                     }
                 }
-                LlmRole::User => {
-                    // Check if this user message contains tool results (LlmContent::ToolResult)
-                    let is_tool_result_msg = msg
-                        .content
-                        .iter()
-                        .all(|c| matches!(c, LlmContent::ToolResult { .. }));
-                    if is_tool_result_msg {
-                        // This is a tool result message in User role - convert to Tool role logic
-                        let mut keep = false;
-                        for content in &msg.content {
-                            if let LlmContent::ToolResult { tool_use_id, .. } = content {
-                                if pending_tool_ids.contains(tool_use_id) {
-                                    pending_tool_ids.remove(tool_use_id);
-                                    keep = true;
-                                }
-                            }
-                        }
-                        if keep {
-                            result.push(msg);
-                        }
-                        // Else: all tool results orphaned, skip
-                    } else {
-                        result.push(msg);
-                    }
+
+                if needed.is_empty() {
+                    result.push(msg.clone());
+                    result.extend(tool_messages);
+                } else {
+                    tracing::warn!(
+                        target: "omiga::openai",
+                        missing_tool_call_ids = ?needed,
+                        "Assistant tool_calls were not followed immediately by matching tool results; stripping stale tool calls"
+                    );
+                    result.push(strip_tool_uses(msg));
                 }
-                _ => {
-                    result.push(msg);
-                }
+
+                i = j.max(i + 1);
+                continue;
             }
-        }
 
-        // If there are still pending tool_ids, we have assistant messages without tool results
-        // This is also an error condition - remove those assistant tool_calls
-        if !pending_tool_ids.is_empty() {
-            tracing::warn!(
-                target: "omiga::openai",
-                pending_tool_ids = ?pending_tool_ids,
-                "Assistant tool_calls without matching tool results, removing tool_calls"
-            );
+            if is_tool_result_message(msg) {
+                tracing::warn!(
+                    target: "omiga::openai",
+                    "Dropping orphaned tool result message before OpenAI request"
+                );
+                i += 1;
+                continue;
+            }
 
-            // Remove tool_calls from assistant messages that don't have matching tool results
-            result = result
-                .into_iter()
-                .map(|mut msg| {
-                    if let LlmRole::Assistant = msg.role {
-                        msg.content.retain(|c| {
-                            if let LlmContent::ToolUse { id, .. } = c {
-                                !pending_tool_ids.contains(id)
-                            } else {
-                                true
-                            }
-                        });
-                    }
-                    msg
-                })
-                .collect();
+            result.push(msg.clone());
+            i += 1;
         }
 
         result
@@ -413,6 +515,60 @@ impl OpenAiCompatibleClient {
             })
             .collect()
     }
+}
+
+fn assistant_tool_use_ids(msg: &LlmMessage) -> Vec<String> {
+    if msg.role != LlmRole::Assistant {
+        return Vec::new();
+    }
+    msg.content
+        .iter()
+        .filter_map(|content| match content {
+            LlmContent::ToolUse { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_tool_result_message(msg: &LlmMessage) -> bool {
+    matches!(msg.role, LlmRole::Tool | LlmRole::User)
+        && !msg.content.is_empty()
+        && msg
+            .content
+            .iter()
+            .all(|content| matches!(content, LlmContent::ToolResult { .. }))
+}
+
+fn filter_tool_result_message_for_ids(
+    msg: &LlmMessage,
+    needed: &mut std::collections::HashSet<String>,
+) -> Option<LlmMessage> {
+    let mut filtered = msg.clone();
+    filtered.content = msg
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            LlmContent::ToolResult { tool_use_id, .. } if needed.remove(tool_use_id) => {
+                Some(content.clone())
+            }
+            _ => None,
+        })
+        .collect();
+
+    if filtered.content.is_empty() {
+        None
+    } else {
+        Some(filtered)
+    }
+}
+
+fn strip_tool_uses(msg: &LlmMessage) -> LlmMessage {
+    let mut stripped = msg.clone();
+    stripped
+        .content
+        .retain(|content| !matches!(content, LlmContent::ToolUse { .. }));
+    stripped.tool_calls = None;
+    stripped
 }
 
 #[async_trait]
@@ -462,6 +618,19 @@ impl LlmClient for OpenAiCompatibleClient {
         }
 
         maybe_attach_kimi_thinking_body(&mut body, &self.config);
+        maybe_attach_deepseek_thinking_body(&mut body, &self.config);
+        let diagnostics = request_diagnostics(&body);
+        if diagnostics.body_bytes >= LARGE_REQUEST_WARN_BYTES {
+            tracing::warn!(
+                target: "omiga::openai",
+                provider = %self.config.provider,
+                model = %self.config.model,
+                body_bytes = diagnostics.body_bytes,
+                message_count = diagnostics.message_count,
+                tool_count = diagnostics.tool_count,
+                "large LLM request body before send"
+            );
+        }
 
         let response = self
             .client
@@ -470,7 +639,9 @@ impl LlmClient for OpenAiCompatibleClient {
             .json(&body)
             .send()
             .await
-            .map_err(ApiError::from)?;
+            .map_err(|e| {
+                enrich_openai_compatible_network_error(&self.config, &url, diagnostics, e)
+            })?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -688,4 +859,95 @@ struct OpenAiToolFunction {
 struct OpenAiToolFunctionDelta {
     name: Option<String>,
     arguments: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn assistant_with_tool(text: &str, id: &str) -> LlmMessage {
+        LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![
+                LlmContent::text(text),
+                LlmContent::tool_use(id, "search", json!({"query": "q"})),
+            ],
+            name: None,
+            tool_calls: None,
+            reasoning_content: None,
+        }
+    }
+
+    fn tool_ids(messages: &[LlmMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .flat_map(|msg| msg.content.iter())
+            .filter_map(|content| match content {
+                LlmContent::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn has_tool_use(message: &LlmMessage) -> bool {
+        message
+            .content
+            .iter()
+            .any(|content| matches!(content, LlmContent::ToolUse { .. }))
+    }
+
+    #[test]
+    fn validate_message_history_preserves_immediate_tool_result() {
+        let messages = vec![
+            LlmMessage::user("question"),
+            assistant_with_tool("checking", "call_1"),
+            LlmMessage::tool("call_1", "result"),
+            LlmMessage::assistant("done"),
+        ];
+
+        let sanitized = OpenAiCompatibleClient::validate_message_history(messages);
+
+        assert_eq!(sanitized.len(), 4);
+        assert!(has_tool_use(&sanitized[1]));
+        assert_eq!(tool_ids(&sanitized), vec!["call_1"]);
+    }
+
+    #[test]
+    fn validate_message_history_strips_interleaved_tool_call_and_drops_delayed_result() {
+        let messages = vec![
+            LlmMessage::user("question"),
+            assistant_with_tool("checking", "call_1"),
+            LlmMessage::assistant("final answer from cancelled overlapping round"),
+            LlmMessage::tool("call_1", "late result"),
+        ];
+
+        let sanitized = OpenAiCompatibleClient::validate_message_history(messages);
+
+        assert_eq!(sanitized.len(), 3);
+        assert!(!has_tool_use(&sanitized[1]));
+        assert_eq!(sanitized[1].text_content(), "checking");
+        assert_eq!(
+            sanitized[2].text_content(),
+            "final answer from cancelled overlapping round"
+        );
+        assert!(tool_ids(&sanitized).is_empty());
+    }
+
+    #[test]
+    fn validate_message_history_drops_unknown_tool_results_inside_contiguous_block() {
+        let messages = vec![
+            assistant_with_tool("checking", "call_1"),
+            LlmMessage::tool("orphan", "orphan result"),
+            LlmMessage::tool("call_1", "real result"),
+            LlmMessage::assistant("done"),
+        ];
+
+        let sanitized = OpenAiCompatibleClient::validate_message_history(messages);
+
+        assert_eq!(sanitized.len(), 3);
+        assert!(has_tool_use(&sanitized[0]));
+        assert_eq!(tool_ids(&sanitized), vec!["call_1"]);
+        assert_eq!(sanitized[2].text_content(), "done");
+    }
 }

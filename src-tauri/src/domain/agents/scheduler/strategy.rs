@@ -5,9 +5,10 @@
 use serde::{Deserialize, Serialize};
 
 /// 调度策略
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum SchedulingStrategy {
     /// 自动选择最佳策略
+    #[default]
     Auto,
     /// 单 Agent 执行（简单任务）
     Single,
@@ -21,6 +22,8 @@ pub enum SchedulingStrategy {
     Competitive,
     /// 验证优先（先验证后执行）
     VerificationFirst,
+    /// Team 模式（Leader 统筹，专职 Worker 并行执行，自动追加验证阶段）
+    Team,
 }
 
 impl SchedulingStrategy {
@@ -34,6 +37,7 @@ impl SchedulingStrategy {
             SchedulingStrategy::Phased => "分阶段",
             SchedulingStrategy::Competitive => "竞争执行",
             SchedulingStrategy::VerificationFirst => "验证优先",
+            SchedulingStrategy::Team => "Team 模式",
         }
     }
 
@@ -47,6 +51,9 @@ impl SchedulingStrategy {
             SchedulingStrategy::Phased => "分阶段执行：探索→设计→实现→验证，适用于复杂功能开发",
             SchedulingStrategy::Competitive => "多个 Agent 同时解决同一问题，选择最佳结果",
             SchedulingStrategy::VerificationFirst => "先验证现有代码，再进行修改，适用于重构和优化",
+            SchedulingStrategy::Team => {
+                "Leader 负责规划与综合，专职 Worker 并行执行，自动包含验证阶段"
+            }
         }
     }
 
@@ -57,6 +64,7 @@ impl SchedulingStrategy {
             SchedulingStrategy::Auto
                 | SchedulingStrategy::Parallel
                 | SchedulingStrategy::Competitive
+                | SchedulingStrategy::Team
         )
     }
 
@@ -67,6 +75,7 @@ impl SchedulingStrategy {
             SchedulingStrategy::Phased
                 | SchedulingStrategy::Sequential
                 | SchedulingStrategy::Parallel
+                | SchedulingStrategy::Team
         )
     }
 
@@ -80,13 +89,25 @@ impl SchedulingStrategy {
             SchedulingStrategy::Phased => 4,
             SchedulingStrategy::Competitive => 3,
             SchedulingStrategy::VerificationFirst => 4,
+            SchedulingStrategy::Team => 6,
         }
     }
-}
 
-impl Default for SchedulingStrategy {
-    fn default() -> Self {
-        SchedulingStrategy::Auto
+    /// Parse a strategy name produced by the LLM planner into a `SchedulingStrategy`.
+    /// Returns `Auto` for unknown or empty strings so callers can always fall back safely.
+    pub fn from_planner_hint(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "team" => Self::Team,
+            "phased" => Self::Phased,
+            "sequential" => Self::Sequential,
+            "parallel" => Self::Parallel,
+            "verification_first" | "verification-first" | "verify_first" | "verify-first" => {
+                Self::VerificationFirst
+            }
+            "competitive" => Self::Competitive,
+            "single" => Self::Single,
+            _ => Self::Auto,
+        }
     }
 }
 

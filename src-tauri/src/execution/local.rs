@@ -117,10 +117,10 @@ impl LocalEnvironment {
     async fn find_bash() -> Result<String, ExecutionError> {
         // 首先检查 SHELL 环境变量
         if let Ok(shell) = std::env::var("SHELL") {
-            if shell.contains("bash") || shell.contains("zsh") {
-                if Self::check_shell_executable(&shell).await {
-                    return Ok(shell);
-                }
+            if (shell.contains("bash") || shell.contains("zsh"))
+                && Self::check_shell_executable(&shell).await
+            {
+                return Ok(shell);
             }
         }
 
@@ -233,13 +233,17 @@ impl LocalEnvironment {
         let effective_cwd = options.cwd.unwrap_or_else(|| self.cwd.clone());
 
         // 准备命令
-        let (exec_command, _effective_stdin): (String, Option<String>) =
-            if options.stdin_data.is_some() && self.stdin_mode() == "heredoc" {
-                let cmd = self.embed_stdin_heredoc(command, options.stdin_data.as_ref().unwrap());
-                (cmd, None)
-            } else {
-                (command.to_string(), options.stdin_data)
-            };
+        let (exec_command, _effective_stdin): (String, Option<String>) = if let Some(stdin_data) =
+            options
+                .stdin_data
+                .as_ref()
+                .filter(|_| self.stdin_mode() == "heredoc")
+        {
+            let cmd = self.embed_stdin_heredoc(command, stdin_data);
+            (cmd, None)
+        } else {
+            (command.to_string(), options.stdin_data)
+        };
 
         let wrapped = self.wrap_command(&exec_command, &effective_cwd);
         let login = !self.snapshot_ready;

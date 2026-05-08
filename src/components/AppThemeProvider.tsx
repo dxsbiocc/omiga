@@ -2,13 +2,13 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import CssBaseline from "@mui/material/CssBaseline";
 import GlobalStyles from "@mui/material/GlobalStyles";
 import { ThemeProvider, createTheme, alpha } from "@mui/material/styles";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getTheme } from "../theme";
 import {
   getAccentPresetOptions,
   getAccentSwatchGradient,
 } from "../theme/accentPresets";
 import { useColorModeStore } from "../state/themeStore";
+import { getCurrentWindowIfTauri } from "../utils/tauriRuntime";
 
 function useSystemPrefersDark(): boolean {
   const [dark, setDark] = useState(() => {
@@ -59,11 +59,12 @@ export function AppThemeProvider({ children }: { children: ReactNode }) {
   }, [resolvedMode]);
 
   useEffect(() => {
-    void getCurrentWindow()
-      .setTheme(resolvedMode)
-      .catch(() => {
-        /* `vite dev` in browser — no Tauri window */
+    void getCurrentWindowIfTauri().then((windowHandle) => {
+      if (!windowHandle) return;
+      return windowHandle.setTheme(resolvedMode).catch(() => {
+        /* browser / non-Tauri runtime */
       });
+    });
   }, [resolvedMode]);
 
   return (

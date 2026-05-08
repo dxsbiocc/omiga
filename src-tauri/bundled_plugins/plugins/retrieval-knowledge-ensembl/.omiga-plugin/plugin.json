@@ -1,0 +1,93 @@
+{
+  "name": "retrieval-knowledge-ensembl",
+  "version": "0.1.0",
+  "description": "Runs Ensembl search/query/fetch through Omiga local subprocess routing.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./bin/retrieval_knowledge_ensembl.py",
+      "args": [],
+      "env": {
+        "OMIGA_RETRIEVAL_SOURCE_IDS": "ensembl",
+        "OMIGA_RETRIEVAL_PLUGIN_NAME": "retrieval-knowledge-ensembl"
+      },
+      "cwd": ".",
+      "idleTtlMs": 60000,
+      "requestTimeoutMs": 30000,
+      "cancelGraceMs": 750,
+      "concurrency": 1
+    },
+    "sources": [
+      {
+        "id": "ensembl",
+        "category": "knowledge",
+        "label": "Ensembl",
+        "description": "Gene, transcript, stable ID, and variant lookup via the public Ensembl REST API.",
+        "aliases": [
+          "ensembl_gene",
+          "ensembl_transcript",
+          "gene_annotation",
+          "transcript",
+          "transcripts",
+          "variation",
+          "variant",
+          "variants"
+        ],
+        "subcategories": [
+          "gene",
+          "variant"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public Ensembl REST API; no credential projection required."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "species",
+            "type": "string",
+            "description": "Ensembl species, default homo_sapiens."
+          },
+          {
+            "name": "object_type",
+            "type": "string",
+            "description": "Ensembl xref object type, default gene."
+          },
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum matching stable IDs to resolve."
+          }
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "Ensembl Retrieval Source",
+    "shortDescription": "Ensembl as a local retrieval plugin",
+    "longDescription": "Runs Ensembl search/query/fetch through Omiga local subprocess routing.",
+    "developerName": "Omiga",
+    "category": "Retrieval",
+    "capabilities": [
+      "Knowledge",
+      "Retrieval",
+      "Local Subprocess",
+      "Search",
+      "Query",
+      "Fetch"
+    ],
+    "brandColor": "#059669",
+    "defaultPrompt": [
+      "Fetch an Ensembl stable ID through the plugin.",
+      "Search Ensembl for BRCA2."
+    ]
+  }
+}

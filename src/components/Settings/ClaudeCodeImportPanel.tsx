@@ -12,8 +12,8 @@ import {
 } from "@mui/material";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
-import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CloudDownloadIcon from "@mui/icons-material/CloudDownload";
+import { extractErrorMessage } from "../../utils/errorMessage";
 
 type ClaudeDefaultPaths = {
   claudeConfigHome: string;
@@ -39,7 +39,6 @@ type PanelMode = "mcp" | "skills" | "both";
 
 type BusyKey =
   | "mcp"
-  | "mcpGlobal"
   | "skillsFolderUser"
   | "skillsFolderProject"
   | "skillsClaudeUser"
@@ -66,8 +65,11 @@ export function ClaudeCodeImportPanel({
     kind: "success" | "error";
     text: string;
   } | null>(null);
+  const showMcp = mode === "mcp" || mode === "both";
+  const showSkills = mode === "skills" || mode === "both";
 
   useEffect(() => {
+    if (!showSkills) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -79,14 +81,14 @@ export function ClaudeCodeImportPanel({
       } catch (e) {
         if (!cancelled) {
           setDefaults(null);
-          setDefaultsError(e instanceof Error ? e.message : String(e));
+          setDefaultsError(extractErrorMessage(e));
         }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [showSkills]);
 
   const runImportMcp = useCallback(async () => {
     setMessage(null);
@@ -94,7 +96,7 @@ export function ClaudeCodeImportPanel({
       multiple: false,
       directory: false,
       filters: [{ name: "JSON", extensions: ["json"] }],
-      title: "选择 Claude Code 形式的 MCP 配置（含 mcpServers）",
+      title: "选择 MCP JSON 配置（含 mcpServers）",
     });
     if (picked == null || Array.isArray(picked)) return;
     const sourcePath = picked;
@@ -114,38 +116,12 @@ export function ClaudeCodeImportPanel({
     } catch (e) {
       setMessage({
         kind: "error",
-        text: e instanceof Error ? e.message : String(e),
+        text: extractErrorMessage(e),
       });
     } finally {
       setBusy(null);
     }
   }, [root]);
-
-  const runImportGlobalClaudeMcp = useCallback(async () => {
-    if (!defaults?.globalClaudeConfig) return;
-    setMessage(null);
-    setBusy("mcpGlobal");
-    try {
-      const res = await invoke<ImportMcpResult>(
-        "import_merge_project_mcp_json",
-        {
-          projectRoot: root,
-          sourcePath: defaults.globalClaudeConfig,
-        },
-      );
-      setMessage({
-        kind: "success",
-        text: `已将 ~/.claude.json 中的 MCP 合并到 ${res.wrotePath}（共 ${res.serverCount} 个服务）。`,
-      });
-    } catch (e) {
-      setMessage({
-        kind: "error",
-        text: e instanceof Error ? e.message : String(e),
-      });
-    } finally {
-      setBusy(null);
-    }
-  }, [root, defaults?.globalClaudeConfig]);
 
   const runImportSkillsFromFolder = useCallback(
     async (target: SkillsImportTarget) => {
@@ -179,7 +155,7 @@ export function ClaudeCodeImportPanel({
       } catch (e) {
         setMessage({
           kind: "error",
-          text: e instanceof Error ? e.message : String(e),
+          text: extractErrorMessage(e),
         });
       } finally {
         setBusy(null);
@@ -213,7 +189,7 @@ export function ClaudeCodeImportPanel({
       } catch (e) {
         setMessage({
           kind: "error",
-          text: e instanceof Error ? e.message : String(e),
+          text: extractErrorMessage(e),
         });
       } finally {
         setBusy(null);
@@ -222,8 +198,6 @@ export function ClaudeCodeImportPanel({
     [root],
   );
 
-  const showMcp = mode === "mcp" || mode === "both";
-  const showSkills = mode === "skills" || mode === "both";
   const busyAny = busy != null;
   const claudeSkillsFrom = defaults?.defaultUserSkillsDir ?? "~/.claude/skills";
   const skillImportBtnSx = {
@@ -237,26 +211,15 @@ export function ClaudeCodeImportPanel({
     <Box sx={{ mt: 2 }}>
       {noWorkspace && showMcp && (
         <Alert severity="warning" sx={{ mb: 2, borderRadius: 2 }}>
-          当前会话未绑定工作区路径，无法将 MCP / 技能导入到当前项目。用户级
-          ~/.omiga 导入仍可使用。
+          当前会话未绑定工作区路径，无法将 MCP 配置保存到当前项目
+          .omiga/mcp.json。
         </Alert>
       )}
 
-      {defaultsError && (
+      {defaultsError && showSkills && (
         <Alert severity="warning" sx={{ mb: 2, borderRadius: 2 }}>
           无法读取默认 Claude 路径：{defaultsError}
         </Alert>
-      )}
-      {defaults && showMcp && (
-        <Typography
-          variant="caption"
-          color="text.secondary"
-          display="block"
-          sx={{ mb: 1 }}
-        >
-          Claude Code 全局 MCP 配置：{defaults.globalClaudeConfig}
-          {defaults.globalClaudeConfigExists ? " ✓" : "（文件不存在）"}
-        </Typography>
       )}
 
       <Box
@@ -270,23 +233,6 @@ export function ClaudeCodeImportPanel({
       >
         {showMcp && (
           <>
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={
-                busy === "mcpGlobal" ? (
-                  <CircularProgress size={16} />
-                ) : (
-                  <ContentCopyIcon fontSize="small" />
-                )
-              }
-              disabled={
-                busyAny || noWorkspace || !defaults?.globalClaudeConfigExists
-              }
-              onClick={() => void runImportGlobalClaudeMcp()}
-            >
-              从 ~/.claude.json 导入 MCP
-            </Button>
             <Button
               variant="outlined"
               size="small"

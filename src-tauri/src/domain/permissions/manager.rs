@@ -3,6 +3,7 @@
 use super::patterns::DangerousPatternDB;
 use super::tool_rules::canonical_permission_tool_name;
 use super::types::*;
+use crate::domain::connectors;
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -59,7 +60,7 @@ impl PermissionManager {
 
     /// 核心权限检查方法
     pub async fn check_permission(&self, context: &PermissionContext) -> PermissionDecision {
-        let tool_key = Self::approval_cache_key(&context.tool_name);
+        let tool_key = Self::approval_cache_key_for_context(context);
 
         // 0. 检查本会话是否已主动拒绝此工具（按工具名，不区分参数）
         {
@@ -88,12 +89,12 @@ impl PermissionManager {
 
         // 3. Critical 风险立即要求确认（未命中上述批准缓存时）
         if risk.level == RiskLevel::Critical {
-            return PermissionDecision::RequireApproval(PermissionRequest {
+            return PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 context: context.clone(),
                 risk,
                 suggested_mode: PermissionMode::AskEveryTime,
-            });
+            }));
         }
 
         // 4. 规则匹配（克隆匹配到的规则，释放读锁）
@@ -133,12 +134,24 @@ impl PermissionManager {
         tool_name: &str,
         arguments: &serde_json::Value,
     ) -> PermissionDecision {
+        self.check_tool_with_root(session_id, tool_name, arguments, None)
+            .await
+    }
+
+    pub async fn check_tool_with_root(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        project_root: Option<&std::path::Path>,
+    ) -> PermissionDecision {
         let context = PermissionContext {
             tool_name: tool_name.to_string(),
             arguments: arguments.clone(),
             session_id: session_id.to_string(),
             file_paths: self.extract_file_paths(tool_name, arguments),
             timestamp: chrono::Utc::now(),
+            project_root: project_root.map(|p| p.to_path_buf()),
         };
         self.check_permission(&context).await
     }
@@ -153,7 +166,7 @@ impl PermissionManager {
         // 校验模式合法性（前端不能传 Bypass）
         mode.validate_user_mode()?;
 
-        let tool_key = Self::approval_cache_key(&context.tool_name);
+        let tool_key = Self::approval_cache_key_for_context(context);
 
         // 批准时移除本会话内对该工具的拒绝记录（用户改变了主意）
         {
@@ -204,7 +217,7 @@ impl PermissionManager {
         context: &PermissionContext,
         reason: &str,
     ) -> Result<(), String> {
-        let tool_key = Self::approval_cache_key(&context.tool_name);
+        let tool_key = Self::approval_cache_key_for_context(context);
 
         {
             let mut denials = self.session_denials.write().await;
@@ -448,7 +461,7 @@ impl PermissionManager {
     // 内部辅助方法
     // =========================================================================
 
-    /// 用户「记住」批准 / 本会话拒绝 使用的键：与 `tool_rules` 一致，Read/WebSearch 等与内置名合并
+    /// 用户「记住」批准 / 本会话拒绝 使用的键：与 `tool_rules` 一致，Read/Search 等与内置名合并
     fn approval_cache_key(tool_name: &str) -> String {
         let c = canonical_permission_tool_name(tool_name.trim());
         if c.starts_with("mcp__") {
@@ -456,6 +469,19 @@ impl PermissionManager {
         } else {
             c.to_ascii_lowercase()
         }
+    }
+
+    fn approval_cache_key_for_context(context: &PermissionContext) -> String {
+        let base = Self::approval_cache_key(&context.tool_name);
+        if base != "connector" {
+            return base;
+        }
+        let Some((connector_id, operation)) =
+            connectors::connector_permission_identity_from_args(&context.arguments)
+        else {
+            return base;
+        };
+        format!("connector:{connector_id}:{operation}")
     }
 
     /// 使用 SHA-256 计算工具+参数哈希（仅单元测试校验 canonical 行为；批准缓存按工具名）
@@ -583,16 +609,16 @@ impl PermissionManager {
             return self.default_decision(context, risk).await;
         }
 
-        let tool_key = Self::approval_cache_key(&context.tool_name);
+        let tool_key = Self::approval_cache_key_for_context(context);
 
         match rule.mode {
             PermissionMode::AskEveryTime => {
-                PermissionDecision::RequireApproval(PermissionRequest {
+                PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                     request_id: uuid::Uuid::new_v4().to_string(),
                     context: context.clone(),
                     risk: risk.clone(),
                     suggested_mode: PermissionMode::Session,
-                })
+                }))
             }
             PermissionMode::Session | PermissionMode::Plan => {
                 if self
@@ -601,12 +627,12 @@ impl PermissionManager {
                 {
                     PermissionDecision::Allow
                 } else {
-                    PermissionDecision::RequireApproval(PermissionRequest {
+                    PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                         request_id: uuid::Uuid::new_v4().to_string(),
                         context: context.clone(),
                         risk: risk.clone(),
                         suggested_mode: rule.mode,
-                    })
+                    }))
                 }
             }
             PermissionMode::TimeWindow { .. } => {
@@ -616,22 +642,22 @@ impl PermissionManager {
                 {
                     PermissionDecision::Allow
                 } else {
-                    PermissionDecision::RequireApproval(PermissionRequest {
+                    PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                         request_id: uuid::Uuid::new_v4().to_string(),
                         context: context.clone(),
                         risk: risk.clone(),
                         suggested_mode: rule.mode,
-                    })
+                    }))
                 }
             }
             PermissionMode::Auto => {
                 if risk.level >= RiskLevel::High {
-                    PermissionDecision::RequireApproval(PermissionRequest {
+                    PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                         request_id: uuid::Uuid::new_v4().to_string(),
                         context: context.clone(),
                         risk: risk.clone(),
                         suggested_mode: PermissionMode::AskEveryTime,
-                    })
+                    }))
                 } else {
                     PermissionDecision::Allow
                 }
@@ -647,12 +673,12 @@ impl PermissionManager {
         risk: &RiskAssessment,
     ) -> PermissionDecision {
         if risk.level >= RiskLevel::High {
-            PermissionDecision::RequireApproval(PermissionRequest {
+            PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 context: context.clone(),
                 risk: risk.clone(),
                 suggested_mode: PermissionMode::AskEveryTime,
-            })
+            }))
         } else {
             PermissionDecision::Allow
         }
@@ -673,20 +699,20 @@ impl PermissionManager {
             // Safe 和 Low 风险自动允许（读取文件、网络搜索等）
             RiskLevel::Safe | RiskLevel::Low => PermissionDecision::Allow,
             // Medium 风险（文件写入、编辑）需要确认
-            RiskLevel::Medium => PermissionDecision::RequireApproval(PermissionRequest {
+            RiskLevel::Medium => PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 context: context.clone(),
                 risk: risk.clone(),
                 suggested_mode: PermissionMode::Session,
-            }),
+            })),
             // High 和 Critical 风险（删除、系统命令）需要确认，建议使用更严格的模式
             RiskLevel::High | RiskLevel::Critical => {
-                PermissionDecision::RequireApproval(PermissionRequest {
+                PermissionDecision::RequireApproval(Box::new(PermissionRequest {
                     request_id: uuid::Uuid::new_v4().to_string(),
                     context: context.clone(),
                     risk: risk.clone(),
                     suggested_mode: PermissionMode::AskEveryTime,
-                })
+                }))
             }
         }
     }
@@ -710,10 +736,8 @@ impl PermissionManager {
                 }
             }
             // 如果没有文件路径信息，WithinProject 视为通过，其他路径匹配器视为不通过
-            else {
-                if !matches!(path_matcher, PathMatcher::WithinProject) {
-                    return false;
-                }
+            else if !matches!(path_matcher, PathMatcher::WithinProject) {
+                return false;
             }
         }
 
@@ -829,6 +853,35 @@ impl PermissionManager {
         detected_risks.extend(tool_risk.detected_risks);
         categories.extend(tool_risk.categories);
 
+        // 1b. Connector 写操作具有外部服务副作用；只有模型显式声明
+        // confirm_write=true 时才进入统一 UI 审批。未声明确认的写操作会先由
+        // connector 工具自身拦截并记录为 blocked，避免无意义地弹审批框。
+        if Self::approval_cache_key(&context.tool_name) == "connector"
+            && connectors::connector_permission_write_confirmed(&context.arguments)
+            && connectors::connector_permission_write_operation_from_args(&context.arguments)
+                .is_some()
+        {
+            let (connector_id, operation) =
+                connectors::connector_permission_identity_from_args(&context.arguments)
+                    .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
+            detected_risks.push(DetectedRisk {
+                category: RiskCategory::Network,
+                severity: RiskLevel::Critical,
+                description: format!("Connector 写操作将修改外部服务: {connector_id}/{operation}"),
+                mitigation: Some(
+                    "请确认目标、内容和账号无误；批准后仍会写入 connector 审计日志。".to_string(),
+                ),
+            });
+            detected_risks.push(DetectedRisk {
+                category: RiskCategory::Privacy,
+                severity: RiskLevel::Medium,
+                description: "外部服务可能接收当前对话生成的内容".to_string(),
+                mitigation: Some("避免发送 secret、token、未确认的私有信息。".to_string()),
+            });
+            categories.push(RiskCategory::Network);
+            categories.push(RiskCategory::Privacy);
+        }
+
         // 2. 参数级别风险（bash/shell 危险命令检测）
         if context.tool_name == "bash" || context.tool_name == "shell" {
             if let Some(cmd) = context.arguments.get("command").and_then(|v| v.as_str()) {
@@ -841,9 +894,12 @@ impl PermissionManager {
         }
 
         // 3. 路径风险
+        let home_dir = dirs::home_dir();
         if let Some(ref paths) = context.file_paths {
             for path in paths {
                 let path_str = path.to_string_lossy();
+
+                // 3a. 系统路径
                 if path_str.starts_with("/etc/")
                     || path_str.starts_with("/boot/")
                     || path_str.starts_with("/sys/")
@@ -856,6 +912,8 @@ impl PermissionManager {
                     });
                     categories.push(RiskCategory::System);
                 }
+
+                // 3b. 敏感文件
                 if path_str.contains(".env")
                     || path_str.contains("secret")
                     || path_str.contains("credential")
@@ -867,6 +925,122 @@ impl PermissionManager {
                         mitigation: Some("确认是否需要修改此文件".to_string()),
                     });
                     categories.push(RiskCategory::Privacy);
+                }
+
+                // 3c. 项目根目录之外的写操作
+                if let Some(ref root) = context.project_root {
+                    let abs_path = if path.is_absolute() {
+                        path.clone()
+                    } else {
+                        root.join(path)
+                    };
+                    let canonical_root = std::fs::canonicalize(root).unwrap_or(root.clone());
+                    let canonical_path =
+                        std::fs::canonicalize(&abs_path).unwrap_or(abs_path.clone());
+
+                    if !canonical_path.starts_with(&canonical_root) {
+                        // 判断是否直接在 home 目录下（更危险）
+                        let is_home_level = home_dir
+                            .as_ref()
+                            .map(|h| {
+                                let canonical_home = std::fs::canonicalize(h).unwrap_or(h.clone());
+                                // 直接子目录或文件（depth == home + 1）
+                                canonical_path.starts_with(&canonical_home)
+                                    && canonical_path
+                                        .strip_prefix(&canonical_home)
+                                        .map(|rel| rel.components().count() <= 1)
+                                        .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+
+                        let (severity, desc) = if is_home_level {
+                            (
+                                RiskLevel::High,
+                                format!(
+                                    "操作路径在 Home 目录根层级 (~/)，超出项目范围: {}",
+                                    path_str
+                                ),
+                            )
+                        } else {
+                            (
+                                RiskLevel::Medium,
+                                format!("操作路径超出项目目录: {}", path_str),
+                            )
+                        };
+                        detected_risks.push(DetectedRisk {
+                            category: RiskCategory::FileSystem,
+                            severity,
+                            description: desc,
+                            mitigation: Some(format!(
+                                "项目根目录为 {}，请确认是否允许访问外部路径",
+                                root.display()
+                            )),
+                        });
+                        categories.push(RiskCategory::FileSystem);
+                    }
+                }
+            }
+        }
+
+        // 3d. bash 命令中的路径越界检测（mkdir / touch / cp 等写入外部路径）
+        if let (Some(ref root), true) = (
+            &context.project_root,
+            context.tool_name == "bash" || context.tool_name == "shell",
+        ) {
+            if let Some(cmd) = context.arguments.get("command").and_then(|v| v.as_str()) {
+                for cap in bash_path_regex().captures_iter(cmd) {
+                    let raw = cap.get(1).map(|m| m.as_str()).unwrap_or_default();
+                    // Expand ~ to home dir
+                    let expanded = if let Some(stripped) = raw.strip_prefix("~/") {
+                        home_dir
+                            .as_ref()
+                            .map(|h| h.join(stripped))
+                            .unwrap_or_else(|| std::path::PathBuf::from(raw))
+                    } else if raw == "~" {
+                        home_dir
+                            .clone()
+                            .unwrap_or_else(|| std::path::PathBuf::from(raw))
+                    } else {
+                        std::path::PathBuf::from(raw)
+                    };
+
+                    if !expanded.is_absolute() {
+                        continue;
+                    }
+
+                    let canonical_root = std::fs::canonicalize(root).unwrap_or(root.clone());
+                    let canonical_path =
+                        std::fs::canonicalize(&expanded).unwrap_or(expanded.clone());
+
+                    if !canonical_path.starts_with(&canonical_root) {
+                        let is_home_level = home_dir
+                            .as_ref()
+                            .map(|h| {
+                                let ch = std::fs::canonicalize(h).unwrap_or(h.clone());
+                                canonical_path.starts_with(&ch)
+                                    && canonical_path
+                                        .strip_prefix(&ch)
+                                        .map(|rel| rel.components().count() <= 1)
+                                        .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+
+                        if is_home_level {
+                            detected_risks.push(DetectedRisk {
+                                category: RiskCategory::FileSystem,
+                                severity: RiskLevel::High,
+                                description: format!(
+                                    "命令中包含 Home 根层级路径 (~/)，超出项目范围: {}",
+                                    raw
+                                ),
+                                mitigation: Some(format!(
+                                    "项目根目录为 {}，该路径超出允许范围",
+                                    root.display()
+                                )),
+                            });
+                            categories.push(RiskCategory::FileSystem);
+                        }
+                    }
                 }
             }
         }
@@ -904,7 +1078,7 @@ impl PermissionManager {
     fn assess_tool_risk(&self, tool_name: &str) -> RiskAssessment {
         match tool_name {
             "bash" | "shell" => RiskAssessment {
-                level: RiskLevel::Medium,
+                level: RiskLevel::High,
                 categories: vec![RiskCategory::System],
                 description: "执行系统命令".to_string(),
                 recommendations: vec![
@@ -913,13 +1087,13 @@ impl PermissionManager {
                 ],
                 detected_risks: vec![DetectedRisk {
                     category: RiskCategory::System,
-                    severity: RiskLevel::Medium,
+                    severity: RiskLevel::High,
                     description: "允许执行任意系统命令".to_string(),
                     mitigation: Some("使用受限的 file_* 工具替代".to_string()),
                 }],
             },
             "file_write" | "file_edit" | "skill_manage" | "skill_config" => RiskAssessment {
-                level: RiskLevel::Low,
+                level: RiskLevel::Medium,
                 categories: vec![RiskCategory::FileSystem, RiskCategory::DataLoss],
                 description: "修改文件内容".to_string(),
                 recommendations: vec![
@@ -928,7 +1102,7 @@ impl PermissionManager {
                 ],
                 detected_risks: vec![DetectedRisk {
                     category: RiskCategory::FileSystem,
-                    severity: RiskLevel::Low,
+                    severity: RiskLevel::Medium,
                     description: "将修改文件内容".to_string(),
                     mitigation: Some("使用 file_read 先查看当前内容".to_string()),
                 }],
@@ -940,7 +1114,7 @@ impl PermissionManager {
                 recommendations: vec![],
                 detected_risks: vec![],
             },
-            "web_fetch" | "web_search" => RiskAssessment {
+            "connector" | "fetch" | "query" | "search" => RiskAssessment {
                 level: RiskLevel::Low,
                 categories: vec![RiskCategory::Network],
                 description: "网络请求".to_string(),
@@ -953,8 +1127,8 @@ impl PermissionManager {
                 }],
             },
             // 其他常见安全工具
-            "list_skills" | "skills_list" | "skill_view" | "search" | "tool_search"
-            | "get_current_time" | "get_system_info" => RiskAssessment {
+            "list_skills" | "skills_list" | "skill_view" | "tool_search" | "get_current_time"
+            | "get_system_info" => RiskAssessment {
                 level: RiskLevel::Safe,
                 categories: vec![],
                 description: format!("使用工具: {}", tool_name),
@@ -1050,6 +1224,103 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn connector_confirmed_write_requires_ui_approval() {
+        let mgr = PermissionManager::new();
+        let args = serde_json::json!({
+            "connector": "slack",
+            "operation": "post_message",
+            "channel": "C123",
+            "text": "Ship it",
+            "confirm_write": true
+        });
+
+        let dec = mgr.check_tool("s_connector", "connector", &args).await;
+        let req = match dec {
+            PermissionDecision::RequireApproval(req) => req,
+            other => panic!("expected connector write approval, got {other:?}"),
+        };
+        assert_eq!(req.risk.level, RiskLevel::Critical);
+        assert!(req
+            .risk
+            .detected_risks
+            .iter()
+            .any(|risk| risk.description.contains("slack/post_message")));
+
+        mgr.approve_request("s_connector", PermissionMode::AskEveryTime, &req.context)
+            .await
+            .unwrap();
+
+        let allowed_once = mgr.check_tool("s_connector", "connector", &args).await;
+        assert!(matches!(allowed_once, PermissionDecision::Allow));
+
+        let requires_again = mgr.check_tool("s_connector", "connector", &args).await;
+        assert!(matches!(
+            requires_again,
+            PermissionDecision::RequireApproval(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn connector_write_approval_is_scoped_to_connector_operation() {
+        let mgr = PermissionManager::new();
+        let slack_post = serde_json::json!({
+            "connector": "slack",
+            "operation": "post_message",
+            "channel": "C123",
+            "text": "Ship it",
+            "confirmWrite": true
+        });
+        let req = match mgr
+            .check_tool("s_connector_scope", "Connector", &slack_post)
+            .await
+        {
+            PermissionDecision::RequireApproval(req) => req,
+            other => panic!("expected slack write approval, got {other:?}"),
+        };
+        mgr.approve_request("s_connector_scope", PermissionMode::Session, &req.context)
+            .await
+            .unwrap();
+        assert!(matches!(
+            mgr.check_tool("s_connector_scope", "connector", &slack_post)
+                .await,
+            PermissionDecision::Allow
+        ));
+
+        let linear_write = serde_json::json!({
+            "connector": "linear",
+            "operation": "update_issue_status",
+            "id": "ENG-1",
+            "confirm_write": true
+        });
+        assert!(matches!(
+            mgr.check_tool("s_connector_scope", "connector", &linear_write)
+                .await,
+            PermissionDecision::RequireApproval(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_connector_write_reaches_tool_level_guard_without_ui_prompt() {
+        let mgr = PermissionManager::new();
+        let dec = mgr
+            .check_tool(
+                "s_connector_unconfirmed",
+                "connector",
+                &serde_json::json!({
+                    "connector": "slack",
+                    "operation": "post_message",
+                    "channel": "C123",
+                    "text": "Ship it"
+                }),
+            )
+            .await;
+        assert!(
+            matches!(dec, PermissionDecision::Allow),
+            "missing confirm_write should be blocked by connector tool guard, not a UI prompt"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // 会话拒绝测试
     // -------------------------------------------------------------------------
@@ -1063,6 +1334,7 @@ mod tests {
             session_id: "session_deny_test".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
 
         // 第一次拒绝
@@ -1096,6 +1368,7 @@ mod tests {
             session_id: "session_a".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
         let ctx_b = PermissionContext {
             session_id: "session_b".to_string(),
@@ -1125,6 +1398,7 @@ mod tests {
             session_id: "s_approve".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
 
         mgr.approve_request("s_approve", PermissionMode::Session, &ctx)
@@ -1158,6 +1432,7 @@ mod tests {
             session_id: "s_alias".to_string(),
             file_paths: Some(vec![std::path::PathBuf::from("/a")]),
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
         mgr.approve_request("s_alias", PermissionMode::Session, &ctx_read)
             .await
@@ -1185,6 +1460,7 @@ mod tests {
             session_id: "s_fw".to_string(),
             file_paths: Some(vec![std::path::PathBuf::from("/tmp/a.txt")]),
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
         mgr.approve_request("s_fw", PermissionMode::Session, &ctx_a)
             .await
@@ -1213,6 +1489,7 @@ mod tests {
             session_id: "s_crit".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
 
         let before = mgr.check_permission(&ctx).await;
@@ -1252,6 +1529,7 @@ mod tests {
             session_id: "s_tw".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
 
         mgr.approve_request("s_tw", PermissionMode::TimeWindow { minutes: 60 }, &ctx)
@@ -1281,6 +1559,7 @@ mod tests {
             session_id: "s".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
         let result = mgr.approve_request("s", PermissionMode::Bypass, &ctx).await;
         assert!(result.is_err(), "Bypass 模式应被拒绝");
@@ -1326,18 +1605,19 @@ mod tests {
             session_id: "s_ul".to_string(),
             file_paths: Some(vec![std::path::PathBuf::from("/tmp/test.txt")]),
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
 
-        // 第一次：规则有效（use_count=0 < limit=1），Auto + Low risk → Allow
+        // 第一次：规则有效（use_count=0 < limit=1），Auto + Medium risk → Allow
         let dec1 = mgr.check_permission(&ctx).await;
         assert!(matches!(dec1, PermissionDecision::Allow), "第一次应 Allow");
 
         // 第二次：规则已失效（use_count=1 >= limit=1），走 default_decision
         let dec2 = mgr.check_permission(&ctx).await;
-        // file_write 在 assess_tool_risk 中为 Low，default_decision 对 Low 为 Allow
+        // file_write 在 assess_tool_risk 中为 Medium，default_decision 对 Medium 为 RequireApproval
         assert!(
-            matches!(dec2, PermissionDecision::Allow),
-            "规则失效后应按默认策略：Low 风险 Allow，实际: {:?}",
+            matches!(dec2, PermissionDecision::RequireApproval(_)),
+            "规则失效后应按默认策略：Medium 风险 RequireApproval，实际: {:?}",
             dec2
         );
     }
@@ -1350,7 +1630,7 @@ mod tests {
             id: "rule_cs".to_string(),
             name: "当前会话规则".to_string(),
             description: None,
-            tool_matcher: ToolMatcher::Exact("bash".to_string()),
+            tool_matcher: ToolMatcher::Exact("file_write".to_string()),
             path_matcher: None,
             argument_conditions: vec![],
             mode: PermissionMode::Auto,
@@ -1364,15 +1644,18 @@ mod tests {
         };
         mgr.add_rule(rule).await.unwrap();
 
-        let safe_cmd = serde_json::json!({"command": "ls"});
+        let write_args = serde_json::json!({"path": "/tmp/current-session-test.txt"});
 
-        // 规则创建者的会话：bash 是 Medium 风险，Auto 规则 → Allow（Low/Medium 允许）
+        // 规则创建者的会话：file_write 是 Medium 风险，Auto 规则 → Allow（Low/Medium 允许）
         let ctx_owner = PermissionContext {
-            tool_name: "bash".to_string(),
-            arguments: safe_cmd.clone(),
+            tool_name: "file_write".to_string(),
+            arguments: write_args.clone(),
             session_id: "session_owner".to_string(),
-            file_paths: None,
+            file_paths: Some(vec![std::path::PathBuf::from(
+                "/tmp/current-session-test.txt",
+            )]),
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
         let dec_owner = mgr.check_permission(&ctx_owner).await;
         assert!(
@@ -1495,6 +1778,7 @@ mod tests {
             session_id: "s_audit".to_string(),
             file_paths: None,
             timestamp: chrono::Utc::now(),
+            project_root: None,
         };
 
         mgr.deny_request(&ctx, "用户明确拒绝").await.unwrap();

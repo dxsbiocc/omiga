@@ -15,21 +15,37 @@ use std::collections::HashSet;
 const SAFETY_BUFFER_TOKENS: u32 = 12_000;
 /// Rough upper bound for tool schema + definitions serialized into the provider request (when tools on).
 const TOOL_SCHEMA_OVERHEAD_TOKENS: u32 = 28_000;
+/// Start compacting before the hard context edge. Users can override with
+/// `OMIGA_AUTO_COMPACT_THRESHOLD_PERCENT`; default is 80%.
+const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT: u32 = 80;
 /// Minimum domain messages to retain after head trimming (last user turn should survive if possible).
 const MIN_MESSAGES: usize = 1;
 /// When truncating tool output, keep at least this many bytes of prefix.
 const MIN_TOOL_OUTPUT_KEEP_BYTES: usize = 2_048;
 
 fn env_truthy(key: &str) -> bool {
-    matches!(
-        std::env::var(key)
-            .map(|s| {
-                let l = s.to_ascii_lowercase();
-                l == "1" || l == "true" || l == "yes"
-            })
-            .unwrap_or(false),
-        true
-    )
+    std::env::var(key)
+        .map(|s| {
+            let l = s.to_ascii_lowercase();
+            l == "1" || l == "true" || l == "yes"
+        })
+        .unwrap_or(false)
+}
+
+fn auto_compact_threshold_percent() -> u32 {
+    if let Ok(s) = std::env::var("OMIGA_AUTO_COMPACT_THRESHOLD_PERCENT") {
+        if let Ok(n) = s.parse::<u32>() {
+            return n.clamp(50, 95);
+        }
+    }
+    if let Ok(s) = std::env::var("OMIGA_AUTO_COMPACT_RATIO") {
+        if let Ok(v) = s.parse::<f32>() {
+            if v.is_finite() {
+                return ((v * 100.0).round() as i32).clamp(50, 95) as u32;
+            }
+        }
+    }
+    DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT
 }
 
 /// Whether automatic compaction is enabled (default: on).
@@ -111,43 +127,53 @@ fn request_overhead_tokens(cfg: &LlmConfig, tools_enabled: bool) -> u32 {
 }
 
 /// Budget for the **chat history** portion only (messages array), in estimated tokens.
+/// This is a *trigger* budget, not the absolute hard context limit: by default Omiga compacts
+/// around 80% of the provider context window so large requests do not fail during upload/streaming.
 pub fn messages_budget_tokens(cfg: &LlmConfig, tools_enabled: bool) -> u32 {
     let ctx = context_window_tokens(cfg);
+    let trigger_ctx = ctx
+        .saturating_mul(auto_compact_threshold_percent())
+        .saturating_div(100);
     let reserve_out = cfg.max_tokens;
     let overhead = request_overhead_tokens(cfg, tools_enabled);
-    ctx.saturating_sub(reserve_out)
+    trigger_ctx
+        .saturating_sub(reserve_out)
         .saturating_sub(SAFETY_BUFFER_TOKENS)
         .saturating_sub(overhead)
 }
 
-fn pop_head_message(messages: &mut Vec<Message>) -> bool {
+fn take_head_message_block(messages: &mut Vec<Message>) -> Vec<Message> {
     if messages.is_empty() {
-        return false;
+        return vec![];
     }
-    match messages.remove(0) {
-        Message::Assistant {
-            tool_calls: Some(calls),
-            ..
-        } => {
-            let mut pending: HashSet<String> = calls.iter().map(|c| c.id.clone()).collect();
-            while !messages.is_empty() && !pending.is_empty() {
-                match &messages[0] {
-                    Message::Tool { tool_call_id, .. } if pending.contains(tool_call_id) => {
-                        let id = tool_call_id.clone();
-                        messages.remove(0);
-                        pending.remove(&id);
-                    }
-                    _ => break,
+    let first = messages.remove(0);
+    let mut removed = vec![first.clone()];
+    if let Message::Assistant {
+        tool_calls: Some(calls),
+        ..
+    } = first
+    {
+        let mut pending: HashSet<String> = calls.iter().map(|c| c.id.clone()).collect();
+        while !messages.is_empty() && !pending.is_empty() {
+            match &messages[0] {
+                Message::Tool { tool_call_id, .. } if pending.contains(tool_call_id) => {
+                    let id = tool_call_id.clone();
+                    removed.push(messages.remove(0));
+                    pending.remove(&id);
                 }
+                _ => break,
             }
         }
-        _ => {}
     }
-    true
+    removed
+}
+
+fn pop_head_message(messages: &mut Vec<Message>) -> bool {
+    !take_head_message_block(messages).is_empty()
 }
 
 fn truncate_tool_results_for_budget(
-    messages: &mut Vec<Message>,
+    messages: &mut [Message],
     cfg: &LlmConfig,
     tools_enabled: bool,
 ) {
@@ -192,28 +218,24 @@ fn truncate_tool_results_for_budget(
 }
 
 fn truncate_text_messages_for_budget(
-    messages: &mut Vec<Message>,
+    messages: &mut [Message],
     cfg: &LlmConfig,
     tools_enabled: bool,
 ) {
     let budget = messages_budget_tokens(cfg, tools_enabled);
-    for _ in 0..64 {
-        let api = SessionCodec::to_api_messages(messages);
-        let est = estimate_tokens_api_messages(&api);
-        if est <= budget {
-            return;
+    let api = SessionCodec::to_api_messages(messages);
+    let est = estimate_tokens_api_messages(&api);
+    if est <= budget {
+        return;
+    }
+    let excess = est.saturating_sub(budget);
+    let drop_chars = (excess as usize).saturating_mul(4).saturating_add(256);
+    if let Some(Message::User { content }) = messages.first_mut() {
+        if content.len() > 512 {
+            let new_len = content.len().saturating_sub(drop_chars).max(256);
+            let prefix = truncate_utf8_prefix(content.as_str(), new_len);
+            *content = format!("{prefix}\n\n[Omiga: message truncated by auto-compact]");
         }
-        let excess = est.saturating_sub(budget);
-        let drop_chars = (excess as usize).saturating_mul(4).saturating_add(256);
-        if let Some(Message::User { content }) = messages.first_mut() {
-            if content.len() > 512 {
-                let new_len = content.len().saturating_sub(drop_chars).max(256);
-                let prefix = truncate_utf8_prefix(content.as_str(), new_len);
-                *content = format!("{prefix}\n\n[Omiga: message truncated by auto-compact]");
-            }
-            break;
-        }
-        break;
     }
 }
 
@@ -267,7 +289,8 @@ pub fn compact_session_messages(
 
     if initial_len > messages.len() || after < before {
         let notice = format!(
-            "[Omiga: Earlier conversation was automatically removed or shortened to stay within the ~{} token context limit. Estimated chat history: ~{} → ~{} tokens.]",
+            "[Omiga: Earlier conversation was automatically removed or shortened near the {}% context threshold (window ~{} tokens). Estimated chat history: ~{} → ~{} tokens.]",
+            auto_compact_threshold_percent(),
             context_window_tokens(cfg),
             before,
             after
@@ -291,6 +314,36 @@ pub fn compact_session_messages(
     })
 }
 
+pub fn preview_removed_messages_for_compaction(
+    messages: &[Message],
+    cfg: &LlmConfig,
+    tools_enabled: bool,
+) -> Option<Vec<Message>> {
+    if !is_auto_compact_enabled() {
+        return None;
+    }
+    let before = estimate_tokens_api_messages(&SessionCodec::to_api_messages(messages));
+    let budget = messages_budget_tokens(cfg, tools_enabled);
+    if before <= budget {
+        return None;
+    }
+
+    let mut preview = messages.to_vec();
+    let mut removed = Vec::new();
+    while preview.len() > MIN_MESSAGES {
+        let est = estimate_tokens_api_messages(&SessionCodec::to_api_messages(&preview));
+        if est <= budget {
+            break;
+        }
+        let block = take_head_message_block(&mut preview);
+        if block.is_empty() {
+            break;
+        }
+        removed.extend(block);
+    }
+    (!removed.is_empty()).then_some(removed)
+}
+
 /// Replace all DB rows for `session_id` with `session.messages` and return the database id of the
 /// **last** user message (for linking `conversation_rounds`).
 pub async fn replace_session_messages(
@@ -302,29 +355,8 @@ pub async fn replace_session_messages(
     let mut last_user_id: Option<String> = None;
     for msg in messages {
         let id = uuid::Uuid::new_v4().to_string();
-        let (
-            row_id,
-            sid,
-            role,
-            content,
-            tool_calls,
-            tool_call_id,
-            token_usage_json,
-            reasoning_content,
-            follow_up_suggestions_json,
-        ) = SessionCodec::message_to_record(msg, &id, session_id);
-        repo.save_message(
-            &row_id,
-            &sid,
-            &role,
-            &content,
-            tool_calls.as_deref(),
-            tool_call_id.as_deref(),
-            token_usage_json.as_deref(),
-            reasoning_content.as_deref(),
-            follow_up_suggestions_json.as_deref(),
-        )
-        .await?;
+        let record = SessionCodec::message_to_record(msg, &id, session_id);
+        repo.save_message(record.as_insert()).await?;
         if matches!(msg, Message::User { .. }) {
             last_user_id = Some(id);
         }
@@ -383,6 +415,13 @@ mod tests {
     fn budget_respects_max_tokens_and_overhead() {
         let c = test_config();
         let b = messages_budget_tokens(&c, true);
+        // Default trigger is ~80% of the context window, then output/tool/safety reserves.
+        let expected = (131_072u32 * DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT / 100)
+            .saturating_sub(c.max_tokens)
+            .saturating_sub(SAFETY_BUFFER_TOKENS)
+            .saturating_sub(TOOL_SCHEMA_OVERHEAD_TOKENS)
+            .saturating_sub(system_prompt_tokens(&c));
+        assert_eq!(b, expected);
         assert!(b < 131_072);
     }
 
@@ -402,6 +441,7 @@ mod tests {
                 token_usage: None,
                 reasoning_content: None,
                 follow_up_suggestions: None,
+                turn_summary: None,
             },
             Message::Tool {
                 tool_call_id: "t1".into(),
@@ -418,6 +458,29 @@ mod tests {
         match &msgs[0] {
             Message::User { content } => assert!(content.contains("u2")),
             _ => panic!("expected user u2"),
+        }
+    }
+
+    #[test]
+    fn preview_removed_messages_collects_trimmed_head_blocks() {
+        let mut c = test_config();
+        c.max_tokens = 4;
+        c.system_prompt = None;
+        let msgs = vec![
+            Message::User {
+                content: "old context ".repeat(40_000),
+            },
+            Message::User {
+                content: "latest".into(),
+            },
+        ];
+
+        let removed = preview_removed_messages_for_compaction(&msgs, &c, false).unwrap();
+
+        assert_eq!(removed.len(), 1);
+        match &removed[0] {
+            Message::User { content } => assert!(content.contains("old context")),
+            _ => panic!("expected removed user message"),
         }
     }
 }

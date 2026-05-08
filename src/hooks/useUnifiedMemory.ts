@@ -40,14 +40,99 @@ export interface ImplicitMemoryStatus {
   last_build_time: number | null;
 }
 
+export interface PermanentProfileStatus {
+  enabled: boolean;
+  item_count: number;
+  injected_char_count: number;
+}
+
+export interface SessionWorkingMemoryStatus {
+  enabled: boolean;
+  dirty: boolean;
+  item_count: number;
+  last_refreshed_at: string | null;
+}
+
+export interface LongTermStatus {
+  project_entry_count: number;
+  global_entry_count: number;
+  /** Entries not reused in >90 days with stability < 0.4 (project + global). */
+  stale_entry_count: number;
+}
+
+export interface KnowledgeBaseStatus {
+  project_page_count: number;
+  global_page_count: number;
+}
+
 export interface MemoryPaths {
   root: string;
   wiki: string;
   implicit: string;
   /** ~/.omiga/memory/permanent/wiki */
   permanent_wiki: string;
+  long_term: string;
+  permanent_long_term: string;
   /** ~/.omiga/memory/raw (configurable) */
   raw: string;
+  /** long_term/sources — web pages and papers registry */
+  sources: string;
+}
+
+export interface SourceRegistryStatus {
+  entry_count: number;
+  stale_count: number;
+}
+
+export interface SourceEntryDto {
+  path: string;
+  url: string;
+  canonical_url: string;
+  title: string | null;
+  domain: string;
+  gist: string | null;
+  accessed_at: string;
+  last_used_at: string;
+  use_count: number;
+  sessions: string[];
+  query_context: string[];
+  expires_at: string | null;
+}
+
+type RawSourceEntryDto = Partial<Record<keyof SourceEntryDto, unknown>>;
+
+function optionalString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+export function normalizeSourceEntry(entry: RawSourceEntryDto): SourceEntryDto {
+  const url = stringValue(entry.url);
+  const accessedAt = stringValue(entry.accessed_at);
+
+  return {
+    path: stringValue(entry.path),
+    url,
+    canonical_url: stringValue(entry.canonical_url) || url,
+    title: optionalString(entry.title),
+    domain: stringValue(entry.domain),
+    gist: optionalString(entry.gist),
+    accessed_at: accessedAt,
+    last_used_at: stringValue(entry.last_used_at) || accessedAt,
+    use_count: typeof entry.use_count === "number" ? entry.use_count : 0,
+    sessions: stringArray(entry.sessions),
+    query_context: stringArray(entry.query_context),
+    expires_at: optionalString(entry.expires_at),
+  };
 }
 
 export interface UnifiedMemoryStatus {
@@ -56,6 +141,11 @@ export interface UnifiedMemoryStatus {
   needs_migration: boolean;
   explicit: ExplicitMemoryStatus;
   implicit: ImplicitMemoryStatus;
+  permanent_profile: PermanentProfileStatus;
+  working_memory: SessionWorkingMemoryStatus;
+  long_term: LongTermStatus;
+  knowledge_base: KnowledgeBaseStatus;
+  source_registry: SourceRegistryStatus;
   paths: MemoryPaths;
 }
 
@@ -80,6 +170,7 @@ export interface QueryResultItem {
   excerpt: string;
   score: number;
   match_type: string;
+  source_type: string;
 }
 
 export interface QueryResponse {
@@ -88,7 +179,38 @@ export interface QueryResponse {
   total_matches: number;
 }
 
-export type MemoryTab = "overview" | "knowledge" | "implicit" | "config";
+export type MemoryTab = "overview" | "knowledge" | "implicit" | "long_term" | "sources" | "dossier" | "config";
+
+export interface DossierDto {
+  slug: string;
+  title: string;
+  brief: string;
+  currentBeliefs: string[];
+  decisions: string[];
+  openQuestions: string[];
+  nextSteps: string[];
+  updatedAt: string;
+  rendered: string;
+}
+
+export interface LongTermEntryDto {
+  path: string;
+  topic: string;
+  summary: string;
+  kind: string;
+  confidence: number;
+  stability: number;
+  importance: number;
+  reuse_probability: number;
+  retention_class: string;
+  status: string;
+  created_at: string;
+  last_reused_at: string | null;
+  expires_at: string | null;
+  source_sessions: string[];
+  entities: string[];
+  global: boolean;
+}
 
 export interface ImportToWikiResult {
   success: boolean;
@@ -327,6 +449,102 @@ export function useUnifiedMemory(projectPath: string) {
     loadSupportedExtensions();
   }, [loadSupportedExtensions]);
 
+  // ── Dossier (project brief) ──────────────────────────────────────────────
+  const [dossier, setDossier] = useState<DossierDto | null>(null);
+  const [dossierLoading, setDossierLoading] = useState(false);
+
+  const loadDossier = useCallback(async () => {
+    setDossierLoading(true);
+    try {
+      const d = await invoke<DossierDto>("memory_get_dossier", { projectPath });
+      setDossier(d);
+    } catch (e) {
+      console.error("[useUnifiedMemory] loadDossier:", e);
+    } finally {
+      setDossierLoading(false);
+    }
+  }, [projectPath]);
+
+  const saveDossier = useCallback(async (updated: Omit<DossierDto, "updatedAt" | "rendered">): Promise<void> => {
+    await invoke("memory_save_dossier", {
+      req: {
+        projectPath,
+        slug: updated.slug,
+        title: updated.title,
+        brief: updated.brief,
+        currentBeliefs: updated.currentBeliefs,
+        decisions: updated.decisions,
+        openQuestions: updated.openQuestions,
+        nextSteps: updated.nextSteps,
+      },
+    });
+    await loadDossier();
+  }, [projectPath, loadDossier]);
+
+  // ── Source registry CRUD ─────────────────────────────────────────────────
+  const [sourceEntries, setSourceEntries] = useState<SourceEntryDto[]>([]);
+  const [sourcesLoading, setSourcesLoading] = useState(false);
+
+  const loadSourceEntries = useCallback(async () => {
+    setSourcesLoading(true);
+    try {
+      const entries = await invoke<RawSourceEntryDto[]>("memory_list_sources", { projectPath });
+      setSourceEntries(entries.map(normalizeSourceEntry));
+    } catch (e) {
+      console.error("[useUnifiedMemory] loadSourceEntries:", e);
+    } finally {
+      setSourcesLoading(false);
+    }
+  }, [projectPath]);
+
+  const deleteSourceEntry = useCallback(async (entryPath: string) => {
+    await invoke("memory_delete_source", { projectPath, entryPath });
+    setSourceEntries(prev => prev.filter(e => e.path !== entryPath));
+  }, [projectPath]);
+
+  // ── Long-term memory CRUD ────────────────────────────────────────────────
+  const [longTermEntries, setLongTermEntries] = useState<LongTermEntryDto[]>([]);
+  const [longTermLoading, setLongTermLoading] = useState(false);
+  const [longTermScope, setLongTermScope] = useState<"all" | "project" | "global">("all");
+
+  const loadLongTermEntries = useCallback(async (scope?: "all" | "project" | "global") => {
+    setLongTermLoading(true);
+    try {
+      const entries = await invoke<LongTermEntryDto[]>("memory_list_long_term", {
+        projectPath,
+        scope: scope ?? longTermScope,
+      });
+      setLongTermEntries(entries);
+    } catch (e) {
+      console.error("[useUnifiedMemory] loadLongTermEntries:", e);
+    } finally {
+      setLongTermLoading(false);
+    }
+  }, [projectPath, longTermScope]);
+
+  const archiveLongTermEntry = useCallback(async (entryPath: string) => {
+    await invoke("memory_archive_long_term_entry", { projectPath, entryPath });
+    setLongTermEntries(prev =>
+      prev.map(e => e.path === entryPath ? { ...e, status: "Archived" } : e)
+    );
+  }, [projectPath]);
+
+  const deleteLongTermEntry = useCallback(async (entryPath: string) => {
+    await invoke("memory_delete_long_term_entry", { projectPath, entryPath });
+    setLongTermEntries(prev => prev.filter(e => e.path !== entryPath));
+  }, [projectPath]);
+
+  const pruneStale = useCallback(async (): Promise<number> => {
+    try {
+      const removed = await invoke<number>("memory_prune_stale", { projectPath });
+      await loadLongTermEntries();
+      await loadSourceEntries();
+      return removed;
+    } catch {
+      return 0;
+    }
+  }, [projectPath, loadLongTermEntries, loadSourceEntries]);
+
   return {
     // State
     status,
@@ -342,7 +560,15 @@ export function useUnifiedMemory(projectPath: string) {
     importing,
     importResult,
     supportedExtensions,
-    
+    dossier,
+    dossierLoading,
+    sourceEntries,
+    sourcesLoading,
+    longTermEntries,
+    longTermLoading,
+    longTermScope,
+    setLongTermScope,
+
     // Actions
     refresh,
     updateConfig,
@@ -354,5 +580,13 @@ export function useUnifiedMemory(projectPath: string) {
     isValidPath,
     importToWiki,
     loadSupportedExtensions,
+    loadDossier,
+    saveDossier,
+    loadSourceEntries,
+    deleteSourceEntry,
+    loadLongTermEntries,
+    archiveLongTermEntry,
+    deleteLongTermEntry,
+    pruneStale,
   };
 }

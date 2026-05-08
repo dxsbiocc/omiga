@@ -241,19 +241,21 @@ mod tests {
 
     #[test]
     fn test_llm_config_file_exec_envs_methods() {
-        let mut exec_envs = ExecutionEnvsConfig::default();
-        exec_envs.modal = Some(ModalExecConfig {
-            token_id: Some("modal-id".to_string()),
-            token_secret: Some("modal-secret".to_string()),
-            default_image: None,
-            enabled: true,
-        });
-        exec_envs.daytona = Some(DaytonaExecConfig {
-            server_url: Some("https://daytona.io".to_string()),
-            api_key: Some("daytona-key".to_string()),
-            default_image: None,
-            enabled: true,
-        });
+        let exec_envs = ExecutionEnvsConfig {
+            modal: Some(ModalExecConfig {
+                token_id: Some("modal-id".to_string()),
+                token_secret: Some("modal-secret".to_string()),
+                default_image: None,
+                enabled: true,
+            }),
+            daytona: Some(DaytonaExecConfig {
+                server_url: Some("https://daytona.io".to_string()),
+                api_key: Some("daytona-key".to_string()),
+                default_image: None,
+                enabled: true,
+            }),
+            ..Default::default()
+        };
 
         let config = LlmConfigFile {
             execution_envs: Some(exec_envs),

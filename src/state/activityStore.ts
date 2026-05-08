@@ -29,6 +29,20 @@ export interface ToolResultStepDetail {
   failed?: boolean;
 }
 
+export interface OperationStepDetail {
+  summary?: string;
+  output?: string;
+  failed?: boolean;
+}
+
+/** A single todo item mirroring the `todo_write` tool schema. */
+export interface ActiveTodoItem {
+  id: string;
+  content: string;
+  activeForm: string;
+  status: string; // "pending" | "in_progress" | "completed"
+}
+
 /** Right-panel + header hints: connection/streaming and background shell jobs. */
 export interface BackgroundJob {
   id: string;
@@ -68,7 +82,7 @@ interface ActivityState {
     patch: Partial<Pick<BackgroundJob, "state" | "exitCode" | "label">>,
   ) => void;
 
-  beginExecutionRun: () => void;
+  beginExecutionRun: (connectTitle?: string) => void;
   onStreamStart: () => void;
   /** First non-empty text in this stream turn. */
   onFirstTextChunk: () => void;
@@ -81,6 +95,25 @@ interface ActivityState {
     toolUseId: string,
     detail?: ToolResultStepDetail,
   ) => void;
+  onOperationStart: (
+    operationId: string,
+    title: string,
+    detail?: OperationStepDetail,
+  ) => void;
+  onOperationDone: (
+    operationId: string,
+    title: string,
+    detail?: OperationStepDetail,
+  ) => void;
+
+  /**
+   * Live todos pushed by every `todo_write` tool result during streaming.
+   * Null means no call has happened yet this turn; TaskStatus falls back to
+   * scanning storeMessages (post-stream).
+   */
+  activeTodos: ActiveTodoItem[] | null;
+  setActiveTodos: (todos: ActiveTodoItem[]) => void;
+  clearActiveTodos: () => void;
 
   clearTransient: () => void;
   /** Clear execution trace (e.g. session switch or failed send before stream). */
@@ -88,6 +121,7 @@ interface ActivityState {
   /** Mark run finished: freeze timer and mark any running steps done. */
   finalizeExecutionRun: () => void;
   clearBackgroundJobs: () => void;
+  clearAllActivity: () => void;
 }
 
 export const useActivityStore = create<ActivityState>((set) => ({
@@ -99,6 +133,7 @@ export const useActivityStore = create<ActivityState>((set) => ({
   executionSteps: [],
   executionStartedAt: null,
   executionEndedAt: null,
+  activeTodos: null,
 
   setConnecting: (v) => set({ isConnecting: v }),
 
@@ -138,10 +173,10 @@ export const useActivityStore = create<ActivityState>((set) => ({
       return { backgroundJobs: nextJobs };
     }),
 
-  beginExecutionRun: () =>
+  beginExecutionRun: (connectTitle = "等待响应") =>
     set({
       executionSteps: [
-        { id: "connect", title: "等待响应", status: "running" },
+        { id: "connect", title: connectTitle, status: "running" },
       ],
       executionStartedAt: Date.now(),
       executionEndedAt: null,
@@ -199,9 +234,8 @@ export const useActivityStore = create<ActivityState>((set) => ({
         if (st.id === "think" || st.id === "reply" || st.id.startsWith("reply-")) {
           return { ...st, status: "done" as const };
         }
-        if (st.id.startsWith("tool-") && st.id !== tid) {
-          return { ...st, status: "done" as const };
-        }
+        // Don't mark other tool steps as done here — parallel tools may still be running.
+        // onToolResultDone is responsible for marking each tool step done when its result arrives.
         return st;
       });
       const exists = next.some((x) => x.id === tid);
@@ -232,18 +266,76 @@ export const useActivityStore = create<ActivityState>((set) => ({
     }),
 
   onToolResultDone: (toolUseId, detail) =>
-    set((s) => ({
-      executionSteps: markStepDone(s.executionSteps, `tool-${toolUseId}`).map(
+    set((s) => {
+      const targetStepId = `tool-${toolUseId}`;
+      const executionSteps = markStepDone(s.executionSteps, targetStepId).map(
         (st) => {
-          if (st.id !== `tool-${toolUseId}`) return st;
+          if (st.id !== targetStepId) return st;
           return {
             ...st,
             ...(detail?.output !== undefined ? { toolOutput: detail.output } : {}),
             ...(detail?.failed !== undefined ? { failed: detail.failed } : {}),
           };
         },
-      ),
-    })),
+      );
+      const hasRunningTool = executionSteps.some(
+        (step) => step.id.startsWith("tool-") && step.status === "running",
+      );
+      return {
+        executionSteps,
+        ...(hasRunningTool ? {} : { currentToolHint: null }),
+      };
+    }),
+
+  onOperationStart: (operationId, title, detail) =>
+    set((s) => {
+      const oid = `op-${operationId}`;
+      const exists = s.executionSteps.some((step) => step.id === oid);
+      const nextStep: ExecutionStep = {
+        id: oid,
+        title,
+        status: "running",
+        ...(detail?.summary !== undefined ? { summary: detail.summary } : {}),
+        ...(detail?.output !== undefined ? { toolOutput: detail.output } : {}),
+      };
+      return {
+        executionSteps: exists
+          ? s.executionSteps.map((step) => (step.id === oid ? nextStep : step))
+          : [...s.executionSteps, nextStep],
+      };
+    }),
+
+  onOperationDone: (operationId, title, detail) =>
+    set((s) => {
+      const oid = `op-${operationId}`;
+      const exists = s.executionSteps.some((step) => step.id === oid);
+      const next = exists
+        ? markStepDone(s.executionSteps, oid).map((step) =>
+            step.id !== oid
+              ? step
+              : {
+                  ...step,
+                  ...(detail?.summary !== undefined ? { summary: detail.summary } : {}),
+                  ...(detail?.output !== undefined ? { toolOutput: detail.output } : {}),
+                  ...(detail?.failed !== undefined ? { failed: detail.failed } : {}),
+                },
+          )
+        : [
+            ...s.executionSteps,
+            {
+              id: oid,
+              title,
+              status: "done",
+              ...(detail?.summary !== undefined ? { summary: detail.summary } : {}),
+              ...(detail?.output !== undefined ? { toolOutput: detail.output } : {}),
+              ...(detail?.failed !== undefined ? { failed: detail.failed } : {}),
+            } satisfies ExecutionStep,
+          ];
+      return { executionSteps: next };
+    }),
+
+  setActiveTodos: (todos) => set({ activeTodos: todos }),
+  clearActiveTodos: () => set({ activeTodos: null }),
 
   clearTransient: () =>
     set({
@@ -258,6 +350,7 @@ export const useActivityStore = create<ActivityState>((set) => ({
       executionSteps: [],
       executionStartedAt: null,
       executionEndedAt: null,
+      activeTodos: null,
     }),
 
   finalizeExecutionRun: () =>
@@ -273,4 +366,17 @@ export const useActivityStore = create<ActivityState>((set) => ({
     }),
 
   clearBackgroundJobs: () => set({ backgroundJobs: [] }),
+
+  clearAllActivity: () =>
+    set({
+      isConnecting: false,
+      isStreaming: false,
+      waitingFirstChunk: false,
+      currentToolHint: null,
+      backgroundJobs: [],
+      executionSteps: [],
+      executionStartedAt: null,
+      executionEndedAt: null,
+      activeTodos: null,
+    }),
 }));

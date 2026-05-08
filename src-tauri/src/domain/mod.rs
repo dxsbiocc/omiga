@@ -1,20 +1,36 @@
 //! Domain layer - Core business logic
 
 pub mod agents;
+pub mod app_data_migration;
 pub mod auto_compact;
+pub mod autopilot_state;
 pub mod background_shell;
+pub mod blackboard;
 pub mod chat_session_title;
 pub mod chat_state;
+pub mod connectors;
+pub mod context_snapshot;
 pub mod integrations_catalog;
 pub mod integrations_config;
 pub mod mcp;
 pub mod memory;
+pub mod mode_resume;
+pub mod operators;
+pub mod orchestration;
 pub mod pageindex;
 pub mod permissions;
 pub mod persistence;
+pub mod plugins;
 pub mod post_turn_settings;
+pub mod ralph_state;
+pub mod research_system;
+pub mod retrieval;
+pub mod retrieval_registry;
+pub mod routing;
 pub mod runtime_constraints;
+pub mod search;
 pub mod session;
 pub mod skills;
 pub mod suggestions;
+pub mod team_state;
 pub mod tools;

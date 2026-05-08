@@ -214,13 +214,16 @@ impl BaseEnvironment for ModalEnvironment {
         let effective_cwd = options.cwd.unwrap_or_else(|| self.cwd.clone());
 
         // 准备命令
-        let (exec_command, _): (String, Option<String>) =
-            if options.stdin_data.is_some() && self.stdin_mode() == "heredoc" {
-                let cmd = self.embed_stdin_heredoc(command, options.stdin_data.as_ref().unwrap());
-                (cmd, None)
-            } else {
-                (command.to_string(), options.stdin_data)
-            };
+        let (exec_command, _): (String, Option<String>) = if let Some(stdin_data) = options
+            .stdin_data
+            .as_ref()
+            .filter(|_| self.stdin_mode() == "heredoc")
+        {
+            let cmd = self.embed_stdin_heredoc(command, stdin_data);
+            (cmd, None)
+        } else {
+            (command.to_string(), options.stdin_data)
+        };
 
         let wrapped = self.wrap_command(&exec_command, &effective_cwd);
 

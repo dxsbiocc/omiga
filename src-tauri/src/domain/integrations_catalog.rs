@@ -2,6 +2,7 @@
 
 use crate::domain::skills::SkillSource;
 use serde::Serialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -12,10 +13,28 @@ pub struct McpToolCatalogEntry {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpServerConfigCatalogEntry {
+    pub kind: String,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub headers: HashMap<String, String>,
+    pub url: Option<String>,
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpServerCatalogEntry {
     pub config_key: String,
     pub normalized_key: String,
     pub enabled: bool,
+    pub config: McpServerConfigCatalogEntry,
+    /// Whether Settings has actively probed `tools/list` for this server in this UI session.
+    pub tool_list_checked: bool,
+    /// True when an OAuth credential for this HTTP endpoint exists in the secure secret store.
+    /// The token value itself is never serialized to the UI or written to MCP JSON.
+    pub oauth_authenticated: bool,
     /// When tool discovery failed (timeout, handshake error, etc.); UI can show error state.
     pub list_tools_error: Option<String>,
     pub tools: Vec<McpToolCatalogEntry>,

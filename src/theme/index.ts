@@ -270,10 +270,22 @@ export const getTheme = (mode: "light" | "dark" = "dark"): ThemeOptions => {
       MuiTooltip: {
         styleOverrides: {
           tooltip: {
+            backgroundColor: isDark ? "#1e293b" : "#ffffff",
+            color: isDark ? "#f8fafc" : "#0f172a",
+            border: `1px solid ${isDark ? "rgba(148, 163, 184, 0.24)" : "rgba(15, 23, 42, 0.12)"}`,
             borderRadius: 6,
+            boxShadow: isDark
+              ? "0 10px 30px rgba(0, 0, 0, 0.42)"
+              : "0 10px 30px rgba(15, 23, 42, 0.14)",
             fontSize: "0.75rem",
             fontWeight: 500,
             padding: "6px 10px",
+          },
+          arrow: {
+            color: isDark ? "#1e293b" : "#ffffff",
+            "&::before": {
+              border: `1px solid ${isDark ? "rgba(148, 163, 184, 0.24)" : "rgba(15, 23, 42, 0.12)"}`,
+            },
           },
         },
       },

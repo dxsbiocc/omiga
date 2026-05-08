@@ -1,16 +1,10 @@
 //! Agent 系统单元测试
 
 use omiga_lib::domain::agents::builtins::{
-    explore::ExploreAgent,
-    general::{get_disallowed_tools, GeneralPurposeAgent},
-    get_agent_tool_set,
-    plan::PlanAgent,
-    resolve_agent_model,
-    verification::VerificationAgent,
+    executor::ExecutorAgent, explore::ExploreAgent, general::GeneralPurposeAgent,
+    get_agent_tool_set, plan::PlanAgent, resolve_agent_model, verification::VerificationAgent,
 };
-use omiga_lib::domain::agents::{
-    builtins, definition, router, AgentDefinition, AgentRouter, AgentSource,
-};
+use omiga_lib::domain::agents::{builtins, AgentDefinition, AgentRouter, AgentSource};
 
 #[test]
 fn test_agent_router_select_default() {
@@ -27,11 +21,13 @@ fn test_agent_router_select_default() {
 
 #[test]
 fn test_agent_router_select_explore() {
+    use omiga_lib::domain::agents::definition::ModelTier;
     let router = AgentRouter::new();
 
     let agent = router.select_agent(Some("Explore"));
     assert_eq!(agent.agent_type(), "Explore");
-    assert_eq!(agent.model(), Some("haiku"));
+    // Explore uses model_tier() = Spark (haiku); model() returns None by default.
+    assert_eq!(agent.model_tier(), ModelTier::Spark);
 }
 
 #[test]
@@ -68,9 +64,10 @@ fn test_explore_agent_disallowed_tools() {
     let disallowed = agent.disallowed_tools().unwrap();
 
     assert!(disallowed.contains(&"Agent".to_string()));
-    assert!(disallowed.contains(&"FileEdit".to_string()));
-    assert!(disallowed.contains(&"FileWrite".to_string()));
-    assert!(disallowed.contains(&"NotebookEdit".to_string()));
+    // Tool names match ToolSchema::new() identifiers (snake_case)
+    assert!(disallowed.contains(&"file_edit".to_string()));
+    assert!(disallowed.contains(&"file_write".to_string()));
+    assert!(disallowed.contains(&"notebook_edit".to_string()));
     assert!(disallowed.contains(&"ExitPlanMode".to_string()));
 }
 
@@ -86,7 +83,17 @@ fn test_plan_agent_disallowed_tools() {
     let disallowed = agent.disallowed_tools().unwrap();
 
     assert!(disallowed.contains(&"Agent".to_string()));
-    assert!(disallowed.contains(&"FileEdit".to_string()));
+    assert!(disallowed.contains(&"file_edit".to_string()));
+}
+
+#[test]
+fn test_executor_agent_keeps_nested_agent_disabled() {
+    let agent = ExecutorAgent;
+    let disallowed = agent.disallowed_tools().unwrap();
+
+    assert!(disallowed.contains(&"Agent".to_string()));
+    assert!(disallowed.contains(&"EnterPlanMode".to_string()));
+    assert!(disallowed.contains(&"ExitPlanMode".to_string()));
 }
 
 #[test]
@@ -97,9 +104,8 @@ fn test_general_purpose_agent_allows_most_tools() {
     assert!(agent.allowed_tools().is_none());
     assert!(agent.disallowed_tools().is_none()); // trait 方法返回 None
 
-    // 但应该禁止 Agent 工具（防止递归）- 通过单独的函数
-    let disallowed = get_disallowed_tools();
-    assert!(disallowed.contains(&"Agent".to_string()));
+    // Agent 工具在运行时通过子 Agent 过滤器阻止递归（不通过 disallowed_tools 返回）
+    assert!(agent.disallowed_tools().is_none());
 }
 
 #[test]

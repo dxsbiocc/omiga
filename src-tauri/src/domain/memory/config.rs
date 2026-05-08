@@ -152,6 +152,14 @@ pub fn permanent_wiki_path() -> PathBuf {
         .join("wiki")
 }
 
+/// Global permanent long-term memory: `~/.omiga/memory/permanent/long_term`
+pub fn permanent_long_term_path() -> PathBuf {
+    user_omiga_root()
+        .join("memory")
+        .join("permanent")
+        .join("long_term")
+}
+
 impl MemoryConfig {
     /// Config file always lives in the **project** at `.omiga/memory/config.json`
     /// (regardless of [`MemoryMode`]).
@@ -190,11 +198,14 @@ impl MemoryConfig {
         self.effective_root(&project_root).join(&self.implicit_dir)
     }
 
+    /// Get long-term memory directory path
+    pub fn long_term_path(&self, project_root: impl AsRef<Path>) -> PathBuf {
+        self.effective_root(&project_root).join("long_term")
+    }
+
     /// Get raw file storage path (absolute). Falls back to `~/.omiga/memory/raw`.
     pub fn raw_path(&self) -> PathBuf {
-        self.raw_dir
-            .clone()
-            .unwrap_or_else(default_raw_path)
+        self.raw_dir.clone().unwrap_or_else(default_raw_path)
     }
 
     /// Legacy helper — use [`project_config_path`] instead.
@@ -222,16 +233,15 @@ impl MemoryConfig {
             ));
         }
 
-        if self.memory_mode == MemoryMode::ProjectRelative {
-            if self.root_dir.as_os_str() == "/"
+        if self.memory_mode == MemoryMode::ProjectRelative
+            && (self.root_dir.as_os_str() == "/"
                 || self.root_dir.as_os_str() == "\\"
                 || root_str == "~"
-                || root_str == "$HOME"
-            {
-                return Err(AppError::Unknown(
-                    "Memory root directory cannot be a system root directory".to_string(),
-                ));
-            }
+                || root_str == "$HOME")
+        {
+            return Err(AppError::Unknown(
+                "Memory root directory cannot be a system root directory".to_string(),
+            ));
         }
 
         Ok(())

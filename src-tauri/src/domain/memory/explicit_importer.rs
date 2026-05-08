@@ -189,10 +189,7 @@ impl ExplicitImporter {
     /// Copy the original file into `raw_dir/<slug>.<ext>` and return the destination path string.
     /// Logs a warning but does not fail the import if the copy cannot be completed.
     async fn copy_raw_file(&self, src: &Path, slug: &str) -> Option<String> {
-        let ext = src
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("bin");
+        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("bin");
         let dest_name = format!("{}.{}", slug, ext);
         let dest = self.raw_dir.join(&dest_name);
 
@@ -305,8 +302,30 @@ impl ExplicitImporter {
             Err(_e) => {
                 // If parsing fails, create simple page with raw content
                 let wiki_content = format!(
-                    "# {}\n\n{}\n\n---\n\n*Imported from text*\n",
-                    title, content
+                    "---\n\
+                     title: {}\n\
+                     knowledge_layer: knowledge_base\n\
+                     template: evidence_interpretation_open_questions\n\
+                     doc_id: {}\n\
+                     source_path: \"text import\"\n\
+                     imported_at: {}\n\
+                     ---\n\n\
+                     # {}\n\n\
+                     > **Source**: `text import`\n\n\
+                     ## Evidence\n\n\
+                     ### Research Question\n\n- Pending structured extraction from source evidence.\n\n\
+                     ### Method Contribution\n\n- Pending structured extraction from source evidence.\n\n\
+                     ### Experimental Setup\n\n- Pending structured extraction from source evidence.\n\n\
+                     ### Main Conclusions\n\n- Pending structured extraction from source evidence.\n\n\
+                     ### Reusable Takeaways\n\n- Pending structured extraction from source evidence.\n\n\
+                     ### Source Notes\n\n{}\n\n\
+                     ## Interpretation\n\n- Add your synthesis here.\n\n\
+                     ## Open Questions\n\n- Track unresolved questions here.\n",
+                    escape_frontmatter_string(title),
+                    slug,
+                    chrono::Utc::now().to_rfc3339(),
+                    title,
+                    content
                 );
 
                 let wiki_path = self.wiki_dir.join(format!("{}.md", slug));
@@ -348,6 +367,33 @@ impl ExplicitImporter {
         parse_result: &crate::domain::pageindex::ParseResult,
     ) -> String {
         let mut content = String::new();
+        let imported_at = chrono::Utc::now().to_rfc3339();
+        let doc_id = slugify(title);
+
+        content.push_str("---\n");
+        content.push_str(&format!("title: {}\n", escape_frontmatter_string(title)));
+        content.push_str("knowledge_layer: knowledge_base\n");
+        content.push_str("template: evidence_interpretation_open_questions\n");
+        content.push_str(&format!("doc_id: {}\n", doc_id));
+        content.push_str(&format!(
+            "source_path: {}\n",
+            escape_frontmatter_string(source_path)
+        ));
+        if let Some(raw) = raw_path {
+            content.push_str(&format!("raw_path: {}\n", escape_frontmatter_string(raw)));
+        }
+        content.push_str(&format!("imported_at: {}\n", imported_at));
+        if !self.options.tags.is_empty() {
+            let tags = self
+                .options
+                .tags
+                .iter()
+                .map(|tag| format!("\"{}\"", tag.replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            content.push_str(&format!("tags: [{}]\n", tags));
+        }
+        content.push_str("---\n\n");
 
         // Header
         content.push_str(&format!("# {}\n\n", title));
@@ -365,10 +411,21 @@ impl ExplicitImporter {
             content.push_str(&format!("> **Tags**: {}\n\n", self.options.tags.join(", ")));
         }
 
-        // Main content
+        content.push_str("## Evidence\n\n");
+        content.push_str("### Research Question\n\n");
+        content.push_str("- Pending structured extraction from source evidence.\n\n");
+        content.push_str("### Method Contribution\n\n");
+        content.push_str("- Pending structured extraction from source evidence.\n\n");
+        content.push_str("### Experimental Setup\n\n");
+        content.push_str("- Pending structured extraction from source evidence.\n\n");
+        content.push_str("### Main Conclusions\n\n");
+        content.push_str("- Pending structured extraction from source evidence.\n\n");
+        content.push_str("### Reusable Takeaways\n\n");
+        content.push_str("- Pending structured extraction from source evidence.\n\n");
+
+        content.push_str("### Source Notes\n\n");
         if !parse_result.sections.is_empty() {
-            // Generate table of contents
-            content.push_str("## Contents\n\n");
+            content.push_str("#### Table of Contents\n\n");
             for (i, section) in parse_result.sections.iter().enumerate() {
                 content.push_str(&format!(
                     "{}. [{}](#{})\n",
@@ -377,14 +434,11 @@ impl ExplicitImporter {
                     slugify(&section.title)
                 ));
             }
-            content.push_str("\n---\n\n");
-
-            // Generate sections
+            content.push('\n');
             for section in &parse_result.sections {
-                content.push_str(&self.format_section(section, 2));
+                content.push_str(&self.format_section(section, 4));
             }
         } else {
-            // No sections, just add content
             let body = if self.options.max_section_length > 0
                 && parse_result.content.len() > self.options.max_section_length
             {
@@ -396,7 +450,17 @@ impl ExplicitImporter {
                 parse_result.content.clone()
             };
             content.push_str(&body);
+            content.push_str("\n\n");
         }
+
+        content.push_str("## Interpretation\n\n");
+        content.push_str(
+            "- Add your synthesis here. Distinguish interpretation from direct evidence.\n\n",
+        );
+        content.push_str("## Open Questions\n\n");
+        content.push_str(
+            "- Track unresolved questions, missing evidence, and follow-up experiments.\n\n",
+        );
 
         // Footer
         content.push_str("\n\n---\n\n");
@@ -538,6 +602,10 @@ fn slugify(s: &str) -> String {
         .replace("--", "-")
         .trim_matches('-')
         .to_string()
+}
+
+fn escape_frontmatter_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\\\""))
 }
 
 /// Check if file extension is supported for explicit memory import

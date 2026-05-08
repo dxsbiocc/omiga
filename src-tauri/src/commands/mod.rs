@@ -5,21 +5,30 @@
 //! - Delegates to domain layer
 //! - Returns structured errors for frontend handling
 
+pub mod blackboard;
 pub mod chat;
+pub mod citation;
 pub mod claude_import;
+pub mod connectors;
+pub mod context_snapshot;
 pub mod execution_envs;
+pub mod extensions;
 pub mod fs;
 pub mod git_workspace;
 pub mod integrations_settings;
 pub mod local_envs;
 pub mod memory;
 pub mod notebook;
+pub mod operators;
 pub mod permissions;
+pub mod plugins;
+pub mod ralph;
 pub mod sandbox_fs;
 pub mod search;
 pub mod session;
 pub mod shell;
 pub mod ssh_fs;
+pub mod terminal;
 pub mod tools;
 
 use crate::errors::AppError;
@@ -80,16 +89,16 @@ pub async fn test_notification(app: tauri::AppHandle) -> Result<String, String> 
         }
     };
 
-    if has_permission {
-        if let Ok(_) = app
+    if has_permission
+        && app
             .notification()
             .builder()
             .title("测试通知 (Backend)")
             .body("这是一条来自后端的测试通知")
             .show()
-        {
-            return Ok("Native notification sent".to_string());
-        }
+            .is_ok()
+    {
+        return Ok("Native notification sent".to_string());
     }
 
     #[cfg(target_os = "macos")]
@@ -121,21 +130,21 @@ pub async fn send_notification(
         Ok(tauri_plugin_notification::PermissionState::Granted)
     );
 
-    if has_permission {
-        if let Ok(_) = app
+    if has_permission
+        && app
             .notification()
             .builder()
             .title(&title)
             .body(&body)
             .show()
-        {
-            return Ok("native".to_string());
-        }
+            .is_ok()
+    {
+        return Ok("native".to_string());
     }
 
     #[cfg(target_os = "macos")]
     {
-        if let Ok(_) = send_notification_via_osascript(&title, &body) {
+        if send_notification_via_osascript(&title, &body).is_ok() {
             return Ok("osascript".to_string());
         }
     }

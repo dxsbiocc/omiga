@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Omiga",
   "version": "0.2.0",
-  "identifier": "com.omiga.app",
+  "identifier": "com.omiga.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -27,7 +27,7 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost blob: data: file:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://localhost:* ws://localhost:* https://*; worker-src 'self' blob:; frame-src 'self' blob: data: https: http:; media-src 'self' blob: data: file:; object-src 'none'; base-uri 'self'",
       "dangerousDisableAssetCspModification": false,
       "capabilities": [
         {
@@ -66,6 +66,9 @@
     "category": "DeveloperTool",
     "shortDescription": "AI coding assistant",
     "longDescription": "An IDE-like AI coding assistant with file operations, search, and session persistence",
+    "resources": [
+      "bundled_plugins"
+    ],
     "macOS": {
       "frameworks": [],
       "minimumSystemVersion": "11.0",

@@ -52,7 +52,6 @@ impl<'a> ShellFileOps<'a> {
             .run(&format!("wc -l < {q} 2>/dev/null || echo 0"))
             .await?;
         let total_lines: usize = total_res
-            .trim()
             .split_whitespace()
             .next()
             .unwrap_or("0")

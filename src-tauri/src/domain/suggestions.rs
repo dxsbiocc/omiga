@@ -5,9 +5,9 @@ use crate::errors::ApiError;
 use crate::infrastructure::streaming::FollowUpSuggestion;
 use crate::llm::{LlmClient, LlmMessage, LlmStreamChunk};
 use futures::StreamExt;
-use regex::Regex;
 
 const MAX_REPLY_CHARS: usize = 12_000;
+const FOLLOW_UP_TIMEOUT_SECS: u64 = 15;
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     let mut out = String::new();
@@ -47,20 +47,6 @@ fn extract_json_array_slice(raw: &str) -> Option<&str> {
     (end > start).then_some(&t[start..=end])
 }
 
-/// 正文中已有 `##/### 下一步建议` + 编号列表时，由前端解析为按钮，跳过第二次 follow-up 模型调用。
-fn assistant_has_embedded_next_steps_section(s: &str) -> bool {
-    let Ok(heading) = Regex::new(r"(?m)^#{2,3}\s*下一步建议") else {
-        return false;
-    };
-    if !heading.is_match(s) {
-        return false;
-    }
-    let Ok(num) = Regex::new(r"(?m)^\s*\d+[.、]\s+\S") else {
-        return false;
-    };
-    num.is_match(s)
-}
-
 fn clamp_label(s: &str) -> String {
     let t = s.trim();
     if t.is_empty() {
@@ -72,6 +58,135 @@ fn clamp_label(s: &str) -> String {
     } else {
         format!("{}…", t.chars().take(13).collect::<String>())
     }
+}
+
+fn normalize_inline_markdown(raw: &str) -> String {
+    raw.replace("**", "")
+        .replace('`', "")
+        .replace(['[', ']'], "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|ch: char| {
+            ch.is_ascii_punctuation() || matches!(ch, '。' | '，' | '、' | '：' | ':' | '-')
+        })
+        .trim()
+        .to_string()
+}
+
+fn first_context_label(raw: &str) -> Option<String> {
+    let candidates = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            !line.starts_with('|')
+                && !line.starts_with("```")
+                && !line.starts_with("---")
+                && !line.starts_with("http://")
+                && !line.starts_with("https://")
+        })
+        .filter_map(|line| {
+            let without_heading = line
+                .trim_start_matches('#')
+                .trim_start_matches(|ch: char| {
+                    ch.is_ascii_digit() || matches!(ch, '.' | '、' | ')' | '）' | '-' | '*' | '•')
+                })
+                .trim();
+            let cleaned = normalize_inline_markdown(without_heading);
+            (cleaned.chars().count() >= 4).then_some(cleaned)
+        })
+        .collect::<Vec<_>>();
+
+    candidates.into_iter().find_map(|candidate| {
+        let chars = candidate.chars().take(24).collect::<String>();
+        (!chars.is_empty()).then_some(chars)
+    })
+}
+
+fn looks_like_code_or_config(raw: &str) -> bool {
+    let total = raw.chars().count().max(1);
+    let fenced = raw.matches("```").count() >= 2;
+    let code_markers = [
+        "function ",
+        "const ",
+        "let ",
+        "use ",
+        "SELECT ",
+        "{",
+        "}",
+        "</",
+    ]
+    .iter()
+    .filter(|marker| raw.contains(**marker))
+    .count();
+    fenced && code_markers >= 3 && raw.lines().count() > 8 && total < 2_000
+}
+
+fn rich_reply_has_follow_up_value(raw: &str) -> bool {
+    let chars = raw.chars().count();
+    if chars < 120 || looks_like_code_or_config(raw) {
+        return false;
+    }
+    let cues = [
+        "研究",
+        "文献",
+        "机制",
+        "实验",
+        "数据",
+        "分析",
+        "应用",
+        "展望",
+        "局限",
+        "验证",
+        "方法",
+        "PMID",
+        "DOI",
+        "参考文献",
+        "下一步",
+        "需要我",
+    ];
+    let cue_count = cues.iter().filter(|cue| raw.contains(**cue)).count();
+    let structured =
+        raw.contains('\n') && (raw.contains("##") || raw.contains('|') || raw.contains("1."));
+    cue_count >= 2 || (structured && cue_count >= 1)
+}
+
+pub fn fallback_follow_up_suggestions(raw: &str) -> Vec<FollowUpSuggestion> {
+    if !rich_reply_has_follow_up_value(raw) {
+        return Vec::new();
+    }
+    let context = first_context_label(raw).unwrap_or_else(|| "上文分析".to_string());
+    let mut items = vec![
+        FollowUpSuggestion {
+            label: "深入检索".to_string(),
+            prompt: format!(
+                "请围绕「{context}」中最关键的一条机制或方向做更深入的检索分析，并补充可追溯文献或数据来源。"
+            ),
+        },
+        FollowUpSuggestion {
+            label: "整理表格".to_string(),
+            prompt: format!(
+                "请把「{context}」的核心结论整理成对比表，突出研究对象、方法、证据强度和局限。"
+            ),
+        },
+    ];
+    if raw.contains("实验") || raw.contains("验证") || raw.contains("技术方案") {
+        items.push(FollowUpSuggestion {
+            label: "设计验证".to_string(),
+            prompt: format!(
+                "请基于「{context}」设计一个可执行的验证方案，列出样本、指标、对照、步骤和预期结果。"
+            ),
+        });
+    } else {
+        items.push(FollowUpSuggestion {
+            label: "展开局限".to_string(),
+            prompt: format!(
+                "请继续分析「{context}」目前结论的主要局限、不确定性，以及下一步最值得补充的信息。"
+            ),
+        });
+    }
+    items
 }
 
 pub fn parse_follow_up_suggestions_json(raw: &str) -> Vec<FollowUpSuggestion> {
@@ -127,9 +242,6 @@ pub async fn generate_follow_up_suggestions(
     if trimmed.chars().count() < 12 {
         return Ok(vec![]);
     }
-    if assistant_has_embedded_next_steps_section(trimmed) {
-        return Ok(vec![]);
-    }
     let body = truncate_chars(trimmed, MAX_REPLY_CHARS);
     let system = r#"你是对话助手。本请求与生成主回复无关，是回合结束后的第二次独立模型调用。用户会贴出「助手对用户的最终回复」。
 
@@ -150,28 +262,128 @@ pub async fn generate_follow_up_suggestions(
 
     let user = format!("助手回复如下：\n\n{}", body);
     let messages = vec![LlmMessage::system(system), LlmMessage::user(user)];
-    let raw = collect_llm_text_only(client, messages).await?;
-    Ok(parse_follow_up_suggestions_json(&raw))
+    let raw = tokio::time::timeout(
+        std::time::Duration::from_secs(FOLLOW_UP_TIMEOUT_SECS),
+        collect_llm_text_only(client, messages),
+    )
+    .await
+    .map_err(|_| ApiError::Timeout)??;
+    let parsed = parse_follow_up_suggestions_json(&raw);
+    if parsed.is_empty() {
+        Ok(fallback_follow_up_suggestions(&body))
+    } else {
+        Ok(parsed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::{LlmConfig, LlmProvider};
+    use async_trait::async_trait;
+    use futures::{stream, Stream};
+    use std::pin::Pin;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     #[test]
-    fn skip_llm_when_markdown_next_steps_embedded() {
-        let s = r#"## 结论
+    fn parses_json_array_from_model_output() {
+        let raw = r#"```json
+        [{"label":"展开实现细节","prompt":"请展开说明上文方案的实现细节。"}]
+        ```"#;
+        let suggestions = parse_follow_up_suggestions_json(raw);
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].label, "展开实现细节");
+        assert_eq!(suggestions[0].prompt, "请展开说明上文方案的实现细节。");
+    }
+
+    struct StaticClient {
+        config: LlmConfig,
+        raw: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmClient for StaticClient {
+        async fn send_message_streaming(
+            &self,
+            _messages: Vec<LlmMessage>,
+            _tools: Vec<crate::domain::tools::ToolSchema>,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmStreamChunk, ApiError>> + Send>>, ApiError>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(stream::iter(vec![
+                Ok(LlmStreamChunk::Text(self.raw.clone())),
+                Ok(LlmStreamChunk::Stop { stop_reason: None }),
+            ])))
+        }
+
+        async fn health_check(&self) -> Result<bool, ApiError> {
+            Ok(true)
+        }
+
+        fn config(&self) -> &LlmConfig {
+            &self.config
+        }
+    }
+
+    #[tokio::test]
+    async fn embedded_markdown_next_steps_do_not_bypass_independent_llm() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let client = StaticClient {
+            config: LlmConfig::new(LlmProvider::OpenAi, "test-key"),
+            raw: r#"[{"label":"检查回归","prompt":"请基于上文继续检查相关回归风险。"}]"#
+                .to_string(),
+            calls: Arc::clone(&calls),
+        };
+        let reply = r#"已经完成修复。
 
 ### 下一步建议（条件出现）
 
-1. 细化托斯卡纳行程
-2. 对比两种方案"#;
-        assert!(assistant_has_embedded_next_steps_section(s));
+1. 本地 Markdown 建议"#;
+
+        let suggestions = generate_follow_up_suggestions(&client, reply, true)
+            .await
+            .expect("suggestions");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].label, "检查回归");
+    }
+
+    #[tokio::test]
+    async fn empty_model_output_returns_contextual_fallback_for_research_reply() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let client = StaticClient {
+            config: LlmConfig::new(LlmProvider::OpenAi, "test-key"),
+            raw: "[]".to_string(),
+            calls: Arc::clone(&calls),
+        };
+        let reply = r#"## QS群体感应研究分析
+
+本轮完成了针对 QS 群体感应的文献梳理，整理了关键机制、疾病关联、参考文献和后续研究方向。
+
+八、💡 总结与展望
+1. 研究持续升温 — 近20年 QS 论文量保持增长。
+2. 应用转化加速 — QSIs 已进入临床前/临床试验。
+
+需要我对其中某一信号通路、特定应用场景或实验技术方案做更深入的检索分析吗？"#;
+
+        let suggestions = generate_follow_up_suggestions(&client, reply, true)
+            .await
+            .expect("suggestions");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(suggestions.len(), 3);
+        assert_eq!(suggestions[0].label, "深入检索");
+        assert!(suggestions[0].prompt.contains("QS群体感应研究分析"));
     }
 
     #[test]
-    fn no_skip_without_numbered_list() {
-        let s = "### 下一步建议\n\n无编号";
-        assert!(!assistant_has_embedded_next_steps_section(s));
+    fn fallback_does_not_create_generic_chips_for_short_final_answers() {
+        let suggestions = fallback_follow_up_suggestions("答案是 42。");
+        assert!(suggestions.is_empty());
     }
 }

@@ -1,10 +1,14 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { notifyProviderChanged } from "../utils/providerEvents";
+import { invokeIfTauri } from "../utils/tauriRuntime";
 import {
   useChatComposerStore,
+  DEFAULT_SESSION_CONFIG,
+  normalizeSessionConfig,
   type SessionConfigResponse,
 } from "./chatComposerStore";
+import { useActivityStore } from "./activityStore";
 
 const dbg = (...args: unknown[]) =>
   console.debug("[OmigaDebug][sessionStore]", ...args);
@@ -148,16 +152,27 @@ export type RoundStatus = "running" | "partial" | "cancelled" | "completed";
 
 export interface SchedulerPlan {
   planId: string;
+  entryAgentType?: string;
+  executionSupervisorAgentType?: string;
   subtasks: Array<{
     id: string;
     description: string;
     agentType: string;
+    supervisorAgentType?: string;
+    stage?: string;
     dependencies: string[];
     critical: boolean;
     estimatedSecs: number;
   }>;
   selectedAgents: string[];
   estimatedDurationSecs: number;
+  reviewerAgents?: string[];
+}
+
+export interface InitialTodoItem {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed";
 }
 
 export interface Message {
@@ -168,12 +183,20 @@ export interface Message {
   composerAgentType?: string;
   /** @ 选择的相对路径，仅本地会话快照 */
   composerAttachedPaths?: string[];
+  /** @ 选择的 Omiga 插件 ID，仅本地会话快照 */
+  composerSelectedPluginIds?: string[];
   /** 调度系统生成的任务执行计划 */
   schedulerPlan?: SchedulerPlan;
+  /** Plan mode 初始 todos（用于任务区计划步骤展示，仅本地会话快照） */
+  initialTodos?: InitialTodoItem[];
   /** Full tool_calls from DB on assistant rows — used to rebuild trace when tool rows are missing or unnamed */
   toolCallsList?: Array<{ id: string; name: string; arguments: string }>;
   /** Assistant thinking merged into the ReAct fold (optional round-trip for local snapshot) */
   prefaceBeforeTools?: string;
+  /** Assistant/tool-gap text that belongs inside the ReAct fold, not as the final answer row. */
+  intermediate?: boolean;
+  /** Unix ms timestamp for when this message was created (from DB created_at). */
+  timestamp?: number;
   toolCall?: {
     id: string;
     name: string;
@@ -181,6 +204,8 @@ export interface Message {
     /** Tool stdout/stderr result (tool role messages also keep plain text in `content`) */
     output?: string;
     status?: "pending" | "running" | "completed" | "error";
+    /** Unix ms when tool finished executing — persisted for elapsed-time display on reload. */
+    completedAt?: number;
   };
   roundId?: string;
   roundStatus?: RoundStatus;
@@ -218,6 +243,7 @@ function sanitizeMessageForPersistence(m: Message): Message {
     ...(ts ? { turnSummary: ts } : { turnSummary: undefined }),
     content: stripTrailingStderrMarker(m.content) ?? "",
     prefaceBeforeTools: stripTrailingStderrMarker(m.prefaceBeforeTools),
+    intermediate: m.intermediate,
     toolCallsList: m.toolCallsList?.map((tc) => ({
       ...tc,
       arguments: stripTrailingStderrMarker(tc.arguments) ?? "",
@@ -248,6 +274,8 @@ interface RawMessage {
   output?: string;
   tool_calls?: Array<{ id: string; name: string; arguments: string }>;
   tool_call_id?: string;
+  /** Persisted assistant reasoning text used to rebuild ReAct fold Thoughts after reload. */
+  reasoning_content?: string;
   token_usage?: {
     input: number;
     output: number;
@@ -256,6 +284,10 @@ interface RawMessage {
   };
   /** Follow-up suggestions from backend (LLM-generated) */
   follow_up_suggestions?: Array<{ label: string; prompt: string }>;
+  /** Optional persisted turn summary text from backend */
+  turn_summary?: string;
+  /** RFC3339 creation timestamp from SQLite — used to reconstruct elapsed-time display. */
+  created_at?: string;
 }
 
 interface SessionData {
@@ -267,7 +299,7 @@ interface SessionData {
   updated_at: string;
   active_provider_entry_name: string | null;
   has_more_messages: boolean;
-  session_config: SessionConfigResponse;
+  session_config?: SessionConfigResponse | null;
 }
 
 interface SendMessageRequest {
@@ -290,6 +322,8 @@ interface SendMessageRequest {
   localVenvName?: string;
   /** Specialist agent id from list_available_agents (e.g. Explore, Plan) */
   composerAgentType?: string;
+  /** Explicit Omiga plugin IDs selected for this turn */
+  selectedPluginIds?: string[];
   /** `ask` | `auto` | `bypass` — user-facing permission stance for this turn */
   permissionMode?: string;
   /** DB user row id — truncate after this row and reuse instead of inserting a duplicate user message */
@@ -349,6 +383,13 @@ interface SessionState {
   updateRoundStatus: (roundId: string, status: RoundStatus) => void;
 }
 
+/** Parse RFC3339/ISO timestamp to Unix ms, returning undefined on failure. */
+function parseCreatedAtMs(createdAt: string | undefined): number | undefined {
+  if (!createdAt) return undefined;
+  const ms = Date.parse(createdAt);
+  return isNaN(ms) ? undefined : ms;
+}
+
 /** Convert raw DB message rows to store Messages. Extracted so both loadSession
  *  and loadMoreMessages can share the same conversion logic. */
 function convertRawMessages(
@@ -357,16 +398,26 @@ function convertRawMessages(
 ): Message[] {
   // Build tool_call_id → {name, arguments} map from assistant rows in O(N).
   const toolMetaById = new Map<string, { name: string; arguments: string }>();
+  // Build tool_call_id → assistant created_at for tool start-time estimation.
+  const toolStartMsByCallId = new Map<string, number>();
   for (const m of rawMessages) {
     if (m.role !== "assistant" || !m.tool_calls?.length) continue;
+    const assistantMs = parseCreatedAtMs(m.created_at);
     for (const tc of m.tool_calls) {
       toolMetaById.set(tc.id, { name: tc.name, arguments: tc.arguments });
+      if (assistantMs !== undefined) {
+        toolStartMsByCallId.set(tc.id, assistantMs);
+      }
     }
   }
 
   return rawMessages.map((m, index) => {
     const content =
-      m.role === "tool" && m.output != null ? m.output : m.content || "";
+      m.role === "tool" && m.output != null
+        ? m.output
+        : m.content || "";
+
+    const rowTimestamp = parseCreatedAtMs(m.created_at);
 
     let toolCallsList: Message["toolCallsList"];
     let toolCall: Message["toolCall"];
@@ -382,11 +433,14 @@ function convertRawMessages(
     } else if (m.role === "tool") {
       const tid = (m.tool_call_id ?? "").trim();
       const meta = tid ? toolMetaById.get(tid) : undefined;
+      const completedAt = rowTimestamp;
       toolCall = {
         id: tid || `tool-row-${index}`,
         name: meta?.name ?? "tool",
         arguments: meta?.arguments ?? "",
         output: m.output ?? content,
+        status: "completed" as const,
+        ...(completedAt !== undefined ? { completedAt } : {}),
       };
     }
 
@@ -404,6 +458,26 @@ function convertRawMessages(
       m.role === "assistant" && m.follow_up_suggestions?.length
         ? m.follow_up_suggestions
         : undefined;
+    const turnSummary: Message["turnSummary"] =
+      m.role === "assistant" && typeof m.turn_summary === "string" && m.turn_summary.trim()
+        ? m.turn_summary.trim()
+        : undefined;
+    const reasoningContent =
+      m.role === "assistant" &&
+      typeof m.reasoning_content === "string" &&
+      m.reasoning_content.trim()
+        ? m.reasoning_content.trim()
+        : undefined;
+    const prefaceBeforeTools =
+      m.role === "assistant" && toolCallsList?.length && reasoningContent
+        ? reasoningContent
+        : undefined;
+    // For tool rows, use the assistant message's created_at as the start timestamp
+    // so elapsed time = completedAt - timestamp reflects actual execution duration.
+    const timestamp: number | undefined =
+      m.role === "tool" && toolCall?.id
+        ? (toolStartMsByCallId.get(toolCall.id) ?? rowTimestamp)
+        : rowTimestamp;
 
     return sanitizeMessageForPersistence({
       id: m.id ?? `${sessionId}-msg-${index}`,
@@ -411,8 +485,11 @@ function convertRawMessages(
       content,
       toolCallsList,
       toolCall,
+      ...(timestamp !== undefined ? { timestamp } : {}),
       ...(tokenUsage ? { tokenUsage } : {}),
       ...(followUpSuggestions ? { followUpSuggestions } : {}),
+      ...(turnSummary ? { turnSummary } : {}),
+      ...(prefaceBeforeTools ? { prefaceBeforeTools } : {}),
     });
   });
 }
@@ -446,6 +523,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         updatedAt: sessionData.updated_at,
         messageCount: 0,
       };
+      const sessionConfig = normalizeSessionConfig(sessionData.session_config);
+      useActivityStore.getState().clearAllActivity();
 
       set((state) => {
         let pending = state.pendingProjectPathSessions;
@@ -464,7 +543,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       });
       useChatComposerStore.getState().initForSession(
         sessionData.id,
-        sessionData.session_config,
+        sessionConfig,
       );
     } catch (error) {
       console.error("Failed to create session:", error);
@@ -515,24 +594,22 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   loadSessions: async () => {
     set({ isLoading: true });
-    try {
-      const sessionsData = await invoke<SessionSummary[]>("list_sessions");
-
-      const sessions: Session[] = sessionsData.map((s) => ({
-        id: s.id,
-        name: s.name,
-        projectPath: s.project_path || ".",
-        workingDirectory: s.project_path || ".",
-        createdAt: s.updated_at,
-        updatedAt: s.updated_at,
-        messageCount: s.message_count,
-      }));
-
-      set({ sessions, isLoading: false });
-    } catch (error) {
-      console.error("Failed to load sessions:", error);
-      set({ isLoading: false });
+    const sessionsData = await invokeIfTauri<SessionSummary[]>("list_sessions");
+    if (!sessionsData) {
+      set({ sessions: [], isLoading: false });
+      return;
     }
+    const sessions: Session[] = sessionsData.map((s) => ({
+      id: s.id,
+      name: s.name,
+      projectPath: s.project_path || ".",
+      workingDirectory: s.project_path || ".",
+      createdAt: s.updated_at,
+      updatedAt: s.updated_at,
+      messageCount: s.message_count,
+    }));
+
+    set({ sessions, isLoading: false });
   },
 
   loadSession: async (sessionId: string, opts?: { clearSwitching?: boolean; silent?: boolean }) => {
@@ -575,13 +652,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       };
 
       const newActiveProvider = sessionData.active_provider_entry_name ?? null;
+      const sessionConfig = normalizeSessionConfig(sessionData.session_config);
       // Write to cache so subsequent switches to this session are instant.
       msgCacheSet(sessionId, {
         session,
         messages,
         hasMoreMessages: sessionData.has_more_messages,
         activeProviderEntryName: newActiveProvider,
-        sessionConfig: sessionData.session_config,
+        sessionConfig,
       });
 
       if (opts?.silent) {
@@ -607,7 +685,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           // Sync composer config only while this session is still active.
           useChatComposerStore
             .getState()
-            .initForSession(sessionId, sessionData.session_config);
+            .initForSession(sessionId, sessionConfig);
         }
         dbg("loadSession:silent-refresh-ok", { sessionId, msgs: messages.length });
         return;
@@ -631,6 +709,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           messages,
           storeMessages: messages,
           isLoading: false,
+          isSwitchingSession: false,
           hasMoreMessages: sessionData.has_more_messages,
           activeProviderEntryName: newActiveProvider,
           sessions,
@@ -645,19 +724,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       );
 
       // Sync composer config so the latest per-session settings are applied.
-      useChatComposerStore.getState().initForSession(sessionId, sessionData.session_config);
+      useChatComposerStore.getState().initForSession(sessionId, sessionConfig);
 
-      // Always notify so ProviderSwitcher refreshes its "active" chip for the new session.
-      notifyProviderChanged();
-
-      // Fire-and-forget: pre-warm LLM config / integrations / permission / MCP caches
-      // so the first send_message in this session doesn't pay cold-cache penalties.
-      // Inspired by codex's startup prewarm pattern.
-      void invoke("prewarm_session", {
+      // Pre-warm LLM config / integrations / permission / MCP caches so the first
+      // send_message in this session doesn't pay cold-cache penalties. Fire notifyProviderChanged
+      // AFTER prewarm completes so ProviderSwitcher reads the already-updated global provider
+      // state — firing it before prewarm causes the chip to show the stale (pre-switch) provider.
+      invoke("prewarm_session", {
         projectPath: session.projectPath,
         activeProviderEntryName: newActiveProvider,
+      }).then(() => {
+        notifyProviderChanged();
       }).catch(() => {
-        // Prewarm is best-effort — silently ignore errors.
+        // Prewarm is best-effort: still notify so the chip isn't stuck.
+        notifyProviderChanged();
       });
 
       const duration = Math.round(performance.now() - perfStart);
@@ -763,6 +843,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setCurrentSession: async (sessionId) => {
     const t0 = performance.now();
     dbg("setCurrentSession", { sessionId });
+    // Activity state is saved/restored by the Chat component's session-switch
+    // useEffect so that parallel streaming sessions are not interrupted.
+    // clearAllActivity() was here before but would destroy the activity state
+    // of a session that is still streaming in the background.
+
     if (!sessionId) {
       set({
         currentSession: null,
@@ -786,7 +871,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         isSwitchingSession: false,
       });
       useChatComposerStore.getState().initForSession(sessionId, cached.sessionConfig);
-      notifyProviderChanged();
+      // Restore the session's provider on the backend before notifying ProviderSwitcher,
+      // otherwise the chip shows the stale (previous session's) provider.
+      const cachedProvider = cached.activeProviderEntryName ?? null;
+      invoke("prewarm_session", {
+        projectPath: cached.session.projectPath,
+        activeProviderEntryName: cachedProvider,
+      }).then(() => {
+        notifyProviderChanged();
+      }).catch(() => {
+        notifyProviderChanged();
+      });
       const hitMs = Math.round(performance.now() - t0);
       console.info(
         `%c[SwPerf] ${sessionId.slice(0, 8)} | CACHE HIT ~${hitMs}ms | msgs: ${cached.messages.length} — background refresh…`,
@@ -818,30 +913,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       currentSession: immediateSession,
       messages: [],
       storeMessages: [],
-      isSwitchingSession: false,
+      isSwitchingSession: true,
     });
     notifyProviderChanged();
 
-    // Load per-session config immediately so composer settings don't flash stale values.
-    void invoke<SessionConfigResponse>("get_session_config", { sessionId })
-      .then((cfg) => {
-        if (get().currentSession?.id !== sessionId) return;
-        useChatComposerStore.getState().initForSession(sessionId, cfg);
-      })
-      .catch(() => {
-        if (get().currentSession?.id !== sessionId) return;
-        useChatComposerStore.getState().initForSession(sessionId, {
-          active_provider_entry_name: null,
-          permission_mode: "auto",
-          composer_agent_type: "auto",
-          execution_environment: "local",
-          ssh_server: null,
-          sandbox_backend: "docker",
-          local_venv_type: "none",
-          local_venv_name: "",
-          use_worktree: false,
-        });
-      });
+    // Initialize composer with defaults immediately (synchronous, no IPC).
+    // load_session already returns session_config in its payload, so the real
+    // config is applied when loadSession completes — no extra IPC needed here.
+    // This removes a redundant get_session_config IPC that would otherwise
+    // compete with load_session on the macOS WKWebView IPC queue (serialized
+    // when the WebView is rendering), adding 200-800 ms to every cache-miss switch.
+    useChatComposerStore.getState().initForSession(sessionId, DEFAULT_SESSION_CONFIG);
 
     void get()
       .loadSession(sessionId)
@@ -862,6 +944,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const newMessage: Message = sanitizeMessageForPersistence({
       ...message,
       id: message.id ?? `msg-${Date.now()}`,
+      timestamp: message.timestamp ?? Date.now(),
     });
     set((state) => {
       const messages = [...state.messages, newMessage];

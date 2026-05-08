@@ -19,16 +19,23 @@
 
 pub mod chat_indexer;
 pub mod config;
+pub mod dossier;
+pub mod long_term;
 pub mod migration;
+pub mod permanent_profile;
 pub mod registry;
+pub mod source_registry;
+pub mod working_memory;
 
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tracing::{info, warn};
+use walkdir::WalkDir;
 
 pub use chat_indexer::{ChatIndexer, ChatMessage, ChatRole};
 pub use config::{
-    permanent_wiki_path, project_storage_key, user_omiga_root, MemoryConfig, MemoryMode,
+    permanent_long_term_path, permanent_wiki_path, project_storage_key, user_omiga_root,
+    MemoryConfig, MemoryMode,
 };
 
 /// Unified memory system handle
@@ -77,6 +84,16 @@ impl MemorySystem {
         self.config.implicit_path(&self.project_root)
     }
 
+    /// Get project-scoped long-term memory path
+    pub fn long_term_path(&self) -> PathBuf {
+        self.config.long_term_path(&self.project_root)
+    }
+
+    /// Get project-scoped source registry directory
+    pub fn sources_path(&self) -> PathBuf {
+        source_registry::sources_dir(&self.long_term_path())
+    }
+
     /// Initialize memory directory structure
     pub async fn init(&self) -> std::io::Result<()> {
         let root = self.root_path();
@@ -84,9 +101,33 @@ impl MemorySystem {
         fs::create_dir_all(self.wiki_path()).await?;
         fs::create_dir_all(self.implicit_path()).await?;
         fs::create_dir_all(self.implicit_path().join("content")).await?;
+        fs::create_dir_all(self.long_term_path()).await?;
         fs::create_dir_all(config::permanent_wiki_path()).await?;
+        fs::create_dir_all(config::permanent_long_term_path()).await?;
         if let Some(parent) = registry::registry_file_path().parent() {
             fs::create_dir_all(parent).await?;
+        }
+        let _ = migration::backfill_wiki_metadata(&self.wiki_path()).await;
+        let _ = migration::backfill_wiki_metadata(&config::permanent_wiki_path()).await;
+
+        // Probabilistic cleanup: prune stale long-term and source entries ~10% of the time on init.
+        if rand_one_in_n(10) {
+            let lt = self.long_term_path();
+            let perm_lt = config::permanent_long_term_path();
+            let removed_project = long_term::prune_stale_entries(&lt, false).await;
+            let removed_global = long_term::prune_stale_entries(&perm_lt, false).await;
+            if removed_project + removed_global > 0 {
+                info!(
+                    "Pruned {} stale long-term entries ({} project, {} global)",
+                    removed_project + removed_global,
+                    removed_project,
+                    removed_global
+                );
+            }
+            let removed_sources = source_registry::prune_stale_sources(&lt, false).await;
+            if removed_sources > 0 {
+                info!("Pruned {} expired source registry entries", removed_sources);
+            }
         }
 
         info!("Initialized memory system at {:?}", root);
@@ -138,7 +179,22 @@ impl MemorySystem {
 
     /// Get unified memory statistics
     pub async fn stats(&self) -> MemoryStats {
-        let mut stats = MemoryStats::default();
+        let lt_project_path = self.long_term_path();
+        let lt_global_path = config::permanent_long_term_path();
+        let stale_project = long_term::count_stale_entries(&lt_project_path).await;
+        let stale_global = long_term::count_stale_entries(&lt_global_path).await;
+        let src_count = source_registry::count_sources(&lt_project_path).await;
+        let stale_src = source_registry::count_stale_sources(&lt_project_path).await;
+        let mut stats = MemoryStats {
+            project_knowledge_pages: count_markdown_pages(&self.wiki_path()).await,
+            global_knowledge_pages: count_markdown_pages(&config::permanent_wiki_path()).await,
+            long_term_project_entries: long_term::count_entries(&lt_project_path).await,
+            long_term_global_entries: long_term::count_entries(&lt_global_path).await,
+            stale_long_term_entries: stale_project + stale_global,
+            source_registry_count: src_count,
+            stale_source_count: stale_src,
+            ..Default::default()
+        };
 
         // Check explicit memory (wiki): project + permanent
         for wiki_root in [self.wiki_path(), config::permanent_wiki_path()] {
@@ -172,91 +228,209 @@ impl MemorySystem {
     /// - **Explicit (Wiki)**：扫描 wiki 目录下所有 `.md` 文件，按关键词匹配返回标题 + 摘要。
     /// - **Implicit (PageIndex)**：从磁盘加载 `tree.json`，用 `QueryEngine` 做 TF-IDF 检索。
     pub async fn query(&self, query: &str, limit: usize) -> UnifiedQueryResult {
+        self.query_with_session(None, query, limit).await
+    }
+
+    /// Hot + Warm memory only — excludes Implicit (Cold / raw chat logs).
+    ///
+    /// Use this for preflight auto-injection. Cold memory is noisy and large;
+    /// it should only surface through explicit `recall` tool calls.
+    pub async fn query_warm(
+        &self,
+        working_memory_excerpt: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> UnifiedQueryResult {
         let limit = limit.max(1);
-        let mut explicit_results = Vec::new();
-        let mut implicit_results = Vec::new();
+        // Phase 1: wider candidate pool — Phase 2 rerank then selects top `limit`.
+        let phase1_limit = (limit * 3).max(12);
+        let mut results = Vec::new();
 
-        // ── Explicit: 搜索项目 wiki，再搜索永久 wiki ────────────────────────
-        for wiki_root in [self.wiki_path(), config::permanent_wiki_path()] {
-            if explicit_results.len() >= limit {
-                break;
-            }
-            if !wiki_root.exists() {
-                continue;
-            }
-            if let Ok(mut entries) = fs::read_dir(&wiki_root).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    if explicit_results.len() >= limit {
-                        break;
-                    }
-                    let path = entry.path();
-                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    if ext != "md" {
-                        continue;
-                    }
-                    let Ok(content) = fs::read_to_string(&path).await else {
-                        continue;
-                    };
-                    if !content.to_lowercase().contains(&query.to_lowercase()) {
-                        continue;
-                    }
-
-                    // 提取标题（第一个 # 行 或文件名）
-                    let title = content
-                        .lines()
-                        .find(|l| l.starts_with("# "))
-                        .map(|l| l.trim_start_matches('#').trim().to_string())
-                        .unwrap_or_else(|| {
-                            path.file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("Untitled")
-                                .to_string()
-                        });
-
-                    let excerpt = extract_excerpt(&content, query, 300);
-                    explicit_results.push(ExplicitResult {
-                        title,
-                        path: path.to_string_lossy().to_string(),
-                        excerpt,
-                    });
-                }
-            }
+        if let Some(excerpt) = working_memory_excerpt {
+            results.extend(query_working_memory(excerpt, query));
         }
 
-        // ── Implicit: 搜索 PageIndex ──────────────────────────────────────
-        let implicit_path = self.implicit_path();
-        let storage = crate::domain::pageindex::IndexStorage::new(&implicit_path);
-        match storage.load_tree().await {
-            Ok(Some(tree)) => {
-                let engine = crate::domain::pageindex::QueryEngine::new();
-                match engine.search(&tree, query, limit).await {
-                    Ok(results) => {
-                        for r in results {
-                            implicit_results.push(ImplicitResult {
-                                title: r.title,
-                                path: r.path,
-                                breadcrumb: r.breadcrumb,
-                                excerpt: r.excerpt,
-                                score: r.score,
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        warn!("PageIndex search error: {}", e);
-                    }
-                }
-            }
-            Ok(None) => {} // 尚未建立索引
-            Err(e) => {
-                warn!("Failed to load PageIndex tree: {}", e);
-            }
-        }
+        let lt_query = enrich_query_with_working_memory(query, working_memory_excerpt);
 
-        let total_matches = explicit_results.len() + implicit_results.len();
+        results.extend(
+            long_term::search_entries(&self.long_term_path(), &lt_query, phase1_limit, false)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "summary".to_string(),
+                    source_type: MemorySourceType::LongTermProject,
+                }),
+        );
+        results.extend(
+            long_term::search_entries(
+                &config::permanent_long_term_path(),
+                &lt_query,
+                phase1_limit,
+                true,
+            )
+            .await
+            .into_iter()
+            .map(|result| MemoryQueryMatch {
+                title: result.title,
+                path: result.path,
+                breadcrumb: vec![],
+                excerpt: result.excerpt,
+                score: result.score,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::LongTermGlobal,
+            }),
+        );
+        results.extend(
+            search_markdown_wiki(&self.wiki_path(), query, phase1_limit)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "Wiki".to_string(),
+                    source_type: MemorySourceType::KnowledgeBaseProject,
+                }),
+        );
+        results.extend(
+            search_markdown_wiki(&config::permanent_wiki_path(), query, phase1_limit)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "Wiki".to_string(),
+                    source_type: MemorySourceType::KnowledgeBaseGlobal,
+                }),
+        );
+
+        // Implicit (Cold) intentionally excluded — available only via explicit `recall` calls.
+
+        sort_memory_results(&mut results);
+        dedupe_matches(&mut results);
+        let phase1_count = results.len();
+        two_phase_rerank(&mut results, working_memory_excerpt);
+        let total_matches = results.len();
+        results.truncate(limit);
+
+        tracing::debug!(
+            target: "omiga::memory::recall",
+            query = %query,
+            phase1_candidates = phase1_count,
+            returned = results.len(),
+            rerank = working_memory_excerpt.is_some(),
+            "query_warm completed"
+        );
+
         UnifiedQueryResult {
             query: query.to_string(),
-            explicit_results,
-            implicit_results,
+            results,
+            total_matches,
+        }
+    }
+
+    pub async fn query_with_session(
+        &self,
+        working_memory_excerpt: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> UnifiedQueryResult {
+        let limit = limit.max(1);
+        // Phase 1: wider candidate pool for Phase 2 reranking.
+        let phase1_limit = (limit * 3).max(12);
+        let mut results = Vec::new();
+
+        if let Some(excerpt) = working_memory_excerpt {
+            results.extend(query_working_memory(excerpt, query));
+        }
+
+        // Augment long-term query with active topic from working memory for context boost.
+        let lt_query = enrich_query_with_working_memory(query, working_memory_excerpt);
+
+        results.extend(
+            long_term::search_entries(&self.long_term_path(), &lt_query, phase1_limit, false)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "summary".to_string(),
+                    source_type: MemorySourceType::LongTermProject,
+                }),
+        );
+        results.extend(
+            long_term::search_entries(
+                &config::permanent_long_term_path(),
+                &lt_query,
+                phase1_limit,
+                true,
+            )
+            .await
+            .into_iter()
+            .map(|result| MemoryQueryMatch {
+                title: result.title,
+                path: result.path,
+                breadcrumb: vec![],
+                excerpt: result.excerpt,
+                score: result.score,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::LongTermGlobal,
+            }),
+        );
+
+        results.extend(
+            search_markdown_wiki(&self.wiki_path(), query, phase1_limit)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "Wiki".to_string(),
+                    source_type: MemorySourceType::KnowledgeBaseProject,
+                }),
+        );
+        results.extend(
+            search_markdown_wiki(&config::permanent_wiki_path(), query, phase1_limit)
+                .await
+                .into_iter()
+                .map(|result| MemoryQueryMatch {
+                    title: result.title,
+                    path: result.path,
+                    breadcrumb: vec![],
+                    excerpt: result.excerpt,
+                    score: result.score,
+                    match_type: "Wiki".to_string(),
+                    source_type: MemorySourceType::KnowledgeBaseGlobal,
+                }),
+        );
+
+        results.extend(query_implicit_matches(&self.implicit_path(), query, limit).await);
+
+        sort_memory_results(&mut results);
+        dedupe_matches(&mut results);
+        two_phase_rerank(&mut results, working_memory_excerpt);
+        let total_matches = results.len();
+        results.truncate(limit);
+
+        UnifiedQueryResult {
+            query: query.to_string(),
+            results,
             total_matches,
         }
     }
@@ -269,29 +443,75 @@ pub struct MemoryStats {
     pub implicit_exists: bool,
     pub implicit_documents: usize,
     pub implicit_sections: usize,
+    pub project_knowledge_pages: usize,
+    pub global_knowledge_pages: usize,
+    pub long_term_project_entries: usize,
+    pub long_term_global_entries: usize,
+    /// Long-term entries not reused in >90 days with stability < 0.4.
+    pub stale_long_term_entries: usize,
+    /// Number of active (non-expired) web sources tracked in the source registry.
+    pub source_registry_count: usize,
+    /// Number of expired source entries not yet pruned.
+    pub stale_source_count: usize,
 }
 
 /// Unified query result
 #[derive(Debug, Clone)]
 pub struct UnifiedQueryResult {
     pub query: String,
-    pub explicit_results: Vec<ExplicitResult>,
-    pub implicit_results: Vec<ImplicitResult>,
+    pub results: Vec<MemoryQueryMatch>,
     pub total_matches: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemorySourceType {
+    WorkingMemory,
+    LongTermProject,
+    LongTermGlobal,
+    KnowledgeBaseProject,
+    KnowledgeBaseGlobal,
+    Implicit,
+}
+
+impl MemorySourceType {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WorkingMemory => "WorkingMemory",
+            Self::LongTermProject => "LongTermProject",
+            Self::LongTermGlobal => "LongTermGlobal",
+            Self::KnowledgeBaseProject => "KnowledgeBaseProject",
+            Self::KnowledgeBaseGlobal => "KnowledgeBaseGlobal",
+            Self::Implicit => "Implicit",
+        }
+    }
+
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::WorkingMemory => 6,
+            Self::LongTermProject => 5,
+            Self::LongTermGlobal => 4,
+            Self::KnowledgeBaseProject => 3,
+            Self::KnowledgeBaseGlobal => 2,
+            Self::Implicit => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryQueryMatch {
+    pub title: String,
+    pub path: String,
+    pub breadcrumb: Vec<String>,
+    pub excerpt: String,
+    pub score: f64,
+    pub match_type: String,
+    pub source_type: MemorySourceType,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExplicitResult {
     pub title: String,
     pub path: String,
-    pub excerpt: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct ImplicitResult {
-    pub title: String,
-    pub path: String,
-    pub breadcrumb: Vec<String>,
     pub excerpt: String,
     pub score: f64,
 }
@@ -356,10 +576,11 @@ pub async fn load_resolved_config(
         || legacy.join("implicit").join("tree.json").exists()
         || legacy.join("tree.json").exists();
     if has_legacy {
-        let mut c = MemoryConfig::default();
-        c.memory_mode = MemoryMode::ProjectRelative;
-        c.root_dir = PathBuf::from(".omiga/memory");
-        return Ok(c);
+        return Ok(MemoryConfig {
+            memory_mode: MemoryMode::ProjectRelative,
+            root_dir: PathBuf::from(".omiga/memory"),
+            ..Default::default()
+        });
     }
     Ok(MemoryConfig::default())
 }
@@ -380,18 +601,31 @@ pub async fn init_memory_system(
 
 /// 在文本中找到最密集的关键词窗口，返回摘要（带省略号）。
 fn extract_excerpt(content: &str, query: &str, max_len: usize) -> String {
+    if content.is_empty() || max_len == 0 {
+        return String::new();
+    }
+
     let query_lower = query.to_lowercase();
     let content_lower = content.to_lowercase();
+    let query_terms = crate::domain::pageindex::derive_query_terms(query);
 
-    // 找到第一个匹配位置作为锚点
-    let anchor = content_lower.find(&query_lower).unwrap_or(0);
+    // 优先定位整句命中，否则回退到查询词命中。
+    let anchor = content_lower
+        .find(&query_lower)
+        .or_else(|| {
+            query_terms
+                .iter()
+                .filter_map(|term| content_lower.find(term))
+                .min()
+        })
+        .unwrap_or(0);
 
-    // 窗口从锚点前 60 字符开始
-    let start = anchor.saturating_sub(60);
+    // 窗口从锚点前 60 字节附近开始；所有切片前都必须回退到 UTF-8 字符边界。
+    let start = floor_char_boundary(content, anchor.saturating_sub(60));
     // 对齐到行首（避免从行中间截断）
     let start = content[..start].rfind('\n').map(|p| p + 1).unwrap_or(start);
 
-    let end = (start + max_len).min(content.len());
+    let end = floor_char_boundary(content, (start + max_len).min(content.len()));
     // 对齐到行尾
     let end = content[end..].find('\n').map(|p| end + p).unwrap_or(end);
 
@@ -403,6 +637,274 @@ fn extract_excerpt(content: &str, query: &str, max_len: usize) -> String {
         (false, true) => format!("{}…", slice),
         _ => slice,
     }
+}
+
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut i = index.min(text.len());
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+async fn count_markdown_pages(root: &Path) -> usize {
+    markdown_files(root).len()
+}
+
+pub async fn search_markdown_wiki(root: &Path, query: &str, limit: usize) -> Vec<ExplicitResult> {
+    if limit == 0 || !root.is_dir() {
+        return vec![];
+    }
+
+    let query_terms = crate::domain::pageindex::derive_query_terms(query);
+    if query_terms.is_empty() {
+        return vec![];
+    }
+
+    let query_lower = query.trim().to_lowercase();
+    let mut results = Vec::new();
+
+    for path in markdown_files(root) {
+        let Ok(content) = fs::read_to_string(&path).await else {
+            continue;
+        };
+        let title = markdown_title(&path, &content);
+        let score = explicit_match_score(&title, &content, &query_lower, &query_terms);
+        if score <= 0.0 {
+            continue;
+        }
+
+        results.push(ExplicitResult {
+            title,
+            path: path.to_string_lossy().to_string(),
+            excerpt: extract_excerpt(&content, query, 300),
+            score,
+        });
+    }
+
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    results.truncate(limit);
+    results
+}
+
+fn markdown_files(root: &Path) -> Vec<PathBuf> {
+    WalkDir::new(root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        })
+        .map(|entry| entry.into_path())
+        .collect()
+}
+
+fn markdown_title(path: &Path, content: &str) -> String {
+    content
+        .lines()
+        .find(|line| line.starts_with("# "))
+        .map(|line| line.trim_start_matches('#').trim().to_string())
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Untitled")
+                .to_string()
+        })
+}
+
+fn explicit_match_score(
+    title: &str,
+    content: &str,
+    query_lower: &str,
+    query_terms: &[String],
+) -> f64 {
+    let mut score = 0.0;
+    let title_lower = title.to_lowercase();
+    let content_lower = content.to_lowercase();
+
+    if !query_lower.is_empty() {
+        if title_lower.contains(query_lower) {
+            score += 0.45;
+        }
+        if content_lower.contains(query_lower) {
+            score += 0.2;
+        }
+    }
+
+    score += crate::domain::pageindex::score_terms_against_text(&title_lower, query_terms) * 1.4;
+    score += crate::domain::pageindex::score_terms_against_text(&content_lower, query_terms);
+
+    score.min(2.0)
+}
+
+fn query_working_memory(excerpt: &str, query: &str) -> Vec<MemoryQueryMatch> {
+    let query_terms = crate::domain::pageindex::derive_query_terms(query);
+    if query_terms.is_empty() || excerpt.trim().is_empty() {
+        return vec![];
+    }
+    let score = crate::domain::pageindex::score_terms_against_text(excerpt, &query_terms);
+    if score <= 0.0 {
+        return vec![];
+    }
+    vec![MemoryQueryMatch {
+        title: "Session scratchpad".to_string(),
+        path: "session_working_memory".to_string(),
+        breadcrumb: vec![],
+        excerpt: extract_excerpt(excerpt, query, 320),
+        score,
+        match_type: "summary".to_string(),
+        source_type: MemorySourceType::WorkingMemory,
+    }]
+}
+
+async fn query_implicit_matches(
+    implicit_path: &Path,
+    query: &str,
+    limit: usize,
+) -> Vec<MemoryQueryMatch> {
+    let storage = crate::domain::pageindex::IndexStorage::new(implicit_path);
+    match storage.load_tree().await {
+        Ok(Some(tree)) => {
+            let engine = crate::domain::pageindex::QueryEngine::new();
+            match engine.search(&tree, query, limit).await {
+                Ok(results) => results
+                    .into_iter()
+                    .map(|result| MemoryQueryMatch {
+                        title: result.title,
+                        path: result.path,
+                        breadcrumb: result.breadcrumb,
+                        excerpt: result.excerpt,
+                        score: result.score,
+                        match_type: format!("{:?}", result.match_type),
+                        source_type: MemorySourceType::Implicit,
+                    })
+                    .collect(),
+                Err(e) => {
+                    warn!("PageIndex search error: {}", e);
+                    vec![]
+                }
+            }
+        }
+        Ok(None) => vec![],
+        Err(e) => {
+            warn!("Failed to load PageIndex tree: {}", e);
+            vec![]
+        }
+    }
+}
+
+fn dedupe_matches(results: &mut Vec<MemoryQueryMatch>) {
+    let mut deduped = Vec::new();
+    for item in results.drain(..) {
+        if deduped.iter().any(|existing: &MemoryQueryMatch| {
+            existing.path == item.path && existing.source_type == item.source_type
+        }) {
+            continue;
+        }
+        deduped.push(item);
+    }
+    *results = deduped;
+}
+
+/// Phase-2 rerank: boost results whose content overlaps with the current session context
+/// (working memory excerpt), blending 70% original score + 30% context overlap.
+fn two_phase_rerank(results: &mut [MemoryQueryMatch], working_memory_excerpt: Option<&str>) {
+    let Some(excerpt) = working_memory_excerpt else {
+        return;
+    };
+    let ctx_terms = crate::domain::pageindex::derive_query_terms(excerpt);
+    if ctx_terms.is_empty() {
+        return;
+    }
+    // Snapshot top-1 title before rerank to detect ranking changes.
+    let top_before = results.first().map(|r| r.title.clone());
+
+    for result in results.iter_mut() {
+        let ctx_score = crate::domain::pageindex::score_terms_against_text(
+            &format!("{} {}", result.title, result.excerpt),
+            &ctx_terms,
+        );
+        result.score = result.score * 0.70 + ctx_score * 0.30;
+    }
+    sort_memory_results(results);
+
+    let top_after = results.first().map(|r| r.title.as_str());
+    if top_before.as_deref() != top_after {
+        tracing::debug!(
+            target: "omiga::memory::recall",
+            before = top_before.as_deref().unwrap_or("(none)"),
+            after = top_after.unwrap_or("(none)"),
+            ctx_terms = ctx_terms.len(),
+            candidates = results.len(),
+            "two-phase rerank changed top result"
+        );
+    }
+}
+
+/// Returns true with probability 1/n using the current timestamp as a cheap entropy source.
+fn rand_one_in_n(n: u64) -> bool {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 % n == 0)
+        .unwrap_or(false)
+}
+
+/// Enrich a long-term search query with signals from the current working memory excerpt.
+///
+/// Extracts `### Session Goal` and `### Active Topic` lines from the rendered excerpt and
+/// appends them to the query so that long-term entries matching the current session context
+/// receive a higher TF-IDF score.
+fn enrich_query_with_working_memory(query: &str, excerpt: Option<&str>) -> String {
+    let Some(excerpt) = excerpt else {
+        return query.to_string();
+    };
+
+    let mut extra_terms = Vec::new();
+    for line in excerpt.lines() {
+        let trimmed = line.trim();
+        // Capture the value that follows "- " under Session Goal / Active Topic sections.
+        if trimmed.starts_with("- ") {
+            extra_terms.push(trimmed.trim_start_matches("- ").trim().to_string());
+            if extra_terms.len() >= 2 {
+                break;
+            }
+        }
+    }
+
+    if extra_terms.is_empty() {
+        return query.to_string();
+    }
+
+    // Cap total enriched query to ~300 chars to avoid diluting the original signal.
+    let suffix = extra_terms.join(" ");
+    let combined = format!("{} {}", query.trim(), suffix.trim());
+    if combined.chars().count() > 300 {
+        combined.chars().take(300).collect()
+    } else {
+        combined
+    }
+}
+
+pub fn sort_memory_results(results: &mut [MemoryQueryMatch]) {
+    results.sort_by(|a, b| {
+        b.source_type
+            .rank()
+            .cmp(&a.source_type.rank())
+            .then_with(|| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.title.cmp(&b.title))
+    });
 }
 
 // Explicit memory importer
@@ -418,6 +920,10 @@ pub fn memory_agent_system_prompt_with_config(
     let wiki_path_str = wiki_pb.to_string_lossy();
     let perm_pb = config::permanent_wiki_path();
     let perm_str = perm_pb.to_string_lossy();
+    let long_term_pb = config.long_term_path(project_root);
+    let long_term_str = long_term_pb.to_string_lossy();
+    let perm_long_term_pb = config::permanent_long_term_path();
+    let perm_long_term_str = perm_long_term_pb.to_string_lossy();
     let imp_pb = config.implicit_path(project_root);
     let imp_str = imp_pb.to_string_lossy();
     format!(
@@ -425,8 +931,10 @@ pub fn memory_agent_system_prompt_with_config(
          You are a specialized memory agent for the Omiga project memory system.\n\
          \n\
          Memory structure:\n\
-         - `{}` — Project explicit memory (Wiki)\n\
-         - `{}` — Permanent explicit memory (user-level Wiki, applies across projects)\n\
+         - `{}` — Project knowledge base (Wiki)\n\
+         - `{}` — Project long-term memory\n\
+         - `{}` — Global knowledge base (user-level Wiki, applies across projects)\n\
+         - `{}` — Global long-term memory\n\
          - `{}` — Implicit memory: Auto-indexed chats / documents\n\
          \n\
          Your responsibilities:\n\
@@ -441,6 +949,229 @@ pub fn memory_agent_system_prompt_with_config(
          Always check existing content first. Prefer editing existing \
          pages over creating duplicates. Keep page excerpts under 800 lines. Return a concise \
          summary of what was done.",
-        wiki_path_str, perm_str, imp_str
+        wiki_path_str, long_term_str, perm_str, perm_long_term_str, imp_str
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn search_markdown_wiki_matches_cjk_natural_language_queries() {
+        let temp = tempfile::tempdir().unwrap();
+        let page = temp.path().join("redox.md");
+        tokio::fs::write(
+            &page,
+            "# 氧化还原节律\n\n氧化还原节律与生物钟调控、NRF2 和谷胱甘肽有关。",
+        )
+        .await
+        .unwrap();
+
+        let results =
+            search_markdown_wiki(temp.path(), "获取全局记忆中与氧化还原节律相关内容", 5).await;
+
+        assert!(!results.is_empty());
+        assert_eq!(results[0].title, "氧化还原节律");
+    }
+
+    #[test]
+    fn extract_excerpt_respects_utf8_boundaries_for_cjk() {
+        let content = format!(
+            "{}直链淀粉相关内容用于验证摘要窗口不会切开中文字符。\n下一行继续。",
+            "前置中文内容".repeat(150)
+        );
+
+        let excerpt = extract_excerpt(&content, "直链淀粉", 301);
+
+        assert!(excerpt.contains("直链淀粉"));
+        assert!(excerpt.is_char_boundary(excerpt.len()));
+    }
+
+    #[tokio::test]
+    async fn search_markdown_wiki_reads_nested_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("topics");
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+        tokio::fs::write(
+            nested.join("circadian.md"),
+            "# circadian redox\n\nRedox rhythm couples ROS buffering with circadian control.",
+        )
+        .await
+        .unwrap();
+
+        let results = search_markdown_wiki(temp.path(), "redox circadian rhythm", 5).await;
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].path.ends_with("circadian.md"));
+    }
+
+    #[test]
+    fn sort_memory_results_prioritizes_memory_layers_before_raw_score() {
+        let mut results = vec![
+            MemoryQueryMatch {
+                title: "Implicit hit".to_string(),
+                path: "chat/1.md".to_string(),
+                breadcrumb: vec![],
+                excerpt: "implicit".to_string(),
+                score: 0.95,
+                match_type: "Content".to_string(),
+                source_type: MemorySourceType::Implicit,
+            },
+            MemoryQueryMatch {
+                title: "Working hit".to_string(),
+                path: "session_working_memory".to_string(),
+                breadcrumb: vec![],
+                excerpt: "working".to_string(),
+                score: 0.40,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::WorkingMemory,
+            },
+            MemoryQueryMatch {
+                title: "Knowledge hit".to_string(),
+                path: "wiki/page.md".to_string(),
+                breadcrumb: vec![],
+                excerpt: "wiki".to_string(),
+                score: 0.90,
+                match_type: "Wiki".to_string(),
+                source_type: MemorySourceType::KnowledgeBaseProject,
+            },
+        ];
+
+        sort_memory_results(&mut results);
+
+        assert_eq!(results[0].title, "Working hit");
+        assert_eq!(results[1].title, "Knowledge hit");
+        assert_eq!(results[2].title, "Implicit hit");
+    }
+
+    #[test]
+    fn enrich_query_appends_working_memory_topic() {
+        let excerpt = "## Working Memory (session scratchpad)\n\n\
+                       ### Session Goal\n- 优化记忆分层检索效率\n\n\
+                       ### Active Topic\n- memory recall ranking\n";
+        let enriched = enrich_query_with_working_memory("recall", Some(excerpt));
+        assert!(
+            enriched.contains("recall"),
+            "original query must be preserved"
+        );
+        assert!(
+            enriched.len() > "recall".len(),
+            "enriched query should be longer than original"
+        );
+    }
+
+    #[test]
+    fn enrich_query_returns_original_when_no_excerpt() {
+        let result = enrich_query_with_working_memory("my query", None);
+        assert_eq!(result, "my query");
+    }
+
+    #[test]
+    fn enrich_query_caps_at_300_chars() {
+        let long_line = "x".repeat(400);
+        let excerpt = format!("### Session Goal\n- {}\n", long_line);
+        let result = enrich_query_with_working_memory("q", Some(&excerpt));
+        assert!(
+            result.chars().count() <= 300,
+            "enriched query must not exceed 300 chars"
+        );
+    }
+
+    #[test]
+    fn two_phase_rerank_noop_without_excerpt() {
+        // two_phase_rerank with None excerpt is an early return — no reordering at all.
+        let mut results = vec![
+            MemoryQueryMatch {
+                title: "first-inserted".to_string(),
+                path: "a.md".to_string(),
+                breadcrumb: vec![],
+                excerpt: "rust memory recall".to_string(),
+                score: 0.8,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::LongTermProject,
+            },
+            MemoryQueryMatch {
+                title: "second-inserted".to_string(),
+                path: "b.md".to_string(),
+                breadcrumb: vec![],
+                excerpt: "python scripting".to_string(),
+                score: 0.9,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::LongTermProject,
+            },
+        ];
+        two_phase_rerank(&mut results, None);
+        // No excerpt → early return, insertion order preserved.
+        assert_eq!(
+            results[0].title, "first-inserted",
+            "no excerpt must leave order unchanged"
+        );
+        assert_eq!(results[1].title, "second-inserted");
+    }
+
+    #[test]
+    fn two_phase_rerank_boosts_context_matching_entry() {
+        // Entry A: generic, slightly higher raw score.
+        // Entry B: title+excerpt exactly match session context terms, slightly lower raw score.
+        // The 30% context boost must be enough to overtake the small raw gap.
+        let mut results = vec![
+            MemoryQueryMatch {
+                title: "networking protocols".to_string(),
+                path: "generic.md".to_string(),
+                breadcrumb: vec![],
+                excerpt: "unrelated topic about TCP UDP networking protocols".to_string(),
+                score: 0.55,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::LongTermProject,
+            },
+            MemoryQueryMatch {
+                title: "memory TF-IDF recall".to_string(),
+                path: "relevant.md".to_string(),
+                breadcrumb: vec![],
+                excerpt: "memory recall optimisation TF-IDF ranking strategy".to_string(),
+                score: 0.51,
+                match_type: "summary".to_string(),
+                source_type: MemorySourceType::LongTermProject,
+            },
+        ];
+        // Context: strong signal about memory/recall/TF-IDF — matches "memory TF-IDF recall" entry.
+        let session_context = "### Session Goal\n- memory recall optimisation TF-IDF ranking\n\
+                               ### Active Topic\n- memory TF-IDF ranking strategy\n";
+        two_phase_rerank(&mut results, Some(session_context));
+        assert_eq!(
+            results[0].title,
+            "memory TF-IDF recall",
+            "context-matching entry must rank first after Phase 2 rerank; got: {:?}",
+            results
+                .iter()
+                .map(|r| (&r.title, r.score))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn two_phase_rerank_blends_scores_70_30() {
+        // Verify the blending formula: new_score = original * 0.7 + ctx * 0.3
+        // Entry with known original score and zero context overlap → score * 0.7.
+        let original_score = 1.0_f64;
+        let mut results = vec![MemoryQueryMatch {
+            title: "no-ctx-match".to_string(),
+            path: "x.md".to_string(),
+            breadcrumb: vec![],
+            excerpt: "qzzqzzqzz unique gibberish".to_string(),
+            score: original_score,
+            match_type: "summary".to_string(),
+            source_type: MemorySourceType::LongTermProject,
+        }];
+        // Context is completely unrelated so ctx_score ≈ 0.
+        let unrelated_ctx = "### Session Goal\n- aaaabbbbcccc unrelated\n";
+        two_phase_rerank(&mut results, Some(unrelated_ctx));
+        // Score should have decreased (0.7 * 1.0 + 0.3 * ~0 < 1.0).
+        assert!(
+            results[0].score < original_score,
+            "score must decrease when context is unrelated; got {}",
+            results[0].score
+        );
+    }
 }
