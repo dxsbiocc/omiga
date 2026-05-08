@@ -30,6 +30,8 @@ const OPERATOR_MAX_MAX_ATTEMPTS: u32 = 5;
 const OPERATOR_CACHE_SCAN_LIMIT: usize = 200;
 const OPERATOR_STRUCTURED_OUTPUTS_FILE: &str = "outputs.json";
 const OPERATOR_STRUCTURED_OUTPUTS_MAX_BYTES: u64 = 1024 * 1024;
+const OPERATOR_PREFLIGHT_MAX_QUESTIONS: usize = 12;
+const OPERATOR_PREFLIGHT_MAX_OPTIONS: usize = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -185,6 +187,8 @@ pub struct OperatorPreflightQuestionSpec {
 #[serde(rename_all = "camelCase")]
 pub struct OperatorPreflightAskWhen {
     #[serde(default)]
+    pub always: bool,
+    #[serde(default)]
     pub missing: bool,
     #[serde(default)]
     pub empty: bool,
@@ -200,6 +204,10 @@ pub struct OperatorPreflightOptionSpec {
     pub value: JsonValue,
     #[serde(default)]
     pub preview: Option<String>,
+    #[serde(default)]
+    pub custom: bool,
+    #[serde(default, rename = "customPlaceholder")]
+    pub custom_placeholder: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -650,8 +658,10 @@ fn validate_operator_preflight(spec: &OperatorSpec) -> Result<(), String> {
     let Some(preflight) = &spec.preflight else {
         return Ok(());
     };
-    if preflight.questions.len() > 4 {
-        return Err("operator preflight.questions supports at most 4 questions".to_string());
+    if preflight.questions.len() > OPERATOR_PREFLIGHT_MAX_QUESTIONS {
+        return Err(format!(
+            "operator preflight.questions supports at most {OPERATOR_PREFLIGHT_MAX_QUESTIONS} questions"
+        ));
     }
     let mut seen_questions = HashSet::new();
     for question in &preflight.questions {
@@ -676,9 +686,9 @@ fn validate_operator_preflight(spec: &OperatorSpec) -> Result<(), String> {
         if question.header.trim().is_empty() {
             return Err("operator preflight question header must not be empty".to_string());
         }
-        if question.options.len() < 2 || question.options.len() > 4 {
+        if question.options.len() < 2 || question.options.len() > OPERATOR_PREFLIGHT_MAX_OPTIONS {
             return Err(format!(
-                "operator preflight question `{}` must declare 2-4 options",
+                "operator preflight question `{}` must declare 2-{OPERATOR_PREFLIGHT_MAX_OPTIONS} options",
                 question.question
             ));
         }
@@ -694,6 +704,18 @@ fn validate_operator_preflight(spec: &OperatorSpec) -> Result<(), String> {
                 return Err(format!(
                     "operator preflight question `{}` repeats option label `{}`",
                     question.question, option.label
+                ));
+            }
+            if question.multi_select && option.custom {
+                return Err(format!(
+                    "operator preflight question `{}` cannot use custom options with multiSelect",
+                    question.question
+                ));
+            }
+            if !option.custom && option.custom_placeholder.is_some() {
+                return Err(format!(
+                    "operator preflight question `{}` has customPlaceholder on a non-custom option",
+                    question.question
                 ));
             }
         }
@@ -1148,20 +1170,21 @@ pub fn operator_tool_schema(operator: ResolvedOperator) -> ToolSchema {
 
 pub fn operator_parameters_schema(spec: &OperatorSpec) -> JsonValue {
     let mut properties = JsonMap::new();
+    let preflight_questions = preflight_question_text_by_param(spec);
     properties.insert(
         "inputs".to_string(),
-        fields_object_schema(&spec.interface.inputs, true),
+        fields_object_schema(&spec.interface.inputs, true, None),
     );
     properties.insert(
         "params".to_string(),
-        fields_object_schema(&spec.interface.params, true),
+        fields_object_schema(&spec.interface.params, true, Some(&preflight_questions)),
     );
     properties.insert(
         "resources".to_string(),
         resources_object_schema(&spec.resources),
     );
     let mut required = vec![JsonValue::String("inputs".to_string())];
-    if has_caller_required_fields(&spec.interface.params) {
+    if has_caller_required_fields(&spec.interface.params, Some(&preflight_questions)) {
         required.push(JsonValue::String("params".to_string()));
     }
     json!({
@@ -1172,23 +1195,53 @@ pub fn operator_parameters_schema(spec: &OperatorSpec) -> JsonValue {
     })
 }
 
-fn has_caller_required_fields(fields: &BTreeMap<String, OperatorFieldSpec>) -> bool {
-    fields
-        .values()
-        .any(|field| field.required && field.default.is_none())
+fn preflight_question_text_by_param(spec: &OperatorSpec) -> BTreeMap<String, String> {
+    spec.preflight
+        .as_ref()
+        .map(|preflight| {
+            preflight
+                .questions
+                .iter()
+                .map(|question| (question.param.clone(), question.question.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn has_caller_required_fields(
+    fields: &BTreeMap<String, OperatorFieldSpec>,
+    preflight_questions: Option<&BTreeMap<String, String>>,
+) -> bool {
+    fields.iter().any(|(name, field)| {
+        field.required
+            && field.default.is_none()
+            && !preflight_questions
+                .map(|questions| questions.contains_key(name))
+                .unwrap_or(false)
+    })
 }
 
 fn fields_object_schema(
     fields: &BTreeMap<String, OperatorFieldSpec>,
     include_required: bool,
+    preflight_questions: Option<&BTreeMap<String, String>>,
 ) -> JsonValue {
     let mut properties = JsonMap::new();
     let mut required = Vec::new();
     for (name, field) in fields {
-        if include_required && field.required && field.default.is_none() {
+        let is_preflight_answered = preflight_questions
+            .map(|questions| questions.contains_key(name))
+            .unwrap_or(false);
+        if include_required && field.required && field.default.is_none() && !is_preflight_answered {
             required.push(JsonValue::String(name.clone()));
         }
-        properties.insert(name.clone(), field_schema(field));
+        properties.insert(
+            name.clone(),
+            field_schema(
+                field,
+                preflight_questions.and_then(|questions| questions.get(name)),
+            ),
+        );
     }
     let mut schema = JsonMap::new();
     schema.insert("type".to_string(), JsonValue::String("object".to_string()));
@@ -1200,7 +1253,7 @@ fn fields_object_schema(
     JsonValue::Object(schema)
 }
 
-fn field_schema(field: &OperatorFieldSpec) -> JsonValue {
+fn field_schema(field: &OperatorFieldSpec, preflight_question: Option<&String>) -> JsonValue {
     let mut schema = JsonMap::new();
     match field.kind {
         OperatorFieldKind::Integer => {
@@ -1223,7 +1276,7 @@ fn field_schema(field: &OperatorFieldSpec) -> JsonValue {
             schema.insert("type".to_string(), JsonValue::String("string".to_string()));
         }
     }
-    if let Some(description) = field_description(field) {
+    if let Some(description) = field_description(field, preflight_question.map(String::as_str)) {
         schema.insert("description".to_string(), JsonValue::String(description));
     }
     if let Some(default) = &field.default {
@@ -1244,10 +1297,18 @@ fn field_schema(field: &OperatorFieldSpec) -> JsonValue {
     JsonValue::Object(schema)
 }
 
-fn field_description(field: &OperatorFieldSpec) -> Option<String> {
+fn field_description(
+    field: &OperatorFieldSpec,
+    preflight_question: Option<&str>,
+) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(description) = &field.description {
         parts.push(description.clone());
+    }
+    if let Some(question) = preflight_question {
+        parts.push(format!(
+            "Ask state: Omiga can collect this from the user before execution (`{question}`); do not guess a value unless the user already specified it."
+        ));
     }
     if field.kind.is_path_like() {
         parts.push(
@@ -1336,25 +1397,24 @@ pub fn apply_operator_preflight_answers(
         let Some(answer) = answers.get(question.question.trim()) else {
             continue;
         };
+        let field = resolved
+            .spec
+            .interface
+            .params
+            .get(question.param.trim())
+            .ok_or_else(|| {
+                format!(
+                    "Preflight question references unknown operator parameter `{}`",
+                    question.param
+                )
+            })?;
         let labels = preflight_answer_labels(answer, question.multi_select);
         if labels.is_empty() {
             continue;
         }
         let values = labels
             .iter()
-            .map(|label| {
-                question
-                    .options
-                    .iter()
-                    .find(|option| option.label.trim() == label)
-                    .map(|option| option.value.clone())
-                    .ok_or_else(|| {
-                        format!(
-                            "Unsupported preflight choice `{}` for operator parameter `{}`",
-                            label, question.param
-                        )
-                    })
-            })
+            .map(|label| preflight_value_for_answer(question, field, label))
             .collect::<Result<Vec<_>, _>>()?;
         let value = if question.multi_select {
             JsonValue::Array(values)
@@ -1374,6 +1434,9 @@ fn preflight_question_should_ask(
     question: &OperatorPreflightQuestionSpec,
     params: Option<&JsonMap<String, JsonValue>>,
 ) -> bool {
+    if question.ask_when.always {
+        return true;
+    }
     let value = params.and_then(|params| params.get(&question.param));
     let missing = value.is_none() || matches!(value, Some(JsonValue::Null));
     if question.ask_when.missing && missing {
@@ -1418,7 +1481,125 @@ fn ask_option_from_spec(
         label: option.label.clone(),
         description: option.description.clone(),
         preview: option.preview.clone(),
+        custom: option.custom,
+        custom_placeholder: option.custom_placeholder.clone(),
     }
+}
+
+fn preflight_value_for_answer(
+    question: &OperatorPreflightQuestionSpec,
+    field: &OperatorFieldSpec,
+    answer_label: &str,
+) -> Result<JsonValue, String> {
+    if let Some(option) = question
+        .options
+        .iter()
+        .find(|option| option.label.trim() == answer_label)
+    {
+        if option.custom {
+            return Err(format!(
+                "Custom preflight choice `{}` for operator parameter `{}` needs a value",
+                option.label, question.param
+            ));
+        }
+        return Ok(option.value.clone());
+    }
+
+    for option in question.options.iter().filter(|option| option.custom) {
+        if let Some(raw_value) = strip_custom_answer_value(answer_label, option.label.trim()) {
+            return parse_custom_preflight_value(field, raw_value).map_err(|err| {
+                format!(
+                    "Invalid custom value for operator parameter `{}`: {err}",
+                    question.param
+                )
+            });
+        }
+    }
+
+    Err(format!(
+        "Unsupported preflight choice `{}` for operator parameter `{}`",
+        answer_label, question.param
+    ))
+}
+
+fn strip_custom_answer_value<'a>(answer: &'a str, label: &str) -> Option<&'a str> {
+    let answer = answer.trim();
+    let rest = answer.strip_prefix(label)?.trim_start();
+    let rest = rest
+        .strip_prefix(':')
+        .or_else(|| rest.strip_prefix('：'))?
+        .trim();
+    (!rest.is_empty()).then_some(rest)
+}
+
+fn parse_custom_preflight_value(field: &OperatorFieldSpec, raw: &str) -> Result<JsonValue, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("value is empty".to_string());
+    }
+    let value = match field.kind {
+        OperatorFieldKind::Integer => {
+            json!(raw
+                .parse::<i64>()
+                .map_err(|_| "expected an integer".to_string())?)
+        }
+        OperatorFieldKind::Number => {
+            let parsed = raw
+                .parse::<f64>()
+                .map_err(|_| "expected a number".to_string())?;
+            if !parsed.is_finite() {
+                return Err("expected a finite number".to_string());
+            }
+            json!(parsed)
+        }
+        OperatorFieldKind::Boolean => match raw.to_ascii_lowercase().as_str() {
+            "true" | "yes" | "y" | "1" | "是" => JsonValue::Bool(true),
+            "false" | "no" | "n" | "0" | "否" => JsonValue::Bool(false),
+            _ => return Err("expected true/false".to_string()),
+        },
+        OperatorFieldKind::Json => {
+            serde_json::from_str(raw).map_err(|err| format!("expected valid JSON: {err}"))?
+        }
+        _ => match field.enum_values.iter().find(|value| match value {
+            JsonValue::String(candidate) => candidate.trim().eq_ignore_ascii_case(raw),
+            _ => *value == &json!(raw),
+        }) {
+            Some(value) => value.clone(),
+            None if !field.enum_values.is_empty() => {
+                let allowed = field
+                    .enum_values
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!("expected one of {allowed}"));
+            }
+            None => JsonValue::String(raw.to_string()),
+        },
+    };
+
+    validate_custom_preflight_bounds(field, &value)?;
+    Ok(value)
+}
+
+fn validate_custom_preflight_bounds(
+    field: &OperatorFieldSpec,
+    value: &JsonValue,
+) -> Result<(), String> {
+    let Some(number) = value.as_f64() else {
+        return Ok(());
+    };
+    if let Some(minimum) = field.minimum {
+        if number < minimum {
+            return Err(format!("must be >= {minimum}"));
+        }
+    }
+    if let Some(maximum) = field.maximum {
+        if number > maximum {
+            return Err(format!("must be <= {maximum}"));
+        }
+    }
+    Ok(())
 }
 
 fn preflight_answer_labels(answer: &JsonValue, multi_select: bool) -> Vec<String> {
@@ -1618,6 +1799,8 @@ struct OperatorRunResult {
     run_context: Option<OperatorRunContext>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provenance_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    export_dir: Option<String>,
     outputs: BTreeMap<String, Vec<ArtifactRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     structured_outputs: Option<JsonValue>,
@@ -1735,6 +1918,8 @@ pub struct OperatorRunSummary {
     pub updated_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export_dir: Option<String>,
     pub output_count: usize,
     pub structured_output_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2419,6 +2604,24 @@ async fn record_operator_cache_hit(
         source_run_id: Some(hit.run_id.clone()),
         source_run_dir: Some(hit.run_dir.clone()),
     };
+    let export_dir = if surface.kind == OperatorExecutionSurfaceKind::Local {
+        let source_out = PathBuf::from(&hit.run_dir).join("out");
+        Some(
+            export_local_operator_results(ctx, resolved, run_id, &source_out)
+                .map_err(|error| error.with_run_dir(run_dir))?,
+        )
+    } else {
+        Some(
+            export_environment_operator_results(
+                ctx,
+                resolved,
+                run_id,
+                &format!("{}/out", hit.run_dir),
+            )
+            .await
+            .map_err(|error| error.with_run_dir(run_dir))?,
+        )
+    };
     let result = OperatorRunResult {
         status: "succeeded".to_string(),
         run_id: run_id.to_string(),
@@ -2434,6 +2637,7 @@ async fn record_operator_cache_hit(
         } else {
             format!("{run_dir}/provenance.json")
         }),
+        export_dir,
         outputs: hit.result.outputs.clone(),
         structured_outputs: hit.result.structured_outputs.clone(),
         effective_inputs,
@@ -3689,6 +3893,19 @@ async fn execute_local(
                 return Err(error);
             }
         };
+    update_local_status(&run_path, "exporting_results", None, Some(&status_metadata))?;
+    let export_dir = match export_local_operator_results(ctx, resolved, run_id, &out) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            let error = if error.run_dir.is_none() {
+                error.with_run_dir(run_dir)
+            } else {
+                error
+            };
+            update_local_status(&run_path, "failed", Some(&error), Some(&status_metadata))?;
+            return Err(error);
+        }
+    };
     let provenance_path = run_path.join("provenance.json");
     let result = OperatorRunResult {
         status: "succeeded".to_string(),
@@ -3698,6 +3915,7 @@ async fn execute_local(
         run_dir: run_dir.to_string(),
         run_context,
         provenance_path: Some(provenance_path.to_string_lossy().into_owned()),
+        export_dir,
         outputs,
         structured_outputs,
         effective_inputs,
@@ -3811,6 +4029,36 @@ async fn execute_in_environment(
             return Err(error);
         }
     };
+    update_environment_status(
+        ctx,
+        run_dir,
+        "exporting_results",
+        None,
+        Some(&status_metadata),
+    )
+    .await?;
+    let export_dir =
+        match export_environment_operator_results(ctx, resolved, run_id, &format!("{run_dir}/out"))
+            .await
+        {
+            Ok(path) => Some(path),
+            Err(error) => {
+                let error = if error.run_dir.is_none() {
+                    error.with_run_dir(run_dir)
+                } else {
+                    error
+                };
+                update_environment_status(
+                    ctx,
+                    run_dir,
+                    "failed",
+                    Some(&error),
+                    Some(&status_metadata),
+                )
+                .await?;
+                return Err(error);
+            }
+        };
     let result = OperatorRunResult {
         status: "succeeded".to_string(),
         run_id: run_id.to_string(),
@@ -3819,6 +4067,7 @@ async fn execute_in_environment(
         run_dir: run_dir.to_string(),
         run_context,
         provenance_path: Some(format!("{run_dir}/provenance.json")),
+        export_dir,
         outputs,
         structured_outputs,
         effective_inputs,
@@ -4336,6 +4585,163 @@ async fn collect_environment_outputs(
         outputs.insert(name.clone(), artifacts);
     }
     Ok(outputs)
+}
+
+fn safe_operator_export_component(value: &str, fallback: &str) -> String {
+    let mut out = value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    out = out
+        .trim_matches(|ch| matches!(ch, '.' | '_' | '-' | ' '))
+        .to_string();
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out
+    }
+}
+
+fn operator_export_relative_path(resolved: &ResolvedOperator, run_id: &str) -> String {
+    let alias = safe_operator_export_component(&resolved.alias, "operator");
+    let run = safe_operator_export_component(run_id, "run");
+    format!("operator-results/{alias}/{run}")
+}
+
+fn local_operator_export_dir(
+    ctx: &crate::domain::tools::ToolContext,
+    resolved: &ResolvedOperator,
+    run_id: &str,
+) -> PathBuf {
+    ctx.project_root
+        .join(operator_export_relative_path(resolved, run_id))
+}
+
+fn environment_operator_export_dir(
+    ctx: &crate::domain::tools::ToolContext,
+    resolved: &ResolvedOperator,
+    run_id: &str,
+) -> String {
+    crate::domain::tools::env_store::remote_path(
+        ctx,
+        &operator_export_relative_path(resolved, run_id),
+    )
+}
+
+fn copy_dir_contents(source_dir: &Path, target_dir: &Path) -> Result<(), String> {
+    if !source_dir.is_dir() {
+        return Err(format!(
+            "operator output directory {} does not exist",
+            source_dir.display()
+        ));
+    }
+    if target_dir.exists() {
+        fs::remove_dir_all(target_dir).map_err(|err| {
+            format!(
+                "remove previous exported results {}: {err}",
+                target_dir.display()
+            )
+        })?;
+    }
+    fs::create_dir_all(target_dir).map_err(|err| {
+        format!(
+            "create exported results dir {}: {err}",
+            target_dir.display()
+        )
+    })?;
+    for entry in fs::read_dir(source_dir).map_err(|err| {
+        format!(
+            "read operator output directory {}: {err}",
+            source_dir.display()
+        )
+    })? {
+        let entry = entry.map_err(|err| format!("read operator output entry: {err}"))?;
+        let source = entry.path();
+        let target = target_dir.join(entry.file_name());
+        copy_path_recursively(&source, &target)?;
+    }
+    Ok(())
+}
+
+fn copy_path_recursively(source: &Path, target: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|err| format!("read metadata for {}: {err}", source.display()))?;
+    if metadata.is_dir() {
+        fs::create_dir_all(target)
+            .map_err(|err| format!("create exported subdir {}: {err}", target.display()))?;
+        for entry in fs::read_dir(source)
+            .map_err(|err| format!("read output subdir {}: {err}", source.display()))?
+        {
+            let entry = entry.map_err(|err| format!("read output subdir entry: {err}"))?;
+            copy_path_recursively(&entry.path(), &target.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    if metadata.is_file() || metadata.file_type().is_symlink() {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("create exported parent {}: {err}", parent.display()))?;
+        }
+        fs::copy(source, target).map_err(|err| {
+            format!(
+                "copy operator result {} to {}: {err}",
+                source.display(),
+                target.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn export_local_operator_results(
+    ctx: &crate::domain::tools::ToolContext,
+    resolved: &ResolvedOperator,
+    run_id: &str,
+    source_out_dir: &Path,
+) -> Result<String, OperatorToolError> {
+    let export_dir = local_operator_export_dir(ctx, resolved, run_id);
+    copy_dir_contents(source_out_dir, &export_dir).map_err(|err| {
+        OperatorToolError::new("result_export_failed", false, err)
+            .with_suggested_action("Check session workspace write permissions and retry.")
+    })?;
+    Ok(export_dir.to_string_lossy().into_owned())
+}
+
+async fn export_environment_operator_results(
+    ctx: &crate::domain::tools::ToolContext,
+    resolved: &ResolvedOperator,
+    run_id: &str,
+    source_out_dir: &str,
+) -> Result<String, OperatorToolError> {
+    let export_dir = environment_operator_export_dir(ctx, resolved, run_id);
+    let command = format!(
+        "if [ ! -d {} ]; then echo 'operator output directory missing' >&2; exit 2; fi\nrm -rf {}\nmkdir -p {}\ncp -R {}/. {}/",
+        sh_quote(source_out_dir),
+        sh_quote(&export_dir),
+        sh_quote(&export_dir),
+        sh_quote(source_out_dir),
+        sh_quote(&export_dir),
+    );
+    let result = execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 60).await?;
+    if result.returncode != 0 {
+        return Err(OperatorToolError::new(
+            "result_export_failed",
+            false,
+            format!(
+                "copy operator results to session workspace failed with exit code {}.",
+                result.returncode
+            ),
+        )
+        .with_suggested_action("Check session workspace write permissions and retry."));
+    }
+    Ok(export_dir)
 }
 
 fn read_local_structured_outputs(
@@ -5713,6 +6119,14 @@ fn summarize_operator_run_documents(
     let provenance_path_value = provenance.as_ref().and_then(|value| {
         json_string_at(value, &["provenancePath"]).or(default_provenance_path.clone())
     });
+    let export_dir = provenance
+        .as_ref()
+        .and_then(|value| json_string_at(value, &["exportDir"]))
+        .or_else(|| {
+            status_doc
+                .as_ref()
+                .and_then(|value| json_string_at(value, &["exportDir"]))
+        });
     let output_count = provenance.as_ref().map(output_artifact_count).unwrap_or(0);
     let structured_output_count = provenance
         .as_ref()
@@ -5809,6 +6223,7 @@ fn summarize_operator_run_documents(
             run_dir: run_dir_value,
             updated_at,
             provenance_path: provenance_path_value,
+            export_dir,
             output_count,
             structured_output_count,
             error_message,
@@ -6332,6 +6747,13 @@ bindings:
                             .iter()
                             .any(|option| option.value == json!("deseq2"))
                 }));
+                assert!(preflight.questions.iter().any(|question| {
+                    question.param == "pvalue_threshold"
+                        && question
+                            .options
+                            .iter()
+                            .any(|option| option.custom && option.custom_placeholder.is_some())
+                }));
                 let schema = operator_parameters_schema(operator);
                 assert!(schema["required"]
                     .as_array()
@@ -6341,10 +6763,17 @@ bindings:
                 let required_params = schema["properties"]["params"]["required"]
                     .as_array()
                     .unwrap();
-                assert!(required_params.iter().any(|value| value == "de_method"));
-                assert!(required_params
+                assert!(required_params.iter().any(|value| value == "group_column"));
+                assert!(!required_params.iter().any(|value| value == "de_method"));
+                assert!(!required_params
                     .iter()
                     .any(|value| value == "input_data_type"));
+                assert!(
+                    schema["properties"]["params"]["properties"]["de_method"]["description"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Ask state")
+                );
             }
             assert_eq!(
                 operator.source.source_plugin,
@@ -6362,6 +6791,7 @@ bindings:
             header: "Method".to_string(),
             multi_select: false,
             ask_when: OperatorPreflightAskWhen {
+                always: false,
                 missing: true,
                 empty: true,
                 values: vec![json!("auto")],
@@ -6372,12 +6802,16 @@ bindings:
                     description: "Let the operator choose.".to_string(),
                     value: json!("auto"),
                     preview: None,
+                    custom: false,
+                    custom_placeholder: None,
                 },
                 OperatorPreflightOptionSpec {
                     label: "Manual".to_string(),
                     description: "Use a fixed method.".to_string(),
                     value: json!("manual"),
                     preview: None,
+                    custom: false,
+                    custom_placeholder: None,
                 },
             ],
         };
@@ -6400,6 +6834,67 @@ bindings:
             preflight_answer_labels(&json!("Auto, Manual"), true),
             vec!["Auto".to_string(), "Manual".to_string()]
         );
+
+        let always_question = OperatorPreflightQuestionSpec {
+            ask_when: OperatorPreflightAskWhen {
+                always: true,
+                missing: false,
+                empty: false,
+                values: Vec::new(),
+            },
+            ..question
+        };
+        assert!(preflight_question_should_ask(
+            &always_question,
+            Some(&manual_params)
+        ));
+    }
+
+    #[test]
+    fn preflight_custom_answers_parse_against_param_type() {
+        let field = OperatorFieldSpec {
+            kind: OperatorFieldKind::Number,
+            minimum: Some(0.0),
+            maximum: Some(1.0),
+            ..OperatorFieldSpec::default()
+        };
+        let question = OperatorPreflightQuestionSpec {
+            id: Some("fdr".to_string()),
+            param: "pvalue_threshold".to_string(),
+            question: "Pick FDR?".to_string(),
+            header: "FDR".to_string(),
+            multi_select: false,
+            ask_when: OperatorPreflightAskWhen {
+                always: true,
+                missing: false,
+                empty: false,
+                values: Vec::new(),
+            },
+            options: vec![
+                OperatorPreflightOptionSpec {
+                    label: "FDR 0.05".to_string(),
+                    description: "Default".to_string(),
+                    value: json!(0.05),
+                    preview: None,
+                    custom: false,
+                    custom_placeholder: None,
+                },
+                OperatorPreflightOptionSpec {
+                    label: "自定义".to_string(),
+                    description: "Typed value".to_string(),
+                    value: json!(0.05),
+                    preview: None,
+                    custom: true,
+                    custom_placeholder: Some("0.05".to_string()),
+                },
+            ],
+        };
+
+        assert_eq!(
+            preflight_value_for_answer(&question, &field, "自定义：0.2").unwrap(),
+            json!(0.2)
+        );
+        assert!(preflight_value_for_answer(&question, &field, "自定义：2").is_err());
     }
 
     #[test]
@@ -7507,6 +8002,14 @@ execution:
         let report_path = Path::new(&result.outputs["report"][0].path);
         assert_eq!(
             fs::read_to_string(report_path).unwrap(),
+            "hello operator smoke\nhello operator smoke\n"
+        );
+        let export_dir = result
+            .export_dir
+            .as_deref()
+            .expect("successful runs should export results to the session workspace");
+        assert_eq!(
+            fs::read_to_string(Path::new(export_dir).join("operator-report.txt")).unwrap(),
             "hello operator smoke\nhello operator smoke\n"
         );
         assert!(Path::new(&format!("{}/status.json", result.run_dir)).is_file());

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   PERMISSION_CONNECTOR_PREVIEW_MAX_HEIGHT,
+  PERMISSION_PROMPT_ACTION_BUTTON_FONT_SIZE,
+  PERMISSION_PROMPT_ACTION_BUTTON_HEIGHT,
   PERMISSION_PROMPT_ROOT_OVERFLOW_Y,
   PERMISSION_RUN_CONTENT_MAX_HEIGHT,
   inferIntent,
@@ -114,5 +116,7 @@ describe("PermissionPromptBar connector intent", () => {
     expect(PERMISSION_CONNECTOR_PREVIEW_MAX_HEIGHT).toBe(
       "clamp(96px, 18vh, 180px)",
     );
+    expect(PERMISSION_PROMPT_ACTION_BUTTON_HEIGHT).toBe(32);
+    expect(PERMISSION_PROMPT_ACTION_BUTTON_FONT_SIZE).toBe("0.8rem");
   });
 });

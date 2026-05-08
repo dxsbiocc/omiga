@@ -11,15 +11,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::pin::Pin;
 
-const MAX_QUESTIONS: usize = 4;
+const MAX_QUESTIONS: usize = 12;
 const MIN_QUESTIONS: usize = 1;
-const MAX_OPTIONS: usize = 4;
+const MAX_OPTIONS: usize = 5;
 const MIN_OPTIONS: usize = 2;
 const HEADER_MAX_CHARS: usize = 12;
 
 pub const DESCRIPTION: &str = r#"Ask the user multiple-choice questions to gather information, resolve ambiguity, or offer options.
 
-Provide 1–4 questions; each question has 2–4 options with short labels and longer descriptions. Optional `preview` on an option helps compare concrete artifacts (markdown or HTML fragment per product guidance).
+Ask as many focused questions as the task genuinely needs, instead of forcing a fixed count. Keep simple tasks to one or two questions, and split complex workflows into a concise sequence. Each question has 2–5 options with short labels and longer descriptions. Optional `preview` on an option helps compare concrete artifacts (markdown or HTML fragment per product guidance). Mark one option as `custom: true` when the UI should collect a user-supplied value.
 
 In the Omiga app, the chat UI shows these questions and waits for your selections before the agent continues.
 
@@ -31,6 +31,10 @@ pub struct QuestionOption {
     pub description: String,
     #[serde(default)]
     pub preview: Option<String>,
+    #[serde(default)]
+    pub custom: bool,
+    #[serde(default, rename = "customPlaceholder")]
+    pub custom_placeholder: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +127,17 @@ fn validate(args: &AskUserQuestionArgs) -> Result<(), ToolError> {
                     message: "`preview` is only supported when multiSelect is false.".to_string(),
                 });
             }
+            if q.multi_select && o.custom {
+                return Err(ToolError::InvalidArguments {
+                    message: "`custom` options are only supported when multiSelect is false."
+                        .to_string(),
+                });
+            }
+            if !o.custom && o.custom_placeholder.is_some() {
+                return Err(ToolError::InvalidArguments {
+                    message: "`customPlaceholder` is only supported on custom options.".to_string(),
+                });
+            }
         }
     }
 
@@ -205,7 +220,7 @@ pub fn schema() -> ToolSchema {
                 "questions": {
                     "type": "array",
                     "minItems": 1,
-                    "maxItems": 4,
+                    "maxItems": 12,
                     "items": {
                         "type": "object",
                         "properties": {
@@ -215,13 +230,15 @@ pub fn schema() -> ToolSchema {
                             "options": {
                                 "type": "array",
                                 "minItems": 2,
-                                "maxItems": 4,
+                                "maxItems": 5,
                                 "items": {
                                     "type": "object",
                                     "properties": {
                                         "label": { "type": "string" },
                                         "description": { "type": "string" },
-                                        "preview": { "type": "string", "description": "Optional focused preview (single-select only)" }
+                                        "preview": { "type": "string", "description": "Optional focused preview (single-select only)" },
+                                        "custom": { "type": "boolean", "description": "If true, the UI asks the user to type a custom value for this option" },
+                                        "customPlaceholder": { "type": "string", "description": "Placeholder shown for the custom value input" }
                                     },
                                     "required": ["label", "description"]
                                 }
@@ -253,11 +270,15 @@ mod tests {
                     label: "tokio".to_string(),
                     description: "Async runtime".to_string(),
                     preview: None,
+                    custom: false,
+                    custom_placeholder: None,
                 },
                 QuestionOption {
                     label: "async-std".to_string(),
                     description: "Alternative".to_string(),
                     preview: None,
+                    custom: false,
+                    custom_placeholder: None,
                 },
             ],
         }
@@ -267,6 +288,25 @@ mod tests {
     fn validate_ok() {
         let args = AskUserQuestionArgs {
             questions: vec![sample_question()],
+            answers: None,
+            annotations: None,
+            metadata: None,
+        };
+        validate(&args).unwrap();
+    }
+
+    #[test]
+    fn validate_allows_task_sized_question_sets() {
+        let questions = (0..6)
+            .map(|idx| {
+                let mut q = sample_question();
+                q.question = format!("Decision {}?", idx + 1);
+                q.header = format!("D{}", idx + 1);
+                q
+            })
+            .collect();
+        let args = AskUserQuestionArgs {
+            questions,
             answers: None,
             annotations: None,
             metadata: None,
@@ -298,11 +338,15 @@ mod tests {
                         label: "A".to_string(),
                         description: "a".to_string(),
                         preview: Some("x".to_string()),
+                        custom: false,
+                        custom_placeholder: None,
                     },
                     QuestionOption {
                         label: "B".to_string(),
                         description: "b".to_string(),
                         preview: None,
+                        custom: false,
+                        custom_placeholder: None,
                     },
                 ],
             }],

@@ -213,6 +213,7 @@ describe("summarizeOperatorRunResult", () => {
           sourcePlugin: "operator-smoke@omiga-curated",
         },
         runDir: "/project/.omiga/runs/oprun_20260506_smoke",
+        exportDir: "/project/operator-results/write_text_report/oprun_20260506_smoke",
         runContext: {
           kind: "smoke",
           smokeTestId: "default",
@@ -248,6 +249,7 @@ describe("summarizeOperatorRunResult", () => {
       retryable: false,
       suggestedAction: "Inspect stderr.",
       stderrTail: "bad flag\n",
+      exportDir: "/project/operator-results/write_text_report/oprun_20260506_smoke",
       outputCount: 1,
       structuredOutputCount: 2,
       cacheKey: "sha256:cache-key",

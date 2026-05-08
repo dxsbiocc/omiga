@@ -823,6 +823,7 @@ export function operatorRunStatusColor(
     case "running":
     case "created":
     case "collecting_outputs":
+    case "exporting_results":
       return "info";
     case "cancelled":
     case "timeout":
@@ -889,6 +890,14 @@ function operatorRunCacheState(
   };
 }
 
+function operatorRunExportDir(
+  run: OperatorRunSummary,
+  detail?: OperatorRunDetail | null,
+): string | null {
+  const value = detail?.document?.exportDir;
+  return typeof value === "string" && value.trim() ? value : run.exportDir ?? null;
+}
+
 export function operatorStructuredOutputEntries(
   detail?: OperatorRunDetail | null,
 ): Array<[string, unknown]> {
@@ -945,6 +954,7 @@ export function operatorRunDiagnosticsPayload(
         smokeTestName: run.smokeTestName,
         runDir: run.runDir,
         provenancePath: run.provenancePath,
+        exportDir: run.exportDir,
         outputCount: run.outputCount,
         updatedAt: run.updatedAt,
       },
@@ -2226,6 +2236,7 @@ function OperatorRunDetailsDialog({
     ? JSON.stringify(Object.fromEntries(structuredOutputEntries), null, 2)
     : "";
   const cacheState = operatorRunCacheState(run, detail);
+  const exportDir = operatorRunExportDir(run, detail);
   return (
     <Dialog open={Boolean(run)} onClose={onClose} fullWidth maxWidth="md" aria-labelledby="operator-run-details-title">
       <DialogTitle id="operator-run-details-title" sx={{ px: 3, py: 2, pr: 7 }}>
@@ -2285,6 +2296,11 @@ function OperatorRunDetailsDialog({
           <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
             Run dir: {detail?.runDir || run.runDir}
           </Typography>
+          {exportDir && (
+            <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
+              Exported results: {exportDir}
+            </Typography>
+          )}
           {detail?.sourcePath && (
             <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
               Source: {detail.sourcePath}

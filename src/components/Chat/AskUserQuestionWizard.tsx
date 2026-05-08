@@ -8,6 +8,7 @@ import {
   Radio,
   RadioGroup,
   Stack,
+  TextField,
   Typography,
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
@@ -19,6 +20,8 @@ export interface AskUserQuestionOption {
   label: string;
   description: string;
   preview?: string;
+  custom?: boolean;
+  customPlaceholder?: string;
 }
 
 export interface AskUserQuestionItem {
@@ -41,7 +44,13 @@ function isQuestionAnswered(
 ): boolean {
   const qt = q.question.trim();
   const v = (selections[qt] ?? "").trim();
-  if (!q.multiSelect) return Boolean(v);
+  if (!q.multiSelect) {
+    const selected = askUserSelectedOption(q, v);
+    if (selected?.custom) {
+      return Boolean(askUserCustomValue(v, selected.label));
+    }
+    return Boolean(selected);
+  }
   return parseMultiLabels(v).length > 0;
 }
 
@@ -204,18 +213,28 @@ export function AskUserQuestionWizard({
             </Stack>
           ) : (
             <RadioGroup
-              value={askUserSelectionRaw(selections, q.question.trim())}
+              value={askUserSelectedOptionLabel(
+                q,
+                askUserSelectionRaw(selections, q.question.trim()),
+              )}
               onChange={(_, v) =>
                 onSelectionsChange((prev) => ({
                   ...prev,
-                  [q.question.trim()]: v,
+                  [q.question.trim()]: q.options.find((opt) => opt.label === v)
+                    ?.custom
+                    ? formatAskUserCustomSelection(
+                        v,
+                        askUserCustomValue(prev[q.question.trim()] ?? "", v) ??
+                          "",
+                      )
+                    : v,
                 }))
               }
             >
               {q.options.map((opt) => {
+                const raw = askUserSelectionRaw(selections, q.question.trim());
                 const selected =
-                  askUserSelectionRaw(selections, q.question.trim()) ===
-                  opt.label;
+                  askUserSelectedOptionLabel(q, raw) === opt.label;
                 return (
                   <Box
                     key={opt.label}
@@ -253,6 +272,35 @@ export function AskUserQuestionWizard({
                         </Box>
                       }
                     />
+                    {selected && opt.custom ? (
+                      <TextField
+                        fullWidth
+                        size="small"
+                        value={askUserCustomValue(raw, opt.label) ?? ""}
+                        placeholder={
+                          opt.customPlaceholder ?? "输入自定义值后提交"
+                        }
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          onSelectionsChange((prev) => ({
+                            ...prev,
+                            [q.question.trim()]: formatAskUserCustomSelection(
+                              opt.label,
+                              value,
+                            ),
+                          }));
+                        }}
+                        sx={{
+                          mt: 0.5,
+                          ml: 3.75,
+                          width: "calc(100% - 30px)",
+                          "& .MuiInputBase-input": {
+                            py: 0.65,
+                            fontSize: 12,
+                          },
+                        }}
+                      />
+                    ) : null}
                   </Box>
                 );
               })}
@@ -379,4 +427,39 @@ function askUserSelectionRaw(
   qt: string,
 ): string {
   return selections[qt] ?? "";
+}
+
+function askUserSelectedOption(
+  q: AskUserQuestionItem,
+  raw: string,
+): AskUserQuestionOption | undefined {
+  const label = askUserSelectedOptionLabel(q, raw);
+  return q.options.find((opt) => opt.label === label);
+}
+
+function askUserSelectedOptionLabel(q: AskUserQuestionItem, raw: string): string {
+  const trimmed = raw.trim();
+  for (const opt of q.options) {
+    if (opt.custom && askUserCustomValue(trimmed, opt.label) !== null) {
+      return opt.label;
+    }
+  }
+  return trimmed;
+}
+
+function askUserCustomValue(raw: string, label: string): string | null {
+  const trimmed = raw.trim();
+  if (trimmed === label) return "";
+  for (const separator of [":", "："]) {
+    const prefix = `${label}${separator}`;
+    if (trimmed.startsWith(prefix)) {
+      return trimmed.slice(prefix.length).trimStart();
+    }
+  }
+  return null;
+}
+
+function formatAskUserCustomSelection(label: string, value: string): string {
+  const trimmed = value.trimStart();
+  return trimmed ? `${label}：${trimmed}` : label;
 }

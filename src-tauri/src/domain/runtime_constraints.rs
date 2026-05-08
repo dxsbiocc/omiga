@@ -696,17 +696,23 @@ fn build_clarification_first_block(
                         "Clarify the exact file, module, component, or surface that should change."
                             .to_string(),
                     preview: None,
+                    custom: false,
+                    custom_placeholder: None,
                 },
                 ask_user_question::QuestionOption {
                     label: "Outcome".to_string(),
                     description: "Clarify the exact behavior or result you want after the change."
                         .to_string(),
                     preview: None,
+                    custom: false,
+                    custom_placeholder: None,
                 },
                 ask_user_question::QuestionOption {
                     label: "Guardrails".to_string(),
                     description: "Clarify constraints, risks, or what must not change.".to_string(),
                     preview: None,
+                    custom: false,
+                    custom_placeholder: None,
                 },
             ],
         }],

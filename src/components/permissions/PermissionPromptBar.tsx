@@ -41,6 +41,8 @@ export const PERMISSION_RUN_CONTENT_MAX_HEIGHT =
 export const PERMISSION_CONNECTOR_PREVIEW_MAX_HEIGHT =
   "clamp(96px, 18vh, 180px)";
 export const PERMISSION_PROMPT_ROOT_OVERFLOW_Y = "visible";
+export const PERMISSION_PROMPT_ACTION_BUTTON_HEIGHT = 32;
+export const PERMISSION_PROMPT_ACTION_BUTTON_FONT_SIZE = "0.8rem";
 
 function firstString(v: unknown): string | null {
   if (typeof v === "string" && v.trim()) return v;
@@ -455,6 +457,20 @@ function ScrollableCodeBlock({
   );
 }
 
+const permissionActionButtonSx = {
+  height: PERMISSION_PROMPT_ACTION_BUTTON_HEIGHT,
+  minHeight: PERMISSION_PROMPT_ACTION_BUTTON_HEIGHT,
+  px: 1.35,
+  py: 0,
+  borderRadius: 1.25,
+  fontSize: PERMISSION_PROMPT_ACTION_BUTTON_FONT_SIZE,
+  lineHeight: 1.2,
+  "& .MuiButton-startIcon": {
+    ml: -0.25,
+    mr: 0.5,
+  },
+};
+
 /** 内联在输入框上方，非弹窗 */
 export const PermissionPromptBar: React.FC = () => {
   const { pendingRequest, approveRequest, denyRequest, error, clearError } =
@@ -686,6 +702,7 @@ export const PermissionPromptBar: React.FC = () => {
               color="inherit"
               variant="outlined"
               disabled={processing}
+              sx={permissionActionButtonSx}
               startIcon={
                 processingAction === "deny" ? (
                   <CircularProgress size={14} color="inherit" />
@@ -700,6 +717,7 @@ export const PermissionPromptBar: React.FC = () => {
               color={isDangerous ? "error" : "primary"}
               variant="outlined"
               disabled={processing}
+              sx={permissionActionButtonSx}
               startIcon={
                 processingAction === "session" ? (
                   <CircularProgress size={14} color="inherit" />
@@ -714,6 +732,7 @@ export const PermissionPromptBar: React.FC = () => {
               color={isDangerous ? "error" : "primary"}
               variant="contained"
               disabled={processing}
+              sx={permissionActionButtonSx}
               startIcon={
                 processingAction === "askEveryTime" ? (
                   <CircularProgress size={14} color="inherit" />

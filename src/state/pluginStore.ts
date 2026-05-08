@@ -199,6 +199,7 @@ export interface OperatorRunSummary {
   runDir: string;
   updatedAt?: string | null;
   provenancePath?: string | null;
+  exportDir?: string | null;
   outputCount: number;
   structuredOutputCount?: number;
   errorMessage?: string | null;
@@ -677,6 +678,7 @@ export function summarizeOperatorRunResult(result: Record<string, unknown>): Ope
     smokeTestName: stringField(runContext.smokeTestName),
     runDir,
     provenancePath: stringField(result.provenancePath),
+    exportDir: stringField(result.exportDir),
     outputCount: outputArtifactCount(result.outputs),
     structuredOutputCount: structuredOutputCount(result.structuredOutputs),
     errorMessage: stringField(error.message),
