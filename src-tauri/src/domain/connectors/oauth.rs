@@ -677,14 +677,12 @@ pub(crate) fn gmail_oauth_token() -> Option<String> {
         .flatten()
 }
 
-#[allow(dead_code)]
 fn gmail_oauth_refresh_token() -> Option<String> {
     secret_store::read_connector_secret("gmail", GMAIL_OAUTH_REFRESH_TOKEN_SECRET)
         .ok()
         .flatten()
 }
 
-#[allow(dead_code)]
 fn gmail_oauth_access_token_expires_at() -> Option<DateTime<Utc>> {
     secret_store::read_connector_secret("gmail", GMAIL_OAUTH_EXPIRES_AT_SECRET)
         .ok()
@@ -693,14 +691,12 @@ fn gmail_oauth_access_token_expires_at() -> Option<DateTime<Utc>> {
         .map(|value| value.with_timezone(&Utc))
 }
 
-#[allow(dead_code)]
 fn gmail_oauth_access_token_is_fresh() -> bool {
     gmail_oauth_access_token_expires_at()
         .map(|expires_at| Utc::now() + Duration::seconds(GMAIL_OAUTH_EXPIRY_SKEW_SECS) < expires_at)
         .unwrap_or(true)
 }
 
-#[allow(dead_code)]
 pub(crate) async fn gmail_oauth_token_or_refresh() -> Option<String> {
     let access_token = gmail_oauth_token();
     if access_token.is_some() && gmail_oauth_access_token_is_fresh() {

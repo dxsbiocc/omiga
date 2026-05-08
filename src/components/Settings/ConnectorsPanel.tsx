@@ -1028,9 +1028,7 @@ function connectorAuthFlowTitle(
   if (flow?.status === "checking") return "正在检测授权";
   if (flow?.status === "waiting") return "等待授权完成";
   if (flow?.status === "setup_required") {
-    return connectorSupportsCredentialValidation(connector)
-      ? "需要邮箱账号和授权码"
-      : "一键登录即将支持";
+    return connectorSetupRequiredTitle(connector);
   }
   if (flow?.status === "error") return "授权未完成";
   if (connector.accessible) return "连接已可用";
@@ -1045,6 +1043,36 @@ function connectorAuthFlowChipColor(
   if (flow.status === "setup_required") return "warning";
   if (flow.status === "error") return "error";
   return "info";
+}
+
+function connectorSetupRequiredTitle(connector: ConnectorInfo): string {
+  if (connector.definition.id === "gmail") {
+    return "需要 Gmail 地址和应用专用密码";
+  }
+  return connectorSupportsCredentialValidation(connector)
+    ? "需要邮箱账号和授权码"
+    : "一键登录即将支持";
+}
+
+function connectorAuthFlowAttentionTitle(
+  connector: ConnectorInfo,
+  flow?: ConnectorAuthFlow,
+): string {
+  if (flow?.status !== "setup_required") return "登录流程已停止，可重试连接。";
+  return connectorSupportsCredentialValidation(connector)
+    ? "需要授权码或应用专用密码才能完成连接。"
+    : "一键登录暂不可用。";
+}
+
+function ConnectorSetupHintChips({ hints }: { hints: string[] }) {
+  if (hints.length === 0) return null;
+  return (
+    <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+      {hints.map((hint) => (
+        <Chip key={hint} size="small" variant="outlined" label={hint} />
+      ))}
+    </Stack>
+  );
 }
 
 function connectorSetupHints(connector: ConnectorInfo): string[] {
@@ -1727,30 +1755,7 @@ function ConnectorConnectDialog({
                         {displayAuthFlow?.message}
                       </Alert>
                     )}
-                    {setupHints.length > 0 && (
-                      <Stack
-                        direction="row"
-                        spacing={0.75}
-                        flexWrap="wrap"
-                        useFlexGap
-                      >
-                        {setupHints.map((hint) => (
-                          <Chip
-                            key={hint}
-                            size="small"
-                            variant="outlined"
-                            label={hint}
-                            sx={{
-                              fontFamily:
-                                hint.includes("OMIGA_") ||
-                                hint.startsWith("Redirect:")
-                                  ? "monospace"
-                                  : undefined,
-                            }}
-                          />
-                        ))}
-                      </Stack>
-                    )}
+                    <ConnectorSetupHintChips hints={setupHints} />
                   </Stack>
                 </Box>
               )}
@@ -2440,29 +2445,9 @@ function ConnectorDetailsDialog({
                           >
                             <Stack spacing={0.75}>
                               <Typography variant="body2" fontWeight={800}>
-                                {authFlow?.status === "setup_required"
-                                  ? connectorSupportsCredentialValidation(connector)
-                                    ? "邮箱授权码未就绪，暂时无法完成连接。"
-                                    : "未生成授权 URL，无法打开浏览器登录。"
-                                  : "登录流程已停止，可重试连接。"}
+                                {connectorAuthFlowAttentionTitle(connector, authFlow)}
                               </Typography>
-                              {setupHints.length > 0 && (
-                                <Stack
-                                  direction="row"
-                                  spacing={0.75}
-                                  flexWrap="wrap"
-                                  useFlexGap
-                                >
-                                  {setupHints.map((hint) => (
-                                    <Chip
-                                      key={hint}
-                                      size="small"
-                                      variant="outlined"
-                                      label={hint}
-                                    />
-                                  ))}
-                                </Stack>
-                              )}
+                              <ConnectorSetupHintChips hints={setupHints} />
                             </Stack>
                           </Alert>
                         )}

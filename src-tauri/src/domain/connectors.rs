@@ -44,6 +44,17 @@ const CODEX_APPS_MCP_SERVER_NAME: &str = "codex_apps";
 const MCP_CONNECTOR_BRIDGE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAIL_ADDRESS_SECRET: &str = "mail_address";
 const MAIL_AUTHORIZATION_CODE_SECRET: &str = "mail_authorization_code";
+const GMAIL_OAUTH_ENV_VARS: &[&str] = &["GMAIL_ACCESS_TOKEN", "GOOGLE_OAUTH_ACCESS_TOKEN"];
+const GMAIL_CONNECTOR_ENV_VARS: &[&str] = &[
+    "GMAIL_ACCESS_TOKEN",
+    "GOOGLE_OAUTH_ACCESS_TOKEN",
+    "GMAIL_ADDRESS",
+    "GMAIL_USERNAME",
+    "GMAIL_APP_PASSWORD",
+    "GMAIL_AUTH_CODE",
+];
+const NOTION_TOKEN_ENV_VARS: &[&str] = &["NOTION_TOKEN", "NOTION_API_KEY"];
+const SLACK_TOKEN_ENV_VARS: &[&str] = &["SLACK_BOT_TOKEN"];
 
 #[cfg(test)]
 pub(crate) static CONNECTOR_TEST_ENV_LOCK: tokio::sync::Mutex<()> =
@@ -874,15 +885,10 @@ pub fn builtin_connector_definitions() -> Vec<ConnectorDefinition> {
         connector(
             "gmail",
             "Gmail",
-            "Use Gmail messages through mailbox account/password login.",
+            "Use Gmail messages through browser OAuth, with Google app passwords as a local fallback.",
             "email",
-            ConnectorAuthType::ApiKey,
-            &[
-                "GMAIL_ADDRESS",
-                "GMAIL_USERNAME",
-                "GMAIL_APP_PASSWORD",
-                "GMAIL_AUTH_CODE",
-            ],
+            ConnectorAuthType::OAuth,
+            GMAIL_CONNECTOR_ENV_VARS,
             Some("https://mail.google.com/"),
             Some("https://support.google.com/accounts/answer/185833"),
             email_connector_tools(),
@@ -2364,30 +2370,51 @@ fn github_token_with_source(
         })
 }
 
+fn gmail_token_with_source(
+    use_external_credentials: bool,
+) -> Option<(String, ConnectorCredentialSource)> {
+    oauth_or_env_token_with_source(
+        oauth::gmail_oauth_token(),
+        ConnectorCredentialSource::OAuthBrowser,
+        use_external_credentials,
+        GMAIL_OAUTH_ENV_VARS,
+    )
+}
+
 fn notion_token_with_source(
     use_external_credentials: bool,
 ) -> Option<(String, ConnectorCredentialSource)> {
-    oauth::notion_oauth_token()
-        .map(|token| (token, ConnectorCredentialSource::OAuthBrowser))
-        .or_else(|| {
-            use_external_credentials
-                .then(|| first_non_empty_env(&["NOTION_TOKEN", "NOTION_API_KEY"]))
-                .flatten()
-                .map(|token| (token, ConnectorCredentialSource::Environment))
-        })
+    oauth_or_env_token_with_source(
+        oauth::notion_oauth_token(),
+        ConnectorCredentialSource::OAuthBrowser,
+        use_external_credentials,
+        NOTION_TOKEN_ENV_VARS,
+    )
 }
 
 fn slack_token_with_source(
     use_external_credentials: bool,
 ) -> Option<(String, ConnectorCredentialSource)> {
-    oauth::slack_oauth_token()
-        .map(|token| (token, ConnectorCredentialSource::OAuthBrowser))
-        .or_else(|| {
-            use_external_credentials
-                .then(|| first_non_empty_env(&["SLACK_BOT_TOKEN"]))
-                .flatten()
-                .map(|token| (token, ConnectorCredentialSource::Environment))
-        })
+    oauth_or_env_token_with_source(
+        oauth::slack_oauth_token(),
+        ConnectorCredentialSource::OAuthBrowser,
+        use_external_credentials,
+        SLACK_TOKEN_ENV_VARS,
+    )
+}
+
+fn oauth_or_env_token_with_source(
+    oauth_token: Option<String>,
+    oauth_source: ConnectorCredentialSource,
+    use_external_credentials: bool,
+    env_vars: &[&str],
+) -> Option<(String, ConnectorCredentialSource)> {
+    oauth_token.map(|token| (token, oauth_source)).or_else(|| {
+        use_external_credentials
+            .then(|| first_non_empty_env(env_vars))
+            .flatten()
+            .map(|token| (token, ConnectorCredentialSource::Environment))
+    })
 }
 
 fn connector_credential_source(
@@ -2397,12 +2424,16 @@ fn connector_credential_source(
 ) -> Option<ConnectorCredentialSource> {
     match connector_id {
         "github" => github_token_with_source(use_env_credentials).map(|(_, source)| source),
-        "gmail" if stored_mail_credentials_configured(connector_id) => {
-            Some(ConnectorCredentialSource::MailCredentials)
-        }
-        "gmail" if use_env_credentials && mail_credentials_configured(connector_id) => {
-            Some(ConnectorCredentialSource::Environment)
-        }
+        "gmail" => gmail_token_with_source(use_env_credentials)
+            .map(|(_, source)| source)
+            .or_else(|| {
+                stored_mail_credentials_configured(connector_id)
+                    .then_some(ConnectorCredentialSource::MailCredentials)
+            })
+            .or_else(|| {
+                (use_env_credentials && mail_credentials_configured(connector_id))
+                    .then_some(ConnectorCredentialSource::Environment)
+            }),
         "notion" => notion_token_with_source(use_env_credentials).map(|(_, source)| source),
         "slack" => slack_token_with_source(use_env_credentials).map(|(_, source)| source),
         "qq_mail" | "netease_mail" if stored_mail_credentials_configured(connector_id) => {
@@ -2786,15 +2817,16 @@ fn mail_credential_check(connector: &ConnectorInfo) -> NativeConnectionCheck {
         );
     };
     if mail_secret(connector_id).is_none() {
-        let credential_name = if connector_id == "gmail" {
-            "邮箱密码或应用专用密码"
+        let (credential_name, credential_hint) = if connector_id == "gmail" {
+            (
+                "Google 应用专用密码",
+                "在连接界面输入 Gmail 地址和 Google 应用专用密码；Omiga 会保存到系统安全存储，不写入 connectors/config.json。",
+            )
         } else {
-            "邮箱授权码或应用专用密码"
-        };
-        let credential_hint = if connector_id == "gmail" {
-            "在连接界面输入 Gmail 密码；Omiga 会保存到系统安全存储，不写入 connectors/config.json。"
-        } else {
-            "在连接界面输入邮箱服务商生成的授权码；Omiga 会保存到系统安全存储，不写入 connectors/config.json。"
+            (
+                "邮箱授权码或应用专用密码",
+                "在连接界面输入邮箱服务商生成的授权码；Omiga 会保存到系统安全存储，不写入 connectors/config.json。",
+            )
         };
         return NativeConnectionCheck::local_error(
             format!("{service_name} 需要{credential_name}才能连接。"),
@@ -2844,7 +2876,7 @@ fn mail_imap_login_check(
             format!("{service_name} IMAP 登录被拒绝。"),
             "mail_imap_auth_failed",
             format!(
-                "Gmail/邮箱服务拒绝了 {identity} 的登录：{details}。请确认密码、应用专用密码或 IMAP 开关。"
+                "邮箱服务拒绝了 {identity} 的登录：{details}。请确认授权码、应用专用密码或 IMAP 开关。"
             ),
             false,
         ),
@@ -3052,6 +3084,26 @@ async fn http_post_json_status_check(
     }
 }
 
+fn connector_native_api_check_result(
+    connector: &ConnectorInfo,
+    check: Result<NativeConnectionCheck, NativeConnectionCheck>,
+) -> ConnectorConnectionTestResult {
+    match check {
+        Ok(check) => connector_test_result_from_check(
+            connector,
+            true,
+            ConnectorConnectionTestKind::NativeApi,
+            check,
+        ),
+        Err(check) => connector_test_result_from_check(
+            connector,
+            false,
+            ConnectorConnectionTestKind::NativeApi,
+            check,
+        ),
+    }
+}
+
 fn truncate_for_display(value: &str, max_chars: usize) -> String {
     let mut out = value.chars().take(max_chars).collect::<String>();
     if value.chars().count() > max_chars {
@@ -3068,48 +3120,51 @@ async fn test_native_connector_connection(
             let token = github_token();
             let endpoint = if token.is_some() { "user" } else { "rate_limit" };
             let url = format!("{}/{}", github_api_base_url(), endpoint);
-            match http_status_check("GitHub", url, token, None).await {
-                Ok(check) => connector_test_result_from_check(
+            connector_native_api_check_result(connector, http_status_check("GitHub", url, token, None).await)
+        }
+        "gmail" => {
+            let token = oauth::gmail_oauth_token_or_refresh()
+                .await
+                .or_else(|| first_non_empty_env(GMAIL_OAUTH_ENV_VARS));
+            if let Some(token) = token {
+                connector_native_api_check_result(
                     connector,
-                    true,
-                    ConnectorConnectionTestKind::NativeApi,
+                    http_status_check(
+                        "Gmail",
+                        format!("{}/users/me/profile", gmail_api_base_url()),
+                        Some(token),
+                        None,
+                    )
+                    .await,
+                )
+            } else if mail_credentials_configured("gmail") {
+                let check = mail_credential_check(connector);
+                connector_test_result_from_check(
+                    connector,
+                    check.error_code.is_none(),
+                    ConnectorConnectionTestKind::LocalState,
                     check,
-                ),
-                Err(check) => connector_test_result_from_check(
+                )
+            } else {
+                connector_test_result_from_check(
                     connector,
                     false,
                     ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
+                    NativeConnectionCheck::missing_credentials(
+                        "Gmail",
+                        "Gmail browser OAuth login or Google app password fallback",
+                    ),
+                )
             }
-        }
-        "gmail" => {
-            let check = mail_credential_check(connector);
-            connector_test_result_from_check(
-                connector,
-                check.error_code.is_none(),
-                ConnectorConnectionTestKind::LocalState,
-                check,
-            )
         }
         "gitlab" => {
             let token = gitlab_token();
             let endpoint = if token.is_some() { "user" } else { "version" };
             let url = format!("{}/{}", gitlab_api_base_url(), endpoint);
-            match http_status_check("GitLab", url, token, Some("PRIVATE-TOKEN")).await {
-                Ok(check) => connector_test_result_from_check(
-                    connector,
-                    true,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-                Err(check) => connector_test_result_from_check(
-                    connector,
-                    false,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-            }
+            connector_native_api_check_result(
+                connector,
+                http_status_check("GitLab", url, token, Some("PRIVATE-TOKEN")).await,
+            )
         }
         "linear" => {
             let Some(authorization) = linear_authorization_header() else {
@@ -3123,29 +3178,18 @@ async fn test_native_connector_connection(
                     ),
                 );
             };
-            match http_post_json_status_check(
-                "Linear",
-                linear_graphql_url(),
-                serde_json::json!({ "query": "query OmigaConnectorTest { viewer { id name email } }" }),
-                Some(authorization),
-                Some("Authorization"),
-                &[],
+            connector_native_api_check_result(
+                connector,
+                http_post_json_status_check(
+                    "Linear",
+                    linear_graphql_url(),
+                    serde_json::json!({ "query": "query OmigaConnectorTest { viewer { id name email } }" }),
+                    Some(authorization),
+                    Some("Authorization"),
+                    &[],
+                )
+                .await,
             )
-            .await
-            {
-                Ok(check) => connector_test_result_from_check(
-                    connector,
-                    true,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-                Err(check) => connector_test_result_from_check(
-                    connector,
-                    false,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-            }
         }
         "notion" => {
             let Some(token) = notion_token() else {
@@ -3159,28 +3203,17 @@ async fn test_native_connector_connection(
                     ),
                 );
             };
-            match http_status_check_with_headers(
-                "Notion",
-                format!("{}/users/me", notion_api_base_url()),
-                Some(token),
-                None,
-                &[("Notion-Version", notion_version())],
+            connector_native_api_check_result(
+                connector,
+                http_status_check_with_headers(
+                    "Notion",
+                    format!("{}/users/me", notion_api_base_url()),
+                    Some(token),
+                    None,
+                    &[("Notion-Version", notion_version())],
+                )
+                .await,
             )
-            .await
-            {
-                Ok(check) => connector_test_result_from_check(
-                    connector,
-                    true,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-                Err(check) => connector_test_result_from_check(
-                    connector,
-                    false,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-            }
         }
         "sentry" => {
             let Some(token) = sentry_token() else {
@@ -3191,27 +3224,16 @@ async fn test_native_connector_connection(
                     NativeConnectionCheck::missing_credentials("Sentry", "SENTRY_AUTH_TOKEN"),
                 );
             };
-            match http_status_check(
-                "Sentry",
-                format!("{}/organizations/", sentry_api_base_url()),
-                Some(token),
-                None,
+            connector_native_api_check_result(
+                connector,
+                http_status_check(
+                    "Sentry",
+                    format!("{}/organizations/", sentry_api_base_url()),
+                    Some(token),
+                    None,
+                )
+                .await,
             )
-            .await
-            {
-                Ok(check) => connector_test_result_from_check(
-                    connector,
-                    true,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-                Err(check) => connector_test_result_from_check(
-                    connector,
-                    false,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-            }
         }
         "slack" => {
             let Some(token) = slack_token() else {
@@ -3225,20 +3247,7 @@ async fn test_native_connector_connection(
                     ),
                 );
             };
-            match slack_auth_test_check(token).await {
-                Ok(check) => connector_test_result_from_check(
-                    connector,
-                    true,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-                Err(check) => connector_test_result_from_check(
-                    connector,
-                    false,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-            }
+            connector_native_api_check_result(connector, slack_auth_test_check(token).await)
         }
         "qq_mail" | "netease_mail" => {
             let check = mail_credential_check(connector);
@@ -3258,27 +3267,16 @@ async fn test_native_connector_connection(
                     NativeConnectionCheck::missing_credentials("Discord", "DISCORD_BOT_TOKEN"),
                 );
             };
-            match http_status_check(
-                "Discord",
-                format!("{}/users/@me", discord_api_base_url()),
-                Some(authorization),
-                Some("Authorization"),
+            connector_native_api_check_result(
+                connector,
+                http_status_check(
+                    "Discord",
+                    format!("{}/users/@me", discord_api_base_url()),
+                    Some(authorization),
+                    Some("Authorization"),
+                )
+                .await,
             )
-            .await
-            {
-                Ok(check) => connector_test_result_from_check(
-                    connector,
-                    true,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-                Err(check) => connector_test_result_from_check(
-                    connector,
-                    false,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-            }
         }
         "jira" => {
             let (Some(base_url), Some(authorization)) =
@@ -3294,27 +3292,16 @@ async fn test_native_connector_connection(
                     ),
                 );
             };
-            match http_status_check(
-                "Jira",
-                format!("{base_url}/myself"),
-                Some(authorization),
-                Some("Authorization"),
+            connector_native_api_check_result(
+                connector,
+                http_status_check(
+                    "Jira",
+                    format!("{base_url}/myself"),
+                    Some(authorization),
+                    Some("Authorization"),
+                )
+                .await,
             )
-            .await
-            {
-                Ok(check) => connector_test_result_from_check(
-                    connector,
-                    true,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-                Err(check) => connector_test_result_from_check(
-                    connector,
-                    false,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-            }
         }
         "confluence" => {
             let (Some(base_url), Some(authorization)) = (
@@ -3331,27 +3318,16 @@ async fn test_native_connector_connection(
                     ),
                 );
             };
-            match http_status_check(
-                "Confluence",
-                format!("{base_url}/user/current"),
-                Some(authorization),
-                Some("Authorization"),
+            connector_native_api_check_result(
+                connector,
+                http_status_check(
+                    "Confluence",
+                    format!("{base_url}/user/current"),
+                    Some(authorization),
+                    Some("Authorization"),
+                )
+                .await,
             )
-            .await
-            {
-                Ok(check) => connector_test_result_from_check(
-                    connector,
-                    true,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-                Err(check) => connector_test_result_from_check(
-                    connector,
-                    false,
-                    ConnectorConnectionTestKind::NativeApi,
-                    check,
-                ),
-            }
         }
         _ => connector_test_result(
             connector,
@@ -3960,7 +3936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gmail_uses_mail_credentials_not_oauth_secret_for_connection_state() {
+    async fn gmail_oauth_secret_makes_gmail_accessible_before_mail_fallback() {
         let _lock = CONNECTOR_TEST_ENV_LOCK.lock().await;
         let dir = tempdir().unwrap();
         let secret_dir = dir.path().join("secrets");
@@ -3995,11 +3971,83 @@ mod tests {
             Vec::new(),
         );
 
-        assert!(!gmail.connected);
-        assert!(!gmail.accessible);
-        assert_eq!(gmail.status, ConnectorConnectionStatus::NeedsAuth);
-        assert_eq!(gmail.auth_source.as_deref(), None);
+        assert!(gmail.connected);
+        assert!(gmail.accessible);
+        assert_eq!(gmail.status, ConnectorConnectionStatus::Connected);
+        assert_eq!(gmail.auth_source.as_deref(), Some("oauth_browser"));
         assert!(!gmail.env_configured);
+    }
+
+    #[tokio::test]
+    async fn gmail_env_oauth_token_makes_gmail_accessible_without_mail_fallback() {
+        let _lock = CONNECTOR_TEST_ENV_LOCK.lock().await;
+        let dir = tempdir().unwrap();
+        let secret_dir = dir.path().join("secrets");
+        let _env = ScopedEnv::set(&[
+            (
+                "OMIGA_CONNECTOR_SECRET_STORE_DIR",
+                secret_dir.to_string_lossy().to_string(),
+            ),
+            ("GMAIL_ACCESS_TOKEN", "gmail-env-token".to_string()),
+            ("GOOGLE_OAUTH_ACCESS_TOKEN", String::new()),
+            ("GMAIL_ADDRESS", String::new()),
+            ("GMAIL_USERNAME", String::new()),
+            ("GMAIL_APP_PASSWORD", String::new()),
+            ("GMAIL_AUTH_CODE", String::new()),
+        ]);
+
+        let definition = builtin_connector_definitions()
+            .into_iter()
+            .find(|definition| definition.id == "gmail")
+            .unwrap();
+        let gmail = connector_info(
+            definition,
+            ConnectorDefinitionSource::BuiltIn,
+            None,
+            Vec::new(),
+        );
+
+        assert!(gmail.connected);
+        assert!(gmail.accessible);
+        assert_eq!(gmail.status, ConnectorConnectionStatus::Connected);
+        assert_eq!(gmail.auth_source.as_deref(), Some("environment"));
+        assert!(gmail.env_configured);
+    }
+
+    #[tokio::test]
+    async fn gmail_connection_test_reports_missing_credentials_without_network() {
+        let _lock = CONNECTOR_TEST_ENV_LOCK.lock().await;
+        let dir = tempdir().unwrap();
+        let secret_dir = dir.path().join("secrets");
+        let _env = ScopedEnv::set(&[
+            (
+                "OMIGA_CONNECTOR_SECRET_STORE_DIR",
+                secret_dir.to_string_lossy().to_string(),
+            ),
+            ("GMAIL_ACCESS_TOKEN", String::new()),
+            ("GOOGLE_OAUTH_ACCESS_TOKEN", String::new()),
+            ("GMAIL_ADDRESS", String::new()),
+            ("GMAIL_USERNAME", String::new()),
+            ("GMAIL_APP_PASSWORD", String::new()),
+            ("GMAIL_AUTH_CODE", String::new()),
+        ]);
+
+        let definition = builtin_connector_definitions()
+            .into_iter()
+            .find(|definition| definition.id == "gmail")
+            .unwrap();
+        let connector = connector_info(
+            definition,
+            ConnectorDefinitionSource::BuiltIn,
+            None,
+            Vec::new(),
+        );
+        let result = test_native_connector_connection(&connector).await;
+
+        assert!(!result.ok);
+        assert_eq!(result.check_kind, ConnectorConnectionTestKind::NativeApi);
+        assert_eq!(result.error_code.as_deref(), Some("missing_credentials"));
+        assert!(result.message.contains("requires"));
     }
 
     #[tokio::test]
@@ -4603,6 +4651,19 @@ mod tests {
             .tools
             .iter()
             .any(|tool| tool.name == "send_message" && !tool.read_only));
+        let gmail = definitions
+            .iter()
+            .find(|definition| definition.id == "gmail")
+            .expect("gmail connector");
+        assert_eq!(gmail.auth_type, ConnectorAuthType::OAuth);
+        assert!(gmail
+            .env_vars
+            .iter()
+            .any(|name| name == "GMAIL_ACCESS_TOKEN"));
+        assert!(gmail
+            .env_vars
+            .iter()
+            .any(|name| name == "GMAIL_APP_PASSWORD"));
     }
 
     #[test]

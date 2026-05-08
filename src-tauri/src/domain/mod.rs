@@ -1,6 +1,7 @@
 //! Domain layer - Core business logic
 
 pub mod agents;
+pub mod app_data_migration;
 pub mod auto_compact;
 pub mod autopilot_state;
 pub mod background_shell;

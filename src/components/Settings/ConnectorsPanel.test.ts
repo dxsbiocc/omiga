@@ -5,6 +5,10 @@ import {
 } from "./ConnectorsPanel";
 import type { ConnectorInfo, ConnectorToolDefinition } from "../../state/connectorStore";
 
+type ConnectorInfoOverrides = Partial<Omit<ConnectorInfo, "definition">> & {
+  definition?: Partial<ConnectorInfo["definition"]>;
+};
+
 function tool(
   overrides: Partial<ConnectorToolDefinition> = {},
 ): ConnectorToolDefinition {
@@ -19,7 +23,7 @@ function tool(
   };
 }
 
-function connector(overrides: Partial<ConnectorInfo> = {}): ConnectorInfo {
+function connector(overrides: ConnectorInfoOverrides = {}): ConnectorInfo {
   const definition = {
     id: "github",
     name: "GitHub",
@@ -59,6 +63,33 @@ function connector(overrides: Partial<ConnectorInfo> = {}): ConnectorInfo {
   };
 }
 
+function gmailConnector(overrides: ConnectorInfoOverrides = {}): ConnectorInfo {
+  return connector({
+    ...overrides,
+    definition: {
+      id: "gmail",
+      name: "Gmail",
+      description: "Reference mailbox messages.",
+      category: "email",
+      authType: "oauth",
+      envVars: [
+        "GMAIL_ACCESS_TOKEN",
+        "GOOGLE_OAUTH_ACCESS_TOKEN",
+        "GMAIL_ADDRESS",
+        "GMAIL_APP_PASSWORD",
+      ],
+      defaultEnabled: true,
+      tools: [
+        tool({
+          execution: "declared",
+          name: "search_messages",
+        }),
+      ],
+      ...overrides.definition,
+    },
+  });
+}
+
 describe("connector product integration state", () => {
   it("treats connectors with first-party login plus native tools as integrated", () => {
     expect(connectorIsProductIntegrated(connector())).toBe(true);
@@ -83,50 +114,25 @@ describe("connector product integration state", () => {
     ).toBe(false);
   });
 
-  it("treats Gmail as integrated through mailbox credential login", () => {
-    expect(
-      connectorIsProductIntegrated(
-        connector({
-          definition: {
-            id: "gmail",
-            name: "Gmail",
-            description: "Reference mailbox messages.",
-            category: "email",
-            authType: "apiKey",
-            envVars: ["GMAIL_ADDRESS", "GMAIL_APP_PASSWORD"],
-            defaultEnabled: true,
-            tools: [
-              tool({
-                execution: "declared",
-                name: "search_messages",
-              }),
-            ],
-          },
-        }),
-      ),
-    ).toBe(true);
+  it("treats Gmail as integrated through OAuth plus app-password fallback", () => {
+    expect(connectorIsProductIntegrated(gmailConnector())).toBe(true);
   });
 
-  it("passes through Gmail mailbox credential errors without OAuth setup copy", () => {
+  it("explains missing Gmail OAuth without requiring developer config", () => {
     const message = connectorLoginFailureMessage(
-      connector({
+      gmailConnector({
         definition: {
-          id: "gmail",
-          name: "Gmail",
-          description: "Reference mailbox messages.",
-          category: "email",
-          authType: "apiKey",
-          envVars: ["GMAIL_ADDRESS", "GMAIL_APP_PASSWORD"],
-          defaultEnabled: true,
+          envVars: ["GMAIL_ACCESS_TOKEN", "GMAIL_ADDRESS", "GMAIL_APP_PASSWORD"],
           tools: [tool({ name: "search_messages" })],
         },
       }),
-      "Gmail 需要邮箱密码才能连接。",
+      "Gmail browser login requires Omiga's own Google OAuth client ID: OMIGA_GMAIL_OAUTH_CLIENT_ID.",
       false,
     );
 
-    expect(message).toBe("Gmail 需要邮箱密码才能连接。");
-    expect(message).not.toContain("OAuth");
+    expect(message).toContain("Gmail 浏览器登录暂未在当前构建启用");
+    expect(message).toContain("Google 应用专用密码备用方式");
+    expect(message).toContain("不会跳转到 OpenAI/Codex 托管授权页");
     expect(message).not.toContain("OMIGA_GMAIL_OAUTH_CLIENT_ID");
   });
 

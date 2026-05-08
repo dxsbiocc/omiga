@@ -2,6 +2,7 @@
 
 use super::CommandResult;
 use crate::app_state::OmigaAppState;
+use crate::domain::app_data_migration::APP_DATA_COMPAT_DIR_NAMES;
 use crate::errors::{AppError, FsError};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Serialize;
@@ -493,12 +494,12 @@ fn trusted_unscoped_read_roots_from(
     }
     if let Some(data_dir) = data_dir {
         // Background agent output is written under the Tauri app data dir.
-        for app_dir in ["com.omiga.desktop", "com.omiga.app", "Omiga", "omiga"] {
+        for app_dir in APP_DATA_COMPAT_DIR_NAMES {
             push_canonical_if_dir(&mut roots, data_dir.join(app_dir));
         }
     }
     if let Some(cache_dir) = cache_dir {
-        for app_dir in ["com.omiga.desktop", "com.omiga.app", "Omiga", "omiga"] {
+        for app_dir in APP_DATA_COMPAT_DIR_NAMES {
             push_canonical_if_dir(&mut roots, cache_dir.join(app_dir));
         }
     }

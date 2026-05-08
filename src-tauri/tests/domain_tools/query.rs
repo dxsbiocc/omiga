@@ -7,6 +7,36 @@ use omiga_lib::domain::tools::{Tool, ToolContext, ToolImpl, ToolKind, WebSearchA
 use omiga_lib::infrastructure::streaming::StreamOutputItem;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
+use std::sync::OnceLock;
+
+static QUERY_TOOL_ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn query_tool_env_lock() -> &'static tokio::sync::Mutex<()> {
+    QUERY_TOOL_ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+struct ScopedEnv {
+    key: &'static str,
+    old: Option<OsString>,
+}
+
+impl ScopedEnv {
+    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+        let old = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, old }
+    }
+}
+
+impl Drop for ScopedEnv {
+    fn drop(&mut self) {
+        match self.old.take() {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
 
 #[test]
 fn query_from_json_accepts_dataset_search() {
@@ -657,6 +687,11 @@ async fn query_tool_executes_ensembl_against_live_api() {
 }
 
 async fn execute_query_json(ctx: &ToolContext, args: QueryArgs) -> JsonValue {
+    let _guard = query_tool_env_lock().lock().await;
+    let home_dir = tempfile::tempdir().expect("create isolated HOME for query tool test");
+    let _home = ScopedEnv::set("HOME", home_dir.path());
+    let _user_profile = ScopedEnv::set("USERPROFILE", home_dir.path());
+
     let mut stream = QueryTool::execute(ctx, args)
         .await
         .expect("execute query tool");

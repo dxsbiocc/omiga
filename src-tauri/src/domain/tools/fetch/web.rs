@@ -1,6 +1,7 @@
 use super::common::{displayed_link_for_url, favicon_for_url, resolve_url, title_from_result};
 use super::FetchArgs;
 use crate::domain::tools::{ToolContext, ToolError};
+use futures::StreamExt;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json::{json, Value as JsonValue};
@@ -78,11 +79,8 @@ pub(super) async fn fetch_web_json(
             if attempt.previous().len() >= 10 {
                 return attempt.error("Too many redirects");
             }
-            match crate::domain::tools::web_safety::validate_public_http_url(
-                &project_root_for_redirect,
-                attempt.url().as_str(),
-                false,
-            ) {
+            match validate_fetch_redirect_target(&project_root_for_redirect, attempt.url().as_str())
+            {
                 Ok(_) => attempt.follow(),
                 Err(message) => attempt.error(message),
             }
@@ -121,28 +119,14 @@ pub(super) async fn fetch_web_json(
         .to_string();
 
     let content_length = response.content_length();
-
-    let body_bytes = tokio::select! {
-        _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-        b = response.bytes() => b.map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Read body: {}", e),
-        })?,
-    };
-
-    if body_bytes.len() as u64 > MAX_BODY_BYTES {
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "Response body too large ({} bytes, max {} bytes)",
-                body_bytes.len(),
-                MAX_BODY_BYTES
-            ),
-        });
-    }
+    reject_oversized_content_length(content_length, MAX_BODY_BYTES)?;
+    let body_bytes =
+        read_body_limited(response, content_length, MAX_BODY_BYTES, &ctx.cancel).await?;
 
     let ct_lower = content_type.to_ascii_lowercase();
     let sniff_html = sniff_likely_html(&body_bytes);
     let text = if ct_lower.contains("html") || sniff_html {
-        html2text::from_read(Cursor::new(body_bytes.as_ref()), 120).map_err(|e| {
+        html2text::from_read(Cursor::new(body_bytes.as_slice()), 120).map_err(|e| {
             ToolError::ExecutionFailed {
                 message: format!("HTML conversion: {}", e),
             }
@@ -200,6 +184,59 @@ pub(super) async fn fetch_web_json(
     Ok(value)
 }
 
+fn validate_fetch_redirect_target(project_root: &std::path::Path, url: &str) -> Result<(), String> {
+    crate::domain::tools::web_safety::validate_public_http_url(project_root, url, true)
+}
+
+fn body_too_large_error(bytes: u64, max_bytes: u64) -> ToolError {
+    ToolError::ExecutionFailed {
+        message: format!("Response body too large ({bytes} bytes, max {max_bytes} bytes)"),
+    }
+}
+
+fn reject_oversized_content_length(
+    content_length: Option<u64>,
+    max_bytes: u64,
+) -> Result<(), ToolError> {
+    if let Some(bytes) = content_length {
+        if bytes > max_bytes {
+            return Err(body_too_large_error(bytes, max_bytes));
+        }
+    }
+    Ok(())
+}
+
+async fn read_body_limited(
+    response: reqwest::Response,
+    content_length: Option<u64>,
+    max_bytes: u64,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Vec<u8>, ToolError> {
+    let capacity = content_length.unwrap_or_default().min(max_bytes) as usize;
+    let mut body = Vec::with_capacity(capacity);
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = tokio::select! {
+        _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+        chunk = stream.next() => chunk,
+    } {
+        let chunk = chunk.map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Read body: {}", e),
+        })?;
+        let next_len = (body.len() as u64)
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| ToolError::ExecutionFailed {
+                message: "Response body size overflowed".to_string(),
+            })?;
+        if next_len > max_bytes {
+            return Err(body_too_large_error(next_len, max_bytes));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body)
+}
+
 fn sniff_likely_html(bytes: &[u8]) -> bool {
     let take = bytes.len().min(512);
     let slice = &bytes[..take];
@@ -237,6 +274,71 @@ mod tests {
         let cleaned = clean_inline_base64_images(raw);
         assert!(cleaned.contains("[image omitted]"));
         assert!(!cleaned.contains("base64"));
+    }
+
+    #[test]
+    fn rejects_oversized_content_length_before_reading_body() {
+        let err = reject_oversized_content_length(Some(101), 100).expect_err("oversized");
+        assert!(err.to_string().contains("Response body too large"));
+    }
+
+    #[test]
+    fn redirect_validation_resolves_dns_before_following() {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let err = validate_fetch_redirect_target(root.path(), "http://example.invalid/")
+            .expect_err("redirect target should require DNS resolution");
+        assert!(err.contains("DNS resolution failed"));
+    }
+
+    #[tokio::test]
+    async fn streaming_body_reader_enforces_running_limit() {
+        use std::io::Write;
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                let mut line = String::new();
+                while reader.read_line(&mut line).expect("read request") > 0 {
+                    if line == "\r\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+            }
+            let body = "abcdef";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("write");
+            stream.flush().expect("flush");
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client");
+        let response = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect("response");
+        let err = read_body_limited(
+            response,
+            None,
+            5,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect_err("body should exceed streaming limit");
+        server.join().expect("server thread");
+        assert!(err.to_string().contains("Response body too large"));
     }
 
     #[test]

@@ -42,6 +42,19 @@ pub fn run() {
                 .expect("Failed to get app data directory");
 
             std::fs::create_dir_all(&app_data_dir).expect("Failed to create app data directory");
+            match domain::app_data_migration::migrate_legacy_app_data_if_needed(&app_data_dir) {
+                Ok(Some(legacy_dir)) => {
+                    tracing::info!(
+                        "Migrated legacy app data from {:?} to {:?}",
+                        legacy_dir,
+                        app_data_dir
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to migrate legacy app data: {}", e);
+                }
+            }
 
             let db_path = app_data_dir.join("omiga.db");
             tracing::info!("Database path: {:?}", db_path);

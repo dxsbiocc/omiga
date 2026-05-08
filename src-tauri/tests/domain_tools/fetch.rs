@@ -4,9 +4,17 @@ use omiga_lib::domain::tools::fetch::{FetchArgs, FetchTool};
 use omiga_lib::domain::tools::{Tool, ToolContext, ToolImpl};
 
 #[test]
-fn old_web_fetch_name_is_not_registered() {
+fn old_web_fetch_name_routes_to_unified_fetch() {
     let j = r#"{"url":"https://example.com","prompt":"x"}"#;
-    assert!(Tool::from_json_str("web_fetch", j).is_err());
+    let tool = Tool::from_json_str("web_fetch", j).expect("legacy alias remains compatible");
+    match tool {
+        Tool::Fetch(args) => {
+            assert_eq!(args.category, "web");
+            assert_eq!(args.url.as_deref(), Some("https://example.com"));
+            assert_eq!(args.prompt.as_deref(), Some("x"));
+        }
+        other => panic!("expected Fetch, got {:?}", other.kind()),
+    }
 }
 
 #[test]

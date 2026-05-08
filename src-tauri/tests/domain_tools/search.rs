@@ -65,9 +65,16 @@ fn search_from_json_accepts_wechat_source() {
 }
 
 #[test]
-fn old_web_search_name_is_not_registered() {
+fn old_web_search_name_routes_to_unified_search() {
     let j = r#"{"query":"hello world"}"#;
-    assert!(Tool::from_json_str("web_search", j).is_err());
+    let tool = Tool::from_json_str("web_search", j).expect("legacy alias remains compatible");
+    match tool {
+        Tool::Search(args) => {
+            assert_eq!(args.category, "web");
+            assert_eq!(args.query, "hello world");
+        }
+        other => panic!("expected Search, got {:?}", other.kind()),
+    }
 }
 
 #[tokio::test]
