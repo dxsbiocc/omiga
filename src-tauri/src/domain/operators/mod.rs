@@ -22,6 +22,11 @@ use std::path::{Path, PathBuf};
 pub const OPERATOR_API_VERSION_V1ALPHA1: &str = "omiga.ai/operator/v1alpha1";
 pub const OPERATOR_KIND: &str = "Operator";
 pub const OPERATOR_TOOL_PREFIX: &str = "operator__";
+pub const OMICS_DE_OPERATOR_ID: &str = "omics_differential_expression_basic";
+pub const OMICS_DE_INPUT_TYPE_QUESTION: &str = "差异表达前，请选择输入矩阵的数据类型？";
+pub const OMICS_DE_METHOD_QUESTION: &str = "差异表达前，请选择主要统计方法？";
+pub const OMICS_DE_FDR_THRESHOLD_QUESTION: &str = "显著差异基因使用哪个 FDR 阈值？";
+pub const OMICS_DE_LOG2FC_THRESHOLD_QUESTION: &str = "显著差异基因使用哪个 |log2FC| 阈值？";
 const OPERATOR_STATE_DIR_NAME: &str = ".omiga";
 const REGISTRY_RELATIVE_PATH: &str = "operators/registry.json";
 const RUNS_RELATIVE_PATH: &str = "runs";
@@ -1047,18 +1052,28 @@ pub fn operator_parameters_schema(spec: &OperatorSpec) -> JsonValue {
     );
     properties.insert(
         "params".to_string(),
-        fields_object_schema(&spec.interface.params, false),
+        fields_object_schema(&spec.interface.params, true),
     );
     properties.insert(
         "resources".to_string(),
         resources_object_schema(&spec.resources),
     );
+    let mut required = vec![JsonValue::String("inputs".to_string())];
+    if has_caller_required_fields(&spec.interface.params) {
+        required.push(JsonValue::String("params".to_string()));
+    }
     json!({
         "type": "object",
         "properties": properties,
-        "required": ["inputs"],
+        "required": required,
         "additionalProperties": false
     })
+}
+
+fn has_caller_required_fields(fields: &BTreeMap<String, OperatorFieldSpec>) -> bool {
+    fields
+        .values()
+        .any(|field| field.required && field.default.is_none())
 }
 
 fn fields_object_schema(
@@ -1068,7 +1083,7 @@ fn fields_object_schema(
     let mut properties = JsonMap::new();
     let mut required = Vec::new();
     for (name, field) in fields {
-        if include_required && field.required {
+        if include_required && field.required && field.default.is_none() {
             required.push(JsonValue::String(name.clone()));
         }
         properties.insert(name.clone(), field_schema(field));
@@ -1141,6 +1156,228 @@ fn field_description(field: &OperatorFieldSpec) -> Option<String> {
         parts.push(format!("Expected formats: {}.", field.formats.join(", ")));
     }
     (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+pub fn operator_preflight_question(
+    tool_name: &str,
+    arguments: &str,
+) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
+    if !is_omics_de_operator_tool(tool_name) {
+        return None;
+    }
+    let value = serde_json::from_str::<JsonValue>(arguments).ok()?;
+    let params = value.get("params").and_then(JsonValue::as_object);
+    let mut questions = Vec::new();
+
+    if param_missing_empty_or_auto(params, "input_data_type") {
+        questions.push(crate::domain::tools::ask_user_question::QuestionItem {
+            question: OMICS_DE_INPUT_TYPE_QUESTION.to_string(),
+            header: "数据类型".to_string(),
+            multi_select: false,
+            options: vec![
+                ask_option(
+                    "Counts",
+                    "原始非负整数 read counts；适合 DESeq2、edgeR、limma-voom。",
+                ),
+                ask_option(
+                    "Quantitative",
+                    "TPM/FPKM/CPM/log2 表达量等已标准化连续矩阵；优先 limma。",
+                ),
+                ask_option(
+                    "Auto",
+                    "由 Omiga 按矩阵是否为非负整数自动判断；不确定时才选择。",
+                ),
+            ],
+        });
+    }
+
+    if param_missing_empty_or_auto(params, "de_method") {
+        questions.push(crate::domain::tools::ask_user_question::QuestionItem {
+            question: OMICS_DE_METHOD_QUESTION.to_string(),
+            header: "DE方法".to_string(),
+            multi_select: false,
+            options: vec![
+                ask_option(
+                    "DESeq2",
+                    "bulk RNA-seq 原始 counts 的常用稳健默认；每组至少 2 个样本更合适。",
+                ),
+                ask_option("edgeR", "原始 counts 的负二项模型；小样本场景也常用。"),
+                ask_option(
+                    "limma",
+                    "标准化/连续表达矩阵优先；counts 时使用 limma-voom。",
+                ),
+                ask_option(
+                    "Auto",
+                    "按数据类型和环境可用包自动尝试，并可能 fallback 到简单检验。",
+                ),
+            ],
+        });
+    }
+
+    if param_missing_or_empty(params, "pvalue_threshold") {
+        questions.push(crate::domain::tools::ask_user_question::QuestionItem {
+            question: OMICS_DE_FDR_THRESHOLD_QUESTION.to_string(),
+            header: "FDR阈值".to_string(),
+            multi_select: false,
+            options: vec![
+                ask_option(
+                    "FDR 0.05",
+                    "常用默认：Benjamini-Hochberg 校正后 FDR < 0.05。",
+                ),
+                ask_option("FDR 0.01", "更严格，降低假阳性但会减少候选基因。"),
+                ask_option("FDR 0.10", "更宽松，探索性分析可用。"),
+            ],
+        });
+    }
+
+    if param_missing_or_empty(params, "log2fc_threshold") {
+        questions.push(crate::domain::tools::ask_user_question::QuestionItem {
+            question: OMICS_DE_LOG2FC_THRESHOLD_QUESTION.to_string(),
+            header: "FC阈值".to_string(),
+            multi_select: false,
+            options: vec![
+                ask_option("|log2FC|≥1", "常用默认：至少 2 倍变化。"),
+                ask_option("|log2FC|≥0.58", "约 1.5 倍变化，更适合温和效应探索。"),
+                ask_option("|log2FC|≥0", "只按显著性筛选，不额外设 fold-change 门槛。"),
+                ask_option("|log2FC|≥2", "至少 4 倍变化，强调大效应基因。"),
+            ],
+        });
+    }
+
+    if questions.is_empty() {
+        return None;
+    }
+
+    Some(
+        crate::domain::tools::ask_user_question::AskUserQuestionArgs {
+            questions,
+            answers: None,
+            annotations: None,
+            metadata: Some(json!({
+                "source": "operator_preflight",
+                "operator_id": OMICS_DE_OPERATOR_ID,
+            })),
+        },
+    )
+}
+
+pub fn apply_operator_preflight_answers(
+    tool_name: &str,
+    arguments: &str,
+    ask_user_output: &JsonValue,
+) -> Result<String, String> {
+    if !is_omics_de_operator_tool(tool_name) {
+        return Ok(arguments.to_string());
+    }
+
+    let answers = ask_user_output
+        .get("answers")
+        .and_then(JsonValue::as_object)
+        .ok_or_else(|| "ask_user_question output did not contain an answers object".to_string())?;
+    let mut invocation = serde_json::from_str::<JsonValue>(arguments)
+        .map_err(|err| format!("Invalid operator arguments JSON: {err}"))?;
+    let root = invocation
+        .as_object_mut()
+        .ok_or_else(|| "Operator arguments must be a JSON object".to_string())?;
+    let params_value = root
+        .entry("params".to_string())
+        .or_insert_with(|| JsonValue::Object(JsonMap::new()));
+    if !params_value.is_object() {
+        *params_value = JsonValue::Object(JsonMap::new());
+    }
+    let params = params_value
+        .as_object_mut()
+        .ok_or_else(|| "Operator params must be a JSON object".to_string())?;
+
+    if let Some(label) = answer_label(answers, OMICS_DE_INPUT_TYPE_QUESTION) {
+        let value = match label {
+            "Counts" => "counts",
+            "Quantitative" => "quantitative",
+            "Auto" => "auto",
+            other => return Err(format!("Unsupported input data type choice: {other}")),
+        };
+        params.insert("input_data_type".to_string(), json!(value));
+    }
+
+    if let Some(label) = answer_label(answers, OMICS_DE_METHOD_QUESTION) {
+        let value = match label {
+            "DESeq2" => "deseq2",
+            "edgeR" => "edger",
+            "limma" => "limma",
+            "Auto" => "auto",
+            other => return Err(format!("Unsupported DE method choice: {other}")),
+        };
+        params.insert("de_method".to_string(), json!(value));
+    }
+
+    if let Some(label) = answer_label(answers, OMICS_DE_FDR_THRESHOLD_QUESTION) {
+        let value = match label {
+            "FDR 0.05" => 0.05,
+            "FDR 0.01" => 0.01,
+            "FDR 0.10" => 0.10,
+            other => return Err(format!("Unsupported FDR threshold choice: {other}")),
+        };
+        params.insert("pvalue_threshold".to_string(), json!(value));
+    }
+
+    if let Some(label) = answer_label(answers, OMICS_DE_LOG2FC_THRESHOLD_QUESTION) {
+        let value = match label {
+            "|log2FC|≥1" => 1.0,
+            "|log2FC|≥0.58" => 0.58,
+            "|log2FC|≥0" => 0.0,
+            "|log2FC|≥2" => 2.0,
+            other => return Err(format!("Unsupported log2FC threshold choice: {other}")),
+        };
+        params.insert("log2fc_threshold".to_string(), json!(value));
+    }
+
+    serde_json::to_string(&invocation).map_err(|err| err.to_string())
+}
+
+fn is_omics_de_operator_tool(tool_name: &str) -> bool {
+    let alias = tool_name
+        .strip_prefix(OPERATOR_TOOL_PREFIX)
+        .unwrap_or(tool_name)
+        .trim();
+    alias == OMICS_DE_OPERATOR_ID
+}
+
+fn ask_option(
+    label: &str,
+    description: &str,
+) -> crate::domain::tools::ask_user_question::QuestionOption {
+    crate::domain::tools::ask_user_question::QuestionOption {
+        label: label.to_string(),
+        description: description.to_string(),
+        preview: None,
+    }
+}
+
+fn param_missing_empty_or_auto(params: Option<&JsonMap<String, JsonValue>>, name: &str) -> bool {
+    match params.and_then(|params| params.get(name)) {
+        Some(JsonValue::String(value)) => {
+            let trimmed = value.trim();
+            trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto")
+        }
+        Some(JsonValue::Null) | None => true,
+        Some(_) => false,
+    }
+}
+
+fn param_missing_or_empty(params: Option<&JsonMap<String, JsonValue>>, name: &str) -> bool {
+    match params.and_then(|params| params.get(name)) {
+        Some(JsonValue::String(value)) => value.trim().is_empty(),
+        Some(JsonValue::Null) | None => true,
+        Some(_) => false,
+    }
+}
+
+fn answer_label<'a>(answers: &'a JsonMap<String, JsonValue>, question: &str) -> Option<&'a str> {
+    answers
+        .get(question)
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn resources_object_schema(resources: &BTreeMap<String, OperatorResourceSpec>) -> JsonValue {

@@ -36,6 +36,12 @@ type Intent = {
   contentLabel?: string;
 };
 
+export const PERMISSION_RUN_CONTENT_MAX_HEIGHT =
+  "clamp(96px, 22vh, 220px)";
+export const PERMISSION_CONNECTOR_PREVIEW_MAX_HEIGHT =
+  "clamp(96px, 18vh, 180px)";
+export const PERMISSION_PROMPT_ROOT_OVERFLOW_Y = "visible";
+
 function firstString(v: unknown): string | null {
   if (typeof v === "string" && v.trim()) return v;
   return null;
@@ -438,7 +444,9 @@ function ScrollableCodeBlock({
         wordBreak: "break-word",
         minHeight,
         maxHeight,
-        overflow: "auto",
+        maxWidth: "100%",
+        overflowX: "hidden",
+        overflowY: "auto",
         overscrollBehavior: "contain",
       }}
     >
@@ -529,8 +537,7 @@ export const PermissionPromptBar: React.FC = () => {
           t.palette.mode === "dark"
             ? "rgba(255,255,255,0.04)"
             : "rgba(0,0,0,0.02)",
-        maxHeight: "44vh",
-        overflowY: "auto",
+        overflowY: PERMISSION_PROMPT_ROOT_OVERFLOW_Y,
       }}
     >
       <Stack spacing={1.1}>
@@ -623,7 +630,10 @@ export const PermissionPromptBar: React.FC = () => {
                     内容预览
                   </Typography>
                   <Box sx={{ mt: 0.25 }}>
-                    <ScrollableCodeBlock label="内容预览">
+                    <ScrollableCodeBlock
+                      label="内容预览"
+                      maxHeight={PERMISSION_CONNECTOR_PREVIEW_MAX_HEIGHT}
+                    >
                       {connectorPreview}
                     </ScrollableCodeBlock>
                   </Box>
@@ -642,8 +652,8 @@ export const PermissionPromptBar: React.FC = () => {
             <Box sx={{ mt: 0.25 }}>
               <ScrollableCodeBlock
                 label={contentLabel}
-                minHeight={120}
-                maxHeight="min(34vh, 360px)"
+                minHeight={96}
+                maxHeight={PERMISSION_RUN_CONTENT_MAX_HEIGHT}
               >
                 {detail}
               </ScrollableCodeBlock>
@@ -663,7 +673,12 @@ export const PermissionPromptBar: React.FC = () => {
           </Alert>
         ) : null}
 
-        <Stack direction="row" justifyContent="flex-end" alignItems="center">
+        <Stack
+          direction="row"
+          justifyContent="flex-end"
+          alignItems="center"
+          sx={{ flexShrink: 0 }}
+        >
           <Stack direction="row" justifyContent="flex-end" spacing={1}>
             <Button
               size="small"

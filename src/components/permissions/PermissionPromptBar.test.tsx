@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { inferIntent, permissionPromptLabels } from "./PermissionPromptBar";
+import {
+  PERMISSION_CONNECTOR_PREVIEW_MAX_HEIGHT,
+  PERMISSION_PROMPT_ROOT_OVERFLOW_Y,
+  PERMISSION_RUN_CONTENT_MAX_HEIGHT,
+  inferIntent,
+  permissionPromptLabels,
+} from "./PermissionPromptBar";
 import { inferConnectorPermissionIntent } from "../../utils/connectorPermissionIntent";
 
 describe("PermissionPromptBar connector intent", () => {
@@ -98,5 +104,15 @@ describe("PermissionPromptBar connector intent", () => {
       target: "user@example.com",
       payloadPreview: "周报",
     });
+  });
+
+  it("keeps the permission prompt itself non-scrollable and constrains only detail previews", () => {
+    expect(PERMISSION_PROMPT_ROOT_OVERFLOW_Y).toBe("visible");
+    expect(PERMISSION_RUN_CONTENT_MAX_HEIGHT).toBe(
+      "clamp(96px, 22vh, 220px)",
+    );
+    expect(PERMISSION_CONNECTOR_PREVIEW_MAX_HEIGHT).toBe(
+      "clamp(96px, 18vh, 180px)",
+    );
   });
 });
