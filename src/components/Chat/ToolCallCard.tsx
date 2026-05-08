@@ -153,16 +153,6 @@ export const ToolCallCard = memo(function ToolCallCard({
             transition: "background-color 150ms ease",
             "&:hover": {
               bgcolor: alpha(chat.accent, 0.06),
-              "& > svg:first-of-type": {
-                color: chat.accent,
-                opacity: 1,
-              },
-              "& > svg:nth-of-type(2)": {
-                color: chat.accent,
-              },
-              "& > .MuiTypography-root": {
-                color: chat.textPrimary,
-              },
             },
           }}
         >
@@ -173,7 +163,7 @@ export const ToolCallCard = memo(function ToolCallCard({
               opacity: 0.65,
               flexShrink: 0,
               transform: nestedOpen ? "rotate(0deg)" : "rotate(-90deg)",
-              transition: "transform 0.2s ease, color 150ms ease, opacity 150ms ease",
+              transition: "transform 0.2s ease",
             }}
           />
           <Chip
@@ -191,7 +181,6 @@ export const ToolCallCard = memo(function ToolCallCard({
               fontSize: 16,
               color: chat.toolIcon,
               flexShrink: 0,
-              transition: "color 150ms ease",
             }}
           />
           <Typography
@@ -202,7 +191,6 @@ export const ToolCallCard = memo(function ToolCallCard({
               flex: 1,
               lineHeight: 1.35,
               wordBreak: "break-word",
-              transition: "color 150ms ease",
             }}
           >
             {panelTitle}

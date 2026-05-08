@@ -146,4 +146,34 @@ describe("ToolCallCard", () => {
     expect(html).toContain("Diagnostics:");
     expect(html).toContain("Raw output");
   });
+
+  it("keeps tool-row hover scoped to the row surface instead of animating every icon", () => {
+    const html = renderToStaticMarkup(
+      <ToolCallCard
+        foldId="rf-1"
+        messageId="tool-hover"
+        content="done"
+        timestamp={1000}
+        toolCall={{
+          name: "bash",
+          status: "completed",
+          input: JSON.stringify({ description: "Run hover regression" }),
+          output: "done",
+          completedAt: 1200,
+        }}
+        previousAssistantHasText
+        nestedOpen={false}
+        showAskUserPanel={false}
+        chat={chat}
+        components={{}}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(html).toContain(":hover");
+    expect(html).not.toContain(":hover&gt;svg");
+    expect(html).not.toContain(":hover>svg");
+    expect(html).not.toContain("svg:first-of-type");
+    expect(html).not.toContain("svg:nth-of-type");
+  });
 });

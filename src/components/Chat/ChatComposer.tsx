@@ -87,6 +87,7 @@ import {
 import {
   useUiStore,
   useChatComposerStore,
+  usePermissionStore,
   usePluginStore,
   type PermissionMode,
   type SandboxBackend,
@@ -148,6 +149,10 @@ const SANDBOX_LABEL: Record<SandboxBackend, string> = {
 
 /** 与 SessionList「Language」二级菜单一致：离开一级行后再关闭子菜单的延迟（ms） */
 const ENV_SUBMENU_PARENT_LEAVE_MS = 200;
+export const COMPOSER_PROMPT_OVERLAY_POSITION = "absolute";
+export const COMPOSER_PROMPT_OVERLAY_BOTTOM = "calc(100% + 8px)";
+export const COMPOSER_PROMPT_OVERLAY_MAX_HEIGHT = "min(42vh, 420px)";
+export const COMPOSER_PROMPT_OVERLAY_Z_INDEX = 18;
 
 /** React StrictMode 下 effect 会双跑，避免同页两次 `invoke` + 弹窗 */
 let rsyncAvailabilityCheckStarted = false;
@@ -757,6 +762,9 @@ export const ChatComposer = memo(function ChatComposer({
   } = useChatComposerStore();
   const pluginMarketplaces = usePluginStore((s) => s.marketplaces);
   const loadPlugins = usePluginStore((s) => s.loadPlugins);
+  const hasPendingPermissionPrompt = usePermissionStore(
+    (s) => s.pendingRequest !== null,
+  );
 
   const permissionAccent = permissionModeAccent(theme, permissionMode);
 
@@ -1822,6 +1830,8 @@ export const ChatComposer = memo(function ChatComposer({
       : shortRepoLabel(workspacePath);
 
   const askUserBlocksInput = Boolean(askUserQuestion);
+  const hasFloatingComposerPrompt =
+    askUserBlocksInput || hasPendingPermissionPrompt;
 
   const placeholder = askUserBlocksInput
     ? "请先完成上方的选择题…"
@@ -2283,48 +2293,81 @@ export const ChatComposer = memo(function ChatComposer({
           })}
         </Stack>
       ) : null}
-      <Paper
-        elevation={0}
-        sx={{
-          borderRadius: 3,
-          overflow: "hidden",
-          position: "relative",
-          bgcolor: composerBg,
-          backdropFilter: "blur(12px)",
-          WebkitBackdropFilter: "blur(12px)",
-          border: `1px solid ${edge(0.12)}`,
-          boxShadow: `
-            0 1px 2px ${edge(0.06)},
-            0 8px 24px ${alpha(accent, 0.08)},
-            inset 0 1px 0 ${edge(0.08)}
-          `,
-          transition:
-            "box-shadow 0.22s ease, border-color 0.22s ease, transform 0.22s ease",
-          "@media (prefers-reduced-motion: reduce)": {
-            transition: "none",
-          },
-          "&:focus-within": {
-            borderColor: alpha(accent, 0.45),
-            boxShadow: `
-              0 1px 2px ${edge(0.08)},
-              0 0 0 3px ${alpha(accent, 0.18)},
-              0 12px 32px ${alpha(accent, 0.12)}
-            `,
-          },
-        }}
-      >
-        {askUserQuestion ? (
-          <AskUserQuestionWizard
-            variant="composer"
-            resetKey={askUserQuestion.resetKey}
-            questions={askUserQuestion.questions}
-            selections={askUserQuestion.selections}
-            onSelectionsChange={askUserQuestion.onSelectionsChange}
-            onSubmit={askUserQuestion.onSubmit}
-          />
+      <Box sx={{ position: "relative", overflow: "visible" }}>
+        {hasFloatingComposerPrompt ? (
+          <Paper
+            elevation={0}
+            aria-live="polite"
+            sx={{
+              position: COMPOSER_PROMPT_OVERLAY_POSITION,
+              left: 0,
+              right: 0,
+              bottom: COMPOSER_PROMPT_OVERLAY_BOTTOM,
+              zIndex: COMPOSER_PROMPT_OVERLAY_Z_INDEX,
+              borderRadius: 3,
+              overflow: "hidden",
+              bgcolor: alpha(paper, isDark ? 0.98 : 0.99),
+              backdropFilter: "blur(14px)",
+              WebkitBackdropFilter: "blur(14px)",
+              border: `1px solid ${alpha(accent, isDark ? 0.26 : 0.18)}`,
+              boxShadow: `
+                0 12px 34px ${alpha(theme.palette.common.black, isDark ? 0.36 : 0.16)},
+                0 0 0 1px ${alpha(accent, isDark ? 0.1 : 0.06)}
+              `,
+            }}
+          >
+            <Box
+              sx={{
+                maxHeight: COMPOSER_PROMPT_OVERLAY_MAX_HEIGHT,
+                overflowY: "auto",
+                overscrollBehavior: "contain",
+              }}
+            >
+              {askUserQuestion ? (
+                <AskUserQuestionWizard
+                  variant="composer"
+                  resetKey={askUserQuestion.resetKey}
+                  questions={askUserQuestion.questions}
+                  selections={askUserQuestion.selections}
+                  onSelectionsChange={askUserQuestion.onSelectionsChange}
+                  onSubmit={askUserQuestion.onSubmit}
+                />
+              ) : null}
+              <PermissionPromptBar />
+            </Box>
+          </Paper>
         ) : null}
-        <PermissionPromptBar />
-        <Box
+        <Paper
+          elevation={0}
+          sx={{
+            borderRadius: 3,
+            overflow: "hidden",
+            position: "relative",
+            bgcolor: composerBg,
+            backdropFilter: "blur(12px)",
+            WebkitBackdropFilter: "blur(12px)",
+            border: `1px solid ${edge(0.12)}`,
+            boxShadow: `
+              0 1px 2px ${edge(0.06)},
+              0 8px 24px ${alpha(accent, 0.08)},
+              inset 0 1px 0 ${edge(0.08)}
+            `,
+            transition:
+              "box-shadow 0.22s ease, border-color 0.22s ease, transform 0.22s ease",
+            "@media (prefers-reduced-motion: reduce)": {
+              transition: "none",
+            },
+            "&:focus-within": {
+              borderColor: alpha(accent, 0.45),
+              boxShadow: `
+                0 1px 2px ${edge(0.08)},
+                0 0 0 3px ${alpha(accent, 0.18)},
+                0 12px 32px ${alpha(accent, 0.12)}
+              `,
+            },
+          }}
+        >
+          <Box
           ref={composerInputAnchorRef}
           onMouseDown={(event) => {
             if (event.target !== event.currentTarget || inputDisabled) return;
@@ -3537,7 +3580,8 @@ export const ChatComposer = memo(function ChatComposer({
             )}
           </Stack>
         </Stack>
-      </Paper>
+        </Paper>
+      </Box>
 
       {/* Bottom: left = path + branch · right = worktree + remote/local */}
       <Stack

@@ -123,4 +123,28 @@ describe("ToolFoldHeader", () => {
     expect(html).toContain("2 并行");
     expect(html).toContain("2 并行运行中");
   });
+
+  it("does not fan hover effects out to every icon in the fold header", () => {
+    const html = renderToStaticMarkup(
+      <ToolFoldHeader
+        foldId="rf-hover"
+        expanded={false}
+        summary="Reasoning · Ran a command"
+        anyRunning={false}
+        runningToolName={null}
+        runningToolCount={0}
+        showGroupDone={false}
+        isLastFold={false}
+        activityIsStreaming={false}
+        waitingFirstChunk={false}
+        chat={chat}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(html).toContain(":hover");
+    expect(html).not.toContain(":hover&gt;svg");
+    expect(html).not.toContain(":hover>svg");
+    expect(html).not.toContain("svg:first-of-type");
+  });
 });
