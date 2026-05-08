@@ -2226,6 +2226,7 @@ export function Chat({ sessionId }: ChatProps) {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
+  const messagesContentRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLElement>(null);
   const prepareResearchGoalCommand = useCallback((command: string) => {
     composerRef.current?.setValue(command);
@@ -3312,6 +3313,7 @@ export function Chat({ sessionId }: ChatProps) {
   // Auto-scroll: only when user is already near the bottom, throttled by RAF
   const shouldAutoScrollRef = useRef(true);
   const scrollRafRef = useRef<number | null>(null);
+  const jumpVisibilityRafRef = useRef<number | null>(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const jumpToLatestAnimationTimerRef = useRef<number | null>(null);
   const jumpToLatestClickAnimatingRef = useRef(false);
@@ -3359,6 +3361,14 @@ export function Chat({ sessionId }: ChatProps) {
     return nearBottom;
   }, [currentResponse, messages.length]);
 
+  const scheduleJumpToLatestVisibilityUpdate = useCallback(() => {
+    if (jumpVisibilityRafRef.current !== null) return;
+    jumpVisibilityRafRef.current = requestAnimationFrame(() => {
+      jumpVisibilityRafRef.current = null;
+      updateJumpToLatestVisibility();
+    });
+  }, [updateJumpToLatestVisibility]);
+
   // Scroll-to-top pagination + auto-scroll bottom detection
   useEffect(() => {
     const el = messagesScrollRef.current;
@@ -3383,6 +3393,29 @@ export function Chat({ sessionId }: ChatProps) {
     shouldAutoScrollRef.current = true;
     setShowJumpToLatest(false);
   }, [resetJumpToLatestClickAnimation, sessionId]);
+
+  useEffect(() => {
+    scheduleJumpToLatestVisibilityUpdate();
+
+    if (typeof ResizeObserver === "undefined") return;
+    const scrollEl = messagesScrollRef.current;
+    if (!scrollEl) return;
+
+    // Re-check when transcript layout changes without a scroll event, e.g.
+    // collapsing a ReAct fold can make the transcript non-scrollable.
+    const observer = new ResizeObserver(scheduleJumpToLatestVisibilityUpdate);
+    observer.observe(scrollEl);
+
+    const contentEl = messagesContentRef.current;
+    if (contentEl) observer.observe(contentEl);
+
+    return () => observer.disconnect();
+  }, [
+    allItemsVisible,
+    isSwitchingSession,
+    scheduleJumpToLatestVisibilityUpdate,
+    sessionId,
+  ]);
 
   const messageRenderItems = useMemo(
     () => groupMessagesForRender(messages),
@@ -3515,6 +3548,10 @@ export function Chat({ sessionId }: ChatProps) {
       if (scrollRafRef.current !== null) {
         cancelAnimationFrame(scrollRafRef.current);
         scrollRafRef.current = null;
+      }
+      if (jumpVisibilityRafRef.current !== null) {
+        cancelAnimationFrame(jumpVisibilityRafRef.current);
+        jumpVisibilityRafRef.current = null;
       }
     };
   }, [clearJumpToLatestTimers]);
@@ -6764,6 +6801,7 @@ export function Chat({ sessionId }: ChatProps) {
                 Uses transform+opacity only: zero layout repaints (GPU path).
                 prefers-reduced-motion: the animation is gated below. */}
             <Box
+              ref={messagesContentRef}
               key={isSwitchingSession ? "skeleton" : (sessionId ?? "none")}
               sx={{
                 display: "flex",
