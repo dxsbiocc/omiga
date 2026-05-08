@@ -47,6 +47,7 @@ impl ToolImpl for OperatorDescribeTool {
                 "manifestPath": spec.source.manifest_path,
             },
             "schema": crate::domain::operators::operator_parameters_schema(&spec),
+            "preflight": spec.preflight,
             "smokeTests": spec.smoke_tests,
             "runtime": spec.runtime,
             "resources": spec.resources,

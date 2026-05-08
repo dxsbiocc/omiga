@@ -58,6 +58,35 @@ Supported field kinds include `string`, `integer`, `number`, `boolean`, `enum`, 
 
 Path-like inputs are resolved as references inside the active session execution environment. The operator runtime does not copy inputs into a separate staging area; the current local workspace or selected remote workspace is already the execution boundary.
 
+## Preflight choices
+
+Use `preflight.questions[]` when an operator needs a bounded user decision before execution. This keeps operator-specific choices in the plugin manifest rather than in the Omiga kernel.
+
+```yaml
+preflight:
+  questions:
+    - id: method
+      param: method
+      question: Which statistical method should this operator use?
+      header: Method
+      askWhen:
+        missing: true
+        empty: true
+        values: [auto]
+      options:
+        - label: Conservative
+          value: conservative
+          description: Prefer stricter calls with fewer false positives.
+        - label: Exploratory
+          value: exploratory
+          description: Prefer broader calls for early discovery work.
+```
+
+- `param` must reference an `interface.params` field.
+- `askWhen.missing`, `askWhen.empty`, and `askWhen.values[]` decide when the chat path asks the question.
+- `options[].label` is what the user sees; `options[].value` is written back into `params.{param}`.
+- Keep defaults in `interface.params` when non-interactive callers should still run without a chat preflight.
+
 ## Smoke tests
 
 Use `smokeTests[]` to declare deterministic validation payloads. The UI uses these payloads for generic smoke-run buttons; no project-specific code is needed. If multiple smoke tests are declared, the UI offers a selector and verifies the resulting run after execution.

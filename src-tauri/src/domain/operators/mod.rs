@@ -22,11 +22,6 @@ use std::path::{Path, PathBuf};
 pub const OPERATOR_API_VERSION_V1ALPHA1: &str = "omiga.ai/operator/v1alpha1";
 pub const OPERATOR_KIND: &str = "Operator";
 pub const OPERATOR_TOOL_PREFIX: &str = "operator__";
-pub const OMICS_DE_OPERATOR_ID: &str = "omics_differential_expression_basic";
-pub const OMICS_DE_INPUT_TYPE_QUESTION: &str = "差异表达前，请选择输入矩阵的数据类型？";
-pub const OMICS_DE_METHOD_QUESTION: &str = "差异表达前，请选择主要统计方法？";
-pub const OMICS_DE_FDR_THRESHOLD_QUESTION: &str = "显著差异基因使用哪个 FDR 阈值？";
-pub const OMICS_DE_LOG2FC_THRESHOLD_QUESTION: &str = "显著差异基因使用哪个 |log2FC| 阈值？";
 const OPERATOR_STATE_DIR_NAME: &str = ".omiga";
 const REGISTRY_RELATIVE_PATH: &str = "operators/registry.json";
 const RUNS_RELATIVE_PATH: &str = "runs";
@@ -164,6 +159,49 @@ pub struct OperatorExecutionSpec {
     pub argv: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorPreflightSpec {
+    #[serde(default)]
+    pub questions: Vec<OperatorPreflightQuestionSpec>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorPreflightQuestionSpec {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub param: String,
+    pub question: String,
+    pub header: String,
+    #[serde(default)]
+    pub multi_select: bool,
+    #[serde(default)]
+    pub ask_when: OperatorPreflightAskWhen,
+    pub options: Vec<OperatorPreflightOptionSpec>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorPreflightAskWhen {
+    #[serde(default)]
+    pub missing: bool,
+    #[serde(default)]
+    pub empty: bool,
+    #[serde(default)]
+    pub values: Vec<JsonValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperatorPreflightOptionSpec {
+    pub label: String,
+    pub description: String,
+    pub value: JsonValue,
+    #[serde(default)]
+    pub preview: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperatorSource {
@@ -182,6 +220,8 @@ pub struct OperatorSpec {
     #[serde(default)]
     pub smoke_tests: Vec<OperatorSmokeTestSpec>,
     pub execution: OperatorExecutionSpec,
+    #[serde(default)]
+    pub preflight: Option<OperatorPreflightSpec>,
     #[serde(default)]
     pub runtime: Option<JsonValue>,
     #[serde(default)]
@@ -208,6 +248,8 @@ pub struct OperatorCandidateSummary {
     pub manifest_path: String,
     pub interface: OperatorInterfaceSpec,
     pub execution: OperatorExecutionSpec,
+    #[serde(default)]
+    pub preflight: Option<OperatorPreflightSpec>,
     #[serde(default)]
     pub runtime: Option<JsonValue>,
     #[serde(default)]
@@ -324,6 +366,8 @@ struct RawOperatorManifest {
     #[serde(default, alias = "tests", alias = "smoke")]
     smoke_tests: Vec<RawOperatorSmokeTestSpec>,
     execution: RawOperatorExecution,
+    #[serde(default)]
+    preflight: Option<OperatorPreflightSpec>,
     #[serde(default)]
     runtime: Option<JsonValue>,
     #[serde(default)]
@@ -581,6 +625,7 @@ pub fn load_operator_manifest(
             .map(OperatorSmokeTestSpec::try_from)
             .collect::<Result<Vec<_>, _>>()?,
         execution: OperatorExecutionSpec { argv },
+        preflight: parsed.preflight,
         runtime: parsed.runtime,
         cache: parsed.cache,
         resources: parsed
@@ -596,8 +641,64 @@ pub fn load_operator_manifest(
             manifest_path: manifest_path.to_path_buf(),
         },
     };
+    validate_operator_preflight(&spec)?;
     validate_operator_smoke_tests(&spec)?;
     Ok(spec)
+}
+
+fn validate_operator_preflight(spec: &OperatorSpec) -> Result<(), String> {
+    let Some(preflight) = &spec.preflight else {
+        return Ok(());
+    };
+    if preflight.questions.len() > 4 {
+        return Err("operator preflight.questions supports at most 4 questions".to_string());
+    }
+    let mut seen_questions = HashSet::new();
+    for question in &preflight.questions {
+        if question.param.trim().is_empty() {
+            return Err("operator preflight question param must not be empty".to_string());
+        }
+        if !spec.interface.params.contains_key(question.param.trim()) {
+            return Err(format!(
+                "operator preflight question references unknown param `{}`",
+                question.param
+            ));
+        }
+        if question.question.trim().is_empty() {
+            return Err("operator preflight question text must not be empty".to_string());
+        }
+        if !seen_questions.insert(question.question.trim()) {
+            return Err(format!(
+                "operator preflight question `{}` is declared more than once",
+                question.question
+            ));
+        }
+        if question.header.trim().is_empty() {
+            return Err("operator preflight question header must not be empty".to_string());
+        }
+        if question.options.len() < 2 || question.options.len() > 4 {
+            return Err(format!(
+                "operator preflight question `{}` must declare 2-4 options",
+                question.question
+            ));
+        }
+        let mut labels = HashSet::new();
+        for option in &question.options {
+            if option.label.trim().is_empty() || option.description.trim().is_empty() {
+                return Err(format!(
+                    "operator preflight question `{}` has an option with empty label/description",
+                    question.question
+                ));
+            }
+            if !labels.insert(option.label.trim()) {
+                return Err(format!(
+                    "operator preflight question `{}` repeats option label `{}`",
+                    question.question, option.label
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_operator_smoke_tests(spec: &OperatorSpec) -> Result<(), String> {
@@ -1005,6 +1106,7 @@ pub fn list_operator_summaries() -> Vec<OperatorCandidateSummary> {
                     .into_owned(),
                 interface: candidate.interface,
                 execution: candidate.execution,
+                preflight: candidate.preflight,
                 runtime: candidate.runtime,
                 resources: candidate.resources,
                 smoke_tests: candidate.smoke_tests,
@@ -1162,88 +1264,24 @@ pub fn operator_preflight_question(
     tool_name: &str,
     arguments: &str,
 ) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
-    if !is_omics_de_operator_tool(tool_name) {
-        return None;
-    }
+    let resolved = resolve_operator_alias(tool_name).ok()?;
+    let preflight = resolved.spec.preflight.as_ref()?;
     let value = serde_json::from_str::<JsonValue>(arguments).ok()?;
     let params = value.get("params").and_then(JsonValue::as_object);
-    let mut questions = Vec::new();
 
-    if param_missing_empty_or_auto(params, "input_data_type") {
-        questions.push(crate::domain::tools::ask_user_question::QuestionItem {
-            question: OMICS_DE_INPUT_TYPE_QUESTION.to_string(),
-            header: "数据类型".to_string(),
-            multi_select: false,
-            options: vec![
-                ask_option(
-                    "Counts",
-                    "原始非负整数 read counts；适合 DESeq2、edgeR、limma-voom。",
-                ),
-                ask_option(
-                    "Quantitative",
-                    "TPM/FPKM/CPM/log2 表达量等已标准化连续矩阵；优先 limma。",
-                ),
-                ask_option(
-                    "Auto",
-                    "由 Omiga 按矩阵是否为非负整数自动判断；不确定时才选择。",
-                ),
-            ],
-        });
-    }
-
-    if param_missing_empty_or_auto(params, "de_method") {
-        questions.push(crate::domain::tools::ask_user_question::QuestionItem {
-            question: OMICS_DE_METHOD_QUESTION.to_string(),
-            header: "DE方法".to_string(),
-            multi_select: false,
-            options: vec![
-                ask_option(
-                    "DESeq2",
-                    "bulk RNA-seq 原始 counts 的常用稳健默认；每组至少 2 个样本更合适。",
-                ),
-                ask_option("edgeR", "原始 counts 的负二项模型；小样本场景也常用。"),
-                ask_option(
-                    "limma",
-                    "标准化/连续表达矩阵优先；counts 时使用 limma-voom。",
-                ),
-                ask_option(
-                    "Auto",
-                    "按数据类型和环境可用包自动尝试，并可能 fallback 到简单检验。",
-                ),
-            ],
-        });
-    }
-
-    if param_missing_or_empty(params, "pvalue_threshold") {
-        questions.push(crate::domain::tools::ask_user_question::QuestionItem {
-            question: OMICS_DE_FDR_THRESHOLD_QUESTION.to_string(),
-            header: "FDR阈值".to_string(),
-            multi_select: false,
-            options: vec![
-                ask_option(
-                    "FDR 0.05",
-                    "常用默认：Benjamini-Hochberg 校正后 FDR < 0.05。",
-                ),
-                ask_option("FDR 0.01", "更严格，降低假阳性但会减少候选基因。"),
-                ask_option("FDR 0.10", "更宽松，探索性分析可用。"),
-            ],
-        });
-    }
-
-    if param_missing_or_empty(params, "log2fc_threshold") {
-        questions.push(crate::domain::tools::ask_user_question::QuestionItem {
-            question: OMICS_DE_LOG2FC_THRESHOLD_QUESTION.to_string(),
-            header: "FC阈值".to_string(),
-            multi_select: false,
-            options: vec![
-                ask_option("|log2FC|≥1", "常用默认：至少 2 倍变化。"),
-                ask_option("|log2FC|≥0.58", "约 1.5 倍变化，更适合温和效应探索。"),
-                ask_option("|log2FC|≥0", "只按显著性筛选，不额外设 fold-change 门槛。"),
-                ask_option("|log2FC|≥2", "至少 4 倍变化，强调大效应基因。"),
-            ],
-        });
-    }
-
+    let questions = preflight
+        .questions
+        .iter()
+        .filter(|question| preflight_question_should_ask(question, params))
+        .map(
+            |question| crate::domain::tools::ask_user_question::QuestionItem {
+                question: question.question.clone(),
+                header: question.header.clone(),
+                multi_select: question.multi_select,
+                options: question.options.iter().map(ask_option_from_spec).collect(),
+            },
+        )
+        .collect::<Vec<_>>();
     if questions.is_empty() {
         return None;
     }
@@ -1255,7 +1293,8 @@ pub fn operator_preflight_question(
             annotations: None,
             metadata: Some(json!({
                 "source": "operator_preflight",
-                "operator_id": OMICS_DE_OPERATOR_ID,
+                "operator_id": resolved.spec.metadata.id,
+                "operator_alias": resolved.alias,
             })),
         },
     )
@@ -1266,9 +1305,13 @@ pub fn apply_operator_preflight_answers(
     arguments: &str,
     ask_user_output: &JsonValue,
 ) -> Result<String, String> {
-    if !is_omics_de_operator_tool(tool_name) {
+    let resolved = match resolve_operator_alias(tool_name) {
+        Ok(resolved) => resolved,
+        Err(_) => return Ok(arguments.to_string()),
+    };
+    let Some(preflight) = resolved.spec.preflight.as_ref() else {
         return Ok(arguments.to_string());
-    }
+    };
 
     let answers = ask_user_output
         .get("answers")
@@ -1289,95 +1332,120 @@ pub fn apply_operator_preflight_answers(
         .as_object_mut()
         .ok_or_else(|| "Operator params must be a JSON object".to_string())?;
 
-    if let Some(label) = answer_label(answers, OMICS_DE_INPUT_TYPE_QUESTION) {
-        let value = match label {
-            "Counts" => "counts",
-            "Quantitative" => "quantitative",
-            "Auto" => "auto",
-            other => return Err(format!("Unsupported input data type choice: {other}")),
+    for question in &preflight.questions {
+        let Some(answer) = answers.get(question.question.trim()) else {
+            continue;
         };
-        params.insert("input_data_type".to_string(), json!(value));
-    }
-
-    if let Some(label) = answer_label(answers, OMICS_DE_METHOD_QUESTION) {
-        let value = match label {
-            "DESeq2" => "deseq2",
-            "edgeR" => "edger",
-            "limma" => "limma",
-            "Auto" => "auto",
-            other => return Err(format!("Unsupported DE method choice: {other}")),
+        let labels = preflight_answer_labels(answer, question.multi_select);
+        if labels.is_empty() {
+            continue;
+        }
+        let values = labels
+            .iter()
+            .map(|label| {
+                question
+                    .options
+                    .iter()
+                    .find(|option| option.label.trim() == label)
+                    .map(|option| option.value.clone())
+                    .ok_or_else(|| {
+                        format!(
+                            "Unsupported preflight choice `{}` for operator parameter `{}`",
+                            label, question.param
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let value = if question.multi_select {
+            JsonValue::Array(values)
+        } else {
+            values
+                .into_iter()
+                .next()
+                .ok_or_else(|| format!("Missing preflight choice for `{}`", question.param))?
         };
-        params.insert("de_method".to_string(), json!(value));
-    }
-
-    if let Some(label) = answer_label(answers, OMICS_DE_FDR_THRESHOLD_QUESTION) {
-        let value = match label {
-            "FDR 0.05" => 0.05,
-            "FDR 0.01" => 0.01,
-            "FDR 0.10" => 0.10,
-            other => return Err(format!("Unsupported FDR threshold choice: {other}")),
-        };
-        params.insert("pvalue_threshold".to_string(), json!(value));
-    }
-
-    if let Some(label) = answer_label(answers, OMICS_DE_LOG2FC_THRESHOLD_QUESTION) {
-        let value = match label {
-            "|log2FC|≥1" => 1.0,
-            "|log2FC|≥0.58" => 0.58,
-            "|log2FC|≥0" => 0.0,
-            "|log2FC|≥2" => 2.0,
-            other => return Err(format!("Unsupported log2FC threshold choice: {other}")),
-        };
-        params.insert("log2fc_threshold".to_string(), json!(value));
+        params.insert(question.param.clone(), value);
     }
 
     serde_json::to_string(&invocation).map_err(|err| err.to_string())
 }
 
-fn is_omics_de_operator_tool(tool_name: &str) -> bool {
-    let alias = tool_name
-        .strip_prefix(OPERATOR_TOOL_PREFIX)
-        .unwrap_or(tool_name)
-        .trim();
-    alias == OMICS_DE_OPERATOR_ID
+fn preflight_question_should_ask(
+    question: &OperatorPreflightQuestionSpec,
+    params: Option<&JsonMap<String, JsonValue>>,
+) -> bool {
+    let value = params.and_then(|params| params.get(&question.param));
+    let missing = value.is_none() || matches!(value, Some(JsonValue::Null));
+    if question.ask_when.missing && missing {
+        return true;
+    }
+    if question.ask_when.empty && value.map(json_value_is_empty).unwrap_or(false) {
+        return true;
+    }
+    if let Some(actual) = value {
+        return question
+            .ask_when
+            .values
+            .iter()
+            .any(|expected| preflight_value_matches(actual, expected));
+    }
+    false
 }
 
-fn ask_option(
-    label: &str,
-    description: &str,
+fn json_value_is_empty(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Null => true,
+        JsonValue::String(value) => value.trim().is_empty(),
+        JsonValue::Array(values) => values.is_empty(),
+        JsonValue::Object(values) => values.is_empty(),
+        _ => false,
+    }
+}
+
+fn preflight_value_matches(actual: &JsonValue, expected: &JsonValue) -> bool {
+    match (actual, expected) {
+        (JsonValue::String(left), JsonValue::String(right)) => {
+            left.trim().eq_ignore_ascii_case(right.trim())
+        }
+        _ => actual == expected,
+    }
+}
+
+fn ask_option_from_spec(
+    option: &OperatorPreflightOptionSpec,
 ) -> crate::domain::tools::ask_user_question::QuestionOption {
     crate::domain::tools::ask_user_question::QuestionOption {
-        label: label.to_string(),
-        description: description.to_string(),
-        preview: None,
+        label: option.label.clone(),
+        description: option.description.clone(),
+        preview: option.preview.clone(),
     }
 }
 
-fn param_missing_empty_or_auto(params: Option<&JsonMap<String, JsonValue>>, name: &str) -> bool {
-    match params.and_then(|params| params.get(name)) {
-        Some(JsonValue::String(value)) => {
-            let trimmed = value.trim();
-            trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto")
+fn preflight_answer_labels(answer: &JsonValue, multi_select: bool) -> Vec<String> {
+    match answer {
+        JsonValue::String(value) if multi_select => value
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+        JsonValue::String(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                Vec::new()
+            } else {
+                vec![value.to_string()]
+            }
         }
-        Some(JsonValue::Null) | None => true,
-        Some(_) => false,
+        JsonValue::Array(values) => values
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
     }
-}
-
-fn param_missing_or_empty(params: Option<&JsonMap<String, JsonValue>>, name: &str) -> bool {
-    match params.and_then(|params| params.get(name)) {
-        Some(JsonValue::String(value)) => value.trim().is_empty(),
-        Some(JsonValue::Null) | None => true,
-        Some(_) => false,
-    }
-}
-
-fn answer_label<'a>(answers: &'a JsonMap<String, JsonValue>, question: &str) -> Option<&'a str> {
-    answers
-        .get(question)
-        .and_then(JsonValue::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
 }
 
 fn resources_object_schema(resources: &BTreeMap<String, OperatorResourceSpec>) -> JsonValue {
@@ -6012,6 +6080,7 @@ mod tests {
                     "${outdir}".to_string(),
                 ],
             },
+            preflight: None,
             runtime: None,
             cache,
             resources: BTreeMap::new(),
@@ -6041,6 +6110,7 @@ mod tests {
             execution: OperatorExecutionSpec {
                 argv: argv.iter().map(|value| value.to_string()).collect(),
             },
+            preflight: None,
             runtime: None,
             cache: None,
             resources: BTreeMap::new(),
@@ -6249,11 +6319,87 @@ bindings:
                 operator.interface.outputs["summary"].kind,
                 OperatorFieldKind::Json
             ));
+            if plugin_name == "operator-differential-expression-r" {
+                let preflight = operator
+                    .preflight
+                    .as_ref()
+                    .expect("differential expression choices should live in manifest preflight");
+                assert_eq!(preflight.questions.len(), 4);
+                assert!(preflight.questions.iter().any(|question| {
+                    question.param == "de_method"
+                        && question
+                            .options
+                            .iter()
+                            .any(|option| option.value == json!("deseq2"))
+                }));
+                let schema = operator_parameters_schema(operator);
+                assert!(schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|value| value == "params"));
+                let required_params = schema["properties"]["params"]["required"]
+                    .as_array()
+                    .unwrap();
+                assert!(required_params.iter().any(|value| value == "de_method"));
+                assert!(required_params
+                    .iter()
+                    .any(|value| value == "input_data_type"));
+            }
             assert_eq!(
                 operator.source.source_plugin,
                 format!("{plugin_name}@omiga-curated")
             );
         }
+    }
+
+    #[test]
+    fn preflight_rules_are_manifest_driven() {
+        let question = OperatorPreflightQuestionSpec {
+            id: Some("method".to_string()),
+            param: "method".to_string(),
+            question: "Pick method?".to_string(),
+            header: "Method".to_string(),
+            multi_select: false,
+            ask_when: OperatorPreflightAskWhen {
+                missing: true,
+                empty: true,
+                values: vec![json!("auto")],
+            },
+            options: vec![
+                OperatorPreflightOptionSpec {
+                    label: "Auto".to_string(),
+                    description: "Let the operator choose.".to_string(),
+                    value: json!("auto"),
+                    preview: None,
+                },
+                OperatorPreflightOptionSpec {
+                    label: "Manual".to_string(),
+                    description: "Use a fixed method.".to_string(),
+                    value: json!("manual"),
+                    preview: None,
+                },
+            ],
+        };
+
+        assert!(preflight_question_should_ask(&question, None));
+        let mut auto_params = JsonMap::new();
+        auto_params.insert("method".to_string(), JsonValue::String("AUTO".to_string()));
+        assert!(preflight_question_should_ask(&question, Some(&auto_params)));
+
+        let mut manual_params = JsonMap::new();
+        manual_params.insert(
+            "method".to_string(),
+            JsonValue::String("manual".to_string()),
+        );
+        assert!(!preflight_question_should_ask(
+            &question,
+            Some(&manual_params)
+        ));
+        assert_eq!(
+            preflight_answer_labels(&json!("Auto, Manual"), true),
+            vec!["Auto".to_string(), "Manual".to_string()]
+        );
     }
 
     #[test]
@@ -6437,6 +6583,7 @@ execution:
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
             },
+            preflight: None,
             runtime: None,
             cache: None,
             resources: BTreeMap::new(),
@@ -6477,6 +6624,7 @@ execution:
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
             },
+            preflight: None,
             runtime: None,
             cache: None,
             resources: BTreeMap::new(),
@@ -6621,6 +6769,7 @@ execution:
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
             },
+            preflight: None,
             runtime: Some(json!({
                 "placement": { "supported": ["local"] },
                 "container": { "supported": ["docker"] },
@@ -6684,6 +6833,7 @@ execution:
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
             },
+            preflight: None,
             runtime: Some(json!({
                 "placement": { "supported": ["local"] },
                 "container": { "supported": ["none"] },
@@ -6836,6 +6986,7 @@ execution:
             execution: OperatorExecutionSpec {
                 argv: vec!["/bin/cat".to_string(), "${inputs.input}".to_string()],
             },
+            preflight: None,
             runtime: Some(json!({
                 "placement": { "supported": ["local"] },
                 "container": {
@@ -6898,6 +7049,7 @@ execution:
             execution: OperatorExecutionSpec {
                 argv: vec!["/bin/true".to_string()],
             },
+            preflight: None,
             runtime: Some(json!({
                 "placement": { "supported": ["local"] },
                 "container": {
@@ -6953,6 +7105,7 @@ execution:
             execution: OperatorExecutionSpec {
                 argv: vec!["/bin/true".to_string()],
             },
+            preflight: None,
             runtime: Some(json!({
                 "placement": { "supported": ["local"] },
                 "container": { "supported": ["none", "docker"] },
@@ -7560,6 +7713,7 @@ execution:
                     r#"cat ${inputs.input} > ${outdir}/report.txt; printf '%s\n' '{"summary":{"lineCount":1},"ok":true}' > ${outdir}/outputs.json"#.to_string(),
                 ],
             },
+            preflight: None,
             runtime: None,
             cache: None,
             resources: BTreeMap::new(),
@@ -7693,6 +7847,7 @@ execution:
             execution: OperatorExecutionSpec {
                 argv: vec!["true".to_string()],
             },
+            preflight: None,
             runtime: None,
             cache: None,
             resources: BTreeMap::new(),
@@ -7778,6 +7933,7 @@ execution:
                 execution: OperatorExecutionSpec {
                     argv: vec!["true".to_string()],
                 },
+                preflight: None,
                 runtime: None,
                 cache: None,
                 resources: BTreeMap::new(),

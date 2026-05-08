@@ -427,7 +427,7 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
     } = shared;
     let tool_use_id = &tool_use_id;
     let tool_name = &tool_name;
-    let arguments = &arguments;
+    let mut effective_arguments = arguments;
     let message_id = &message_id;
     let session_id = &session_id;
     let tool_results_dir = tool_results_dir.as_path();
@@ -460,7 +460,7 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                 &StreamOutputItem::ToolResult {
                     tool_use_id: tool_use_id.clone(),
                     name: tool_name.clone(),
-                    input: arguments.clone(),
+                    input: effective_arguments.clone(),
                     output: error_msg.clone(),
                     is_error: true,
                 },
@@ -468,6 +468,116 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
             return (tool_use_id.clone(), error_msg, true);
         }
     }
+
+    if tool_name.starts_with(crate::domain::operators::OPERATOR_TOOL_PREFIX) {
+        if let Some(question_args) =
+            crate::domain::operators::operator_preflight_question(tool_name, &effective_arguments)
+        {
+            let Some(app_state) = app.try_state::<OmigaAppState>() else {
+                let error_msg = "内部错误：无法获取应用状态以显示 operator 参数选择".to_string();
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: effective_arguments.clone(),
+                        output: error_msg.clone(),
+                        is_error: true,
+                    },
+                );
+                return (tool_use_id.clone(), error_msg, true);
+            };
+            let ask_arguments = match serde_json::to_string(&question_args) {
+                Ok(value) => value,
+                Err(err) => {
+                    let error_msg =
+                        format!("Failed to serialize operator preflight questions: {err}");
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: effective_arguments.clone(),
+                            output: error_msg.clone(),
+                            is_error: true,
+                        },
+                    );
+                    return (tool_use_id.clone(), error_msg, true);
+                }
+            };
+            let ask_tool_use_id = format!(
+                "operator-preflight-{}-{}",
+                tool_use_id,
+                uuid::Uuid::new_v4().simple()
+            );
+            let (_ask_id, ask_output, ask_is_error) =
+                execute_ask_user_question_interactive(AskUserQuestionExecution {
+                    tool_use_id: ask_tool_use_id,
+                    tool_name: "ask_user_question".to_string(),
+                    arguments: ask_arguments,
+                    app: app.clone(),
+                    message_id: message_id.to_string(),
+                    session_id: session_id.to_string(),
+                    tool_results_dir,
+                    waiters: app_state.chat.ask_user_waiters.clone(),
+                    cancel_flag: cancel_flag.clone(),
+                })
+                .await;
+            if ask_is_error {
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: effective_arguments.clone(),
+                        output: ask_output.clone(),
+                        is_error: true,
+                    },
+                );
+                return (tool_use_id.clone(), ask_output, true);
+            }
+            let ask_output_json = match serde_json::from_str::<serde_json::Value>(&ask_output) {
+                Ok(value) => value,
+                Err(err) => {
+                    let error_msg = format!("Failed to parse operator preflight answers: {err}");
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: effective_arguments.clone(),
+                            output: error_msg.clone(),
+                            is_error: true,
+                        },
+                    );
+                    return (tool_use_id.clone(), error_msg, true);
+                }
+            };
+            match crate::domain::operators::apply_operator_preflight_answers(
+                tool_name,
+                &effective_arguments,
+                &ask_output_json,
+            ) {
+                Ok(updated) => effective_arguments = updated,
+                Err(err) => {
+                    let error_msg = format!("Failed to apply operator preflight answers: {err}");
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: effective_arguments.clone(),
+                            output: error_msg.clone(),
+                            is_error: true,
+                        },
+                    );
+                    return (tool_use_id.clone(), error_msg, true);
+                }
+            }
+        }
+    }
+
+    let arguments = &effective_arguments;
 
     // === Permission Check for ALL tools (not just skill) ===
     // Skip permission check for certain safe tools
