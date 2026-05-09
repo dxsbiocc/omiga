@@ -153,7 +153,13 @@ export function finalizeActivitySnapshot(
     savedAt: endedAt,
     executionEndedAt: snapshot.executionEndedAt ?? endedAt,
     executionSteps: snapshot.executionSteps.map((step) =>
-      step.status === "running" ? { ...step, status: "done" as const } : step,
+      step.status === "running"
+        ? {
+            ...step,
+            status: "done" as const,
+            completedAt: step.completedAt ?? endedAt,
+          }
+        : step,
     ),
   });
 }

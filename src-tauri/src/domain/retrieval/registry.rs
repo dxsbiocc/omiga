@@ -202,7 +202,7 @@ impl SourceRegistration {
 
     fn from_plugin(
         plugin: &PluginRetrievalRegistration,
-        source: super::plugin::manifest::PluginRetrievalSource,
+        source: crate::domain::plugin_runtime::retrieval::manifest::PluginRetrievalSource,
     ) -> Self {
         Self {
             category: source.category,
@@ -273,7 +273,7 @@ fn is_plugin_source_explicitly_enabled(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::retrieval::plugin::manifest::{
+    use crate::domain::plugin_runtime::retrieval::manifest::{
         PluginRetrievalManifest, PluginRetrievalRuntime, PluginRetrievalSource,
     };
     use crate::domain::retrieval::types::{RetrievalRequest, RetrievalTool};

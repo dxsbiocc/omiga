@@ -1,13 +1,13 @@
-//! Omiga native plugin discovery, marketplace, installation, and runtime capability loading.
+//! Omiga native plugin discovery, marketplace, installation, and runtime contribution loading.
 //!
-//! A plugin is an Omiga-native capability bundle: skills, MCP server configs, app connector
+//! A plugin is an Omiga-native extension bundle: skills, MCP server configs, app connector
 //! references, and UI metadata. It intentionally does not execute VS Code extension code.
 
 use crate::domain::mcp::config::{servers_from_mcp_json, McpServerConfig};
-use crate::domain::retrieval::plugin::lifecycle::{
+use crate::domain::plugin_runtime::retrieval::lifecycle::{
     PluginLifecycleKey, PluginLifecycleRouteStatus, PluginLifecycleState,
 };
-use crate::domain::retrieval::plugin::manifest::{
+use crate::domain::plugin_runtime::retrieval::manifest::{
     load_plugin_retrieval_manifest, PluginRetrievalManifest,
 };
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use tokio::time::Instant;
 
+pub const PLUGIN_MANIFEST_FILE: &str = "plugin.json";
 pub const OMIGA_PLUGIN_MANIFEST_PATH: &str = ".omiga-plugin/plugin.json";
 pub const CODEX_PLUGIN_MANIFEST_PATH: &str = ".codex-plugin/plugin.json";
 const MARKETPLACE_FILE_NAME: &str = "marketplace.json";
@@ -87,9 +88,14 @@ pub struct PluginManifest {
     pub name: String,
     pub version: Option<String>,
     pub description: Option<String>,
+    pub operators: Option<PathBuf>,
+    pub templates: Option<PathBuf>,
     pub skills: Option<PathBuf>,
+    pub agents: Option<PathBuf>,
+    pub environments: Option<PathBuf>,
     pub mcp_servers: Option<PathBuf>,
     pub apps: Option<PathBuf>,
+    pub hooks: Option<PathBuf>,
     pub retrieval: Option<PluginRetrievalManifest>,
     pub interface: Option<PluginInterface>,
 }
@@ -104,11 +110,21 @@ struct RawPluginManifest {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
+    operators: Option<String>,
+    #[serde(default)]
+    templates: Option<String>,
+    #[serde(default)]
     skills: Option<String>,
+    #[serde(default)]
+    agents: Option<String>,
+    #[serde(default)]
+    environments: Option<String>,
     #[serde(default)]
     mcp_servers: Option<String>,
     #[serde(default)]
     apps: Option<String>,
+    #[serde(default)]
+    hooks: Option<String>,
     #[serde(default)]
     retrieval: Option<JsonValue>,
     #[serde(default)]
@@ -768,14 +784,7 @@ fn default_prompts(value: Option<RawDefaultPrompt>) -> Vec<String> {
 }
 
 pub fn load_plugin_manifest(plugin_root: &Path) -> Option<PluginManifest> {
-    let manifest_path = if plugin_root.join(OMIGA_PLUGIN_MANIFEST_PATH).is_file() {
-        plugin_root.join(OMIGA_PLUGIN_MANIFEST_PATH)
-    } else {
-        plugin_root.join(CODEX_PLUGIN_MANIFEST_PATH)
-    };
-    if !manifest_path.is_file() {
-        return None;
-    }
+    let manifest_path = plugin_manifest_path(plugin_root)?;
     let raw = fs::read_to_string(&manifest_path).ok()?;
     let parsed: RawPluginManifest = serde_json::from_str(&raw)
         .map_err(|err| {
@@ -837,16 +846,36 @@ pub fn load_plugin_manifest(plugin_root: &Path) -> Option<PluginManifest> {
         name,
         version: parsed.version,
         description: parsed.description,
+        operators: resolve_optional_path(plugin_root, parsed.operators.as_deref(), "operators"),
+        templates: resolve_optional_path(plugin_root, parsed.templates.as_deref(), "templates"),
         skills: resolve_optional_path(plugin_root, parsed.skills.as_deref(), "skills"),
+        agents: resolve_optional_path(plugin_root, parsed.agents.as_deref(), "agents"),
+        environments: resolve_optional_path(
+            plugin_root,
+            parsed.environments.as_deref(),
+            "environments",
+        ),
         mcp_servers: resolve_optional_path(
             plugin_root,
             parsed.mcp_servers.as_deref(),
             "mcpServers",
         ),
         apps: resolve_optional_path(plugin_root, parsed.apps.as_deref(), "apps"),
+        hooks: resolve_optional_path(plugin_root, parsed.hooks.as_deref(), "hooks"),
         retrieval,
         interface,
     })
+}
+
+pub fn plugin_manifest_path(plugin_root: &Path) -> Option<PathBuf> {
+    [
+        PLUGIN_MANIFEST_FILE,
+        OMIGA_PLUGIN_MANIFEST_PATH,
+        CODEX_PLUGIN_MANIFEST_PATH,
+    ]
+    .into_iter()
+    .map(|relative| plugin_root.join(relative))
+    .find(|path| path.is_file())
 }
 
 fn read_config() -> PluginConfigFile {
@@ -947,7 +976,10 @@ fn plugin_kind_for_manifest(
             || plugin_interface_matches(manifest.interface.as_ref(), needles)
     };
 
-    if source_path.join("operators").is_dir() || category_matches(&["operator"]) {
+    if manifest.operators.is_some()
+        || source_path.join("operators").is_dir()
+        || category_matches(&["operator"])
+    {
         return PluginKind::Operator;
     }
     if manifest.retrieval.is_some()
@@ -964,7 +996,7 @@ fn plugin_kind_for_manifest(
     {
         return PluginKind::Source;
     }
-    if category_matches(&["workflow", "notebook"]) {
+    if manifest.templates.is_some() || category_matches(&["workflow", "notebook", "template"]) {
         return PluginKind::Workflow;
     }
     if manifest.skills.is_some()
@@ -981,9 +1013,7 @@ fn plugin_kind_for_manifest(
 }
 
 fn active_plugin_root_in_base(base: &Path) -> Option<PathBuf> {
-    if base.join(OMIGA_PLUGIN_MANIFEST_PATH).is_file()
-        || base.join(CODEX_PLUGIN_MANIFEST_PATH).is_file()
-    {
+    if plugin_manifest_path(base).is_some() {
         return Some(base.to_path_buf());
     }
     let mut versions = fs::read_dir(base)
@@ -1902,9 +1932,9 @@ mod tests {
         with_skill: bool,
     ) -> PathBuf {
         let plugin_root = store_root.join(kind.dir_name()).join(name);
-        fs::create_dir_all(plugin_root.join(".omiga-plugin")).unwrap();
+        fs::create_dir_all(&plugin_root).unwrap();
         fs::write(
-            plugin_root.join(".omiga-plugin/plugin.json"),
+            plugin_root.join(PLUGIN_MANIFEST_FILE),
             format!(
                 r#"{{
                   "name": "{name}",
@@ -1931,16 +1961,30 @@ mod tests {
     fn resolves_manifest_paths_safely() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let plugin = tmp.path().join("sample");
-        fs::create_dir_all(plugin.join(".omiga-plugin")).unwrap();
+        fs::create_dir_all(&plugin).unwrap();
         fs::write(
-            plugin.join(".omiga-plugin/plugin.json"),
-            r#"{"name":"sample","skills":"./skills","mcpServers":"../bad"}"#,
+            plugin.join(PLUGIN_MANIFEST_FILE),
+            r#"{
+              "name":"sample",
+              "operators":"./ops",
+              "templates":"./templates",
+              "skills":"./skills",
+              "agents":"./agents",
+              "environments":"./envs",
+              "mcpServers":"../bad",
+              "hooks":"./hooks/hooks.json"
+            }"#,
         )
         .unwrap();
         let manifest = load_plugin_manifest(&plugin).expect("manifest");
         assert_eq!(manifest.name, "sample");
+        assert_eq!(manifest.operators, Some(plugin.join("ops")));
+        assert_eq!(manifest.templates, Some(plugin.join("templates")));
         assert_eq!(manifest.skills, Some(plugin.join("skills")));
+        assert_eq!(manifest.agents, Some(plugin.join("agents")));
+        assert_eq!(manifest.environments, Some(plugin.join("envs")));
         assert_eq!(manifest.mcp_servers, None);
+        assert_eq!(manifest.hooks, Some(plugin.join("hooks/hooks.json")));
     }
 
     #[test]

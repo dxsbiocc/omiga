@@ -235,7 +235,7 @@ resources:
 execution:
   argv:
     - Rscript
-    - ./bin/differential_expression_basic.R
+    - ./scripts/differential_expression_basic.R
     - ${inputs.matrix}
     - ${inputs.metadata}
     - ${outdir}

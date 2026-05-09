@@ -5,6 +5,7 @@ import {
   ChatMarkdownContent,
   countReferenceEntries,
   hasMarkdownMath,
+  hideInlineBase64Images,
   normalizeChatMarkdown,
   normalizeSafeHtmlAnchors,
   splitTerminalReferences,
@@ -38,6 +39,17 @@ describe("ChatMarkdownContent", () => {
     expect(normalizeSafeHtmlAnchors('<a href="javascript:alert(1)">bad</a>')).toContain(
       "javascript:alert",
     );
+  });
+
+  it("hides inline base64 image payloads instead of rendering huge chat text", () => {
+    const payload = `iVBORw0KGgo${"A".repeat(180)}`;
+    const markdown = `![火山图]\n(data:image/png;base64,${payload})`;
+    const normalized = hideInlineBase64Images(markdown);
+
+    expect(normalized).toContain("火山图");
+    expect(normalized).toContain("Markdown 文件路径引用");
+    expect(normalized).not.toContain(payload);
+    expect(normalizeChatMarkdown(markdown)).not.toContain(payload);
   });
 
   it("splits a terminal references section for accordion rendering", () => {

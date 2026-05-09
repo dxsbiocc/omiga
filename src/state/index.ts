@@ -26,6 +26,8 @@ export {
   type ExecutionStep,
   type ToolUseStepDetail,
   type ToolResultStepDetail,
+  activeTodoStatusKind,
+  mergeActiveTodosWithTiming,
 } from "./activityStore";
 export { useWorkspaceStore } from "./workspaceStore";
 export { useUiStore, type UiState } from "./uiStore";

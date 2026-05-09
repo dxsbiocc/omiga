@@ -1,3 +1,3 @@
 pub mod builtin;
-pub mod plugin;
+pub mod plugin_provider;
 pub mod routing;

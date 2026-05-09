@@ -2,7 +2,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, sta
 import { flushSync } from "react-dom";
 import type { Components } from "react-markdown";
 import type { Theme } from "@mui/material/styles";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   Box,
@@ -46,6 +46,7 @@ import "katex/dist/katex.min.css";
 import {
   useSessionStore,
   useActivityStore,
+  mergeActiveTodosWithTiming,
   useChatComposerStore,
   type PermissionMode,
   type SandboxBackend,
@@ -113,6 +114,10 @@ import {
   toggleNestedToolPanelOpenForFold,
   type NestedToolPanelOpenByFold,
 } from "./toolPanelOpenState";
+import {
+  shouldShowPostTurnSuggestionsGeneratingPlaceholder,
+  shouldStartPostTurnSuggestionsIndicator,
+} from "./postTurnSuggestionsState";
 import { BackgroundAgentTranscriptDrawer } from "./BackgroundAgentTranscriptDrawer";
 import { SessionSwitchSkeleton } from "./SessionSwitchSkeleton";
 import { AgentSessionStatus } from "./AgentSessionStatus";
@@ -1582,12 +1587,63 @@ function LazyMarkdownBlockFallback({ label = "正在加载内容…" }: { label?
   );
 }
 
+const MARKDOWN_LOCAL_IMAGE_EXT_RE =
+  /\.(?:png|jpe?g|gif|webp|svg|bmp|ico|tiff?|avif)(?:[?#].*)?$/i;
+
+function hasUrlScheme(value: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:/i.test(value);
+}
+
+function isAbsoluteLocalPath(value: string): boolean {
+  return value.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(value);
+}
+
+function stripFileQueryAndHash(value: string): {
+  path: string;
+  suffix: string;
+} {
+  const index = value.search(/[?#]/);
+  if (index === -1) return { path: value, suffix: "" };
+  return { path: value.slice(0, index), suffix: value.slice(index) };
+}
+
+function resolveMarkdownImageSrc(src: string, workspacePath: string): string {
+  const raw = src.trim();
+  if (!raw) return "";
+  if (/^data:image\/[^;]+;base64,/i.test(raw)) return "";
+
+  if (/^(?:https?|blob|asset|tauri):/i.test(raw)) return raw;
+
+  if (/^file:\/\//i.test(raw)) {
+    try {
+      return convertFileSrc(decodeURIComponent(new URL(raw).pathname));
+    } catch {
+      return raw;
+    }
+  }
+
+  if (isAbsoluteLocalPath(raw)) {
+    const { path, suffix } = stripFileQueryAndHash(raw);
+    return `${convertFileSrc(path)}${suffix}`;
+  }
+
+  if (!hasUrlScheme(raw) && workspacePath && MARKDOWN_LOCAL_IMAGE_EXT_RE.test(raw)) {
+    const base = workspacePath.replace(/[\\/]+$/, "");
+    const relative = raw.replace(/^\.?[\\/]+/, "");
+    const { path, suffix } = stripFileQueryAndHash(`${base}/${relative}`);
+    return `${convertFileSrc(path)}${suffix}`;
+  }
+
+  return raw;
+}
+
 function buildMarkdownComponents(
   isAgent: boolean,
   theme: Theme,
   CHAT: ReturnType<typeof getChatTokens>,
   onImageClick: (src: string, alt: string) => void,
   onNodeClick?: (text: string) => void,
+  workspacePath = "",
 ) {
   return {
   code({
@@ -1825,12 +1881,26 @@ function buildMarkdownComponents(
   },
   img({ src, alt }) {
     const url = typeof src === "string" ? src : "";
+    const resolvedUrl = resolveMarkdownImageSrc(url, workspacePath);
+    if (!resolvedUrl) {
+      return (
+        <Alert severity="warning" sx={{ my: 1 }}>
+          内联图片数据已隐藏。请使用 Markdown 文件路径引用输出图片，例如{" "}
+          <Box component="code" sx={{ fontFamily: "monospace" }}>
+            ![图](&lt;path/to/image.png&gt;)
+          </Box>
+          。
+        </Alert>
+      );
+    }
     return (
       <Box
         component="img"
-        src={url}
+        src={resolvedUrl}
         alt={typeof alt === "string" ? alt : ""}
-        onClick={() => onImageClick(url, typeof alt === "string" ? alt : "")}
+        onClick={() =>
+          onImageClick(resolvedUrl, typeof alt === "string" ? alt : "")
+        }
         sx={{
           display: "block",
           maxWidth: "100%",
@@ -2243,6 +2313,23 @@ export function Chat({ sessionId }: ChatProps) {
     label: string;
     prompt: string;
   }> | null>(null);
+  /**
+   * Stream id whose completed turn may still emit post-turn metadata.
+   * Cleared as soon as the user/queue starts another main turn so stale
+   * background metadata events cannot leak into the next run.
+   */
+  const postTurnMetaStreamIdRef = useRef<string | null>(null);
+  /** Stream id currently allowed to show/clear the suggestions-generating placeholder. */
+  const postTurnSuggestionStreamIdRef = useRef<string | null>(null);
+  const clearPostTurnSuggestionsIndicator = useCallback(() => {
+    postTurnSuggestionStreamIdRef.current = null;
+    pendingFollowUpSuggestionsRef.current = null;
+    setSuggestionsGenerating(false);
+  }, []);
+  const clearPostTurnMetaState = useCallback(() => {
+    postTurnMetaStreamIdRef.current = null;
+    clearPostTurnSuggestionsIndicator();
+  }, [clearPostTurnSuggestionsIndicator]);
   /** Populated by `turn_summary` stream frame; consumed when attaching the final assistant row */
   const pendingTurnSummaryRef = useRef<string | null>(null);
   /** Populated by `token_usage` stream frame; consumed when attaching the final assistant row */
@@ -2741,7 +2828,7 @@ export function Chat({ sessionId }: ChatProps) {
       cancelAnimationFrame(foldIntermediateFlushRafRef.current);
       foldIntermediateFlushRafRef.current = null;
     }
-    pendingFollowUpSuggestionsRef.current = null;
+    clearPostTurnMetaState();
     pendingTurnSummaryRef.current = null;
     pendingTokenUsageRef.current = null;
     clearRunningToolTracking();
@@ -2840,7 +2927,13 @@ export function Chat({ sessionId }: ChatProps) {
         backgroundJobs: [...act.backgroundJobs],
       });
     };
-  }, [sessionId, bumpQueueUi, clearCancelFallbackTimer, clearRunningToolTracking]);
+  }, [
+    sessionId,
+    bumpQueueUi,
+    clearCancelFallbackTimer,
+    clearPostTurnMetaState,
+    clearRunningToolTracking,
+  ]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -3714,6 +3807,16 @@ export function Chat({ sessionId }: ChatProps) {
     !pendingAskUser &&
     !awaitingResumeAfterCancel &&
     composerSuggestions.length > 0;
+  const showSuggestionsGeneratingPlaceholder =
+    shouldShowPostTurnSuggestionsGeneratingPlaceholder({
+      suggestionsGenerating,
+      showNextStepSuggestions,
+      currentStreamId,
+      isConnecting,
+      isStreaming,
+      waitingFirstChunk,
+      activityIsStreaming,
+    });
   const showTurnSummaryCard =
     Boolean(sessionId) &&
     Boolean(stickyTurnSummary) &&
@@ -3913,17 +4016,19 @@ export function Chat({ sessionId }: ChatProps) {
   const markSnapshotStepDone = (
     steps: SnapshotExecutionStep[],
     id: string,
+    completedAt = Date.now(),
   ): SnapshotExecutionStep[] =>
     steps.map((step) =>
       step.id === id && step.status === "running"
-        ? { ...step, status: "done" as const }
+        ? { ...step, status: "done" as const, completedAt }
         : step,
     );
 
   const ensureSnapshotStreamStarted = (
     snap: SessionStreamSnapshot,
   ): SessionStreamSnapshot => {
-    const nextSteps = markSnapshotStepDone(snap.executionSteps, "connect");
+    const now = Date.now();
+    const nextSteps = markSnapshotStepDone(snap.executionSteps, "connect", now);
     return {
       ...snap,
       isConnecting: false,
@@ -3933,7 +4038,12 @@ export function Chat({ sessionId }: ChatProps) {
         ? nextSteps
         : [
             ...nextSteps,
-            { id: "think", title: "推理中", status: "running" as const },
+            {
+              id: "think",
+              title: "推理中",
+              status: "running" as const,
+              startedAt: now,
+            },
           ],
     };
   };
@@ -3941,13 +4051,19 @@ export function Chat({ sessionId }: ChatProps) {
   const markSnapshotFirstOutput = (
     snap: SessionStreamSnapshot,
   ): SessionStreamSnapshot => {
+    const now = Date.now();
     const running = snap.executionSteps.find((step) => step.status === "running");
     if (running?.id === "think") {
       return {
         ...snap,
         executionSteps: [
-          ...markSnapshotStepDone(snap.executionSteps, "think"),
-          { id: "reply", title: "解析输出", status: "running" as const },
+          ...markSnapshotStepDone(snap.executionSteps, "think", now),
+          {
+            id: "reply",
+            title: "解析输出",
+            status: "running" as const,
+            startedAt: now,
+          },
         ],
       };
     }
@@ -3957,9 +4073,10 @@ export function Chat({ sessionId }: ChatProps) {
         executionSteps: [
           ...snap.executionSteps,
           {
-            id: `reply-${Date.now()}`,
+            id: `reply-${now}`,
             title: "解析输出",
             status: "running" as const,
+            startedAt: now,
           },
         ],
       };
@@ -3973,20 +4090,24 @@ export function Chat({ sessionId }: ChatProps) {
     title: string,
     detail: { summary?: string; input?: string; toolName?: string },
   ): SessionStreamSnapshot => {
+    const now = Date.now();
     const stepId = `tool-${toolUseId}`;
     const baseSteps = snap.executionSteps.map((step) => {
       if (
         step.status === "running" &&
         (step.id === "think" || step.id === "reply" || step.id.startsWith("reply-"))
       ) {
-        return { ...step, status: "done" as const };
+        return { ...step, status: "done" as const, completedAt: now };
       }
       return step;
     });
+    const existingStep = baseSteps.find((step) => step.id === stepId);
     const nextStep: SnapshotExecutionStep = {
       id: stepId,
       title,
       status: "running",
+      startedAt: existingStep?.startedAt ?? now,
+      completedAt: undefined,
       summary: detail.summary ?? title,
       ...(detail.input !== undefined ? { input: detail.input } : {}),
       ...(detail.toolName !== undefined ? { toolName: detail.toolName } : {}),
@@ -4005,21 +4126,25 @@ export function Chat({ sessionId }: ChatProps) {
     snap: SessionStreamSnapshot,
     toolUseId: string,
     detail: { output?: string; failed?: boolean },
-  ): SessionStreamSnapshot => ({
-    ...snap,
-    executionSteps: markSnapshotStepDone(
-      snap.executionSteps,
-      `tool-${toolUseId}`,
-    ).map((step) =>
-      step.id === `tool-${toolUseId}`
-        ? {
-            ...step,
-            ...(detail.output !== undefined ? { toolOutput: detail.output } : {}),
-            ...(detail.failed !== undefined ? { failed: detail.failed } : {}),
-          }
-        : step,
-    ),
-  });
+  ): SessionStreamSnapshot => {
+    const now = Date.now();
+    return {
+      ...snap,
+      executionSteps: markSnapshotStepDone(
+        snap.executionSteps,
+        `tool-${toolUseId}`,
+        now,
+      ).map((step) =>
+        step.id === `tool-${toolUseId}`
+          ? {
+              ...step,
+              ...(detail.output !== undefined ? { toolOutput: detail.output } : {}),
+              ...(detail.failed !== undefined ? { failed: detail.failed } : {}),
+            }
+          : step,
+      ),
+    };
+  };
 
   const getBackgroundStreamSnapshot = (
     ownerSessionId: string,
@@ -4031,6 +4156,7 @@ export function Chat({ sessionId }: ChatProps) {
       existing && (existing.streamId === streamId || existing.streamId === null)
         ? existing
         : null;
+    const now = Date.now();
     return {
       streamId,
       roundId: roundId ?? reusable?.roundId ?? null,
@@ -4045,8 +4171,15 @@ export function Chat({ sessionId }: ChatProps) {
       executionSteps:
         reusable?.executionSteps.length
           ? [...reusable.executionSteps]
-          : [{ id: "connect", title: "等待响应", status: "running" as const }],
-      executionStartedAt: reusable?.executionStartedAt ?? Date.now(),
+          : [
+              {
+                id: "connect",
+                title: "等待响应",
+                status: "running" as const,
+                startedAt: now,
+              },
+            ],
+      executionStartedAt: reusable?.executionStartedAt ?? now,
       executionEndedAt: reusable?.executionEndedAt ?? null,
       activeTodos: reusable?.activeTodos ?? null,
       backgroundJobs: reusable?.backgroundJobs ? [...reusable.backgroundJobs] : [],
@@ -4188,14 +4321,15 @@ export function Chat({ sessionId }: ChatProps) {
               }>;
             };
             if (Array.isArray(parsed.todos)) {
+              const nextTodos = parsed.todos.map((todo, index) => ({
+                id: todo.id ?? `todo-${index}`,
+                content: todo.content,
+                activeForm: todo.activeForm ?? todo.active_form ?? todo.content,
+                status: String(todo.status),
+              }));
               snap = {
                 ...snap,
-                activeTodos: parsed.todos.map((todo, index) => ({
-                  id: todo.id ?? `todo-${index}`,
-                  content: todo.content,
-                  activeForm: todo.activeForm ?? todo.active_form ?? todo.content,
-                  status: String(todo.status),
-                })),
+                activeTodos: mergeActiveTodosWithTiming(nextTodos, snap.activeTodos),
               };
             }
           } catch {
@@ -4357,12 +4491,11 @@ export function Chat({ sessionId }: ChatProps) {
           );
         if (!needBootstrap) return;
 
-        pendingFollowUpSuggestionsRef.current = null;
+        clearPostTurnMetaState();
         pendingTurnSummaryRef.current = null;
         pendingTokenUsageRef.current = null;
         isStreamingRef.current = true;
         setIsStreaming(true);
-        setSuggestionsGenerating(false);
         act.setConnecting(false);
         act.setStreaming(true, true);
         segmentStartRef.current = true;
@@ -4497,6 +4630,8 @@ export function Chat({ sessionId }: ChatProps) {
         if (ownerSessionId) {
           clearStreamSnapshot(ownerSessionId);
         }
+        postTurnMetaStreamIdRef.current = streamId;
+        postTurnSuggestionStreamIdRef.current = streamId;
 
         if (isDev) {
           console.debug("[OmigaDev][AgentComplete]", {
@@ -4509,15 +4644,21 @@ export function Chat({ sessionId }: ChatProps) {
         return true;
       };
 
-      const finalizeIfPostTurnMetaOutranComplete = () => {
-        const act = useActivityStore.getState();
+      const finalizeIfPostTurnMetaOutranComplete = (
+        options: { terminalMeta?: boolean } = {},
+      ) => {
         const streamLooksActive =
           currentStreamIdRef.current === streamId ||
-          isStreamingRef.current ||
-          act.isConnecting ||
-          act.isStreaming;
+          (currentStreamIdRef.current === null &&
+            isStreamingRef.current &&
+            postTurnMetaStreamIdRef.current !== streamId);
         if (!streamLooksActive) return false;
-        if (activeRunningToolIdsRef.current.size > 0) return false;
+        // suggestions_complete is emitted only after the visible answer and
+        // post-turn metadata finish. If a stale tool row still looks "running",
+        // settle it instead of leaving the UI stuck at “解析输出”.
+        if (!options.terminalMeta && activeRunningToolIdsRef.current.size > 0) {
+          return false;
+        }
         return finalizeSuccessfulStream("post-turn-meta");
       };
 
@@ -4799,6 +4940,7 @@ export function Chat({ sessionId }: ChatProps) {
           setPendingAskUser(null);
           setAskUserSelections({});
           pendingTokenUsageRef.current = null;
+          clearPostTurnMetaState();
           useActivityStore.getState().finalizeExecutionRun();
           useActivityStore.getState().clearTransient();
           setCurrentResponse("");
@@ -4842,6 +4984,7 @@ export function Chat({ sessionId }: ChatProps) {
           setPendingAskUser(null);
           setAskUserSelections({});
           pendingTokenUsageRef.current = null;
+          clearPostTurnMetaState();
           useActivityStore.getState().finalizeExecutionRun();
           useActivityStore.getState().clearTransient();
           // Mark round as cancelled - use ref to get latest round ID
@@ -4883,6 +5026,10 @@ export function Chat({ sessionId }: ChatProps) {
         }
         case "turn_summary": {
           if (isEventForReplacedStream()) break;
+          const isLivePostTurnStream = currentStreamIdRef.current === streamId;
+          const isFinalizedPostTurnStream =
+            postTurnMetaStreamIdRef.current === streamId;
+          if (!isLivePostTurnStream && !isFinalizedPostTurnStream) break;
           const raw = payload.data;
           let text: string | null = null;
           if (raw != null && typeof raw === "object" && "text" in raw) {
@@ -4893,16 +5040,13 @@ export function Chat({ sessionId }: ChatProps) {
           }
           if (
             activeRunningToolIdsRef.current.size === 0 &&
-            (currentStreamIdRef.current === streamId ||
-              isStreamingRef.current ||
-              useActivityStore.getState().isConnecting ||
-              useActivityStore.getState().isStreaming)
+            isLivePostTurnStream
           ) {
             pendingTurnSummaryRef.current = text;
             finalizeSuccessfulStream("post-turn-meta");
             break;
           }
-          if (!isStreamingRef.current) {
+          if (isFinalizedPostTurnStream) {
             if (text) {
               setMessages((prev) => {
                 const lastIdx = prev.length - 1;
@@ -4915,13 +5059,15 @@ export function Chat({ sessionId }: ChatProps) {
                 return next;
               });
             }
-          } else {
-            pendingTurnSummaryRef.current = text;
           }
           break;
         }
         case "follow_up_suggestions": {
           if (isEventForReplacedStream()) break;
+          const isLivePostTurnStream = currentStreamIdRef.current === streamId;
+          const isFinalizedPostTurnStream =
+            postTurnMetaStreamIdRef.current === streamId;
+          if (!isLivePostTurnStream && !isFinalizedPostTurnStream) break;
           const raw = payload.data;
           const rows = Array.isArray(raw)
             ? (raw as Array<{ label?: unknown; prompt?: unknown }>)
@@ -4936,10 +5082,7 @@ export function Chat({ sessionId }: ChatProps) {
 
           if (
             activeRunningToolIdsRef.current.size === 0 &&
-            (currentStreamIdRef.current === streamId ||
-              isStreamingRef.current ||
-              useActivityStore.getState().isConnecting ||
-              useActivityStore.getState().isStreaming)
+            isLivePostTurnStream
           ) {
             pendingFollowUpSuggestionsRef.current = parsed;
             setSuggestionsGenerating(false);
@@ -4952,8 +5095,8 @@ export function Chat({ sessionId }: ChatProps) {
           // message, and overwriting the store snapshot with fewer messages would cause the
           // storeMessages useEffect to wipe out that new user message.
           // The suggestions are already persisted to the DB by the Rust backend.
-          if (!isStreamingRef.current) {
-            setSuggestionsGenerating(false);
+          if (isFinalizedPostTurnStream) {
+            clearPostTurnSuggestionsIndicator();
             if (parsed.length > 0) {
               setMessages((prev) => {
                 const lastIdx = prev.length - 1;
@@ -4967,21 +5110,36 @@ export function Chat({ sessionId }: ChatProps) {
                 return next;
               });
             }
-          } else {
-            pendingFollowUpSuggestionsRef.current = parsed;
           }
           break;
         }
         case "suggestions_generating": {
           if (isEventForReplacedStream()) break;
           finalizeIfPostTurnMetaOutranComplete();
-          setSuggestionsGenerating(true);
+          const act = useActivityStore.getState();
+          if (
+            shouldStartPostTurnSuggestionsIndicator({
+              activePostTurnStreamId: postTurnSuggestionStreamIdRef.current,
+              eventStreamId: streamId,
+              currentStreamId: currentStreamIdRef.current,
+              isConnecting: act.isConnecting,
+              isStreaming: isStreamingRef.current,
+              waitingFirstChunk: act.waitingFirstChunk,
+              activityIsStreaming: act.isStreaming,
+              queuedMainSendCount: queuedMainSendQueueRef.current.length,
+              flushingQueuedMainSend: mainQueueFlushPayloadRef.current !== null,
+            })
+          ) {
+            setSuggestionsGenerating(true);
+          }
           break;
         }
         case "suggestions_complete": {
           if (isEventForReplacedStream()) break;
-          finalizeIfPostTurnMetaOutranComplete();
-          setSuggestionsGenerating(false);
+          finalizeIfPostTurnMetaOutranComplete({ terminalMeta: true });
+          if (postTurnSuggestionStreamIdRef.current === streamId) {
+            clearPostTurnSuggestionsIndicator();
+          }
           break;
         }
         case "token_usage": {
@@ -5207,6 +5365,8 @@ export function Chat({ sessionId }: ChatProps) {
       useChatComposerStore.getState().clearComposerSelectedPluginIds();
       return;
     }
+
+    clearPostTurnMetaState();
 
     if (researchParsed || goalParsed) {
       const specialCommand = researchParsed
@@ -5815,6 +5975,7 @@ export function Chat({ sessionId }: ChatProps) {
       retrySendInFlightRef.current = true;
       queuedMainSendQueueRef.current = [];
       mainQueueFlushPayloadRef.current = null;
+      clearPostTurnMetaState();
       bumpQueueUi();
 
       setMessages(truncated);
@@ -6024,6 +6185,7 @@ export function Chat({ sessionId }: ChatProps) {
       replaceStoreMessagesSnapshot,
       bumpQueueUi,
       clearStaleRetryBusyFlag,
+      clearPostTurnMetaState,
       clearRunningToolTracking,
     ],
   );
@@ -6122,6 +6284,7 @@ export function Chat({ sessionId }: ChatProps) {
     if (!next) return;
     bumpQueueUi();
     mainQueueFlushPayloadRef.current = next;
+    clearPostTurnMetaState();
     flushSync(() => {
       composerRef.current?.setValue(next.body);
       const st = useChatComposerStore.getState();
@@ -6198,10 +6361,9 @@ export function Chat({ sessionId }: ChatProps) {
           setPendingAssistantHint(null);
           setPendingAskUser(null);
           setAskUserSelections({});
-          pendingFollowUpSuggestionsRef.current = null;
+          clearPostTurnMetaState();
           pendingTurnSummaryRef.current = null;
           pendingTokenUsageRef.current = null;
-          setSuggestionsGenerating(false);
           setAwaitingResumeAfterCancel(true);
           const act = useActivityStore.getState();
           act.clearTransient();
@@ -6301,6 +6463,7 @@ export function Chat({ sessionId }: ChatProps) {
     setUserMessageEdit(null);
     setPendingAskUser(null);
     setAskUserSelections({});
+    clearPostTurnMetaState();
     clearQueuedMainSends();
     setFollowUpTaskId(null);
     setBgTranscriptTaskId(null);
@@ -6366,6 +6529,7 @@ export function Chat({ sessionId }: ChatProps) {
     currentStreamId,
     clearQueuedMainSends,
     clearCancelFallbackTimer,
+    clearPostTurnMetaState,
     clearRunningToolTracking,
   ]);
 
@@ -6523,9 +6687,25 @@ export function Chat({ sessionId }: ChatProps) {
     queueMicrotask(() => composerRef.current?.focus());
   }, []);
 
+  const markdownImageWorkspacePath =
+    currentSession?.workingDirectory ?? currentSession?.projectPath ?? "";
   const agentComponents = useMemo(
-    () => buildMarkdownComponents(true, theme, CHAT, handleMarkdownImageClick, handleNodeClick),
-    [theme, CHAT, handleMarkdownImageClick, handleNodeClick],
+    () =>
+      buildMarkdownComponents(
+        true,
+        theme,
+        CHAT,
+        handleMarkdownImageClick,
+        handleNodeClick,
+        markdownImageWorkspacePath,
+      ),
+    [
+      theme,
+      CHAT,
+      handleMarkdownImageClick,
+      handleNodeClick,
+      markdownImageWorkspacePath,
+    ],
   );
   const handleCopyUserMessage = useCallback(
     (message: Message) => {
@@ -7100,7 +7280,7 @@ export function Chat({ sessionId }: ChatProps) {
               </Fade>
             )}
 
-            {suggestionsGenerating && !showNextStepSuggestions && (
+            {showSuggestionsGeneratingPlaceholder && (
               <Fade in timeout={200}>
                 <Box sx={{ width: "100%", pt: 0.5, pb: 0.5 }}>
                   <Typography

@@ -95,7 +95,7 @@ fn _assert_error_send_sync(_: RetrievalError) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::retrieval::plugin::manifest::load_plugin_retrieval_manifest;
+    use crate::domain::plugin_runtime::retrieval::manifest::load_plugin_retrieval_manifest;
     use crate::domain::tools::WebSearchApiKeys;
     use crate::infrastructure::streaming::StreamOutputItem;
     use futures::StreamExt;

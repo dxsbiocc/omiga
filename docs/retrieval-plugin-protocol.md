@@ -12,7 +12,7 @@ Use it as the canonical minimal example when authoring or testing a retrieval pl
 
 ## Boundaries and guarantees
 
-- The plugin process is spawned from the local plugin directory declared in `.omiga-plugin/plugin.json`.
+- The plugin process is spawned from the local plugin directory declared in `plugin.json`.
 - Omiga sends exactly one request at a time to a child process. `runtime.concurrency` must be `1` for protocol version 1.
 - Successful idle child processes may be pooled and reused until `runtime.idleTtlMs` expires.
 - Failed, cancelled, timed-out, malformed, disabled, removed, or expired child processes are discarded and are not reused.
@@ -21,7 +21,7 @@ Use it as the canonical minimal example when authoring or testing a retrieval pl
 
 ## Manifest shape
 
-Declare retrieval support under the top-level `retrieval` key in `.omiga-plugin/plugin.json`:
+Declare retrieval support under the top-level `retrieval` key in `plugin.json`:
 
 ```json
 {
@@ -30,7 +30,7 @@ Declare retrieval support under the top-level `retrieval` key in `.omiga-plugin/
   "retrieval": {
     "protocolVersion": 1,
     "runtime": {
-      "command": "./bin/basic_retrieval_plugin.py",
+      "command": "./scripts/basic_retrieval_plugin.py",
       "args": [],
       "cwd": ".",
       "idleTtlMs": 30000,

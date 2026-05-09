@@ -2,12 +2,12 @@
 
 use crate::app_state::OmigaAppState;
 use crate::commands::CommandResult;
-use crate::domain::plugins::{self, PluginDetail, PluginInstallResult, PluginMarketplaceEntry};
-use crate::domain::retrieval::plugin::lifecycle::PluginLifecycleRouteStatus;
-use crate::domain::retrieval::plugin::validation::{
+use crate::domain::plugin_runtime::retrieval::lifecycle::PluginLifecycleRouteStatus;
+use crate::domain::plugin_runtime::retrieval::validation::{
     validate_retrieval_plugin_root, PluginRetrievalValidationReport,
 };
-use crate::domain::retrieval::providers::plugin::{
+use crate::domain::plugins::{self, PluginDetail, PluginInstallResult, PluginMarketplaceEntry};
+use crate::domain::retrieval::providers::plugin_provider::{
     clear_global_plugin_process_pool, global_plugin_process_pool_statuses,
     PluginProcessPoolRouteStatus,
 };

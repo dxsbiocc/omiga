@@ -7,7 +7,7 @@ import {
   Timer,
   Circle,
 } from "@mui/icons-material";
-import type { PlanTodoItem } from "./PlanTodoList";
+import { planTodoRuntimeLabel, type PlanTodoItem } from "./PlanTodoList";
 import { AgentInfoChip } from "./AgentInfoChip";
 
 export interface RuntimeAgentTaskItem {
@@ -26,6 +26,7 @@ interface RunningTaskCardProps {
 }
 
 export function RunningTaskCard({ item, onClick }: RunningTaskCardProps) {
+  const runtimeLabel = planTodoRuntimeLabel(item);
   return (
     <Box
       onClick={onClick}
@@ -94,7 +95,22 @@ export function RunningTaskCard({ item, onClick }: RunningTaskCardProps) {
             },
           }}
         />
-        <Timer sx={{ fontSize: 14, color: alpha("#6366f1", 0.6) }} />
+        <Chip
+          size="small"
+          icon={<Timer sx={{ fontSize: 12 }} />}
+          label={runtimeLabel ?? "计时中"}
+          sx={{
+            height: 20,
+            fontSize: 9.5,
+            fontVariantNumeric: "tabular-nums",
+            bgcolor: alpha("#6366f1", 0.08),
+            color: "#4f46e5",
+            "& .MuiChip-icon": {
+              ml: 0.55,
+              color: "#6366f1",
+            },
+          }}
+        />
       </Stack>
 
       {/* 任务内容 */}
@@ -237,6 +253,7 @@ interface PendingTaskCardProps {
 }
 
 export function PendingTaskCard({ item, onClick }: PendingTaskCardProps) {
+  const runtimeLabel = planTodoRuntimeLabel(item);
   return (
     <Box
       onClick={onClick}
@@ -265,17 +282,27 @@ export function PendingTaskCard({ item, onClick }: PendingTaskCardProps) {
           flexShrink: 0,
         }}
       />
-      <Typography
-        variant="body2"
-        sx={{
-          fontSize: 12,
-          color: "text.secondary",
-          lineHeight: 1.4,
-          flex: 1,
-        }}
-      >
-        {item.name}
-      </Typography>
+      <Box sx={{ flex: 1, minWidth: 0 }}>
+        <Typography
+          variant="body2"
+          sx={{
+            fontSize: 12,
+            color: "text.secondary",
+            lineHeight: 1.4,
+          }}
+        >
+          {item.name}
+        </Typography>
+        {runtimeLabel && (
+          <Typography
+            variant="caption"
+            color="text.disabled"
+            sx={{ fontSize: 9, fontVariantNumeric: "tabular-nums" }}
+          >
+            {runtimeLabel}
+          </Typography>
+        )}
+      </Box>
     </Box>
   );
 }
@@ -287,6 +314,7 @@ interface CompletedTaskCardProps {
 }
 
 export function CompletedTaskCard({ item, onClick }: CompletedTaskCardProps) {
+  const runtimeLabel = planTodoRuntimeLabel(item);
   return (
     <Box
       onClick={onClick}
@@ -315,18 +343,28 @@ export function CompletedTaskCard({ item, onClick }: CompletedTaskCardProps) {
           flexShrink: 0,
         }}
       />
-      <Typography
-        variant="body2"
-        sx={{
-          fontSize: 12,
-          color: "text.secondary",
-          lineHeight: 1.4,
-          flex: 1,
-          textDecoration: "line-through",
-        }}
-      >
-        {item.name}
-      </Typography>
+      <Box sx={{ flex: 1, minWidth: 0 }}>
+        <Typography
+          variant="body2"
+          sx={{
+            fontSize: 12,
+            color: "text.secondary",
+            lineHeight: 1.4,
+            textDecoration: "line-through",
+          }}
+        >
+          {item.name}
+        </Typography>
+        {runtimeLabel && (
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ fontSize: 9, fontVariantNumeric: "tabular-nums" }}
+          >
+            耗时 {runtimeLabel}
+          </Typography>
+        )}
+      </Box>
     </Box>
   );
 }
@@ -338,6 +376,7 @@ interface ErrorTaskCardProps {
 }
 
 export function ErrorTaskCard({ item, onClick }: ErrorTaskCardProps) {
+  const runtimeLabel = planTodoRuntimeLabel(item);
   return (
     <Box
       onClick={onClick}
@@ -388,7 +427,7 @@ export function ErrorTaskCard({ item, onClick }: ErrorTaskCardProps) {
             display: "block",
           }}
         >
-          执行出错
+          执行出错{runtimeLabel ? ` · ${runtimeLabel}` : ""}
         </Typography>
       </Box>
     </Box>

@@ -14,6 +14,10 @@ import { CheckCircle, CloudQueue, RadioButtonUnchecked, WarningAmber } from "@mu
 import { alpha } from "@mui/material/styles";
 import type { ExecutionStep } from "../../state/activityStore";
 import {
+  formatDurationMsCompact,
+  formatStepElapsedLabel,
+} from "../ExecutionStepPanel";
+import {
   formatToolDisplayName,
   getExecutionSurfacePrimaryLabel,
   type ExecutionSurfaceContext,
@@ -38,6 +42,9 @@ interface StepDisplayRow {
   failed: boolean;
   background: boolean;
   count: number;
+  startedAt?: number;
+  completedAt?: number;
+  durationMs?: number;
   output?: string;
 }
 
@@ -52,7 +59,12 @@ function coerceStaleToolStep(
   if (streamActive || step.status !== "running" || !step.id.startsWith("tool-")) {
     return step;
   }
-  return { ...step, status: "done" };
+  return { ...step, status: "done", completedAt: step.completedAt ?? Date.now() };
+}
+
+function stepDurationMs(step: ExecutionStep, now = Date.now()): number | undefined {
+  if (step.startedAt == null) return undefined;
+  return Math.max(0, (step.completedAt ?? now) - step.startedAt);
 }
 
 function buildDisplayRows(
@@ -75,8 +87,13 @@ function buildDisplayRows(
       previous.background === background
     ) {
       previous.count += 1;
+      const durationMs = stepDurationMs(step);
+      if (durationMs !== undefined) {
+        previous.durationMs = (previous.durationMs ?? 0) + durationMs;
+      }
       continue;
     }
+    const durationMs = stepDurationMs(step);
     rows.push({
       id: step.id,
       label,
@@ -84,6 +101,9 @@ function buildDisplayRows(
       failed,
       background,
       count: 1,
+      startedAt: step.startedAt,
+      completedAt: step.completedAt,
+      ...(durationMs !== undefined ? { durationMs } : {}),
       output: step.toolOutput,
     });
   }
@@ -100,8 +120,13 @@ function buildGroupedFailureRows(steps: ExecutionStep[]): StepDisplayRow[] {
     const existing = byLabel.get(label);
     if (existing) {
       existing.count += 1;
+      const durationMs = stepDurationMs(step);
+      if (durationMs !== undefined) {
+        existing.durationMs = (existing.durationMs ?? 0) + durationMs;
+      }
       continue;
     }
+    const durationMs = stepDurationMs(step);
     const row: StepDisplayRow = {
       id: step.id,
       label,
@@ -109,6 +134,9 @@ function buildGroupedFailureRows(steps: ExecutionStep[]): StepDisplayRow[] {
       failed: true,
       background,
       count: 1,
+      startedAt: step.startedAt,
+      completedAt: step.completedAt,
+      ...(durationMs !== undefined ? { durationMs } : {}),
       output: step.toolOutput,
     };
     byLabel.set(label, row);
@@ -160,6 +188,10 @@ export function ReactStepList({
         const isDone = row.status === "done";
         const isRun = row.status === "running";
         const isBackgroundRun = row.background && isRun;
+        const elapsedLabel =
+          row.status === "running"
+            ? formatStepElapsedLabel(row.startedAt, row.completedAt)
+            : formatDurationMsCompact(row.durationMs);
         return (
           <ListItem
             key={row.id}
@@ -240,6 +272,20 @@ export function ReactStepList({
                         "& .MuiChip-label": { px: 0.55 },
                       }}
                     />
+                  )}
+                  {elapsedLabel && (
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{
+                        fontSize: 9,
+                        fontVariantNumeric: "tabular-nums",
+                        flexShrink: 0,
+                      }}
+                      title={isRun ? "当前步骤已运行时间" : "步骤执行耗时"}
+                    >
+                      {elapsedLabel}
+                    </Typography>
                   )}
                 </Stack>
               }

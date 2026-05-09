@@ -36,6 +36,14 @@ type Intent = {
   contentLabel?: string;
 };
 
+export function permissionPromptDisplayTitle(
+  intent: Pick<Intent, "operation" | "title">,
+): string {
+  const rawTitle = (intent.operation ?? intent.title).trim();
+  const withoutGenericRunPrefix = rawTitle.replace(/^运行[:：]\s*/, "").trim();
+  return withoutGenericRunPrefix || rawTitle || "权限请求";
+}
+
 export const PERMISSION_RUN_CONTENT_MAX_HEIGHT =
   "clamp(96px, 22vh, 220px)";
 export const PERMISSION_CONNECTOR_PREVIEW_MAX_HEIGHT =
@@ -43,6 +51,8 @@ export const PERMISSION_CONNECTOR_PREVIEW_MAX_HEIGHT =
 export const PERMISSION_PROMPT_ROOT_OVERFLOW_Y = "visible";
 export const PERMISSION_PROMPT_ACTION_BUTTON_HEIGHT = 32;
 export const PERMISSION_PROMPT_ACTION_BUTTON_FONT_SIZE = "0.8rem";
+export const PERMISSION_PROMPT_HEADER_ALIGN_ITEMS = "center" as const;
+export const PERMISSION_PROMPT_HEADER_MIN_HEIGHT = 28;
 
 function firstString(v: unknown): string | null {
   if (typeof v === "string" && v.trim()) return v;
@@ -534,7 +544,7 @@ export const PermissionPromptBar: React.FC = () => {
   const connectorTargetLabel = connectorIntent?.target ?? "未提供目标对象";
   const connectorPreview = connectorIntent?.payloadPreview ?? null;
   const labels = permissionPromptLabels(connectorIntent, isCritical, processing);
-  const actionTitle = intent.operation ?? intent.title;
+  const actionTitle = permissionPromptDisplayTitle(intent);
   const contentLabel = intent.contentLabel ?? "请求内容";
   const allowOnceButtonLabel = isConnectorWrite
     ? "仅本次写入"
@@ -558,18 +568,31 @@ export const PermissionPromptBar: React.FC = () => {
     >
       <Stack spacing={1.1}>
         {/* 标题行：只放用户需要判断的具体操作，避免展示 request id / raw payload 等噪音。 */}
-        <Stack direction="row" alignItems="flex-start" gap={1}>
-          <Box sx={{ display: "flex", pt: 0.1 }}>
+        <Stack
+          direction="row"
+          alignItems={PERMISSION_PROMPT_HEADER_ALIGN_ITEMS}
+          gap={1}
+          sx={{ minHeight: PERMISSION_PROMPT_HEADER_MIN_HEIGHT }}
+        >
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              flexShrink: 0,
+              height: 24,
+            }}
+          >
             {getRiskIcon(pendingRequest.risk_level)}
           </Box>
-          <Box sx={{ minWidth: 0, flex: 1 }}>
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ display: "block", lineHeight: 1.3 }}
-            >
-              权限请求
-            </Typography>
+          <Box
+            sx={{
+              minWidth: 0,
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              minHeight: 24,
+            }}
+          >
             <Typography
               variant="subtitle2"
               fontWeight={700}

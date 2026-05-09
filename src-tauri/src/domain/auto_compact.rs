@@ -1,7 +1,8 @@
 //! Automatic conversation compaction when estimated prompt size approaches the model context limit.
 //!
 //! Mirrors the intent of Claude Code's `autoCompact` (threshold below context window). Omiga keeps
-//! domain [`Message`] rows in SQLite; when compacting we replace the full message list for the session.
+//! the SQLite transcript as the user-visible audit log; compaction only mutates the in-memory
+//! model-context copy used for subsequent provider calls.
 
 use crate::api::{ContentBlock, Message as ApiMessage};
 use crate::constants::tool_limits::truncate_utf8_prefix;
@@ -364,18 +365,23 @@ pub async fn replace_session_messages(
     Ok(last_user_id)
 }
 
-/// Outcome when compaction persisted new message rows (IDs change — use for `conversation_rounds`).
+/// Outcome when compaction shortened the model-context copy.
 #[derive(Debug, Clone)]
 pub struct AutoCompactPersisted {
     pub log_line: String,
-    /// DB id of the latest user message after rewrite (current turn).
+    /// DB id of the latest user message for linking the current round.
     pub last_user_message_id: String,
 }
 
-/// Run compaction and persist to SQLite.
+/// Run compaction for the in-memory model context.
+///
+/// Important: this is intentionally non-destructive. Earlier versions rewrote the SQLite message
+/// rows with the compacted context, which made the chat UI lose old transcript entries and show only
+/// the auto-compact notice. The persisted transcript must remain intact; only `session.messages`
+/// should be shortened before conversion to provider API messages.
 pub async fn compact_session_and_persist(
-    repo: &SessionRepository,
-    session_id: &str,
+    _repo: &SessionRepository,
+    _session_id: &str,
     session: &mut crate::domain::session::Session,
     cfg: &LlmConfig,
     tools_enabled: bool,
@@ -384,12 +390,10 @@ pub async fn compact_session_and_persist(
     let Some(result) = compact_session_messages(&mut session.messages, cfg, tools_enabled) else {
         return Ok(None);
     };
-    let last_user = replace_session_messages(repo, session_id, &session.messages).await?;
     session.updated_at = chrono::Utc::now();
-    let _ = repo.touch_session(session_id).await;
-    let last_user_message_id = last_user.unwrap_or_else(|| fallback_user_message_id.to_string());
+    let last_user_message_id = fallback_user_message_id.to_string();
     let log_line = format!(
-        "Auto-compact: ~{} → ~{} tokens (trimmed {} head block(s)).",
+        "Auto-compact model context: ~{} → ~{} tokens (trimmed {} head block(s)); transcript preserved.",
         result.estimated_tokens_before, result.estimated_tokens_after, result.removed_head_blocks
     );
     tracing::info!(target: "omiga::auto_compact", "{}", log_line);

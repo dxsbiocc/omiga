@@ -46,7 +46,7 @@ resources:
 execution:
   argv:
     - /bin/sh
-    - ./bin/seqtk_sample.sh
+    - ./scripts/seqtk_sample.sh
     - ${inputs.reads}
     - ${outdir}
     - ${params.sample_size}

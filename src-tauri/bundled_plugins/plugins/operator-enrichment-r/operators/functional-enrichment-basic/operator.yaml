@@ -107,7 +107,7 @@ resources:
 execution:
   argv:
     - Rscript
-    - ./bin/functional_enrichment_basic.R
+    - ./scripts/functional_enrichment_basic.R
     - ${inputs.genes}
     - ${inputs.gene_sets}
     - ${outdir}

@@ -1,5 +1,5 @@
 use super::builtin::BuiltinProvider;
-use super::plugin::PluginRetrievalProvider;
+use super::plugin_provider::PluginRetrievalProvider;
 use crate::domain::plugins::{enabled_plugin_retrieval_plugins, PluginRetrievalRegistration};
 use crate::domain::retrieval::registry::RetrievalRouteRegistry;
 use crate::domain::retrieval::{
@@ -97,7 +97,7 @@ fn capability_supports_operation(capability: &str, operation: RetrievalOperation
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::retrieval::plugin::manifest::{
+    use crate::domain::plugin_runtime::retrieval::manifest::{
         PluginRetrievalManifest, PluginRetrievalRuntime, PluginRetrievalSource,
     };
     use crate::domain::retrieval::types::RetrievalTool;

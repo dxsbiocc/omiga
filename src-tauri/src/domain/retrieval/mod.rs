@@ -8,7 +8,6 @@ pub mod core;
 pub mod credentials;
 pub mod normalize;
 pub mod output;
-pub mod plugin;
 pub mod providers;
 pub mod registry;
 pub mod tool_bridge;

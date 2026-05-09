@@ -61,7 +61,7 @@ resources:
 execution:
   argv:
     - /bin/sh
-    - ./bin/write_container_report.sh
+    - ./scripts/write_container_report.sh
     - ${outdir}
     - ${params.message}
     - ${params.repeat}

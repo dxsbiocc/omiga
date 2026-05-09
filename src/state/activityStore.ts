@@ -9,6 +9,10 @@ export interface ExecutionStep {
   id: string;
   title: string;
   status: "done" | "running";
+  /** Unix ms when this visible step started. */
+  startedAt?: number;
+  /** Unix ms when this visible step completed. */
+  completedAt?: number;
   /** Tool steps only: collapsed header (e.g. sentence-style description). */
   summary?: string;
   toolName?: string;
@@ -41,6 +45,12 @@ export interface ActiveTodoItem {
   content: string;
   activeForm: string;
   status: string; // "pending" | "in_progress" | "completed"
+  /** Unix ms when this todo entered an active/running state. */
+  startedAt?: number;
+  /** Unix ms when this todo entered a terminal state. */
+  completedAt?: number;
+  /** Unix ms when this todo status was last observed. */
+  updatedAt?: number;
 }
 
 /** Right-panel + header hints: connection/streaming and background shell jobs. */
@@ -52,9 +62,53 @@ export interface BackgroundJob {
   exitCode?: number;
 }
 
-function markStepDone(steps: ExecutionStep[], id: string): ExecutionStep[] {
+export function activeTodoStatusKind(
+  status: string,
+): "pending" | "running" | "completed" | "error" {
+  const s = status.toLowerCase();
+  if (s.includes("progress")) return "running";
+  if (s.includes("complete")) return "completed";
+  if (s.includes("error") || s.includes("fail")) return "error";
+  return "pending";
+}
+
+export function mergeActiveTodosWithTiming(
+  todos: ActiveTodoItem[],
+  previous: ActiveTodoItem[] | null | undefined,
+  now = Date.now(),
+): ActiveTodoItem[] {
+  const previousById = new Map((previous ?? []).map((todo) => [todo.id, todo]));
+  return todos.map((todo) => {
+    const prev = previousById.get(todo.id);
+    const prevKind = prev ? activeTodoStatusKind(prev.status) : null;
+    const nextKind = activeTodoStatusKind(todo.status);
+    const startedAt =
+      nextKind === "running" && prevKind !== "running"
+        ? prev?.startedAt ?? now
+        : prev?.startedAt ?? todo.startedAt;
+    const completedAt =
+      nextKind === "completed" || nextKind === "error"
+        ? prev?.completedAt ?? todo.completedAt ?? now
+        : todo.completedAt;
+
+    return {
+      ...todo,
+      ...(startedAt !== undefined ? { startedAt } : {}),
+      ...(completedAt !== undefined ? { completedAt } : {}),
+      updatedAt: now,
+    };
+  });
+}
+
+function markStepDone(
+  steps: ExecutionStep[],
+  id: string,
+  completedAt = Date.now(),
+): ExecutionStep[] {
   return steps.map((s) =>
-    s.id === id && s.status === "running" ? { ...s, status: "done" as const } : s,
+    s.id === id && s.status === "running"
+      ? { ...s, status: "done" as const, completedAt }
+      : s,
   );
 }
 
@@ -173,20 +227,23 @@ export const useActivityStore = create<ActivityState>((set) => ({
       return { backgroundJobs: nextJobs };
     }),
 
-  beginExecutionRun: (connectTitle = "等待响应") =>
+  beginExecutionRun: (connectTitle = "等待响应") => {
+    const now = Date.now();
     set({
       executionSteps: [
-        { id: "connect", title: connectTitle, status: "running" },
+        { id: "connect", title: connectTitle, status: "running", startedAt: now },
       ],
-      executionStartedAt: Date.now(),
+      executionStartedAt: now,
       executionEndedAt: null,
-    }),
+    });
+  },
 
   onStreamStart: () =>
     set((s) => {
+      const now = Date.now();
       const next = s.executionSteps.map((st) =>
         st.id === "connect" && st.status === "running"
-          ? { ...st, status: "done" as const }
+          ? { ...st, status: "done" as const, completedAt: now }
           : st,
       );
       if (next.some((x) => x.id === "think")) {
@@ -195,19 +252,20 @@ export const useActivityStore = create<ActivityState>((set) => ({
       return {
         executionSteps: [
           ...next,
-          { id: "think", title: "推理中", status: "running" },
+          { id: "think", title: "推理中", status: "running", startedAt: now },
         ],
       };
     }),
 
   onFirstTextChunk: () =>
     set((s) => {
+      const now = Date.now();
       const running = s.executionSteps.find((x) => x.status === "running");
       if (running?.id === "think") {
         return {
           executionSteps: [
-            ...markStepDone(s.executionSteps, "think"),
-            { id: "reply", title: "解析输出", status: "running" },
+            ...markStepDone(s.executionSteps, "think", now),
+            { id: "reply", title: "解析输出", status: "running", startedAt: now },
           ],
         };
       }
@@ -216,9 +274,10 @@ export const useActivityStore = create<ActivityState>((set) => ({
           executionSteps: [
             ...s.executionSteps,
             {
-              id: `reply-${Date.now()}`,
+              id: `reply-${now}`,
               title: "解析输出",
               status: "running",
+              startedAt: now,
             },
           ],
         };
@@ -228,11 +287,12 @@ export const useActivityStore = create<ActivityState>((set) => ({
 
   onToolUseStart: (toolUseId, title, detail) =>
     set((s) => {
+      const now = Date.now();
       const tid = `tool-${toolUseId}`;
       let next = s.executionSteps.map((st) => {
         if (st.status !== "running") return st;
         if (st.id === "think" || st.id === "reply" || st.id.startsWith("reply-")) {
-          return { ...st, status: "done" as const };
+          return { ...st, status: "done" as const, completedAt: now };
         }
         // Don't mark other tool steps as done here — parallel tools may still be running.
         // onToolResultDone is responsible for marking each tool step done when its result arrives.
@@ -243,6 +303,8 @@ export const useActivityStore = create<ActivityState>((set) => ({
         ...base,
         title,
         status: "running" as const,
+        startedAt: base.startedAt ?? now,
+        completedAt: undefined,
         ...(detail?.summary !== undefined ? { summary: detail.summary } : {}),
         ...(detail?.input !== undefined ? { input: detail.input } : {}),
         ...(detail?.toolName !== undefined ? { toolName: detail.toolName } : {}),
@@ -256,6 +318,7 @@ export const useActivityStore = create<ActivityState>((set) => ({
             id: tid,
             title,
             status: "running",
+            startedAt: now,
             summary: detail?.summary ?? title,
             input: detail?.input,
             toolName: detail?.toolName,
@@ -267,8 +330,9 @@ export const useActivityStore = create<ActivityState>((set) => ({
 
   onToolResultDone: (toolUseId, detail) =>
     set((s) => {
+      const now = Date.now();
       const targetStepId = `tool-${toolUseId}`;
-      const executionSteps = markStepDone(s.executionSteps, targetStepId).map(
+      const executionSteps = markStepDone(s.executionSteps, targetStepId, now).map(
         (st) => {
           if (st.id !== targetStepId) return st;
           return {
@@ -289,12 +353,16 @@ export const useActivityStore = create<ActivityState>((set) => ({
 
   onOperationStart: (operationId, title, detail) =>
     set((s) => {
+      const now = Date.now();
       const oid = `op-${operationId}`;
+      const previous = s.executionSteps.find((step) => step.id === oid);
       const exists = s.executionSteps.some((step) => step.id === oid);
       const nextStep: ExecutionStep = {
         id: oid,
         title,
         status: "running",
+        startedAt: previous?.startedAt ?? now,
+        completedAt: undefined,
         ...(detail?.summary !== undefined ? { summary: detail.summary } : {}),
         ...(detail?.output !== undefined ? { toolOutput: detail.output } : {}),
       };
@@ -307,10 +375,11 @@ export const useActivityStore = create<ActivityState>((set) => ({
 
   onOperationDone: (operationId, title, detail) =>
     set((s) => {
+      const now = Date.now();
       const oid = `op-${operationId}`;
       const exists = s.executionSteps.some((step) => step.id === oid);
       const next = exists
-        ? markStepDone(s.executionSteps, oid).map((step) =>
+        ? markStepDone(s.executionSteps, oid, now).map((step) =>
             step.id !== oid
               ? step
               : {
@@ -326,6 +395,8 @@ export const useActivityStore = create<ActivityState>((set) => ({
               id: oid,
               title,
               status: "done",
+              startedAt: now,
+              completedAt: now,
               ...(detail?.summary !== undefined ? { summary: detail.summary } : {}),
               ...(detail?.output !== undefined ? { toolOutput: detail.output } : {}),
               ...(detail?.failed !== undefined ? { failed: detail.failed } : {}),
@@ -334,7 +405,10 @@ export const useActivityStore = create<ActivityState>((set) => ({
       return { executionSteps: next };
     }),
 
-  setActiveTodos: (todos) => set({ activeTodos: todos }),
+  setActiveTodos: (todos) =>
+    set((s) => ({
+      activeTodos: mergeActiveTodosWithTiming(todos, s.activeTodos),
+    })),
   clearActiveTodos: () => set({ activeTodos: null }),
 
   clearTransient: () =>
@@ -357,7 +431,9 @@ export const useActivityStore = create<ActivityState>((set) => ({
     set((s) => {
       const now = Date.now();
       const next = s.executionSteps.map((st) =>
-        st.status === "running" ? { ...st, status: "done" as const } : st,
+        st.status === "running"
+          ? { ...st, status: "done" as const, completedAt: st.completedAt ?? now }
+          : st,
       );
       return {
         executionSteps: next,

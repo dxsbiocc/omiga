@@ -866,7 +866,9 @@ pub fn list_operator_manifest_diagnostics() -> Vec<OperatorManifestDiagnostic> {
 }
 
 fn discover_manifest_paths(plugin_root: &Path) -> Vec<PathBuf> {
-    let operators_root = plugin_root.join("operators");
+    let operators_root = crate::domain::plugins::load_plugin_manifest(plugin_root)
+        .and_then(|manifest| manifest.operators)
+        .unwrap_or_else(|| plugin_root.join("operators"));
     let mut out = Vec::new();
     if !operators_root.is_dir() {
         return out;
@@ -6602,6 +6604,53 @@ bindings:
     }
 
     #[test]
+    fn discovers_operators_from_manifest_declared_path() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("plugin.json"),
+            r#"{"name":"custom-operator-plugin","operators":"./custom-units"}"#,
+        )
+        .unwrap();
+        let manifest = tmp
+            .path()
+            .join("custom-units")
+            .join("custom")
+            .join("operator.yaml");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(
+            &manifest,
+            r#"
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: custom_manifest_path
+  version: 1
+execution:
+  argv: ["true"]
+"#,
+        )
+        .unwrap();
+        let plugin = crate::domain::plugins::LoadedPlugin {
+            id: "custom-operator-plugin@local".to_string(),
+            manifest_name: Some("custom-operator-plugin".to_string()),
+            display_name: None,
+            description: None,
+            root: tmp.path().to_path_buf(),
+            enabled: true,
+            skill_roots: Vec::new(),
+            mcp_servers: HashMap::new(),
+            apps: Vec::new(),
+            retrieval: None,
+            error: None,
+        };
+
+        let candidates = discover_operator_candidates_from_plugins([&plugin]);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].metadata.id, "custom_manifest_path");
+    }
+
+    #[test]
     fn discovers_bundled_smoke_operator_from_active_plugin() {
         let (plugin_root, manifest) = bundled_smoke_operator_paths();
         assert!(manifest.is_file());
@@ -6628,7 +6677,7 @@ bindings:
         assert_eq!(smoke.source.source_plugin, "operator-smoke@omiga-curated");
         assert_eq!(smoke.metadata.version, "0.1.0");
         assert_eq!(smoke.execution.argv[0], "/bin/sh");
-        assert_eq!(smoke.execution.argv[1], "./bin/write_text_report.sh");
+        assert_eq!(smoke.execution.argv[1], "./scripts/write_text_report.sh");
         assert_eq!(smoke.smoke_tests.len(), 1);
         assert_eq!(smoke.smoke_tests[0].id, "default");
         assert_eq!(
@@ -6648,7 +6697,7 @@ bindings:
         assert_eq!(container.execution.argv[0], "/bin/sh");
         assert_eq!(
             container.execution.argv[1],
-            "./bin/write_container_report.sh"
+            "./scripts/write_container_report.sh"
         );
         assert_eq!(container.smoke_tests.len(), 1);
         assert_eq!(container.smoke_tests[0].id, "default");
@@ -6670,7 +6719,7 @@ bindings:
         )
         .unwrap();
         assert!(Path::new(&argv[1]).is_absolute());
-        assert!(argv[1].ends_with("bin/write_text_report.sh"));
+        assert!(argv[1].ends_with("scripts/write_text_report.sh"));
     }
 
     #[test]
@@ -6927,7 +6976,7 @@ bindings:
         )
         .unwrap();
         assert!(Path::new(&argv[1]).is_absolute());
-        assert!(argv[1].ends_with("bin/write_container_report.sh"));
+        assert!(argv[1].ends_with("scripts/write_container_report.sh"));
 
         let command = operator_execution_command(
             &docker_ctx,

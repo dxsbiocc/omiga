@@ -31,7 +31,10 @@ import {
   useChatComposerStore,
   type Message,
 } from "../../state";
-import type { ActiveTodoItem } from "../../state/activityStore";
+import {
+  activeTodoStatusKind,
+  type ActiveTodoItem,
+} from "../../state/activityStore";
 import { normalizeAgentDisplayName } from "../../state/agentStore";
 import { formatExecutionElapsedFixed } from "../ExecutionStepPanel";
 import { PlanTodoList, type PlanTodoItem } from "./PlanTodoList";
@@ -83,6 +86,9 @@ interface TodoLine {
   content: string;
   activeForm: string;
   status: string;
+  startedAt?: number;
+  completedAt?: number;
+  updatedAt?: number;
 }
 
 type ModeLaneInfo = {
@@ -265,6 +271,30 @@ function parseTodoWriteArgs(raw: string | undefined): TodoLine[] | null {
   }
 }
 
+function mergeTodoLineTiming(
+  todo: TodoLine,
+  previous: TodoLine | undefined,
+  observedAt: number,
+): TodoLine {
+  const previousKind = previous ? activeTodoStatusKind(previous.status) : null;
+  const nextKind = activeTodoStatusKind(todo.status);
+  const startedAt =
+    nextKind === "running" && previousKind !== "running"
+      ? previous?.startedAt ?? observedAt
+      : previous?.startedAt ?? todo.startedAt;
+  const completedAt =
+    nextKind === "completed" || nextKind === "error"
+      ? previous?.completedAt ?? todo.completedAt ?? observedAt
+      : todo.completedAt;
+
+  return {
+    ...todo,
+    ...(startedAt !== undefined ? { startedAt } : {}),
+    ...(completedAt !== undefined ? { completedAt } : {}),
+    updatedAt: observedAt,
+  };
+}
+
 function latestTodosFromMessages(messages: Message[]): TodoLine[] {
   let latestUserIndex = -1;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -275,15 +305,31 @@ function latestTodosFromMessages(messages: Message[]): TodoLine[] {
   }
 
   const startIndex = latestUserIndex >= 0 ? latestUserIndex : 0;
-  for (let i = messages.length - 1; i >= startIndex; i--) {
+  const byId = new Map<string, TodoLine>();
+  let latestOrder: string[] = [];
+
+  for (let i = startIndex; i < messages.length; i += 1) {
     const m = messages[i];
     if (m.role === "user" && m.initialTodos && m.initialTodos.length > 0) {
-      return m.initialTodos.map((todo, idx) => ({
-        id: todo.id ?? `plan-todo-${idx}`,
-        content: todo.content,
-        activeForm: todo.content,
-        status: todo.status,
-      }));
+      const observedAt = m.timestamp ?? Date.now();
+      latestOrder = m.initialTodos.map((todo, idx) => {
+        const id = todo.id ?? `plan-todo-${idx}`;
+        byId.set(
+          id,
+          mergeTodoLineTiming(
+            {
+              id,
+              content: todo.content,
+              activeForm: todo.content,
+              status: todo.status,
+            },
+            byId.get(id),
+            observedAt,
+          ),
+        );
+        return id;
+      });
+      continue;
     }
     if (
       m.role === "tool" &&
@@ -291,31 +337,41 @@ function latestTodosFromMessages(messages: Message[]): TodoLine[] {
       m.toolCall.arguments
     ) {
       const parsed = parseTodoWriteArgs(m.toolCall.arguments);
-      if (parsed !== null) return parsed;
+      if (parsed !== null) {
+        const observedAt = m.toolCall.completedAt ?? m.timestamp ?? Date.now();
+        latestOrder = parsed.map((todo) => {
+          byId.set(
+            todo.id,
+            mergeTodoLineTiming(todo, byId.get(todo.id), observedAt),
+          );
+          return todo.id;
+        });
+      }
     }
   }
-  return [];
+
+  return latestOrder
+    .map((id) => byId.get(id))
+    .filter((todo): todo is TodoLine => Boolean(todo));
 }
 
 function activeTodoToPlanItem(t: ActiveTodoItem): PlanTodoItem {
-  const s = t.status.toLowerCase();
-  let status: PlanTodoItem["status"] = "pending";
-  if (s.includes("progress")) status = "running";
-  else if (s.includes("complete")) status = "completed";
-  else if (s.includes("error") || s.includes("fail")) status = "error";
-  return { id: t.id, name: t.content || t.activeForm, status };
-}
-
-function todoToPlanItem(t: TodoLine): PlanTodoItem {
-  const s = t.status.toLowerCase();
-  let status: PlanTodoItem["status"] = "pending";
-  if (s.includes("progress")) status = "running";
-  else if (s.includes("complete")) status = "completed";
-  else if (s.includes("error") || s.includes("fail")) status = "error";
   return {
     id: t.id,
     name: t.content || t.activeForm,
-    status,
+    status: activeTodoStatusKind(t.status),
+    startedAt: t.startedAt,
+    completedAt: t.completedAt,
+  };
+}
+
+function todoToPlanItem(t: TodoLine): PlanTodoItem {
+  return {
+    id: t.id,
+    name: t.content || t.activeForm,
+    status: activeTodoStatusKind(t.status),
+    startedAt: t.startedAt,
+    completedAt: t.completedAt,
   };
 }
 

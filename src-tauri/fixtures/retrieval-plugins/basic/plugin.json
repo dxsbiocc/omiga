@@ -1,0 +1,56 @@
+{
+  "name": "retrieval-protocol-example",
+  "version": "0.1.0",
+  "description": "Runnable fixture for the Omiga local retrieval plugin protocol.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./scripts/basic_retrieval_plugin.py",
+      "args": [],
+      "cwd": ".",
+      "idleTtlMs": 30000,
+      "requestTimeoutMs": 5000,
+      "cancelGraceMs": 500,
+      "concurrency": 1
+    },
+    "sources": [
+      {
+        "id": "example_dataset",
+        "category": "dataset",
+        "label": "Example Dataset",
+        "description": "Local fixture source that demonstrates search, query, and fetch responses.",
+        "aliases": ["example data"],
+        "subcategories": ["sample metadata"],
+        "capabilities": ["search", "query", "fetch"],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": ["pubmed_email"],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Fixture only: does not perform network access or mutate local files."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": false,
+        "parameters": [
+          {
+            "name": "organism",
+            "type": "string",
+            "description": "Optional organism label echoed into fixture metadata."
+          }
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "Retrieval Protocol Example",
+    "shortDescription": "Local search/query/fetch fixture",
+    "longDescription": "Demonstrates the internal JSONL child-process protocol for local retrieval plugins.",
+    "developerName": "Omiga",
+    "category": "Developer Tools",
+    "capabilities": ["Retrieval", "Search", "Query", "Fetch"],
+    "brandColor": "#5B8DEF",
+    "defaultPrompt": [
+      "Use dataset source example_dataset to search for BRCA1.",
+      "Fetch example-1 from the example_dataset fixture."
+    ]
+  }
+}

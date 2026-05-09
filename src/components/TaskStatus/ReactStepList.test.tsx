@@ -44,6 +44,8 @@ describe("ReactStepList", () => {
         status: "done",
         toolName: "file_write",
         failed: false,
+        startedAt: 1_000,
+        completedAt: 3_500,
       },
     ]);
 
@@ -54,7 +56,31 @@ describe("ReactStepList", () => {
     expect(html).toContain("×2");
     expect(html).toContain("成功调用（最近优先）");
     expect(html).toContain("1 次成功");
+    expect(html).toContain("2s");
     expect(html).not.toContain("需处理");
+  });
+
+  it("shows per-step execution time for running and completed rows", () => {
+    const html = renderSteps([
+      {
+        id: "tool-read",
+        title: "file_read",
+        status: "done",
+        toolName: "file_read",
+        startedAt: 1_000,
+        completedAt: 4_100,
+      },
+      {
+        id: "tool-bash",
+        title: "bash",
+        status: "running",
+        toolName: "bash",
+        startedAt: Date.now() - 2_200,
+      },
+    ]);
+
+    expect(html).toContain("3s");
+    expect(html).toContain("2s");
   });
 
   it("marks running background operation steps with a dedicated badge", () => {

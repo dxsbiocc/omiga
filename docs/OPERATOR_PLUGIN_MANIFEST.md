@@ -216,7 +216,7 @@ Execution is structured argv, not an inline shell template. Plugin wrapper files
 execution:
   argv:
     - /bin/sh
-    - ./bin/write_text_report.sh
+    - ./scripts/write_text_report.sh
     - ${outdir}
     - ${params.message}
     - ${params.repeat}

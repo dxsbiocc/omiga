@@ -102,7 +102,7 @@ resources:
 execution:
   argv:
     - Rscript
-    - ./bin/pca_matrix.R
+    - ./scripts/pca_matrix.R
     - ${inputs.matrix}
     - ${outdir}
     - ${params.delimiter}

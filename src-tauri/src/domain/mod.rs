@@ -20,6 +20,7 @@ pub mod orchestration;
 pub mod pageindex;
 pub mod permissions;
 pub mod persistence;
+pub mod plugin_runtime;
 pub mod plugins;
 pub mod post_turn_settings;
 pub mod ralph_state;

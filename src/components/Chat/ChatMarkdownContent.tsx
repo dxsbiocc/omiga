@@ -38,8 +38,33 @@ export function hasMarkdownMath(source: string): boolean {
 /** Normalize cheap text-only transforms once per content change. */
 export function normalizeChatMarkdown(source: string): string {
   return fixBrokenGfmTables(
-    normalizeSafeHtmlAnchors(source.replace(/<br\s*\/?>/gi, "\n")),
+    hideInlineBase64Images(
+      normalizeSafeHtmlAnchors(source.replace(/<br\s*\/?>/gi, "\n")),
+    ),
   );
+}
+
+const INLINE_BASE64_IMAGE_MARKDOWN_RE =
+  /!\[([^\]\n]{0,160})\]\s*\n?\(\s*data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+(?:\s*\))?/gi;
+const INLINE_BASE64_IMAGE_URI_RE =
+  /data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\r\n]+/gi;
+
+export function hideInlineBase64Images(source: string): string {
+  if (!source || !/data:image\/[^;]+;base64,/i.test(source)) return source;
+
+  const replacementFor = (alt: string) => {
+    const label = alt.trim() || "图片";
+    return `[${label}：内联图片数据已隐藏；请改用 Markdown 文件路径引用，例如 \`![${label}](<path/to/image.png>)\`。]`;
+  };
+
+  return source
+    .replace(INLINE_BASE64_IMAGE_MARKDOWN_RE, (_match, alt: string) =>
+      replacementFor(alt),
+    )
+    .replace(
+      INLINE_BASE64_IMAGE_URI_RE,
+      "[内联图片数据已隐藏；请改用 Markdown 文件路径引用。]",
+    );
 }
 
 function decodeBasicHtmlEntities(value: string): string {

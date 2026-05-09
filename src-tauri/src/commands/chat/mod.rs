@@ -2744,7 +2744,7 @@ pub async fn send_message(
         }
         Ok(Err(e)) => {
             return Err(OmigaError::Chat(ChatError::StreamError(format!(
-                "Auto-compact persist failed: {}",
+                "Auto-compact failed: {}",
                 e
             ))));
         }
@@ -2752,7 +2752,7 @@ pub async fn send_message(
             tracing::warn!(
                 target: "omiga::auto_compact",
                 session_id = %session_id,
-                "Auto-compact persist timed out; continuing with current transcript"
+                "Auto-compact timed out; continuing with current transcript"
             );
             append_preflight_stage_failed_event(
                 repo,

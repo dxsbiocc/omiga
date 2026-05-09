@@ -150,9 +150,13 @@ const SANDBOX_LABEL: Record<SandboxBackend, string> = {
 /** 与 SessionList「Language」二级菜单一致：离开一级行后再关闭子菜单的延迟（ms） */
 const ENV_SUBMENU_PARENT_LEAVE_MS = 200;
 export const COMPOSER_PROMPT_OVERLAY_POSITION = "absolute";
-export const COMPOSER_PROMPT_OVERLAY_BOTTOM = "calc(100% + 8px)";
+export const COMPOSER_PROMPT_OVERLAY_BOTTOM = "100%";
 export const COMPOSER_PROMPT_OVERLAY_MAX_HEIGHT = "min(42vh, 420px)";
 export const COMPOSER_PROMPT_OVERLAY_Z_INDEX = 18;
+export const COMPOSER_INPUT_JOINED_Z_INDEX =
+  COMPOSER_PROMPT_OVERLAY_Z_INDEX;
+export const COMPOSER_PROMPT_JOINED_BORDER_RADIUS = "24px 24px 0 0";
+export const COMPOSER_INPUT_JOINED_BORDER_RADIUS = "0 0 24px 24px";
 
 /** React StrictMode 下 effect 会双跑，避免同页两次 `invoke` + 弹窗 */
 let rsyncAvailabilityCheckStarted = false;
@@ -1949,6 +1953,7 @@ export const ChatComposer = memo(function ChatComposer({
             backdropFilter: "blur(10px)",
             WebkitBackdropFilter: "blur(10px)",
             border: `1px solid ${pen.borderSubtle}`,
+            borderLeft: `3px solid ${alpha(accent, isDark ? 0.72 : 0.82)}`,
             boxShadow: `
               0 1px 2px ${edge(0.06)},
               0 6px 20px ${alpha(accent, 0.07)},
@@ -1960,20 +1965,7 @@ export const ChatComposer = memo(function ChatComposer({
             },
           }}
         >
-          {/* 主色强调条：队列锚点，与 File Manager 行选中态同系 */}
-          <Box
-            aria-hidden
-            sx={{
-              position: "absolute",
-              left: 0,
-              top: 0,
-              bottom: 0,
-              width: 3,
-              background: `linear-gradient(180deg, ${alpha(accent, 0.95)} 0%, ${alpha(accent, 0.35)} 100%)`,
-              borderRadius: "0 4px 4px 0",
-            }}
-          />
-          <Stack sx={{ pl: 1.25 }}>
+          <Stack>
             <Stack
               direction="row"
               alignItems="center"
@@ -2304,14 +2296,15 @@ export const ChatComposer = memo(function ChatComposer({
               right: 0,
               bottom: COMPOSER_PROMPT_OVERLAY_BOTTOM,
               zIndex: COMPOSER_PROMPT_OVERLAY_Z_INDEX,
-              borderRadius: 3,
+              borderRadius: COMPOSER_PROMPT_JOINED_BORDER_RADIUS,
               overflow: "hidden",
               bgcolor: alpha(paper, isDark ? 0.98 : 0.99),
               backdropFilter: "blur(14px)",
               WebkitBackdropFilter: "blur(14px)",
               border: `1px solid ${alpha(accent, isDark ? 0.26 : 0.18)}`,
+              borderBottom: 0,
               boxShadow: `
-                0 12px 34px ${alpha(theme.palette.common.black, isDark ? 0.36 : 0.16)},
+                0 -8px 28px ${alpha(theme.palette.common.black, isDark ? 0.3 : 0.12)},
                 0 0 0 1px ${alpha(accent, isDark ? 0.1 : 0.06)}
               `,
             }}
@@ -2340,9 +2333,12 @@ export const ChatComposer = memo(function ChatComposer({
         <Paper
           elevation={0}
           sx={{
-            borderRadius: 3,
+            borderRadius: hasFloatingComposerPrompt
+              ? COMPOSER_INPUT_JOINED_BORDER_RADIUS
+              : 3,
             overflow: "hidden",
             position: "relative",
+            zIndex: COMPOSER_INPUT_JOINED_Z_INDEX,
             bgcolor: composerBg,
             backdropFilter: "blur(12px)",
             WebkitBackdropFilter: "blur(12px)",

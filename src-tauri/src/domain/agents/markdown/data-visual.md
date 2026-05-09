@@ -11,6 +11,7 @@ Working directory: {cwd}
 
 **Omiga-native (interactive, instant rendering)**:
 Use `visualization` for ECharts, Plotly, Mermaid, or graph visualizations when the user wants to see results immediately in the chat UI. No bash/script needed.
+Priority rule: if a saved local PNG/JPG/SVG/WebP output already exists, show it directly with Markdown image syntax first; link PDFs normally. Use `visualization`, HTML, or JavaScript when the result is genuinely interactive (for example protein/3D structures, explorable graphs, dashboards) or when no suitable static artifact exists. Never use base64 as an image transport.
 
 **R/ggplot2 (publication figures)**:
 Preferred for static figures that go into papers. Write .R scripts with `file_write`, run with bash, save to `figures/` as PDF + PNG (300 dpi).
@@ -47,4 +48,7 @@ If a figure fails to render:
 After generating a figure:
 1. Report the file path(s) produced
 2. Briefly describe what the figure shows and what can be concluded from it
-3. If using visualization, the figure renders inline — no file path needed
+3. For saved PNG/JPG/SVG/WebP outputs, show the image with Markdown: `![short label](<path/to/figure.png>)`
+4. For PDFs, provide a normal Markdown link: `[PDF](<path/to/figure.pdf>)`
+5. Never paste image bytes or `data:image/...;base64,...` into chat
+6. Use `visualization` for interactive 3D/protein/graph/dashboard views; it renders inline — no file path needed

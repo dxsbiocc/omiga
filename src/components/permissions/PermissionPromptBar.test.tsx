@@ -3,9 +3,12 @@ import {
   PERMISSION_CONNECTOR_PREVIEW_MAX_HEIGHT,
   PERMISSION_PROMPT_ACTION_BUTTON_FONT_SIZE,
   PERMISSION_PROMPT_ACTION_BUTTON_HEIGHT,
+  PERMISSION_PROMPT_HEADER_ALIGN_ITEMS,
+  PERMISSION_PROMPT_HEADER_MIN_HEIGHT,
   PERMISSION_PROMPT_ROOT_OVERFLOW_Y,
   PERMISSION_RUN_CONTENT_MAX_HEIGHT,
   inferIntent,
+  permissionPromptDisplayTitle,
   permissionPromptLabels,
 } from "./PermissionPromptBar";
 import { inferConnectorPermissionIntent } from "../../utils/connectorPermissionIntent";
@@ -88,6 +91,15 @@ describe("PermissionPromptBar connector intent", () => {
     expect(intent.detail).toContain("python3");
   });
 
+  it("shows only the concrete Bash title in the prompt header", () => {
+    const intent = inferIntent("Bash", {
+      description: "检查 pymol 是否安装",
+      command: "which pymol",
+    });
+
+    expect(permissionPromptDisplayTitle(intent)).toBe("检查 pymol 是否安装");
+  });
+
   it("normalizes email connector send requests", () => {
     const intent = inferConnectorPermissionIntent("connector", {
       connector: "qq-mail",
@@ -118,5 +130,7 @@ describe("PermissionPromptBar connector intent", () => {
     );
     expect(PERMISSION_PROMPT_ACTION_BUTTON_HEIGHT).toBe(32);
     expect(PERMISSION_PROMPT_ACTION_BUTTON_FONT_SIZE).toBe("0.8rem");
+    expect(PERMISSION_PROMPT_HEADER_ALIGN_ITEMS).toBe("center");
+    expect(PERMISSION_PROMPT_HEADER_MIN_HEIGHT).toBe(28);
   });
 });
