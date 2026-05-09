@@ -1,0 +1,46 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: functional_enrichment_basic
+  version: 0.1.0
+  name: Functional Enrichment
+  description: Parameterized ORA/GSEA enrichment analysis skeleton for gene lists and ranked gene tables. The MVP template points at the existing curated enrichment operator until rendered templates are promoted.
+  tags:
+    - omics
+    - enrichment
+    - gene-sets
+    - ora
+    - gsea
+classification:
+  category: omics/knowledge/functional-enrichment
+  tags:
+    - gene-list
+    - ranked-genes
+    - gene-sets
+    - enrichment
+    - figure
+  stageInput:
+    - gene_list
+    - ranked_gene_table
+    - gene_sets
+  stageOutput:
+    - enrichment_results
+    - enrichment_plots
+exposure:
+  exposeToAgent: true
+interface:
+  inputs: {}
+  params: {}
+  outputs: {}
+runtime:
+  envRef: r-bioc
+template:
+  engine: static
+  entry: ./template.yaml
+aliases:
+  - enrichment_basic
+  - ora_gsea
+  - functional_enrichment
+execution:
+  interpreter: existing-operator
+migrationTarget: omics_functional_enrichment_basic

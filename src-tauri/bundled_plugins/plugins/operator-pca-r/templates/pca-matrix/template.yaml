@@ -1,0 +1,45 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: pca_matrix_basic
+  version: 0.1.0
+  name: PCA Matrix Overview
+  description: Parameterized PCA analysis skeleton for numeric omics matrices. The MVP template points at the existing curated PCA operator until rendered templates are promoted.
+  tags:
+    - omics
+    - transcriptomics
+    - pca
+    - dimensionality-reduction
+classification:
+  category: omics/transcriptomics/dimensionality-reduction
+  tags:
+    - rna
+    - pca
+    - matrix
+    - sample-overview
+    - figure
+  stageInput:
+    - count_matrix
+    - expression_matrix
+    - sample_metadata
+  stageOutput:
+    - pca_scores
+    - pca_plots
+exposure:
+  exposeToAgent: true
+interface:
+  inputs: {}
+  params: {}
+  outputs: {}
+runtime:
+  envRef: r-bioc
+template:
+  engine: static
+  entry: ./template.yaml
+aliases:
+  - pca_basic
+  - pca_matrix
+  - sample_pca
+execution:
+  interpreter: existing-operator
+migrationTarget: omics_pca_matrix

@@ -572,8 +572,11 @@ Completed in the first version:
 - read-only Unit Index over Operator / Template / Skill references
 - `unit_list`, `unit_search`, `unit_describe`
 - TemplateSpec parsing, validation, discovery, aliases, and diagnostics
-- bundled differential-expression TemplateSpec with `migrationTarget:
-  omics_differential_expression_basic`
+- bundled differential-expression / PCA / enrichment TemplateSpecs with
+  migration targets:
+  - `omics_differential_expression_basic`
+  - `omics_pca_matrix`
+  - `omics_functional_enrichment_basic`
 - `template_execute`
   - delegates migration-target templates to the existing operator runtime
   - supports a minimal rendered-script path for simple local templates

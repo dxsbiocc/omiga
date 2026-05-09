@@ -916,6 +916,25 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
 
+    fn bundled_loaded_plugin(plugin_name: &str, display_name: &str) -> LoadedPlugin {
+        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("bundled_plugins/plugins")
+            .join(plugin_name);
+        LoadedPlugin {
+            id: format!("{plugin_name}@omiga-curated"),
+            manifest_name: Some(plugin_name.to_string()),
+            display_name: Some(display_name.to_string()),
+            description: None,
+            root: plugin_root,
+            enabled: true,
+            skill_roots: Vec::new(),
+            mcp_servers: HashMap::new(),
+            apps: Vec::new(),
+            retrieval: None,
+            error: None,
+        }
+    }
+
     fn write_valid_template(path: &Path, id: &str) {
         fs::write(
             path,
@@ -1076,21 +1095,10 @@ template:
 
     #[test]
     fn discovers_bundled_differential_expression_template() {
-        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("bundled_plugins/plugins/operator-differential-expression-r");
-        let plugin = LoadedPlugin {
-            id: "operator-differential-expression-r@omiga-curated".to_string(),
-            manifest_name: Some("operator-differential-expression-r".to_string()),
-            display_name: Some("Differential Expression".to_string()),
-            description: None,
-            root: plugin_root,
-            enabled: true,
-            skill_roots: Vec::new(),
-            mcp_servers: HashMap::new(),
-            apps: Vec::new(),
-            retrieval: None,
-            error: None,
-        };
+        let plugin = bundled_loaded_plugin(
+            "operator-differential-expression-r",
+            "Differential Expression",
+        );
 
         let candidates = discover_template_candidates_from_plugins([&plugin]);
         let template = candidates
@@ -1107,6 +1115,56 @@ template:
             Some("omics/transcriptomics/differential")
         );
         assert!(template.spec.exposure.expose_to_agent);
+    }
+
+    #[test]
+    fn discovers_bundled_analysis_template_migration_candidates() {
+        let plugins = [
+            bundled_loaded_plugin(
+                "operator-differential-expression-r",
+                "Differential Expression",
+            ),
+            bundled_loaded_plugin("operator-pca-r", "PCA"),
+            bundled_loaded_plugin("operator-enrichment-r", "Functional Enrichment"),
+        ];
+        let candidates = discover_template_candidates_from_plugins(plugins.iter());
+        let by_id = candidates
+            .iter()
+            .map(|candidate| (candidate.spec.metadata.id.as_str(), candidate))
+            .collect::<HashMap<_, _>>();
+
+        let expected = [
+            (
+                "bulk_differential_expression_basic",
+                "omics_differential_expression_basic",
+                "omics/transcriptomics/differential",
+            ),
+            (
+                "pca_matrix_basic",
+                "omics_pca_matrix",
+                "omics/transcriptomics/dimensionality-reduction",
+            ),
+            (
+                "functional_enrichment_basic",
+                "omics_functional_enrichment_basic",
+                "omics/knowledge/functional-enrichment",
+            ),
+        ];
+
+        for (template_id, migration_target, category) in expected {
+            let template = by_id
+                .get(template_id)
+                .unwrap_or_else(|| panic!("missing bundled template `{template_id}`"));
+            assert_eq!(
+                template.spec.migration_target.as_deref(),
+                Some(migration_target)
+            );
+            assert_eq!(
+                template.spec.classification.category.as_deref(),
+                Some(category)
+            );
+            assert!(template.spec.exposure.expose_to_agent);
+        }
     }
 
     #[tokio::test]
@@ -1186,6 +1244,78 @@ execution:
             .expect("report path");
         assert_eq!(fs::read_to_string(report).expect("report"), "hello world\n");
         assert_eq!(metadata["executionMode"], "renderedTemplate");
+    }
+
+    #[tokio::test]
+    async fn execute_template_via_migration_target_reuses_operator_runtime() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let template = TemplateSpecWithSource {
+            spec: TemplateSpec {
+                api_version: TEMPLATE_API_VERSION_V1ALPHA1.to_string(),
+                kind: TEMPLATE_KIND.to_string(),
+                metadata: TemplateMetadata {
+                    id: "smoke_template".to_string(),
+                    version: "0.1.0".to_string(),
+                    name: Some("Smoke Template".to_string()),
+                    description: None,
+                    tags: Vec::new(),
+                },
+                classification: TemplateClassification::default(),
+                exposure: TemplateExposure::default(),
+                interface: JsonValue::Null,
+                runtime: TemplateRuntime::default(),
+                template: TemplateBody {
+                    engine: "static".to_string(),
+                    entry: PathBuf::from("./template.yaml"),
+                },
+                aliases: Vec::new(),
+                execution: TemplateExecution::default(),
+                migration_target: Some("write_text_report".to_string()),
+            },
+            source: TemplateSource {
+                source_plugin: "template-smoke@local".to_string(),
+                plugin_root: tmp.path().to_path_buf(),
+                manifest_path: tmp.path().join("template.yaml"),
+            },
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let invocation = crate::domain::operators::OperatorInvocation {
+            inputs: BTreeMap::new(),
+            params: BTreeMap::from([
+                ("message".to_string(), json!("delegated template")),
+                ("repeat".to_string(), json!(2)),
+            ]),
+            resources: BTreeMap::new(),
+        };
+
+        let (raw, is_error, metadata) =
+            execute_template_via_migration_target(&ctx, &template, &invocation)
+                .await
+                .expect("migration target execution");
+
+        assert!(!is_error, "{raw}");
+        assert_eq!(metadata["executionMode"], "migrationTarget");
+        assert_eq!(metadata["migrationTarget"], "write_text_report");
+        let parsed: JsonValue = serde_json::from_str(&raw).expect("operator result json");
+        assert_eq!(parsed["status"], "succeeded");
+        assert_eq!(parsed["operator"]["id"], "write_text_report");
+        assert_eq!(parsed["runContext"]["kind"], "template");
+        let report = parsed["outputs"]["report"][0]["path"]
+            .as_str()
+            .expect("report path");
+        assert_eq!(
+            fs::read_to_string(report).expect("report"),
+            "delegated template\ndelegated template\n"
+        );
+
+        let records =
+            crate::domain::execution_records::list_recent_execution_records(tmp.path(), 10)
+                .await
+                .expect("records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, "operator");
+        assert_eq!(records[0].unit_id.as_deref(), Some("write_text_report"));
+        assert_eq!(records[0].status, "succeeded");
     }
 
     #[tokio::test]
