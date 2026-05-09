@@ -643,6 +643,12 @@ Completed in the second version:
 - Lineage diagnostics:
   - ExecutionRecord child filtering and `childrenByParent` output are covered by
     tool-level tests, not only storage tests.
+  - `execution_record_list` now also returns a compact `lineageSummary` with
+    returned root/child counts, included child counts, status/kind buckets,
+    execution-mode buckets such as `renderedTemplate` or
+    `fallbackMigrationTarget`, and per-parent child counts.
+  - The project-scoped SQLite store has a parent-execution index so
+    child-record inspection remains cheap as the local run history grows.
 
 Beyond the second version:
 

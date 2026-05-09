@@ -20,6 +20,22 @@ pub struct ExecutionRecordListArgs {
 
 pub struct ExecutionRecordListTool;
 
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct LineageSummary {
+    returned_records: usize,
+    returned_root_records: usize,
+    returned_records_with_parent: usize,
+    included_child_records: usize,
+    parents_with_included_children: usize,
+    returned_status_counts: BTreeMap<String, usize>,
+    returned_kind_counts: BTreeMap<String, usize>,
+    included_child_status_counts: BTreeMap<String, usize>,
+    included_child_kind_counts: BTreeMap<String, usize>,
+    execution_mode_counts: BTreeMap<String, usize>,
+    children_by_parent_count: BTreeMap<String, usize>,
+}
+
 #[async_trait]
 impl ToolImpl for ExecutionRecordListTool {
     type Args = ExecutionRecordListArgs;
@@ -65,7 +81,13 @@ impl ToolImpl for ExecutionRecordListTool {
                     children.insert(record.id.clone(), child_records);
                 }
             }
-            serde_json::to_value(children).unwrap_or_else(|_| serde_json::json!({}))
+            children
+        } else {
+            BTreeMap::new()
+        };
+        let lineage_summary = lineage_summary(&records, &children_by_parent);
+        let children_by_parent_json = if args.include_children {
+            serde_json::to_value(&children_by_parent).unwrap_or_else(|_| serde_json::json!({}))
         } else {
             serde_json::Value::Null
         };
@@ -74,7 +96,8 @@ impl ToolImpl for ExecutionRecordListTool {
             "count": records.len(),
             "parentExecutionId": args.parent_execution_id,
             "records": records,
-            "childrenByParent": children_by_parent,
+            "childrenByParent": children_by_parent_json,
+            "lineageSummary": lineage_summary,
         });
         Ok(stream_single(StreamOutputItem::Text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string()),
@@ -108,6 +131,63 @@ pub fn schema() -> ToolSchema {
     )
 }
 
+fn lineage_summary(
+    records: &[crate::domain::execution_records::ExecutionRecord],
+    children_by_parent: &BTreeMap<String, Vec<crate::domain::execution_records::ExecutionRecord>>,
+) -> LineageSummary {
+    let mut summary = LineageSummary {
+        returned_records: records.len(),
+        ..LineageSummary::default()
+    };
+
+    for record in records {
+        if record.parent_execution_id.is_some() {
+            summary.returned_records_with_parent += 1;
+        } else {
+            summary.returned_root_records += 1;
+        }
+        increment_count(&mut summary.returned_status_counts, &record.status);
+        increment_count(&mut summary.returned_kind_counts, &record.kind);
+        if let Some(mode) = execution_mode(record) {
+            increment_count(&mut summary.execution_mode_counts, &mode);
+        }
+    }
+
+    for (parent_id, children) in children_by_parent {
+        if children.is_empty() {
+            continue;
+        }
+        summary.parents_with_included_children += 1;
+        summary
+            .children_by_parent_count
+            .insert(parent_id.clone(), children.len());
+        summary.included_child_records += children.len();
+        for child in children {
+            increment_count(&mut summary.included_child_status_counts, &child.status);
+            increment_count(&mut summary.included_child_kind_counts, &child.kind);
+            if let Some(mode) = execution_mode(child) {
+                increment_count(&mut summary.execution_mode_counts, &mode);
+            }
+        }
+    }
+
+    summary
+}
+
+fn increment_count(counts: &mut BTreeMap<String, usize>, key: &str) {
+    *counts.entry(key.to_string()).or_insert(0) += 1;
+}
+
+fn execution_mode(record: &crate::domain::execution_records::ExecutionRecord) -> Option<String> {
+    let metadata = record.metadata_json.as_deref()?;
+    let value = serde_json::from_str::<serde_json::Value>(metadata).ok()?;
+    value
+        .pointer("/execution/executionMode")
+        .or_else(|| value.get("executionMode"))
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,7 +214,11 @@ mod tests {
                 param_hash: None,
                 output_summary_json: Some(json!({"status": "succeeded"})),
                 runtime_json: None,
-                metadata_json: None,
+                metadata_json: Some(json!({
+                    "execution": {
+                        "executionMode": "fallbackMigrationTarget"
+                    }
+                })),
             },
         )
         .await
@@ -174,6 +258,12 @@ mod tests {
         assert_eq!(children["count"], 1);
         assert_eq!(children["records"][0]["id"], child_id);
         assert_eq!(children["records"][0]["parentExecutionId"], parent_id);
+        assert_eq!(children["lineageSummary"]["returnedRecords"], 1);
+        assert_eq!(children["lineageSummary"]["returnedRecordsWithParent"], 1);
+        assert_eq!(
+            children["lineageSummary"]["returnedKindCounts"]["operator"],
+            1
+        );
 
         let parents_with_children = execute_to_json(
             &ctx,
@@ -187,6 +277,31 @@ mod tests {
         assert_eq!(
             parents_with_children["childrenByParent"][parent_id.as_str()][0]["id"],
             child_id
+        );
+        assert_eq!(
+            parents_with_children["lineageSummary"]["returnedRecords"],
+            2
+        );
+        assert_eq!(
+            parents_with_children["lineageSummary"]["returnedRootRecords"],
+            1
+        );
+        assert_eq!(
+            parents_with_children["lineageSummary"]["returnedRecordsWithParent"],
+            1
+        );
+        assert_eq!(
+            parents_with_children["lineageSummary"]["includedChildRecords"],
+            1
+        );
+        assert_eq!(
+            parents_with_children["lineageSummary"]["childrenByParentCount"][parent_id.as_str()],
+            1
+        );
+        assert_eq!(
+            parents_with_children["lineageSummary"]["executionModeCounts"]
+                ["fallbackMigrationTarget"],
+            1
         );
     }
 

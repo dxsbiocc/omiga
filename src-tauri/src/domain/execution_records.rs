@@ -259,6 +259,14 @@ async fn ensure_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_executions_parent
+        ON executions(parent_execution_id, COALESCE(ended_at, started_at, id) DESC)
+        "#,
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
