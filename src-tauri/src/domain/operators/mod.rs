@@ -2151,6 +2151,19 @@ pub async fn execute_operator_tool_call_with_context(
         Ok(resolved) => resolved,
         Err(error) => return (failure_json(alias, None, None, run_context, error), true),
     };
+    execute_resolved_operator_tool_call_with_context(ctx, alias, resolved, arguments, run_context)
+        .await
+}
+
+pub async fn execute_resolved_operator_tool_call_with_context(
+    ctx: &crate::domain::tools::ToolContext,
+    alias: &str,
+    resolved: ResolvedOperator,
+    arguments: &str,
+    run_context: Option<OperatorRunContext>,
+) -> (String, bool) {
+    let run_context = run_context.and_then(OperatorRunContext::normalized);
+    let started_at = chrono::Utc::now().to_rfc3339();
     let invocation = match serde_json::from_str::<OperatorInvocation>(arguments) {
         Ok(invocation) => invocation,
         Err(err) => {
@@ -2164,6 +2177,17 @@ pub async fn execute_operator_tool_call_with_context(
             .with_suggested_action(
                 "Retry with the operator schema's inputs/params/resources shape.",
             );
+            record_operator_failure_best_effort(
+                ctx,
+                alias,
+                Some(&resolved),
+                None,
+                None,
+                run_context.clone(),
+                &started_at,
+                &error,
+            )
+            .await;
             return (
                 failure_json(alias, Some(&resolved), None, run_context, error),
                 true,
@@ -2171,21 +2195,42 @@ pub async fn execute_operator_tool_call_with_context(
         }
     };
 
-    match execute_resolved_operator(ctx, resolved.clone(), invocation, run_context.clone()).await {
-        Ok(result) => (
-            serde_json::to_string_pretty(&result).unwrap_or_else(|err| {
-                failure_json(
-                    alias,
-                    Some(&resolved),
-                    None,
-                    run_context.clone(),
-                    OperatorToolError::new("serialization_failed", false, err.to_string()),
-                )
-            }),
-            false,
-        ),
+    match execute_resolved_operator(
+        ctx,
+        resolved.clone(),
+        invocation.clone(),
+        run_context.clone(),
+    )
+    .await
+    {
+        Ok(result) => {
+            record_operator_success_best_effort(ctx, &result, &started_at).await;
+            (
+                serde_json::to_string_pretty(&result).unwrap_or_else(|err| {
+                    failure_json(
+                        alias,
+                        Some(&resolved),
+                        None,
+                        run_context.clone(),
+                        OperatorToolError::new("serialization_failed", false, err.to_string()),
+                    )
+                }),
+                false,
+            )
+        }
         Err(error) => {
             let run_dir = error.run_dir.clone();
+            record_operator_failure_best_effort(
+                ctx,
+                alias,
+                Some(&resolved),
+                run_dir.as_deref(),
+                Some(&invocation),
+                run_context.clone(),
+                &started_at,
+                &error,
+            )
+            .await;
             (
                 failure_json(
                     alias,
@@ -2227,6 +2272,136 @@ fn failure_json(
         "error": error,
     }))
     .unwrap_or_else(|_| "{\"status\":\"failed\"}".to_string())
+}
+
+async fn record_operator_success_best_effort(
+    ctx: &crate::domain::tools::ToolContext,
+    result: &OperatorRunResult,
+    started_at: &str,
+) {
+    let output_summary = operator_output_summary(result);
+    let metadata = json!({
+        "runId": result.run_id,
+        "runDir": result.run_dir,
+        "provenancePath": result.provenance_path,
+        "exportDir": result.export_dir,
+        "operatorAlias": result.operator.alias,
+        "runContext": result.run_context,
+        "cache": result.cache,
+    });
+    let record = crate::domain::execution_records::ExecutionRecordInput {
+        kind: "operator".to_string(),
+        unit_id: Some(result.operator.id.clone()),
+        canonical_id: Some(canonical_operator_unit_id(&result.operator)),
+        provider_plugin: Some(result.operator.source_plugin.clone()),
+        status: result.status.clone(),
+        session_id: ctx.session_id.clone(),
+        parent_execution_id: None,
+        started_at: Some(started_at.to_string()),
+        ended_at: Some(chrono::Utc::now().to_rfc3339()),
+        input_hash: crate::domain::execution_records::hash_execution_map(&result.effective_inputs),
+        param_hash: crate::domain::execution_records::hash_execution_map(&result.effective_params),
+        output_summary_json: Some(output_summary),
+        runtime_json: Some(result.enforcement.clone()),
+        metadata_json: Some(metadata),
+    };
+    crate::domain::execution_records::record_execution_best_effort(&ctx.project_root, record).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_operator_failure_best_effort(
+    ctx: &crate::domain::tools::ToolContext,
+    alias: &str,
+    resolved: Option<&ResolvedOperator>,
+    run_dir: Option<&str>,
+    invocation: Option<&OperatorInvocation>,
+    run_context: Option<OperatorRunContext>,
+    started_at: &str,
+    error: &OperatorToolError,
+) {
+    let operator = resolved.map(|resolved| OperatorRunIdentity {
+        alias: alias.to_string(),
+        id: resolved.spec.metadata.id.clone(),
+        version: resolved.spec.metadata.version.clone(),
+        source_plugin: resolved.spec.source.source_plugin.clone(),
+        manifest_path: resolved
+            .spec
+            .source
+            .manifest_path
+            .to_string_lossy()
+            .into_owned(),
+    });
+    let metadata = json!({
+        "runDir": run_dir,
+        "operatorAlias": alias,
+        "operator": operator,
+        "runContext": run_context,
+        "error": error,
+    });
+    let (input_hash, param_hash) = invocation
+        .map(|invocation| {
+            (
+                crate::domain::execution_records::hash_execution_map(&invocation.inputs),
+                crate::domain::execution_records::hash_execution_map(&invocation.params),
+            )
+        })
+        .unwrap_or((None, None));
+    let output_summary = json!({
+        "errorKind": error.kind,
+        "retryable": error.retryable,
+        "runDir": run_dir,
+    });
+    let record = crate::domain::execution_records::ExecutionRecordInput {
+        kind: "operator".to_string(),
+        unit_id: operator.as_ref().map(|operator| operator.id.clone()),
+        canonical_id: operator.as_ref().map(canonical_operator_unit_id),
+        provider_plugin: operator
+            .as_ref()
+            .map(|operator| operator.source_plugin.clone()),
+        status: "failed".to_string(),
+        session_id: ctx.session_id.clone(),
+        parent_execution_id: None,
+        started_at: Some(started_at.to_string()),
+        ended_at: Some(chrono::Utc::now().to_rfc3339()),
+        input_hash,
+        param_hash,
+        output_summary_json: Some(output_summary),
+        runtime_json: Some(enforcement_json_for_context(ctx)),
+        metadata_json: Some(metadata),
+    };
+    crate::domain::execution_records::record_execution_best_effort(&ctx.project_root, record).await;
+}
+
+fn canonical_operator_unit_id(operator: &OperatorRunIdentity) -> String {
+    format!("{}/operator/{}", operator.source_plugin, operator.id.trim())
+}
+
+fn operator_output_summary(result: &OperatorRunResult) -> JsonValue {
+    let output_artifact_count = result
+        .outputs
+        .values()
+        .map(|artifacts| artifacts.len())
+        .sum::<usize>();
+    json!({
+        "runId": result.run_id,
+        "outputKeys": result.outputs.keys().cloned().collect::<Vec<_>>(),
+        "outputArtifactCount": output_artifact_count,
+        "structuredOutputCount": result.structured_outputs.as_ref().map(output_artifact_count_json).unwrap_or(0),
+        "status": result.status,
+    })
+}
+
+fn output_artifact_count_json(value: &JsonValue) -> usize {
+    value.as_object().map(|object| object.len()).unwrap_or(0)
+}
+
+fn enforcement_json_for_context(ctx: &crate::domain::tools::ToolContext) -> JsonValue {
+    json!({
+        "executionEnvironment": ctx.execution_environment,
+        "sandboxBackend": ctx.sandbox_backend,
+        "localVenvType": ctx.local_venv_type,
+        "localVenvName": ctx.local_venv_name,
+    })
 }
 
 async fn execute_resolved_operator(
@@ -6547,6 +6722,121 @@ mod tests {
             params: BTreeMap::new(),
             resources: BTreeMap::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn successful_operator_tool_call_writes_execution_record() {
+        let tmp = TempDir::new().unwrap();
+        let spec = argv_operator_spec(
+            &tmp,
+            &[
+                "/bin/sh",
+                "-c",
+                "printf 'execution-record-success\\n' >/dev/null",
+            ],
+        );
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path())
+            .with_session_id(Some("session-op".to_string()));
+        let arguments =
+            serde_json::to_string(&OperatorInvocation::default()).expect("serialize invocation");
+
+        let (raw, is_error) = execute_resolved_operator_tool_call_with_context(
+            &ctx,
+            "x",
+            ResolvedOperator {
+                alias: "x".to_string(),
+                spec,
+            },
+            &arguments,
+            None,
+        )
+        .await;
+
+        assert!(!is_error, "{raw}");
+        let rows = crate::domain::execution_records::list_recent_execution_records(tmp.path(), 10)
+            .await
+            .expect("records");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "operator");
+        assert_eq!(rows[0].unit_id.as_deref(), Some("x"));
+        assert_eq!(rows[0].canonical_id.as_deref(), Some("p/operator/x"));
+        assert_eq!(rows[0].provider_plugin.as_deref(), Some("p"));
+        assert_eq!(rows[0].status, "succeeded");
+        assert_eq!(rows[0].session_id.as_deref(), Some("session-op"));
+    }
+
+    #[tokio::test]
+    async fn failed_operator_tool_call_writes_execution_record() {
+        let tmp = TempDir::new().unwrap();
+        let spec = argv_operator_spec(
+            &tmp,
+            &["/bin/sh", "-c", "echo execution-record-failure >&2; exit 7"],
+        );
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let arguments =
+            serde_json::to_string(&OperatorInvocation::default()).expect("serialize invocation");
+
+        let (raw, is_error) = execute_resolved_operator_tool_call_with_context(
+            &ctx,
+            "x",
+            ResolvedOperator {
+                alias: "x".to_string(),
+                spec,
+            },
+            &arguments,
+            None,
+        )
+        .await;
+
+        assert!(is_error, "{raw}");
+        let rows = crate::domain::execution_records::list_recent_execution_records(tmp.path(), 10)
+            .await
+            .expect("records");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "operator");
+        assert_eq!(rows[0].unit_id.as_deref(), Some("x"));
+        assert_eq!(rows[0].status, "failed");
+        assert!(rows[0]
+            .metadata_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("tool_exit_nonzero"));
+    }
+
+    #[tokio::test]
+    async fn operator_success_does_not_fail_when_execution_record_write_fails() {
+        let tmp = TempDir::new().unwrap();
+        let state_dir = tmp.path().join(".omiga");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(state_dir.join("execution"), "not a directory").unwrap();
+        let spec = argv_operator_spec(
+            &tmp,
+            &[
+                "/bin/sh",
+                "-c",
+                "printf 'record-write-blocked\\n' >/dev/null",
+            ],
+        );
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let arguments =
+            serde_json::to_string(&OperatorInvocation::default()).expect("serialize invocation");
+
+        let (raw, is_error) = execute_resolved_operator_tool_call_with_context(
+            &ctx,
+            "x",
+            ResolvedOperator {
+                alias: "x".to_string(),
+                spec,
+            },
+            &arguments,
+            None,
+        )
+        .await;
+
+        assert!(!is_error, "{raw}");
+        let parsed: JsonValue = serde_json::from_str(&raw).expect("operator result json");
+        assert_eq!(parsed["status"], "succeeded");
+        assert!(state_dir.join("execution").is_file());
     }
 
     #[test]

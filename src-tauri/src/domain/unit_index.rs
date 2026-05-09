@@ -261,12 +261,15 @@ pub fn template_units_from_summaries(
             let mut tags = summary.tags.clone();
             extend_unique(&mut tags, summary.classification.tags.clone());
             push_unique(&mut tags, "template");
-            let aliases = summary
-                .migration_target
-                .iter()
-                .filter(|target| target.as_str() != summary.id.as_str())
-                .cloned()
-                .collect::<Vec<_>>();
+            let mut aliases = summary.aliases.clone();
+            aliases.extend(
+                summary
+                    .migration_target
+                    .iter()
+                    .filter(|target| target.as_str() != summary.id.as_str())
+                    .cloned(),
+            );
+            dedup_strings(&mut aliases);
             UnitIndexEntry {
                 canonical_id: canonical_unit_id(
                     &summary.source_plugin,
@@ -316,6 +319,7 @@ pub fn template_units_from_specs(specs: Vec<TemplateSpecWithSource>) -> Vec<Unit
             exposure: candidate.spec.exposure,
             runtime: candidate.spec.runtime,
             template: candidate.spec.template,
+            aliases: candidate.spec.aliases,
             execution: candidate.spec.execution,
             migration_target: candidate.spec.migration_target,
         })
@@ -555,6 +559,14 @@ fn extend_unique(values: &mut Vec<String>, new_values: impl IntoIterator<Item = 
             values.push(trimmed.to_string());
         }
     }
+}
+
+fn dedup_strings(values: &mut Vec<String>) {
+    let mut seen = BTreeSet::new();
+    values.retain(|value| {
+        let trimmed = value.trim().to_string();
+        !trimmed.is_empty() && seen.insert(normalize(&trimmed))
+    });
 }
 
 #[cfg(test)]

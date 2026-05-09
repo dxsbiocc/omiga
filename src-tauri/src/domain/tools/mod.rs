@@ -11,6 +11,7 @@ pub mod bash;
 pub mod connector;
 pub mod enter_plan_mode;
 pub mod env_store;
+pub mod execution_record_list;
 pub mod exit_plan_mode;
 pub mod fetch;
 pub mod file_edit;
@@ -41,6 +42,7 @@ pub mod task_list;
 pub mod task_output;
 pub mod task_stop;
 pub mod task_update;
+pub mod template_execute;
 pub mod todo_write;
 pub mod tool_search;
 pub mod unit_describe;
@@ -83,6 +85,8 @@ pub enum ToolKind {
     UnitList,
     UnitSearch,
     UnitDescribe,
+    TemplateExecute,
+    ExecutionRecordList,
     Visualization,
     Sleep,
     AskUserQuestion,
@@ -138,6 +142,8 @@ impl fmt::Display for ToolKind {
             ToolKind::UnitList => write!(f, "unit_list"),
             ToolKind::UnitSearch => write!(f, "unit_search"),
             ToolKind::UnitDescribe => write!(f, "unit_describe"),
+            ToolKind::TemplateExecute => write!(f, "template_execute"),
+            ToolKind::ExecutionRecordList => write!(f, "execution_record_list"),
             ToolKind::Visualization => write!(f, "visualization"),
             ToolKind::Sleep => write!(f, "sleep"),
             ToolKind::AskUserQuestion => write!(f, "ask_user_question"),
@@ -183,6 +189,8 @@ pub enum Tool {
     UnitList(unit_list::UnitListArgs),
     UnitSearch(unit_search::UnitSearchArgs),
     UnitDescribe(unit_describe::UnitDescribeArgs),
+    TemplateExecute(template_execute::TemplateExecuteArgs),
+    ExecutionRecordList(execution_record_list::ExecutionRecordListArgs),
     Visualization(visualization::VisualizationArgs),
     Sleep(sleep::SleepArgs),
     AskUserQuestion(ask_user_question::AskUserQuestionArgs),
@@ -229,6 +237,8 @@ impl Tool {
             Tool::UnitList(_) => ToolKind::UnitList,
             Tool::UnitSearch(_) => ToolKind::UnitSearch,
             Tool::UnitDescribe(_) => ToolKind::UnitDescribe,
+            Tool::TemplateExecute(_) => ToolKind::TemplateExecute,
+            Tool::ExecutionRecordList(_) => ToolKind::ExecutionRecordList,
             Tool::Visualization(_) => ToolKind::Visualization,
             Tool::Sleep(_) => ToolKind::Sleep,
             Tool::AskUserQuestion(_) => ToolKind::AskUserQuestion,
@@ -272,6 +282,8 @@ impl Tool {
             Tool::UnitList(_) => "unit_list",
             Tool::UnitSearch(_) => "unit_search",
             Tool::UnitDescribe(_) => "unit_describe",
+            Tool::TemplateExecute(_) => "template_execute",
+            Tool::ExecutionRecordList(_) => "execution_record_list",
             Tool::Visualization(_) => "Visualization",
             Tool::Sleep(_) => "Sleep",
             Tool::AskUserQuestion(_) => "AskUserQuestion",
@@ -315,6 +327,8 @@ impl Tool {
             Tool::UnitList(_) => unit_list::DESCRIPTION,
             Tool::UnitSearch(_) => unit_search::DESCRIPTION,
             Tool::UnitDescribe(_) => unit_describe::DESCRIPTION,
+            Tool::TemplateExecute(_) => template_execute::DESCRIPTION,
+            Tool::ExecutionRecordList(_) => execution_record_list::DESCRIPTION,
             Tool::Visualization(_) => visualization::DESCRIPTION,
             Tool::Sleep(_) => sleep::DESCRIPTION,
             Tool::AskUserQuestion(_) => ask_user_question::DESCRIPTION,
@@ -363,6 +377,12 @@ impl Tool {
             Tool::UnitList(args) => unit_list::UnitListTool::execute(ctx, args).await?,
             Tool::UnitSearch(args) => unit_search::UnitSearchTool::execute(ctx, args).await?,
             Tool::UnitDescribe(args) => unit_describe::UnitDescribeTool::execute(ctx, args).await?,
+            Tool::TemplateExecute(args) => {
+                template_execute::TemplateExecuteTool::execute(ctx, args).await?
+            }
+            Tool::ExecutionRecordList(args) => {
+                execution_record_list::ExecutionRecordListTool::execute(ctx, args).await?
+            }
             Tool::Visualization(args) => {
                 visualization::VisualizationTool::execute(ctx, args).await?
             }
@@ -540,6 +560,18 @@ impl Tool {
                 })?;
                 Ok(Tool::UnitDescribe(args))
             }
+            ToolKind::TemplateExecute => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid template_execute arguments: {}", e),
+                })?;
+                Ok(Tool::TemplateExecute(args))
+            }
+            ToolKind::ExecutionRecordList => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid execution_record_list arguments: {}", e),
+                })?;
+                Ok(Tool::ExecutionRecordList(args))
+            }
             ToolKind::Visualization => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
                     message: format!("Invalid visualization arguments: {}", e),
@@ -686,6 +718,8 @@ impl Tool {
             "unit_list" | "UnitList" => ToolKind::UnitList,
             "unit_search" | "UnitSearch" => ToolKind::UnitSearch,
             "unit_describe" | "UnitDescribe" => ToolKind::UnitDescribe,
+            "template_execute" | "TemplateExecute" => ToolKind::TemplateExecute,
+            "execution_record_list" | "ExecutionRecordList" => ToolKind::ExecutionRecordList,
             "visualization" => ToolKind::Visualization,
             "sleep" => ToolKind::Sleep,
             "ask_user_question" | "AskUserQuestion" => ToolKind::AskUserQuestion,
@@ -1318,6 +1352,8 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         unit_list::schema(),
         unit_search::schema(),
         unit_describe::schema(),
+        template_execute::schema(),
+        execution_record_list::schema(),
         visualization::schema(),
         sleep::schema(),
         ask_user_question::schema(),
@@ -1371,12 +1407,14 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "unit_describe" => (1, 8),
         "list_mcp_resources" => (1, 9),
         "read_mcp_resource" => (1, 10),
+        "execution_record_list" => (1, 11),
 
         // Mutating tools.
         "file_edit" => (2, 0),
         "file_write" => (2, 1),
         "notebook_edit" => (2, 2),
         "todo_write" => (2, 3),
+        "template_execute" => (2, 4),
 
         // Orchestration and app-specific tools.
         "agent" | "Agent" => (3, 0),
@@ -1576,6 +1614,7 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
             | "unit_list"
             | "unit_search"
             | "unit_describe"
+            | "execution_record_list"
             | "ToolSearch"
             | "tool_search"
             | "visualization"
@@ -1640,6 +1679,16 @@ mod tool_enum_tests {
 
         let t = Tool::from_json_str("unit_describe", r#"{"id":"provider/template/demo"}"#).unwrap();
         assert!(matches!(t, Tool::UnitDescribe(_)));
+
+        let t = Tool::from_json_str(
+            "template_execute",
+            r#"{"id":"demo","inputs":{},"params":{},"resources":{}}"#,
+        )
+        .unwrap();
+        assert!(matches!(t, Tool::TemplateExecute(_)));
+
+        let t = Tool::from_json_str("execution_record_list", r#"{"limit":5}"#).unwrap();
+        assert!(matches!(t, Tool::ExecutionRecordList(_)));
     }
 
     #[test]

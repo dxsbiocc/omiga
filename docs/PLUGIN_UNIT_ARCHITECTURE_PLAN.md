@@ -537,10 +537,14 @@ Deliverables:
 - Execute through the existing run workspace / logs / outputs / provenance substrate.
 - Migrate bulk differential expression as the first executable Template.
 - Keep old operator path available until parity is verified.
+- Add `template_execute` as the explicit execution surface for Template units.
 
 Acceptance criteria:
 
-- DE template produces equivalent output artifacts to current DE operator for the same smoke input.
+- V1: DE template can execute through `migrationTarget` and therefore preserves
+  current operator outputs while the rendered R-template path is validated.
+- Later parity gate: rendered DE template produces equivalent output artifacts
+  to current DE operator for the same smoke input.
 - Template run status, logs, outputs, and provenance are visible through the same run inspection surface.
 - Template execution writes ExecutionRecord.
 
@@ -552,12 +556,45 @@ Deliverables:
 - Write records for operator runs.
 - Write records for template runs after Phase 4.
 - Add a small read/debug command for recent execution records.
+- Add `execution_record_list` as a read-only diagnostic tool.
 
 Acceptance criteria:
 
 - Successful and failed operator runs create execution rows.
 - Records include unit/provider/status/session/time/hash/output summary fields.
 - Existing run behavior is unchanged if record writing fails; record failure is diagnostic, not fatal.
+
+### First-version implementation status: 2026-05-09
+
+Completed in the first version:
+
+- root-level `plugin.json` loading and bundled manifest/script cleanup
+- read-only Unit Index over Operator / Template / Skill references
+- `unit_list`, `unit_search`, `unit_describe`
+- TemplateSpec parsing, validation, discovery, aliases, and diagnostics
+- bundled differential-expression TemplateSpec with `migrationTarget:
+  omics_differential_expression_basic`
+- `template_execute`
+  - delegates migration-target templates to the existing operator runtime
+  - supports a minimal rendered-script path for simple local templates
+  - reuses operator run workspaces, logs, output collection, provenance, and
+    runtime checks instead of creating a parallel runtime
+- project-scoped ExecutionRecord SQLite store at
+  `.omiga/execution/executions.sqlite`
+- best-effort ExecutionRecord writes for successful/failed operator runs and
+  template runs
+- `execution_record_list` read-only diagnostic tool
+
+Deferred from first version:
+
+- full rendered R implementation for bulk DE, PCA, and enrichment templates
+- fixture-based DE parity comparison between rendered Template and legacy
+  operator output
+- parent/child linking between a Template ExecutionRecord and the delegated
+  Operator ExecutionRecord
+- environment profile resolver and automatic environment preparation
+- retrieval-to-Operator migration for GEO / PubMed / UniProt
+- self-evolution graph mining and auto-registration
 
 ## Non-goals for MVP
 
