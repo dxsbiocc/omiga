@@ -907,6 +907,9 @@ pub struct SendMessageRequest {
     /// `ask` | `auto` | `bypass` — user-facing permission stance for this turn.
     #[serde(default, rename = "permissionMode")]
     pub permission_mode: Option<String>,
+    /// `off` | `task` | `session` — explicit user gate for Computer Use facade tools.
+    #[serde(default, rename = "computerUseMode")]
+    pub computer_use_mode: Option<String>,
     /// `local` | `ssh` | `sandbox` — chat composer execution surface (tools / terminal).
     #[serde(default, rename = "executionEnvironment")]
     pub execution_environment: Option<String>,

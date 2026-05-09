@@ -47,6 +47,7 @@ export {
 export {
   useChatComposerStore,
   type PermissionMode,
+  type ComputerUseMode,
   type SandboxBackend,
   type ExecutionEnvironment,
   type LocalVenvType,

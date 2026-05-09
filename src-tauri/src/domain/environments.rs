@@ -10,6 +10,7 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
 
 pub const ENVIRONMENT_API_VERSION_V1ALPHA1: &str = "omiga.ai/environment/v1alpha1";
 pub const ENVIRONMENT_KIND: &str = "Environment";
@@ -101,6 +102,15 @@ pub struct EnvironmentSpecWithSource {
     pub source: EnvironmentSource,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentManifestDiagnostic {
+    pub source_plugin: String,
+    pub manifest_path: String,
+    pub severity: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvironmentProfileSummary {
@@ -136,6 +146,24 @@ pub struct EnvironmentResolution {
     pub diagnostics: Vec<String>,
     #[serde(default, rename = "verificationStatus")]
     pub verification_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentCheckResult {
+    pub status: String,
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default, rename = "exitCode")]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub stdout: String,
+    #[serde(default)]
+    pub stderr: String,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default, rename = "durationMs")]
+    pub duration_ms: u128,
 }
 
 pub fn load_environment_manifest(
@@ -196,6 +224,11 @@ pub fn discover_environment_profiles() -> Vec<EnvironmentSpecWithSource> {
     discover_environment_profiles_from_plugins(outcome.plugins())
 }
 
+pub fn list_environment_manifest_diagnostics() -> Vec<EnvironmentManifestDiagnostic> {
+    let outcome = crate::domain::plugins::plugin_load_outcome();
+    environment_manifest_diagnostics_from_plugins(outcome.plugins())
+}
+
 pub fn discover_environment_profiles_from_plugins<'a>(
     plugins: impl IntoIterator<Item = &'a crate::domain::plugins::LoadedPlugin>,
 ) -> Vec<EnvironmentSpecWithSource> {
@@ -222,6 +255,33 @@ pub fn discover_environment_profiles_from_plugins<'a>(
             .then_with(|| left.spec.metadata.version.cmp(&right.spec.metadata.version))
     });
     out
+}
+
+pub fn environment_manifest_diagnostics_from_plugins<'a>(
+    plugins: impl IntoIterator<Item = &'a crate::domain::plugins::LoadedPlugin>,
+) -> Vec<EnvironmentManifestDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for plugin in plugins.into_iter().filter(|plugin| plugin.is_active()) {
+        for manifest_path in discover_environment_manifest_paths(&plugin.root) {
+            if let Err(error) =
+                load_environment_manifest(&manifest_path, plugin.id.clone(), plugin.root.clone())
+            {
+                diagnostics.push(EnvironmentManifestDiagnostic {
+                    source_plugin: plugin.id.clone(),
+                    manifest_path: manifest_path.to_string_lossy().into_owned(),
+                    severity: "error".to_string(),
+                    message: error,
+                });
+            }
+        }
+    }
+    diagnostics.sort_by(|left, right| {
+        left.source_plugin
+            .cmp(&right.source_plugin)
+            .then_with(|| left.manifest_path.cmp(&right.manifest_path))
+            .then_with(|| left.message.cmp(&right.message))
+    });
+    diagnostics
 }
 
 pub fn discover_environment_manifest_paths(plugin_root: &Path) -> Vec<PathBuf> {
@@ -357,6 +417,71 @@ pub fn canonical_environment_id(profile: &EnvironmentSpecWithSource) -> String {
     )
 }
 
+pub fn check_environment_profile(profile: &EnvironmentProfileSummary) -> EnvironmentCheckResult {
+    let command = profile.diagnostics.check_command.clone();
+    if command.is_empty() {
+        return EnvironmentCheckResult {
+            status: "notConfigured".to_string(),
+            command,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some(
+                "environment profile does not declare diagnostics.checkCommand".to_string(),
+            ),
+            duration_ms: 0,
+        };
+    }
+    if !is_allowed_check_command(&command) {
+        return EnvironmentCheckResult {
+            status: "blocked".to_string(),
+            command,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some(
+                "diagnostics.checkCommand is not in the V4 safe environment-check allowlist"
+                    .to_string(),
+            ),
+            duration_ms: 0,
+        };
+    }
+    let started = Instant::now();
+    match std::process::Command::new(&command[0])
+        .args(&command[1..])
+        .output()
+    {
+        Ok(output) => EnvironmentCheckResult {
+            status: if output.status.success() {
+                "available".to_string()
+            } else {
+                "unavailable".to_string()
+            },
+            command,
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout)
+                .chars()
+                .take(4000)
+                .collect(),
+            stderr: String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(4000)
+                .collect(),
+            error: None,
+            duration_ms: started.elapsed().as_millis(),
+        },
+        Err(err) => EnvironmentCheckResult {
+            status: "unavailable".to_string(),
+            command,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some(err.to_string()),
+            duration_ms: started.elapsed().as_millis(),
+        },
+    }
+}
+
 fn environment_summary(profile: EnvironmentSpecWithSource) -> EnvironmentProfileSummary {
     let canonical_id = canonical_environment_id(&profile);
     EnvironmentProfileSummary {
@@ -377,6 +502,31 @@ fn environment_summary(profile: EnvironmentSpecWithSource) -> EnvironmentProfile
 fn environment_matches_ref(profile: &EnvironmentSpecWithSource, needle: &str) -> bool {
     canonical_environment_id(profile).to_ascii_lowercase() == needle
         || profile.spec.metadata.id.trim().to_ascii_lowercase() == needle
+}
+
+fn is_allowed_check_command(command: &[String]) -> bool {
+    let Some(executable) = command.first() else {
+        return false;
+    };
+    let basename = Path::new(executable)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(executable)
+        .trim()
+        .to_ascii_lowercase();
+    let args = command
+        .iter()
+        .skip(1)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    match basename.as_str() {
+        "true" => args.is_empty(),
+        "rscript" | "python" | "python3" | "conda" | "singularity" => {
+            matches!(args.as_slice(), [arg] if arg == "--version" || arg == "-v")
+        }
+        "docker" => matches!(args.as_slice(), [arg] if arg == "version" || arg == "--version"),
+        _ => false,
+    }
 }
 
 fn collect_environment_manifest_paths(root: &Path, out: &mut Vec<PathBuf>) {
@@ -557,6 +707,84 @@ diagnostics:
         assert_eq!(
             resolved.canonical_id.as_deref(),
             Some("plugin@local/environment/r-bioc")
+        );
+    }
+
+    #[test]
+    fn environment_check_runs_only_safe_check_commands() {
+        let safe = EnvironmentProfileSummary {
+            id: "safe".to_string(),
+            version: "0.1.0".to_string(),
+            canonical_id: "p/environment/safe".to_string(),
+            source_plugin: "p".to_string(),
+            manifest_path: "environment.yaml".to_string(),
+            name: None,
+            description: None,
+            tags: Vec::new(),
+            runtime: EnvironmentRuntimeProfile::default(),
+            requirements: EnvironmentRequirements::default(),
+            diagnostics: EnvironmentDiagnostics {
+                check_command: vec!["true".to_string()],
+                ..EnvironmentDiagnostics::default()
+            },
+        };
+        let checked = check_environment_profile(&safe);
+        assert_eq!(checked.status, "available");
+        assert_eq!(checked.exit_code, Some(0));
+
+        let blocked = EnvironmentProfileSummary {
+            diagnostics: EnvironmentDiagnostics {
+                check_command: vec!["/bin/sh".to_string(), "-c".to_string(), "true".to_string()],
+                ..EnvironmentDiagnostics::default()
+            },
+            ..safe
+        };
+        let checked = check_environment_profile(&blocked);
+        assert_eq!(checked.status, "blocked");
+    }
+
+    #[test]
+    fn reports_invalid_environment_manifest_diagnostics() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugin = tmp.path().join("plugin");
+        write_plugin(&plugin, "plugin");
+        let env_dir = plugin.join("environments").join("bad");
+        fs::create_dir_all(&env_dir).expect("env dir");
+        fs::write(
+            env_dir.join("environment.yaml"),
+            r#"apiVersion: wrong
+kind: Environment
+metadata:
+  id: bad
+  version: 0.1.0
+"#,
+        )
+        .expect("bad env");
+        let loaded = loaded_plugin("plugin@local", &plugin);
+
+        let diagnostics = environment_manifest_diagnostics_from_plugins([&loaded]);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].source_plugin, "plugin@local");
+        assert!(diagnostics[0].message.contains("unsupported apiVersion"));
+    }
+
+    #[test]
+    fn discovers_bundled_visualization_r_environment_profile() {
+        let plugin_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("bundled_plugins/plugins/visualization-r");
+        let plugin = loaded_plugin("visualization-r@omiga-curated", &plugin_root);
+
+        let profiles = discover_environment_profiles_from_plugins([&plugin]);
+
+        let profile = profiles
+            .iter()
+            .find(|profile| profile.spec.metadata.id == "r-base")
+            .expect("visualization-r r-base profile");
+        assert_eq!(profile.spec.runtime.command.as_deref(), Some("Rscript"));
+        assert_eq!(
+            profile.spec.diagnostics.check_command,
+            vec!["Rscript".to_string(), "--version".to_string()]
         );
     }
 }

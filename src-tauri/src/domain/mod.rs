@@ -8,6 +8,7 @@ pub mod background_shell;
 pub mod blackboard;
 pub mod chat_session_title;
 pub mod chat_state;
+pub mod computer_use;
 pub mod connectors;
 pub mod context_snapshot;
 pub mod environments;

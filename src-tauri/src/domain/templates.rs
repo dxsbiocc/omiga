@@ -394,15 +394,36 @@ fn resolve_template(raw_id: &str) -> Result<TemplateSpecWithSource, String> {
         .into_iter()
         .filter(|candidate| template_matches_id(candidate, &needle))
         .collect::<Vec<_>>();
+    select_template_match(id, matches)
+}
+
+fn select_template_match(
+    id: &str,
+    matches: Vec<TemplateSpecWithSource>,
+) -> Result<TemplateSpecWithSource, String> {
     match matches.as_slice() {
         [only] => Ok(only.clone()),
         [] => Err(format!(
             "Template `{id}` was not found. Use unit_search kind=template to inspect templates."
         )),
-        many => Err(format!(
-            "Template `{id}` is ambiguous across {} candidates; use canonical id.",
-            many.len()
-        )),
+        many => {
+            let best_priority = many
+                .iter()
+                .map(template_preference_priority)
+                .min()
+                .unwrap_or(u8::MAX);
+            let preferred = many
+                .iter()
+                .filter(|candidate| template_preference_priority(candidate) == best_priority)
+                .collect::<Vec<_>>();
+            match preferred.as_slice() {
+                [only] => Ok((*only).clone()),
+                _ => Err(format!(
+                    "Template `{id}` is ambiguous across {} candidates; use canonical id.",
+                    many.len()
+                )),
+            }
+        }
     }
 }
 
@@ -425,6 +446,17 @@ fn template_matches_id(candidate: &TemplateSpecWithSource, needle: &str) -> bool
 
 fn normalize_match(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+fn template_preference_priority(candidate: &TemplateSpecWithSource) -> u8 {
+    let source = candidate.source.source_plugin.to_ascii_lowercase();
+    let marketplace = source.rsplit_once('@').map(|(_, marketplace)| marketplace);
+    match marketplace {
+        Some("omiga-project") => 0,
+        Some("omiga-user") => 1,
+        Some("omiga-curated") => 2,
+        _ => 3,
+    }
 }
 
 fn uses_existing_operator(template: &TemplateSpecWithSource) -> bool {
@@ -1312,7 +1344,7 @@ mod tests {
     use super::*;
     use crate::domain::plugins::LoadedPlugin;
     use serde_json::json;
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::{BTreeMap, HashMap, HashSet};
 
     fn bundled_loaded_plugin(plugin_name: &str, display_name: &str) -> LoadedPlugin {
         let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1399,6 +1431,33 @@ migrationTarget: demo_operator
             ),
         )
         .expect("write template");
+    }
+
+    fn temp_loaded_plugin(id: &str, root: PathBuf) -> LoadedPlugin {
+        LoadedPlugin {
+            id: id.to_string(),
+            manifest_name: Some(id.split('@').next().unwrap_or(id).to_string()),
+            display_name: None,
+            description: None,
+            root,
+            enabled: true,
+            skill_roots: Vec::new(),
+            mcp_servers: HashMap::new(),
+            apps: Vec::new(),
+            retrieval: None,
+            error: None,
+        }
+    }
+
+    fn write_temp_template_plugin(root: &Path, template_id: &str) {
+        let template_dir = root.join("templates").join(template_id);
+        fs::create_dir_all(&template_dir).expect("mkdir template plugin");
+        fs::write(
+            root.join("plugin.json"),
+            r#"{"name":"visualization-r-preference","version":"0.1.0","templates":"./templates"}"#,
+        )
+        .expect("plugin manifest");
+        write_valid_template(&template_dir.join("template.yaml"), template_id);
     }
 
     #[test]
@@ -1594,6 +1653,163 @@ template:
                 Some(category)
             );
             assert!(template.spec.exposure.expose_to_agent);
+        }
+    }
+
+    #[test]
+    fn discovers_bundled_visualization_r_templates() {
+        let plugin = bundled_loaded_plugin("visualization-r", "R Visualization Templates");
+        let candidates = discover_template_candidates_from_plugins([&plugin]);
+        let ids = candidates
+            .iter()
+            .map(|candidate| candidate.spec.metadata.id.as_str())
+            .collect::<HashSet<_>>();
+
+        let expected = [
+            "viz_scatter_basic",
+            "viz_scatter_correlation",
+            "viz_scatter_enrichment_dot",
+            "viz_scatter_ma",
+            "viz_scatter_pca_score",
+            "viz_scatter_volcano",
+            "viz_distribution_boxplot",
+            "viz_distribution_violin",
+            "viz_bar_basic",
+            "viz_bar_grouped",
+            "viz_heatmap_basic",
+            "viz_heatmap_clustered",
+            "viz_line_group",
+        ];
+
+        assert_eq!(candidates.len(), expected.len());
+        for id in expected {
+            assert!(ids.contains(id), "missing visualization template `{id}`");
+        }
+        assert!(candidates.iter().all(|candidate| {
+            candidate.spec.runtime.env_ref.as_deref() == Some("r-base")
+                && candidate
+                    .spec
+                    .template
+                    .entry
+                    .to_string_lossy()
+                    .ends_with("template.R.j2")
+                && candidate.spec.exposure.expose_to_agent
+        }));
+    }
+
+    #[test]
+    fn short_template_ids_prefer_project_then_user_then_bundled_templates() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_root = tmp.path().join("project");
+        let user_root = tmp.path().join("user");
+        let bundled_root = tmp.path().join("bundled");
+        for root in [&project_root, &user_root, &bundled_root] {
+            write_temp_template_plugin(root, "viz_scatter_basic");
+        }
+
+        let project = temp_loaded_plugin(
+            "project-visualization-r@omiga-project",
+            project_root.clone(),
+        );
+        let user = temp_loaded_plugin("user-visualization-r@omiga-user", user_root.clone());
+        let bundled = temp_loaded_plugin("visualization-r@omiga-curated", bundled_root.clone());
+
+        let all = discover_template_candidates_from_plugins([&bundled, &user, &project]);
+        let selected =
+            select_template_match("viz_scatter_basic", all).expect("project preference template");
+        assert_eq!(
+            selected.source.source_plugin,
+            "project-visualization-r@omiga-project"
+        );
+
+        let without_project = discover_template_candidates_from_plugins([&bundled, &user]);
+        let selected =
+            select_template_match("viz_scatter_basic", without_project).expect("user preference");
+        assert_eq!(
+            selected.source.source_plugin,
+            "user-visualization-r@omiga-user"
+        );
+
+        let bundled_only = discover_template_candidates_from_plugins([&bundled]);
+        let selected =
+            select_template_match("viz_scatter_basic", bundled_only).expect("bundled fallback");
+        assert_eq!(
+            selected.source.source_plugin,
+            "visualization-r@omiga-curated"
+        );
+    }
+
+    #[test]
+    fn duplicate_template_ids_at_same_preference_level_stay_ambiguous() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first_root = tmp.path().join("first");
+        let second_root = tmp.path().join("second");
+        write_temp_template_plugin(&first_root, "viz_scatter_basic");
+        write_temp_template_plugin(&second_root, "viz_scatter_basic");
+        let first = temp_loaded_plugin("first-visualization-r@lab", first_root);
+        let second = temp_loaded_plugin("second-visualization-r@lab", second_root);
+
+        let candidates = discover_template_candidates_from_plugins([&first, &second]);
+        let error = select_template_match("viz_scatter_basic", candidates)
+            .expect_err("same-level duplicates should remain ambiguous");
+        assert!(error.contains("ambiguous"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn execute_bundled_visualization_r_template_smoke() {
+        let r_ready = std::process::Command::new("Rscript")
+            .args([
+                "-e",
+                "if (!requireNamespace('ggplot2', quietly = TRUE)) quit(status = 1)",
+            ])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !r_ready {
+            eprintln!("skipping visualization-r execution smoke: Rscript/ggplot2 unavailable");
+            return;
+        }
+
+        let plugin_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("bundled_plugins/plugins/visualization-r");
+        let template_dir = plugin_root.join("templates/scatter/basic");
+        let template = load_template_manifest(
+            &template_dir.join("template.yaml"),
+            "visualization-r@omiga-curated",
+            plugin_root,
+        )
+        .expect("visualization template");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let input = tmp.path().join("scatter-basic-example.tsv");
+        fs::copy(template_dir.join("example.tsv"), &input).expect("copy example");
+        let invocation = crate::domain::operators::OperatorInvocation {
+            inputs: BTreeMap::from([("table".to_string(), json!(input.to_string_lossy()))]),
+            params: BTreeMap::new(),
+            resources: BTreeMap::new(),
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let (raw, is_error, metadata) =
+            execute_template_runtime(&ctx, &template, &invocation, None)
+                .await
+                .expect("visualization-r execution");
+
+        assert!(!is_error, "{raw}");
+        assert_eq!(metadata["executionMode"], "renderedTemplate");
+        assert_eq!(metadata["environment"]["status"], "resolved");
+        let parsed: JsonValue = serde_json::from_str(&raw).expect("template result json");
+        assert_eq!(parsed["status"], "succeeded");
+        for output in ["figure_png", "figure_pdf"] {
+            let path = parsed["outputs"][output][0]["path"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{output} output path"));
+            assert!(
+                fs::metadata(path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0)
+                    > 0,
+                "{output} should be non-empty at {path}"
+            );
         }
     }
 

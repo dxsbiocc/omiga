@@ -90,6 +90,7 @@ import {
   usePermissionStore,
   usePluginStore,
   type PermissionMode,
+  type ComputerUseMode,
   type SandboxBackend,
   type LocalVenvType,
 } from "../../state";
@@ -252,6 +253,27 @@ const PERMISSION_META: Record<PermissionMode, { label: string; hint: string }> =
       hint: "尽量减少权限提示（谨慎使用）。",
     },
   };
+
+const COMPUTER_USE_META: Record<
+  ComputerUseMode,
+  { label: string; menuLabel: string; hint: string }
+> = {
+  off: {
+    label: "Computer Off",
+    menuLabel: "关闭",
+    hint: "不允许 AI 观察或操作本机应用。",
+  },
+  task: {
+    label: "Computer Task",
+    menuLabel: "仅下一条消息",
+    hint: "仅下一条消息可使用本机截图与键鼠操作；发送后自动关闭。",
+  },
+  session: {
+    label: "Computer Session",
+    menuLabel: "当前会话",
+    hint: "当前会话后续消息持续允许 Computer Use，直到手动关闭。",
+  },
+};
 
 /** 解析 hex 相对亮度（0–1），非 hex 时返回 0.5 避免误判 */
 function hexRelativeLuminance(color: string): number {
@@ -742,6 +764,8 @@ export const ChatComposer = memo(function ChatComposer({
   const {
     permissionMode,
     setPermissionMode,
+    computerUseMode,
+    setComputerUseMode,
     composerAgentType,
     setComposerAgentType,
     composerAttachedPaths,
@@ -771,11 +795,16 @@ export const ChatComposer = memo(function ChatComposer({
   );
 
   const permissionAccent = permissionModeAccent(theme, permissionMode);
+  const computerUseAccent =
+    computerUseMode === "off" ? mut : theme.palette.info.main;
 
   const [plusAnchor, setPlusAnchor] = useState<null | HTMLElement>(null);
   const [permissionAnchor, setPermissionAnchor] = useState<null | HTMLElement>(
     null,
   );
+  const [computerUseAnchor, setComputerUseAnchor] =
+    useState<null | HTMLElement>(null);
+  const [computerUseStopPending, setComputerUseStopPending] = useState(false);
   const [envAnchor, setEnvAnchor] = useState<null | HTMLElement>(null);
   const [sandboxMenuAnchor, setSandboxMenuAnchor] =
     useState<null | HTMLElement>(null);
@@ -789,6 +818,27 @@ export const ChatComposer = memo(function ChatComposer({
     { kind: string; label: string; name: string }[]
   >([]);
   const [localVenvsLoading, setLocalVenvsLoading] = useState(false);
+
+  const openComputerUseSettings = useCallback(() => {
+    setComputerUseAnchor(null);
+    setSettingsTabIndex(15);
+    setSettingsOpen(true);
+    setRightPanelMode("settings");
+  }, [setRightPanelMode, setSettingsOpen, setSettingsTabIndex]);
+
+  const stopComputerUseRun = useCallback(async () => {
+    if (!sessionId) return;
+    setComputerUseStopPending(true);
+    try {
+      await invoke("computer_use_stop_active_run", { sessionId });
+      setComputerUseMode("off");
+      setComputerUseAnchor(null);
+    } catch (error) {
+      console.warn("Failed to stop Computer Use run", error);
+    } finally {
+      setComputerUseStopPending(false);
+    }
+  }, [sessionId, setComputerUseMode]);
 
   // 沙箱 / SSH 二级菜单：与 SessionList「Language」相同（定时器 + 嵌套 Menu + pointerEvents），避免 Popover 与一级 Menu 模态层事件死循环
   const sandboxSubmenuLeaveTimerRef = useRef<ReturnType<
@@ -3474,6 +3524,195 @@ export const ChatComposer = memo(function ChatComposer({
                 </Tooltip>
               );
             })}
+          </Menu>
+
+          <Button
+            size="small"
+            variant="text"
+            color="inherit"
+            onClick={(e) => setComputerUseAnchor(e.currentTarget)}
+            startIcon={
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  color: computerUseAccent,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                <Laptop size={17} strokeWidth={2} color={computerUseAccent} />
+              </Box>
+            }
+            endIcon={
+              <Box
+                component="span"
+                sx={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  color: computerUseAccent,
+                  lineHeight: 0,
+                  "& svg": { display: "block" },
+                }}
+              >
+                <ChevronDown
+                  size={18}
+                  strokeWidth={2}
+                  color={computerUseAccent}
+                />
+              </Box>
+            }
+            sx={{
+              textTransform: "none",
+              color: computerUseAccent,
+              ...composerLabelText,
+              borderRadius: 2.5,
+              px: 1,
+              minHeight: "var(--composer-toolbar-h)",
+              height: "var(--composer-toolbar-h)",
+              maxWidth: 220,
+              border: "1px solid transparent",
+              bgcolor:
+                computerUseMode === "off"
+                  ? "transparent"
+                  : alpha(computerUseAccent, isDark ? 0.14 : 0.1),
+              boxShadow: "none",
+              transition:
+                "background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease",
+              "@media (prefers-reduced-motion: reduce)": {
+                transition: "none",
+              },
+              "&:hover": {
+                bgcolor: alpha(computerUseAccent, 0.12),
+                borderColor: alpha(computerUseAccent, 0.28),
+                boxShadow: "none",
+              },
+            }}
+          >
+            <Typography
+              variant="body2"
+              noWrap
+              component="span"
+              sx={{ ...composerLabelText, color: "inherit" }}
+            >
+              {COMPUTER_USE_META[computerUseMode].label}
+            </Typography>
+          </Button>
+          <Menu
+            anchorEl={computerUseAnchor}
+            open={Boolean(computerUseAnchor)}
+            onClose={() => setComputerUseAnchor(null)}
+            slotProps={{ paper: { sx: { minWidth: 300, borderRadius: 2 } } }}
+          >
+            <Box sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider" }}>
+              <Typography
+                variant="subtitle2"
+                component="span"
+                sx={{
+                  display: "inline-block",
+                  cursor: "default",
+                  ...composerLabelText,
+                  color: ink,
+                }}
+              >
+                Computer Use
+              </Typography>
+              <Typography
+                variant="caption"
+                component="div"
+                sx={{ mt: 0.4, color: mut, lineHeight: 1.4 }}
+              >
+                显式开启后，AI 才能在本机观察界面并通过受控工具操作应用。
+              </Typography>
+            </Box>
+            {(Object.keys(COMPUTER_USE_META) as ComputerUseMode[]).map(
+              (key) => {
+                const rowAccent =
+                  key === "off" ? mut : theme.palette.info.main;
+                return (
+                  <Tooltip
+                    key={key}
+                    title={COMPUTER_USE_META[key].hint}
+                    placement="left"
+                    enterDelay={200}
+                  >
+                    <MenuItem
+                      selected={computerUseMode === key}
+                      onClick={() => {
+                        setComputerUseMode(key);
+                        setComputerUseAnchor(null);
+                      }}
+                      sx={{
+                        "&.Mui-selected": {
+                          bgcolor: alpha(rowAccent, isDark ? 0.18 : 0.12),
+                          "&:hover": {
+                            bgcolor: alpha(rowAccent, isDark ? 0.26 : 0.16),
+                          },
+                        },
+                      }}
+                    >
+                      <ListItemIcon
+                        sx={{
+                          minWidth: 40,
+                          lineHeight: 0,
+                          color: rowAccent,
+                          "& svg": { display: "block" },
+                        }}
+                      >
+                        <Laptop size={20} strokeWidth={2} color={rowAccent} />
+                      </ListItemIcon>
+                      <ListItemText
+                        primary={COMPUTER_USE_META[key].menuLabel}
+                        secondary={COMPUTER_USE_META[key].hint}
+                        primaryTypographyProps={{
+                          sx: { ...composerLabelText, color: rowAccent },
+                        }}
+                        secondaryTypographyProps={{
+                          sx: { color: mut, fontSize: 12 },
+                        }}
+                      />
+                    </MenuItem>
+                  </Tooltip>
+                );
+              },
+            )}
+            <Divider />
+            <MenuItem onClick={openComputerUseSettings}>
+              <ListItemIcon sx={{ minWidth: 40, color: mut }}>
+                <Settings size={20} strokeWidth={2} />
+              </ListItemIcon>
+              <ListItemText
+                primary="设置与运行记录"
+                secondary="配置 allowed apps、审计日志和插件状态。"
+                primaryTypographyProps={{
+                  sx: { ...composerLabelText, color: ink },
+                }}
+                secondaryTypographyProps={{
+                  sx: { color: mut, fontSize: 12 },
+                }}
+              />
+            </MenuItem>
+            <MenuItem
+              disabled={!sessionId || computerUseStopPending}
+              onClick={() => void stopComputerUseRun()}
+            >
+              <ListItemIcon sx={{ minWidth: 40, color: errorMain }}>
+                <Square fontSize="small" />
+              </ListItemIcon>
+              <ListItemText
+                primary={
+                  computerUseStopPending ? "正在停止..." : "停止当前 Computer Use run"
+                }
+                secondary="立即在 Omiga core 标记停止，阻断后续本机动作。"
+                primaryTypographyProps={{
+                  sx: { ...composerLabelText, color: errorMain },
+                }}
+                secondaryTypographyProps={{
+                  sx: { color: mut, fontSize: 12 },
+                }}
+              />
+            </MenuItem>
           </Menu>
 
           <Stack

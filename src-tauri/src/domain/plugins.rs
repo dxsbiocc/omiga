@@ -1636,6 +1636,51 @@ fn plugin_mcp_servers(
         return HashMap::new();
     };
     servers_from_mcp_json(&raw)
+        .into_iter()
+        .map(|(name, config)| (name, rebase_plugin_mcp_server(plugin_root, config)))
+        .collect()
+}
+
+fn rebase_plugin_mcp_server(plugin_root: &Path, config: McpServerConfig) -> McpServerConfig {
+    match config {
+        McpServerConfig::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => {
+            let cwd = Some(resolve_plugin_stdio_cwd(plugin_root, cwd.as_deref()));
+            McpServerConfig::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            }
+        }
+        other => other,
+    }
+}
+
+fn resolve_plugin_stdio_cwd(plugin_root: &Path, cwd: Option<&str>) -> String {
+    let Some(raw) = cwd.map(str::trim).filter(|value| !value.is_empty()) else {
+        return plugin_root.to_string_lossy().into_owned();
+    };
+
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
+    }
+
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        path.to_string_lossy().into_owned()
+    } else if raw == "." {
+        plugin_root.to_string_lossy().into_owned()
+    } else {
+        let relative = raw.strip_prefix("./").unwrap_or(raw);
+        plugin_root.join(relative).to_string_lossy().into_owned()
+    }
 }
 
 pub fn enabled_plugin_mcp_servers() -> HashMap<String, McpServerConfig> {
@@ -2209,6 +2254,62 @@ mod tests {
     }
 
     #[test]
+    fn plugin_stdio_mcp_servers_resolve_relative_cwd_from_plugin_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugin_root = tmp.path().join("computer-use");
+        fs::create_dir_all(&plugin_root).unwrap();
+        fs::write(
+            plugin_root.join(PLUGIN_MANIFEST_FILE),
+            r#"{
+              "name": "computer-use",
+              "version": "0.1.0",
+              "mcpServers": "./.mcp.json",
+              "interface": {
+                "displayName": "Computer Use",
+                "category": "Automation"
+              }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            plugin_root.join(".mcp.json"),
+            r#"{
+              "mcpServers": {
+                "computer": {
+                  "command": "./bin/darwin-arm64/computer-use",
+                  "args": ["--stdio"]
+                },
+                "computer-subdir": {
+                  "command": "../bin/darwin-arm64/computer-use",
+                  "cwd": "./mcp"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let manifest = load_plugin_manifest(&plugin_root).expect("manifest");
+        let servers = plugin_mcp_servers(&plugin_root, &manifest);
+
+        match servers.get("computer") {
+            Some(McpServerConfig::Stdio { command, cwd, .. }) => {
+                assert_eq!(command, "./bin/darwin-arm64/computer-use");
+                let expected = plugin_root.to_string_lossy().into_owned();
+                assert_eq!(cwd.as_deref(), Some(expected.as_str()));
+            }
+            other => panic!("expected computer stdio server, got {other:?}"),
+        }
+        match servers.get("computer-subdir") {
+            Some(McpServerConfig::Stdio { command, cwd, .. }) => {
+                assert_eq!(command, "../bin/darwin-arm64/computer-use");
+                let expected = plugin_root.join("mcp").to_string_lossy().into_owned();
+                assert_eq!(cwd.as_deref(), Some(expected.as_str()));
+            }
+            other => panic!("expected computer-subdir stdio server, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn plugins_system_section_renders_available_capabilities() {
         let mut mcp_servers = HashMap::new();
         mcp_servers.insert(
@@ -2601,5 +2702,37 @@ mod tests {
                 "{plugin_name} should replace builtins and support search/query/fetch"
             );
         }
+    }
+
+    #[test]
+    fn bundled_marketplace_exposes_visualization_r_plugin_and_skill() {
+        let marketplace_path = dev_builtin_marketplace_path();
+        let marketplace = read_marketplace(&marketplace_path).unwrap();
+        let entry = marketplace
+            .plugins
+            .iter()
+            .find(|entry| entry.name == "visualization-r")
+            .expect("visualization-r marketplace entry");
+        assert_eq!(entry.category.as_deref(), Some("Visualization"));
+        assert_eq!(entry.policy.installation, PluginInstallPolicy::Available);
+        assert_eq!(entry.policy.authentication, PluginAuthPolicy::OnUse);
+
+        let detail = read_plugin(&marketplace_path, "visualization-r").expect("plugin detail");
+        assert_eq!(detail.summary.id, "visualization-r@omiga-curated");
+        assert_eq!(
+            detail
+                .summary
+                .interface
+                .as_ref()
+                .and_then(|interface| interface.display_name.as_deref()),
+            Some("R Visualization Templates")
+        );
+        assert!(
+            detail
+                .skills
+                .iter()
+                .any(|skill| skill.name == "visualize-r"),
+            "visualization-r should expose $visualize-r"
+        );
     }
 }

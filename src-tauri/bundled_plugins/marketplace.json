@@ -77,6 +77,42 @@
       "category": "Operator"
     },
     {
+      "name": "visualization-r",
+      "source": {
+        "source": "local",
+        "path": "./plugins/visualization-r"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Visualization"
+    },
+    {
+      "name": "operator-pubmed-search",
+      "source": {
+        "source": "local",
+        "path": "./plugins/operator-pubmed-search"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Operator"
+    },
+    {
+      "name": "computer-use",
+      "source": {
+        "source": "local",
+        "path": "./plugins/computer-use"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Automation"
+    },
+    {
       "name": "retrieval-dataset-geo",
       "source": {
         "source": "local",

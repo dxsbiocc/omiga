@@ -11,6 +11,8 @@ pub mod bash;
 pub mod connector;
 pub mod enter_plan_mode;
 pub mod env_store;
+pub mod environment_profile_check;
+pub mod execution_lineage_report;
 pub mod execution_record_list;
 pub mod exit_plan_mode;
 pub mod fetch;
@@ -45,6 +47,7 @@ pub mod task_update;
 pub mod template_execute;
 pub mod todo_write;
 pub mod tool_search;
+pub mod unit_authoring_validate;
 pub mod unit_describe;
 pub mod unit_list;
 pub mod unit_search;
@@ -85,7 +88,10 @@ pub enum ToolKind {
     UnitList,
     UnitSearch,
     UnitDescribe,
+    UnitAuthoringValidate,
     TemplateExecute,
+    EnvironmentProfileCheck,
+    ExecutionLineageReport,
     ExecutionRecordList,
     Visualization,
     Sleep,
@@ -142,7 +148,10 @@ impl fmt::Display for ToolKind {
             ToolKind::UnitList => write!(f, "unit_list"),
             ToolKind::UnitSearch => write!(f, "unit_search"),
             ToolKind::UnitDescribe => write!(f, "unit_describe"),
+            ToolKind::UnitAuthoringValidate => write!(f, "unit_authoring_validate"),
             ToolKind::TemplateExecute => write!(f, "template_execute"),
+            ToolKind::EnvironmentProfileCheck => write!(f, "environment_profile_check"),
+            ToolKind::ExecutionLineageReport => write!(f, "execution_lineage_report"),
             ToolKind::ExecutionRecordList => write!(f, "execution_record_list"),
             ToolKind::Visualization => write!(f, "visualization"),
             ToolKind::Sleep => write!(f, "sleep"),
@@ -189,7 +198,10 @@ pub enum Tool {
     UnitList(unit_list::UnitListArgs),
     UnitSearch(unit_search::UnitSearchArgs),
     UnitDescribe(unit_describe::UnitDescribeArgs),
+    UnitAuthoringValidate(unit_authoring_validate::UnitAuthoringValidateArgs),
     TemplateExecute(template_execute::TemplateExecuteArgs),
+    EnvironmentProfileCheck(environment_profile_check::EnvironmentProfileCheckArgs),
+    ExecutionLineageReport(execution_lineage_report::ExecutionLineageReportArgs),
     ExecutionRecordList(execution_record_list::ExecutionRecordListArgs),
     Visualization(visualization::VisualizationArgs),
     Sleep(sleep::SleepArgs),
@@ -237,7 +249,10 @@ impl Tool {
             Tool::UnitList(_) => ToolKind::UnitList,
             Tool::UnitSearch(_) => ToolKind::UnitSearch,
             Tool::UnitDescribe(_) => ToolKind::UnitDescribe,
+            Tool::UnitAuthoringValidate(_) => ToolKind::UnitAuthoringValidate,
             Tool::TemplateExecute(_) => ToolKind::TemplateExecute,
+            Tool::EnvironmentProfileCheck(_) => ToolKind::EnvironmentProfileCheck,
+            Tool::ExecutionLineageReport(_) => ToolKind::ExecutionLineageReport,
             Tool::ExecutionRecordList(_) => ToolKind::ExecutionRecordList,
             Tool::Visualization(_) => ToolKind::Visualization,
             Tool::Sleep(_) => ToolKind::Sleep,
@@ -282,7 +297,10 @@ impl Tool {
             Tool::UnitList(_) => "unit_list",
             Tool::UnitSearch(_) => "unit_search",
             Tool::UnitDescribe(_) => "unit_describe",
+            Tool::UnitAuthoringValidate(_) => "unit_authoring_validate",
             Tool::TemplateExecute(_) => "template_execute",
+            Tool::EnvironmentProfileCheck(_) => "environment_profile_check",
+            Tool::ExecutionLineageReport(_) => "execution_lineage_report",
             Tool::ExecutionRecordList(_) => "execution_record_list",
             Tool::Visualization(_) => "Visualization",
             Tool::Sleep(_) => "Sleep",
@@ -327,7 +345,10 @@ impl Tool {
             Tool::UnitList(_) => unit_list::DESCRIPTION,
             Tool::UnitSearch(_) => unit_search::DESCRIPTION,
             Tool::UnitDescribe(_) => unit_describe::DESCRIPTION,
+            Tool::UnitAuthoringValidate(_) => unit_authoring_validate::DESCRIPTION,
             Tool::TemplateExecute(_) => template_execute::DESCRIPTION,
+            Tool::EnvironmentProfileCheck(_) => environment_profile_check::DESCRIPTION,
+            Tool::ExecutionLineageReport(_) => execution_lineage_report::DESCRIPTION,
             Tool::ExecutionRecordList(_) => execution_record_list::DESCRIPTION,
             Tool::Visualization(_) => visualization::DESCRIPTION,
             Tool::Sleep(_) => sleep::DESCRIPTION,
@@ -377,8 +398,17 @@ impl Tool {
             Tool::UnitList(args) => unit_list::UnitListTool::execute(ctx, args).await?,
             Tool::UnitSearch(args) => unit_search::UnitSearchTool::execute(ctx, args).await?,
             Tool::UnitDescribe(args) => unit_describe::UnitDescribeTool::execute(ctx, args).await?,
+            Tool::UnitAuthoringValidate(args) => {
+                unit_authoring_validate::UnitAuthoringValidateTool::execute(ctx, args).await?
+            }
             Tool::TemplateExecute(args) => {
                 template_execute::TemplateExecuteTool::execute(ctx, args).await?
+            }
+            Tool::EnvironmentProfileCheck(args) => {
+                environment_profile_check::EnvironmentProfileCheckTool::execute(ctx, args).await?
+            }
+            Tool::ExecutionLineageReport(args) => {
+                execution_lineage_report::ExecutionLineageReportTool::execute(ctx, args).await?
             }
             Tool::ExecutionRecordList(args) => {
                 execution_record_list::ExecutionRecordListTool::execute(ctx, args).await?
@@ -560,11 +590,29 @@ impl Tool {
                 })?;
                 Ok(Tool::UnitDescribe(args))
             }
+            ToolKind::UnitAuthoringValidate => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid unit_authoring_validate arguments: {}", e),
+                })?;
+                Ok(Tool::UnitAuthoringValidate(args))
+            }
             ToolKind::TemplateExecute => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
                     message: format!("Invalid template_execute arguments: {}", e),
                 })?;
                 Ok(Tool::TemplateExecute(args))
+            }
+            ToolKind::EnvironmentProfileCheck => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid environment_profile_check arguments: {}", e),
+                })?;
+                Ok(Tool::EnvironmentProfileCheck(args))
+            }
+            ToolKind::ExecutionLineageReport => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid execution_lineage_report arguments: {}", e),
+                })?;
+                Ok(Tool::ExecutionLineageReport(args))
             }
             ToolKind::ExecutionRecordList => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
@@ -718,7 +766,14 @@ impl Tool {
             "unit_list" | "UnitList" => ToolKind::UnitList,
             "unit_search" | "UnitSearch" => ToolKind::UnitSearch,
             "unit_describe" | "UnitDescribe" => ToolKind::UnitDescribe,
+            "unit_authoring_validate" | "UnitAuthoringValidate" => ToolKind::UnitAuthoringValidate,
             "template_execute" | "TemplateExecute" => ToolKind::TemplateExecute,
+            "environment_profile_check" | "EnvironmentProfileCheck" => {
+                ToolKind::EnvironmentProfileCheck
+            }
+            "execution_lineage_report" | "ExecutionLineageReport" => {
+                ToolKind::ExecutionLineageReport
+            }
             "execution_record_list" | "ExecutionRecordList" => ToolKind::ExecutionRecordList,
             "visualization" => ToolKind::Visualization,
             "sleep" => ToolKind::Sleep,
@@ -1352,7 +1407,10 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         unit_list::schema(),
         unit_search::schema(),
         unit_describe::schema(),
+        unit_authoring_validate::schema(),
         template_execute::schema(),
+        environment_profile_check::schema(),
+        execution_lineage_report::schema(),
         execution_record_list::schema(),
         visualization::schema(),
         sleep::schema(),
@@ -1405,9 +1463,12 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "unit_list" => (1, 6),
         "unit_search" => (1, 7),
         "unit_describe" => (1, 8),
-        "list_mcp_resources" => (1, 9),
-        "read_mcp_resource" => (1, 10),
-        "execution_record_list" => (1, 11),
+        "unit_authoring_validate" => (1, 9),
+        "list_mcp_resources" => (1, 10),
+        "read_mcp_resource" => (1, 11),
+        "execution_record_list" => (1, 12),
+        "execution_lineage_report" => (1, 13),
+        "environment_profile_check" => (1, 14),
 
         // Mutating tools.
         "file_edit" => (2, 0),
@@ -1614,7 +1675,10 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
             | "unit_list"
             | "unit_search"
             | "unit_describe"
+            | "unit_authoring_validate"
             | "execution_record_list"
+            | "execution_lineage_report"
+            | "environment_profile_check"
             | "ToolSearch"
             | "tool_search"
             | "visualization"
@@ -1680,6 +1744,9 @@ mod tool_enum_tests {
         let t = Tool::from_json_str("unit_describe", r#"{"id":"provider/template/demo"}"#).unwrap();
         assert!(matches!(t, Tool::UnitDescribe(_)));
 
+        let t = Tool::from_json_str("unit_authoring_validate", r#"{"includeOk":true}"#).unwrap();
+        assert!(matches!(t, Tool::UnitAuthoringValidate(_)));
+
         let t = Tool::from_json_str(
             "template_execute",
             r#"{"id":"demo","inputs":{},"params":{},"resources":{}}"#,
@@ -1689,6 +1756,12 @@ mod tool_enum_tests {
 
         let t = Tool::from_json_str("execution_record_list", r#"{"limit":5}"#).unwrap();
         assert!(matches!(t, Tool::ExecutionRecordList(_)));
+
+        let t = Tool::from_json_str("execution_lineage_report", r#"{"limit":5}"#).unwrap();
+        assert!(matches!(t, Tool::ExecutionLineageReport(_)));
+
+        let t = Tool::from_json_str("environment_profile_check", r#"{"envRef":"r-bioc"}"#).unwrap();
+        assert!(matches!(t, Tool::EnvironmentProfileCheck(_)));
     }
 
     #[test]

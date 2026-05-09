@@ -1,0 +1,25 @@
+{
+  "name": "operator-pubmed-search",
+  "version": "0.1.0",
+  "description": "V4 pilot Operator for PubMed search as an additive retrieval-as-Operator path.",
+  "operators": "./operators",
+  "interface": {
+    "displayName": "PubMed Search Operator",
+    "shortDescription": "PubMed API wrapper pilot",
+    "longDescription": "Provides an additive PubMed search Operator with structured TSV/JSON outputs. Existing retrieval tools remain available as compatibility fallback.",
+    "developerName": "Omiga",
+    "category": "Operator",
+    "capabilities": [
+      "Operator",
+      "Retrieval",
+      "Literature",
+      "PubMed",
+      "External Network",
+      "Offline Fixture"
+    ],
+    "brandColor": "#8B5CF6",
+    "defaultPrompt": [
+      "Search PubMed through the operator path and save structured results."
+    ]
+  }
+}

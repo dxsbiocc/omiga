@@ -703,6 +703,78 @@ Deferred beyond the third version:
 - retrieval-to-Operator migration for GEO / PubMed / UniProt.
 - self-evolution graph mining and auto-registration.
 
+### Fourth-version implementation status: 2026-05-09
+
+Completed in the fourth version:
+
+- Environment profile validation entrypoint:
+  - added `environment_profile_check` as a read-only diagnostic tool.
+  - it resolves `runtime.envRef` with provider-plugin disambiguation and can
+    optionally run a safe `diagnostics.checkCommand`.
+  - V4 checks are intentionally allowlisted version/probe commands only; they do
+    not install packages, create conda environments, pull containers, or mutate
+    runtime state.
+- Authoring validation entrypoint:
+  - added `unit_authoring_validate` to validate installed Operator, Template,
+    and Environment manifests from one tool call.
+  - the output is a compact manifest-health summary for plugin authors and
+    future self-evolution review loops.
+- Execution lineage report:
+  - added `execution_lineage_report` as a higher-level read-only summary over
+    project-scoped ExecutionRecords.
+  - it reports root/child counts, parent coverage, status/kind buckets,
+    execution-mode buckets, fallback counts, and optional per-root child
+    summaries.
+- Retrieval-as-Operator pilot:
+  - added bundled `operator-pubmed-search` as an additive PubMed API wrapper
+    Operator.
+  - the pilot supports deterministic `offline_fixture` mode and live NCBI
+    E-utilities mode with explicit `external_network` permissions.
+  - this does not replace the existing PubMed retrieval tool; it proves the
+    Operator path in parallel with the compatibility retrieval path.
+- Visualization Template library pilot:
+  - added bundled `visualization-r` as a Template-first static figure library.
+  - it contributes `$visualize-r`, thirteen visual-grammar Templates, a shared R
+    helper library, deterministic examples, smoke/index scripts, and a
+    preference-template promotion helper.
+  - `$visualize` remains a router skill; the plotting implementation lives in
+    Template units and editable rendered R scripts, not in a new plotting DSL.
+- Flexible plugin/MCP groundwork:
+  - added a `computer-use` optional plugin tracer bullet and documented its
+    phased implementation plan.
+  - plugin-provided stdio MCP servers now resolve relative `cwd` from plugin
+    root so bundled sidecars can be packaged without hardcoding project paths.
+  - raw `mcp__computer__*` backend tools are hidden from model-visible MCP tool
+    discovery and rejected at execution time so they cannot bypass the guarded
+    `computer_*` facade policy layer.
+  - added the explicit Computer Use `off` / `task` / `session` gate through the
+    composer state, request payload, backend request parser, and runtime
+    metadata. The gate controls schema injection and execution rejection; task
+    scope resets after send, and session scope can be preserved for resumed
+    turns.
+  - added model-visible `computer_*` facade schemas, backend MCP bridging,
+    action policy checks, stop/budget handling, target-window revalidation,
+    project-local audit logging, and secret redaction around the mock backend.
+  - the current `computer-use` sidecar remains a mock MCP backend for transport
+    validation; full run-history browsing and native macOS automation remain
+    future work.
+- Safety boundaries:
+  - the PubMed pilot avoids passing API keys as Operator params/argv. Live mode
+    may use `NCBI_API_KEY` from the runtime environment later, but secrets are
+    not part of the unit contract.
+  - environment checks are diagnostic-only and conservative.
+
+Deferred beyond the fourth version:
+
+- GEO and UniProt retrieval-as-Operator pilots.
+- versioned cache policy and recorded live-output fixtures for external-network
+  Operators.
+- deterministic Bioconductor-backed parity fixtures for DE and enrichment.
+- opt-in environment preparation after profile checks are stable.
+- Computer Use run-history browser hardening and native macOS backend progression.
+- self-evolution reports that propose new Operator / Template candidates from
+  ExecutionRecord lineage.
+
 ## Non-goals for MVP
 
 - Do not reimplement skills.

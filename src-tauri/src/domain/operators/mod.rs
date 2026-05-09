@@ -7067,6 +7067,12 @@ execution:
                 "seqtk_sample_reads",
                 "/bin/sh",
             ),
+            (
+                "operator-pubmed-search",
+                "pubmed-search",
+                "pubmed_search",
+                "python3",
+            ),
         ];
 
         for (plugin_name, operator_dir, operator_id, first_argv) in cases {
@@ -8527,6 +8533,61 @@ execution:
             first.outputs["report"][0].path
         );
         assert_eq!(fs::read_to_string(&marker).unwrap(), "run\nrun\n");
+    }
+
+    #[tokio::test]
+    async fn executes_pubmed_operator_with_offline_fixture() {
+        let tmp = TempDir::new().unwrap();
+        let (plugin_root, manifest) =
+            bundled_plugin_operator_manifest_path("operator-pubmed-search", "pubmed-search");
+        let spec = load_operator_manifest(
+            &manifest,
+            "operator-pubmed-search@omiga-curated",
+            plugin_root.clone(),
+        )
+        .unwrap();
+        let fixture = plugin_root.join("examples").join("pubmed_fixture.json");
+        let invocation = OperatorInvocation {
+            inputs: BTreeMap::new(),
+            params: BTreeMap::from([
+                ("query".to_string(), json!("TP53 cancer")),
+                ("limit".to_string(), json!(2)),
+                ("mode".to_string(), json!("offline_fixture")),
+                (
+                    "fixture_json".to_string(),
+                    json!(fixture.to_string_lossy().to_string()),
+                ),
+                ("email".to_string(), json!("")),
+            ]),
+            resources: BTreeMap::new(),
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let result = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "pubmed_search".to_string(),
+                spec,
+            },
+            invocation,
+            Some(OperatorRunContext {
+                kind: Some("operator-pilot".to_string()),
+                smoke_test_id: Some("offline-fixture".to_string()),
+                smoke_test_name: Some("PubMed offline fixture".to_string()),
+                parent_execution_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, "succeeded");
+        let structured_outputs = result.structured_outputs.as_ref().unwrap();
+        assert_eq!(structured_outputs["summary"]["count"], 2);
+        assert_eq!(structured_outputs["summary"]["mode"], "offline_fixture");
+        let results_path = Path::new(&result.outputs["results"][0].path);
+        let results = fs::read_to_string(results_path).expect("results");
+        assert!(results.contains("31452104"));
+        assert!(results.contains("25772236"));
     }
 
     #[tokio::test]

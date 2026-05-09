@@ -6,6 +6,7 @@ import {
   Article,
   Assignment as AssignmentIcon,
   Checklist as ChecklistIcon,
+  Computer as ComputerIcon,
   Construction,
   ExpandMore,
   FolderOpen,
@@ -33,6 +34,7 @@ type ChatTokens = ReturnType<typeof getChatTokens>;
 
 function toolRowIcon(toolName: string) {
   const n = toolName.toLowerCase();
+  if (n.startsWith("computer_")) return ComputerIcon;
   if (n.includes("ask_user") || n.includes("askuserquestion"))
     return ForumOutlined;
   if (n === "Agent" || n === "Task") return SmartToy;
@@ -65,6 +67,82 @@ function toolRowIcon(toolName: string) {
   if (n.includes("taskstop") || n.includes("taskoutput")) return TerminalIcon;
   if (n.includes("read")) return Article;
   return Construction;
+}
+
+function isComputerUseTool(toolName: string): boolean {
+  return toolName.toLowerCase().startsWith("computer_");
+}
+
+function parseToolInput(input: string | undefined): Record<string, unknown> | null {
+  if (!input?.trim()) return null;
+  try {
+    const parsed = JSON.parse(input) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    /* not JSON */
+  }
+  return null;
+}
+
+function compactString(value: unknown, max = 80): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
+}
+
+function computerUseInputSummary(toolName: string, input: string | undefined): string {
+  const parsed = parseToolInput(input);
+  if (!parsed) return input?.trim() ? "[Computer Use input hidden]" : "";
+
+  const summary: Record<string, unknown> = {};
+  for (const key of [
+    "observationId",
+    "targetWindowId",
+    "x",
+    "y",
+    "button",
+    "elementId",
+    "reason",
+    "targetHint",
+    "appName",
+    "bundleId",
+    "windowTitle",
+  ]) {
+    if (!(key in parsed)) continue;
+    const value = parsed[key];
+    summary[key] = typeof value === "string" ? compactString(value) ?? value : value;
+  }
+
+  if (typeof parsed.text === "string") {
+    summary.text = `[hidden ${parsed.text.length} chars]`;
+  }
+
+  if (Object.keys(summary).length === 0) {
+    summary.kind = toolName;
+  }
+  return JSON.stringify(summary, null, 2);
+}
+
+function computerUsePanelTitle(toolName: string, input: string | undefined): string {
+  const parsed = parseToolInput(input);
+  if (toolName === "computer_type" && typeof parsed?.text === "string") {
+    return `computer_type · text hidden (${parsed.text.length} chars)`;
+  }
+  if (toolName === "computer_click") {
+    const x = parsed?.x;
+    const y = parsed?.y;
+    if (typeof x === "number" && typeof y === "number") {
+      return `computer_click · (${x}, ${y})`;
+    }
+  }
+  if (toolName === "computer_click_element") {
+    const elementId = compactString(parsed?.elementId, 48);
+    if (elementId) return `computer_click_element · ${elementId}`;
+  }
+  return toolName;
 }
 
 export interface ToolCallCardProps {
@@ -102,12 +180,22 @@ export const ToolCallCard = memo(function ToolCallCard({
     toolCall,
   );
   const structuredError = parseStructuredToolErrorHint(displayOutput);
-  const hasInput = Boolean(toolCall.input && toolCall.input.trim());
+  const isComputerTool = isComputerUseTool(toolCall.name);
+  const displayInput = isComputerTool
+    ? computerUseInputSummary(toolCall.name, toolCall.input)
+    : toolCall.input;
+  const hasInput = Boolean(displayInput && displayInput.trim());
   const hasOutput = Boolean(displayOutput);
   const isBash =
     toolCall.name === "bash" || toolCall.name.toLowerCase().includes("bash");
-  const commandSectionLabel = isBash ? "Command" : toolCall.name;
-  const panelTitle = toolCallPanelTitle(toolCall.input, toolCall.name);
+  const commandSectionLabel = isBash
+    ? "Command"
+    : isComputerTool
+      ? "Computer Use request"
+      : toolCall.name;
+  const panelTitle = isComputerTool
+    ? computerUsePanelTitle(toolCall.name, toolCall.input)
+    : toolCallPanelTitle(toolCall.input, toolCall.name);
   const prefaceThought = prefaceBeforeTools?.trim() ?? "";
   const toolDurationLabel = formatToolDuration(timestamp, toolCall.completedAt);
   const thoughtRow =
@@ -294,7 +382,7 @@ export const ToolCallCard = memo(function ToolCallCard({
                           wordBreak: "break-word",
                         }}
                       >
-                        {toolCall.input}
+                        {displayInput}
                       </Typography>
                     </Box>
                   </Box>

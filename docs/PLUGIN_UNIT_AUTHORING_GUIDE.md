@@ -2,7 +2,7 @@
 
 Date: 2026-05-09
 
-This guide captures the V3 authoring rules for Omiga plugins, Operators,
+This guide captures the V4 authoring rules for Omiga plugins, Operators,
 Templates, Skills, and Environment profiles.
 
 ## Choose the right abstraction
@@ -86,10 +86,22 @@ diagnostics:
   installHint: Install R/Rscript and required Bioconductor packages before running.
 ```
 
-V3 resolution is diagnostic-only. It records the resolved profile, requirements,
-check command, and install hint in Template execution metadata. It does not
+V4 resolution and checks are diagnostic-only. They record the resolved profile,
+requirements, check command, and install hint in Template execution metadata and
+can optionally probe a safe version/check command. They do not
 install packages, create conda environments, pull containers, or load HPC
 modules automatically.
+
+Use `environment_profile_check` to validate a declared profile without changing
+runtime state:
+
+```json
+{
+  "envRef": "r-bioc",
+  "providerPlugin": "operator-pca-r@omiga-curated",
+  "runCheck": false
+}
+```
 
 ## Retrieval migration rule
 
@@ -97,3 +109,56 @@ Keep existing retrieval tools stable. New thin API wrappers such as PubMed,
 UniProt, or GEO should be added as Operators in an additive path with offline
 fixtures and explicit `external_network` semantics before changing routing
 defaults.
+
+The V4 PubMed pilot follows this pattern:
+
+```text
+operator-pubmed-search/
+  plugin.json
+  operators/pubmed-search/operator.yaml
+  scripts/pubmed_search.py
+  examples/pubmed_fixture.json
+```
+
+Authoring rules for API-wrapper Operators:
+
+- keep the existing retrieval tool as fallback during migration
+- declare `permissions.sideEffects: [external_network]`
+- provide deterministic offline fixtures for tests and parity checks
+- write structured files plus `outputs.json`
+- do not pass secrets as params or argv; use credential refs or runtime
+  environment variables when credential support is added
+- keep live network behavior opt-in and timeout-bounded
+
+## Authoring validation
+
+Run `unit_authoring_validate` after adding or editing plugin contributions. It
+checks installed Operator, Template, and Environment manifests and returns a
+compact count/diagnostics report:
+
+```json
+{
+  "includeOk": true
+}
+```
+
+Use `execution_lineage_report` when validating runtime behavior across
+Template/Operator boundaries. It summarizes parent/child ExecutionRecords and
+fallback execution modes without reading raw SQLite rows manually.
+
+## Visualization template pattern
+
+For static figures, prefer Template units over ad-hoc plotting Operators.
+`visualization-r` is the bundled V4 pattern:
+
+- organize by visual grammar (`scatter`, `distribution`, `bar`, `heatmap`,
+  `line`) and use tags for domain presets such as `omics-preset`
+- keep each template human-editable: `template.yaml`, `template.R.j2`, and a
+  small `example.tsv`
+- emit `figure.*`, `plot-script.R`, `rerun.sh`, and optional summaries
+- support one-off customization by editing `plot-script.R`
+- promote reusable styles only when explicitly requested, without modifying
+  built-in templates
+
+Do not invent a JSON-to-plot DSL. Stable inputs and output contracts belong in
+`template.yaml`; visual details belong in editable R code.

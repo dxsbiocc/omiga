@@ -392,14 +392,89 @@ fn describe_template_unit(unit: UnitIndexEntry) -> Option<UnitDescription> {
                 &candidate.spec.metadata.id,
             ) == unit.canonical_id
         })?;
+    let execute = template_execute_example(&template, &unit.canonical_id);
     Some(UnitDescription {
         unit,
         details: serde_json::json!({
             "schemaKind": "TemplateSpec",
             "template": template,
-            "note": "Execute this Template with template_execute. Rendered templates may inherit migration-target Operator contracts and fallback for parity-safe migration."
+            "execute": execute,
+            "note": "Execute this Template with template_execute."
         }),
     })
+}
+
+fn template_execute_example(
+    template: &TemplateSpecWithSource,
+    canonical_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "tool": "template_execute",
+        "arguments": {
+            "id": canonical_id,
+            "inputs": template_example_inputs(template),
+            "params": interface_defaults(&template.spec.interface, "params"),
+            "resources": interface_defaults(&template.spec.interface, "resources"),
+        }
+    })
+}
+
+fn template_example_inputs(
+    template: &TemplateSpecWithSource,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut values = interface_defaults(&template.spec.interface, "inputs");
+    let Some(inputs) = interface_section(&template.spec.interface, "inputs") else {
+        return values;
+    };
+    let file_inputs = inputs
+        .iter()
+        .filter(|(_, field)| {
+            field
+                .get("kind")
+                .and_then(|value| value.as_str())
+                .map(|kind| kind.eq_ignore_ascii_case("file"))
+                .unwrap_or(false)
+        })
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    if file_inputs.len() == 1 {
+        if let Some(example) = template
+            .source
+            .manifest_path
+            .parent()
+            .map(|dir| dir.join("example.tsv"))
+            .filter(|path| path.is_file())
+        {
+            values.insert(
+                file_inputs[0].clone(),
+                serde_json::Value::String(example.to_string_lossy().into_owned()),
+            );
+        }
+    }
+    values
+}
+
+fn interface_defaults(
+    interface: &serde_json::Value,
+    section: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut values = serde_json::Map::new();
+    let Some(fields) = interface_section(interface, section) else {
+        return values;
+    };
+    for (name, field) in fields {
+        if let Some(default) = field.get("default") {
+            values.insert(name.clone(), default.clone());
+        }
+    }
+    values
+}
+
+fn interface_section<'a>(
+    interface: &'a serde_json::Value,
+    section: &str,
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    interface.get(section)?.as_object()
 }
 
 fn describe_skill_unit(unit: UnitIndexEntry, skills: &[SkillEntry]) -> Option<UnitDescription> {
@@ -684,6 +759,78 @@ mod tests {
         assert_eq!(
             units[0].classification.category.as_deref(),
             Some("workflow/skill")
+        );
+    }
+
+    #[test]
+    fn indexes_visualization_r_templates_as_template_units() {
+        let plugin_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("bundled_plugins/plugins/visualization-r");
+        let template = crate::domain::templates::load_template_manifest(
+            &plugin_root
+                .join("templates")
+                .join("scatter")
+                .join("basic")
+                .join("template.yaml"),
+            "visualization-r@omiga-curated",
+            plugin_root,
+        )
+        .expect("visualization-r template");
+
+        let units = template_units_from_specs(vec![template]);
+
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].id, "viz_scatter_basic");
+        assert_eq!(
+            units[0].canonical_id,
+            "visualization-r@omiga-curated/template/viz_scatter_basic"
+        );
+        assert_eq!(
+            units[0].classification.category.as_deref(),
+            Some("visualization/scatter")
+        );
+        assert!(units[0]
+            .classification
+            .tags
+            .iter()
+            .any(|tag| tag == "ggplot2"));
+    }
+
+    #[test]
+    fn template_descriptions_include_executable_argument_skeleton() {
+        let plugin_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("bundled_plugins/plugins/visualization-r");
+        let template = crate::domain::templates::load_template_manifest(
+            &plugin_root
+                .join("templates")
+                .join("scatter")
+                .join("basic")
+                .join("template.yaml"),
+            "visualization-r@omiga-curated",
+            plugin_root,
+        )
+        .expect("visualization-r template");
+
+        let execute = template_execute_example(
+            &template,
+            "visualization-r@omiga-curated/template/viz_scatter_basic",
+        );
+
+        assert_eq!(execute["tool"], "template_execute");
+        assert_eq!(
+            execute["arguments"]["id"],
+            "visualization-r@omiga-curated/template/viz_scatter_basic"
+        );
+        assert!(
+            execute["arguments"]["inputs"]["table"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("templates/scatter/basic/example.tsv")),
+            "{execute}"
+        );
+        assert_eq!(execute["arguments"]["params"]["x_column"], "x_value");
+        assert_eq!(
+            execute["arguments"]["params"]["title"],
+            "Basic scatter plot"
         );
     }
 }

@@ -1,0 +1,20 @@
+{
+  "records": [
+    {
+      "pmid": "31452104",
+      "title": "The p53 pathway: origins, inactivation in cancer, and emerging therapeutic approaches.",
+      "journal": "Annual Review of Pharmacology and Toxicology",
+      "pubDate": "2020",
+      "authors": ["Levine AJ"],
+      "url": "https://pubmed.ncbi.nlm.nih.gov/31452104/"
+    },
+    {
+      "pmid": "25772236",
+      "title": "Mutant p53 in cancer: new functions and therapeutic opportunities.",
+      "journal": "Cancer Cell",
+      "pubDate": "2015",
+      "authors": ["Muller PAJ", "Vousden KH"],
+      "url": "https://pubmed.ncbi.nlm.nih.gov/25772236/"
+    }
+  ]
+}

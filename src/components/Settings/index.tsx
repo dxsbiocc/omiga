@@ -53,6 +53,7 @@ import { ExecutionEnvsSettingsTab } from "./ExecutionEnvsSettingsTab";
 import { RuntimeConstraintsPanel } from "./RuntimeConstraintsPanel";
 import { PluginsPanel } from "./PluginsPanel";
 import { ConnectorsPanel } from "./ConnectorsPanel";
+import { ComputerUseSettingsTab } from "./ComputerUseSettingsTab";
 import {
   DEFAULT_WEB_SEARCH_METHODS,
   moveItemToIndex,
@@ -68,7 +69,7 @@ import { AgentRolesPanel } from "../AgentRoles/AgentRolesPanel";
 interface SettingsProps {
   open: boolean;
   onClose: () => void;
-  /** See `openSettingsTabMap.ts`: 0–14 */
+  /** See `openSettingsTabMap.ts`: 0–15 */
   initialTab?: number;
   /** When `initialTab` is Execution (9): inner tab 0 Modal / 1 Daytona / 2 SSH */
   initialExecutionSubTab?: number;
@@ -99,6 +100,7 @@ const SETTINGS_SECTIONS: {
     header: "Integrations",
     items: [
       { index: 4, label: "Plugins" },
+      { index: 15, label: "Computer Use" },
       { index: 14, label: "Connectors" },
       { index: 5, label: "MCP" },
       { index: 6, label: "Skills" },
@@ -119,7 +121,7 @@ const SETTINGS_SECTIONS: {
 ];
 
 const SETTINGS_NAV_FLAT = SETTINGS_SECTIONS.flatMap((s) => s.items);
-const SETTINGS_TAB_MAX = 14;
+const SETTINGS_TAB_MAX = 15;
 
 function clampSettingsTab(i: number): number {
   const clamped = Math.min(
@@ -3445,6 +3447,13 @@ export function Settings({
 
             {activeTab === 4 && (
               <PluginsPanel projectPath={projectPath} />
+            )}
+
+            {activeTab === 15 && (
+              <ComputerUseSettingsTab
+                projectPath={projectPath}
+                onOpenPlugins={() => setActiveTab(4)}
+              />
             )}
 
             {activeTab === 14 && (

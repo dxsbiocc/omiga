@@ -10,12 +10,15 @@ use crate::domain::retrieval::types::{
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 const MAX_RESPONSE_LINE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_STDERR_TAIL_BYTES: usize = 16 * 1024;
 
 #[cfg(test)]
 fn plugin_process_start_lock() -> &'static tokio::sync::Mutex<()> {
@@ -30,6 +33,7 @@ pub struct PluginProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
 }
 
 impl PluginProcess {
@@ -69,8 +73,9 @@ impl PluginProcess {
             let _ = child.kill().await;
             return Err(RetrievalError::Cancelled);
         }
+        let stderr_tail = Arc::new(Mutex::new(Vec::new()));
         if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(drain_stderr(stderr));
+            tokio::spawn(drain_stderr(stderr, Arc::clone(&stderr_tail)));
         }
         let stdin = child.stdin.take().ok_or_else(|| RetrievalError::Protocol {
             plugin: Some(plugin_id.clone()),
@@ -90,6 +95,7 @@ impl PluginProcess {
             child,
             stdin,
             stdout: BufReader::new(stdout),
+            stderr_tail,
         };
         process.initialize_with_cancel(cancel).await?;
         Ok(process)
@@ -281,9 +287,15 @@ impl PluginProcess {
                         message: format!("read plugin response: {err}"),
                     })?;
             if n == 0 {
+                let stderr = self.stderr_excerpt().await;
+                let message = if stderr.is_empty() {
+                    "plugin exited before response".to_string()
+                } else {
+                    format!("plugin exited before response; stderr: {stderr}")
+                };
                 return Err(RetrievalError::Protocol {
                     plugin: Some(self.plugin_id.clone()),
-                    message: "plugin exited before response".to_string(),
+                    message,
                 });
             }
             if line.len() > MAX_RESPONSE_LINE_BYTES {
@@ -370,6 +382,12 @@ impl PluginProcess {
             }),
         }
     }
+
+    async fn stderr_excerpt(&self) -> String {
+        String::from_utf8_lossy(&self.stderr_tail.lock().await)
+            .trim()
+            .to_string()
+    }
 }
 
 impl Drop for PluginProcess {
@@ -414,12 +432,19 @@ fn validate_source_capabilities(
     Ok(())
 }
 
-async fn drain_stderr(mut stderr: tokio::process::ChildStderr) {
+async fn drain_stderr(mut stderr: tokio::process::ChildStderr, tail: Arc<Mutex<Vec<u8>>>) {
     let mut buf = [0_u8; 4096];
     loop {
         match stderr.read(&mut buf).await {
             Ok(0) | Err(_) => break,
-            Ok(_) => {}
+            Ok(n) => {
+                let mut tail = tail.lock().await;
+                tail.extend_from_slice(&buf[..n]);
+                if tail.len() > MAX_STDERR_TAIL_BYTES {
+                    let drain = tail.len() - MAX_STDERR_TAIL_BYTES;
+                    tail.drain(..drain);
+                }
+            }
         }
     }
 }

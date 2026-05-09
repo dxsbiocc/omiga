@@ -176,4 +176,37 @@ describe("ToolCallCard", () => {
     expect(html).not.toContain("svg:first-of-type");
     expect(html).not.toContain("svg:nth-of-type");
   });
+
+  it("summarizes computer_type input without rendering typed text", () => {
+    const html = renderToStaticMarkup(
+      <ToolCallCard
+        foldId="rf-computer"
+        messageId="tool-computer"
+        content=""
+        timestamp={1000}
+        toolCall={{
+          name: "computer_type",
+          status: "completed",
+          input: JSON.stringify({
+            observationId: "obs_1",
+            targetWindowId: 7,
+            text: "password=hunter2",
+          }),
+          output: JSON.stringify({ ok: true }),
+          completedAt: 1100,
+        }}
+        previousAssistantHasText
+        nestedOpen
+        showAskUserPanel={false}
+        chat={chat}
+        components={{}}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("computer_type · text hidden");
+    expect(html).toContain("[hidden 16 chars]");
+    expect(html).not.toContain("hunter2");
+    expect(html).not.toContain("password=hunter2");
+  });
 });

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub const DESCRIPTION: &str =
-    "Execute an Omiga Template unit by id. Prefer this for high-level omics workflows such as differential expression, PCA, and enrichment; use operator__* only when the user explicitly needs an atomic operator. Template execution can render local scripts, inherit backing Operator ask/preflight questions, and optionally fall back to a migrationTarget for parity-safe runs.";
+    "Execute an Omiga Template unit by id. Prefer this for high-level analysis and visualization workflows; use operator__* only when the user explicitly needs an atomic operator. Template execution can render local scripts, inherit backing Operator ask/preflight questions, and optionally fall back to a migrationTarget for parity-safe runs.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -58,7 +58,7 @@ pub fn schema() -> ToolSchema {
             "properties": {
                 "id": {
                     "type": "string",
-                    "description": "Template canonicalId, short id, alias, or migrationTarget alias. Use unit_search kind=template first when uncertain; prefer Template ids for analysis workflows."
+                    "description": "Template canonicalId, short id, alias, or migrationTarget alias. Use unit_search/unit_describe kind=template first when uncertain; prefer Template ids for analysis and visualization workflows."
                 },
                 "inputs": {
                     "type": "object",

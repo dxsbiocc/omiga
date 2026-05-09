@@ -1,0 +1,121 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_scatter_volcano
+  version: 0.1.0
+  name: Volcano Plot
+  description: Volcano plot for differential-result tables; an omics preset within the general visualization library.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+    - omics-preset
+    - differential-result
+    - threshold-annotation
+classification:
+  category: visualization/scatter
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+    - omics-preset
+    - differential-result
+    - threshold-annotation
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Input CSV/TSV table. See this template's example.tsv for the expected shape.
+  params:
+    log2fc_column:
+      kind: string
+      default: log2FoldChange
+    pvalue_column:
+      kind: string
+      default: padj
+    label_column:
+      kind: string
+      default: gene
+    log2fc_threshold:
+      kind: number
+      default: 1
+    pvalue_threshold:
+      kind: number
+      default: 0.05
+    title:
+      kind: string
+      default: Volcano plot
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 7.5
+    height:
+      kind: number
+      default: 5.5
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - volcano
+  - volcano_plot
+  - scatter_volcano
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.log2fc_column}
+    - ${params.pvalue_column}
+    - ${params.label_column}
+    - ${params.log2fc_threshold}
+    - ${params.pvalue_threshold}
+    - ${params.title}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

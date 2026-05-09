@@ -74,6 +74,15 @@ pub fn parse_mcp_tool_name(full: &str) -> Option<(String, String)> {
     Some((server, tool?))
 }
 
+/// Computer Use uses MCP as an internal transport, but model-facing calls must
+/// go through Omiga's `computer_*` facade so core policy, audit, stop handling,
+/// and target-window revalidation cannot be bypassed.
+#[must_use]
+pub fn is_reserved_computer_mcp_tool(full: &str) -> bool {
+    mcp_info_from_string(full)
+        .is_some_and(|(server, tool)| server.eq_ignore_ascii_case("computer") && tool.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +100,16 @@ mod tests {
         let (s, t) = parse_mcp_tool_name(&fq).unwrap();
         assert_eq!(s, "my-server");
         assert_eq!(t, "do_thing");
+    }
+
+    #[test]
+    fn detects_reserved_computer_tools() {
+        assert!(is_reserved_computer_mcp_tool("mcp__computer__click"));
+        assert!(is_reserved_computer_mcp_tool("mcp__Computer__click"));
+        assert!(is_reserved_computer_mcp_tool("mcp__computer__type_text"));
+        assert!(!is_reserved_computer_mcp_tool("mcp__computer"));
+        assert!(!is_reserved_computer_mcp_tool("mcp__playwright__click"));
+        assert!(!is_reserved_computer_mcp_tool("computer_click"));
     }
 
     #[test]

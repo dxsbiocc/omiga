@@ -128,6 +128,7 @@ pub(super) struct ToolExecutionRequest<'a> {
     pub local_venv_type: String,
     pub local_venv_name: String,
     pub env_store: crate::domain::tools::env_store::EnvStore,
+    pub computer_use_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -151,6 +152,7 @@ struct ToolExecutionShared {
     local_venv_type: String,
     local_venv_name: String,
     env_store: crate::domain::tools::env_store::EnvStore,
+    computer_use_enabled: bool,
 }
 
 struct SingleToolExecution {
@@ -186,6 +188,7 @@ pub(super) async fn execute_tool_calls(
         local_venv_type,
         local_venv_name,
         env_store,
+        computer_use_enabled,
     } = request;
 
     let cancel_flag = agent_runtime.map(|r| r.cancel_flag.clone());
@@ -210,6 +213,7 @@ pub(super) async fn execute_tool_calls(
         local_venv_type,
         local_venv_name,
         env_store,
+        computer_use_enabled,
     };
 
     // (tool_use_id, output, is_error)
@@ -424,6 +428,7 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
         local_venv_type,
         local_venv_name,
         env_store,
+        computer_use_enabled,
     } = shared;
     let tool_use_id = &tool_use_id;
     let tool_name = &tool_name;
@@ -593,6 +598,23 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
     }
 
     let arguments = &effective_arguments;
+
+    if crate::domain::mcp::names::is_reserved_computer_mcp_tool(tool_name) {
+        let error_msg = format!(
+            "Raw Computer Use MCP backend tool `{tool_name}` is not directly callable. Enable Computer Use for the task and use the `computer_*` facade tools so Omiga can enforce permissions, audit logging, stop handling, and target-window validation."
+        );
+        let _ = app.emit(
+            &format!("chat-stream-{}", message_id),
+            &StreamOutputItem::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                name: tool_name.clone(),
+                input: arguments.clone(),
+                output: error_msg.clone(),
+                is_error: true,
+            },
+        );
+        return (tool_use_id.clone(), error_msg, true);
+    }
 
     // === Permission Check for ALL tools (not just skill) ===
     // Skip permission check for certain safe tools
@@ -1565,6 +1587,368 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
         let model_output =
             process_tool_output_for_model(output_text.clone(), tool_use_id, tool_results_dir).await;
         (tool_use_id.clone(), model_output, is_error)
+    } else if crate::domain::computer_use::is_facade_tool_name(tool_name) {
+        if !computer_use_enabled {
+            let error_msg = format!(
+                "Computer Use facade tool `{tool_name}` is not enabled for this task. Enable Computer Use as `task` or `session` before using `computer_*` tools."
+            );
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            return (tool_use_id.clone(), error_msg, true);
+        }
+        let timeout = std::time::Duration::from_secs(120);
+        let Some(facade_tool) =
+            crate::domain::computer_use::ComputerFacadeTool::from_model_name(tool_name)
+        else {
+            let error_msg = format!("Unknown Computer Use facade tool: {tool_name}");
+            let _ = app.emit(
+                &format!("chat-stream-{}", message_id),
+                &StreamOutputItem::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    name: tool_name.clone(),
+                    input: arguments.clone(),
+                    output: error_msg.clone(),
+                    is_error: true,
+                },
+            );
+            return (tool_use_id.clone(), error_msg, true);
+        };
+
+        let (mcp_manager, session_id_opt, settings_repo) = app
+            .try_state::<crate::app_state::OmigaAppState>()
+            .map(|s| {
+                (
+                    Some(s.chat.mcp_manager.clone()),
+                    Some(session_id.to_string()),
+                    Some(s.repo.clone()),
+                )
+            })
+            .unwrap_or((None, None, None));
+        let settings_raw = if let Some(repo) = settings_repo {
+            repo.get_setting(crate::domain::computer_use::SETTINGS_KEY)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let computer_use_settings =
+            crate::domain::computer_use::ComputerUseSettings::from_stored_json(
+                settings_raw.as_deref(),
+            );
+        let mcp_pool_legacy: Option<
+            std::sync::Arc<
+                tokio::sync::Mutex<
+                    std::collections::HashMap<
+                        String,
+                        crate::domain::mcp::client::McpLiveConnection,
+                    >,
+                >,
+            >,
+        > = None;
+        let mut prepared = match crate::domain::computer_use::prepare_facade_call(
+            session_id,
+            facade_tool,
+            arguments,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                crate::domain::computer_use::record_policy_rejection(
+                    project_root,
+                    session_id,
+                    facade_tool,
+                    arguments,
+                    &error,
+                );
+                let error_msg = error.model_output();
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: crate::domain::computer_use::redact_json_value(
+                            &serde_json::from_str::<serde_json::Value>(arguments)
+                                .unwrap_or_else(|_| serde_json::json!({})),
+                        )
+                        .to_string(),
+                        output: error_msg.clone(),
+                        is_error: true,
+                    },
+                );
+                return (tool_use_id.clone(), error_msg, true);
+            }
+        };
+        prepared.inject_settings(&computer_use_settings);
+
+        if prepared.requires_backend_validate() {
+            let validation_tool_name = prepared.validate_backend_tool_name();
+            let validation_arguments = prepared.validate_backend_arguments_json();
+            match crate::domain::mcp::tool_dispatch::execute_mcp_tool_call(
+                project_root,
+                &validation_tool_name,
+                &validation_arguments,
+                timeout,
+                mcp_manager.clone(),
+                mcp_pool_legacy.clone(),
+                session_id_opt.clone(),
+            )
+            .await
+            {
+                Ok((validation_output_text, validation_is_error)) => {
+                    let validation_result =
+                        serde_json::from_str::<serde_json::Value>(&validation_output_text)
+                            .unwrap_or_else(
+                                |_| serde_json::json!({ "text": validation_output_text }),
+                            );
+                    let safe_validation_result =
+                        crate::domain::computer_use::sanitize_backend_result_for_model(
+                            &validation_result,
+                        );
+                    if let Some(violation) =
+                        crate::domain::computer_use::app_policy_violation_from_backend_result(
+                            &computer_use_settings,
+                            &safe_validation_result,
+                        )
+                    {
+                        let output_value = crate::domain::computer_use::app_not_allowed_output(
+                            &prepared.run_id,
+                            facade_tool,
+                            &validation_tool_name,
+                            &violation,
+                        );
+                        let output_text = output_value.to_string();
+                        crate::domain::computer_use::record_facade_result(
+                            project_root,
+                            session_id,
+                            &prepared,
+                            false,
+                            &output_value,
+                        );
+                        let _ = app.emit(
+                            &format!("chat-stream-{}", message_id),
+                            &StreamOutputItem::ToolResult {
+                                tool_use_id: tool_use_id.clone(),
+                                name: tool_name.clone(),
+                                input: prepared.redacted_arguments.to_string(),
+                                output: output_text.clone(),
+                                is_error: true,
+                            },
+                        );
+                        let model_output = process_tool_output_for_model(
+                            output_text.clone(),
+                            tool_use_id,
+                            tool_results_dir,
+                        )
+                        .await;
+                        return (tool_use_id.clone(), model_output, true);
+                    }
+                    if validation_is_error
+                        || !crate::domain::computer_use::backend_validation_allows_action(
+                            &safe_validation_result,
+                        )
+                    {
+                        let output_text = serde_json::json!({
+                            "ok": false,
+                            "error": "target_validation_failed",
+                            "requiresObserve": true,
+                            "runId": prepared.run_id,
+                            "facadeTool": facade_tool.model_name(),
+                            "backendTool": validation_tool_name,
+                            "backendResult": safe_validation_result,
+                        })
+                        .to_string();
+                        crate::domain::computer_use::record_facade_result(
+                            project_root,
+                            session_id,
+                            &prepared,
+                            false,
+                            &serde_json::from_str::<serde_json::Value>(&output_text)
+                                .unwrap_or_else(|_| serde_json::json!({ "ok": false })),
+                        );
+                        let _ = app.emit(
+                            &format!("chat-stream-{}", message_id),
+                            &StreamOutputItem::ToolResult {
+                                tool_use_id: tool_use_id.clone(),
+                                name: tool_name.clone(),
+                                input: prepared.redacted_arguments.to_string(),
+                                output: output_text.clone(),
+                                is_error: true,
+                            },
+                        );
+                        let model_output = process_tool_output_for_model(
+                            output_text.clone(),
+                            tool_use_id,
+                            tool_results_dir,
+                        )
+                        .await;
+                        return (tool_use_id.clone(), model_output, true);
+                    }
+                }
+                Err(e) => {
+                    let error_msg = format!("Computer Use target validation error: {e}");
+                    crate::domain::computer_use::record_facade_result(
+                        project_root,
+                        session_id,
+                        &prepared,
+                        false,
+                        &serde_json::json!({ "error": error_msg }),
+                    );
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: prepared.redacted_arguments.to_string(),
+                            output: error_msg.clone(),
+                            is_error: true,
+                        },
+                    );
+                    return (tool_use_id.clone(), error_msg, true);
+                }
+            }
+        }
+
+        match crate::domain::mcp::tool_dispatch::execute_mcp_tool_call(
+            project_root,
+            &prepared.backend_tool_name,
+            &prepared.backend_arguments_json,
+            timeout,
+            mcp_manager,
+            mcp_pool_legacy,
+            session_id_opt,
+        )
+        .await
+        {
+            Ok((backend_output_text, backend_is_error)) => {
+                let backend_result =
+                    serde_json::from_str::<serde_json::Value>(&backend_output_text)
+                        .unwrap_or_else(|_| serde_json::json!({ "text": backend_output_text }));
+                let safe_backend_result =
+                    crate::domain::computer_use::sanitize_backend_result_for_model(&backend_result);
+                if let Some(violation) =
+                    crate::domain::computer_use::app_policy_violation_from_backend_result(
+                        &computer_use_settings,
+                        &safe_backend_result,
+                    )
+                {
+                    let output_value = crate::domain::computer_use::app_not_allowed_output(
+                        &prepared.run_id,
+                        facade_tool,
+                        &prepared.backend_tool_name,
+                        &violation,
+                    );
+                    let output_text = output_value.to_string();
+                    let _ = app.emit(
+                        &format!("chat-stream-{}", message_id),
+                        &StreamOutputItem::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            name: tool_name.clone(),
+                            input: prepared.redacted_arguments.to_string(),
+                            output: output_text.clone(),
+                            is_error: true,
+                        },
+                    );
+                    crate::domain::computer_use::record_facade_result(
+                        project_root,
+                        session_id,
+                        &prepared,
+                        false,
+                        &output_value,
+                    );
+                    let model_output = process_tool_output_for_model(
+                        output_text.clone(),
+                        tool_use_id,
+                        tool_results_dir,
+                    )
+                    .await;
+                    return (tool_use_id.clone(), model_output, true);
+                }
+                let output_text = serde_json::json!({
+                    "ok": !backend_is_error,
+                    "facadeTool": facade_tool.model_name(),
+                    "runId": prepared.run_id,
+                    "backendTool": prepared.backend_tool_name,
+                    "backendResult": safe_backend_result,
+                })
+                .to_string();
+                let display_output = if output_text.len() > PREVIEW_SIZE_BYTES {
+                    let prefix = truncate_utf8_prefix(&output_text, PREVIEW_SIZE_BYTES);
+                    format!(
+                        "{}\n\n[Output truncated... {} total characters]",
+                        prefix,
+                        output_text.len()
+                    )
+                } else {
+                    output_text.clone()
+                };
+                let safe_input = prepared.redacted_arguments.to_string();
+                let display_input = if safe_input.len() > TOOL_DISPLAY_MAX_INPUT_CHARS {
+                    let prefix = truncate_utf8_prefix(&safe_input, TOOL_DISPLAY_MAX_INPUT_CHARS);
+                    format!(
+                        "{}\n\n[Input truncated... {} total characters]",
+                        prefix,
+                        safe_input.len()
+                    )
+                } else {
+                    safe_input
+                };
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: display_input,
+                        output: display_output,
+                        is_error: backend_is_error,
+                    },
+                );
+                crate::domain::computer_use::record_facade_result(
+                    project_root,
+                    session_id,
+                    &prepared,
+                    !backend_is_error,
+                    &safe_backend_result,
+                );
+                let model_output = process_tool_output_for_model(
+                    output_text.clone(),
+                    tool_use_id,
+                    tool_results_dir,
+                )
+                .await;
+                (tool_use_id.clone(), model_output, backend_is_error)
+            }
+            Err(e) => {
+                let error_msg = format!(
+                    "Computer Use backend error: {e}. Install and enable the `computer-use` plugin, then retry with Computer Use enabled."
+                );
+                crate::domain::computer_use::record_facade_result(
+                    project_root,
+                    session_id,
+                    &prepared,
+                    false,
+                    &serde_json::json!({ "error": error_msg }),
+                );
+                let _ = app.emit(
+                    &format!("chat-stream-{}", message_id),
+                    &StreamOutputItem::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        name: tool_name.clone(),
+                        input: prepared.redacted_arguments.to_string(),
+                        output: error_msg.clone(),
+                        is_error: true,
+                    },
+                );
+                (tool_use_id.clone(), error_msg, true)
+            }
+        }
     } else if tool_name.starts_with("mcp__") {
         let timeout = std::time::Duration::from_secs(120);
         // Use the session-aware MCP connection manager to avoid spawning new processes

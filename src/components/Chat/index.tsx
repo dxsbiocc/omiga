@@ -49,6 +49,7 @@ import {
   mergeActiveTodosWithTiming,
   useChatComposerStore,
   type PermissionMode,
+  type ComputerUseMode,
   type SandboxBackend,
   type ExecutionEnvironment,
   type Message as StoreMessage,
@@ -325,6 +326,7 @@ interface QueuedMainSend {
   composerSelectedPluginIds: string[];
   composerAgentType: string;
   permissionMode: PermissionMode;
+  computerUseMode: ComputerUseMode;
   /** 发送入队时的运行环境（与 composer 一致） */
   environment: ExecutionEnvironment;
   /** SSH 服务器名称（仅在 environment === "ssh" 时有效） */
@@ -2281,6 +2283,7 @@ export function Chat({ sessionId }: ChatProps) {
         }
         st.setComposerAgentType(item.composerAgentType);
         st.setPermissionMode(item.permissionMode);
+        st.setComputerUseMode(item.computerUseMode);
         st.setEnvironment(item.environment);
         st.setSshServer(item.sshServer);
       });
@@ -2429,6 +2432,7 @@ export function Chat({ sessionId }: ChatProps) {
         composerSelectedPluginIds: [],
         composerAgentType: "general-purpose",
         permissionMode: st.permissionMode,
+        computerUseMode: "off",
         environment: st.environment,
         sshServer: st.sshServer,
         sandboxBackend: st.sandboxBackend,
@@ -5229,6 +5233,7 @@ export function Chat({ sessionId }: ChatProps) {
       sandboxBackend: storeSb,
       localVenvType: storeVenvType,
       localVenvName: storeVenvName,
+      computerUseMode: storeComputerUseMode,
     } = useChatComposerStore.getState();
 
     const composerAgentType = flushPayload
@@ -5237,6 +5242,9 @@ export function Chat({ sessionId }: ChatProps) {
     const permissionMode = flushPayload
       ? flushPayload.permissionMode
       : storePerm;
+    const computerUseMode = flushPayload
+      ? flushPayload.computerUseMode
+      : storeComputerUseMode;
     const environment = flushPayload ? flushPayload.environment : storeEnv;
     const sshServer = flushPayload ? flushPayload.sshServer : storeSsh;
     const sandboxBackend = flushPayload ? flushPayload.sandboxBackend : storeSb;
@@ -5293,6 +5301,7 @@ export function Chat({ sessionId }: ChatProps) {
       composerRef.current?.setValue("");
       useChatComposerStore.getState().clearComposerAttachedPaths();
       useChatComposerStore.getState().clearComposerSelectedPluginIds();
+      useChatComposerStore.getState().resetTaskComputerUseMode();
       try {
         const response = await invoke<{
           message_id: string;
@@ -5355,6 +5364,7 @@ export function Chat({ sessionId }: ChatProps) {
         composerSelectedPluginIds: [...composerSelectedPluginIds],
         composerAgentType,
         permissionMode,
+        computerUseMode,
         environment,
         sshServer: useChatComposerStore.getState().sshServer,
         sandboxBackend: useChatComposerStore.getState().sandboxBackend,
@@ -5363,6 +5373,7 @@ export function Chat({ sessionId }: ChatProps) {
       composerRef.current?.setValue("");
       useChatComposerStore.getState().clearComposerAttachedPaths();
       useChatComposerStore.getState().clearComposerSelectedPluginIds();
+      useChatComposerStore.getState().resetTaskComputerUseMode();
       return;
     }
 
@@ -5458,6 +5469,7 @@ export function Chat({ sessionId }: ChatProps) {
       composerRef.current?.setValue("");
       useChatComposerStore.getState().clearComposerAttachedPaths();
       useChatComposerStore.getState().clearComposerSelectedPluginIds();
+      useChatComposerStore.getState().resetTaskComputerUseMode();
 
       const requestSessionId = sessionId;
       try {
@@ -5668,6 +5680,7 @@ export function Chat({ sessionId }: ChatProps) {
     composerRef.current?.setValue("");
     useChatComposerStore.getState().clearComposerAttachedPaths();
     useChatComposerStore.getState().clearComposerSelectedPluginIds();
+    useChatComposerStore.getState().resetTaskComputerUseMode();
 
     const requestSessionId = sessionId;
     try {
@@ -5711,6 +5724,7 @@ export function Chat({ sessionId }: ChatProps) {
           localVenvName,
           activeProviderEntryName,
           selectedPluginIds: composerSelectedPluginIds,
+          computerUseMode,
         },
       });
 
@@ -6010,10 +6024,11 @@ export function Chat({ sessionId }: ChatProps) {
       flushSync(() => {
         useChatComposerStore.getState().setComposerAgentType(composeAgent);
       });
-      const { permissionMode } = useChatComposerStore.getState();
+      const { permissionMode, computerUseMode } = useChatComposerStore.getState();
 
       const userMessageId = message.id;
       const requestSessionId = sessionId;
+      useChatComposerStore.getState().resetTaskComputerUseMode();
 
       try {
         const response = await invoke<{
@@ -6041,6 +6056,7 @@ export function Chat({ sessionId }: ChatProps) {
             localVenvName: useChatComposerStore.getState().localVenvName,
             activeProviderEntryName,
             selectedPluginIds: message.composerSelectedPluginIds ?? [],
+            computerUseMode,
             ...(isPersistedMessageIdForRetry(message.id)
               ? { retryFromUserMessageId: message.id }
               : {}),
@@ -6298,6 +6314,7 @@ export function Chat({ sessionId }: ChatProps) {
       }
       st.setComposerAgentType(next.composerAgentType);
       st.setPermissionMode(next.permissionMode);
+      st.setComputerUseMode(next.computerUseMode);
       st.setEnvironment(next.environment);
       st.setSshServer(next.sshServer);
       st.setSandboxBackend(next.sandboxBackend);
@@ -6569,8 +6586,17 @@ export function Chat({ sessionId }: ChatProps) {
       return next;
     });
 
-    const { composerAgentType, permissionMode, environment, sshServer, sandboxBackend } =
+    const {
+      composerAgentType,
+      permissionMode,
+      computerUseMode,
+      environment,
+      sshServer,
+      sandboxBackend,
+    } =
       useChatComposerStore.getState();
+    const resumeComputerUseMode =
+      computerUseMode === "session" ? computerUseMode : "off";
     const requestSessionId = sessionId;
 
     try {
@@ -6595,6 +6621,7 @@ export function Chat({ sessionId }: ChatProps) {
           localVenvType: useChatComposerStore.getState().localVenvType,
           localVenvName: useChatComposerStore.getState().localVenvName,
           activeProviderEntryName,
+          computerUseMode: resumeComputerUseMode,
         },
       });
 

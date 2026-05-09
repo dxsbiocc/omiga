@@ -529,6 +529,9 @@ impl PermissionManager {
 
     fn approval_must_be_single_use(context: &PermissionContext) -> bool {
         let base = Self::approval_cache_key(&context.tool_name);
+        if base == "computer_type" {
+            return true;
+        }
         if base != "bash" && base != "shell" {
             return false;
         }
@@ -1271,6 +1274,20 @@ impl PermissionManager {
             categories.push(RiskCategory::Privacy);
         }
 
+        if Self::approval_cache_key(&context.tool_name) == "computer_type"
+            && crate::domain::computer_use::value_contains_probable_secret(&context.arguments)
+        {
+            detected_risks.push(DetectedRisk {
+                category: RiskCategory::Privacy,
+                severity: RiskLevel::Critical,
+                description: "Computer Use 将输入疑似 secret/token/password".to_string(),
+                mitigation: Some(
+                    "确认目标窗口可信；该输入只允许单次批准，审计日志会脱敏保存。".to_string(),
+                ),
+            });
+            categories.push(RiskCategory::Privacy);
+        }
+
         // 2. 参数级别风险（bash/shell 危险命令检测）
         if context.tool_name == "bash" || context.tool_name == "shell" {
             if let Some(cmd) = context.arguments.get("command").and_then(|v| v.as_str()) {
@@ -1515,6 +1532,66 @@ impl PermissionManager {
                     mitigation: None,
                 }],
             },
+            "computer_observe" => RiskAssessment {
+                level: RiskLevel::Medium,
+                categories: vec![RiskCategory::Privacy],
+                description: "观察本机屏幕/前台窗口".to_string(),
+                recommendations: vec!["确认当前屏幕未显示不应共享的敏感内容".to_string()],
+                detected_risks: vec![DetectedRisk {
+                    category: RiskCategory::Privacy,
+                    severity: RiskLevel::Medium,
+                    description: "可能读取屏幕截图、窗口标题或页面内容".to_string(),
+                    mitigation: Some("只在需要本机 UI 自动化的任务中开启 Computer Use".to_string()),
+                }],
+            },
+            "computer_set_target" => RiskAssessment {
+                level: RiskLevel::Medium,
+                categories: vec![RiskCategory::System],
+                description: "选择本机目标应用/窗口".to_string(),
+                recommendations: vec!["确认目标应用和窗口正确".to_string()],
+                detected_risks: vec![DetectedRisk {
+                    category: RiskCategory::System,
+                    severity: RiskLevel::Medium,
+                    description: "可能切换或聚焦本机应用窗口".to_string(),
+                    mitigation: Some("跨 App 操作前应显式确认目标".to_string()),
+                }],
+            },
+            "computer_click" | "computer_click_element" => RiskAssessment {
+                level: RiskLevel::Medium,
+                categories: vec![RiskCategory::System],
+                description: "在本机目标窗口执行点击".to_string(),
+                recommendations: vec!["确认最近 observation 与当前窗口一致".to_string()],
+                detected_risks: vec![DetectedRisk {
+                    category: RiskCategory::System,
+                    severity: RiskLevel::Medium,
+                    description: "将向本机应用发送鼠标点击".to_string(),
+                    mitigation: Some(
+                        "动作前由 Computer Use facade 执行观察/限速/stop 检查".to_string(),
+                    ),
+                }],
+            },
+            "computer_type" => RiskAssessment {
+                level: RiskLevel::High,
+                categories: vec![RiskCategory::Privacy, RiskCategory::System],
+                description: "向本机目标窗口输入文本".to_string(),
+                recommendations: vec![
+                    "确认目标窗口可信".to_string(),
+                    "不要输入 secret/token/password，除非用户明确要求".to_string(),
+                ],
+                detected_risks: vec![DetectedRisk {
+                    category: RiskCategory::Privacy,
+                    severity: RiskLevel::High,
+                    description: "将向本机应用输入可能包含隐私的数据".to_string(),
+                    mitigation: Some("Computer Use 审计日志会脱敏保存输入".to_string()),
+                }],
+            },
+            "computer_stop" => RiskAssessment {
+                level: RiskLevel::Safe,
+                categories: vec![],
+                description: "停止 Computer Use 运行".to_string(),
+                recommendations: vec![],
+                detected_risks: vec![],
+            },
             // 其他常见安全工具
             "list_skills" | "skills_list" | "skill_view" | "tool_search" | "get_current_time"
             | "get_system_info" => RiskAssessment {
@@ -1648,6 +1725,67 @@ mod tests {
             requires_again,
             PermissionDecision::RequireApproval(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn computer_use_tool_risks_are_classified() {
+        let mgr = PermissionManager::new();
+
+        let observe = mgr
+            .check_tool("s_computer", "computer_observe", &serde_json::json!({}))
+            .await;
+        let req = match observe {
+            PermissionDecision::RequireApproval(req) => req,
+            other => panic!("expected observe approval, got {other:?}"),
+        };
+        assert_eq!(req.risk.level, RiskLevel::Medium);
+
+        let type_text = mgr
+            .check_tool(
+                "s_computer_type",
+                "computer_type",
+                &serde_json::json!({"text": "hello"}),
+            )
+            .await;
+        let req = match type_text {
+            PermissionDecision::RequireApproval(req) => req,
+            other => panic!("expected type approval, got {other:?}"),
+        };
+        assert_eq!(req.risk.level, RiskLevel::High);
+
+        let stop = mgr
+            .check_tool("s_computer_stop", "computer_stop", &serde_json::json!({}))
+            .await;
+        assert!(matches!(stop, PermissionDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn computer_type_probable_secret_forces_critical_single_use() {
+        let mgr = PermissionManager::new();
+        let args = serde_json::json!({"text": "password=hunter2"});
+
+        let first = mgr
+            .check_tool("s_computer_secret", "computer_type", &args)
+            .await;
+        let req = match first {
+            PermissionDecision::RequireApproval(req) => req,
+            other => panic!("expected secret approval, got {other:?}"),
+        };
+        assert_eq!(req.risk.level, RiskLevel::Critical);
+
+        mgr.approve_request("s_computer_secret", PermissionMode::Session, &req.context)
+            .await
+            .unwrap();
+
+        let allowed_once = mgr
+            .check_tool("s_computer_secret", "computer_type", &args)
+            .await;
+        assert!(matches!(allowed_once, PermissionDecision::Allow));
+
+        let second = mgr
+            .check_tool("s_computer_secret", "computer_type", &args)
+            .await;
+        assert!(matches!(second, PermissionDecision::RequireApproval(_)));
     }
 
     #[tokio::test]

@@ -2,7 +2,9 @@
 
 use crate::domain::mcp::client::list_tools_for_server;
 use crate::domain::mcp::config::merged_mcp_servers;
-use crate::domain::mcp::names::{build_mcp_tool_name, normalize_name_for_mcp, parse_mcp_tool_name};
+use crate::domain::mcp::names::{
+    build_mcp_tool_name, is_reserved_computer_mcp_tool, normalize_name_for_mcp, parse_mcp_tool_name,
+};
 use crate::domain::tools::ToolSchema;
 use futures::future::join_all;
 use serde_json::json;
@@ -22,9 +24,10 @@ pub fn filter_mcp_tool_schemas_by_configured_servers(
     schemas
         .into_iter()
         .filter(|schema| {
-            parse_mcp_tool_name(&schema.name)
-                .map(|(server, _)| configured.contains(&server))
-                .unwrap_or(false)
+            !is_reserved_computer_mcp_tool(&schema.name)
+                && parse_mcp_tool_name(&schema.name)
+                    .map(|(server, _)| configured.contains(&server))
+                    .unwrap_or(false)
         })
         .collect()
 }
@@ -62,6 +65,13 @@ pub async fn discover_mcp_tool_schemas(project_root: &Path, timeout: Duration) -
             Ok(tools) => {
                 for t in tools {
                     let fq = build_mcp_tool_name(&server_name, t.name.as_ref());
+                    if is_reserved_computer_mcp_tool(&fq) {
+                        tracing::debug!(
+                            tool = %fq,
+                            "reserved Computer Use MCP backend tool hidden behind computer_* facade"
+                        );
+                        continue;
+                    }
                     let desc = t.description.as_deref().unwrap_or("MCP tool").to_string();
                     let params = serde_json::to_value(&*t.input_schema)
                         .unwrap_or_else(|_| json!({"type": "object"}));
@@ -94,8 +104,10 @@ mod tests {
                 "Playwright",
                 json!({"type":"object"}),
             ),
+            ToolSchema::new("mcp__computer__click", "Computer", json!({"type":"object"})),
         ];
-        let configured_server_names = HashSet::from(["playwright".to_string()]);
+        let configured_server_names =
+            HashSet::from(["playwright".to_string(), "computer".to_string()]);
 
         let filtered =
             filter_mcp_tool_schemas_by_configured_servers(schemas, &configured_server_names);

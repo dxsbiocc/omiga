@@ -1,0 +1,63 @@
+#!/usr/bin/env Rscript
+# Template: scatter/volcano
+# Purpose: Volcano plot for differential-result tables.
+#
+# Input example:
+#   See example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/volcano
+#
+# Personalization:
+#   This Rscript template emits plot-script.R and rerun.sh by default.
+#   For one-off customization, edit the emitted source artifact and rerun/render it.
+#   To save a reusable style, use scripts/promote_visual_template.py.
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_formats <- function(value) {
+  value <- arg_or(value, "png,pdf")
+}
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+
+config <- list(columns = list(log2fc = arg_or(3, "log2FoldChange"), pvalue = arg_or(4, "padj"), label = arg_or(5, "gene")), thresholds = list(log2fc = as.numeric(arg_or(6, "1")), pvalue = as.numeric(arg_or(7, "0.05"))), labels = list(title = arg_or(8, "Volcano plot")), style = list(up = "#DC2626", down = "#2563EB", ns = "#9CA3AF", base_size = 12))
+delimiter <- arg_or(9, "auto"); width <- as.numeric(arg_or(10, "7.5")); height <- as.numeric(arg_or(11, "5.5")); dpi <- as.integer(arg_or(12, "300"))
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$log2fc, config$columns$pvalue, config$columns$label), "scatter/volcano input")
+  df <- ensure_numeric_columns(df, c(config$columns$log2fc, config$columns$pvalue), "scatter/volcano input")
+  df$.log2fc <- df[[config$columns$log2fc]]; df$.pvalue <- pmax(df[[config$columns$pvalue]], .Machine$double.xmin); df$.neglog10 <- -log10(df$.pvalue)
+  df$.regulation <- ifelse(df$.log2fc >= config$thresholds$log2fc & df$.pvalue <= config$thresholds$pvalue, "Up", ifelse(df$.log2fc <= -config$thresholds$log2fc & df$.pvalue <= config$thresholds$pvalue, "Down", "NS"))
+  df$.regulation <- factor(df$.regulation, levels = c("Down", "NS", "Up")); df
+}
+make_plot <- function(df, config) {
+  label_df <- utils::head(df[df$.regulation != "NS", ][order(df[df$.regulation != "NS", ]$.pvalue, -abs(df[df$.regulation != "NS", ]$.log2fc)), , drop = FALSE], 8)
+  ggplot2::ggplot(df, ggplot2::aes(x = .log2fc, y = .neglog10, color = .regulation)) + ggplot2::geom_point(alpha = 0.78, size = 2.1) + ggplot2::geom_vline(xintercept = c(-config$thresholds$log2fc, config$thresholds$log2fc), linetype = "dashed", linewidth = 0.35) + ggplot2::geom_hline(yintercept = -log10(config$thresholds$pvalue), linetype = "dashed", linewidth = 0.35) + ggplot2::geom_text(data = label_df, ggplot2::aes(label = .data[[config$columns$label]]), vjust = -0.7, size = 3, show.legend = FALSE) + ggplot2::scale_color_manual(values = c(Down = config$style$down, NS = config$style$ns, Up = config$style$up)) + ggplot2::labs(title = config$labels$title, x = "log2 fold change", y = "-log10 adjusted p-value", color = "Regulation") + theme_visualization(base_size = config$style$base_size)
+}
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- make_plot(plot_df, config)
+  p <- customize_plot(p, plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "rows"), value = c("scatter/volcano", nrow(plot_df))), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "scatter/volcano", rows = nrow(plot_df)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+
+main()

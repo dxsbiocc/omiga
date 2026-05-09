@@ -9,6 +9,7 @@ pub mod blackboard;
 pub mod chat;
 pub mod citation;
 pub mod claude_import;
+pub mod computer_use;
 pub mod connectors;
 pub mod context_snapshot;
 pub mod execution_envs;

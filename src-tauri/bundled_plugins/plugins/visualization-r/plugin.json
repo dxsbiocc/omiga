@@ -1,0 +1,27 @@
+{
+  "name": "visualization-r",
+  "version": "0.1.0",
+  "description": "Human-editable R visualization templates for static publication-style figures.",
+  "templates": "./templates",
+  "skills": "./skills",
+  "interface": {
+    "displayName": "R Visualization Templates",
+    "shortDescription": "Human-editable R figure templates",
+    "longDescription": "Provides general-purpose R/ggplot2 visualization templates. Plotting units are Templates, not Operators: users start from common styles, customize the generated editable source artifact, and optionally promote reusable styles into user or project preference templates.",
+    "developerName": "Omiga",
+    "category": "Visualization",
+    "capabilities": [
+      "Template",
+      "Rscript",
+      "ggplot2",
+      "Static Figures",
+      "Publication Figures",
+      "Human Editable"
+    ],
+    "brandColor": "#7C3AED",
+    "defaultPrompt": [
+      "Use visualization-r templates to create an editable static figure."
+    ]
+  },
+  "environments": "./environments"
+}
