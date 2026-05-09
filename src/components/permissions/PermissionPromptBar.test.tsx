@@ -8,8 +8,11 @@ import {
   PERMISSION_PROMPT_ROOT_OVERFLOW_Y,
   PERMISSION_RUN_CONTENT_MAX_HEIGHT,
   inferIntent,
+  permissionCommandSafetyKind,
+  permissionInstallChoiceQuestions,
   permissionPromptDisplayTitle,
   permissionPromptLabels,
+  permissionSessionApprovalCopy,
 } from "./PermissionPromptBar";
 import { inferConnectorPermissionIntent } from "../../utils/connectorPermissionIntent";
 
@@ -98,6 +101,63 @@ describe("PermissionPromptBar connector intent", () => {
     });
 
     expect(permissionPromptDisplayTitle(intent)).toBe("检查 pymol 是否安装");
+  });
+
+  it("makes session approval scope explicit for shell commands", () => {
+    const copy = permissionSessionApprovalCopy("Bash", undefined);
+
+    expect(copy.buttonLabel).toBe("本会话允许同类命令");
+    expect(copy.title).toContain("仅同类命令");
+    expect(copy.title).toContain("危险命令仍会重新确认");
+  });
+
+  it("keeps connector session approval scoped to the same operation", () => {
+    const intent = inferIntent("connector", {
+      connector: "slack",
+      operation: "post_message",
+      channel: "C123",
+      text: "Ship it",
+      confirm_write: true,
+    });
+    const copy = permissionSessionApprovalCopy("connector", intent.connector);
+
+    expect(copy.buttonLabel).toBe("本会话允许同类操作");
+    expect(copy.title).toContain("同一连接器的同一操作");
+    expect(copy.title).toContain("其它连接器或操作仍会确认");
+  });
+
+  it("detects software install commands for choice-based approval", () => {
+    expect(
+      permissionCommandSafetyKind("bash", { command: "npm install left-pad" }),
+    ).toBe("install");
+    expect(
+      permissionCommandSafetyKind("bash", { command: "python3 -m pip install pandas" }),
+    ).toBe("install");
+    expect(
+      permissionCommandSafetyKind("bash", { command: "npm test" }),
+    ).toBeNull();
+  });
+
+  it("detects destructive deletion commands as single-use approvals", () => {
+    expect(
+      permissionCommandSafetyKind("bash", { command: "rm -rf /tmp/demo" }),
+    ).toBe("destructive");
+    expect(
+      permissionCommandSafetyKind("bash", { command: "git reset --hard HEAD" }),
+    ).toBe("destructive");
+  });
+
+  it("asks install location through choices instead of yes/no", () => {
+    const [question] = permissionInstallChoiceQuestions();
+    const labels = question.options.map((opt) => opt.label);
+
+    expect(question.question).toContain("请选择安装位置");
+    expect(labels).toContain("安装到当前项目/虚拟环境（推荐）");
+    expect(labels).toContain("按当前命令安装（仅本次）");
+    expect(labels).toContain("自定义安装位置");
+    expect(labels).toContain("不安装");
+    expect(labels).not.toContain("是");
+    expect(labels).not.toContain("否");
   });
 
   it("normalizes email connector send requests", () => {

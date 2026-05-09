@@ -24,6 +24,10 @@ import {
   type ConnectorPermissionIntent,
   type PermissionArgs,
 } from "../../utils/connectorPermissionIntent";
+import {
+  AskUserQuestionWizard,
+  type AskUserQuestionItem,
+} from "../Chat/AskUserQuestionWizard";
 
 type AnyArgs = PermissionArgs;
 type Intent = {
@@ -420,6 +424,122 @@ export function permissionPromptLabels(
   };
 }
 
+export function permissionSessionApprovalCopy(
+  toolNameRaw: string,
+  connectorIntent: ConnectorPermissionIntent | undefined,
+): { buttonLabel: string; title: string } {
+  const toolName = (toolNameRaw || "").trim();
+  if (connectorIntent) {
+    return {
+      buttonLabel: "本会话允许同类操作",
+      title: "仅同一连接器的同一操作不再询问；其它连接器或操作仍会确认。",
+    };
+  }
+  if (toolName === "bash" || toolName === "Bash" || toolName === "shell") {
+    return {
+      buttonLabel: "本会话允许同类命令",
+      title: "仅同类命令不再询问；脚本、复合命令和危险命令仍会重新确认。",
+    };
+  }
+  return {
+    buttonLabel: "本会话允许",
+    title: "本会话内仅记住当前工具类型；其它工具仍会确认。",
+  };
+}
+
+const INSTALL_LOCATION_QUESTION =
+  "该命令会安装软件/依赖。请选择安装位置或处理方式。";
+const INSTALL_CURRENT_LABEL = "按当前命令安装（仅本次）";
+const INSTALL_PROJECT_LABEL = "安装到当前项目/虚拟环境（推荐）";
+const INSTALL_USER_LABEL = "安装到用户目录";
+const INSTALL_CUSTOM_LABEL = "自定义安装位置";
+const INSTALL_DENY_LABEL = "不安装";
+
+export function permissionCommandSafetyKind(
+  toolNameRaw: string,
+  args: AnyArgs,
+): "install" | "destructive" | null {
+  const toolName = (toolNameRaw || "").trim();
+  if (toolName !== "bash" && toolName !== "Bash" && toolName !== "shell") {
+    return null;
+  }
+  const command = firstString(args?.command) ?? firstString(args?.cmd) ?? "";
+  const lower = command.toLowerCase();
+  const boundary = String.raw`(?:^|[;&|]|\$\(|\`)`;
+  const sudoEnv = String.raw`\s*(?:sudo\s+)?(?:env\s+(?:\S+=\S+\s+)*)?`;
+
+  const installPatterns = [
+    String.raw`${boundary}${sudoEnv}npm\s+(?:install|i|add|ci)\b`,
+    String.raw`${boundary}${sudoEnv}(?:yarn|pnpm|bun)\s+(?:add|install)\b`,
+    String.raw`${boundary}${sudoEnv}(?:pip|pip3)\s+install\b`,
+    String.raw`${boundary}${sudoEnv}(?:python|python2|python3)\s+-m\s+pip\s+install\b`,
+    String.raw`${boundary}${sudoEnv}uv\s+(?:add|sync|pip\s+install|tool\s+install)\b`,
+    String.raw`${boundary}${sudoEnv}(?:cargo|gem|brew|port)\s+install\b`,
+    String.raw`${boundary}${sudoEnv}go\s+(?:install|get)\b`,
+    String.raw`${boundary}${sudoEnv}(?:apt|apt-get|yum|dnf)\s+install\b`,
+    String.raw`${boundary}${sudoEnv}apk\s+add\b`,
+    String.raw`${boundary}${sudoEnv}pacman\s+-S`,
+    String.raw`${boundary}${sudoEnv}(?:conda|mamba|micromamba)\s+(?:install|create)\b`,
+  ];
+  if (installPatterns.some((p) => new RegExp(p).test(lower))) {
+    return "install";
+  }
+
+  const destructivePatterns = [
+    String.raw`${boundary}${sudoEnv}(?:rm|rmdir|unlink|shred|trash|trash-put)\b`,
+    String.raw`${boundary}${sudoEnv}find\s+.*(?:-delete|-exec\s+rm)\b`,
+    String.raw`${boundary}${sudoEnv}git\s+(?:clean\b|reset\s+--hard|push\s+.*(?:--force|--force-with-lease|\s-f\b))`,
+    String.raw`curl.*\|\s*sh\b`,
+    String.raw`wget.*\|\s*sh\b`,
+  ];
+  return destructivePatterns.some((p) => new RegExp(p).test(lower))
+    ? "destructive"
+    : null;
+}
+
+export function permissionInstallChoiceQuestions(): AskUserQuestionItem[] {
+  return [
+    {
+      header: "Install",
+      question: INSTALL_LOCATION_QUESTION,
+      options: [
+        {
+          label: INSTALL_PROJECT_LABEL,
+          description:
+            "不要执行当前命令；让助手改用项目内依赖、虚拟环境或 lockfile 友好的安装方式。",
+        },
+        {
+          label: INSTALL_CURRENT_LABEL,
+          description:
+            "我已确认当前命令的安装目标；仅允许这一次，不记住后续安装。",
+        },
+        {
+          label: INSTALL_USER_LABEL,
+          description:
+            "不要执行当前命令；让助手改为用户目录级安装，避免系统级写入。",
+        },
+        {
+          label: INSTALL_CUSTOM_LABEL,
+          description: "不要执行当前命令；让助手按你填写的位置重新组织安装命令。",
+          custom: true,
+          customPlaceholder: "例如：./.venv、~/apps、/opt/tooling/...",
+        },
+        {
+          label: INSTALL_DENY_LABEL,
+          description: "拒绝安装，当前命令不会执行。",
+        },
+      ],
+    },
+  ];
+}
+
+function installChoiceDenialReason(raw: string): string | null {
+  const choice = raw.trim();
+  if (!choice || choice.startsWith(INSTALL_CURRENT_LABEL)) return null;
+  if (choice === INSTALL_DENY_LABEL) return "用户拒绝安装软件/依赖";
+  return `用户同意安装软件/依赖，但要求：${choice}。请调整安装命令后重试，不要执行当前安装命令。`;
+}
+
 function ScrollableCodeBlock({
   label,
   children,
@@ -488,6 +608,9 @@ export const PermissionPromptBar: React.FC = () => {
   const [processingAction, setProcessingAction] = useState<
     ModeChoice | "deny" | null
   >(null);
+  const [installSelections, setInstallSelections] = useState<
+    Record<string, string>
+  >({});
   const intent = useMemo(
     () =>
       pendingRequest
@@ -504,6 +627,7 @@ export const PermissionPromptBar: React.FC = () => {
   useEffect(() => {
     if (!pendingRequest) return;
     setProcessingAction(null);
+    setInstallSelections({});
   }, [pendingRequest?.request_id, pendingRequest?.tool_name]);
 
   if (!pendingRequest || !intent) return null;
@@ -514,6 +638,14 @@ export const PermissionPromptBar: React.FC = () => {
   const isCritical = pendingRequest.risk_level === "critical";
   const isConnectorWrite = connectorIntent?.isWrite === true;
   const processing = processingAction !== null;
+  const commandSafetyKind = permissionCommandSafetyKind(
+    pendingRequest.tool_name,
+    pendingRequest.arguments as AnyArgs,
+  );
+  const requiresSingleUseApproval =
+    commandSafetyKind === "install" || commandSafetyKind === "destructive";
+  const installQuestions =
+    commandSafetyKind === "install" ? permissionInstallChoiceQuestions() : [];
 
   const handleApprove = async (modeValue: ModeChoice) => {
     setProcessingAction(modeValue);
@@ -540,6 +672,33 @@ export const PermissionPromptBar: React.FC = () => {
     }
   };
 
+  const handleInstallChoiceSubmit = async () => {
+    const rawChoice = installSelections[INSTALL_LOCATION_QUESTION] ?? "";
+    const denialReason = installChoiceDenialReason(rawChoice);
+    if (denialReason) {
+      setProcessingAction("deny");
+      clearError();
+      try {
+        await denyRequest(denialReason);
+      } catch {
+        // store 已记录
+      } finally {
+        setProcessingAction(null);
+      }
+      return;
+    }
+
+    setProcessingAction("askEveryTime");
+    clearError();
+    try {
+      await approveRequest("AskEveryTime");
+    } catch {
+      // store 已记录
+    } finally {
+      setProcessingAction(null);
+    }
+  };
+
   const detail = intent.detail;
   const connectorTargetLabel = connectorIntent?.target ?? "未提供目标对象";
   const connectorPreview = connectorIntent?.payloadPreview ?? null;
@@ -551,6 +710,10 @@ export const PermissionPromptBar: React.FC = () => {
     : connectorIntent
       ? "仅本次访问"
       : "仅本次运行";
+  const sessionApprovalCopy = permissionSessionApprovalCopy(
+    pendingRequest.tool_name,
+    connectorIntent,
+  );
 
   return (
     <Box
@@ -718,55 +881,74 @@ export const PermissionPromptBar: React.FC = () => {
           alignItems="center"
           sx={{ flexShrink: 0 }}
         >
-          <Stack direction="row" justifyContent="flex-end" spacing={1}>
-            <Button
-              size="small"
-              onClick={handleDeny}
-              color="inherit"
-              variant="outlined"
-              disabled={processing}
-              sx={permissionActionButtonSx}
-              startIcon={
-                processingAction === "deny" ? (
-                  <CircularProgress size={14} color="inherit" />
-                ) : null
-              }
-            >
-              拒绝
-            </Button>
-            <Button
-              size="small"
-              onClick={() => void handleApprove("session")}
-              color={isDangerous ? "error" : "primary"}
-              variant="outlined"
-              disabled={processing}
-              sx={permissionActionButtonSx}
-              startIcon={
-                processingAction === "session" ? (
-                  <CircularProgress size={14} color="inherit" />
-                ) : null
-              }
-            >
-              本会话允许
-            </Button>
-            <Button
-              size="small"
-              onClick={() => void handleApprove("askEveryTime")}
-              color={isDangerous ? "error" : "primary"}
-              variant="contained"
-              disabled={processing}
-              sx={permissionActionButtonSx}
-              startIcon={
-                processingAction === "askEveryTime" ? (
-                  <CircularProgress size={14} color="inherit" />
-                ) : null
-              }
-            >
-              {processingAction === "askEveryTime"
-                ? "处理中…"
-                : allowOnceButtonLabel}
-            </Button>
-          </Stack>
+          {commandSafetyKind === "install" ? (
+            <Box sx={{ width: "100%" }}>
+              <AskUserQuestionWizard
+                resetKey={pendingRequest.request_id ?? pendingRequest.tool_name}
+                questions={installQuestions}
+                selections={installSelections}
+                onSelectionsChange={setInstallSelections}
+                onSubmit={() => void handleInstallChoiceSubmit()}
+                variant="inline"
+              />
+            </Box>
+          ) : (
+            <Stack direction="row" justifyContent="flex-end" spacing={1}>
+              <Button
+                size="small"
+                onClick={handleDeny}
+                color="inherit"
+                variant="outlined"
+                disabled={processing}
+                sx={permissionActionButtonSx}
+                startIcon={
+                  processingAction === "deny" ? (
+                    <CircularProgress size={14} color="inherit" />
+                  ) : null
+                }
+              >
+                拒绝
+              </Button>
+              {!requiresSingleUseApproval && (
+                <Button
+                  size="small"
+                  onClick={() => void handleApprove("session")}
+                  color={isDangerous ? "error" : "primary"}
+                  variant="outlined"
+                  disabled={processing}
+                  title={sessionApprovalCopy.title}
+                  sx={permissionActionButtonSx}
+                  startIcon={
+                    processingAction === "session" ? (
+                      <CircularProgress size={14} color="inherit" />
+                    ) : null
+                  }
+                >
+                  {processingAction === "session"
+                    ? "处理中…"
+                    : sessionApprovalCopy.buttonLabel}
+                </Button>
+              )}
+              <Button
+                size="small"
+                onClick={() => void handleApprove("askEveryTime")}
+                color={isDangerous ? "error" : "primary"}
+                variant="contained"
+                disabled={processing}
+                title="仅允许当前这次调用，不记住后续请求。"
+                sx={permissionActionButtonSx}
+                startIcon={
+                  processingAction === "askEveryTime" ? (
+                    <CircularProgress size={14} color="inherit" />
+                  ) : null
+                }
+              >
+                {processingAction === "askEveryTime"
+                  ? "处理中…"
+                  : allowOnceButtonLabel}
+              </Button>
+            </Stack>
+          )}
         </Stack>
       </Stack>
     </Box>
