@@ -50,7 +50,7 @@ impl ToolImpl for UnitListTool {
             "total": units.len(),
             "units": matches,
             "templateDiagnostics": crate::domain::templates::list_template_manifest_diagnostics(),
-            "note": "unit_list is read-only; execution remains through existing operator__*, skill, and retrieval tools."
+            "note": "unit_list is read-only. Execute Template units through template_execute; use operator__* for atomic operators and existing skill/retrieval tools for their own runtimes."
         });
         Ok(stream_single(StreamOutputItem::Text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string()),

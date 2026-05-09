@@ -1,0 +1,6 @@
+#!/usr/bin/env Rscript
+args <- commandArgs(trailingOnly = TRUE)
+plugin_root <- "{{ template.pluginRoot }}"
+script <- file.path(plugin_root, "scripts", "functional_enrichment_basic.R")
+status <- system2("Rscript", c(script, args))
+if (!identical(status, 0L)) quit(save = "no", status = status)

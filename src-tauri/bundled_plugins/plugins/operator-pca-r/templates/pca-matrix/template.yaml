@@ -2,9 +2,9 @@ apiVersion: omiga.ai/unit/v1alpha1
 kind: Template
 metadata:
   id: pca_matrix_basic
-  version: 0.1.0
+  version: 0.2.0
   name: PCA Matrix Overview
-  description: Parameterized PCA analysis skeleton for numeric omics matrices. The MVP template points at the existing curated PCA operator until rendered templates are promoted.
+  description: Rendered R PCA analysis skeleton for numeric omics matrices. The second-version template keeps the legacy curated operator as migration fallback and parity baseline.
   tags:
     - omics
     - transcriptomics
@@ -34,12 +34,27 @@ interface:
 runtime:
   envRef: r-bioc
 template:
-  engine: static
-  entry: ./template.yaml
+  engine: jinja2
+  entry: ./template.R.j2
 aliases:
   - pca_basic
   - pca_matrix
   - sample_pca
 execution:
-  interpreter: existing-operator
+  interpreter: Rscript
+  fallbackToMigrationTarget: true
+  argv:
+    - ${inputs.matrix}
+    - ${outdir}
+    - ${params.delimiter}
+    - ${params.row_names}
+    - ${params.features_by_rows}
+    - ${params.center}
+    - ${params.scale}
+    - ${params.top_variable_features}
+    - ${inputs.metadata}
+    - ${params.sample_column}
+    - ${params.group_column}
+    - ${params.plot_labels}
+    - ${params.confidence_hulls}
 migrationTarget: omics_pca_matrix

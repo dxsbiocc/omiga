@@ -63,7 +63,7 @@ impl ToolImpl for UnitSearchTool {
             "stage": args.stage,
             "count": matches.len(),
             "units": matches,
-            "note": "Use unit_describe with canonicalId for the full manifest/spec after narrowing candidates."
+            "note": "Use unit_describe with canonicalId for the full manifest/spec after narrowing candidates. Prefer template_execute for Template units and operator__* for atomic Operator units."
         });
         Ok(stream_single(StreamOutputItem::Text(
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string()),

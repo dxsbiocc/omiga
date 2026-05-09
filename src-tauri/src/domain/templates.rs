@@ -7,7 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -242,6 +241,7 @@ pub async fn execute_template_tool_call(
                     None,
                     &message,
                     None,
+                    None,
                 )
                 .await;
                 return (
@@ -251,10 +251,69 @@ pub async fn execute_template_tool_call(
             }
         };
 
-    let result = if uses_existing_operator(&template) {
-        execute_template_via_migration_target(ctx, &template, &invocation).await
+    let parent_execution_id =
+        record_template_start_best_effort(ctx, &template, &invocation, &started_at).await;
+
+    let primary_result = if uses_existing_operator(&template) {
+        execute_template_via_migration_target(
+            ctx,
+            &template,
+            &invocation,
+            parent_execution_id.as_deref(),
+        )
+        .await
     } else {
-        execute_rendered_template(ctx, &template, &invocation).await
+        execute_rendered_template(ctx, &template, &invocation, parent_execution_id.as_deref()).await
+    };
+    let result = match primary_result {
+        Ok((raw, true, metadata))
+            if !uses_existing_operator(&template)
+                && template_fallback_to_migration_target(&template) =>
+        {
+            execute_template_via_migration_target(
+                ctx,
+                &template,
+                &invocation,
+                parent_execution_id.as_deref(),
+            )
+            .await
+            .map(|(fallback_raw, fallback_is_error, fallback_metadata)| {
+                (
+                    fallback_raw,
+                    fallback_is_error,
+                    serde_json::json!({
+                        "executionMode": "fallbackMigrationTarget",
+                        "primary": metadata,
+                        "primaryResult": serde_json::from_str::<JsonValue>(&raw).ok(),
+                        "fallback": fallback_metadata,
+                    }),
+                )
+            })
+        }
+        Err(message)
+            if !uses_existing_operator(&template)
+                && template_fallback_to_migration_target(&template) =>
+        {
+            execute_template_via_migration_target(
+                ctx,
+                &template,
+                &invocation,
+                parent_execution_id.as_deref(),
+            )
+            .await
+            .map(|(fallback_raw, fallback_is_error, fallback_metadata)| {
+                (
+                    fallback_raw,
+                    fallback_is_error,
+                    serde_json::json!({
+                        "executionMode": "fallbackMigrationTarget",
+                        "primaryError": message,
+                        "fallback": fallback_metadata,
+                    }),
+                )
+            })
+        }
+        other => other,
     };
 
     match result {
@@ -267,6 +326,7 @@ pub async fn execute_template_tool_call(
                 &raw,
                 is_error,
                 metadata,
+                parent_execution_id.as_deref(),
             )
             .await;
             (raw, is_error)
@@ -280,6 +340,7 @@ pub async fn execute_template_tool_call(
                 None,
                 &message,
                 None,
+                parent_execution_id.as_deref(),
             )
             .await;
             (
@@ -349,16 +410,190 @@ fn uses_existing_operator(template: &TemplateSpecWithSource) -> bool {
             .unwrap_or(false)
 }
 
+fn template_fallback_to_migration_target(template: &TemplateSpecWithSource) -> bool {
+    template
+        .spec
+        .execution
+        .extra
+        .get("fallbackToMigrationTarget")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false)
+        && template.spec.migration_target.is_some()
+}
+
+pub fn template_preflight_question(
+    arguments: &str,
+) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
+    let value = serde_json::from_str::<JsonValue>(arguments).ok()?;
+    let root = value.as_object()?;
+    let id = root.get("id").and_then(JsonValue::as_str)?;
+    let template = resolve_template(id).ok()?;
+    template_preflight_question_for_template(&template, root)
+}
+
+fn template_preflight_question_for_template(
+    template: &TemplateSpecWithSource,
+    root: &serde_json::Map<String, JsonValue>,
+) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
+    let (_alias, spec) = describe_template_migration_target(template).ok()?;
+    let params = root.get("params").and_then(JsonValue::as_object);
+    let mut question_args = crate::domain::operators::operator_preflight_question_for_spec(
+        &spec,
+        Some(spec.metadata.id.as_str()),
+        params,
+    )?;
+    question_args.metadata = Some(serde_json::json!({
+        "source": "template_preflight",
+        "template_id": template.spec.metadata.id,
+        "template_aliases": template.spec.aliases,
+        "migration_target": spec.metadata.id,
+    }));
+    Some(question_args)
+}
+
+pub fn apply_template_preflight_answers(
+    arguments: &str,
+    ask_user_output: &JsonValue,
+) -> Result<String, String> {
+    let mut value = serde_json::from_str::<JsonValue>(arguments)
+        .map_err(|err| format!("Invalid template_execute arguments JSON: {err}"))?;
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| "template_execute arguments must be a JSON object".to_string())?;
+    let id = root
+        .get("id")
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "template_execute arguments must include string id".to_string())?;
+    let template = resolve_template(&id)?;
+    apply_template_preflight_answers_for_template(root, &template, ask_user_output)?;
+    serde_json::to_string(&value).map_err(|err| err.to_string())
+}
+
+fn apply_template_preflight_answers_for_template(
+    root: &mut serde_json::Map<String, JsonValue>,
+    template: &TemplateSpecWithSource,
+    ask_user_output: &JsonValue,
+) -> Result<(), String> {
+    let (_alias, spec) = match describe_template_migration_target(template) {
+        Ok(value) => value,
+        Err(_) => return Ok(()),
+    };
+    let Some(preflight) = spec.preflight.as_ref() else {
+        return Ok(());
+    };
+    let operator_invocation = serde_json::json!({
+        "inputs": root
+            .get("inputs")
+            .cloned()
+            .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+        "params": root
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+        "resources": root
+            .get("resources")
+            .cloned()
+            .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+    });
+    let updated_invocation = crate::domain::operators::apply_operator_preflight_answers_for_spec(
+        &spec,
+        preflight,
+        &serde_json::to_string(&operator_invocation).map_err(|err| err.to_string())?,
+        ask_user_output,
+    )?;
+    let updated = serde_json::from_str::<JsonValue>(&updated_invocation)
+        .map_err(|err| format!("Invalid updated operator invocation JSON: {err}"))?;
+    root.insert(
+        "params".to_string(),
+        updated
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+    );
+    Ok(())
+}
+
+fn describe_template_migration_target(
+    template: &TemplateSpecWithSource,
+) -> Result<(Option<String>, crate::domain::operators::OperatorSpec), String> {
+    let target = template.spec.migration_target.as_deref().ok_or_else(|| {
+        "template migrationTarget is required for existing-operator execution".to_string()
+    })?;
+    let local_specs =
+        load_local_template_migration_target_specs(template, target).map_err(|err| {
+            format!(
+                "load local migrationTarget `{target}` for template `{}`: {err}",
+                template.spec.metadata.id
+            )
+        })?;
+    match local_specs.as_slice() {
+        [only] => return Ok((Some(target.to_string()), only.clone())),
+        [] => {}
+        many => {
+            let count = many.len();
+            return Err(format!(
+                "template migrationTarget `{target}` has {count} local operator candidates in plugin `{}`",
+                template.source.source_plugin
+            ));
+        }
+    }
+    crate::domain::operators::describe_operator(target).map_err(|error| error.message)
+}
+
+fn load_local_template_migration_target_specs(
+    template: &TemplateSpecWithSource,
+    target: &str,
+) -> Result<Vec<crate::domain::operators::OperatorSpec>, String> {
+    let mut manifests = Vec::new();
+    collect_operator_manifests(
+        &template.source.plugin_root.join("operators"),
+        &mut manifests,
+    )?;
+    let mut matches = Vec::new();
+    for manifest in manifests {
+        let spec = crate::domain::operators::load_operator_manifest(
+            &manifest,
+            template.source.source_plugin.clone(),
+            template.source.plugin_root.clone(),
+        )?;
+        if spec.metadata.id == target {
+            matches.push(spec);
+        }
+    }
+    Ok(matches)
+}
+
+fn collect_operator_manifests(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir).map_err(|err| format!("read `{}`: {err}", dir.display()))? {
+        let entry = entry.map_err(|err| format!("read `{}` entry: {err}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_operator_manifests(&path, out)?;
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, "operator.yaml" | "operator.yml"))
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 async fn execute_template_via_migration_target(
     ctx: &crate::domain::tools::ToolContext,
     template: &TemplateSpecWithSource,
     invocation: &crate::domain::operators::OperatorInvocation,
+    parent_execution_id: Option<&str>,
 ) -> Result<(String, bool, JsonValue), String> {
     let target = template.spec.migration_target.as_deref().ok_or_else(|| {
         "template migrationTarget is required for existing-operator execution".to_string()
     })?;
-    let (alias, spec) =
-        crate::domain::operators::describe_operator(target).map_err(|error| error.message)?;
+    let (alias, spec) = describe_template_migration_target(template)?;
     let alias = alias.unwrap_or_else(|| target.to_string());
     let arguments = serde_json::to_string(invocation)
         .map_err(|err| format!("serialize delegated operator invocation: {err}"))?;
@@ -366,6 +601,7 @@ async fn execute_template_via_migration_target(
         kind: Some("template".to_string()),
         smoke_test_id: Some(template.spec.metadata.id.clone()),
         smoke_test_name: template.spec.metadata.name.clone(),
+        parent_execution_id: parent_execution_id.map(str::to_string),
     };
     let (raw, is_error) =
         crate::domain::operators::execute_resolved_operator_tool_call_with_context(
@@ -393,10 +629,14 @@ async fn execute_rendered_template(
     ctx: &crate::domain::tools::ToolContext,
     template: &TemplateSpecWithSource,
     invocation: &crate::domain::operators::OperatorInvocation,
+    parent_execution_id: Option<&str>,
 ) -> Result<(String, bool, JsonValue), String> {
     let rendered = render_template_script(ctx, template, invocation)?;
     let interface = parse_template_operator_interface(template)?;
     let runtime = serde_json::to_value(&template.spec.runtime).ok();
+    let backing = describe_template_migration_target(template)
+        .ok()
+        .map(|(_, spec)| spec);
     let mut argv = Vec::new();
     if let Some(interpreter) = template
         .spec
@@ -423,12 +663,18 @@ async fn execute_rendered_template(
         interface,
         smoke_tests: Vec::new(),
         execution: crate::domain::operators::OperatorExecutionSpec { argv },
-        preflight: None,
+        preflight: backing.as_ref().and_then(|spec| spec.preflight.clone()),
         runtime,
         cache: None,
-        resources: BTreeMap::new(),
-        bindings: Vec::new(),
-        permissions: None,
+        resources: backing
+            .as_ref()
+            .map(|spec| spec.resources.clone())
+            .unwrap_or_default(),
+        bindings: backing
+            .as_ref()
+            .map(|spec| spec.bindings.clone())
+            .unwrap_or_default(),
+        permissions: backing.and_then(|spec| spec.permissions),
         source: crate::domain::operators::OperatorSource {
             source_plugin: template.source.source_plugin.clone(),
             plugin_root: rendered.render_root.clone(),
@@ -441,6 +687,7 @@ async fn execute_rendered_template(
         kind: Some("template".to_string()),
         smoke_test_id: Some(template.spec.metadata.id.clone()),
         smoke_test_name: template.spec.metadata.name.clone(),
+        parent_execution_id: parent_execution_id.map(str::to_string),
     };
     let (raw, is_error) =
         crate::domain::operators::execute_resolved_operator_tool_call_with_context(
@@ -558,6 +805,32 @@ fn render_template_text(
             }
         }
     }
+    let manifest_dir = template
+        .source
+        .manifest_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| template.source.plugin_root.clone());
+    for (key, value) in [
+        (
+            "pluginRoot",
+            template.source.plugin_root.to_string_lossy().into_owned(),
+        ),
+        ("manifestDir", manifest_dir.to_string_lossy().into_owned()),
+        (
+            "manifestPath",
+            template.source.manifest_path.to_string_lossy().into_owned(),
+        ),
+        ("sourcePlugin", template.source.source_plugin.clone()),
+    ] {
+        for pattern in [
+            format!("{{{{ template.{key} }}}}"),
+            format!("{{{{template.{key}}}}}"),
+            format!("${{template.{key}}}"),
+        ] {
+            rendered = rendered.replace(&pattern, &value);
+        }
+    }
     Ok(rendered)
 }
 
@@ -574,13 +847,59 @@ fn template_value_to_string(value: &JsonValue) -> String {
 fn parse_template_operator_interface(
     template: &TemplateSpecWithSource,
 ) -> Result<crate::domain::operators::OperatorInterfaceSpec, String> {
-    if template.spec.interface.is_null() {
-        return Ok(crate::domain::operators::OperatorInterfaceSpec::default());
+    let parsed = if template.spec.interface.is_null() {
+        crate::domain::operators::OperatorInterfaceSpec::default()
+    } else {
+        serde_json::from_value(template.spec.interface.clone())
+            .map_err(|err| format!("template interface is not operator-compatible: {err}"))?
+    };
+    if parsed.inputs.is_empty() && parsed.params.is_empty() && parsed.outputs.is_empty() {
+        if let Ok((_alias, backing)) = describe_template_migration_target(template) {
+            return Ok(backing.interface);
+        }
     }
-    serde_json::from_value(template.spec.interface.clone())
-        .map_err(|err| format!("template interface is not operator-compatible: {err}"))
+    Ok(parsed)
 }
 
+async fn record_template_start_best_effort(
+    ctx: &crate::domain::tools::ToolContext,
+    template: &TemplateSpecWithSource,
+    invocation: &crate::domain::operators::OperatorInvocation,
+    started_at: &str,
+) -> Option<String> {
+    let record = template_execution_record(
+        ctx,
+        template,
+        invocation,
+        started_at,
+        None,
+        "running",
+        serde_json::json!({ "status": "running" }),
+        serde_json::json!({
+            "templateId": template.spec.metadata.id,
+            "sourcePlugin": template.source.source_plugin,
+            "manifestPath": template.source.manifest_path,
+            "migrationTarget": template.spec.migration_target,
+            "execution": { "phase": "started" },
+        }),
+    );
+    let id = format!("execrec_{}", uuid::Uuid::new_v4().simple());
+    match crate::domain::execution_records::record_execution_with_id(
+        &ctx.project_root,
+        id.clone(),
+        record,
+    )
+    .await
+    {
+        Ok(id) => Some(id),
+        Err(err) => {
+            tracing::warn!("template execution record start failed: {err}");
+            None
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn record_template_execution_best_effort(
     ctx: &crate::domain::tools::ToolContext,
     template: &TemplateSpecWithSource,
@@ -589,6 +908,7 @@ async fn record_template_execution_best_effort(
     raw: &str,
     is_error: bool,
     metadata: JsonValue,
+    execution_id: Option<&str>,
 ) {
     let parsed = serde_json::from_str::<JsonValue>(raw).ok();
     let status = parsed
@@ -597,30 +917,34 @@ async fn record_template_execution_best_effort(
         .and_then(JsonValue::as_str)
         .unwrap_or(if is_error { "failed" } else { "succeeded" });
     let output_summary = template_output_summary(parsed.as_ref(), is_error);
-    let record = crate::domain::execution_records::ExecutionRecordInput {
-        kind: "template".to_string(),
-        unit_id: Some(template.spec.metadata.id.clone()),
-        canonical_id: Some(canonical_template_unit_id(template)),
-        provider_plugin: Some(template.source.source_plugin.clone()),
-        status: status.to_string(),
-        session_id: ctx.session_id.clone(),
-        parent_execution_id: None,
-        started_at: Some(started_at.to_string()),
-        ended_at: Some(chrono::Utc::now().to_rfc3339()),
-        input_hash: crate::domain::execution_records::hash_execution_map(&invocation.inputs),
-        param_hash: crate::domain::execution_records::hash_execution_map(&invocation.params),
-        output_summary_json: Some(output_summary),
-        runtime_json: serde_json::to_value(&template.spec.runtime).ok(),
-        metadata_json: Some(serde_json::json!({
+    let record = template_execution_record(
+        ctx,
+        template,
+        invocation,
+        started_at,
+        Some(chrono::Utc::now().to_rfc3339()),
+        status,
+        output_summary,
+        serde_json::json!({
             "templateId": template.spec.metadata.id,
             "sourcePlugin": template.source.source_plugin,
             "manifestPath": template.source.manifest_path,
             "migrationTarget": template.spec.migration_target,
             "execution": metadata,
             "operatorResult": parsed,
-        })),
-    };
-    crate::domain::execution_records::record_execution_best_effort(&ctx.project_root, record).await;
+        }),
+    );
+    if let Some(id) = execution_id {
+        crate::domain::execution_records::update_execution_record_best_effort(
+            &ctx.project_root,
+            id,
+            record,
+        )
+        .await;
+    } else {
+        crate::domain::execution_records::record_execution_best_effort(&ctx.project_root, record)
+            .await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -632,6 +956,7 @@ async fn record_template_failure_best_effort(
     metadata: Option<JsonValue>,
     message: &str,
     status: Option<&str>,
+    execution_id: Option<&str>,
 ) {
     let (input_hash, param_hash) = invocation
         .map(|invocation| {
@@ -664,7 +989,46 @@ async fn record_template_failure_best_effort(
             "error": message,
         })),
     };
-    crate::domain::execution_records::record_execution_best_effort(&ctx.project_root, record).await;
+    if let Some(id) = execution_id {
+        crate::domain::execution_records::update_execution_record_best_effort(
+            &ctx.project_root,
+            id,
+            record,
+        )
+        .await;
+    } else {
+        crate::domain::execution_records::record_execution_best_effort(&ctx.project_root, record)
+            .await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn template_execution_record(
+    ctx: &crate::domain::tools::ToolContext,
+    template: &TemplateSpecWithSource,
+    invocation: &crate::domain::operators::OperatorInvocation,
+    started_at: &str,
+    ended_at: Option<String>,
+    status: &str,
+    output_summary_json: JsonValue,
+    metadata_json: JsonValue,
+) -> crate::domain::execution_records::ExecutionRecordInput {
+    crate::domain::execution_records::ExecutionRecordInput {
+        kind: "template".to_string(),
+        unit_id: Some(template.spec.metadata.id.clone()),
+        canonical_id: Some(canonical_template_unit_id(template)),
+        provider_plugin: Some(template.source.source_plugin.clone()),
+        status: status.to_string(),
+        session_id: ctx.session_id.clone(),
+        parent_execution_id: None,
+        started_at: Some(started_at.to_string()),
+        ended_at,
+        input_hash: crate::domain::execution_records::hash_execution_map(&invocation.inputs),
+        param_hash: crate::domain::execution_records::hash_execution_map(&invocation.params),
+        output_summary_json: Some(output_summary_json),
+        runtime_json: serde_json::to_value(&template.spec.runtime).ok(),
+        metadata_json: Some(metadata_json),
+    }
 }
 
 fn template_output_summary(parsed: Option<&JsonValue>, is_error: bool) -> JsonValue {
@@ -914,7 +1278,7 @@ mod tests {
     use super::*;
     use crate::domain::plugins::LoadedPlugin;
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     fn bundled_loaded_plugin(plugin_name: &str, display_name: &str) -> LoadedPlugin {
         let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -933,6 +1297,38 @@ mod tests {
             retrieval: None,
             error: None,
         }
+    }
+
+    fn bundled_template_and_operator(
+        plugin_name: &str,
+        template_dir: &str,
+        operator_dir: &str,
+    ) -> (
+        TemplateSpecWithSource,
+        crate::domain::operators::OperatorSpec,
+    ) {
+        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("bundled_plugins/plugins")
+            .join(plugin_name);
+        let template = load_template_manifest(
+            &plugin_root
+                .join("templates")
+                .join(template_dir)
+                .join("template.yaml"),
+            format!("{plugin_name}@omiga-curated"),
+            plugin_root.clone(),
+        )
+        .expect("template");
+        let operator = crate::domain::operators::load_operator_manifest(
+            &plugin_root
+                .join("operators")
+                .join(operator_dir)
+                .join("operator.yaml"),
+            format!("{plugin_name}@omiga-curated"),
+            plugin_root,
+        )
+        .expect("operator");
+        (template, operator)
     }
 
     fn write_valid_template(path: &Path, id: &str) {
@@ -1167,6 +1563,144 @@ template:
         }
     }
 
+    #[test]
+    fn rendered_analysis_templates_preserve_backing_operator_contracts() {
+        let cases = [
+            (
+                "operator-differential-expression-r",
+                "differential-expression-basic",
+                "differential-expression-basic",
+            ),
+            ("operator-pca-r", "pca-matrix", "pca-matrix"),
+            (
+                "operator-enrichment-r",
+                "functional-enrichment-basic",
+                "functional-enrichment-basic",
+            ),
+        ];
+
+        for (plugin_name, template_dir, operator_dir) in cases {
+            let (template, operator) =
+                bundled_template_and_operator(plugin_name, template_dir, operator_dir);
+            assert!(
+                !uses_existing_operator(&template),
+                "{plugin_name} should default to rendered execution in v2"
+            );
+            assert!(template_fallback_to_migration_target(&template));
+            assert_eq!(
+                template.spec.migration_target.as_deref(),
+                Some(operator.metadata.id.as_str())
+            );
+            assert_eq!(
+                template.spec.execution.interpreter.as_deref(),
+                Some("Rscript")
+            );
+            assert_eq!(
+                template.spec.execution.argv,
+                operator.execution.argv[2..].to_vec(),
+                "{plugin_name} rendered argv must preserve backing operator args"
+            );
+            let rendered_interface = parse_template_operator_interface(&template)
+                .expect("template interface should inherit target interface");
+            assert_eq!(
+                serde_json::to_value(rendered_interface).unwrap(),
+                serde_json::to_value(operator.interface).unwrap(),
+                "{plugin_name} rendered template must inherit backing operator interface"
+            );
+        }
+    }
+
+    #[test]
+    fn render_template_text_injects_template_source_context() {
+        let (template, _operator) =
+            bundled_template_and_operator("operator-pca-r", "pca-matrix", "pca-matrix");
+        let rendered = render_template_text(
+            "{{ template.pluginRoot }}|{{template.manifestDir}}|${template.sourcePlugin}",
+            &template,
+            &crate::domain::operators::OperatorInvocation::default(),
+        )
+        .expect("render");
+
+        assert!(rendered.contains("operator-pca-r"));
+        assert!(rendered.contains("templates/pca-matrix"));
+        assert!(rendered.contains("operator-pca-r@omiga-curated"));
+    }
+
+    #[test]
+    fn template_preflight_reuses_migration_target_questions() {
+        let (template, _operator) = bundled_template_and_operator(
+            "operator-differential-expression-r",
+            "differential-expression-basic",
+            "differential-expression-basic",
+        );
+        let args = serde_json::to_string(&json!({
+            "id": "bulk_differential_expression_basic",
+            "inputs": {},
+            "params": {
+                "input_data_type": "auto",
+                "de_method": "auto"
+            },
+            "resources": {}
+        }))
+        .unwrap();
+        let value = serde_json::from_str::<JsonValue>(&args).unwrap();
+        let root = value.as_object().unwrap();
+
+        let question_args = template_preflight_question_for_template(&template, root)
+            .expect("DE template should inherit backing operator preflight");
+
+        assert_eq!(question_args.questions.len(), 4);
+        assert_eq!(
+            question_args.metadata.as_ref().unwrap()["source"],
+            "template_preflight"
+        );
+        assert_eq!(
+            question_args.metadata.as_ref().unwrap()["migration_target"],
+            "omics_differential_expression_basic"
+        );
+        assert!(question_args
+            .questions
+            .iter()
+            .any(|question| question.question.contains("主要统计方法")));
+    }
+
+    #[test]
+    fn apply_template_preflight_answers_updates_template_params() {
+        let (template, _operator) = bundled_template_and_operator(
+            "operator-differential-expression-r",
+            "differential-expression-basic",
+            "differential-expression-basic",
+        );
+        let args = serde_json::to_string(&json!({
+            "id": "bulk_differential_expression_basic",
+            "inputs": {},
+            "params": {
+                "input_data_type": "auto",
+                "de_method": "auto"
+            },
+            "resources": {}
+        }))
+        .unwrap();
+        let ask_output = json!({
+            "answers": {
+                "差异表达前，请选择输入矩阵的数据类型？": "Counts",
+                "差异表达前，请选择主要统计方法？": "DESeq2",
+                "显著差异基因使用哪个 FDR 阈值？": "FDR 0.01",
+                "显著差异基因使用哪个 |log2FC| 阈值？": "|log2FC|≥2"
+            }
+        });
+
+        let mut parsed = serde_json::from_str::<JsonValue>(&args).unwrap();
+        let root = parsed.as_object_mut().unwrap();
+        apply_template_preflight_answers_for_template(root, &template, &ask_output)
+            .expect("template preflight answers should apply");
+
+        assert_eq!(parsed["params"]["input_data_type"], "counts");
+        assert_eq!(parsed["params"]["de_method"], "deseq2");
+        assert_eq!(parsed["params"]["pvalue_threshold"], 0.01);
+        assert_eq!(parsed["params"]["log2fc_threshold"], 2);
+    }
+
     #[tokio::test]
     async fn execute_rendered_template_runs_shell_script() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1231,9 +1765,10 @@ execution:
             resources: BTreeMap::new(),
         };
 
-        let (raw, is_error, metadata) = execute_rendered_template(&ctx, &template, &invocation)
-            .await
-            .expect("rendered execution");
+        let (raw, is_error, metadata) =
+            execute_rendered_template(&ctx, &template, &invocation, None)
+                .await
+                .expect("rendered execution");
 
         assert!(!is_error, "{raw}");
         let parsed: JsonValue = serde_json::from_str(&raw).expect("operator result json");
@@ -1287,9 +1822,13 @@ execution:
             ]),
             resources: BTreeMap::new(),
         };
+        let started_at = "2026-05-09T00:00:00Z";
+        let parent_id = record_template_start_best_effort(&ctx, &template, &invocation, started_at)
+            .await
+            .expect("template parent record");
 
         let (raw, is_error, metadata) =
-            execute_template_via_migration_target(&ctx, &template, &invocation)
+            execute_template_via_migration_target(&ctx, &template, &invocation, Some(&parent_id))
                 .await
                 .expect("migration target execution");
 
@@ -1300,6 +1839,7 @@ execution:
         assert_eq!(parsed["status"], "succeeded");
         assert_eq!(parsed["operator"]["id"], "write_text_report");
         assert_eq!(parsed["runContext"]["kind"], "template");
+        assert_eq!(parsed["runContext"]["parentExecutionId"], parent_id);
         let report = parsed["outputs"]["report"][0]["path"]
             .as_str()
             .expect("report path");
@@ -1307,15 +1847,39 @@ execution:
             fs::read_to_string(report).expect("report"),
             "delegated template\ndelegated template\n"
         );
+        record_template_execution_best_effort(
+            &ctx,
+            &template,
+            &invocation,
+            started_at,
+            &raw,
+            is_error,
+            metadata,
+            Some(&parent_id),
+        )
+        .await;
 
         let records =
             crate::domain::execution_records::list_recent_execution_records(tmp.path(), 10)
                 .await
                 .expect("records");
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].kind, "operator");
-        assert_eq!(records[0].unit_id.as_deref(), Some("write_text_report"));
-        assert_eq!(records[0].status, "succeeded");
+        assert_eq!(records.len(), 2);
+        let parent = records
+            .iter()
+            .find(|record| record.id == parent_id)
+            .expect("parent record");
+        assert_eq!(parent.kind, "template");
+        assert_eq!(parent.status, "succeeded");
+        let child = records
+            .iter()
+            .find(|record| record.kind == "operator")
+            .expect("child operator record");
+        assert_eq!(child.unit_id.as_deref(), Some("write_text_report"));
+        assert_eq!(
+            child.parent_execution_id.as_deref(),
+            Some(parent_id.as_str())
+        );
+        assert_eq!(child.status, "succeeded");
     }
 
     #[tokio::test]
@@ -1341,6 +1905,7 @@ execution:
             r#"{"status":"succeeded","runId":"oprun_template","outputs":{"report":[]}}"#,
             false,
             json!({"executionMode": "migrationTarget"}),
+            None,
         )
         .await;
 

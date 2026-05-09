@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub const DESCRIPTION: &str =
-    "Execute an Omiga Template unit by id. MVP supports migrationTarget delegation and static/jinja2-compatible simple rendered scripts.";
+    "Execute an Omiga Template unit by id. Prefer this for high-level omics workflows such as differential expression, PCA, and enrichment; use operator__* only when the user explicitly needs an atomic operator. Template execution can render local scripts, inherit backing Operator ask/preflight questions, and optionally fall back to a migrationTarget for parity-safe runs.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -58,16 +58,16 @@ pub fn schema() -> ToolSchema {
             "properties": {
                 "id": {
                     "type": "string",
-                    "description": "Template canonicalId, short id, alias, or migrationTarget alias. Use unit_search kind=template first when uncertain."
+                    "description": "Template canonicalId, short id, alias, or migrationTarget alias. Use unit_search kind=template first when uncertain; prefer Template ids for analysis workflows."
                 },
                 "inputs": {
                     "type": "object",
-                    "description": "Template input object; same shape as OperatorInvocation.inputs.",
+                    "description": "Template input object; same shape as OperatorInvocation.inputs. For migrated templates this inherits the backing Operator input contract.",
                     "additionalProperties": true
                 },
                 "params": {
                     "type": "object",
-                    "description": "Template parameter object; same shape as OperatorInvocation.params.",
+                    "description": "Template parameter object; same shape as OperatorInvocation.params. If backing preflight questions exist, the chat path asks the user for missing or ask-state choices before execution.",
                     "additionalProperties": true
                 },
                 "resources": {

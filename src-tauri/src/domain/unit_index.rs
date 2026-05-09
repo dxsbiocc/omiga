@@ -377,7 +377,7 @@ fn describe_operator_unit(unit: UnitIndexEntry) -> Option<UnitDescription> {
         details: serde_json::json!({
             "schemaKind": "OperatorCandidateSummary",
             "operator": summary,
-            "note": "Read-only Unit Index description; execution still uses existing operator__* tools."
+            "note": "Read-only Unit Index description. Execute atomic operators with existing operator__* tools; prefer template_execute when a Template wraps this operator as a higher-level workflow."
         }),
     })
 }
@@ -397,7 +397,7 @@ fn describe_template_unit(unit: UnitIndexEntry) -> Option<UnitDescription> {
         details: serde_json::json!({
             "schemaKind": "TemplateSpec",
             "template": template,
-            "note": "Template execution is not enabled in this read-only MVP."
+            "note": "Execute this Template with template_execute. Rendered templates may inherit migration-target Operator contracts and fallback for parity-safe migration."
         }),
     })
 }

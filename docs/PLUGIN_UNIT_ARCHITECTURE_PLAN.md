@@ -599,6 +599,52 @@ Deferred from first version:
 - retrieval-to-Operator migration for GEO / PubMed / UniProt
 - self-evolution graph mining and auto-registration
 
+### Second-version implementation status: 2026-05-09
+
+Completed in the second version:
+
+- ExecutionRecord parent/child lineage:
+  - Template execution creates a parent record at start and updates it on
+    success/failure.
+  - Delegated or rendered backing Operator execution receives
+    `runContext.parentExecutionId`.
+  - `execution_record_list` can filter by `parentExecutionId` and can include a
+    `childrenByParent` diagnostic map.
+- Rendered R Template path for bundled analysis workflows:
+  - bulk differential expression
+  - PCA matrix overview
+  - functional enrichment
+- Parity-safe fallback:
+  - rendered Templates keep `migrationTarget` as the curated baseline.
+  - `fallbackToMigrationTarget: true` allows the runtime to fall back to the
+    existing Operator result when the rendered path errors or marks itself as an
+    error.
+  - rendered wrappers call the existing curated R scripts from the plugin root,
+    so the first rendered slice is intentionally parity-preserving rather than
+    a divergent reimplementation.
+- Contract-level parity tests:
+  - rendered Template argv mirrors the backing Operator argv after the script
+    slot.
+  - empty Template interfaces inherit the migration-target Operator interface.
+  - rendered templates inject source context such as `template.pluginRoot`.
+- Template-preferred routing and ask/preflight:
+  - `template_execute` is described as the preferred high-level workflow surface
+    for DE/PCA/enrichment-style analyses.
+  - Template execution inherits backing Operator preflight questions where a
+    migration target provides them, so the agent can ask focused recommended and
+    custom-choice questions before execution instead of guessing analysis
+    parameters.
+
+Still deferred after the second version:
+
+- Independent, fully expanded R template bodies that no longer call the legacy
+  curated scripts internally.
+- Fixture-based numeric/artifact parity comparison between those independent
+  rendered bodies and the legacy Operators.
+- environment profile resolver and automatic environment preparation.
+- retrieval-to-Operator migration for GEO / PubMed / UniProt.
+- self-evolution graph mining and auto-registration.
+
 ## Non-goals for MVP
 
 - Do not reimplement skills.
@@ -670,7 +716,9 @@ Frontend:
 Runtime:
 
 - existing operator smoke tests remain green
-- DE template smoke parity test after executable Template MVP
+- rendered Template contract parity tests remain green for DE/PCA/enrichment
+- numeric/artifact fixture parity becomes required once rendered templates stop
+  delegating internally to the curated legacy R scripts
 
 Docs:
 

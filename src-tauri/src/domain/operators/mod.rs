@@ -1328,10 +1328,17 @@ pub fn operator_preflight_question(
     arguments: &str,
 ) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
     let resolved = resolve_operator_alias(tool_name).ok()?;
-    let preflight = resolved.spec.preflight.as_ref()?;
     let value = serde_json::from_str::<JsonValue>(arguments).ok()?;
     let params = value.get("params").and_then(JsonValue::as_object);
+    operator_preflight_question_for_spec(&resolved.spec, Some(resolved.alias.as_str()), params)
+}
 
+pub fn operator_preflight_question_for_spec(
+    spec: &OperatorSpec,
+    alias: Option<&str>,
+    params: Option<&JsonMap<String, JsonValue>>,
+) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
+    let preflight = spec.preflight.as_ref()?;
     let questions = preflight
         .questions
         .iter()
@@ -1356,8 +1363,8 @@ pub fn operator_preflight_question(
             annotations: None,
             metadata: Some(json!({
                 "source": "operator_preflight",
-                "operator_id": resolved.spec.metadata.id,
-                "operator_alias": resolved.alias,
+                "operator_id": spec.metadata.id,
+                "operator_alias": alias,
             })),
         },
     )
@@ -1375,7 +1382,15 @@ pub fn apply_operator_preflight_answers(
     let Some(preflight) = resolved.spec.preflight.as_ref() else {
         return Ok(arguments.to_string());
     };
+    apply_operator_preflight_answers_for_spec(&resolved.spec, preflight, arguments, ask_user_output)
+}
 
+pub fn apply_operator_preflight_answers_for_spec(
+    spec: &OperatorSpec,
+    preflight: &OperatorPreflightSpec,
+    arguments: &str,
+    ask_user_output: &JsonValue,
+) -> Result<String, String> {
     let answers = ask_user_output
         .get("answers")
         .and_then(JsonValue::as_object)
@@ -1399,8 +1414,11 @@ pub fn apply_operator_preflight_answers(
         let Some(answer) = answers.get(question.question.trim()) else {
             continue;
         };
-        let field = resolved
-            .spec
+        let labels = preflight_answer_labels(answer, question.multi_select);
+        if labels.is_empty() {
+            continue;
+        }
+        let field = spec
             .interface
             .params
             .get(question.param.trim())
@@ -1410,10 +1428,6 @@ pub fn apply_operator_preflight_answers(
                     question.param
                 )
             })?;
-        let labels = preflight_answer_labels(answer, question.multi_select);
-        if labels.is_empty() {
-            continue;
-        }
         let values = labels
             .iter()
             .map(|label| preflight_value_for_answer(question, field, label))
@@ -1853,6 +1867,8 @@ pub struct OperatorRunContext {
     pub smoke_test_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smoke_test_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_execution_id: Option<String>,
 }
 
 impl OperatorRunContext {
@@ -1870,6 +1886,12 @@ impl OperatorRunContext {
                 .unwrap_or_default()
                 .trim()
                 .is_empty()
+            && self
+                .parent_execution_id
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
     }
 
     fn normalized(self) -> Option<Self> {
@@ -1877,6 +1899,7 @@ impl OperatorRunContext {
             kind: normalize_optional_string(self.kind),
             smoke_test_id: normalize_optional_string(self.smoke_test_id),
             smoke_test_name: normalize_optional_string(self.smoke_test_name),
+            parent_execution_id: normalize_optional_string(self.parent_execution_id),
         };
         (!normalized.is_empty()).then_some(normalized)
     }
@@ -2296,7 +2319,10 @@ async fn record_operator_success_best_effort(
         provider_plugin: Some(result.operator.source_plugin.clone()),
         status: result.status.clone(),
         session_id: ctx.session_id.clone(),
-        parent_execution_id: None,
+        parent_execution_id: result
+            .run_context
+            .as_ref()
+            .and_then(|context| context.parent_execution_id.clone()),
         started_at: Some(started_at.to_string()),
         ended_at: Some(chrono::Utc::now().to_rfc3339()),
         input_hash: crate::domain::execution_records::hash_execution_map(&result.effective_inputs),
@@ -2360,7 +2386,9 @@ async fn record_operator_failure_best_effort(
             .map(|operator| operator.source_plugin.clone()),
         status: "failed".to_string(),
         session_id: ctx.session_id.clone(),
-        parent_execution_id: None,
+        parent_execution_id: run_context
+            .as_ref()
+            .and_then(|context| context.parent_execution_id.clone()),
         started_at: Some(started_at.to_string()),
         ended_at: Some(chrono::Utc::now().to_rfc3339()),
         input_hash,
@@ -7315,6 +7343,7 @@ execution:
                 kind: Some("smoke".to_string()),
                 smoke_test_id: Some("default".to_string()),
                 smoke_test_name: Some("Active container smoke".to_string()),
+                parent_execution_id: None,
             }),
         )
         .await
@@ -8322,6 +8351,7 @@ execution:
                 kind: Some("smoke".to_string()),
                 smoke_test_id: Some("default".to_string()),
                 smoke_test_name: Some("Write text report smoke".to_string()),
+                parent_execution_id: None,
             }),
         )
         .await
@@ -8463,6 +8493,7 @@ execution:
             kind: Some("smoke".to_string()),
             smoke_test_id: Some("default".to_string()),
             smoke_test_name: Some("Cache bypass smoke".to_string()),
+            parent_execution_id: None,
         });
 
         let first = execute_resolved_operator(

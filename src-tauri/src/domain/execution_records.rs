@@ -74,15 +74,44 @@ pub async fn record_execution(
     project_root: &Path,
     record: ExecutionRecordInput,
 ) -> Result<String, String> {
+    record_execution_with_id(project_root, new_execution_record_id(), record).await
+}
+
+pub async fn record_execution_with_id(
+    project_root: &Path,
+    id: String,
+    record: ExecutionRecordInput,
+) -> Result<String, String> {
     let pool = open_execution_db(project_root)
         .await
         .map_err(|err| format!("open execution db: {err}"))?;
-    insert_execution_record(&pool, record).await
+    insert_execution_record(&pool, id, record).await
 }
 
 pub async fn record_execution_best_effort(project_root: &Path, record: ExecutionRecordInput) {
     if let Err(err) = record_execution(project_root, record).await {
         tracing::warn!("execution record write failed: {err}");
+    }
+}
+
+pub async fn update_execution_record(
+    project_root: &Path,
+    id: &str,
+    record: ExecutionRecordInput,
+) -> Result<(), String> {
+    let pool = open_execution_db(project_root)
+        .await
+        .map_err(|err| format!("open execution db: {err}"))?;
+    update_execution_record_row(&pool, id, record).await
+}
+
+pub async fn update_execution_record_best_effort(
+    project_root: &Path,
+    id: &str,
+    record: ExecutionRecordInput,
+) {
+    if let Err(err) = update_execution_record(project_root, id, record).await {
+        tracing::warn!("execution record update failed: {err}");
     }
 }
 
@@ -114,6 +143,37 @@ pub async fn list_recent_execution_records(
     .map_err(|err| format!("list execution records: {err}"))
 }
 
+pub async fn list_child_execution_records(
+    project_root: &Path,
+    parent_execution_id: &str,
+    limit: usize,
+) -> Result<Vec<ExecutionRecord>, String> {
+    if !execution_db_path(project_root).is_file() {
+        return Ok(Vec::new());
+    }
+    let pool = open_execution_db(project_root)
+        .await
+        .map_err(|err| format!("open execution db: {err}"))?;
+    let limit = i64::try_from(limit.clamp(1, 200)).unwrap_or(50);
+    sqlx::query_as::<_, ExecutionRecord>(
+        r#"
+        SELECT
+          id, kind, unit_id, canonical_id, provider_plugin, status, session_id,
+          parent_execution_id, started_at, ended_at, input_hash, param_hash,
+          output_summary_json, runtime_json, metadata_json
+        FROM executions
+        WHERE parent_execution_id = ?
+        ORDER BY COALESCE(ended_at, started_at, id) DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(parent_execution_id)
+    .bind(limit)
+    .fetch_all(&pool)
+    .await
+    .map_err(|err| format!("list child execution records: {err}"))
+}
+
 pub fn hash_json(value: &JsonValue) -> Option<String> {
     let canonical = serde_json::to_vec(value).ok()?;
     Some(hash_bytes(&canonical))
@@ -128,6 +188,10 @@ fn hash_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(bytes);
     format!("sha256:{digest:x}")
+}
+
+fn new_execution_record_id() -> String {
+    format!("execrec_{}", uuid::Uuid::new_v4().simple())
 }
 
 async fn open_execution_db(project_root: &Path) -> Result<SqlitePool, sqlx::Error> {
@@ -200,12 +264,12 @@ async fn ensure_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
 async fn insert_execution_record(
     pool: &SqlitePool,
+    id: String,
     record: ExecutionRecordInput,
 ) -> Result<String, String> {
-    let id = format!("execrec_{}", uuid::Uuid::new_v4().simple());
     let now = chrono::Utc::now().to_rfc3339();
     let started_at = record.started_at.unwrap_or_else(|| now.clone());
-    let ended_at = record.ended_at.unwrap_or(now);
+    let ended_at = record.ended_at;
     let output_summary_json = optional_json_string(record.output_summary_json)?;
     let runtime_json = optional_json_string(record.runtime_json)?;
     let metadata_json = optional_json_string(record.metadata_json)?;
@@ -240,6 +304,64 @@ async fn insert_execution_record(
     .map_err(|err| format!("insert execution record: {err}"))?;
 
     Ok(id)
+}
+
+async fn update_execution_record_row(
+    pool: &SqlitePool,
+    id: &str,
+    record: ExecutionRecordInput,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let started_at = record.started_at.unwrap_or_else(|| now.clone());
+    let ended_at = record.ended_at;
+    let output_summary_json = optional_json_string(record.output_summary_json)?;
+    let runtime_json = optional_json_string(record.runtime_json)?;
+    let metadata_json = optional_json_string(record.metadata_json)?;
+
+    let result = sqlx::query(
+        r#"
+        UPDATE executions
+        SET
+          kind = ?,
+          unit_id = ?,
+          canonical_id = ?,
+          provider_plugin = ?,
+          status = ?,
+          session_id = ?,
+          parent_execution_id = ?,
+          started_at = ?,
+          ended_at = ?,
+          input_hash = ?,
+          param_hash = ?,
+          output_summary_json = ?,
+          runtime_json = ?,
+          metadata_json = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(record.kind)
+    .bind(record.unit_id)
+    .bind(record.canonical_id)
+    .bind(record.provider_plugin)
+    .bind(record.status)
+    .bind(record.session_id)
+    .bind(record.parent_execution_id)
+    .bind(started_at)
+    .bind(ended_at)
+    .bind(record.input_hash)
+    .bind(record.param_hash)
+    .bind(output_summary_json)
+    .bind(runtime_json)
+    .bind(metadata_json)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|err| format!("update execution record: {err}"))?;
+
+    if result.rows_affected() == 0 {
+        return Err(format!("execution record `{id}` does not exist"));
+    }
+    Ok(())
 }
 
 fn optional_json_string(value: Option<JsonValue>) -> Result<Option<String>, String> {
@@ -297,6 +419,105 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("outputCount"));
+    }
+
+    #[tokio::test]
+    async fn execution_record_parent_child_round_trip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let parent_id = record_execution(
+            tmp.path(),
+            ExecutionRecordInput {
+                kind: "template".to_string(),
+                unit_id: Some("template_a".to_string()),
+                canonical_id: Some("provider/template/template_a".to_string()),
+                provider_plugin: Some("provider".to_string()),
+                status: "running".to_string(),
+                session_id: Some("session-1".to_string()),
+                parent_execution_id: None,
+                started_at: Some("2026-05-09T00:00:00Z".to_string()),
+                ended_at: None,
+                input_hash: None,
+                param_hash: None,
+                output_summary_json: Some(json!({"status": "running"})),
+                runtime_json: None,
+                metadata_json: None,
+            },
+        )
+        .await
+        .expect("parent");
+        let before_update = list_recent_execution_records(tmp.path(), 10)
+            .await
+            .expect("before update");
+        assert_eq!(before_update[0].status, "running");
+        assert!(before_update[0].ended_at.is_none());
+        let child_id = record_execution(
+            tmp.path(),
+            ExecutionRecordInput {
+                kind: "operator".to_string(),
+                unit_id: Some("operator_a".to_string()),
+                canonical_id: Some("provider/operator/operator_a".to_string()),
+                provider_plugin: Some("provider".to_string()),
+                status: "succeeded".to_string(),
+                session_id: Some("session-1".to_string()),
+                parent_execution_id: Some(parent_id.clone()),
+                started_at: Some("2026-05-09T00:00:01Z".to_string()),
+                ended_at: Some("2026-05-09T00:00:02Z".to_string()),
+                input_hash: None,
+                param_hash: None,
+                output_summary_json: Some(json!({"status": "succeeded"})),
+                runtime_json: None,
+                metadata_json: None,
+            },
+        )
+        .await
+        .expect("child");
+
+        update_execution_record(
+            tmp.path(),
+            &parent_id,
+            ExecutionRecordInput {
+                kind: "template".to_string(),
+                unit_id: Some("template_a".to_string()),
+                canonical_id: Some("provider/template/template_a".to_string()),
+                provider_plugin: Some("provider".to_string()),
+                status: "succeeded".to_string(),
+                session_id: Some("session-1".to_string()),
+                parent_execution_id: None,
+                started_at: Some("2026-05-09T00:00:00Z".to_string()),
+                ended_at: Some("2026-05-09T00:00:03Z".to_string()),
+                input_hash: None,
+                param_hash: None,
+                output_summary_json: Some(json!({"status": "succeeded"})),
+                runtime_json: None,
+                metadata_json: Some(json!({"child": child_id})),
+            },
+        )
+        .await
+        .expect("update parent");
+
+        let children = list_child_execution_records(tmp.path(), &parent_id, 10)
+            .await
+            .expect("children");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, child_id);
+        assert_eq!(
+            children[0].parent_execution_id.as_deref(),
+            Some(parent_id.as_str())
+        );
+
+        let records = list_recent_execution_records(tmp.path(), 10)
+            .await
+            .expect("records");
+        let parent = records
+            .iter()
+            .find(|record| record.id == parent_id)
+            .expect("updated parent");
+        assert_eq!(parent.status, "succeeded");
+        assert!(parent
+            .metadata_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains(&child_id));
     }
 
     #[test]

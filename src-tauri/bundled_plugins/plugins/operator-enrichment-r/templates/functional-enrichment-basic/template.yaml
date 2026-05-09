@@ -2,9 +2,9 @@ apiVersion: omiga.ai/unit/v1alpha1
 kind: Template
 metadata:
   id: functional_enrichment_basic
-  version: 0.1.0
+  version: 0.2.0
   name: Functional Enrichment
-  description: Parameterized ORA/GSEA enrichment analysis skeleton for gene lists and ranked gene tables. The MVP template points at the existing curated enrichment operator until rendered templates are promoted.
+  description: Rendered R ORA/GSEA enrichment analysis skeleton for gene lists and ranked gene tables. The second-version template keeps the legacy curated operator as migration fallback and parity baseline.
   tags:
     - omics
     - enrichment
@@ -35,12 +35,27 @@ interface:
 runtime:
   envRef: r-bioc
 template:
-  engine: static
-  entry: ./template.yaml
+  engine: jinja2
+  entry: ./template.R.j2
 aliases:
   - enrichment_basic
   - ora_gsea
   - functional_enrichment
 execution:
-  interpreter: existing-operator
+  interpreter: Rscript
+  fallbackToMigrationTarget: true
+  argv:
+    - ${inputs.genes}
+    - ${inputs.gene_sets}
+    - ${outdir}
+    - ${params.gene_sets_format}
+    - ${params.min_size}
+    - ${params.max_size}
+    - ${params.pvalue_threshold}
+    - ${params.analysis_mode}
+    - ${params.gene_column}
+    - ${params.score_column}
+    - ${params.display_top_n}
+    - ${params.plot_style}
+    - ${params.gsea_weight}
 migrationTarget: omics_functional_enrichment_basic
