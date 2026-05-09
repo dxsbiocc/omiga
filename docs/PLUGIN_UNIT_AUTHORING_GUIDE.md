@@ -146,6 +146,12 @@ Use `execution_lineage_report` when validating runtime behavior across
 Template/Operator boundaries. It summarizes parent/child ExecutionRecords and
 fallback execution modes without reading raw SQLite rows manually.
 
+Use `execution_archive_advisor` after a task finishes to let the agent analyze
+recent ExecutionRecords and propose what to archive, fix before archiving,
+promote into reusable defaults/examples, inspect as fallback lineage, or clean
+after the parent result has been preserved. The advisor is read-only: it does
+not delete runs, move artifacts, or auto-register new units.
+
 ## Visualization template pattern
 
 For static figures, prefer Template units over ad-hoc plotting Operators.

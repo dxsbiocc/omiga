@@ -12,6 +12,7 @@ pub mod connector;
 pub mod enter_plan_mode;
 pub mod env_store;
 pub mod environment_profile_check;
+pub mod execution_archive_advisor;
 pub mod execution_lineage_report;
 pub mod execution_record_list;
 pub mod exit_plan_mode;
@@ -91,6 +92,7 @@ pub enum ToolKind {
     UnitAuthoringValidate,
     TemplateExecute,
     EnvironmentProfileCheck,
+    ExecutionArchiveAdvisor,
     ExecutionLineageReport,
     ExecutionRecordList,
     Visualization,
@@ -151,6 +153,7 @@ impl fmt::Display for ToolKind {
             ToolKind::UnitAuthoringValidate => write!(f, "unit_authoring_validate"),
             ToolKind::TemplateExecute => write!(f, "template_execute"),
             ToolKind::EnvironmentProfileCheck => write!(f, "environment_profile_check"),
+            ToolKind::ExecutionArchiveAdvisor => write!(f, "execution_archive_advisor"),
             ToolKind::ExecutionLineageReport => write!(f, "execution_lineage_report"),
             ToolKind::ExecutionRecordList => write!(f, "execution_record_list"),
             ToolKind::Visualization => write!(f, "visualization"),
@@ -201,6 +204,7 @@ pub enum Tool {
     UnitAuthoringValidate(unit_authoring_validate::UnitAuthoringValidateArgs),
     TemplateExecute(template_execute::TemplateExecuteArgs),
     EnvironmentProfileCheck(environment_profile_check::EnvironmentProfileCheckArgs),
+    ExecutionArchiveAdvisor(execution_archive_advisor::ExecutionArchiveAdvisorArgs),
     ExecutionLineageReport(execution_lineage_report::ExecutionLineageReportArgs),
     ExecutionRecordList(execution_record_list::ExecutionRecordListArgs),
     Visualization(visualization::VisualizationArgs),
@@ -252,6 +256,7 @@ impl Tool {
             Tool::UnitAuthoringValidate(_) => ToolKind::UnitAuthoringValidate,
             Tool::TemplateExecute(_) => ToolKind::TemplateExecute,
             Tool::EnvironmentProfileCheck(_) => ToolKind::EnvironmentProfileCheck,
+            Tool::ExecutionArchiveAdvisor(_) => ToolKind::ExecutionArchiveAdvisor,
             Tool::ExecutionLineageReport(_) => ToolKind::ExecutionLineageReport,
             Tool::ExecutionRecordList(_) => ToolKind::ExecutionRecordList,
             Tool::Visualization(_) => ToolKind::Visualization,
@@ -300,6 +305,7 @@ impl Tool {
             Tool::UnitAuthoringValidate(_) => "unit_authoring_validate",
             Tool::TemplateExecute(_) => "template_execute",
             Tool::EnvironmentProfileCheck(_) => "environment_profile_check",
+            Tool::ExecutionArchiveAdvisor(_) => "execution_archive_advisor",
             Tool::ExecutionLineageReport(_) => "execution_lineage_report",
             Tool::ExecutionRecordList(_) => "execution_record_list",
             Tool::Visualization(_) => "Visualization",
@@ -348,6 +354,7 @@ impl Tool {
             Tool::UnitAuthoringValidate(_) => unit_authoring_validate::DESCRIPTION,
             Tool::TemplateExecute(_) => template_execute::DESCRIPTION,
             Tool::EnvironmentProfileCheck(_) => environment_profile_check::DESCRIPTION,
+            Tool::ExecutionArchiveAdvisor(_) => execution_archive_advisor::DESCRIPTION,
             Tool::ExecutionLineageReport(_) => execution_lineage_report::DESCRIPTION,
             Tool::ExecutionRecordList(_) => execution_record_list::DESCRIPTION,
             Tool::Visualization(_) => visualization::DESCRIPTION,
@@ -406,6 +413,9 @@ impl Tool {
             }
             Tool::EnvironmentProfileCheck(args) => {
                 environment_profile_check::EnvironmentProfileCheckTool::execute(ctx, args).await?
+            }
+            Tool::ExecutionArchiveAdvisor(args) => {
+                execution_archive_advisor::ExecutionArchiveAdvisorTool::execute(ctx, args).await?
             }
             Tool::ExecutionLineageReport(args) => {
                 execution_lineage_report::ExecutionLineageReportTool::execute(ctx, args).await?
@@ -608,6 +618,12 @@ impl Tool {
                 })?;
                 Ok(Tool::EnvironmentProfileCheck(args))
             }
+            ToolKind::ExecutionArchiveAdvisor => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid execution_archive_advisor arguments: {}", e),
+                })?;
+                Ok(Tool::ExecutionArchiveAdvisor(args))
+            }
             ToolKind::ExecutionLineageReport => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
                     message: format!("Invalid execution_lineage_report arguments: {}", e),
@@ -770,6 +786,9 @@ impl Tool {
             "template_execute" | "TemplateExecute" => ToolKind::TemplateExecute,
             "environment_profile_check" | "EnvironmentProfileCheck" => {
                 ToolKind::EnvironmentProfileCheck
+            }
+            "execution_archive_advisor" | "ExecutionArchiveAdvisor" => {
+                ToolKind::ExecutionArchiveAdvisor
             }
             "execution_lineage_report" | "ExecutionLineageReport" => {
                 ToolKind::ExecutionLineageReport
@@ -1410,6 +1429,7 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         unit_authoring_validate::schema(),
         template_execute::schema(),
         environment_profile_check::schema(),
+        execution_archive_advisor::schema(),
         execution_lineage_report::schema(),
         execution_record_list::schema(),
         visualization::schema(),
@@ -1468,7 +1488,8 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "read_mcp_resource" => (1, 11),
         "execution_record_list" => (1, 12),
         "execution_lineage_report" => (1, 13),
-        "environment_profile_check" => (1, 14),
+        "execution_archive_advisor" => (1, 14),
+        "environment_profile_check" => (1, 15),
 
         // Mutating tools.
         "file_edit" => (2, 0),
@@ -1678,6 +1699,7 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
             | "unit_authoring_validate"
             | "execution_record_list"
             | "execution_lineage_report"
+            | "execution_archive_advisor"
             | "environment_profile_check"
             | "ToolSearch"
             | "tool_search"
@@ -1759,6 +1781,9 @@ mod tool_enum_tests {
 
         let t = Tool::from_json_str("execution_lineage_report", r#"{"limit":5}"#).unwrap();
         assert!(matches!(t, Tool::ExecutionLineageReport(_)));
+
+        let t = Tool::from_json_str("execution_archive_advisor", r#"{"limit":5}"#).unwrap();
+        assert!(matches!(t, Tool::ExecutionArchiveAdvisor(_)));
 
         let t = Tool::from_json_str("environment_profile_check", r#"{"envRef":"r-bioc"}"#).unwrap();
         assert!(matches!(t, Tool::EnvironmentProfileCheck(_)));

@@ -356,7 +356,9 @@ ExecutionRecord is the minimum data foundation for future self-evolution:
 - optimization: default parameter and execution path suggestions
 - emergence: high-frequency combinations becoming Template / Skill candidates
 
-MVP records data only. It does not implement lineage graph mining or automatic registration.
+MVP records data first. The current implementation also includes read-only
+diagnostic/advisor tools, but it still does not automatically register,
+delete, or publish derived units without human approval.
 
 ### Storage
 
@@ -587,6 +589,9 @@ Completed in the first version:
 - best-effort ExecutionRecord writes for successful/failed operator runs and
   template runs
 - `execution_record_list` read-only diagnostic tool
+- `execution_archive_advisor` read-only advisor tool that classifies recent
+  ExecutionRecords into archive, fix, cleanup, lineage-inspection, and reusable
+  choice promotion recommendations
 
 Deferred from first version:
 
@@ -810,6 +815,34 @@ Next focused improvements:
   `metadata.preflight` in the task/record detail pane.
 - Extend GEO/UniProt API-wrapper pilots as Operators without changing existing
   built-in retrieval tool behavior.
+
+### Focused follow-up status: execution archive advisor, 2026-05-09
+
+Completed in this focused follow-up:
+
+- Added `execution_archive_advisor`, a read-only agent-facing tool that scans
+  recent project-scoped ExecutionRecords from
+  `.omiga/execution/executions.sqlite`.
+- The advisor emits actionable recommendations:
+  - `archive_result` for successful runs with outputs, run directories, or
+    provenance.
+  - `fix_before_archive` for failed runs that should be inspected before
+    deletion or result packaging.
+  - `cleanup_candidate` for successful child runs that can be pruned after the
+    parent lineage has been archived.
+  - `inspect_lineage` for fallback migration-target paths that should be kept
+    together until parity is verified.
+  - `promote_reusable_choice` when `paramSources` / `metadata.preflight`
+    indicate reusable user-selected analysis choices.
+- The advisor intentionally does not mutate the workspace: no deletion, no
+  artifact moves, and no automatic Operator/Template registration.
+
+Next focused improvements:
+
+- Add a UI/trace affordance that renders advisor recommendations alongside
+  `paramSources` and `metadata.preflight` in the task/record detail pane.
+- Add an explicit report-writing command that saves human-reviewable archive
+  suggestions under `.omiga/execution/archive-suggestions/` after confirmation.
 
 ## Non-goals for MVP
 
