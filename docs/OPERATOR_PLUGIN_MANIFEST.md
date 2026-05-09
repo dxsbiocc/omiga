@@ -87,6 +87,8 @@ preflight:
 - `askWhen.missing`, `askWhen.empty`, and `askWhen.values[]` decide when the chat path asks the question.
 - Any preflight-backed param also has an explicit ask state: callers may omit the param or set it to `ask` (or `{"state":"ask"}` / `{"status":"ask"}`) to force Omiga to ask the user before execution. Reserve `ask` for this sentinel on preflight params.
 - `options[].label` is what the user sees; `options[].value` is written back into `params.{param}`.
+- Applied answers are recorded as `metadata.preflight` and execution `paramSources`, so record viewers can distinguish user preflight choices from caller-supplied and default params.
+- `unit_authoring_validate` warns when preflight only asks about data/grouping and omits method, threshold, or filtering decisions that affect analysis semantics.
 - Keep defaults in `interface.params` when non-interactive callers should still run without a chat preflight.
 
 ## Smoke tests

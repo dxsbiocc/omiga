@@ -26,6 +26,8 @@ impl ToolImpl for UnitAuthoringValidateTool {
         args: Self::Args,
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
         let operator_diagnostics = crate::domain::operators::list_operator_manifest_diagnostics();
+        let operator_authoring_diagnostics =
+            crate::domain::operators::list_operator_authoring_diagnostics();
         let template_diagnostics = crate::domain::templates::list_template_manifest_diagnostics();
         let environment_diagnostics =
             crate::domain::environments::list_environment_manifest_diagnostics();
@@ -34,9 +36,11 @@ impl ToolImpl for UnitAuthoringValidateTool {
         let environment_count = crate::domain::environments::discover_environment_profiles().len();
         let diagnostic_count =
             operator_diagnostics.len() + template_diagnostics.len() + environment_diagnostics.len();
+        let authoring_diagnostic_count = operator_authoring_diagnostics.len();
         let mut output = serde_json::json!({
             "ok": diagnostic_count == 0,
             "diagnosticCount": diagnostic_count,
+            "authoringDiagnosticCount": authoring_diagnostic_count,
             "counts": {
                 "operators": operator_count,
                 "templates": template_count,
@@ -46,6 +50,9 @@ impl ToolImpl for UnitAuthoringValidateTool {
                 "operators": operator_diagnostics,
                 "templates": template_diagnostics,
                 "environments": environment_diagnostics
+            },
+            "authoringDiagnostics": {
+                "operators": operator_authoring_diagnostics
             },
             "note": "V4 authoring validation is read-only. It validates manifests and contribution discovery; it does not execute units or install environments."
         });
@@ -96,6 +103,8 @@ mod tests {
         assert!(value["diagnostics"]["operators"].is_array());
         assert!(value["diagnostics"]["templates"].is_array());
         assert!(value["diagnostics"]["environments"].is_array());
+        assert!(value["authoringDiagnostics"]["operators"].is_array());
+        assert!(value["authoringDiagnosticCount"].as_u64().is_some());
     }
 
     async fn execute_to_json(

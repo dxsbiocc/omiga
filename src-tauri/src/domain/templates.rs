@@ -576,6 +576,9 @@ fn apply_template_preflight_answers_for_template(
             .cloned()
             .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
     );
+    if let Some(metadata) = updated.get("metadata").cloned() {
+        root.insert("metadata".to_string(), metadata);
+    }
     Ok(())
 }
 
@@ -1079,6 +1082,7 @@ fn template_execution_record(
     output_summary_json: JsonValue,
     metadata_json: JsonValue,
 ) -> crate::domain::execution_records::ExecutionRecordInput {
+    let metadata_json = attach_invocation_provenance_metadata(metadata_json, invocation);
     crate::domain::execution_records::ExecutionRecordInput {
         kind: "template".to_string(),
         unit_id: Some(template.spec.metadata.id.clone()),
@@ -1094,6 +1098,33 @@ fn template_execution_record(
         output_summary_json: Some(output_summary_json),
         runtime_json: serde_json::to_value(&template.spec.runtime).ok(),
         metadata_json: Some(metadata_json),
+    }
+}
+
+fn attach_invocation_provenance_metadata(
+    metadata_json: JsonValue,
+    invocation: &crate::domain::operators::OperatorInvocation,
+) -> JsonValue {
+    let Some(preflight) =
+        crate::domain::operators::operator_invocation_preflight_metadata(invocation)
+    else {
+        return metadata_json;
+    };
+    let param_sources =
+        crate::domain::operators::operator_invocation_preflight_param_sources(invocation);
+    match metadata_json {
+        JsonValue::Object(mut object) => {
+            object.insert("preflight".to_string(), preflight);
+            if !param_sources.is_empty() {
+                object.insert("paramSources".to_string(), serde_json::json!(param_sources));
+            }
+            JsonValue::Object(object)
+        }
+        other => serde_json::json!({
+            "execution": other,
+            "preflight": preflight,
+            "paramSources": param_sources,
+        }),
     }
 }
 
@@ -1658,7 +1689,7 @@ template:
 
     #[test]
     fn discovers_bundled_visualization_r_templates() {
-        let plugin = bundled_loaded_plugin("visualization-r", "R Visualization Templates");
+        let plugin = bundled_loaded_plugin("visualization-r", "R Visualization");
         let candidates = discover_template_candidates_from_plugins([&plugin]);
         let ids = candidates
             .iter()
@@ -1786,6 +1817,7 @@ template:
             inputs: BTreeMap::from([("table".to_string(), json!(input.to_string_lossy()))]),
             params: BTreeMap::new(),
             resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
         };
         let ctx = crate::domain::tools::ToolContext::new(tmp.path());
 
@@ -2099,6 +2131,17 @@ template:
         assert_eq!(parsed["params"]["de_method"], "deseq2");
         assert_eq!(parsed["params"]["pvalue_threshold"], 0.01);
         assert_eq!(parsed["params"]["log2fc_threshold"], 2);
+        assert_eq!(
+            parsed["metadata"]["preflight"]["paramsBySource"]["de_method"],
+            "user_preflight"
+        );
+        assert_eq!(
+            parsed["metadata"]["preflight"]["answeredParams"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
     }
 
     #[tokio::test]
@@ -2180,6 +2223,7 @@ execution:
             inputs: BTreeMap::new(),
             params: BTreeMap::from([("message".to_string(), json!("world"))]),
             resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
         };
 
         let (raw, is_error, metadata) =
@@ -2247,6 +2291,7 @@ execution:
                 ("confidence_hulls".to_string(), json!(false)),
             ]),
             resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
         };
         let ctx = crate::domain::tools::ToolContext::new(tmp.path());
 
@@ -2395,6 +2440,7 @@ migrationTarget: local_fallback_report
             inputs: BTreeMap::new(),
             params: BTreeMap::from([("message".to_string(), json!("fallback ok"))]),
             resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
         };
         let started_at = "2026-05-09T00:00:00Z";
         let parent_id = record_template_start_best_effort(&ctx, &template, &invocation, started_at)
@@ -2492,6 +2538,7 @@ migrationTarget: local_fallback_report
                 ("repeat".to_string(), json!(2)),
             ]),
             resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
         };
         let started_at = "2026-05-09T00:00:00Z";
         let parent_id = record_template_start_best_effort(&ctx, &template, &invocation, started_at)
@@ -2566,6 +2613,7 @@ migrationTarget: local_fallback_report
             inputs: BTreeMap::new(),
             params: BTreeMap::from([("alpha".to_string(), json!(0.05))]),
             resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
         };
 
         record_template_execution_best_effort(

@@ -795,15 +795,19 @@ Completed in this focused follow-up:
   decisions: input data type, DE method, FDR threshold, and log2FC threshold;
   these are recommended/customizable analysis choices rather than only dataset
   or grouping questions.
+- Added preflight provenance: applied Operator/Template preflight answers now
+  carry `metadata.preflight`, run result/provenance JSON includes
+  `paramSources`, and ExecutionRecords preserve which params came from
+  `user_preflight` versus caller/default/system sources.
+- Extended `unit_authoring_validate` with authoring diagnostics that warn when
+  an Operator preflight asks only data/grouping questions and omits method,
+  threshold, or filtering decisions.
 - Documented the authoring rule in `docs/OPERATOR_PLUGIN_MANIFEST.md`.
 
 Next focused improvements:
 
-- Add a small UI/trace affordance that shows which params were filled by
-  preflight versus supplied by the agent/user.
-- Add authoring diagnostics that flag preflight questions which only ask about
-  data location/grouping but never expose method, threshold, or filtering
-  choices.
+- Add a small UI/trace affordance that renders `paramSources` and
+  `metadata.preflight` in the task/record detail pane.
 - Extend GEO/UniProt API-wrapper pilots as Operators without changing existing
   built-in retrieval tool behavior.
 

@@ -33,6 +33,11 @@ const OPERATOR_STRUCTURED_OUTPUTS_MAX_BYTES: u64 = 1024 * 1024;
 const OPERATOR_PREFLIGHT_MAX_QUESTIONS: usize = 4;
 const OPERATOR_PREFLIGHT_MAX_OPTIONS: usize = 5;
 const OPERATOR_PREFLIGHT_ASK_STATE: &str = "ask";
+const OPERATOR_PREFLIGHT_METADATA_KEY: &str = "preflight";
+const OPERATOR_PARAM_SOURCE_USER_PREFLIGHT: &str = "user_preflight";
+const OPERATOR_PARAM_SOURCE_CALLER: &str = "caller";
+const OPERATOR_PARAM_SOURCE_DEFAULT: &str = "default";
+const OPERATOR_PARAM_SOURCE_SYSTEM: &str = "system";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -866,6 +871,141 @@ pub fn list_operator_manifest_diagnostics() -> Vec<OperatorManifestDiagnostic> {
     operator_manifest_diagnostics_from_plugins(outcome.plugins())
 }
 
+pub fn list_operator_authoring_diagnostics() -> Vec<OperatorManifestDiagnostic> {
+    let mut diagnostics = discover_operator_candidates()
+        .iter()
+        .flat_map(operator_preflight_authoring_diagnostics)
+        .collect::<Vec<_>>();
+    diagnostics.sort_by(|left, right| {
+        left.source_plugin
+            .cmp(&right.source_plugin)
+            .then_with(|| left.manifest_path.cmp(&right.manifest_path))
+            .then_with(|| left.message.cmp(&right.message))
+    });
+    diagnostics
+}
+
+fn operator_preflight_authoring_diagnostics(
+    spec: &OperatorSpec,
+) -> Vec<OperatorManifestDiagnostic> {
+    let Some(preflight) = &spec.preflight else {
+        return Vec::new();
+    };
+    if preflight.questions.is_empty() {
+        return Vec::new();
+    }
+    let asks_method = preflight
+        .questions
+        .iter()
+        .any(preflight_question_mentions_method_choice);
+    let asks_threshold_or_filter = preflight
+        .questions
+        .iter()
+        .any(preflight_question_mentions_threshold_or_filter);
+    let only_data_or_grouping = preflight
+        .questions
+        .iter()
+        .all(preflight_question_mentions_data_or_grouping);
+
+    if only_data_or_grouping && !asks_method && !asks_threshold_or_filter {
+        return vec![OperatorManifestDiagnostic {
+            source_plugin: spec.source.source_plugin.clone(),
+            manifest_path: spec.source.manifest_path.to_string_lossy().into_owned(),
+            severity: "warning".to_string(),
+            message: format!(
+                "operator `{}` preflight only asks data/grouping questions; add method, threshold, or filtering choices when those decisions affect analysis semantics",
+                spec.metadata.id
+            ),
+        }];
+    }
+    Vec::new()
+}
+
+fn preflight_question_mentions_method_choice(question: &OperatorPreflightQuestionSpec) -> bool {
+    preflight_question_text(question).contains_any(&[
+        "method",
+        "stat",
+        "test",
+        "model",
+        "algorithm",
+        "de_method",
+        "方法",
+        "统计",
+        "检验",
+        "模型",
+    ])
+}
+
+fn preflight_question_mentions_threshold_or_filter(
+    question: &OperatorPreflightQuestionSpec,
+) -> bool {
+    preflight_question_text(question).contains_any(&[
+        "threshold",
+        "cutoff",
+        "filter",
+        "pvalue",
+        "p-value",
+        "fdr",
+        "padj",
+        "log2fc",
+        "fc",
+        "min",
+        "max",
+        "top",
+        "size",
+        "阈值",
+        "过滤",
+        "筛选",
+        "显著",
+        "p值",
+    ])
+}
+
+fn preflight_question_mentions_data_or_grouping(question: &OperatorPreflightQuestionSpec) -> bool {
+    preflight_question_text(question).contains_any(&[
+        "input",
+        "data",
+        "type",
+        "sample",
+        "group",
+        "control",
+        "case",
+        "metadata",
+        "column",
+        "comparison",
+        "delimiter",
+        "row",
+        "输入",
+        "数据",
+        "样本",
+        "分组",
+        "对照",
+        "列",
+        "比较",
+    ])
+}
+
+fn preflight_question_text(question: &OperatorPreflightQuestionSpec) -> String {
+    format!(
+        "{} {} {} {}",
+        question.id.as_deref().unwrap_or_default(),
+        question.param,
+        question.question,
+        question.header
+    )
+    .to_ascii_lowercase()
+}
+
+trait ContainsAny {
+    fn contains_any(&self, needles: &[&str]) -> bool;
+}
+
+impl ContainsAny for String {
+    fn contains_any(&self, needles: &[&str]) -> bool {
+        needles.iter().any(|needle| self.contains(needle))
+    }
+}
+
 fn discover_manifest_paths(plugin_root: &Path) -> Vec<PathBuf> {
     let operators_root = crate::domain::plugins::load_plugin_manifest(plugin_root)
         .and_then(|manifest| manifest.operators)
@@ -1424,50 +1564,96 @@ pub fn apply_operator_preflight_answers_for_spec(
     let root = invocation
         .as_object_mut()
         .ok_or_else(|| "Operator arguments must be a JSON object".to_string())?;
-    let params_value = root
-        .entry("params".to_string())
-        .or_insert_with(|| JsonValue::Object(JsonMap::new()));
-    if !params_value.is_object() {
-        *params_value = JsonValue::Object(JsonMap::new());
-    }
-    let params = params_value
-        .as_object_mut()
-        .ok_or_else(|| "Operator params must be a JSON object".to_string())?;
-
-    for question in &preflight.questions {
-        let Some(answer) = answers.get(question.question.trim()) else {
-            continue;
-        };
-        let labels = preflight_answer_labels(answer, question.multi_select);
-        if labels.is_empty() {
-            continue;
+    let mut answered_params = Vec::new();
+    {
+        let params_value = root
+            .entry("params".to_string())
+            .or_insert_with(|| JsonValue::Object(JsonMap::new()));
+        if !params_value.is_object() {
+            *params_value = JsonValue::Object(JsonMap::new());
         }
-        let field = spec
-            .interface
-            .params
-            .get(question.param.trim())
-            .ok_or_else(|| {
-                format!(
-                    "Preflight question references unknown operator parameter `{}`",
-                    question.param
-                )
-            })?;
-        let values = labels
-            .iter()
-            .map(|label| preflight_value_for_answer(question, field, label))
-            .collect::<Result<Vec<_>, _>>()?;
-        let value = if question.multi_select {
-            JsonValue::Array(values)
-        } else {
-            values
-                .into_iter()
-                .next()
-                .ok_or_else(|| format!("Missing preflight choice for `{}`", question.param))?
-        };
-        params.insert(question.param.clone(), value);
+        let params = params_value
+            .as_object_mut()
+            .ok_or_else(|| "Operator params must be a JSON object".to_string())?;
+
+        for question in &preflight.questions {
+            let Some(answer) = answers.get(question.question.trim()) else {
+                continue;
+            };
+            let labels = preflight_answer_labels(answer, question.multi_select);
+            if labels.is_empty() {
+                continue;
+            }
+            let field = spec
+                .interface
+                .params
+                .get(question.param.trim())
+                .ok_or_else(|| {
+                    format!(
+                        "Preflight question references unknown operator parameter `{}`",
+                        question.param
+                    )
+                })?;
+            let values = labels
+                .iter()
+                .map(|label| preflight_value_for_answer(question, field, label))
+                .collect::<Result<Vec<_>, _>>()?;
+            let value = if question.multi_select {
+                JsonValue::Array(values)
+            } else {
+                values
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| format!("Missing preflight choice for `{}`", question.param))?
+            };
+            params.insert(question.param.clone(), value);
+            answered_params.push(json!({
+                "param": question.param.clone(),
+                "questionId": question.id.clone(),
+                "question": question.question.clone(),
+                "labels": labels,
+            }));
+        }
+    }
+    if !answered_params.is_empty() {
+        attach_operator_preflight_metadata(root, spec, answered_params);
     }
 
     serde_json::to_string(&invocation).map_err(|err| err.to_string())
+}
+
+fn attach_operator_preflight_metadata(
+    root: &mut JsonMap<String, JsonValue>,
+    spec: &OperatorSpec,
+    answered_params: Vec<JsonValue>,
+) {
+    let mut params_by_source = JsonMap::new();
+    for param in answered_params
+        .iter()
+        .filter_map(|entry| entry.get("param").and_then(JsonValue::as_str))
+    {
+        params_by_source.insert(
+            param.to_string(),
+            JsonValue::String(OPERATOR_PARAM_SOURCE_USER_PREFLIGHT.to_string()),
+        );
+    }
+    let metadata_value = root
+        .entry("metadata".to_string())
+        .or_insert_with(|| JsonValue::Object(JsonMap::new()));
+    if !metadata_value.is_object() {
+        *metadata_value = JsonValue::Object(JsonMap::new());
+    }
+    if let Some(metadata) = metadata_value.as_object_mut() {
+        metadata.insert(
+            OPERATOR_PREFLIGHT_METADATA_KEY.to_string(),
+            json!({
+                "source": "operator_preflight",
+                "operatorId": spec.metadata.id,
+                "answeredParams": answered_params,
+                "paramsBySource": params_by_source,
+            }),
+        );
+    }
 }
 
 fn preflight_question_should_ask(
@@ -1740,6 +1926,8 @@ pub struct OperatorInvocation {
     pub params: BTreeMap<String, JsonValue>,
     #[serde(default)]
     pub resources: BTreeMap<String, JsonValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, JsonValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1878,6 +2066,10 @@ struct OperatorRunResult {
     effective_inputs: BTreeMap<String, JsonValue>,
     input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    param_sources: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preflight: Option<JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
     attempt: u32,
     max_attempts: u32,
@@ -2358,15 +2550,19 @@ async fn record_operator_success_best_effort(
     started_at: &str,
 ) {
     let output_summary = operator_output_summary(result);
-    let metadata = json!({
+    let mut metadata = json!({
         "runId": result.run_id,
         "runDir": result.run_dir,
         "provenancePath": result.provenance_path,
         "exportDir": result.export_dir,
         "operatorAlias": result.operator.alias,
         "runContext": result.run_context,
+        "paramSources": result.param_sources,
         "cache": result.cache,
     });
+    if let Some(preflight) = &result.preflight {
+        metadata["preflight"] = preflight.clone();
+    }
     let record = crate::domain::execution_records::ExecutionRecordInput {
         kind: "operator".to_string(),
         unit_id: Some(result.operator.id.clone()),
@@ -2412,13 +2608,26 @@ async fn record_operator_failure_best_effort(
             .to_string_lossy()
             .into_owned(),
     });
-    let metadata = json!({
+    let mut metadata = json!({
         "runDir": run_dir,
         "operatorAlias": alias,
         "operator": operator,
         "runContext": run_context,
         "error": error,
     });
+    if let (Some(resolved), Some(invocation)) = (resolved, invocation) {
+        let preflight_param_names = operator_invocation_preflight_answered_params(invocation);
+        let supplied_param_names = invocation.params.keys().cloned().collect::<BTreeSet<_>>();
+        metadata["paramSources"] = json!(operator_param_sources(
+            &resolved.spec,
+            &supplied_param_names,
+            &preflight_param_names,
+            &invocation.params,
+        ));
+        if let Some(preflight) = operator_invocation_preflight_metadata(invocation) {
+            metadata["preflight"] = preflight;
+        }
+    }
     let (input_hash, param_hash) = invocation
         .map(|invocation| {
             (
@@ -2487,6 +2696,80 @@ fn enforcement_json_for_context(ctx: &crate::domain::tools::ToolContext) -> Json
     })
 }
 
+pub fn operator_invocation_preflight_metadata(
+    invocation: &OperatorInvocation,
+) -> Option<JsonValue> {
+    invocation
+        .metadata
+        .get(OPERATOR_PREFLIGHT_METADATA_KEY)
+        .cloned()
+}
+
+pub fn operator_invocation_preflight_param_sources(
+    invocation: &OperatorInvocation,
+) -> BTreeMap<String, String> {
+    operator_invocation_preflight_answered_params(invocation)
+        .into_iter()
+        .map(|param| (param, OPERATOR_PARAM_SOURCE_USER_PREFLIGHT.to_string()))
+        .collect()
+}
+
+fn operator_invocation_preflight_answered_params(
+    invocation: &OperatorInvocation,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let Some(preflight) = operator_invocation_preflight_metadata(invocation) else {
+        return out;
+    };
+    if let Some(params_by_source) = preflight
+        .get("paramsBySource")
+        .and_then(JsonValue::as_object)
+    {
+        out.extend(params_by_source.keys().cloned());
+    }
+    if let Some(answered) = preflight
+        .get("answeredParams")
+        .and_then(JsonValue::as_array)
+    {
+        out.extend(
+            answered
+                .iter()
+                .filter_map(|entry| entry.get("param").and_then(JsonValue::as_str))
+                .map(str::to_string),
+        );
+    }
+    out
+}
+
+fn operator_param_sources(
+    spec: &OperatorSpec,
+    supplied_param_names: &BTreeSet<String>,
+    preflight_param_names: &BTreeSet<String>,
+    effective_params: &BTreeMap<String, JsonValue>,
+) -> BTreeMap<String, String> {
+    effective_params
+        .keys()
+        .map(|param| {
+            let source = if preflight_param_names.contains(param) {
+                OPERATOR_PARAM_SOURCE_USER_PREFLIGHT
+            } else if supplied_param_names.contains(param) {
+                OPERATOR_PARAM_SOURCE_CALLER
+            } else if spec
+                .interface
+                .params
+                .get(param)
+                .and_then(|field| field.default.as_ref())
+                .is_some()
+            {
+                OPERATOR_PARAM_SOURCE_DEFAULT
+            } else {
+                OPERATOR_PARAM_SOURCE_SYSTEM
+            };
+            (param.clone(), source.to_string())
+        })
+        .collect()
+}
+
 async fn execute_resolved_operator(
     ctx: &crate::domain::tools::ToolContext,
     resolved: ResolvedOperator,
@@ -2524,11 +2807,20 @@ async fn execute_resolved_operator(
         invocation.params.keys(),
         &resolved.spec.interface.params,
     )?;
+    let preflight = operator_invocation_preflight_metadata(&invocation);
+    let preflight_param_names = operator_invocation_preflight_answered_params(&invocation);
+    let supplied_param_names = invocation.params.keys().cloned().collect::<BTreeSet<_>>();
     let mut effective_params = apply_param_defaults(&resolved.spec, invocation.params);
     validate_field_values("params", &resolved.spec.interface.params, &effective_params)?;
     let effective_resources =
         apply_resource_defaults_and_overrides(&resolved.spec, invocation.resources)?;
     apply_equal_bindings(&resolved.spec, &mut effective_params, &effective_resources)?;
+    let param_sources = operator_param_sources(
+        &resolved.spec,
+        &supplied_param_names,
+        &preflight_param_names,
+        &effective_params,
+    );
 
     let canonical_inputs = canonicalize_inputs(
         ctx,
@@ -2577,6 +2869,8 @@ async fn execute_resolved_operator(
                 canonical_inputs,
                 input_fingerprints,
                 effective_params,
+                param_sources,
+                preflight,
                 effective_resources,
                 enforcement,
             )
@@ -2604,6 +2898,8 @@ async fn execute_resolved_operator(
                 canonical_inputs.clone(),
                 input_fingerprints.clone(),
                 effective_params.clone(),
+                param_sources.clone(),
+                preflight.clone(),
                 effective_resources.clone(),
                 enforcement.clone(),
                 cache_metadata.clone(),
@@ -2622,6 +2918,8 @@ async fn execute_resolved_operator(
                 canonical_inputs.clone(),
                 input_fingerprints.clone(),
                 effective_params.clone(),
+                param_sources.clone(),
+                preflight.clone(),
                 effective_resources.clone(),
                 enforcement.clone(),
                 cache_metadata.clone(),
@@ -2841,6 +3139,8 @@ async fn record_operator_cache_hit(
     effective_inputs: BTreeMap<String, JsonValue>,
     input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
+    param_sources: BTreeMap<String, String>,
+    preflight: Option<JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
     enforcement: JsonValue,
 ) -> Result<OperatorRunResult, OperatorToolError> {
@@ -2903,6 +3203,8 @@ async fn record_operator_cache_hit(
         effective_inputs,
         input_fingerprints,
         effective_params,
+        param_sources,
+        preflight,
         effective_resources,
         attempt: retry_state.attempt,
         max_attempts: retry_state.max_attempts,
@@ -4037,6 +4339,8 @@ async fn execute_local(
     effective_inputs: BTreeMap<String, JsonValue>,
     input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
+    param_sources: BTreeMap<String, String>,
+    preflight: Option<JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
     enforcement: JsonValue,
     cache: Option<OperatorRunCacheMetadata>,
@@ -4181,6 +4485,8 @@ async fn execute_local(
         effective_inputs,
         input_fingerprints,
         effective_params,
+        param_sources,
+        preflight,
         effective_resources,
         attempt: retry_state.attempt,
         max_attempts: retry_state.max_attempts,
@@ -4206,6 +4512,8 @@ async fn execute_in_environment(
     effective_inputs: BTreeMap<String, JsonValue>,
     input_fingerprints: BTreeMap<String, JsonValue>,
     effective_params: BTreeMap<String, JsonValue>,
+    param_sources: BTreeMap<String, String>,
+    preflight: Option<JsonValue>,
     effective_resources: BTreeMap<String, JsonValue>,
     enforcement: JsonValue,
     cache: Option<OperatorRunCacheMetadata>,
@@ -4333,6 +4641,8 @@ async fn execute_in_environment(
         effective_inputs,
         input_fingerprints,
         effective_params,
+        param_sources,
+        preflight,
         effective_resources,
         attempt: retry_state.attempt,
         max_attempts: retry_state.max_attempts,
@@ -6804,6 +7114,7 @@ mod tests {
             inputs: BTreeMap::from([("input".to_string(), JsonValue::String(input.to_string()))]),
             params: BTreeMap::new(),
             resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
         }
     }
 
@@ -6846,6 +7157,77 @@ mod tests {
         assert_eq!(rows[0].provider_plugin.as_deref(), Some("p"));
         assert_eq!(rows[0].status, "succeeded");
         assert_eq!(rows[0].session_id.as_deref(), Some("session-op"));
+    }
+
+    #[tokio::test]
+    async fn operator_result_and_record_include_param_sources() {
+        let tmp = TempDir::new().unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["/bin/sh", "-c", "true"]);
+        spec.interface.params.insert(
+            "method".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::Enum,
+                enum_values: vec![json!("auto"), json!("manual")],
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.interface.params.insert(
+            "alpha".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::Number,
+                default: Some(json!(0.05)),
+                ..OperatorFieldSpec::default()
+            },
+        );
+        let invocation = OperatorInvocation {
+            params: BTreeMap::from([("method".to_string(), json!("manual"))]),
+            metadata: BTreeMap::from([(
+                OPERATOR_PREFLIGHT_METADATA_KEY.to_string(),
+                json!({
+                    "source": "operator_preflight",
+                    "operatorId": "x",
+                    "answeredParams": [{"param": "method"}],
+                    "paramsBySource": {"method": OPERATOR_PARAM_SOURCE_USER_PREFLIGHT},
+                }),
+            )]),
+            ..OperatorInvocation::default()
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let arguments = serde_json::to_string(&invocation).expect("serialize invocation");
+
+        let (raw, is_error) = execute_resolved_operator_tool_call_with_context(
+            &ctx,
+            "x",
+            ResolvedOperator {
+                alias: "x".to_string(),
+                spec,
+            },
+            &arguments,
+            None,
+        )
+        .await;
+
+        assert!(!is_error, "{raw}");
+        let parsed = serde_json::from_str::<JsonValue>(&raw).unwrap();
+        assert_eq!(
+            parsed["paramSources"]["method"],
+            OPERATOR_PARAM_SOURCE_USER_PREFLIGHT
+        );
+        assert_eq!(
+            parsed["paramSources"]["alpha"],
+            OPERATOR_PARAM_SOURCE_DEFAULT
+        );
+        assert_eq!(
+            parsed["preflight"]["paramsBySource"]["method"],
+            OPERATOR_PARAM_SOURCE_USER_PREFLIGHT
+        );
+
+        let rows = crate::domain::execution_records::list_recent_execution_records(tmp.path(), 10)
+            .await
+            .expect("records");
+        let metadata = rows[0].metadata_json.as_deref().unwrap_or_default();
+        assert!(metadata.contains("\"paramSources\""));
+        assert!(metadata.contains(OPERATOR_PARAM_SOURCE_USER_PREFLIGHT));
     }
 
     #[tokio::test]
@@ -7296,6 +7678,162 @@ execution:
             &always_question,
             Some(&manual_params)
         ));
+    }
+
+    #[test]
+    fn preflight_answers_record_param_source_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["true"]);
+        spec.metadata.id = "preflight_metadata".to_string();
+        spec.interface.params.insert(
+            "method".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::Enum,
+                enum_values: vec![json!("auto"), json!("manual")],
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.preflight = Some(OperatorPreflightSpec {
+            questions: vec![OperatorPreflightQuestionSpec {
+                id: Some("method".to_string()),
+                param: "method".to_string(),
+                question: "Pick method?".to_string(),
+                header: "Method".to_string(),
+                multi_select: false,
+                ask_when: OperatorPreflightAskWhen {
+                    always: true,
+                    missing: false,
+                    empty: false,
+                    values: Vec::new(),
+                },
+                options: vec![
+                    OperatorPreflightOptionSpec {
+                        label: "Auto".to_string(),
+                        description: "Auto method".to_string(),
+                        value: json!("auto"),
+                        preview: None,
+                        custom: false,
+                        custom_placeholder: None,
+                    },
+                    OperatorPreflightOptionSpec {
+                        label: "Manual".to_string(),
+                        description: "Manual method".to_string(),
+                        value: json!("manual"),
+                        preview: None,
+                        custom: false,
+                        custom_placeholder: None,
+                    },
+                ],
+            }],
+        });
+        let updated = apply_operator_preflight_answers_for_spec(
+            &spec,
+            spec.preflight.as_ref().unwrap(),
+            &json!({"params": {"method": "ask"}}).to_string(),
+            &json!({"answers": {"Pick method?": "Manual"}}),
+        )
+        .expect("apply preflight");
+        let parsed = serde_json::from_str::<JsonValue>(&updated).unwrap();
+
+        assert_eq!(parsed["params"]["method"], "manual");
+        assert_eq!(
+            parsed["metadata"]["preflight"]["paramsBySource"]["method"],
+            OPERATOR_PARAM_SOURCE_USER_PREFLIGHT
+        );
+        assert_eq!(
+            parsed["metadata"]["preflight"]["answeredParams"][0]["param"],
+            "method"
+        );
+    }
+
+    #[test]
+    fn preflight_authoring_diagnostics_flag_data_only_questions() {
+        let tmp = TempDir::new().unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["true"]);
+        spec.metadata.id = "data_only_preflight".to_string();
+        spec.interface.params.insert(
+            "group_column".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::String,
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.interface.params.insert(
+            "sample_column".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::String,
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.preflight = Some(OperatorPreflightSpec {
+            questions: vec![
+                test_preflight_question("group", "group_column", "Which group column?"),
+                test_preflight_question("sample", "sample_column", "Which sample column?"),
+            ],
+        });
+
+        let diagnostics = operator_preflight_authoring_diagnostics(&spec);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, "warning");
+        assert!(diagnostics[0].message.contains("data/grouping"));
+
+        spec.interface.params.insert(
+            "de_method".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::Enum,
+                enum_values: vec![json!("auto"), json!("deseq2")],
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.preflight
+            .as_mut()
+            .unwrap()
+            .questions
+            .push(test_preflight_question(
+                "method",
+                "de_method",
+                "Which analysis method?",
+            ));
+        assert!(operator_preflight_authoring_diagnostics(&spec).is_empty());
+    }
+
+    fn test_preflight_question(
+        id: &str,
+        param: &str,
+        question: &str,
+    ) -> OperatorPreflightQuestionSpec {
+        OperatorPreflightQuestionSpec {
+            id: Some(id.to_string()),
+            param: param.to_string(),
+            question: question.to_string(),
+            header: id.to_string(),
+            multi_select: false,
+            ask_when: OperatorPreflightAskWhen {
+                always: true,
+                missing: false,
+                empty: false,
+                values: Vec::new(),
+            },
+            options: vec![
+                OperatorPreflightOptionSpec {
+                    label: "A".to_string(),
+                    description: "First option".to_string(),
+                    value: json!("a"),
+                    preview: None,
+                    custom: false,
+                    custom_placeholder: None,
+                },
+                OperatorPreflightOptionSpec {
+                    label: "B".to_string(),
+                    description: "Second option".to_string(),
+                    value: json!("b"),
+                    preview: None,
+                    custom: false,
+                    custom_placeholder: None,
+                },
+            ],
+        }
     }
 
     #[test]
@@ -8635,6 +9173,7 @@ execution:
                 ("email".to_string(), json!("")),
             ]),
             resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
         };
         let ctx = crate::domain::tools::ToolContext::new(tmp.path());
 
@@ -8748,6 +9287,7 @@ execution:
                 )]),
                 params: BTreeMap::new(),
                 resources: BTreeMap::new(),
+                metadata: BTreeMap::new(),
             },
             None,
         )
