@@ -410,6 +410,58 @@ Future direction:
 
 This is a later migration track, not an MVP blocker.
 
+### Retrieval-to-Operator migration strategy
+
+The migration should be additive and low-risk. Do **not** rewrite the existing
+retrieval / built-in tool-function logic as part of the Operator / Template MVP.
+
+Rationale:
+
+- Existing retrieval tools already provide useful behavior and are a stable
+  compatibility path for current users.
+- API wrapper behavior is network-sensitive and easy to regress through
+  seemingly small changes to query normalization, credentials, pagination, rate
+  limits, caching, and output formatting.
+- The new Operator / Template system should prove itself by running in parallel
+  before it replaces existing routes.
+
+Preferred path:
+
+1. Keep current retrieval and built-in tool functions unchanged except for
+   compatibility fixes required by `plugin.json` loading.
+2. Add new API wrapper Operators for thin public-data-source calls:
+   - GEO
+   - PubMed
+   - UniProt
+3. Register those Operators through the Unit Index with clear category/tags such
+   as `utility/data_retrieval`, `literature`, `knowledge`, `external_network`.
+4. Give each API wrapper Operator an explicit contract:
+   - inputs / params / outputs
+   - credential refs, if any
+   - `sideEffects: [external_network]`
+   - rate-limit and timeout expectations
+   - cache/version policy where possible
+   - structured output files suitable for downstream Templates
+5. Route new Agent tasks toward the Operator path once the Unit Index can expose
+   them cleanly, while keeping retrieval tools available as fallback.
+6. Compare old retrieval outputs and new Operator outputs on a small offline /
+   recorded fixture set before changing defaults.
+7. Only after parity and stability are demonstrated, consider weakening or
+   deprecating the old retrieval-specific paths.
+
+Mapping guidance:
+
+- Thin deterministic API wrappers -> Operator.
+- Multi-step query / filter / normalize / summarize flows -> Template.
+- Exploratory research workflows, literature review, and judgment-heavy source
+  selection -> Skill.
+
+Non-goal:
+
+- Do not collapse existing retrieval functions into the new Operator system in a
+  single rewrite. The migration should happen source-by-source and remain
+  reversible.
+
 ## Phased delivery plan
 
 ### Phase 1: Plugin manifest and contribution loading
@@ -512,8 +564,11 @@ Acceptance criteria:
 After MVP:
 
 1. **Retrieval-as-Operator migration**
-   - GEO, PubMed, and UniProt are good first candidates.
+   - Use an additive migration, not a rewrite of existing retrieval internals.
+   - GEO, PubMed, and UniProt are good first API wrapper Operator candidates.
    - Add `external_network` and versioned cache support.
+   - Keep old retrieval tools as compatibility fallback until fixture-based
+     parity is demonstrated.
 
 2. **Stage inference**
    - infer data stage from file types and file internals
@@ -580,4 +635,3 @@ Keep PRs small:
 5. ExecutionRecord SQLite write path
 
 Do not combine retrieval migration or environment resolver with the MVP PRs.
-
