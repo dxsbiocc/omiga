@@ -34,4 +34,6 @@ pub mod session;
 pub mod skills;
 pub mod suggestions;
 pub mod team_state;
+pub mod templates;
 pub mod tools;
+pub mod unit_index;

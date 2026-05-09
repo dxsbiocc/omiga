@@ -43,6 +43,9 @@ pub mod task_stop;
 pub mod task_update;
 pub mod todo_write;
 pub mod tool_search;
+pub mod unit_describe;
+pub mod unit_list;
+pub mod unit_search;
 pub mod visualization;
 pub mod web_safety;
 pub mod workflow;
@@ -77,6 +80,9 @@ pub enum ToolKind {
     NotebookEdit,
     OperatorList,
     OperatorDescribe,
+    UnitList,
+    UnitSearch,
+    UnitDescribe,
     Visualization,
     Sleep,
     AskUserQuestion,
@@ -129,6 +135,9 @@ impl fmt::Display for ToolKind {
             ToolKind::NotebookEdit => write!(f, "notebook_edit"),
             ToolKind::OperatorList => write!(f, "operator_list"),
             ToolKind::OperatorDescribe => write!(f, "operator_describe"),
+            ToolKind::UnitList => write!(f, "unit_list"),
+            ToolKind::UnitSearch => write!(f, "unit_search"),
+            ToolKind::UnitDescribe => write!(f, "unit_describe"),
             ToolKind::Visualization => write!(f, "visualization"),
             ToolKind::Sleep => write!(f, "sleep"),
             ToolKind::AskUserQuestion => write!(f, "ask_user_question"),
@@ -171,6 +180,9 @@ pub enum Tool {
     NotebookEdit(notebook_edit::NotebookEditArgs),
     OperatorList(operator_list::OperatorListArgs),
     OperatorDescribe(operator_describe::OperatorDescribeArgs),
+    UnitList(unit_list::UnitListArgs),
+    UnitSearch(unit_search::UnitSearchArgs),
+    UnitDescribe(unit_describe::UnitDescribeArgs),
     Visualization(visualization::VisualizationArgs),
     Sleep(sleep::SleepArgs),
     AskUserQuestion(ask_user_question::AskUserQuestionArgs),
@@ -214,6 +226,9 @@ impl Tool {
             Tool::NotebookEdit(_) => ToolKind::NotebookEdit,
             Tool::OperatorList(_) => ToolKind::OperatorList,
             Tool::OperatorDescribe(_) => ToolKind::OperatorDescribe,
+            Tool::UnitList(_) => ToolKind::UnitList,
+            Tool::UnitSearch(_) => ToolKind::UnitSearch,
+            Tool::UnitDescribe(_) => ToolKind::UnitDescribe,
             Tool::Visualization(_) => ToolKind::Visualization,
             Tool::Sleep(_) => ToolKind::Sleep,
             Tool::AskUserQuestion(_) => ToolKind::AskUserQuestion,
@@ -254,6 +269,9 @@ impl Tool {
             Tool::NotebookEdit(_) => "NotebookEdit",
             Tool::OperatorList(_) => "operator_list",
             Tool::OperatorDescribe(_) => "operator_describe",
+            Tool::UnitList(_) => "unit_list",
+            Tool::UnitSearch(_) => "unit_search",
+            Tool::UnitDescribe(_) => "unit_describe",
             Tool::Visualization(_) => "Visualization",
             Tool::Sleep(_) => "Sleep",
             Tool::AskUserQuestion(_) => "AskUserQuestion",
@@ -294,6 +312,9 @@ impl Tool {
             Tool::NotebookEdit(_) => notebook_edit::DESCRIPTION,
             Tool::OperatorList(_) => operator_list::DESCRIPTION,
             Tool::OperatorDescribe(_) => operator_describe::DESCRIPTION,
+            Tool::UnitList(_) => unit_list::DESCRIPTION,
+            Tool::UnitSearch(_) => unit_search::DESCRIPTION,
+            Tool::UnitDescribe(_) => unit_describe::DESCRIPTION,
             Tool::Visualization(_) => visualization::DESCRIPTION,
             Tool::Sleep(_) => sleep::DESCRIPTION,
             Tool::AskUserQuestion(_) => ask_user_question::DESCRIPTION,
@@ -339,6 +360,9 @@ impl Tool {
             Tool::OperatorDescribe(args) => {
                 operator_describe::OperatorDescribeTool::execute(ctx, args).await?
             }
+            Tool::UnitList(args) => unit_list::UnitListTool::execute(ctx, args).await?,
+            Tool::UnitSearch(args) => unit_search::UnitSearchTool::execute(ctx, args).await?,
+            Tool::UnitDescribe(args) => unit_describe::UnitDescribeTool::execute(ctx, args).await?,
             Tool::Visualization(args) => {
                 visualization::VisualizationTool::execute(ctx, args).await?
             }
@@ -498,6 +522,24 @@ impl Tool {
                 })?;
                 Ok(Tool::OperatorDescribe(args))
             }
+            ToolKind::UnitList => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid unit_list arguments: {}", e),
+                })?;
+                Ok(Tool::UnitList(args))
+            }
+            ToolKind::UnitSearch => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid unit_search arguments: {}", e),
+                })?;
+                Ok(Tool::UnitSearch(args))
+            }
+            ToolKind::UnitDescribe => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid unit_describe arguments: {}", e),
+                })?;
+                Ok(Tool::UnitDescribe(args))
+            }
             ToolKind::Visualization => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
                     message: format!("Invalid visualization arguments: {}", e),
@@ -641,6 +683,9 @@ impl Tool {
             "notebook_edit" => ToolKind::NotebookEdit,
             "operator_list" | "OperatorList" => ToolKind::OperatorList,
             "operator_describe" | "OperatorDescribe" => ToolKind::OperatorDescribe,
+            "unit_list" | "UnitList" => ToolKind::UnitList,
+            "unit_search" | "UnitSearch" => ToolKind::UnitSearch,
+            "unit_describe" | "UnitDescribe" => ToolKind::UnitDescribe,
             "visualization" => ToolKind::Visualization,
             "sleep" => ToolKind::Sleep,
             "ask_user_question" | "AskUserQuestion" => ToolKind::AskUserQuestion,
@@ -1270,6 +1315,9 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         todo_write::schema(),
         operator_list::schema(),
         operator_describe::schema(),
+        unit_list::schema(),
+        unit_search::schema(),
+        unit_describe::schema(),
         visualization::schema(),
         sleep::schema(),
         ask_user_question::schema(),
@@ -1318,8 +1366,11 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "connector" => (1, 3),
         "operator_list" => (1, 4),
         "operator_describe" => (1, 5),
-        "list_mcp_resources" => (1, 6),
-        "read_mcp_resource" => (1, 7),
+        "unit_list" => (1, 6),
+        "unit_search" => (1, 7),
+        "unit_describe" => (1, 8),
+        "list_mcp_resources" => (1, 9),
+        "read_mcp_resource" => (1, 10),
 
         // Mutating tools.
         "file_edit" => (2, 0),
@@ -1522,6 +1573,9 @@ pub fn is_concurrency_safe_by_name(name: &str) -> bool {
             | "connector"
             | "operator_list"
             | "operator_describe"
+            | "unit_list"
+            | "unit_search"
+            | "unit_describe"
             | "ToolSearch"
             | "tool_search"
             | "visualization"
@@ -1577,6 +1631,15 @@ mod tool_enum_tests {
 
         let t = Tool::from_json_str("grep", r#"{"pattern":"x"}"#).unwrap();
         assert!(matches!(t, Tool::Grep(_)));
+
+        let t = Tool::from_json_str("unit_list", r#"{"kind":"template"}"#).unwrap();
+        assert!(matches!(t, Tool::UnitList(_)));
+
+        let t = Tool::from_json_str("unit_search", r#"{"query":"diff","stage":"count"}"#).unwrap();
+        assert!(matches!(t, Tool::UnitSearch(_)));
+
+        let t = Tool::from_json_str("unit_describe", r#"{"id":"provider/template/demo"}"#).unwrap();
+        assert!(matches!(t, Tool::UnitDescribe(_)));
     }
 
     #[test]

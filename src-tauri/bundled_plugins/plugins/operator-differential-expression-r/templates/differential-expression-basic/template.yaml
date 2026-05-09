@@ -1,0 +1,40 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: bulk_differential_expression_basic
+  version: 0.1.0
+  name: Bulk Differential Expression
+  description: Parameterized bulk RNA-seq differential-expression analysis skeleton. This read-only MVP template points at the existing curated differential-expression operator until executable templates are enabled.
+  tags:
+    - omics
+    - transcriptomics
+    - differential-expression
+    - bulk-rnaseq
+classification:
+  category: omics/transcriptomics/differential
+  tags:
+    - rna
+    - bulk-rnaseq
+    - differential
+    - table
+    - figure
+  stageInput:
+    - count_matrix
+    - sample_metadata
+  stageOutput:
+    - diff_results
+    - differential_plots
+exposure:
+  exposeToAgent: true
+interface:
+  inputs: {}
+  params: {}
+  outputs: {}
+runtime:
+  envRef: r-bioc
+template:
+  engine: static
+  entry: ./template.yaml
+execution:
+  interpreter: existing-operator
+migrationTarget: omics_differential_expression_basic

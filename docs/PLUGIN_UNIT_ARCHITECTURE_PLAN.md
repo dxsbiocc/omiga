@@ -516,6 +516,19 @@ Acceptance criteria:
 - `unit_describe` returns full TemplateSpec.
 - No template execution is required yet.
 
+First implementation slice:
+
+- backend TemplateSpec parser/validator/discovery through manifest `templates`
+  paths
+- backend Unit Index model over Operator / Template / Skill entries
+- read-only agent tools: `unit_list`, `unit_search`, `unit_describe`
+- one bundled differential-expression TemplateSpec that marks the existing
+  operator as its migration target
+
+This slice intentionally does **not** execute templates, rewrite existing
+operators, or change retrieval internals. It proves the routing/catalog layer
+before moving execution into generated template runs.
+
 ### Phase 4: Executable Template MVP
 
 Deliverables:
