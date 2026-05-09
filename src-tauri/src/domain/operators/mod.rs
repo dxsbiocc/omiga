@@ -30,8 +30,9 @@ const OPERATOR_MAX_MAX_ATTEMPTS: u32 = 5;
 const OPERATOR_CACHE_SCAN_LIMIT: usize = 200;
 const OPERATOR_STRUCTURED_OUTPUTS_FILE: &str = "outputs.json";
 const OPERATOR_STRUCTURED_OUTPUTS_MAX_BYTES: u64 = 1024 * 1024;
-const OPERATOR_PREFLIGHT_MAX_QUESTIONS: usize = 12;
+const OPERATOR_PREFLIGHT_MAX_QUESTIONS: usize = 4;
 const OPERATOR_PREFLIGHT_MAX_OPTIONS: usize = 5;
+const OPERATOR_PREFLIGHT_ASK_STATE: &str = "ask";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1296,7 +1297,30 @@ fn field_schema(field: &OperatorFieldSpec, preflight_question: Option<&String>) 
     if let Some(maximum) = field.maximum {
         schema.insert("maximum".to_string(), json!(maximum));
     }
-    JsonValue::Object(schema)
+    let value_schema = JsonValue::Object(schema);
+    if preflight_question.is_some() {
+        return preflight_ask_state_schema(value_schema);
+    }
+    value_schema
+}
+
+fn preflight_ask_state_schema(value_schema: JsonValue) -> JsonValue {
+    let mut wrapped = JsonMap::new();
+    if let Some(description) = value_schema.get("description").cloned() {
+        wrapped.insert("description".to_string(), description);
+    }
+    wrapped.insert(
+        "oneOf".to_string(),
+        json!([
+            value_schema,
+            {
+                "type": "string",
+                "enum": [OPERATOR_PREFLIGHT_ASK_STATE],
+                "description": "Explicit ask state: set this parameter to `ask` to make Omiga ask the user through the operator preflight UI."
+            }
+        ]),
+    );
+    JsonValue::Object(wrapped)
 }
 
 fn field_description(
@@ -1309,7 +1333,7 @@ fn field_description(
     }
     if let Some(question) = preflight_question {
         parts.push(format!(
-            "Ask state: Omiga can collect this from the user before execution (`{question}`); do not guess a value unless the user already specified it."
+            "Ask state: omit this value or set it to `{OPERATOR_PREFLIGHT_ASK_STATE}` to make Omiga collect it before execution (`{question}`); do not guess a value unless the user already specified it."
         ));
     }
     if field.kind.is_path_like() {
@@ -1454,6 +1478,12 @@ fn preflight_question_should_ask(
         return true;
     }
     let value = params.and_then(|params| params.get(&question.param));
+    if value
+        .map(json_value_is_preflight_ask_state)
+        .unwrap_or(false)
+    {
+        return true;
+    }
     let missing = value.is_none() || matches!(value, Some(JsonValue::Null));
     if question.ask_when.missing && missing {
         return true;
@@ -1469,6 +1499,31 @@ fn preflight_question_should_ask(
             .any(|expected| preflight_value_matches(actual, expected));
     }
     false
+}
+
+fn json_value_is_preflight_ask_state(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::String(value) => value
+            .trim()
+            .eq_ignore_ascii_case(OPERATOR_PREFLIGHT_ASK_STATE),
+        JsonValue::Object(values) => {
+            values
+                .get("state")
+                .or_else(|| values.get("status"))
+                .and_then(JsonValue::as_str)
+                .map(|value| {
+                    value
+                        .trim()
+                        .eq_ignore_ascii_case(OPERATOR_PREFLIGHT_ASK_STATE)
+                })
+                .unwrap_or(false)
+                || values
+                    .get(OPERATOR_PREFLIGHT_ASK_STATE)
+                    .and_then(JsonValue::as_bool)
+                    .unwrap_or(false)
+        }
+        _ => false,
+    }
 }
 
 fn json_value_is_empty(value: &JsonValue) -> bool {
@@ -7147,6 +7202,14 @@ execution:
                         .unwrap()
                         .contains("Ask state")
                 );
+                let ask_state_schema = schema["properties"]["params"]["properties"]["de_method"]
+                    ["oneOf"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|candidate| candidate["enum"] == json!(["ask"]))
+                    .expect("preflight params should allow explicit ask state");
+                assert_eq!(ask_state_schema["type"], "string");
             }
             assert_eq!(
                 operator.source.source_plugin,
@@ -7203,6 +7266,18 @@ execution:
             &question,
             Some(&manual_params)
         ));
+
+        let mut ask_params = JsonMap::new();
+        ask_params.insert("method".to_string(), JsonValue::String("ASK".to_string()));
+        assert!(preflight_question_should_ask(&question, Some(&ask_params)));
+
+        let mut ask_object_params = JsonMap::new();
+        ask_object_params.insert("method".to_string(), json!({"state": "ask"}));
+        assert!(preflight_question_should_ask(
+            &question,
+            Some(&ask_object_params)
+        ));
+
         assert_eq!(
             preflight_answer_labels(&json!("Auto, Manual"), true),
             vec!["Auto".to_string(), "Manual".to_string()]

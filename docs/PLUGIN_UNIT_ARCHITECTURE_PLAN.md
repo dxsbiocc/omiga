@@ -775,6 +775,38 @@ Deferred beyond the fourth version:
 - self-evolution reports that propose new Operator / Template candidates from
   ExecutionRecord lineage.
 
+### Focused follow-up status: ask/preflight hardening, 2026-05-09
+
+Current-window focus after V4 is the Operator/Template ask/preflight path, not
+Computer Use or visualization Template expansion.
+
+Completed in this focused follow-up:
+
+- Constrained `ask_user_question` and Operator preflight manifests to **1–4
+  focused questions** so agents can adapt question count by task without
+  falling back to long forms.
+- Added an explicit preflight ask state for Operator/Template-backed params:
+  callers may omit a preflight param or set it to `ask` / `{"state":"ask"}` /
+  `{"status":"ask"}` to force Omiga to collect the user's choice before
+  execution.
+- Exposed the ask state in generated Operator parameter schemas via a `oneOf`
+  branch, while preserving the real value schema for normal execution.
+- Kept the bundled differential-expression Operator at four manifest-driven
+  decisions: input data type, DE method, FDR threshold, and log2FC threshold;
+  these are recommended/customizable analysis choices rather than only dataset
+  or grouping questions.
+- Documented the authoring rule in `docs/OPERATOR_PLUGIN_MANIFEST.md`.
+
+Next focused improvements:
+
+- Add a small UI/trace affordance that shows which params were filled by
+  preflight versus supplied by the agent/user.
+- Add authoring diagnostics that flag preflight questions which only ask about
+  data location/grouping but never expose method, threshold, or filtering
+  choices.
+- Extend GEO/UniProt API-wrapper pilots as Operators without changing existing
+  built-in retrieval tool behavior.
+
 ## Non-goals for MVP
 
 - Do not reimplement skills.

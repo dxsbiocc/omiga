@@ -83,7 +83,9 @@ preflight:
 ```
 
 - `param` must reference an `interface.params` field.
+- Keep an operator preflight to **1–4 focused questions**. If a workflow needs more decisions, split it into another short ask round instead of showing a long form.
 - `askWhen.missing`, `askWhen.empty`, and `askWhen.values[]` decide when the chat path asks the question.
+- Any preflight-backed param also has an explicit ask state: callers may omit the param or set it to `ask` (or `{"state":"ask"}` / `{"status":"ask"}`) to force Omiga to ask the user before execution. Reserve `ask` for this sentinel on preflight params.
 - `options[].label` is what the user sees; `options[].value` is written back into `params.{param}`.
 - Keep defaults in `interface.params` when non-interactive callers should still run without a chat preflight.
 

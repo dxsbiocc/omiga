@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::pin::Pin;
 
-const MAX_QUESTIONS: usize = 12;
+const MAX_QUESTIONS: usize = 4;
 const MIN_QUESTIONS: usize = 1;
 const MAX_OPTIONS: usize = 5;
 const MIN_OPTIONS: usize = 2;
@@ -19,7 +19,7 @@ const HEADER_MAX_CHARS: usize = 12;
 
 pub const DESCRIPTION: &str = r#"Ask the user multiple-choice questions to gather information, resolve ambiguity, or offer options.
 
-Ask as many focused questions as the task genuinely needs, instead of forcing a fixed count. Keep simple tasks to one or two questions, and split complex workflows into a concise sequence. Each question has 2–5 options with short labels and longer descriptions. Optional `preview` on an option helps compare concrete artifacts (markdown or HTML fragment per product guidance). Mark one option as `custom: true` when the UI should collect a user-supplied value.
+Ask 1–4 focused questions as the task genuinely needs, instead of forcing a fixed count. Keep simple tasks to one or two questions, and split complex workflows into another short ask round if more than four decisions are truly needed. Each question has 2–5 options with short labels and longer descriptions. Optional `preview` on an option helps compare concrete artifacts (markdown or HTML fragment per product guidance). Mark one option as `custom: true` when the UI should collect a user-supplied value.
 
 In the Omiga app, the chat UI shows these questions and waits for your selections before the agent continues.
 
@@ -220,7 +220,7 @@ pub fn schema() -> ToolSchema {
                 "questions": {
                     "type": "array",
                     "minItems": 1,
-                    "maxItems": 12,
+                    "maxItems": 4,
                     "items": {
                         "type": "object",
                         "properties": {
@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn validate_allows_task_sized_question_sets() {
-        let questions = (0..6)
+        let questions = (0..4)
             .map(|idx| {
                 let mut q = sample_question();
                 q.question = format!("Decision {}?", idx + 1);
@@ -312,6 +312,26 @@ mod tests {
             metadata: None,
         };
         validate(&args).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_more_than_four_questions() {
+        let questions = (0..5)
+            .map(|idx| {
+                let mut q = sample_question();
+                q.question = format!("Decision {}?", idx + 1);
+                q.header = format!("D{}", idx + 1);
+                q
+            })
+            .collect();
+        let args = AskUserQuestionArgs {
+            questions,
+            answers: None,
+            annotations: None,
+            metadata: None,
+        };
+        let err = validate(&args).unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments { .. }));
     }
 
     #[test]
