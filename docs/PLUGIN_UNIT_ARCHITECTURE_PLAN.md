@@ -627,6 +627,12 @@ Completed in the second version:
     slot.
   - empty Template interfaces inherit the migration-target Operator interface.
   - rendered templates inject source context such as `template.pluginRoot`.
+- Fixture-level parity hardening:
+  - PCA has an executable fixture that runs both the rendered Template wrapper
+    and the migration-target Operator, then compares structured outputs and key
+    TSV artifacts.
+  - DE and enrichment stay at contract/wrapper parity until their Bioconductor
+    dependencies are available in a deterministic test environment.
 - Template-preferred routing and ask/preflight:
   - `template_execute` is described as the preferred high-level workflow surface
     for DE/PCA/enrichment-style analyses.
@@ -634,13 +640,16 @@ Completed in the second version:
     migration target provides them, so the agent can ask focused recommended and
     custom-choice questions before execution instead of guessing analysis
     parameters.
+- Lineage diagnostics:
+  - ExecutionRecord child filtering and `childrenByParent` output are covered by
+    tool-level tests, not only storage tests.
 
-Still deferred after the second version:
+Beyond the second version:
 
 - Independent, fully expanded R template bodies that no longer call the legacy
   curated scripts internally.
-- Fixture-based numeric/artifact parity comparison between those independent
-  rendered bodies and the legacy Operators.
+- Full fixture-based numeric/artifact parity for those independent rendered
+  bodies and the legacy Operators.
 - environment profile resolver and automatic environment preparation.
 - retrieval-to-Operator migration for GEO / PubMed / UniProt.
 - self-evolution graph mining and auto-registration.
@@ -717,6 +726,8 @@ Runtime:
 
 - existing operator smoke tests remain green
 - rendered Template contract parity tests remain green for DE/PCA/enrichment
+- rendered PCA fixture parity test compares actual Template wrapper and
+  migration-target Operator outputs
 - numeric/artifact fixture parity becomes required once rendered templates stop
   delegating internally to the curated legacy R scripts
 

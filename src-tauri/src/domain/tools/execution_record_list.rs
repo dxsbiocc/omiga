@@ -107,3 +107,101 @@ pub fn schema() -> ToolSchema {
         }),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::streaming::StreamOutputItem;
+    use futures::StreamExt;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn lists_children_by_parent_and_filters_child_records() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let parent_id = crate::domain::execution_records::record_execution(
+            tmp.path(),
+            crate::domain::execution_records::ExecutionRecordInput {
+                kind: "template".to_string(),
+                unit_id: Some("template_a".to_string()),
+                canonical_id: Some("provider/template/template_a".to_string()),
+                provider_plugin: Some("provider".to_string()),
+                status: "succeeded".to_string(),
+                session_id: Some("session-1".to_string()),
+                parent_execution_id: None,
+                started_at: Some("2026-05-09T00:00:00Z".to_string()),
+                ended_at: Some("2026-05-09T00:00:03Z".to_string()),
+                input_hash: None,
+                param_hash: None,
+                output_summary_json: Some(json!({"status": "succeeded"})),
+                runtime_json: None,
+                metadata_json: None,
+            },
+        )
+        .await
+        .expect("parent");
+        let child_id = crate::domain::execution_records::record_execution(
+            tmp.path(),
+            crate::domain::execution_records::ExecutionRecordInput {
+                kind: "operator".to_string(),
+                unit_id: Some("operator_a".to_string()),
+                canonical_id: Some("provider/operator/operator_a".to_string()),
+                provider_plugin: Some("provider".to_string()),
+                status: "succeeded".to_string(),
+                session_id: Some("session-1".to_string()),
+                parent_execution_id: Some(parent_id.clone()),
+                started_at: Some("2026-05-09T00:00:01Z".to_string()),
+                ended_at: Some("2026-05-09T00:00:02Z".to_string()),
+                input_hash: None,
+                param_hash: None,
+                output_summary_json: Some(json!({"status": "succeeded"})),
+                runtime_json: None,
+                metadata_json: None,
+            },
+        )
+        .await
+        .expect("child");
+        let ctx = ToolContext::new(tmp.path());
+
+        let children = execute_to_json(
+            &ctx,
+            ExecutionRecordListArgs {
+                limit: Some(10),
+                parent_execution_id: Some(parent_id.clone()),
+                include_children: false,
+            },
+        )
+        .await;
+        assert_eq!(children["count"], 1);
+        assert_eq!(children["records"][0]["id"], child_id);
+        assert_eq!(children["records"][0]["parentExecutionId"], parent_id);
+
+        let parents_with_children = execute_to_json(
+            &ctx,
+            ExecutionRecordListArgs {
+                limit: Some(10),
+                parent_execution_id: None,
+                include_children: true,
+            },
+        )
+        .await;
+        assert_eq!(
+            parents_with_children["childrenByParent"][parent_id.as_str()][0]["id"],
+            child_id
+        );
+    }
+
+    async fn execute_to_json(
+        ctx: &ToolContext,
+        args: ExecutionRecordListArgs,
+    ) -> serde_json::Value {
+        let mut stream = ExecutionRecordListTool::execute(ctx, args)
+            .await
+            .expect("execute");
+        while let Some(item) = stream.next().await {
+            if let StreamOutputItem::Text(text) = item {
+                return serde_json::from_str(&text).expect("json");
+            }
+        }
+        panic!("execution_record_list did not return text output");
+    }
+}

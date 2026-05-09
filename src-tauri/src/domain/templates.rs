@@ -254,67 +254,8 @@ pub async fn execute_template_tool_call(
     let parent_execution_id =
         record_template_start_best_effort(ctx, &template, &invocation, &started_at).await;
 
-    let primary_result = if uses_existing_operator(&template) {
-        execute_template_via_migration_target(
-            ctx,
-            &template,
-            &invocation,
-            parent_execution_id.as_deref(),
-        )
-        .await
-    } else {
-        execute_rendered_template(ctx, &template, &invocation, parent_execution_id.as_deref()).await
-    };
-    let result = match primary_result {
-        Ok((raw, true, metadata))
-            if !uses_existing_operator(&template)
-                && template_fallback_to_migration_target(&template) =>
-        {
-            execute_template_via_migration_target(
-                ctx,
-                &template,
-                &invocation,
-                parent_execution_id.as_deref(),
-            )
-            .await
-            .map(|(fallback_raw, fallback_is_error, fallback_metadata)| {
-                (
-                    fallback_raw,
-                    fallback_is_error,
-                    serde_json::json!({
-                        "executionMode": "fallbackMigrationTarget",
-                        "primary": metadata,
-                        "primaryResult": serde_json::from_str::<JsonValue>(&raw).ok(),
-                        "fallback": fallback_metadata,
-                    }),
-                )
-            })
-        }
-        Err(message)
-            if !uses_existing_operator(&template)
-                && template_fallback_to_migration_target(&template) =>
-        {
-            execute_template_via_migration_target(
-                ctx,
-                &template,
-                &invocation,
-                parent_execution_id.as_deref(),
-            )
-            .await
-            .map(|(fallback_raw, fallback_is_error, fallback_metadata)| {
-                (
-                    fallback_raw,
-                    fallback_is_error,
-                    serde_json::json!({
-                        "executionMode": "fallbackMigrationTarget",
-                        "primaryError": message,
-                        "fallback": fallback_metadata,
-                    }),
-                )
-            })
-        }
-        other => other,
-    };
+    let result =
+        execute_template_runtime(ctx, &template, &invocation, parent_execution_id.as_deref()).await;
 
     match result {
         Ok((raw, is_error, metadata)) => {
@@ -348,6 +289,59 @@ pub async fn execute_template_tool_call(
                 true,
             )
         }
+    }
+}
+
+async fn execute_template_runtime(
+    ctx: &crate::domain::tools::ToolContext,
+    template: &TemplateSpecWithSource,
+    invocation: &crate::domain::operators::OperatorInvocation,
+    parent_execution_id: Option<&str>,
+) -> Result<(String, bool, JsonValue), String> {
+    let primary_result = if uses_existing_operator(template) {
+        execute_template_via_migration_target(ctx, template, invocation, parent_execution_id).await
+    } else {
+        execute_rendered_template(ctx, template, invocation, parent_execution_id).await
+    };
+    match primary_result {
+        Ok((raw, true, metadata))
+            if !uses_existing_operator(template)
+                && template_fallback_to_migration_target(template) =>
+        {
+            execute_template_via_migration_target(ctx, template, invocation, parent_execution_id)
+                .await
+                .map(|(fallback_raw, fallback_is_error, fallback_metadata)| {
+                    (
+                        fallback_raw,
+                        fallback_is_error,
+                        serde_json::json!({
+                            "executionMode": "fallbackMigrationTarget",
+                            "primary": metadata,
+                            "primaryResult": serde_json::from_str::<JsonValue>(&raw).ok(),
+                            "fallback": fallback_metadata,
+                        }),
+                    )
+                })
+        }
+        Err(message)
+            if !uses_existing_operator(template)
+                && template_fallback_to_migration_target(template) =>
+        {
+            execute_template_via_migration_target(ctx, template, invocation, parent_execution_id)
+                .await
+                .map(|(fallback_raw, fallback_is_error, fallback_metadata)| {
+                    (
+                        fallback_raw,
+                        fallback_is_error,
+                        serde_json::json!({
+                            "executionMode": "fallbackMigrationTarget",
+                            "primaryError": message,
+                            "fallback": fallback_metadata,
+                        }),
+                    )
+                })
+        }
+        other => other,
     }
 }
 
@@ -1779,6 +1773,255 @@ execution:
             .expect("report path");
         assert_eq!(fs::read_to_string(report).expect("report"), "hello world\n");
         assert_eq!(metadata["executionMode"], "renderedTemplate");
+    }
+
+    #[tokio::test]
+    async fn rendered_pca_template_matches_migration_target_fixture_outputs() {
+        if std::process::Command::new("Rscript")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping PCA rendered parity fixture: Rscript unavailable");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let matrix = tmp.path().join("pca-matrix.tsv");
+        let metadata = tmp.path().join("pca-metadata.tsv");
+        fs::write(
+            &matrix,
+            "gene\ts1\ts2\ts3\ts4\n\
+             g1\t10\t11\t2\t1\n\
+             g2\t5\t6\t7\t8\n\
+             g3\t100\t98\t30\t33\n\
+             g4\t3\t4\t20\t21\n",
+        )
+        .expect("matrix");
+        fs::write(&metadata, "sample\tgroup\ns1\tA\ns2\tA\ns3\tB\ns4\tB\n").expect("metadata");
+        let (template, _operator) =
+            bundled_template_and_operator("operator-pca-r", "pca-matrix", "pca-matrix");
+        let invocation = crate::domain::operators::OperatorInvocation {
+            inputs: BTreeMap::from([
+                ("matrix".to_string(), json!(matrix.to_string_lossy())),
+                ("metadata".to_string(), json!(metadata.to_string_lossy())),
+            ]),
+            params: BTreeMap::from([
+                ("delimiter".to_string(), json!("tab")),
+                ("row_names".to_string(), json!(true)),
+                ("features_by_rows".to_string(), json!(true)),
+                ("center".to_string(), json!(true)),
+                ("scale".to_string(), json!(false)),
+                ("top_variable_features".to_string(), json!(4)),
+                ("sample_column".to_string(), json!("sample")),
+                ("group_column".to_string(), json!("group")),
+                ("plot_labels".to_string(), json!(false)),
+                ("confidence_hulls".to_string(), json!(false)),
+            ]),
+            resources: BTreeMap::new(),
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let (rendered_raw, rendered_is_error, rendered_metadata) =
+            execute_rendered_template(&ctx, &template, &invocation, None)
+                .await
+                .expect("rendered template");
+        let (target_raw, target_is_error, target_metadata) =
+            execute_template_via_migration_target(&ctx, &template, &invocation, None)
+                .await
+                .expect("migration target");
+
+        assert!(!rendered_is_error, "{rendered_raw}");
+        assert!(!target_is_error, "{target_raw}");
+        assert_eq!(rendered_metadata["executionMode"], "renderedTemplate");
+        assert_eq!(target_metadata["executionMode"], "migrationTarget");
+
+        let rendered: JsonValue = serde_json::from_str(&rendered_raw).expect("rendered json");
+        let target: JsonValue = serde_json::from_str(&target_raw).expect("target json");
+        assert_eq!(rendered["status"], "succeeded");
+        assert_eq!(target["status"], "succeeded");
+        assert_eq!(
+            rendered["structuredOutputs"]["samples"],
+            target["structuredOutputs"]["samples"]
+        );
+        assert_eq!(
+            rendered["structuredOutputs"]["groups"],
+            target["structuredOutputs"]["groups"]
+        );
+        assert_eq!(
+            rendered["structuredOutputs"]["featuresUsed"],
+            target["structuredOutputs"]["featuresUsed"]
+        );
+        for output_name in ["scores", "variance", "group_summary"] {
+            assert_eq!(
+                output_file_contents(&rendered, output_name),
+                output_file_contents(&target, output_name),
+                "PCA output `{output_name}` should match between rendered template and migration target"
+            );
+        }
+    }
+
+    fn output_file_contents(result: &JsonValue, output_name: &str) -> String {
+        let path = result["outputs"][output_name][0]["path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing output path `{output_name}`"));
+        fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("read output `{output_name}` at `{path}`: {err}"))
+    }
+
+    #[tokio::test]
+    async fn rendered_template_failure_falls_back_and_records_child_lineage() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugin_root = tmp.path().join("fallback-plugin");
+        let script_dir = plugin_root.join("scripts");
+        let operator_dir = plugin_root.join("operators").join("fallback-report");
+        let template_dir = plugin_root.join("templates").join("fallback-report");
+        fs::create_dir_all(&script_dir).expect("scripts");
+        fs::create_dir_all(&operator_dir).expect("operator dir");
+        fs::create_dir_all(&template_dir).expect("template dir");
+        fs::write(
+            script_dir.join("write_report.sh"),
+            r#"#!/bin/sh
+set -eu
+outdir="$1"
+message="$2"
+mkdir -p "$outdir"
+printf '%s\n' "$message" > "$outdir/report.txt"
+printf '{"message":"%s"}\n' "$message" > "$outdir/outputs.json"
+"#,
+        )
+        .expect("operator script");
+        fs::write(
+            operator_dir.join("operator.yaml"),
+            r#"apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: local_fallback_report
+  version: 0.1.0
+  name: Local fallback report
+interface:
+  params:
+    message:
+      kind: string
+      required: true
+  outputs:
+    report:
+      kind: file
+      required: true
+      glob: report.txt
+    message:
+      kind: string
+      required: true
+runtime:
+  placement:
+    supported: [local]
+  container:
+    supported: [none]
+execution:
+  argv:
+    - /bin/sh
+    - ./scripts/write_report.sh
+    - ${outdir}
+    - ${params.message}
+"#,
+        )
+        .expect("operator manifest");
+        fs::write(
+            template_dir.join("fail.sh"),
+            r#"#!/bin/sh
+echo "primary rendered path failed intentionally" >&2
+exit 7
+"#,
+        )
+        .expect("template script");
+        fs::write(
+            template_dir.join("template.yaml"),
+            r#"apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: fallback_template
+  version: 0.1.0
+  name: Fallback Template
+interface:
+  inputs: {}
+  params: {}
+  outputs: {}
+template:
+  engine: jinja2
+  entry: ./fail.sh
+execution:
+  interpreter: /bin/sh
+  fallbackToMigrationTarget: true
+migrationTarget: local_fallback_report
+"#,
+        )
+        .expect("template manifest");
+        let template = load_template_manifest(
+            &template_dir.join("template.yaml"),
+            "fallback@local",
+            plugin_root,
+        )
+        .expect("template");
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+        let invocation = crate::domain::operators::OperatorInvocation {
+            inputs: BTreeMap::new(),
+            params: BTreeMap::from([("message".to_string(), json!("fallback ok"))]),
+            resources: BTreeMap::new(),
+        };
+        let started_at = "2026-05-09T00:00:00Z";
+        let parent_id = record_template_start_best_effort(&ctx, &template, &invocation, started_at)
+            .await
+            .expect("parent record");
+
+        let (raw, is_error, metadata) =
+            execute_template_runtime(&ctx, &template, &invocation, Some(parent_id.as_str()))
+                .await
+                .expect("fallback execution");
+        record_template_execution_best_effort(
+            &ctx,
+            &template,
+            &invocation,
+            started_at,
+            &raw,
+            is_error,
+            metadata.clone(),
+            Some(parent_id.as_str()),
+        )
+        .await;
+
+        assert!(!is_error, "{raw}");
+        let parsed: JsonValue = serde_json::from_str(&raw).expect("fallback json");
+        assert_eq!(parsed["status"], "succeeded");
+        assert_eq!(parsed["structuredOutputs"]["message"], "fallback ok");
+        assert_eq!(metadata["executionMode"], "fallbackMigrationTarget");
+        assert_eq!(metadata["fallback"]["executionMode"], "migrationTarget");
+
+        let children = crate::domain::execution_records::list_child_execution_records(
+            tmp.path(),
+            &parent_id,
+            10,
+        )
+        .await
+        .expect("children");
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().any(|record| {
+            record.kind == "operator"
+                && record.unit_id.as_deref() == Some("fallback_template")
+                && record.status == "failed"
+        }));
+        assert!(children.iter().any(|record| {
+            record.kind == "operator"
+                && record.unit_id.as_deref() == Some("local_fallback_report")
+                && record.status == "succeeded"
+        }));
+        let parent =
+            crate::domain::execution_records::list_recent_execution_records(tmp.path(), 10)
+                .await
+                .expect("records")
+                .into_iter()
+                .find(|record| record.id == parent_id)
+                .expect("parent");
+        assert_eq!(parent.status, "succeeded");
     }
 
     #[tokio::test]
