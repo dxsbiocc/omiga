@@ -4,6 +4,7 @@
   "description": "Built-in atomic operator plugin: real ORA and GSEA enrichment via clusterProfiler and fgsea in the shared analysis environment.",
   "operators": "./operators",
   "templates": "./templates",
+  "environments": "./environments",
   "interface": {
     "displayName": "Functional Enrichment",
     "shortDescription": "clusterProfiler/fgsea enrichment plots",

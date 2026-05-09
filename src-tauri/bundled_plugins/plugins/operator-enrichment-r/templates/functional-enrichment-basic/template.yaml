@@ -2,9 +2,9 @@ apiVersion: omiga.ai/unit/v1alpha1
 kind: Template
 metadata:
   id: functional_enrichment_basic
-  version: 0.2.0
+  version: 0.3.0
   name: Functional Enrichment
-  description: Rendered R ORA/GSEA enrichment analysis skeleton for gene lists and ranked gene tables. The second-version template keeps the legacy curated operator as migration fallback and parity baseline.
+  description: Rendered R ORA/GSEA enrichment analysis skeleton for gene lists and ranked gene tables. The third-version template owns an independent rendered R body while keeping the legacy curated operator as migration fallback and parity baseline.
   tags:
     - omics
     - enrichment

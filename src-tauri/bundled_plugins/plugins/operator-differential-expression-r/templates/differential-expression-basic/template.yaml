@@ -2,9 +2,9 @@ apiVersion: omiga.ai/unit/v1alpha1
 kind: Template
 metadata:
   id: bulk_differential_expression_basic
-  version: 0.2.0
+  version: 0.3.0
   name: Bulk Differential Expression
-  description: Rendered R differential-expression analysis skeleton. The second-version template keeps the legacy curated operator as migration fallback and parity baseline.
+  description: Rendered R differential-expression analysis skeleton. The third-version template owns an independent rendered R body while keeping the legacy curated operator as migration fallback and parity baseline.
   tags:
     - omics
     - transcriptomics

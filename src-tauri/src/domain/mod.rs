@@ -10,6 +10,7 @@ pub mod chat_session_title;
 pub mod chat_state;
 pub mod connectors;
 pub mod context_snapshot;
+pub mod environments;
 pub mod execution_records;
 pub mod integrations_catalog;
 pub mod integrations_config;

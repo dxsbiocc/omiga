@@ -650,13 +650,56 @@ Completed in the second version:
   - The project-scoped SQLite store has a parent-execution index so
     child-record inspection remains cheap as the local run history grows.
 
-Beyond the second version:
+### Third-version implementation status: 2026-05-09
 
-- Independent, fully expanded R template bodies that no longer call the legacy
-  curated scripts internally.
-- Full fixture-based numeric/artifact parity for those independent rendered
-  bodies and the legacy Operators.
-- environment profile resolver and automatic environment preparation.
+Completed in the third version:
+
+- Unit-level Environment resolver MVP:
+  - Added plugin-contributed `Environment` manifests under declared
+    `environments` paths.
+  - Added environment profile parsing, validation, discovery, and provider-
+    scoped resolution for `runtime.envRef`.
+  - Template execution records now include environment-resolution diagnostics in
+    the Template metadata payload.
+  - The resolver is intentionally diagnostic-only: it records requirements,
+    check commands, and install hints, but it does not create environments or
+    install packages automatically.
+- Bundled R environment profiles:
+  - differential expression, PCA, and enrichment plugins now declare
+    `environments: "./environments"`.
+  - each bundled R Template resolves `runtime.envRef: r-bioc` to a
+    plugin-local Environment profile with `Rscript` command requirements and
+    R/Bioconductor package notes.
+- Independent rendered R Template bodies:
+  - bulk differential expression
+  - PCA matrix overview
+  - functional enrichment
+  - these rendered Template bodies no longer shell out to the legacy curated
+    operator scripts.
+  - shared helper sourcing from plugin `scripts/omics_common.R` remains allowed
+    because it is a shared library boundary, not the legacy executable entry.
+- Parity and contract hardening:
+  - PCA fixture parity still compares rendered Template output with the
+    migration-target Operator.
+  - DE and enrichment retain migration-target fallback for dependency-sensitive
+    Bioconductor environments.
+  - Template contract snapshot tests now lock version, envRef, fallback,
+    migration target, inherited inputs/params/outputs, preflight params, and
+    rendered argv shape for the three bundled analysis Templates.
+  - Tests assert bundled Template bodies do not reference or shell out to the
+    legacy operator scripts.
+- Authoring guidance:
+  - `docs/PLUGIN_UNIT_AUTHORING_GUIDE.md` documents when to choose Plugin,
+    Operator, Template, Skill, and Environment profiles, plus the V3 Template
+    migration and retrieval migration rules.
+
+Deferred beyond the third version:
+
+- Full fixture-based numeric/artifact parity for DE and enrichment independent
+  rendered bodies once deterministic Bioconductor test environments are
+  available.
+- Automatic environment preparation for conda/docker/singularity/module/system
+  profiles.
 - retrieval-to-Operator migration for GEO / PubMed / UniProt.
 - self-evolution graph mining and auto-registration.
 
@@ -693,9 +736,10 @@ After MVP:
    - load full schemas only for 3-8 narrowed candidates
 
 4. **Environment resolver**
-   - preflight `envRef`
+   - build on the V3 diagnostic `envRef` resolver
    - support conda/docker/singularity/module/system profiles
-   - do not create a plugin-wide environment
+   - add explicit, opt-in automatic preparation and package checks
+   - keep runtime binding unit-level; do not create a plugin-wide environment
 
 5. **Crystallization reports**
    - group repeated temporary scripts

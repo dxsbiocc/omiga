@@ -298,6 +298,7 @@ async fn execute_template_runtime(
     invocation: &crate::domain::operators::OperatorInvocation,
     parent_execution_id: Option<&str>,
 ) -> Result<(String, bool, JsonValue), String> {
+    let environment = template_environment_resolution(template);
     let primary_result = if uses_existing_operator(template) {
         execute_template_via_migration_target(ctx, template, invocation, parent_execution_id).await
     } else {
@@ -314,12 +315,15 @@ async fn execute_template_runtime(
                     (
                         fallback_raw,
                         fallback_is_error,
-                        serde_json::json!({
-                            "executionMode": "fallbackMigrationTarget",
-                            "primary": metadata,
-                            "primaryResult": serde_json::from_str::<JsonValue>(&raw).ok(),
-                            "fallback": fallback_metadata,
-                        }),
+                        attach_template_environment(
+                            serde_json::json!({
+                                "executionMode": "fallbackMigrationTarget",
+                                "primary": metadata,
+                                "primaryResult": serde_json::from_str::<JsonValue>(&raw).ok(),
+                                "fallback": fallback_metadata,
+                            }),
+                            &environment,
+                        ),
                     )
                 })
         }
@@ -333,15 +337,50 @@ async fn execute_template_runtime(
                     (
                         fallback_raw,
                         fallback_is_error,
-                        serde_json::json!({
-                            "executionMode": "fallbackMigrationTarget",
-                            "primaryError": message,
-                            "fallback": fallback_metadata,
-                        }),
+                        attach_template_environment(
+                            serde_json::json!({
+                                "executionMode": "fallbackMigrationTarget",
+                                "primaryError": message,
+                                "fallback": fallback_metadata,
+                            }),
+                            &environment,
+                        ),
                     )
                 })
         }
+        Ok((raw, is_error, metadata)) => Ok((
+            raw,
+            is_error,
+            attach_template_environment(metadata, &environment),
+        )),
         other => other,
+    }
+}
+
+fn template_environment_resolution(
+    template: &TemplateSpecWithSource,
+) -> crate::domain::environments::EnvironmentResolution {
+    crate::domain::environments::resolve_environment_ref(
+        template.spec.runtime.env_ref.as_deref(),
+        &template.source.source_plugin,
+        &template.source.plugin_root,
+    )
+}
+
+fn attach_template_environment(
+    metadata: JsonValue,
+    environment: &crate::domain::environments::EnvironmentResolution,
+) -> JsonValue {
+    let environment = serde_json::to_value(environment).unwrap_or_else(|_| serde_json::json!({}));
+    match metadata {
+        JsonValue::Object(mut object) => {
+            object.insert("environment".to_string(), environment);
+            JsonValue::Object(object)
+        }
+        other => serde_json::json!({
+            "execution": other,
+            "environment": environment,
+        }),
     }
 }
 
@@ -874,6 +913,7 @@ async fn record_template_start_best_effort(
             "sourcePlugin": template.source.source_plugin,
             "manifestPath": template.source.manifest_path,
             "migrationTarget": template.spec.migration_target,
+            "environment": template_environment_resolution(template),
             "execution": { "phase": "started" },
         }),
     );
@@ -1601,6 +1641,156 @@ template:
                 serde_json::to_value(operator.interface).unwrap(),
                 "{plugin_name} rendered template must inherit backing operator interface"
             );
+            let template_source =
+                fs::read_to_string(resolve_template_entry_path(&template).unwrap())
+                    .expect("template source");
+            assert!(
+                !template_source.contains("system2("),
+                "{plugin_name} V3 template body must not shell out to a legacy operator script"
+            );
+            let legacy_script_name = Path::new(&operator.execution.argv[1])
+                .file_name()
+                .and_then(|value| value.to_str())
+                .expect("legacy script name");
+            assert!(
+                !template_source.contains(legacy_script_name),
+                "{plugin_name} V3 template body must not reference legacy script `{legacy_script_name}`"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_template_contract_snapshot_is_stable() {
+        let cases = [
+            (
+                "operator-differential-expression-r",
+                "differential-expression-basic",
+                "differential-expression-basic",
+            ),
+            ("operator-pca-r", "pca-matrix", "pca-matrix"),
+            (
+                "operator-enrichment-r",
+                "functional-enrichment-basic",
+                "functional-enrichment-basic",
+            ),
+        ];
+        let snapshots = cases
+            .into_iter()
+            .map(|(plugin_name, template_dir, operator_dir)| {
+                let (template, operator) =
+                    bundled_template_and_operator(plugin_name, template_dir, operator_dir);
+                (
+                    template.spec.metadata.id.clone(),
+                    template_contract_snapshot(&template, &operator),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            serde_json::to_value(snapshots).unwrap(),
+            json!({
+                "bulk_differential_expression_basic": {
+                    "version": "0.3.0",
+                    "envRef": "r-bioc",
+                    "migrationTarget": "omics_differential_expression_basic",
+                    "fallbackToMigrationTarget": true,
+                    "inputs": ["matrix", "metadata"],
+                    "params": ["case_group", "comparisons", "control_group", "de_method", "delimiter", "group_column", "input_data_type", "log2fc_threshold", "pseudocount", "pvalue_threshold", "row_names", "sample_column"],
+                    "outputs": ["beeswarm_plot", "beeswarm_plot_pdf", "plot", "plot_pdf", "quadrant_plot", "quadrant_plot_pdf", "results", "significant", "summary", "volcano_plot", "volcano_plot_pdf"],
+                    "preflightParams": ["input_data_type", "de_method", "pvalue_threshold", "log2fc_threshold"],
+                    "argvAfterScript": ["${inputs.matrix}", "${inputs.metadata}", "${outdir}", "${params.group_column}", "${params.case_group}", "${params.control_group}", "${params.sample_column}", "${params.delimiter}", "${params.row_names}", "${params.pseudocount}", "${params.log2fc_threshold}", "${params.pvalue_threshold}", "${params.comparisons}", "${params.input_data_type}", "${params.de_method}"]
+                },
+                "functional_enrichment_basic": {
+                    "version": "0.3.0",
+                    "envRef": "r-bioc",
+                    "migrationTarget": "omics_functional_enrichment_basic",
+                    "fallbackToMigrationTarget": true,
+                    "inputs": ["gene_sets", "genes"],
+                    "params": ["analysis_mode", "display_top_n", "gene_column", "gene_sets_format", "gsea_weight", "max_size", "min_size", "plot_style", "pvalue_threshold", "score_column"],
+                    "outputs": ["barplot", "dotplot", "gsea_curve", "plot", "results", "summary", "top"],
+                    "preflightParams": [],
+                    "argvAfterScript": ["${inputs.genes}", "${inputs.gene_sets}", "${outdir}", "${params.gene_sets_format}", "${params.min_size}", "${params.max_size}", "${params.pvalue_threshold}", "${params.analysis_mode}", "${params.gene_column}", "${params.score_column}", "${params.display_top_n}", "${params.plot_style}", "${params.gsea_weight}"]
+                },
+                "pca_matrix_basic": {
+                    "version": "0.3.0",
+                    "envRef": "r-bioc",
+                    "migrationTarget": "omics_pca_matrix",
+                    "fallbackToMigrationTarget": true,
+                    "inputs": ["matrix", "metadata"],
+                    "params": ["center", "confidence_hulls", "delimiter", "features_by_rows", "group_column", "plot_labels", "row_names", "sample_column", "scale", "top_variable_features"],
+                    "outputs": ["group_summary", "loadings", "plot", "scores", "scree_plot", "summary", "variance"],
+                    "preflightParams": [],
+                    "argvAfterScript": ["${inputs.matrix}", "${outdir}", "${params.delimiter}", "${params.row_names}", "${params.features_by_rows}", "${params.center}", "${params.scale}", "${params.top_variable_features}", "${inputs.metadata}", "${params.sample_column}", "${params.group_column}", "${params.plot_labels}", "${params.confidence_hulls}"]
+                }
+            })
+        );
+    }
+
+    fn template_contract_snapshot(
+        template: &TemplateSpecWithSource,
+        operator: &crate::domain::operators::OperatorSpec,
+    ) -> JsonValue {
+        let rendered_interface =
+            parse_template_operator_interface(template).expect("operator-compatible interface");
+        json!({
+            "version": template.spec.metadata.version,
+            "envRef": template.spec.runtime.env_ref,
+            "migrationTarget": template.spec.migration_target,
+            "fallbackToMigrationTarget": template_fallback_to_migration_target(template),
+            "inputs": rendered_interface.inputs.keys().cloned().collect::<Vec<_>>(),
+            "params": rendered_interface.params.keys().cloned().collect::<Vec<_>>(),
+            "outputs": rendered_interface.outputs.keys().cloned().collect::<Vec<_>>(),
+            "preflightParams": operator
+                .preflight
+                .as_ref()
+                .map(|preflight| preflight
+                    .questions
+                    .iter()
+                    .map(|question| question.param.clone())
+                    .collect::<Vec<_>>())
+                .unwrap_or_default(),
+            "argvAfterScript": template.spec.execution.argv,
+        })
+    }
+
+    #[test]
+    fn bundled_templates_resolve_environment_profiles() {
+        for (plugin_name, template_dir, operator_dir) in [
+            (
+                "operator-differential-expression-r",
+                "differential-expression-basic",
+                "differential-expression-basic",
+            ),
+            ("operator-pca-r", "pca-matrix", "pca-matrix"),
+            (
+                "operator-enrichment-r",
+                "functional-enrichment-basic",
+                "functional-enrichment-basic",
+            ),
+        ] {
+            let (template, _operator) =
+                bundled_template_and_operator(plugin_name, template_dir, operator_dir);
+            let resolved = template_environment_resolution(&template);
+            assert_eq!(resolved.status, "resolved", "{plugin_name}");
+            assert_eq!(resolved.env_ref.as_deref(), Some("r-bioc"));
+            assert!(
+                resolved
+                    .canonical_id
+                    .as_deref()
+                    .unwrap_or_default()
+                    .ends_with("/environment/r-bioc"),
+                "{plugin_name}"
+            );
+            assert_eq!(
+                resolved
+                    .profile
+                    .as_ref()
+                    .unwrap()
+                    .runtime
+                    .command
+                    .as_deref(),
+                Some("Rscript")
+            );
         }
     }
 
@@ -1699,8 +1889,23 @@ template:
     async fn execute_rendered_template_runs_shell_script() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let plugin_root = tmp.path().join("plugin");
+        let environment_dir = plugin_root.join("environments").join("r-bioc");
         let template_dir = plugin_root.join("templates").join("demo");
+        fs::create_dir_all(&environment_dir).expect("env dir");
         fs::create_dir_all(&template_dir).expect("mkdir");
+        fs::write(
+            environment_dir.join("environment.yaml"),
+            r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: r-bioc
+  version: 0.1.0
+runtime:
+  type: system
+  command: /bin/sh
+"#,
+        )
+        .expect("env");
         fs::write(
             template_dir.join("run.sh"),
             r#"#!/bin/sh
@@ -1736,6 +1941,8 @@ interface:
     message:
       kind: string
       required: true
+runtime:
+  envRef: r-bioc
 template:
   engine: jinja2
   entry: ./run.sh
@@ -1760,7 +1967,7 @@ execution:
         };
 
         let (raw, is_error, metadata) =
-            execute_rendered_template(&ctx, &template, &invocation, None)
+            execute_template_runtime(&ctx, &template, &invocation, None)
                 .await
                 .expect("rendered execution");
 
@@ -1773,6 +1980,11 @@ execution:
             .expect("report path");
         assert_eq!(fs::read_to_string(report).expect("report"), "hello world\n");
         assert_eq!(metadata["executionMode"], "renderedTemplate");
+        assert_eq!(metadata["environment"]["status"], "resolved");
+        assert_eq!(
+            metadata["environment"]["canonicalId"],
+            "demo@local/environment/r-bioc"
+        );
     }
 
     #[tokio::test]

@@ -2,9 +2,9 @@ apiVersion: omiga.ai/unit/v1alpha1
 kind: Template
 metadata:
   id: pca_matrix_basic
-  version: 0.2.0
+  version: 0.3.0
   name: PCA Matrix Overview
-  description: Rendered R PCA analysis skeleton for numeric omics matrices. The second-version template keeps the legacy curated operator as migration fallback and parity baseline.
+  description: Rendered R PCA analysis skeleton for numeric omics matrices. The third-version template owns an independent rendered R body while keeping the legacy curated operator as migration fallback and parity baseline.
   tags:
     - omics
     - transcriptomics

@@ -4,6 +4,7 @@
   "description": "Built-in atomic operator plugin: PCA with grouped default plots powered by base R.",
   "operators": "./operators",
   "templates": "./templates",
+  "environments": "./environments",
   "interface": {
     "displayName": "PCA",
     "shortDescription": "PCA with grouped default plots",
