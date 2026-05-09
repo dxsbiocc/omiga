@@ -22,6 +22,8 @@ pub mod file_read;
 pub mod file_write;
 pub mod glob;
 pub mod grep;
+pub mod learning_proposal_decide;
+pub mod learning_proposal_list;
 pub mod list_mcp_resources;
 pub mod list_skills;
 pub mod notebook_edit;
@@ -93,6 +95,8 @@ pub enum ToolKind {
     TemplateExecute,
     EnvironmentProfileCheck,
     ExecutionArchiveAdvisor,
+    LearningProposalList,
+    LearningProposalDecide,
     ExecutionLineageReport,
     ExecutionRecordList,
     Visualization,
@@ -154,6 +158,8 @@ impl fmt::Display for ToolKind {
             ToolKind::TemplateExecute => write!(f, "template_execute"),
             ToolKind::EnvironmentProfileCheck => write!(f, "environment_profile_check"),
             ToolKind::ExecutionArchiveAdvisor => write!(f, "execution_archive_advisor"),
+            ToolKind::LearningProposalList => write!(f, "learning_proposal_list"),
+            ToolKind::LearningProposalDecide => write!(f, "learning_proposal_decide"),
             ToolKind::ExecutionLineageReport => write!(f, "execution_lineage_report"),
             ToolKind::ExecutionRecordList => write!(f, "execution_record_list"),
             ToolKind::Visualization => write!(f, "visualization"),
@@ -205,6 +211,8 @@ pub enum Tool {
     TemplateExecute(template_execute::TemplateExecuteArgs),
     EnvironmentProfileCheck(environment_profile_check::EnvironmentProfileCheckArgs),
     ExecutionArchiveAdvisor(execution_archive_advisor::ExecutionArchiveAdvisorArgs),
+    LearningProposalList(learning_proposal_list::LearningProposalListArgs),
+    LearningProposalDecide(learning_proposal_decide::LearningProposalDecideArgs),
     ExecutionLineageReport(execution_lineage_report::ExecutionLineageReportArgs),
     ExecutionRecordList(execution_record_list::ExecutionRecordListArgs),
     Visualization(visualization::VisualizationArgs),
@@ -257,6 +265,8 @@ impl Tool {
             Tool::TemplateExecute(_) => ToolKind::TemplateExecute,
             Tool::EnvironmentProfileCheck(_) => ToolKind::EnvironmentProfileCheck,
             Tool::ExecutionArchiveAdvisor(_) => ToolKind::ExecutionArchiveAdvisor,
+            Tool::LearningProposalList(_) => ToolKind::LearningProposalList,
+            Tool::LearningProposalDecide(_) => ToolKind::LearningProposalDecide,
             Tool::ExecutionLineageReport(_) => ToolKind::ExecutionLineageReport,
             Tool::ExecutionRecordList(_) => ToolKind::ExecutionRecordList,
             Tool::Visualization(_) => ToolKind::Visualization,
@@ -306,6 +316,8 @@ impl Tool {
             Tool::TemplateExecute(_) => "template_execute",
             Tool::EnvironmentProfileCheck(_) => "environment_profile_check",
             Tool::ExecutionArchiveAdvisor(_) => "execution_archive_advisor",
+            Tool::LearningProposalList(_) => "learning_proposal_list",
+            Tool::LearningProposalDecide(_) => "learning_proposal_decide",
             Tool::ExecutionLineageReport(_) => "execution_lineage_report",
             Tool::ExecutionRecordList(_) => "execution_record_list",
             Tool::Visualization(_) => "Visualization",
@@ -355,6 +367,8 @@ impl Tool {
             Tool::TemplateExecute(_) => template_execute::DESCRIPTION,
             Tool::EnvironmentProfileCheck(_) => environment_profile_check::DESCRIPTION,
             Tool::ExecutionArchiveAdvisor(_) => execution_archive_advisor::DESCRIPTION,
+            Tool::LearningProposalList(_) => learning_proposal_list::DESCRIPTION,
+            Tool::LearningProposalDecide(_) => learning_proposal_decide::DESCRIPTION,
             Tool::ExecutionLineageReport(_) => execution_lineage_report::DESCRIPTION,
             Tool::ExecutionRecordList(_) => execution_record_list::DESCRIPTION,
             Tool::Visualization(_) => visualization::DESCRIPTION,
@@ -416,6 +430,12 @@ impl Tool {
             }
             Tool::ExecutionArchiveAdvisor(args) => {
                 execution_archive_advisor::ExecutionArchiveAdvisorTool::execute(ctx, args).await?
+            }
+            Tool::LearningProposalList(args) => {
+                learning_proposal_list::LearningProposalListTool::execute(ctx, args).await?
+            }
+            Tool::LearningProposalDecide(args) => {
+                learning_proposal_decide::LearningProposalDecideTool::execute(ctx, args).await?
             }
             Tool::ExecutionLineageReport(args) => {
                 execution_lineage_report::ExecutionLineageReportTool::execute(ctx, args).await?
@@ -624,6 +644,18 @@ impl Tool {
                 })?;
                 Ok(Tool::ExecutionArchiveAdvisor(args))
             }
+            ToolKind::LearningProposalList => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid learning_proposal_list arguments: {}", e),
+                })?;
+                Ok(Tool::LearningProposalList(args))
+            }
+            ToolKind::LearningProposalDecide => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid learning_proposal_decide arguments: {}", e),
+                })?;
+                Ok(Tool::LearningProposalDecide(args))
+            }
             ToolKind::ExecutionLineageReport => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
                     message: format!("Invalid execution_lineage_report arguments: {}", e),
@@ -789,6 +821,10 @@ impl Tool {
             }
             "execution_archive_advisor" | "ExecutionArchiveAdvisor" => {
                 ToolKind::ExecutionArchiveAdvisor
+            }
+            "learning_proposal_list" | "LearningProposalList" => ToolKind::LearningProposalList,
+            "learning_proposal_decide" | "LearningProposalDecide" => {
+                ToolKind::LearningProposalDecide
             }
             "execution_lineage_report" | "ExecutionLineageReport" => {
                 ToolKind::ExecutionLineageReport
@@ -1430,6 +1466,8 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         template_execute::schema(),
         environment_profile_check::schema(),
         execution_archive_advisor::schema(),
+        learning_proposal_list::schema(),
+        learning_proposal_decide::schema(),
         execution_lineage_report::schema(),
         execution_record_list::schema(),
         visualization::schema(),
@@ -1489,7 +1527,8 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "execution_record_list" => (1, 12),
         "execution_lineage_report" => (1, 13),
         "execution_archive_advisor" => (1, 14),
-        "environment_profile_check" => (1, 15),
+        "learning_proposal_list" => (1, 15),
+        "environment_profile_check" => (1, 16),
 
         // Mutating tools.
         "file_edit" => (2, 0),
@@ -1497,6 +1536,7 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "notebook_edit" => (2, 2),
         "todo_write" => (2, 3),
         "template_execute" => (2, 4),
+        "learning_proposal_decide" => (2, 5),
 
         // Orchestration and app-specific tools.
         "agent" | "Agent" => (3, 0),
@@ -1784,6 +1824,16 @@ mod tool_enum_tests {
 
         let t = Tool::from_json_str("execution_archive_advisor", r#"{"limit":5}"#).unwrap();
         assert!(matches!(t, Tool::ExecutionArchiveAdvisor(_)));
+
+        let t = Tool::from_json_str("learning_proposal_list", r#"{"refresh":true}"#).unwrap();
+        assert!(matches!(t, Tool::LearningProposalList(_)));
+
+        let t = Tool::from_json_str(
+            "learning_proposal_decide",
+            r#"{"proposalId":"learn_1","decision":"approve"}"#,
+        )
+        .unwrap();
+        assert!(matches!(t, Tool::LearningProposalDecide(_)));
 
         let t = Tool::from_json_str("environment_profile_check", r#"{"envRef":"r-bioc"}"#).unwrap();
         assert!(matches!(t, Tool::EnvironmentProfileCheck(_)));

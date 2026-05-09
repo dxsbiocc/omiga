@@ -292,6 +292,7 @@ fn recommend_for_record(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn base_recommendation(
     record: &ExecutionRecord,
     action: &str,

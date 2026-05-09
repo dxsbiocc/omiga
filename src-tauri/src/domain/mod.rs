@@ -15,6 +15,7 @@ pub mod environments;
 pub mod execution_records;
 pub mod integrations_catalog;
 pub mod integrations_config;
+pub mod learning_proposals;
 pub mod mcp;
 pub mod memory;
 pub mod mode_resume;
