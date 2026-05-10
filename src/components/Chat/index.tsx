@@ -308,6 +308,7 @@ interface LearningProposalToast {
   title: string;
   message: string;
   severity: ToastSeverity;
+  showPreferenceListAction?: boolean;
 }
 
 interface LearningProposalPromptAction {
@@ -316,16 +317,51 @@ interface LearningProposalPromptAction {
   description: string;
 }
 
+interface LearningProposalPromptDetail {
+  label: string;
+  value: string;
+}
+
 interface LearningProposalPrompt {
   proposalId: string;
   kind: string;
   title: string;
   message: string;
+  details?: LearningProposalPromptDetail[];
   actions: LearningProposalPromptAction[];
 }
 
 interface LearningProposalActionResult {
   proposalId: string;
+  status: string;
+  notification: string;
+}
+
+interface LearningPreferenceCandidateSummary {
+  totalCount: number;
+  candidateCount: number;
+  promotedCount: number;
+  missingSelectedParamsCount: number;
+}
+
+interface LearningPreferenceCandidateView {
+  candidateId: string;
+  status: string;
+  title: string;
+  message: string;
+  canPromote: boolean;
+  details: LearningProposalPromptDetail[];
+}
+
+interface LearningPreferenceCandidateOverview {
+  storePath: string;
+  projectPreferencesPath: string;
+  summary: LearningPreferenceCandidateSummary;
+  candidates: LearningPreferenceCandidateView[];
+}
+
+interface LearningPreferencePromotionActionResult {
+  candidateId: string;
   status: string;
   notification: string;
 }
@@ -359,6 +395,68 @@ function parseJsonObject(raw: string | undefined): Record<string, unknown> | nul
   } catch {
     return null;
   }
+}
+
+function stringListField(
+  value: Record<string, unknown> | null,
+  key: string,
+): string[] {
+  const field = value?.[key];
+  if (!Array.isArray(field)) return [];
+  return field
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function learningProposalDetailsFromRecord(
+  proposal: Record<string, unknown> | null,
+): LearningProposalPromptDetail[] {
+  const explicitDetails = Array.isArray(proposal?.details)
+    ? proposal.details
+        .map(objectRecord)
+        .filter((detail): detail is Record<string, unknown> => Boolean(detail))
+        .map((detail) => ({
+          label: stringField(detail, "label") ?? "",
+          value: stringField(detail, "value") ?? "",
+        }))
+        .filter((detail) => detail.label && detail.value)
+    : [];
+  if (explicitDetails.length > 0) return explicitDetails;
+
+  const evidence = objectRecord(proposal?.evidence);
+  const kind = stringField(proposal, "kind") ?? "proposal";
+  const details: LearningProposalPromptDetail[] = [
+    {
+      label: "建议类型",
+      value:
+        kind === "archive_result"
+          ? "结果封存候选"
+          : kind === "reusable_choice"
+            ? "项目偏好候选"
+            : "学习建议",
+    },
+  ];
+  const source =
+    stringField(evidence, "canonicalId") ?? stringField(evidence, "unitId");
+  if (source) details.push({ label: "来源单元", value: source });
+  const plugin = stringField(evidence, "providerPlugin");
+  if (plugin) details.push({ label: "插件", value: plugin });
+  const answeredParams = stringListField(evidence, "answeredParams");
+  if (answeredParams.length > 0) {
+    details.push({ label: "用户确认参数", value: answeredParams.join(", ") });
+  }
+  const artifacts = stringListField(evidence, "artifactPaths");
+  if (artifacts.length > 0) {
+    details.push({ label: "相关产物", value: `${artifacts.length} 个产物/路径` });
+  }
+  const runDir = stringField(evidence, "runDir");
+  if (runDir) details.push({ label: "运行目录", value: runDir });
+  details.push({
+    label: "安全边界",
+    value: "只写项目学习记录；不会静默修改 operator、template 或移动产物文件。",
+  });
+  return details;
 }
 
 function learningProposalToastFromToolResult(
@@ -421,6 +519,7 @@ function learningProposalPromptFromToolResult(
     kind: stringField(firstProposal, "kind") ?? "proposal",
     title: stringField(firstProposal, "title") ?? "发现可复用建议",
     message,
+    details: learningProposalDetailsFromRecord(firstProposal),
     actions: actions.length > 0
       ? actions
       : [
@@ -2275,7 +2374,19 @@ export function Chat({ sessionId }: ChatProps) {
     useState<LearningProposalToast | null>(null);
   const [learningProposalPrompt, setLearningProposalPrompt] =
     useState<LearningProposalPrompt | null>(null);
+  const [learningProposalDetailOpen, setLearningProposalDetailOpen] =
+    useState(false);
   const [learningProposalBusyAction, setLearningProposalBusyAction] =
+    useState<string | null>(null);
+  const [learningPreferenceListOpen, setLearningPreferenceListOpen] =
+    useState(false);
+  const [learningPreferenceListLoading, setLearningPreferenceListLoading] =
+    useState(false);
+  const [learningPreferenceListError, setLearningPreferenceListError] =
+    useState<string | null>(null);
+  const [learningPreferenceList, setLearningPreferenceList] =
+    useState<LearningPreferenceCandidateOverview | null>(null);
+  const [learningPreferencePromotingId, setLearningPreferencePromotingId] =
     useState<string | null>(null);
   const learningProposalSeenRef = useRef<Set<string>>(new Set());
   /** Background Agent tasks (Rust `BackgroundAgentManager`) for teammate-style follow-ups. */
@@ -2689,8 +2800,45 @@ export function Chat({ sessionId }: ChatProps) {
   useEffect(() => {
     learningProposalSeenRef.current.clear();
     setLearningProposalPrompt(null);
+    setLearningProposalDetailOpen(false);
     setLearningProposalBusyAction(null);
+    setLearningPreferenceListOpen(false);
+    setLearningPreferenceList(null);
+    setLearningPreferenceListError(null);
+    setLearningPreferencePromotingId(null);
   }, [sessionId, researchGoalProjectPath]);
+
+  const loadLearningPreferenceCandidates = useCallback(async () => {
+    const projectRoot =
+      currentSession?.workingDirectory ?? currentSession?.projectPath ?? "";
+    if (!projectRoot.trim()) {
+      setLearningPreferenceListError("当前会话没有有效项目目录。");
+      setLearningPreferenceListOpen(true);
+      return;
+    }
+    setLearningPreferenceListOpen(true);
+    setLearningPreferenceListLoading(true);
+    setLearningPreferenceListError(null);
+    try {
+      const overview = await invoke<LearningPreferenceCandidateOverview>(
+        "learning_preference_candidates",
+        {
+          projectRoot,
+          includePromoted: true,
+        },
+      );
+      setLearningPreferenceList(overview);
+    } catch (error) {
+      console.warn("[Chat] Failed to load learning preferences:", error);
+      setLearningPreferenceListError(
+        typeof error === "string"
+          ? error
+          : "无法读取已保存的学习记录，请稍后重试。",
+      );
+    } finally {
+      setLearningPreferenceListLoading(false);
+    }
+  }, [currentSession?.projectPath, currentSession?.workingDirectory]);
 
   const handleLearningProposalAction = useCallback(
     async (actionId: string) => {
@@ -2713,6 +2861,7 @@ export function Chat({ sessionId }: ChatProps) {
           },
         );
         setLearningProposalPrompt(null);
+        setLearningProposalDetailOpen(false);
         setLearningProposalToast({
           title:
             result.status === "applied"
@@ -2720,6 +2869,7 @@ export function Chat({ sessionId }: ChatProps) {
               : "学习建议已更新",
           message: result.notification,
           severity: result.status === "applied" ? "success" : "info",
+          showPreferenceListAction: result.status === "applied",
         });
       } catch (error) {
         console.warn("[Chat] Failed to respond to learning proposal:", error);
@@ -2740,6 +2890,46 @@ export function Chat({ sessionId }: ChatProps) {
       currentSession?.workingDirectory,
       learningProposalBusyAction,
       learningProposalPrompt,
+    ],
+  );
+
+  const handlePromoteLearningPreference = useCallback(
+    async (candidateId: string) => {
+      const projectRoot =
+        currentSession?.workingDirectory ?? currentSession?.projectPath ?? "";
+      if (!projectRoot.trim() || learningPreferencePromotingId) return;
+      setLearningPreferencePromotingId(candidateId);
+      try {
+        const result = await invoke<LearningPreferencePromotionActionResult>(
+          "learning_preference_candidate_promote",
+          {
+            projectRoot,
+            candidateId,
+          },
+        );
+        setLearningProposalToast({
+          title: "项目偏好已保存",
+          message: result.notification,
+          severity: "success",
+          showPreferenceListAction: true,
+        });
+        await loadLearningPreferenceCandidates();
+      } catch (error) {
+        console.warn("[Chat] Failed to promote learning preference:", error);
+        setLearningPreferenceListError(
+          typeof error === "string"
+            ? error
+            : "无法提升这条学习记录，请稍后重试。",
+        );
+      } finally {
+        setLearningPreferencePromotingId(null);
+      }
+    },
+    [
+      currentSession?.projectPath,
+      currentSession?.workingDirectory,
+      learningPreferencePromotingId,
+      loadLearningPreferenceCandidates,
     ],
   );
 
@@ -6765,6 +6955,11 @@ export function Chat({ sessionId }: ChatProps) {
     composerRef.current?.setValue("");
     setBgToast(null);
     setLearningProposalToast(null);
+    setLearningProposalDetailOpen(false);
+    setLearningPreferenceListOpen(false);
+    setLearningPreferenceList(null);
+    setLearningPreferenceListError(null);
+    setLearningPreferencePromotingId(null);
     setPathRequiredToast(null);
     setCopySuccessToast(false);
     setCurrentRoundId(null);
@@ -8313,31 +8508,104 @@ export function Chat({ sessionId }: ChatProps) {
         </DialogActions>
       </Dialog>
 
-      <Dialog
+      <NotificationToast
         open={Boolean(learningProposalPrompt)}
+        autoHideDuration={null}
         onClose={() => {
           if (learningProposalBusyAction) return;
           setLearningProposalPrompt(null);
+          setLearningProposalDetailOpen(false);
         }}
-        maxWidth="xs"
+        severity="info"
+        title={learningProposalPrompt?.title ?? "学习建议"}
+        message={learningProposalPrompt?.message ?? ""}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        zIndexOffset={3}
+        actions={
+          <>
+            <Button
+              type="button"
+              size="small"
+              variant="text"
+              onClick={() => setLearningProposalDetailOpen(true)}
+              sx={{ minWidth: 0, px: 1 }}
+            >
+              详情
+            </Button>
+            {(learningProposalPrompt?.actions ?? []).map((action) => (
+              <Button
+                key={action.id}
+                type="button"
+                size="small"
+                variant={action.id === "approve_apply" ? "contained" : "text"}
+                color={
+                  action.id === "dismiss"
+                    ? "inherit"
+                    : action.id === "approve_apply"
+                      ? "success"
+                      : "primary"
+                }
+                disabled={Boolean(learningProposalBusyAction)}
+                onClick={() => void handleLearningProposalAction(action.id)}
+                sx={{ minWidth: 0, px: 1 }}
+              >
+                {learningProposalBusyAction === action.id
+                  ? "处理中…"
+                  : action.label}
+              </Button>
+            ))}
+          </>
+        }
+      />
+
+      <Dialog
+        open={Boolean(learningProposalPrompt) && learningProposalDetailOpen}
+        onClose={() => setLearningProposalDetailOpen(false)}
+        maxWidth="sm"
         fullWidth
       >
-        <DialogTitle>{learningProposalPrompt?.title ?? "学习建议"}</DialogTitle>
+        <DialogTitle>{learningProposalPrompt?.title ?? "学习建议详情"}</DialogTitle>
         <DialogContent>
           <Alert severity="info" sx={{ mb: 1.5 }}>
             {learningProposalPrompt?.message ?? ""}
           </Alert>
-          <Typography variant="body2" color="text.secondary">
-            保存后只会写入项目学习记录，用于后续 agent
-            自动分析和给出固化建议；不会静默修改 operator、template 或移动产物文件。
-          </Typography>
+          <Stack spacing={1.1}>
+            {(learningProposalPrompt?.details ?? []).map((detail) => (
+              <Box
+                key={`${detail.label}:${detail.value}`}
+                sx={{
+                  display: "grid",
+                  gridTemplateColumns: { xs: "1fr", sm: "120px 1fr" },
+                  gap: 0.75,
+                  alignItems: "baseline",
+                }}
+              >
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ fontWeight: 800 }}
+                >
+                  {detail.label}
+                </Typography>
+                <Typography variant="body2" sx={{ wordBreak: "break-word" }}>
+                  {detail.value}
+                </Typography>
+              </Box>
+            ))}
+          </Stack>
         </DialogContent>
         <DialogActions>
+          <Button
+            type="button"
+            color="inherit"
+            onClick={() => setLearningProposalDetailOpen(false)}
+          >
+            返回
+          </Button>
           {(learningProposalPrompt?.actions ?? []).map((action) => (
             <Button
               key={action.id}
               type="button"
-              size="small"
               variant={action.id === "approve_apply" ? "contained" : "text"}
               color={
                 action.id === "dismiss"
@@ -8348,13 +8616,129 @@ export function Chat({ sessionId }: ChatProps) {
               }
               disabled={Boolean(learningProposalBusyAction)}
               onClick={() => void handleLearningProposalAction(action.id)}
-              sx={{ minHeight: 30, py: 0.35 }}
             >
               {learningProposalBusyAction === action.id
                 ? "处理中…"
                 : action.label}
             </Button>
           ))}
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={learningPreferenceListOpen}
+        onClose={() => setLearningPreferenceListOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>已保存的学习记录</DialogTitle>
+        <DialogContent>
+          {learningPreferenceListLoading ? (
+            <Stack direction="row" spacing={1.25} alignItems="center">
+              <CircularProgress size={18} />
+              <Typography variant="body2" color="text.secondary">
+                正在读取项目学习记录…
+              </Typography>
+            </Stack>
+          ) : learningPreferenceListError ? (
+            <Alert severity="error">{learningPreferenceListError}</Alert>
+          ) : !learningPreferenceList ||
+            learningPreferenceList.candidates.length === 0 ? (
+            <Alert severity="info">
+              当前项目还没有已保存的偏好候选。只有用户确认保存后才会出现在这里。
+            </Alert>
+          ) : (
+            <Stack spacing={1.5}>
+              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                <Chip
+                  size="small"
+                  label={`${learningPreferenceList.summary.totalCount} 条记录`}
+                />
+                <Chip
+                  size="small"
+                  label={`${learningPreferenceList.summary.candidateCount} 条候选`}
+                />
+                <Chip
+                  size="small"
+                  label={`${learningPreferenceList.summary.promotedCount} 条已提升`}
+                />
+              </Stack>
+              {learningPreferenceList.candidates.map((candidate, index) => (
+                <Box key={candidate.candidateId}>
+                  {index > 0 ? <Divider sx={{ mb: 1.5 }} /> : null}
+                  <Stack spacing={0.8}>
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>
+                        {candidate.title}
+                      </Typography>
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        color={candidate.canPromote ? "success" : "default"}
+                        label={candidate.canPromote ? "可提升" : candidate.status}
+                      />
+                    </Stack>
+                    <Typography variant="body2" color="text.secondary">
+                      {candidate.message}
+                    </Typography>
+                    {candidate.canPromote ? (
+                      <Box>
+                        <Button
+                          type="button"
+                          size="small"
+                          variant="outlined"
+                          color="success"
+                          disabled={Boolean(learningPreferencePromotingId)}
+                          onClick={() =>
+                            void handlePromoteLearningPreference(
+                              candidate.candidateId,
+                            )
+                          }
+                        >
+                          {learningPreferencePromotingId === candidate.candidateId
+                            ? "提升中…"
+                            : "提升为项目偏好"}
+                        </Button>
+                      </Box>
+                    ) : null}
+                    <Stack spacing={0.6}>
+                      {candidate.details.map((detail) => (
+                        <Box
+                          key={`${candidate.candidateId}:${detail.label}`}
+                          sx={{
+                            display: "grid",
+                            gridTemplateColumns: { xs: "1fr", sm: "120px 1fr" },
+                            gap: 0.75,
+                            alignItems: "baseline",
+                          }}
+                        >
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ fontWeight: 800 }}
+                          >
+                            {detail.label}
+                          </Typography>
+                          <Typography variant="body2" sx={{ wordBreak: "break-word" }}>
+                            {detail.value}
+                          </Typography>
+                        </Box>
+                      ))}
+                    </Stack>
+                  </Stack>
+                </Box>
+              ))}
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            type="button"
+            color="inherit"
+            onClick={() => setLearningPreferenceListOpen(false)}
+          >
+            关闭
+          </Button>
         </DialogActions>
       </Dialog>
 
@@ -8390,7 +8774,24 @@ export function Chat({ sessionId }: ChatProps) {
         severity={learningProposalToast?.severity ?? "info"}
         title={learningProposalToast?.title ?? "学习建议"}
         message={learningProposalToast?.message ?? ""}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         zIndexOffset={2}
+        actions={
+          learningProposalToast?.showPreferenceListAction ? (
+            <Button
+              type="button"
+              size="small"
+              variant="text"
+              onClick={() => {
+                setLearningProposalToast(null);
+                void loadLearningPreferenceCandidates();
+              }}
+              sx={{ minWidth: 0, px: 1 }}
+            >
+              查看已保存
+            </Button>
+          ) : null
+        }
       />
 
       <BackgroundAgentTranscriptDrawer

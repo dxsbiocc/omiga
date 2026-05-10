@@ -18,6 +18,7 @@ const LEARNING_PROPOSALS_RELATIVE_PATH: &str = ".omiga/learning/proposals.json";
 const LEARNING_APPLIED_RELATIVE_PATH: &str = ".omiga/learning/applied.json";
 const LEARNING_PREFERENCE_CANDIDATES_RELATIVE_PATH: &str =
     ".omiga/learning/preference-candidates.json";
+const LEARNING_PROJECT_PREFERENCES_RELATIVE_PATH: &str = ".omiga/learning/project-preferences.json";
 const LEARNING_ARCHIVE_MARKERS_RELATIVE_PATH: &str = ".omiga/learning/archive-markers.json";
 const STORE_SCHEMA_VERSION: u32 = 1;
 
@@ -190,6 +191,8 @@ pub struct LearningPreferenceCandidate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_plugin: Option<String>,
     pub answered_params: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub selected_params: BTreeMap<String, JsonValue>,
     pub param_source_summary: BTreeMap<String, usize>,
     pub source_record_ids: Vec<String>,
     pub evidence: JsonValue,
@@ -213,6 +216,74 @@ impl Default for LearningPreferenceCandidateStore {
             candidates: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningProjectPreference {
+    pub id: String,
+    pub candidate_id: String,
+    pub proposal_id: String,
+    pub status: String,
+    pub scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_plugin: Option<String>,
+    pub params: BTreeMap<String, JsonValue>,
+    pub answered_params: Vec<String>,
+    pub source_record_ids: Vec<String>,
+    pub evidence: JsonValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub promoted_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningProjectPreferenceStore {
+    pub schema_version: u32,
+    pub preferences: Vec<LearningProjectPreference>,
+}
+
+impl Default for LearningProjectPreferenceStore {
+    fn default() -> Self {
+        Self {
+            schema_version: STORE_SCHEMA_VERSION,
+            preferences: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningPreferenceCandidateSummary {
+    pub total_count: usize,
+    pub candidate_count: usize,
+    pub promoted_count: usize,
+    pub missing_selected_params_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningPreferenceCandidateList {
+    pub store_path: String,
+    pub project_preferences_path: String,
+    pub summary: LearningPreferenceCandidateSummary,
+    pub candidates: Vec<LearningPreferenceCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningPreferencePromotionResult {
+    pub candidate_store_path: String,
+    pub project_preferences_path: String,
+    pub candidate: LearningPreferenceCandidate,
+    pub preference: LearningProjectPreference,
+    pub notification: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -276,6 +347,10 @@ pub fn learning_applied_path(project_root: &Path) -> PathBuf {
 
 pub fn learning_preference_candidates_path(project_root: &Path) -> PathBuf {
     project_root.join(LEARNING_PREFERENCE_CANDIDATES_RELATIVE_PATH)
+}
+
+pub fn learning_project_preferences_path(project_root: &Path) -> PathBuf {
+    project_root.join(LEARNING_PROJECT_PREFERENCES_RELATIVE_PATH)
 }
 
 pub fn learning_archive_markers_path(project_root: &Path) -> PathBuf {
@@ -388,6 +463,80 @@ pub fn apply_learning_proposal(
     })
 }
 
+pub fn list_learning_preference_candidates(
+    project_root: &Path,
+    include_promoted: bool,
+) -> Result<LearningPreferenceCandidateList, String> {
+    let path = learning_preference_candidates_path(project_root);
+    let mut store = load_json_or_default::<LearningPreferenceCandidateStore>(&path)?;
+    sort_preference_candidates(&mut store.candidates);
+    let mut candidates = store.candidates;
+    if !include_promoted {
+        candidates.retain(|candidate| candidate.status != "promoted");
+    }
+    let summary = summarize_preference_candidates(&candidates);
+    Ok(LearningPreferenceCandidateList {
+        store_path: path.to_string_lossy().into_owned(),
+        project_preferences_path: learning_project_preferences_path(project_root)
+            .to_string_lossy()
+            .into_owned(),
+        summary,
+        candidates,
+    })
+}
+
+pub fn promote_learning_preference_candidate(
+    project_root: &Path,
+    candidate_id: &str,
+    note: Option<String>,
+) -> Result<LearningPreferencePromotionResult, String> {
+    let candidate_id = candidate_id.trim();
+    if candidate_id.is_empty() {
+        return Err("candidate id must not be empty".to_string());
+    }
+
+    let candidate_path = learning_preference_candidates_path(project_root);
+    let mut candidate_store =
+        load_json_or_default::<LearningPreferenceCandidateStore>(&candidate_path)?;
+    let now = now_rfc3339();
+    let candidate = candidate_store
+        .candidates
+        .iter_mut()
+        .find(|candidate| candidate.id == candidate_id)
+        .ok_or_else(|| format!("learning preference candidate `{candidate_id}` not found"))?;
+    if candidate.selected_params.is_empty() {
+        return Err(format!(
+            "learning preference candidate `{candidate_id}` has no selectedParams to promote"
+        ));
+    }
+
+    candidate.status = "promoted".to_string();
+    candidate.updated_at = now.clone();
+    if let Some(note) = note.clone() {
+        candidate.note = Some(note);
+    }
+    let candidate = candidate.clone();
+    sort_preference_candidates(&mut candidate_store.candidates);
+    save_json_file(&candidate_path, &candidate_store)?;
+
+    let preference = project_preference_for_candidate(&candidate, note, &now);
+    upsert_project_preference(project_root, preference.clone())?;
+
+    Ok(LearningPreferencePromotionResult {
+        candidate_store_path: candidate_path.to_string_lossy().into_owned(),
+        project_preferences_path: learning_project_preferences_path(project_root)
+            .to_string_lossy()
+            .into_owned(),
+        notification: format!(
+            "已将 `{}` 提升为项目偏好，后续 agent 可优先复用 {} 个参数。",
+            candidate.id,
+            preference.params.len()
+        ),
+        candidate,
+        preference,
+    })
+}
+
 fn load_store(project_root: &Path) -> Result<LearningProposalStore, String> {
     let path = learning_proposals_path(project_root);
     if !path.is_file() {
@@ -482,11 +631,36 @@ fn preference_candidate_for_proposal(
         canonical_id: evidence_string(proposal, "canonicalId"),
         provider_plugin: evidence_string(proposal, "providerPlugin"),
         answered_params: evidence_string_vec(proposal, "answeredParams"),
+        selected_params: evidence_json_map(proposal, "selectedParams"),
         param_source_summary: evidence_usize_map(proposal, "paramSourceSummary"),
         source_record_ids: proposal.source_record_ids.clone(),
         evidence: proposal.evidence.clone(),
         note,
         created_at: now.to_string(),
+        updated_at: now.to_string(),
+    }
+}
+
+fn project_preference_for_candidate(
+    candidate: &LearningPreferenceCandidate,
+    note: Option<String>,
+    now: &str,
+) -> LearningProjectPreference {
+    LearningProjectPreference {
+        id: format!("project_{}", candidate.id),
+        candidate_id: candidate.id.clone(),
+        proposal_id: candidate.proposal_id.clone(),
+        status: "active".to_string(),
+        scope: "project".to_string(),
+        unit_id: candidate.unit_id.clone(),
+        canonical_id: candidate.canonical_id.clone(),
+        provider_plugin: candidate.provider_plugin.clone(),
+        params: candidate.selected_params.clone(),
+        answered_params: candidate.answered_params.clone(),
+        source_record_ids: candidate.source_record_ids.clone(),
+        evidence: candidate.evidence.clone(),
+        note,
+        promoted_at: now.to_string(),
         updated_at: now.to_string(),
     }
 }
@@ -531,6 +705,28 @@ fn upsert_apply_record(project_root: &Path, mut record: LearningApplyRecord) -> 
     save_json_file(&path, &store)
 }
 
+fn upsert_project_preference(
+    project_root: &Path,
+    mut preference: LearningProjectPreference,
+) -> Result<(), String> {
+    let path = learning_project_preferences_path(project_root);
+    let mut store = load_json_or_default::<LearningProjectPreferenceStore>(&path)?;
+    if let Some(existing) = store
+        .preferences
+        .iter_mut()
+        .find(|existing| existing.id == preference.id)
+    {
+        preference.promoted_at.clone_from(&existing.promoted_at);
+        *existing = preference;
+    } else {
+        store.preferences.push(preference);
+    }
+    store
+        .preferences
+        .sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    save_json_file(&path, &store)
+}
+
 fn upsert_preference_candidate(
     project_root: &Path,
     mut candidate: LearningPreferenceCandidate,
@@ -547,9 +743,7 @@ fn upsert_preference_candidate(
     } else {
         store.candidates.push(candidate);
     }
-    store
-        .candidates
-        .sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    sort_preference_candidates(&mut store.candidates);
     save_json_file(&path, &store)
 }
 
@@ -631,6 +825,19 @@ fn evidence_usize_map(proposal: &LearningProposal, key: &str) -> BTreeMap<String
         }
     }
     out
+}
+
+fn evidence_json_map(proposal: &LearningProposal, key: &str) -> BTreeMap<String, JsonValue> {
+    proposal
+        .evidence
+        .get(key)
+        .and_then(JsonValue::as_object)
+        .map(|map| {
+            map.iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn apply_notification(
@@ -724,6 +931,26 @@ fn summarize_proposals(proposals: &[LearningProposal]) -> LearningProposalSummar
     summary
 }
 
+fn summarize_preference_candidates(
+    candidates: &[LearningPreferenceCandidate],
+) -> LearningPreferenceCandidateSummary {
+    let mut summary = LearningPreferenceCandidateSummary {
+        total_count: candidates.len(),
+        ..LearningPreferenceCandidateSummary::default()
+    };
+    for candidate in candidates {
+        if candidate.status == "promoted" {
+            summary.promoted_count += 1;
+        } else {
+            summary.candidate_count += 1;
+        }
+        if candidate.selected_params.is_empty() {
+            summary.missing_selected_params_count += 1;
+        }
+    }
+    summary
+}
+
 fn generate_learning_proposals_from_records(
     records: &[ExecutionRecord],
     now: &str,
@@ -738,6 +965,7 @@ fn generate_learning_proposals_from_records(
         let output_ref = output_summary.as_ref();
         let param_sources = param_source_summary(metadata_ref);
         let answered_params = preflight_answered_params(metadata_ref);
+        let selected_params = selected_param_values(metadata_ref, &answered_params);
         let has_user_preflight = param_sources.get("user_preflight").copied().unwrap_or(0) > 0
             || !answered_params.is_empty();
         let artifact_paths = artifact_paths(record, metadata_ref, output_ref);
@@ -754,6 +982,7 @@ fn generate_learning_proposals_from_records(
                 &unit_label,
                 &param_sources,
                 &answered_params,
+                &selected_params,
                 &artifact_paths,
                 run_dir.as_deref(),
                 provenance_path.as_deref(),
@@ -799,6 +1028,7 @@ fn reusable_choice_proposal(
     unit_label: &str,
     param_sources: &BTreeMap<String, usize>,
     answered_params: &[String],
+    selected_params: &BTreeMap<String, JsonValue>,
     artifact_paths: &[String],
     run_dir: Option<&str>,
     provenance_path: Option<&str>,
@@ -829,6 +1059,7 @@ fn reusable_choice_proposal(
             "providerPlugin": record.provider_plugin,
             "paramSourceSummary": param_sources,
             "answeredParams": answered_params,
+            "selectedParams": selected_params,
             "runDir": run_dir,
             "provenancePath": provenance_path,
             "artifactPaths": artifact_paths,
@@ -1042,6 +1273,31 @@ fn preflight_answered_params(metadata: Option<&JsonValue>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn selected_param_values(
+    metadata: Option<&JsonValue>,
+    answered_params: &[String],
+) -> BTreeMap<String, JsonValue> {
+    let mut out = BTreeMap::new();
+    let Some(selected) = metadata
+        .and_then(|value| value.get("selectedParams"))
+        .or_else(|| {
+            metadata
+                .and_then(|value| value.get("preflight"))
+                .and_then(|preflight| preflight.get("selectedParams"))
+        })
+        .and_then(JsonValue::as_object)
+    else {
+        return out;
+    };
+    let answered = answered_params.iter().collect::<HashSet<_>>();
+    for (param, value) in selected {
+        if answered.is_empty() || answered.contains(param) {
+            out.insert(param.clone(), value.clone());
+        }
+    }
+    out
+}
+
 fn string_at(value: Option<&JsonValue>, pointers: &[&str]) -> Option<String> {
     let value = value?;
     pointers
@@ -1074,6 +1330,15 @@ fn sort_apply_records(records: &mut [LearningApplyRecord]) {
         right
             .updated_at
             .cmp(&left.updated_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn sort_preference_candidates(candidates: &mut [LearningPreferenceCandidate]) {
+    candidates.sort_by(|left, right| {
+        left.status
+            .cmp(&right.status)
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
             .then_with(|| left.id.cmp(&right.id))
     });
 }
@@ -1299,7 +1564,8 @@ mod tests {
                     "runDir": ".omiga/runs/oprun_2",
                     "provenancePath": ".omiga/runs/oprun_2/provenance.json",
                     "paramSources": {"method": "user_preflight"},
-                    "preflight": {"answeredParams": [{"param": "method"}]}
+                    "preflight": {"answeredParams": [{"param": "method"}]},
+                    "selectedParams": {"method": "deseq2"}
                 })),
             },
         )
@@ -1356,6 +1622,10 @@ mod tests {
         .unwrap();
         assert_eq!(preferences.candidates.len(), 1);
         assert_eq!(preferences.candidates[0].answered_params, vec!["method"]);
+        assert_eq!(
+            preferences.candidates[0].selected_params["method"],
+            "deseq2"
+        );
 
         apply_learning_proposal(tmp.path(), &reusable_id, false, None).unwrap();
         let apply_store =
@@ -1384,5 +1654,78 @@ mod tests {
             archive_markers.markers[0].provenance_path.as_deref(),
             Some(".omiga/runs/oprun_2/provenance.json")
         );
+    }
+
+    #[tokio::test]
+    async fn promotes_preference_candidate_to_project_preference_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        record_execution(
+            tmp.path(),
+            ExecutionRecordInput {
+                kind: "operator".to_string(),
+                unit_id: Some("demo".to_string()),
+                canonical_id: Some("plugin/operator/demo".to_string()),
+                provider_plugin: Some("omics".to_string()),
+                status: "succeeded".to_string(),
+                session_id: None,
+                parent_execution_id: None,
+                started_at: Some("2026-05-10T00:00:00Z".to_string()),
+                ended_at: Some("2026-05-10T00:00:02Z".to_string()),
+                input_hash: None,
+                param_hash: Some("sha256:param".to_string()),
+                output_summary_json: None,
+                runtime_json: None,
+                metadata_json: Some(json!({
+                    "paramSources": {"method": "user_preflight", "alpha": "user_preflight"},
+                    "preflight": {
+                        "answeredParams": [{"param": "method"}, {"param": "alpha"}]
+                    },
+                    "selectedParams": {"method": "deseq2", "alpha": 0.05}
+                })),
+            },
+        )
+        .await
+        .unwrap();
+
+        let listed = refresh_and_list_learning_proposals(tmp.path(), 50, false)
+            .await
+            .unwrap();
+        let reusable_id = listed.proposals[0].id.clone();
+        decide_learning_proposal(
+            tmp.path(),
+            &reusable_id,
+            LearningProposalDecision::Approve,
+            None,
+        )
+        .unwrap();
+        apply_learning_proposal(tmp.path(), &reusable_id, false, None).unwrap();
+
+        let candidates = list_learning_preference_candidates(tmp.path(), false).unwrap();
+        assert_eq!(candidates.summary.candidate_count, 1);
+        assert_eq!(candidates.summary.missing_selected_params_count, 0);
+        let candidate_id = candidates.candidates[0].id.clone();
+
+        let promoted = promote_learning_preference_candidate(
+            tmp.path(),
+            &candidate_id,
+            Some("make project default".to_string()),
+        )
+        .unwrap();
+        assert_eq!(promoted.candidate.status, "promoted");
+        assert_eq!(promoted.preference.status, "active");
+        assert_eq!(promoted.preference.params["method"], "deseq2");
+        assert_eq!(promoted.preference.params["alpha"], 0.05);
+
+        let active = load_json_or_default::<LearningProjectPreferenceStore>(
+            &learning_project_preferences_path(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(active.preferences.len(), 1);
+        assert_eq!(active.preferences[0].candidate_id, candidate_id);
+
+        let remaining = list_learning_preference_candidates(tmp.path(), false).unwrap();
+        assert_eq!(remaining.summary.total_count, 0);
+        let all = list_learning_preference_candidates(tmp.path(), true).unwrap();
+        assert_eq!(all.summary.promoted_count, 1);
     }
 }

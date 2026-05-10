@@ -28,7 +28,9 @@ interface NotificationToastProps {
   onClose: () => void;
   severity?: NotificationSeverity;
   title?: ReactNode;
-  autoHideDuration?: number;
+  actions?: ReactNode;
+  autoHideDuration?: SnackbarProps["autoHideDuration"];
+  anchorOrigin?: SnackbarProps["anchorOrigin"];
   zIndexOffset?: number;
 }
 
@@ -55,14 +57,34 @@ export function NotificationToast({
   onClose,
   severity = "info",
   title,
+  actions,
   autoHideDuration = 4000,
+  anchorOrigin,
   zIndexOffset = 0,
 }: NotificationToastProps) {
   const theme = useTheme();
+  const resolvedAnchorOrigin = anchorOrigin ?? {
+    vertical: "top" as const,
+    horizontal: "center" as const,
+  };
   const isDark = theme.palette.mode === "dark";
   const accent = theme.palette[severity].main;
   const accentStrong = isDark ? lighten(accent, 0.22) : darken(accent, 0.08);
   const Icon = TOAST_ICONS[severity];
+  const offsetSx =
+    resolvedAnchorOrigin.vertical === "top"
+      ? {
+          top: {
+            xs: "calc(env(safe-area-inset-top) + 12px)",
+            sm: "calc(env(safe-area-inset-top) + 20px)",
+          },
+        }
+      : {
+          bottom: {
+            xs: "calc(env(safe-area-inset-bottom) + 12px)",
+            sm: "calc(env(safe-area-inset-bottom) + 20px)",
+          },
+        };
 
   const handleClose: SnackbarProps["onClose"] = (_event, reason) => {
     if (reason === "clickaway") return;
@@ -74,12 +96,9 @@ export function NotificationToast({
       open={open}
       autoHideDuration={autoHideDuration}
       onClose={handleClose}
-      anchorOrigin={{ vertical: "top", horizontal: "center" }}
+      anchorOrigin={resolvedAnchorOrigin}
       sx={{
-        top: {
-          xs: "calc(env(safe-area-inset-top) + 12px)",
-          sm: "calc(env(safe-area-inset-top) + 20px)",
-        },
+        ...offsetSx,
         zIndex: (t) => t.zIndex.snackbar + zIndexOffset,
       }}
     >
@@ -186,6 +205,19 @@ export function NotificationToast({
           >
             {message}
           </Typography>
+          {actions ? (
+            <Box
+              sx={{
+                mt: 0.8,
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                gap: 0.75,
+              }}
+            >
+              {actions}
+            </Box>
+          ) : null}
         </Box>
 
         <IconButton

@@ -294,6 +294,8 @@ pub fn run() {
             commands::operators::cleanup_operator_runs,
             commands::learning_proposals::learning_proposal_next,
             commands::learning_proposals::learning_proposal_respond,
+            commands::learning_proposals::learning_preference_candidates,
+            commands::learning_proposals::learning_preference_candidate_promote,
             commands::extensions::vscode_extensions_dir,
             commands::extensions::install_vscode_extension,
             commands::extensions::list_recommended_vscode_extensions,

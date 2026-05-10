@@ -59,6 +59,30 @@ Skill，也不移动或删除产物文件。
 - `.omiga/learning/archive-markers.json`：结果封存标记；记录 runDir、provenance 和产物路径，
   后续可由归档 agent 执行真实搬运/复制/清理。
 
+### `learning_preference_candidate_list`
+
+列出已保存的参数/工作流偏好候选。候选来自用户已确认并 apply 的 `reusable_choice`
+proposal；它们仍然是 inactive 状态，不会自动覆盖 operator/template。
+
+参数：
+
+- `includePromoted`: 是否包含已经提升为项目偏好的候选。
+
+### `learning_preference_candidate_promote`
+
+将某个候选提升为项目级 active preference，写入：
+
+- `.omiga/learning/project-preferences.json`
+
+参数：
+
+- `candidateId`: `learning_preference_candidate_list` 返回的候选 ID。
+- `note`: 可选的人类备注。
+
+提升流程只固化已捕获的 `selectedParams`，并把候选标记为 `promoted`。它仍不改写 bundled
+Operator/Template 文件，也不移动结果目录；后续 agent 可以读取 project preferences 并在相似任务中
+优先复用。
+
 ## 轻量用户确认
 
 Chat 窗口在空闲状态会调用 `learning_proposal_next(refresh=false)` 做一次低成本检查；若已存在
@@ -85,4 +109,6 @@ proposal 生成仍由 agent/工具显式触发：
 
 1. 学习 agent 周期性查看 `.omiga/learning/proposals.json`，自动给出合并、忽略或 apply
    建议。
-2. 将 preference candidates 升级为真实项目偏好或 Template 默认值时，继续要求可审计确认。
+2. 将 `.omiga/learning/project-preferences.json` 接入 operator/template preflight 前的推荐或自动填充，
+   但继续保留显式 ask 状态和用户覆盖优先级。
+3. 对 archive markers 增加封存 agent：复制关键产物、保留 provenance、生成可回溯 summary。

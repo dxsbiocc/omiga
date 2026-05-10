@@ -2563,6 +2563,14 @@ async fn record_operator_success_best_effort(
     if let Some(preflight) = &result.preflight {
         metadata["preflight"] = preflight.clone();
     }
+    let selected_params = selected_params_for_source(
+        &result.effective_params,
+        &result.param_sources,
+        "user_preflight",
+    );
+    if !selected_params.is_empty() {
+        metadata["selectedParams"] = json!(selected_params);
+    }
     let record = crate::domain::execution_records::ExecutionRecordInput {
         kind: "operator".to_string(),
         unit_id: Some(result.operator.id.clone()),
@@ -2583,6 +2591,22 @@ async fn record_operator_success_best_effort(
         metadata_json: Some(metadata),
     };
     crate::domain::execution_records::record_execution_best_effort(&ctx.project_root, record).await;
+}
+
+fn selected_params_for_source(
+    effective_params: &BTreeMap<String, JsonValue>,
+    param_sources: &BTreeMap<String, String>,
+    wanted_source: &str,
+) -> BTreeMap<String, JsonValue> {
+    effective_params
+        .iter()
+        .filter_map(|(param, value)| {
+            param_sources
+                .get(param)
+                .filter(|source| source.as_str() == wanted_source)
+                .map(|_| (param.clone(), value.clone()))
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]

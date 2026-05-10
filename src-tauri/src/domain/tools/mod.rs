@@ -22,6 +22,8 @@ pub mod file_read;
 pub mod file_write;
 pub mod glob;
 pub mod grep;
+pub mod learning_preference_candidate_list;
+pub mod learning_preference_candidate_promote;
 pub mod learning_proposal_apply;
 pub mod learning_proposal_decide;
 pub mod learning_proposal_list;
@@ -99,6 +101,8 @@ pub enum ToolKind {
     LearningProposalList,
     LearningProposalDecide,
     LearningProposalApply,
+    LearningPreferenceCandidateList,
+    LearningPreferenceCandidatePromote,
     ExecutionLineageReport,
     ExecutionRecordList,
     Visualization,
@@ -163,6 +167,12 @@ impl fmt::Display for ToolKind {
             ToolKind::LearningProposalList => write!(f, "learning_proposal_list"),
             ToolKind::LearningProposalDecide => write!(f, "learning_proposal_decide"),
             ToolKind::LearningProposalApply => write!(f, "learning_proposal_apply"),
+            ToolKind::LearningPreferenceCandidateList => {
+                write!(f, "learning_preference_candidate_list")
+            }
+            ToolKind::LearningPreferenceCandidatePromote => {
+                write!(f, "learning_preference_candidate_promote")
+            }
             ToolKind::ExecutionLineageReport => write!(f, "execution_lineage_report"),
             ToolKind::ExecutionRecordList => write!(f, "execution_record_list"),
             ToolKind::Visualization => write!(f, "visualization"),
@@ -217,6 +227,12 @@ pub enum Tool {
     LearningProposalList(learning_proposal_list::LearningProposalListArgs),
     LearningProposalDecide(learning_proposal_decide::LearningProposalDecideArgs),
     LearningProposalApply(learning_proposal_apply::LearningProposalApplyArgs),
+    LearningPreferenceCandidateList(
+        learning_preference_candidate_list::LearningPreferenceCandidateListArgs,
+    ),
+    LearningPreferenceCandidatePromote(
+        learning_preference_candidate_promote::LearningPreferenceCandidatePromoteArgs,
+    ),
     ExecutionLineageReport(execution_lineage_report::ExecutionLineageReportArgs),
     ExecutionRecordList(execution_record_list::ExecutionRecordListArgs),
     Visualization(visualization::VisualizationArgs),
@@ -272,6 +288,10 @@ impl Tool {
             Tool::LearningProposalList(_) => ToolKind::LearningProposalList,
             Tool::LearningProposalDecide(_) => ToolKind::LearningProposalDecide,
             Tool::LearningProposalApply(_) => ToolKind::LearningProposalApply,
+            Tool::LearningPreferenceCandidateList(_) => ToolKind::LearningPreferenceCandidateList,
+            Tool::LearningPreferenceCandidatePromote(_) => {
+                ToolKind::LearningPreferenceCandidatePromote
+            }
             Tool::ExecutionLineageReport(_) => ToolKind::ExecutionLineageReport,
             Tool::ExecutionRecordList(_) => ToolKind::ExecutionRecordList,
             Tool::Visualization(_) => ToolKind::Visualization,
@@ -324,6 +344,8 @@ impl Tool {
             Tool::LearningProposalList(_) => "learning_proposal_list",
             Tool::LearningProposalDecide(_) => "learning_proposal_decide",
             Tool::LearningProposalApply(_) => "learning_proposal_apply",
+            Tool::LearningPreferenceCandidateList(_) => "learning_preference_candidate_list",
+            Tool::LearningPreferenceCandidatePromote(_) => "learning_preference_candidate_promote",
             Tool::ExecutionLineageReport(_) => "execution_lineage_report",
             Tool::ExecutionRecordList(_) => "execution_record_list",
             Tool::Visualization(_) => "Visualization",
@@ -376,6 +398,12 @@ impl Tool {
             Tool::LearningProposalList(_) => learning_proposal_list::DESCRIPTION,
             Tool::LearningProposalDecide(_) => learning_proposal_decide::DESCRIPTION,
             Tool::LearningProposalApply(_) => learning_proposal_apply::DESCRIPTION,
+            Tool::LearningPreferenceCandidateList(_) => {
+                learning_preference_candidate_list::DESCRIPTION
+            }
+            Tool::LearningPreferenceCandidatePromote(_) => {
+                learning_preference_candidate_promote::DESCRIPTION
+            }
             Tool::ExecutionLineageReport(_) => execution_lineage_report::DESCRIPTION,
             Tool::ExecutionRecordList(_) => execution_record_list::DESCRIPTION,
             Tool::Visualization(_) => visualization::DESCRIPTION,
@@ -446,6 +474,18 @@ impl Tool {
             }
             Tool::LearningProposalApply(args) => {
                 learning_proposal_apply::LearningProposalApplyTool::execute(ctx, args).await?
+            }
+            Tool::LearningPreferenceCandidateList(args) => {
+                learning_preference_candidate_list::LearningPreferenceCandidateListTool::execute(
+                    ctx, args,
+                )
+                .await?
+            }
+            Tool::LearningPreferenceCandidatePromote(args) => {
+                learning_preference_candidate_promote::LearningPreferenceCandidatePromoteTool::execute(
+                    ctx, args,
+                )
+                .await?
             }
             Tool::ExecutionLineageReport(args) => {
                 execution_lineage_report::ExecutionLineageReportTool::execute(ctx, args).await?
@@ -672,6 +712,24 @@ impl Tool {
                 })?;
                 Ok(Tool::LearningProposalApply(args))
             }
+            ToolKind::LearningPreferenceCandidateList => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!(
+                        "Invalid learning_preference_candidate_list arguments: {}",
+                        e
+                    ),
+                })?;
+                Ok(Tool::LearningPreferenceCandidateList(args))
+            }
+            ToolKind::LearningPreferenceCandidatePromote => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!(
+                        "Invalid learning_preference_candidate_promote arguments: {}",
+                        e
+                    ),
+                })?;
+                Ok(Tool::LearningPreferenceCandidatePromote(args))
+            }
             ToolKind::ExecutionLineageReport => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
                     message: format!("Invalid execution_lineage_report arguments: {}", e),
@@ -843,6 +901,12 @@ impl Tool {
                 ToolKind::LearningProposalDecide
             }
             "learning_proposal_apply" | "LearningProposalApply" => ToolKind::LearningProposalApply,
+            "learning_preference_candidate_list" | "LearningPreferenceCandidateList" => {
+                ToolKind::LearningPreferenceCandidateList
+            }
+            "learning_preference_candidate_promote" | "LearningPreferenceCandidatePromote" => {
+                ToolKind::LearningPreferenceCandidatePromote
+            }
             "execution_lineage_report" | "ExecutionLineageReport" => {
                 ToolKind::ExecutionLineageReport
             }
@@ -1486,6 +1550,8 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         learning_proposal_list::schema(),
         learning_proposal_decide::schema(),
         learning_proposal_apply::schema(),
+        learning_preference_candidate_list::schema(),
+        learning_preference_candidate_promote::schema(),
         execution_lineage_report::schema(),
         execution_record_list::schema(),
         visualization::schema(),
@@ -1546,7 +1612,8 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "execution_lineage_report" => (1, 13),
         "execution_archive_advisor" => (1, 14),
         "learning_proposal_list" => (1, 15),
-        "environment_profile_check" => (1, 16),
+        "learning_preference_candidate_list" => (1, 16),
+        "environment_profile_check" => (1, 17),
 
         // Mutating tools.
         "file_edit" => (2, 0),
@@ -1556,6 +1623,7 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "template_execute" => (2, 4),
         "learning_proposal_decide" => (2, 5),
         "learning_proposal_apply" => (2, 6),
+        "learning_preference_candidate_promote" => (2, 7),
 
         // Orchestration and app-specific tools.
         "agent" | "Agent" => (3, 0),
@@ -1860,6 +1928,20 @@ mod tool_enum_tests {
         )
         .unwrap();
         assert!(matches!(t, Tool::LearningProposalApply(_)));
+
+        let t = Tool::from_json_str(
+            "learning_preference_candidate_list",
+            r#"{"includePromoted":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(t, Tool::LearningPreferenceCandidateList(_)));
+
+        let t = Tool::from_json_str(
+            "learning_preference_candidate_promote",
+            r#"{"candidateId":"pref_learn_1","note":"confirmed"}"#,
+        )
+        .unwrap();
+        assert!(matches!(t, Tool::LearningPreferenceCandidatePromote(_)));
 
         let t = Tool::from_json_str("environment_profile_check", r#"{"envRef":"r-bioc"}"#).unwrap();
         assert!(matches!(t, Tool::EnvironmentProfileCheck(_)));

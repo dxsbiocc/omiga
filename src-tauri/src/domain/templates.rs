@@ -1112,11 +1112,27 @@ fn attach_invocation_provenance_metadata(
     };
     let param_sources =
         crate::domain::operators::operator_invocation_preflight_param_sources(invocation);
+    let selected_params = invocation
+        .params
+        .iter()
+        .filter_map(|(param, value)| {
+            param_sources
+                .get(param)
+                .filter(|source| source.as_str() == "user_preflight")
+                .map(|_| (param.clone(), value.clone()))
+        })
+        .collect::<serde_json::Map<String, JsonValue>>();
     match metadata_json {
         JsonValue::Object(mut object) => {
             object.insert("preflight".to_string(), preflight);
             if !param_sources.is_empty() {
                 object.insert("paramSources".to_string(), serde_json::json!(param_sources));
+            }
+            if !selected_params.is_empty() {
+                object.insert(
+                    "selectedParams".to_string(),
+                    JsonValue::Object(selected_params),
+                );
             }
             JsonValue::Object(object)
         }
@@ -1124,6 +1140,7 @@ fn attach_invocation_provenance_metadata(
             "execution": other,
             "preflight": preflight,
             "paramSources": param_sources,
+            "selectedParams": selected_params,
         }),
     }
 }
