@@ -59,6 +59,20 @@ Skill，也不移动或删除产物文件。
 - `.omiga/learning/archive-markers.json`：结果封存标记；记录 runDir、provenance 和产物路径，
   后续可由归档 agent 执行真实搬运/复制/清理。
 
+## 轻量用户确认
+
+Chat 窗口在空闲状态会调用 `learning_proposal_next(refresh=false)` 做一次低成本检查；若已存在
+pending proposal，则弹出简洁确认框。UI 不在空闲轮询中扫描 ExecutionRecord 或生成新 proposal，
+proposal 生成仍由 agent/工具显式触发：
+
+- **保存**：调用 `learning_proposal_respond(action=approve_apply)`，内部串联 approve + apply，
+  成功后提示“已保存为项目学习记录”。
+- **稍后**：标记为 `snoozed`，避免继续打断当前会话。
+- **忽略**：标记为 `dismissed`。
+
+该确认框只显示 `title`、`userMessage` 和按钮，不展示执行 trace。关闭弹窗只在当前会话内
+抑制重复提醒，不改变 proposal 状态。
+
 ## 产品原则
 
 - 面向用户：提示“发现可固化经验，是否保存？”，而不是展示 trace 细节。
@@ -69,7 +83,6 @@ Skill，也不移动或删除产物文件。
 
 ## 后续提升
 
-1. 前端接入轻量弹窗/通知，只展示 `userMessage` 和确认按钮。
-2. 学习 agent 周期性查看 `.omiga/learning/proposals.json`，自动给出合并、忽略或 apply
+1. 学习 agent 周期性查看 `.omiga/learning/proposals.json`，自动给出合并、忽略或 apply
    建议。
-3. 将 preference candidates 升级为真实项目偏好或 Template 默认值时，继续要求可审计确认。
+2. 将 preference candidates 升级为真实项目偏好或 Template 默认值时，继续要求可审计确认。

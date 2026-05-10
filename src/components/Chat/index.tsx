@@ -302,6 +302,147 @@ interface Message {
   initialTodos?: InitialTodoItem[];
 }
 
+type ToastSeverity = "success" | "info" | "warning" | "error";
+
+interface LearningProposalToast {
+  title: string;
+  message: string;
+  severity: ToastSeverity;
+}
+
+interface LearningProposalPromptAction {
+  id: "approve_apply" | "snooze" | "dismiss" | string;
+  label: string;
+  description: string;
+}
+
+interface LearningProposalPrompt {
+  proposalId: string;
+  kind: string;
+  title: string;
+  message: string;
+  actions: LearningProposalPromptAction[];
+}
+
+interface LearningProposalActionResult {
+  proposalId: string;
+  status: string;
+  notification: string;
+}
+
+interface StreamToolResultPayload {
+  tool_use_id?: string;
+  name: string;
+  input: string;
+  output: string;
+  is_error: boolean;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function stringField(
+  value: Record<string, unknown> | null,
+  key: string,
+): string | null {
+  const field = value?.[key];
+  return typeof field === "string" && field.trim() ? field.trim() : null;
+}
+
+function parseJsonObject(raw: string | undefined): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    return objectRecord(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function learningProposalToastFromToolResult(
+  resultData: StreamToolResultPayload | undefined,
+): LearningProposalToast | null {
+  if (!resultData || resultData.is_error) return null;
+  if (
+    resultData.name !== "learning_proposal_decide" &&
+    resultData.name !== "learning_proposal_apply"
+  ) {
+    return null;
+  }
+  const output = parseJsonObject(resultData.output);
+  if (!output) return null;
+
+  const notification = stringField(output, "notification");
+  if (notification) {
+    return {
+      title:
+        resultData.name === "learning_proposal_apply"
+          ? "学习建议已固化"
+          : "学习建议已更新",
+      message: notification,
+      severity: "success",
+    };
+  }
+
+  return null;
+}
+
+function learningProposalPromptFromToolResult(
+  resultData: StreamToolResultPayload | undefined,
+): LearningProposalPrompt | null {
+  if (!resultData || resultData.is_error || resultData.name !== "learning_proposal_list") {
+    return null;
+  }
+  const output = parseJsonObject(resultData.output);
+  const proposals = Array.isArray(output?.proposals) ? output.proposals : [];
+  const firstProposal = proposals.map(objectRecord).find(Boolean) ?? null;
+  const proposalId = stringField(firstProposal, "id");
+  const message =
+    stringField(firstProposal, "userMessage") ??
+    stringField(firstProposal, "summary");
+  if (!proposalId || !message) return null;
+
+  const rawActions = Array.isArray(firstProposal?.actions)
+    ? firstProposal.actions
+    : [];
+  const actions = rawActions
+    .map(objectRecord)
+    .filter((action): action is Record<string, unknown> => Boolean(action))
+    .map((action) => ({
+      id: stringField(action, "id") ?? "approve_apply",
+      label: stringField(action, "label") ?? "保存",
+      description: stringField(action, "description") ?? "",
+    }));
+
+  return {
+    proposalId,
+    kind: stringField(firstProposal, "kind") ?? "proposal",
+    title: stringField(firstProposal, "title") ?? "发现可复用建议",
+    message,
+    actions: actions.length > 0
+      ? actions
+      : [
+          {
+            id: "approve_apply",
+            label: "保存",
+            description: "确认并保存为项目学习记录。",
+          },
+          {
+            id: "snooze",
+            label: "稍后",
+            description: "暂时不处理。",
+          },
+          {
+            id: "dismiss",
+            label: "忽略",
+            description: "不保存这条学习建议。",
+          },
+        ],
+  };
+}
+
 function assistantMessageHasVisibleText(message: Message): boolean {
   return message.role !== "assistant" || message.content.trim().length > 0;
 }
@@ -2129,6 +2270,14 @@ export function Chat({ sessionId }: ChatProps) {
     useState(false);
   /** Toast when a background bash command completes (`background-shell-complete`). */
   const [bgToast, setBgToast] = useState<string | null>(null);
+  /** Human-facing learning proposal notification; JSON stays in tool output. */
+  const [learningProposalToast, setLearningProposalToast] =
+    useState<LearningProposalToast | null>(null);
+  const [learningProposalPrompt, setLearningProposalPrompt] =
+    useState<LearningProposalPrompt | null>(null);
+  const [learningProposalBusyAction, setLearningProposalBusyAction] =
+    useState<string | null>(null);
+  const learningProposalSeenRef = useRef<Set<string>>(new Set());
   /** Background Agent tasks (Rust `BackgroundAgentManager`) for teammate-style follow-ups. */
   const [backgroundTasks, setBackgroundTasks] = useState<BackgroundAgentTask[]>(
     [],
@@ -2507,6 +2656,7 @@ export function Chat({ sessionId }: ChatProps) {
       setActiveResearchGoal(null);
       setGoalCriteriaDialogOpen(false);
       setGoalAuditDialogOpen(false);
+      setLearningProposalPrompt(null);
       return;
     }
 
@@ -2535,6 +2685,63 @@ export function Chat({ sessionId }: ChatProps) {
       cancelled = true;
     };
   }, [sessionId, researchGoalProjectPath]);
+
+  useEffect(() => {
+    learningProposalSeenRef.current.clear();
+    setLearningProposalPrompt(null);
+    setLearningProposalBusyAction(null);
+  }, [sessionId, researchGoalProjectPath]);
+
+  const handleLearningProposalAction = useCallback(
+    async (actionId: string) => {
+      const prompt = learningProposalPrompt;
+      if (!prompt || learningProposalBusyAction) return;
+      const projectRoot =
+        currentSession?.workingDirectory ?? currentSession?.projectPath ?? "";
+      if (!projectRoot.trim()) {
+        setLearningProposalPrompt(null);
+        return;
+      }
+      setLearningProposalBusyAction(actionId);
+      try {
+        const result = await invoke<LearningProposalActionResult>(
+          "learning_proposal_respond",
+          {
+            projectRoot,
+            proposalId: prompt.proposalId,
+            action: actionId,
+          },
+        );
+        setLearningProposalPrompt(null);
+        setLearningProposalToast({
+          title:
+            result.status === "applied"
+              ? "学习记录已保存"
+              : "学习建议已更新",
+          message: result.notification,
+          severity: result.status === "applied" ? "success" : "info",
+        });
+      } catch (error) {
+        console.warn("[Chat] Failed to respond to learning proposal:", error);
+        setLearningProposalToast({
+          title: "学习建议处理失败",
+          message:
+            typeof error === "string"
+              ? error
+              : "无法更新这条学习建议，请稍后重试。",
+          severity: "error",
+        });
+      } finally {
+        setLearningProposalBusyAction(null);
+      }
+    },
+    [
+      currentSession?.projectPath,
+      currentSession?.workingDirectory,
+      learningProposalBusyAction,
+      learningProposalPrompt,
+    ],
+  );
 
   useEffect(() => {
     goalAutoRunLastKeyRef.current = null;
@@ -3835,6 +4042,58 @@ export function Chat({ sessionId }: ChatProps) {
     setAskUserSelections({});
   }, [sessionId]);
 
+  useEffect(() => {
+    const projectRoot =
+      currentSession?.workingDirectory ?? currentSession?.projectPath ?? "";
+    if (
+      !sessionId ||
+      !projectRoot.trim() ||
+      isSwitchingSession ||
+      isStreaming ||
+      isConnecting ||
+      waitingFirstChunk ||
+      pendingAskUser ||
+      learningProposalPrompt
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      // Do not refresh/scan ExecutionRecords from UI idle state. Proposal
+      // generation is an agent/user-triggered analysis step; the UI only
+      // surfaces already-created pending prompts.
+      void invoke<LearningProposalPrompt | null>("learning_proposal_next", {
+        projectRoot,
+        refresh: false,
+      })
+        .then((prompt) => {
+          if (cancelled || !prompt) return;
+          if (learningProposalSeenRef.current.has(prompt.proposalId)) return;
+          learningProposalSeenRef.current.add(prompt.proposalId);
+          setLearningProposalPrompt(prompt);
+        })
+        .catch((error) => {
+          console.warn("[Chat] Failed to load learning proposal prompt:", error);
+        });
+    }, 900);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    currentSession?.projectPath,
+    currentSession?.workingDirectory,
+    isConnecting,
+    isStreaming,
+    isSwitchingSession,
+    learningProposalPrompt,
+    pendingAskUser,
+    sessionId,
+    waitingFirstChunk,
+  ]);
+
   const submitPendingAskUser = useCallback(async () => {
     if (!pendingAskUser) return;
     const answers: Record<string, string> = {};
@@ -4880,6 +5139,24 @@ export function Chat({ sessionId }: ChatProps) {
             setPendingAskUser((p) =>
               p?.toolUseId === toolResultMatchId ? null : p,
             );
+          }
+          const learningPrompt =
+            learningProposalPromptFromToolResult(resultData);
+          if (
+            learningPrompt &&
+            !learningProposalSeenRef.current.has(learningPrompt.proposalId)
+          ) {
+            learningProposalSeenRef.current.add(learningPrompt.proposalId);
+            setLearningProposalToast(null);
+            setLearningProposalPrompt(learningPrompt);
+          } else if (learningPrompt) {
+            setLearningProposalToast(null);
+          } else {
+            const learningNotice =
+              learningProposalToastFromToolResult(resultData);
+            if (learningNotice) {
+              setLearningProposalToast(learningNotice);
+            }
           }
           segmentStartRef.current = true;
           // Real-time todo sync: push todos to activityStore on every todo_write result
@@ -6487,6 +6764,7 @@ export function Chat({ sessionId }: ChatProps) {
     setIndexingStatus("idle");
     composerRef.current?.setValue("");
     setBgToast(null);
+    setLearningProposalToast(null);
     setPathRequiredToast(null);
     setCopySuccessToast(false);
     setCurrentRoundId(null);
@@ -8035,6 +8313,51 @@ export function Chat({ sessionId }: ChatProps) {
         </DialogActions>
       </Dialog>
 
+      <Dialog
+        open={Boolean(learningProposalPrompt)}
+        onClose={() => {
+          if (learningProposalBusyAction) return;
+          setLearningProposalPrompt(null);
+        }}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>{learningProposalPrompt?.title ?? "学习建议"}</DialogTitle>
+        <DialogContent>
+          <Alert severity="info" sx={{ mb: 1.5 }}>
+            {learningProposalPrompt?.message ?? ""}
+          </Alert>
+          <Typography variant="body2" color="text.secondary">
+            保存后只会写入项目学习记录，用于后续 agent
+            自动分析和给出固化建议；不会静默修改 operator、template 或移动产物文件。
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          {(learningProposalPrompt?.actions ?? []).map((action) => (
+            <Button
+              key={action.id}
+              type="button"
+              size="small"
+              variant={action.id === "approve_apply" ? "contained" : "text"}
+              color={
+                action.id === "dismiss"
+                  ? "inherit"
+                  : action.id === "approve_apply"
+                    ? "success"
+                    : "primary"
+              }
+              disabled={Boolean(learningProposalBusyAction)}
+              onClick={() => void handleLearningProposalAction(action.id)}
+              sx={{ minHeight: 30, py: 0.35 }}
+            >
+              {learningProposalBusyAction === action.id
+                ? "处理中…"
+                : action.label}
+            </Button>
+          ))}
+        </DialogActions>
+      </Dialog>
+
       <NotificationToast
         open={copySuccessToast}
         autoHideDuration={3000}
@@ -8056,6 +8379,18 @@ export function Chat({ sessionId }: ChatProps) {
         severity="info"
         title="后台任务通知"
         message={bgToast}
+      />
+
+      <NotificationToast
+        open={Boolean(learningProposalToast)}
+        autoHideDuration={9000}
+        onClose={() => {
+          setLearningProposalToast(null);
+        }}
+        severity={learningProposalToast?.severity ?? "info"}
+        title={learningProposalToast?.title ?? "学习建议"}
+        message={learningProposalToast?.message ?? ""}
+        zIndexOffset={2}
       />
 
       <BackgroundAgentTranscriptDrawer

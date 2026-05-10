@@ -17,6 +17,7 @@ pub mod extensions;
 pub mod fs;
 pub mod git_workspace;
 pub mod integrations_settings;
+pub mod learning_proposals;
 pub mod local_envs;
 pub mod memory;
 pub mod notebook;
