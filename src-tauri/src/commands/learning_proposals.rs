@@ -7,8 +7,6 @@ use crate::domain::learning_proposals::{
 };
 use crate::errors::AppError;
 use serde::Serialize;
-use serde_json::Value as JsonValue;
-use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -21,19 +19,11 @@ pub struct LearningProposalPromptAction {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct LearningProposalPromptDetail {
-    pub label: String,
-    pub value: String,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct LearningProposalPrompt {
     pub proposal_id: String,
     pub kind: String,
     pub title: String,
     pub message: String,
-    pub details: Vec<LearningProposalPromptDetail>,
     pub actions: Vec<LearningProposalPromptAction>,
 }
 
@@ -62,7 +52,6 @@ pub struct LearningPreferenceCandidateView {
     pub title: String,
     pub message: String,
     pub can_promote: bool,
-    pub details: Vec<LearningProposalPromptDetail>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -105,103 +94,12 @@ fn kind_label(kind: &LearningProposalKind) -> String {
     .to_string()
 }
 
-fn evidence_string(proposal: &LearningProposal, key: &str) -> Option<String> {
-    proposal
-        .evidence
-        .get(key)
-        .and_then(JsonValue::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn evidence_string_list(proposal: &LearningProposal, key: &str) -> Vec<String> {
-    proposal
-        .evidence
-        .get(key)
-        .and_then(JsonValue::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(JsonValue::as_str)
-                .filter(|value| !value.trim().is_empty())
-                .map(ToOwned::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn push_detail(details: &mut Vec<LearningProposalPromptDetail>, label: &str, value: String) {
-    if value.trim().is_empty() {
-        return;
-    }
-    details.push(LearningProposalPromptDetail {
-        label: label.to_string(),
-        value,
-    });
-}
-
-fn proposal_details(root: &Path, proposal: &LearningProposal) -> Vec<LearningProposalPromptDetail> {
-    let mut details = Vec::new();
-    push_detail(
-        &mut details,
-        "建议类型",
-        match proposal.kind {
-            LearningProposalKind::ReusableChoice => "项目偏好候选".to_string(),
-            LearningProposalKind::ArchiveResult => "结果封存候选".to_string(),
-        },
-    );
-    if let Some(canonical_id) = evidence_string(proposal, "canonicalId") {
-        push_detail(&mut details, "来源单元", canonical_id);
-    } else if let Some(unit_id) = evidence_string(proposal, "unitId") {
-        push_detail(&mut details, "来源单元", unit_id);
-    }
-    if let Some(plugin) = evidence_string(proposal, "providerPlugin") {
-        push_detail(&mut details, "插件", plugin);
-    }
-    let answered_params = evidence_string_list(proposal, "answeredParams");
-    if !answered_params.is_empty() {
-        push_detail(&mut details, "用户确认参数", answered_params.join(", "));
-    }
-    let artifact_paths = evidence_string_list(proposal, "artifactPaths");
-    if !artifact_paths.is_empty() {
-        push_detail(
-            &mut details,
-            "相关产物",
-            format!("{} 个产物/路径", artifact_paths.len()),
-        );
-    }
-    if let Some(run_dir) = evidence_string(proposal, "runDir") {
-        push_detail(&mut details, "运行目录", run_dir);
-    }
-    let save_path = match proposal.kind {
-        LearningProposalKind::ReusableChoice => {
-            learning_proposals::learning_preference_candidates_path(root)
-        }
-        LearningProposalKind::ArchiveResult => {
-            learning_proposals::learning_archive_markers_path(root)
-        }
-    };
-    push_detail(
-        &mut details,
-        "保存位置",
-        save_path.to_string_lossy().into_owned(),
-    );
-    push_detail(
-        &mut details,
-        "安全边界",
-        "只写项目学习记录；不会静默修改 operator、template 或移动产物文件。".to_string(),
-    );
-    details
-}
-
-fn prompt_from_proposal(root: &Path, proposal: LearningProposal) -> LearningProposalPrompt {
-    let details = proposal_details(root, &proposal);
+fn prompt_from_proposal(proposal: LearningProposal) -> LearningProposalPrompt {
     LearningProposalPrompt {
         proposal_id: proposal.id,
         kind: kind_label(&proposal.kind),
         title: proposal.title,
         message: proposal.user_message,
-        details,
         actions: vec![
             LearningProposalPromptAction {
                 id: "approve_apply".to_string(),
@@ -222,58 +120,12 @@ fn prompt_from_proposal(root: &Path, proposal: LearningProposal) -> LearningProp
     }
 }
 
-fn status_label(status: &str) -> String {
-    match status {
-        "candidate" => "候选".to_string(),
-        "promoted" => "已提升为项目偏好".to_string(),
-        other => other.to_string(),
-    }
-}
-
 fn candidate_title(candidate: &LearningPreferenceCandidate) -> String {
-    let unit = candidate
-        .canonical_id
-        .as_deref()
-        .or(candidate.unit_id.as_deref())
-        .unwrap_or("未知单元");
-    format!("{}：{}", status_label(&candidate.status), unit)
-}
-
-fn preference_candidate_details(
-    candidate: &LearningPreferenceCandidate,
-) -> Vec<LearningProposalPromptDetail> {
-    let mut details = Vec::new();
-    push_detail(&mut details, "状态", status_label(&candidate.status));
-    if let Some(canonical_id) = candidate.canonical_id.clone() {
-        push_detail(&mut details, "来源单元", canonical_id);
-    } else if let Some(unit_id) = candidate.unit_id.clone() {
-        push_detail(&mut details, "来源单元", unit_id);
+    if candidate.status == "promoted" {
+        "已保存为项目偏好".to_string()
+    } else {
+        "可保存为项目偏好".to_string()
     }
-    if let Some(plugin) = candidate.provider_plugin.clone() {
-        push_detail(&mut details, "插件", plugin);
-    }
-    if !candidate.answered_params.is_empty() {
-        push_detail(
-            &mut details,
-            "用户确认参数",
-            candidate.answered_params.join(", "),
-        );
-    }
-    push_detail(
-        &mut details,
-        "可复用参数",
-        if candidate.selected_params.is_empty() {
-            "暂无可直接提升的参数；需要 agent 进一步整理。".to_string()
-        } else {
-            format!("{} 个参数", candidate.selected_params.len())
-        },
-    );
-    push_detail(
-        &mut details,
-        "安全边界",
-        "这是项目偏好候选；不会覆盖默认模板，除非用户后续明确提升。".to_string(),
-    );
-    details
 }
 
 fn preference_candidate_view(
@@ -293,7 +145,6 @@ fn preference_candidate_view(
             )
         },
         can_promote: candidate.status != "promoted" && selected_count > 0,
-        details: preference_candidate_details(&candidate),
     }
 }
 
@@ -371,11 +222,7 @@ pub async fn learning_proposal_next(
         learning_proposals::list_learning_proposals(&root, false)
     }
     .map_err(learning_error)?;
-    Ok(list
-        .proposals
-        .into_iter()
-        .next()
-        .map(|proposal| prompt_from_proposal(&root, proposal)))
+    Ok(list.proposals.into_iter().next().map(prompt_from_proposal))
 }
 
 #[tauri::command]
@@ -496,14 +343,7 @@ mod tests {
                 .unwrap()
                 .expect("pending learning prompt");
         assert_eq!(prompt.actions[0].id, "approve_apply");
-        assert!(prompt
-            .details
-            .iter()
-            .any(|detail| detail.label == "保存位置"));
-        assert!(prompt
-            .details
-            .iter()
-            .any(|detail| detail.label == "安全边界"));
+        assert!(prompt.message.contains("是否把这些选择保存"));
 
         let result = learning_proposal_respond(
             Some(tmp.path().to_string_lossy().into_owned()),
@@ -522,11 +362,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(saved.summary.total_count, 1);
-        assert!(saved.candidates[0].title.contains("候选"));
-        assert!(saved.candidates[0]
-            .details
-            .iter()
-            .any(|detail| detail.label == "安全边界"));
+        assert_eq!(saved.candidates[0].title, "可保存为项目偏好");
         assert!(saved.candidates[0].can_promote);
 
         let promoted = learning_preference_candidate_promote(

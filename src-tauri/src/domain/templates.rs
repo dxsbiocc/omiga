@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -493,20 +494,35 @@ pub fn template_preflight_question(
     let root = value.as_object()?;
     let id = root.get("id").and_then(JsonValue::as_str)?;
     let template = resolve_template(id).ok()?;
-    template_preflight_question_for_template(&template, root)
+    template_preflight_question_for_template(&template, root, None)
+}
+
+pub fn template_preflight_question_with_project_preferences(
+    project_root: &Path,
+    arguments: &str,
+) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
+    let value = serde_json::from_str::<JsonValue>(arguments).ok()?;
+    let root = value.as_object()?;
+    let id = root.get("id").and_then(JsonValue::as_str)?;
+    let template = resolve_template(id).ok()?;
+    let recommended_params = template_project_preference_params(project_root, &template);
+    template_preflight_question_for_template(&template, root, recommended_params.as_ref())
 }
 
 fn template_preflight_question_for_template(
     template: &TemplateSpecWithSource,
     root: &serde_json::Map<String, JsonValue>,
+    recommended_params: Option<&BTreeMap<String, JsonValue>>,
 ) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
     let (_alias, spec) = describe_template_migration_target(template).ok()?;
     let params = root.get("params").and_then(JsonValue::as_object);
-    let mut question_args = crate::domain::operators::operator_preflight_question_for_spec(
-        &spec,
-        Some(spec.metadata.id.as_str()),
-        params,
-    )?;
+    let mut question_args =
+        crate::domain::operators::operator_preflight_question_for_spec_with_recommended_params(
+            &spec,
+            Some(spec.metadata.id.as_str()),
+            params,
+            recommended_params,
+        )?;
     question_args.metadata = Some(serde_json::json!({
         "source": "template_preflight",
         "template_id": template.spec.metadata.id,
@@ -514,6 +530,31 @@ fn template_preflight_question_for_template(
         "migration_target": spec.metadata.id,
     }));
     Some(question_args)
+}
+
+fn template_project_preference_params(
+    project_root: &Path,
+    template: &TemplateSpecWithSource,
+) -> Option<BTreeMap<String, JsonValue>> {
+    let canonical_id = format!(
+        "{}/template/{}",
+        template.source.source_plugin,
+        template.spec.metadata.id.trim()
+    );
+    let hints = crate::domain::learning_proposals::matching_learning_project_preference_hints(
+        project_root,
+        Some(template.spec.metadata.id.as_str()),
+        Some(canonical_id.as_str()),
+        Some(template.source.source_plugin.as_str()),
+    )
+    .ok()?;
+    let mut params = BTreeMap::new();
+    for hint in hints.hints {
+        for (key, value) in hint.params {
+            params.entry(key).or_insert(value);
+        }
+    }
+    (!params.is_empty()).then_some(params)
 }
 
 pub fn apply_template_preflight_answers(
@@ -2095,7 +2136,7 @@ template:
         let value = serde_json::from_str::<JsonValue>(&args).unwrap();
         let root = value.as_object().unwrap();
 
-        let question_args = template_preflight_question_for_template(&template, root)
+        let question_args = template_preflight_question_for_template(&template, root, None)
             .expect("DE template should inherit backing operator preflight");
 
         assert_eq!(question_args.questions.len(), 4);

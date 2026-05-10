@@ -1497,12 +1497,41 @@ pub fn operator_preflight_question(
     operator_preflight_question_for_spec(&resolved.spec, Some(resolved.alias.as_str()), params)
 }
 
+pub fn operator_preflight_question_with_project_preferences(
+    project_root: &Path,
+    tool_name: &str,
+    arguments: &str,
+) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
+    let resolved = resolve_operator_alias(tool_name).ok()?;
+    let value = serde_json::from_str::<JsonValue>(arguments).ok()?;
+    let params = value.get("params").and_then(JsonValue::as_object);
+    let recommended_params = operator_project_preference_params(project_root, &resolved.spec);
+    operator_preflight_question_for_spec_with_recommended_params(
+        &resolved.spec,
+        Some(resolved.alias.as_str()),
+        params,
+        recommended_params.as_ref(),
+    )
+}
+
 pub fn operator_preflight_question_for_spec(
     spec: &OperatorSpec,
     alias: Option<&str>,
     params: Option<&JsonMap<String, JsonValue>>,
 ) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
+    operator_preflight_question_for_spec_with_recommended_params(spec, alias, params, None)
+}
+
+pub fn operator_preflight_question_for_spec_with_recommended_params(
+    spec: &OperatorSpec,
+    alias: Option<&str>,
+    params: Option<&JsonMap<String, JsonValue>>,
+    recommended_params: Option<&BTreeMap<String, JsonValue>>,
+) -> Option<crate::domain::tools::ask_user_question::AskUserQuestionArgs> {
     let preflight = spec.preflight.as_ref()?;
+    let recommended_keys = recommended_params
+        .map(|params| params.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
     let questions = preflight
         .questions
         .iter()
@@ -1512,7 +1541,10 @@ pub fn operator_preflight_question_for_spec(
                 question: question.question.clone(),
                 header: question.header.clone(),
                 multi_select: question.multi_select,
-                options: question.options.iter().map(ask_option_from_spec).collect(),
+                options: ask_options_from_specs(
+                    question,
+                    recommended_params.and_then(|params| params.get(&question.param)),
+                ),
             },
         )
         .collect::<Vec<_>>();
@@ -1529,6 +1561,7 @@ pub fn operator_preflight_question_for_spec(
                 "source": "operator_preflight",
                 "operator_id": spec.metadata.id,
                 "operator_alias": alias,
+                "recommended_params": recommended_keys,
             })),
         },
     )
@@ -1731,13 +1764,78 @@ fn preflight_value_matches(actual: &JsonValue, expected: &JsonValue) -> bool {
     }
 }
 
+fn operator_project_preference_params(
+    project_root: &Path,
+    spec: &OperatorSpec,
+) -> Option<BTreeMap<String, JsonValue>> {
+    let canonical_id = canonical_operator_unit_id_for_spec(spec);
+    let hints = crate::domain::learning_proposals::matching_learning_project_preference_hints(
+        project_root,
+        Some(spec.metadata.id.as_str()),
+        Some(canonical_id.as_str()),
+        Some(spec.source.source_plugin.as_str()),
+    )
+    .ok()?;
+    let mut params = BTreeMap::new();
+    for hint in hints.hints {
+        for (key, value) in hint.params {
+            params.entry(key).or_insert(value);
+        }
+    }
+    (!params.is_empty()).then_some(params)
+}
+
+fn ask_options_from_specs(
+    question: &OperatorPreflightQuestionSpec,
+    recommended_value: Option<&JsonValue>,
+) -> Vec<crate::domain::tools::ask_user_question::QuestionOption> {
+    let recommended_index = recommended_value.and_then(|value| {
+        question
+            .options
+            .iter()
+            .position(|option| preflight_option_matches_recommended_value(option, value))
+    });
+    let mut options = question
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| ask_option_from_spec(option, Some(index) == recommended_index))
+        .collect::<Vec<_>>();
+    if let Some(index) = recommended_index.filter(|index| *index < options.len()) {
+        let recommended = options.remove(index);
+        options.insert(0, recommended);
+    }
+    options
+}
+
+fn preflight_option_matches_recommended_value(
+    option: &OperatorPreflightOptionSpec,
+    recommended_value: &JsonValue,
+) -> bool {
+    preflight_value_matches(&option.value, recommended_value)
+        || recommended_value
+            .as_str()
+            .map(|value| option.label.trim().eq_ignore_ascii_case(value.trim()))
+            .unwrap_or(false)
+}
+
 fn ask_option_from_spec(
     option: &OperatorPreflightOptionSpec,
+    recommended: bool,
 ) -> crate::domain::tools::ask_user_question::QuestionOption {
+    let description = if recommended {
+        format!(
+            "推荐：可直接确认，或改选其他选项。{}",
+            option.description.trim()
+        )
+    } else {
+        option.description.clone()
+    };
     crate::domain::tools::ask_user_question::QuestionOption {
         label: option.label.clone(),
-        description: option.description.clone(),
+        description,
         preview: option.preview.clone(),
+        recommended,
         custom: option.custom,
         custom_placeholder: option.custom_placeholder.clone(),
     }
@@ -2690,6 +2788,14 @@ async fn record_operator_failure_best_effort(
 
 fn canonical_operator_unit_id(operator: &OperatorRunIdentity) -> String {
     format!("{}/operator/{}", operator.source_plugin, operator.id.trim())
+}
+
+fn canonical_operator_unit_id_for_spec(spec: &OperatorSpec) -> String {
+    format!(
+        "{}/operator/{}",
+        spec.source.source_plugin,
+        spec.metadata.id.trim()
+    )
 }
 
 fn operator_output_summary(result: &OperatorRunResult) -> JsonValue {
@@ -7768,6 +7874,92 @@ execution:
             parsed["metadata"]["preflight"]["answeredParams"][0]["param"],
             "method"
         );
+    }
+
+    #[test]
+    fn preflight_project_preferences_recommend_without_overriding_explicit_params() {
+        let tmp = TempDir::new().unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["true"]);
+        spec.metadata.id = "preflight_recommendation".to_string();
+        spec.interface.params.insert(
+            "method".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::Enum,
+                enum_values: vec![json!("auto"), json!("manual")],
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.preflight = Some(OperatorPreflightSpec {
+            questions: vec![OperatorPreflightQuestionSpec {
+                id: Some("method".to_string()),
+                param: "method".to_string(),
+                question: "Pick method?".to_string(),
+                header: "Method".to_string(),
+                multi_select: false,
+                ask_when: OperatorPreflightAskWhen {
+                    always: false,
+                    missing: true,
+                    empty: true,
+                    values: Vec::new(),
+                },
+                options: vec![
+                    OperatorPreflightOptionSpec {
+                        label: "Auto".to_string(),
+                        description: "Auto method".to_string(),
+                        value: json!("auto"),
+                        preview: None,
+                        custom: false,
+                        custom_placeholder: None,
+                    },
+                    OperatorPreflightOptionSpec {
+                        label: "Manual".to_string(),
+                        description: "Manual method".to_string(),
+                        value: json!("manual"),
+                        preview: None,
+                        custom: false,
+                        custom_placeholder: None,
+                    },
+                ],
+            }],
+        });
+        let recommended_params = BTreeMap::from([("method".to_string(), json!("manual"))]);
+
+        let missing_params = operator_preflight_question_for_spec_with_recommended_params(
+            &spec,
+            Some("recommend"),
+            None,
+            Some(&recommended_params),
+        )
+        .expect("missing params should ask");
+        assert_eq!(missing_params.questions[0].options[0].label, "Manual");
+        assert!(missing_params.questions[0].options[0].recommended);
+        assert!(missing_params.questions[0].options[0]
+            .description
+            .contains("推荐"));
+
+        let mut explicit_params = JsonMap::new();
+        explicit_params.insert("method".to_string(), json!("auto"));
+        assert!(
+            operator_preflight_question_for_spec_with_recommended_params(
+                &spec,
+                Some("recommend"),
+                Some(&explicit_params),
+                Some(&recommended_params),
+            )
+            .is_none(),
+            "project preferences must not override explicit caller params"
+        );
+
+        let mut ask_params = JsonMap::new();
+        ask_params.insert("method".to_string(), json!({"state": "ask"}));
+        let ask_question = operator_preflight_question_for_spec_with_recommended_params(
+            &spec,
+            Some("recommend"),
+            Some(&ask_params),
+            Some(&recommended_params),
+        )
+        .expect("explicit ask state should still ask with recommendation");
+        assert_eq!(ask_question.questions[0].options[0].label, "Manual");
     }
 
     #[test]

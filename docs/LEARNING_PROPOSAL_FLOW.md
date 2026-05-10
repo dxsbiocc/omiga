@@ -87,7 +87,8 @@ Operator/Template 文件，也不移动结果目录；后续 agent 可以读取 
 
 Chat 窗口在空闲状态会调用 `learning_proposal_next(refresh=false)` 做一次低成本检查；若已存在
 pending proposal，则弹出简洁确认框。UI 不在空闲轮询中扫描 ExecutionRecord 或生成新 proposal，
-proposal 生成仍由 agent/工具显式触发：
+proposal 生成仍由 agent/工具显式触发。面向用户的呈现只保留结果与动作，不展开来源单元、
+插件、运行目录、保存路径或 trace 细节；这些证据仍保存在 JSON 中供学习 agent 使用。
 
 - **保存**：调用 `learning_proposal_respond(action=approve_apply)`，内部串联 approve + apply，
   成功后提示“已保存为项目学习记录”。
@@ -96,6 +97,16 @@ proposal 生成仍由 agent/工具显式触发：
 
 该确认框只显示 `title`、`userMessage` 和按钮，不展示执行 trace。关闭弹窗只在当前会话内
 抑制重复提醒，不改变 proposal 状态。
+
+## 项目偏好推荐层
+
+已提升的 `.omiga/learning/project-preferences.json` 会接入 Operator/Template preflight：
+
+1. 若本次调用已经显式传入参数，则以显式参数为准，不弹出该参数的问题，也不被项目偏好覆盖。
+2. 若参数缺失、为空或显式设置为 `ask`，preflight 仍会询问用户。
+3. 若项目偏好中的参数值能匹配该问题的某个选项，该选项会被标记为“推荐”并默认选中；
+   用户仍可直接改选其他选项。
+4. 偏好只影响推荐顺序与默认勾选，不静默改写 Operator/Template 文件，也不替代本轮用户选择。
 
 ## 产品原则
 
@@ -109,6 +120,4 @@ proposal 生成仍由 agent/工具显式触发：
 
 1. 学习 agent 周期性查看 `.omiga/learning/proposals.json`，自动给出合并、忽略或 apply
    建议。
-2. 将 `.omiga/learning/project-preferences.json` 接入 operator/template preflight 前的推荐或自动填充，
-   但继续保留显式 ask 状态和用户覆盖优先级。
-3. 对 archive markers 增加封存 agent：复制关键产物、保留 provenance、生成可回溯 summary。
+2. 对 archive markers 增加封存 agent：复制关键产物、保留 provenance、生成可回溯 summary。

@@ -317,17 +317,11 @@ interface LearningProposalPromptAction {
   description: string;
 }
 
-interface LearningProposalPromptDetail {
-  label: string;
-  value: string;
-}
-
 interface LearningProposalPrompt {
   proposalId: string;
   kind: string;
   title: string;
   message: string;
-  details?: LearningProposalPromptDetail[];
   actions: LearningProposalPromptAction[];
 }
 
@@ -350,7 +344,6 @@ interface LearningPreferenceCandidateView {
   title: string;
   message: string;
   canPromote: boolean;
-  details: LearningProposalPromptDetail[];
 }
 
 interface LearningPreferenceCandidateOverview {
@@ -395,68 +388,6 @@ function parseJsonObject(raw: string | undefined): Record<string, unknown> | nul
   } catch {
     return null;
   }
-}
-
-function stringListField(
-  value: Record<string, unknown> | null,
-  key: string,
-): string[] {
-  const field = value?.[key];
-  if (!Array.isArray(field)) return [];
-  return field
-    .filter((entry): entry is string => typeof entry === "string")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
-
-function learningProposalDetailsFromRecord(
-  proposal: Record<string, unknown> | null,
-): LearningProposalPromptDetail[] {
-  const explicitDetails = Array.isArray(proposal?.details)
-    ? proposal.details
-        .map(objectRecord)
-        .filter((detail): detail is Record<string, unknown> => Boolean(detail))
-        .map((detail) => ({
-          label: stringField(detail, "label") ?? "",
-          value: stringField(detail, "value") ?? "",
-        }))
-        .filter((detail) => detail.label && detail.value)
-    : [];
-  if (explicitDetails.length > 0) return explicitDetails;
-
-  const evidence = objectRecord(proposal?.evidence);
-  const kind = stringField(proposal, "kind") ?? "proposal";
-  const details: LearningProposalPromptDetail[] = [
-    {
-      label: "建议类型",
-      value:
-        kind === "archive_result"
-          ? "结果封存候选"
-          : kind === "reusable_choice"
-            ? "项目偏好候选"
-            : "学习建议",
-    },
-  ];
-  const source =
-    stringField(evidence, "canonicalId") ?? stringField(evidence, "unitId");
-  if (source) details.push({ label: "来源单元", value: source });
-  const plugin = stringField(evidence, "providerPlugin");
-  if (plugin) details.push({ label: "插件", value: plugin });
-  const answeredParams = stringListField(evidence, "answeredParams");
-  if (answeredParams.length > 0) {
-    details.push({ label: "用户确认参数", value: answeredParams.join(", ") });
-  }
-  const artifacts = stringListField(evidence, "artifactPaths");
-  if (artifacts.length > 0) {
-    details.push({ label: "相关产物", value: `${artifacts.length} 个产物/路径` });
-  }
-  const runDir = stringField(evidence, "runDir");
-  if (runDir) details.push({ label: "运行目录", value: runDir });
-  details.push({
-    label: "安全边界",
-    value: "只写项目学习记录；不会静默修改 operator、template 或移动产物文件。",
-  });
-  return details;
 }
 
 function learningProposalToastFromToolResult(
@@ -519,7 +450,6 @@ function learningProposalPromptFromToolResult(
     kind: stringField(firstProposal, "kind") ?? "proposal",
     title: stringField(firstProposal, "title") ?? "发现可复用建议",
     message,
-    details: learningProposalDetailsFromRecord(firstProposal),
     actions: actions.length > 0
       ? actions
       : [
@@ -540,6 +470,21 @@ function learningProposalPromptFromToolResult(
           },
         ],
   };
+}
+
+function defaultAskUserSelections(
+  questions: AskUserQuestionItem[],
+): Record<string, string> {
+  return questions.reduce<Record<string, string>>((acc, question) => {
+    if (question.multiSelect) return acc;
+    const recommended = question.options.find(
+      (option) => option.recommended && !option.custom,
+    );
+    if (recommended) {
+      acc[question.question.trim()] = recommended.label;
+    }
+    return acc;
+  }, {});
 }
 
 function assistantMessageHasVisibleText(message: Message): boolean {
@@ -2374,8 +2319,6 @@ export function Chat({ sessionId }: ChatProps) {
     useState<LearningProposalToast | null>(null);
   const [learningProposalPrompt, setLearningProposalPrompt] =
     useState<LearningProposalPrompt | null>(null);
-  const [learningProposalDetailOpen, setLearningProposalDetailOpen] =
-    useState(false);
   const [learningProposalBusyAction, setLearningProposalBusyAction] =
     useState<string | null>(null);
   const [learningPreferenceListOpen, setLearningPreferenceListOpen] =
@@ -2800,7 +2743,6 @@ export function Chat({ sessionId }: ChatProps) {
   useEffect(() => {
     learningProposalSeenRef.current.clear();
     setLearningProposalPrompt(null);
-    setLearningProposalDetailOpen(false);
     setLearningProposalBusyAction(null);
     setLearningPreferenceListOpen(false);
     setLearningPreferenceList(null);
@@ -2861,7 +2803,6 @@ export function Chat({ sessionId }: ChatProps) {
           },
         );
         setLearningProposalPrompt(null);
-        setLearningProposalDetailOpen(false);
         setLearningProposalToast({
           title:
             result.status === "applied"
@@ -5269,7 +5210,7 @@ export function Chat({ sessionId }: ChatProps) {
           if (!sid || !mid || !tuid || !Array.isArray(qs) || qs.length === 0) {
             break;
           }
-          setAskUserSelections({});
+          setAskUserSelections(defaultAskUserSelections(qs));
           setPendingAskUser({
             toolUseId: tuid,
             sessionId: sid,
@@ -6955,7 +6896,6 @@ export function Chat({ sessionId }: ChatProps) {
     composerRef.current?.setValue("");
     setBgToast(null);
     setLearningProposalToast(null);
-    setLearningProposalDetailOpen(false);
     setLearningPreferenceListOpen(false);
     setLearningPreferenceList(null);
     setLearningPreferenceListError(null);
@@ -8514,7 +8454,6 @@ export function Chat({ sessionId }: ChatProps) {
         onClose={() => {
           if (learningProposalBusyAction) return;
           setLearningProposalPrompt(null);
-          setLearningProposalDetailOpen(false);
         }}
         severity="info"
         title={learningProposalPrompt?.title ?? "学习建议"}
@@ -8523,15 +8462,6 @@ export function Chat({ sessionId }: ChatProps) {
         zIndexOffset={3}
         actions={
           <>
-            <Button
-              type="button"
-              size="small"
-              variant="text"
-              onClick={() => setLearningProposalDetailOpen(true)}
-              sx={{ minWidth: 0, px: 1 }}
-            >
-              详情
-            </Button>
             {(learningProposalPrompt?.actions ?? []).map((action) => (
               <Button
                 key={action.id}
@@ -8557,73 +8487,6 @@ export function Chat({ sessionId }: ChatProps) {
           </>
         }
       />
-
-      <Dialog
-        open={Boolean(learningProposalPrompt) && learningProposalDetailOpen}
-        onClose={() => setLearningProposalDetailOpen(false)}
-        maxWidth="sm"
-        fullWidth
-      >
-        <DialogTitle>{learningProposalPrompt?.title ?? "学习建议详情"}</DialogTitle>
-        <DialogContent>
-          <Alert severity="info" sx={{ mb: 1.5 }}>
-            {learningProposalPrompt?.message ?? ""}
-          </Alert>
-          <Stack spacing={1.1}>
-            {(learningProposalPrompt?.details ?? []).map((detail) => (
-              <Box
-                key={`${detail.label}:${detail.value}`}
-                sx={{
-                  display: "grid",
-                  gridTemplateColumns: { xs: "1fr", sm: "120px 1fr" },
-                  gap: 0.75,
-                  alignItems: "baseline",
-                }}
-              >
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ fontWeight: 800 }}
-                >
-                  {detail.label}
-                </Typography>
-                <Typography variant="body2" sx={{ wordBreak: "break-word" }}>
-                  {detail.value}
-                </Typography>
-              </Box>
-            ))}
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button
-            type="button"
-            color="inherit"
-            onClick={() => setLearningProposalDetailOpen(false)}
-          >
-            返回
-          </Button>
-          {(learningProposalPrompt?.actions ?? []).map((action) => (
-            <Button
-              key={action.id}
-              type="button"
-              variant={action.id === "approve_apply" ? "contained" : "text"}
-              color={
-                action.id === "dismiss"
-                  ? "inherit"
-                  : action.id === "approve_apply"
-                    ? "success"
-                    : "primary"
-              }
-              disabled={Boolean(learningProposalBusyAction)}
-              onClick={() => void handleLearningProposalAction(action.id)}
-            >
-              {learningProposalBusyAction === action.id
-                ? "处理中…"
-                : action.label}
-            </Button>
-          ))}
-        </DialogActions>
-      </Dialog>
 
       <Dialog
         open={learningPreferenceListOpen}
@@ -8701,30 +8564,6 @@ export function Chat({ sessionId }: ChatProps) {
                         </Button>
                       </Box>
                     ) : null}
-                    <Stack spacing={0.6}>
-                      {candidate.details.map((detail) => (
-                        <Box
-                          key={`${candidate.candidateId}:${detail.label}`}
-                          sx={{
-                            display: "grid",
-                            gridTemplateColumns: { xs: "1fr", sm: "120px 1fr" },
-                            gap: 0.75,
-                            alignItems: "baseline",
-                          }}
-                        >
-                          <Typography
-                            variant="caption"
-                            color="text.secondary"
-                            sx={{ fontWeight: 800 }}
-                          >
-                            {detail.label}
-                          </Typography>
-                          <Typography variant="body2" sx={{ wordBreak: "break-word" }}>
-                            {detail.value}
-                          </Typography>
-                        </Box>
-                      ))}
-                    </Stack>
                   </Stack>
                 </Box>
               ))}

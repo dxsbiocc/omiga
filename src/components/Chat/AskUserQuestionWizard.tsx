@@ -3,6 +3,7 @@ import {
   Box,
   Button,
   Checkbox,
+  Chip,
   FormControl,
   FormControlLabel,
   Radio,
@@ -20,6 +21,7 @@ export interface AskUserQuestionOption {
   label: string;
   description: string;
   preview?: string;
+  recommended?: boolean;
   custom?: boolean;
   customPlaceholder?: string;
 }
@@ -188,12 +190,21 @@ export function AskUserQuestionWizard({
                       }
                       label={
                         <Box>
-                          <Typography
-                            variant="caption"
-                            sx={{ fontWeight: 600, display: "block" }}
-                          >
-                            {opt.label}
-                          </Typography>
+                          <Stack direction="row" spacing={0.75} alignItems="center">
+                            <Typography
+                              variant="caption"
+                              sx={{ fontWeight: 600, display: "block" }}
+                            >
+                              {opt.label}
+                            </Typography>
+                            {opt.recommended ? (
+                              <Chip
+                                size="small"
+                                label="推荐"
+                                sx={{ height: 18, fontSize: 10, fontWeight: 700 }}
+                              />
+                            ) : null}
+                          </Stack>
                           <Typography
                             variant="caption"
                             sx={{
@@ -253,12 +264,21 @@ export function AskUserQuestionWizard({
                       control={<Radio size="small" />}
                       label={
                         <Box>
-                          <Typography
-                            variant="caption"
-                            sx={{ fontWeight: 600, display: "block" }}
-                          >
-                            {opt.label}
-                          </Typography>
+                          <Stack direction="row" spacing={0.75} alignItems="center">
+                            <Typography
+                              variant="caption"
+                              sx={{ fontWeight: 600, display: "block" }}
+                            >
+                              {opt.label}
+                            </Typography>
+                            {opt.recommended ? (
+                              <Chip
+                                size="small"
+                                label="推荐"
+                                sx={{ height: 18, fontSize: 10, fontWeight: 700 }}
+                              />
+                            ) : null}
+                          </Stack>
                           <Typography
                             variant="caption"
                             sx={{

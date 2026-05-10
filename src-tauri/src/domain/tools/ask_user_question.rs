@@ -32,6 +32,8 @@ pub struct QuestionOption {
     #[serde(default)]
     pub preview: Option<String>,
     #[serde(default)]
+    pub recommended: bool,
+    #[serde(default)]
     pub custom: bool,
     #[serde(default, rename = "customPlaceholder")]
     pub custom_placeholder: Option<String>,
@@ -237,6 +239,7 @@ pub fn schema() -> ToolSchema {
                                         "label": { "type": "string" },
                                         "description": { "type": "string" },
                                         "preview": { "type": "string", "description": "Optional focused preview (single-select only)" },
+                                        "recommended": { "type": "boolean", "description": "If true, the UI may preselect or visually emphasize this recommended option while still letting the user change it" },
                                         "custom": { "type": "boolean", "description": "If true, the UI asks the user to type a custom value for this option" },
                                         "customPlaceholder": { "type": "string", "description": "Placeholder shown for the custom value input" }
                                     },
@@ -270,6 +273,7 @@ mod tests {
                     label: "tokio".to_string(),
                     description: "Async runtime".to_string(),
                     preview: None,
+                    recommended: false,
                     custom: false,
                     custom_placeholder: None,
                 },
@@ -277,6 +281,7 @@ mod tests {
                     label: "async-std".to_string(),
                     description: "Alternative".to_string(),
                     preview: None,
+                    recommended: false,
                     custom: false,
                     custom_placeholder: None,
                 },
@@ -358,6 +363,7 @@ mod tests {
                         label: "A".to_string(),
                         description: "a".to_string(),
                         preview: Some("x".to_string()),
+                        recommended: false,
                         custom: false,
                         custom_placeholder: None,
                     },
@@ -365,6 +371,7 @@ mod tests {
                         label: "B".to_string(),
                         description: "b".to_string(),
                         preview: None,
+                        recommended: false,
                         custom: false,
                         custom_placeholder: None,
                     },

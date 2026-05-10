@@ -286,6 +286,37 @@ pub struct LearningPreferencePromotionResult {
     pub notification: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningProjectPreferenceHint {
+    pub id: String,
+    pub status: String,
+    pub scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_plugin: Option<String>,
+    pub match_reasons: Vec<String>,
+    pub params: BTreeMap<String, JsonValue>,
+    pub answered_params: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub updated_at: String,
+    pub summary: String,
+    pub safety_note: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningProjectPreferenceHintList {
+    pub store_path: String,
+    pub count: usize,
+    pub hints: Vec<LearningProjectPreferenceHint>,
+    pub note: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LearningArchiveMarker {
@@ -537,6 +568,33 @@ pub fn promote_learning_preference_candidate(
     })
 }
 
+pub fn matching_learning_project_preference_hints(
+    project_root: &Path,
+    unit_id: Option<&str>,
+    canonical_id: Option<&str>,
+    provider_plugin: Option<&str>,
+) -> Result<LearningProjectPreferenceHintList, String> {
+    let path = learning_project_preferences_path(project_root);
+    let store = load_json_or_default::<LearningProjectPreferenceStore>(&path)?;
+    let mut hints = store
+        .preferences
+        .into_iter()
+        .filter(|preference| preference.status == "active" && !preference.params.is_empty())
+        .filter_map(|preference| {
+            project_preference_match_reasons(&preference, unit_id, canonical_id, provider_plugin)
+                .map(|reasons| project_preference_hint(preference, reasons))
+        })
+        .collect::<Vec<_>>();
+    sort_project_preference_hints(&mut hints);
+    Ok(LearningProjectPreferenceHintList {
+        store_path: path.to_string_lossy().into_owned(),
+        count: hints.len(),
+        hints,
+        note: "项目偏好只作为推荐，不会自动改写模板代码或覆盖本次明确参数；若与用户当前要求冲突，以当前要求为准。"
+            .to_string(),
+    })
+}
+
 fn load_store(project_root: &Path) -> Result<LearningProposalStore, String> {
     let path = learning_proposals_path(project_root);
     if !path.is_file() {
@@ -725,6 +783,88 @@ fn upsert_project_preference(
         .preferences
         .sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     save_json_file(&path, &store)
+}
+
+fn project_preference_match_reasons(
+    preference: &LearningProjectPreference,
+    unit_id: Option<&str>,
+    canonical_id: Option<&str>,
+    provider_plugin: Option<&str>,
+) -> Option<Vec<String>> {
+    let mut reasons = Vec::new();
+    if optional_str_eq(preference.canonical_id.as_deref(), canonical_id) {
+        reasons.push("canonicalId".to_string());
+    }
+    if optional_str_eq(preference.unit_id.as_deref(), unit_id) {
+        reasons.push("unitId".to_string());
+    }
+    let has_specific_scope = preference.canonical_id.is_some() || preference.unit_id.is_some();
+    if !has_specific_scope
+        && optional_str_eq(preference.provider_plugin.as_deref(), provider_plugin)
+    {
+        reasons.push("providerPlugin".to_string());
+    }
+    if reasons.is_empty() {
+        None
+    } else {
+        Some(reasons)
+    }
+}
+
+fn project_preference_hint(
+    preference: LearningProjectPreference,
+    match_reasons: Vec<String>,
+) -> LearningProjectPreferenceHint {
+    let summary = format!(
+        "建议优先考虑：{}。",
+        summarize_param_pairs(&preference.params)
+    );
+    LearningProjectPreferenceHint {
+        id: preference.id,
+        status: preference.status,
+        scope: preference.scope,
+        unit_id: preference.unit_id,
+        canonical_id: preference.canonical_id,
+        provider_plugin: preference.provider_plugin,
+        match_reasons,
+        params: preference.params,
+        answered_params: preference.answered_params,
+        note: preference.note,
+        updated_at: preference.updated_at,
+        summary,
+        safety_note: "仅作为推荐；不要静默覆盖本次用户明确给出的参数。".to_string(),
+    }
+}
+
+fn summarize_param_pairs(params: &BTreeMap<String, JsonValue>) -> String {
+    let pairs = params
+        .iter()
+        .take(6)
+        .map(|(key, value)| format!("{key}={}", compact_json_value(value)))
+        .collect::<Vec<_>>();
+    let suffix = if params.len() > pairs.len() {
+        format!("，另有 {} 项", params.len() - pairs.len())
+    } else {
+        String::new()
+    };
+    format!("{}{}", pairs.join(", "), suffix)
+}
+
+fn compact_json_value(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) => value.clone(),
+        JsonValue::Bool(value) => value.to_string(),
+        JsonValue::Number(value) => value.to_string(),
+        JsonValue::Null => "null".to_string(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "<complex>".to_string()),
+    }
+}
+
+fn optional_str_eq(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn upsert_preference_candidate(
@@ -1341,6 +1481,25 @@ fn sort_preference_candidates(candidates: &mut [LearningPreferenceCandidate]) {
             .then_with(|| right.updated_at.cmp(&left.updated_at))
             .then_with(|| left.id.cmp(&right.id))
     });
+}
+
+fn sort_project_preference_hints(hints: &mut [LearningProjectPreferenceHint]) {
+    hints.sort_by(|left, right| {
+        project_preference_match_rank(&left.match_reasons)
+            .cmp(&project_preference_match_rank(&right.match_reasons))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn project_preference_match_rank(reasons: &[String]) -> u8 {
+    if reasons.iter().any(|reason| reason == "canonicalId") {
+        0
+    } else if reasons.iter().any(|reason| reason == "unitId") {
+        1
+    } else {
+        2
+    }
 }
 
 fn status_rank(status: &LearningProposalStatus) -> u8 {
