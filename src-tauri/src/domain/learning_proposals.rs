@@ -7,13 +7,18 @@
 //! then perform a concrete apply step in a later flow.
 
 use crate::domain::execution_records::ExecutionRecord;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const LEARNING_PROPOSALS_RELATIVE_PATH: &str = ".omiga/learning/proposals.json";
+const LEARNING_APPLIED_RELATIVE_PATH: &str = ".omiga/learning/applied.json";
+const LEARNING_PREFERENCE_CANDIDATES_RELATIVE_PATH: &str =
+    ".omiga/learning/preference-candidates.json";
+const LEARNING_ARCHIVE_MARKERS_RELATIVE_PATH: &str = ".omiga/learning/archive-markers.json";
 const STORE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -131,8 +136,150 @@ pub struct LearningProposalDecisionResult {
     pub notification: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningAppliedTarget {
+    pub target_type: String,
+    pub path: String,
+    pub record_id: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningApplyRecord {
+    pub id: String,
+    pub proposal_id: String,
+    pub kind: LearningProposalKind,
+    pub status: String,
+    pub source_record_ids: Vec<String>,
+    pub targets: Vec<LearningAppliedTarget>,
+    pub evidence: JsonValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub applied_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningApplyStore {
+    pub schema_version: u32,
+    pub records: Vec<LearningApplyRecord>,
+}
+
+impl Default for LearningApplyStore {
+    fn default() -> Self {
+        Self {
+            schema_version: STORE_SCHEMA_VERSION,
+            records: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningPreferenceCandidate {
+    pub id: String,
+    pub proposal_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_plugin: Option<String>,
+    pub answered_params: Vec<String>,
+    pub param_source_summary: BTreeMap<String, usize>,
+    pub source_record_ids: Vec<String>,
+    pub evidence: JsonValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningPreferenceCandidateStore {
+    pub schema_version: u32,
+    pub candidates: Vec<LearningPreferenceCandidate>,
+}
+
+impl Default for LearningPreferenceCandidateStore {
+    fn default() -> Self {
+        Self {
+            schema_version: STORE_SCHEMA_VERSION,
+            candidates: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningArchiveMarker {
+    pub id: String,
+    pub proposal_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_plugin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_path: Option<String>,
+    pub artifact_paths: Vec<String>,
+    pub source_record_ids: Vec<String>,
+    pub evidence: JsonValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningArchiveMarkerStore {
+    pub schema_version: u32,
+    pub markers: Vec<LearningArchiveMarker>,
+}
+
+impl Default for LearningArchiveMarkerStore {
+    fn default() -> Self {
+        Self {
+            schema_version: STORE_SCHEMA_VERSION,
+            markers: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningProposalApplyResult {
+    pub proposal_store_path: String,
+    pub apply_store_path: String,
+    pub proposal: LearningProposal,
+    pub apply_record: LearningApplyRecord,
+    pub notification: String,
+}
+
 pub fn learning_proposals_path(project_root: &Path) -> PathBuf {
     project_root.join(LEARNING_PROPOSALS_RELATIVE_PATH)
+}
+
+pub fn learning_applied_path(project_root: &Path) -> PathBuf {
+    project_root.join(LEARNING_APPLIED_RELATIVE_PATH)
+}
+
+pub fn learning_preference_candidates_path(project_root: &Path) -> PathBuf {
+    project_root.join(LEARNING_PREFERENCE_CANDIDATES_RELATIVE_PATH)
+}
+
+pub fn learning_archive_markers_path(project_root: &Path) -> PathBuf {
+    project_root.join(LEARNING_ARCHIVE_MARKERS_RELATIVE_PATH)
 }
 
 pub async fn refresh_and_list_learning_proposals(
@@ -193,6 +340,54 @@ pub fn decide_learning_proposal(
     })
 }
 
+pub fn apply_learning_proposal(
+    project_root: &Path,
+    proposal_id: &str,
+    allow_unapproved: bool,
+    note: Option<String>,
+) -> Result<LearningProposalApplyResult, String> {
+    let mut proposal_store = load_store(project_root)?;
+    let now = now_rfc3339();
+    let proposal = proposal_store
+        .proposals
+        .iter_mut()
+        .find(|proposal| proposal.id == proposal_id)
+        .ok_or_else(|| format!("learning proposal `{proposal_id}` not found"))?;
+
+    if proposal.status != LearningProposalStatus::Approved
+        && proposal.status != LearningProposalStatus::Applied
+        && !allow_unapproved
+    {
+        return Err(format!(
+            "learning proposal `{proposal_id}` must be approved before apply"
+        ));
+    }
+
+    let previous_status = proposal.status.clone();
+    let apply_record = apply_record_for_proposal(project_root, proposal, note.clone(), &now)?;
+    upsert_apply_record(project_root, apply_record.clone())?;
+
+    proposal.status = LearningProposalStatus::Applied;
+    proposal.updated_at = now.clone();
+    if let Some(note) = note {
+        proposal.decision_note = Some(note);
+    }
+    let proposal = proposal.clone();
+    save_store(project_root, &proposal_store)?;
+
+    Ok(LearningProposalApplyResult {
+        proposal_store_path: learning_proposals_path(project_root)
+            .to_string_lossy()
+            .into_owned(),
+        apply_store_path: learning_applied_path(project_root)
+            .to_string_lossy()
+            .into_owned(),
+        notification: apply_notification(&proposal, previous_status),
+        proposal,
+        apply_record,
+    })
+}
+
 fn load_store(project_root: &Path) -> Result<LearningProposalStore, String> {
     let path = learning_proposals_path(project_root);
     if !path.is_file() {
@@ -224,6 +419,243 @@ fn save_store(project_root: &Path, store: &LearningProposalStore) -> Result<(), 
         .map_err(|err| format!("write learning proposal store `{}`: {err}", path.display()))
 }
 
+fn apply_record_for_proposal(
+    project_root: &Path,
+    proposal: &LearningProposal,
+    note: Option<String>,
+    now: &str,
+) -> Result<LearningApplyRecord, String> {
+    let mut targets = Vec::new();
+    match proposal.kind {
+        LearningProposalKind::ReusableChoice => {
+            let candidate = preference_candidate_for_proposal(proposal, note.clone(), now);
+            let path = learning_preference_candidates_path(project_root);
+            upsert_preference_candidate(project_root, candidate.clone())?;
+            targets.push(LearningAppliedTarget {
+                target_type: "preference_candidate".to_string(),
+                path: path.to_string_lossy().into_owned(),
+                record_id: candidate.id,
+                description:
+                    "Saved as a project-scoped preference candidate; not an active default yet."
+                        .to_string(),
+            });
+        }
+        LearningProposalKind::ArchiveResult => {
+            let marker = archive_marker_for_proposal(proposal, note.clone(), now);
+            let path = learning_archive_markers_path(project_root);
+            upsert_archive_marker(project_root, marker.clone())?;
+            targets.push(LearningAppliedTarget {
+                target_type: "archive_marker".to_string(),
+                path: path.to_string_lossy().into_owned(),
+                record_id: marker.id,
+                description:
+                    "Saved as a project-scoped archive marker; artifacts are not moved or deleted."
+                        .to_string(),
+            });
+        }
+    }
+
+    Ok(LearningApplyRecord {
+        id: format!("apply_{}", proposal.id),
+        proposal_id: proposal.id.clone(),
+        kind: proposal.kind.clone(),
+        status: "applied".to_string(),
+        source_record_ids: proposal.source_record_ids.clone(),
+        targets,
+        evidence: proposal.evidence.clone(),
+        note,
+        applied_at: now.to_string(),
+        updated_at: now.to_string(),
+    })
+}
+
+fn preference_candidate_for_proposal(
+    proposal: &LearningProposal,
+    note: Option<String>,
+    now: &str,
+) -> LearningPreferenceCandidate {
+    LearningPreferenceCandidate {
+        id: format!("pref_{}", proposal.id),
+        proposal_id: proposal.id.clone(),
+        status: "candidate".to_string(),
+        unit_id: evidence_string(proposal, "unitId"),
+        canonical_id: evidence_string(proposal, "canonicalId"),
+        provider_plugin: evidence_string(proposal, "providerPlugin"),
+        answered_params: evidence_string_vec(proposal, "answeredParams"),
+        param_source_summary: evidence_usize_map(proposal, "paramSourceSummary"),
+        source_record_ids: proposal.source_record_ids.clone(),
+        evidence: proposal.evidence.clone(),
+        note,
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
+    }
+}
+
+fn archive_marker_for_proposal(
+    proposal: &LearningProposal,
+    note: Option<String>,
+    now: &str,
+) -> LearningArchiveMarker {
+    LearningArchiveMarker {
+        id: format!("archive_{}", proposal.id),
+        proposal_id: proposal.id.clone(),
+        status: "marked".to_string(),
+        unit_id: evidence_string(proposal, "unitId"),
+        canonical_id: evidence_string(proposal, "canonicalId"),
+        provider_plugin: evidence_string(proposal, "providerPlugin"),
+        run_dir: evidence_string(proposal, "runDir"),
+        provenance_path: evidence_string(proposal, "provenancePath"),
+        artifact_paths: evidence_string_vec(proposal, "artifactPaths"),
+        source_record_ids: proposal.source_record_ids.clone(),
+        evidence: proposal.evidence.clone(),
+        note,
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
+    }
+}
+
+fn upsert_apply_record(project_root: &Path, mut record: LearningApplyRecord) -> Result<(), String> {
+    let path = learning_applied_path(project_root);
+    let mut store = load_json_or_default::<LearningApplyStore>(&path)?;
+    if let Some(existing) = store
+        .records
+        .iter_mut()
+        .find(|existing| existing.id == record.id)
+    {
+        record.applied_at.clone_from(&existing.applied_at);
+        *existing = record;
+    } else {
+        store.records.push(record);
+    }
+    sort_apply_records(&mut store.records);
+    save_json_file(&path, &store)
+}
+
+fn upsert_preference_candidate(
+    project_root: &Path,
+    mut candidate: LearningPreferenceCandidate,
+) -> Result<(), String> {
+    let path = learning_preference_candidates_path(project_root);
+    let mut store = load_json_or_default::<LearningPreferenceCandidateStore>(&path)?;
+    if let Some(existing) = store
+        .candidates
+        .iter_mut()
+        .find(|existing| existing.id == candidate.id)
+    {
+        candidate.created_at.clone_from(&existing.created_at);
+        *existing = candidate;
+    } else {
+        store.candidates.push(candidate);
+    }
+    store
+        .candidates
+        .sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    save_json_file(&path, &store)
+}
+
+fn upsert_archive_marker(
+    project_root: &Path,
+    mut marker: LearningArchiveMarker,
+) -> Result<(), String> {
+    let path = learning_archive_markers_path(project_root);
+    let mut store = load_json_or_default::<LearningArchiveMarkerStore>(&path)?;
+    if let Some(existing) = store
+        .markers
+        .iter_mut()
+        .find(|existing| existing.id == marker.id)
+    {
+        marker.created_at.clone_from(&existing.created_at);
+        *existing = marker;
+    } else {
+        store.markers.push(marker);
+    }
+    store
+        .markers
+        .sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    save_json_file(&path, &store)
+}
+
+fn load_json_or_default<T>(path: &Path) -> Result<T, String>
+where
+    T: Default + DeserializeOwned,
+{
+    if !path.is_file() {
+        return Ok(T::default());
+    }
+    let raw = fs::read_to_string(path)
+        .map_err(|err| format!("read JSON store `{}`: {err}", path.display()))?;
+    serde_json::from_str::<T>(&raw)
+        .map_err(|err| format!("parse JSON store `{}`: {err}", path.display()))
+}
+
+fn save_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("create JSON store dir `{}`: {err}", parent.display()))?;
+    }
+    let raw = serde_json::to_string_pretty(value)
+        .map_err(|err| format!("serialize JSON store `{}`: {err}", path.display()))?;
+    fs::write(path, raw).map_err(|err| format!("write JSON store `{}`: {err}", path.display()))
+}
+
+fn evidence_string(proposal: &LearningProposal, key: &str) -> Option<String> {
+    proposal
+        .evidence
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn evidence_string_vec(proposal: &LearningProposal, key: &str) -> Vec<String> {
+    proposal
+        .evidence
+        .get(key)
+        .and_then(JsonValue::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn evidence_usize_map(proposal: &LearningProposal, key: &str) -> BTreeMap<String, usize> {
+    let mut out = BTreeMap::new();
+    if let Some(map) = proposal.evidence.get(key).and_then(JsonValue::as_object) {
+        for (key, value) in map {
+            if let Some(count) = value.as_u64().and_then(|count| usize::try_from(count).ok()) {
+                out.insert(key.clone(), count);
+            }
+        }
+    }
+    out
+}
+
+fn apply_notification(
+    proposal: &LearningProposal,
+    previous_status: LearningProposalStatus,
+) -> String {
+    if previous_status == LearningProposalStatus::Applied {
+        return format!("学习建议已处于固化状态：{}。", proposal.title);
+    }
+    match proposal.kind {
+        LearningProposalKind::ReusableChoice => {
+            format!(
+                "已固化学习建议：{}。已写入项目偏好候选，后续任务可由学习 agent 决定是否提升为模板默认值。",
+                proposal.title
+            )
+        }
+        LearningProposalKind::ArchiveResult => {
+            format!(
+                "已固化学习建议：{}。已写入结果封存标记，后续任务可按 marker 引用或执行真实归档。",
+                proposal.title
+            )
+        }
+    }
+}
+
 async fn refresh_store_from_execution_records(
     project_root: &Path,
     limit: usize,
@@ -232,7 +664,7 @@ async fn refresh_store_from_execution_records(
     let records =
         crate::domain::execution_records::list_recent_execution_records(project_root, limit)
             .await?;
-    let existing = store
+    let mut existing = store
         .proposals
         .iter()
         .map(|proposal| (proposal.id.clone(), proposal.status.clone()))
@@ -245,6 +677,7 @@ async fn refresh_store_from_execution_records(
             candidate.status = status.clone();
             continue;
         }
+        existing.insert(candidate.id.clone(), candidate.status.clone());
         store.proposals.push(candidate);
         generated += 1;
     }
@@ -296,6 +729,7 @@ fn generate_learning_proposals_from_records(
     now: &str,
 ) -> Vec<LearningProposal> {
     let mut proposals = Vec::new();
+    let mut reusable_choice_keys = HashSet::new();
     for record in records.iter().filter(|record| record.status == "succeeded") {
         let metadata = parse_json(record.metadata_json.as_deref());
         let runtime = parse_json(record.runtime_json.as_deref());
@@ -312,7 +746,9 @@ fn generate_learning_proposals_from_records(
         let provenance_path = string_at(metadata_ref, &["/provenancePath", "/provenance_path"]);
         let unit_label = unit_label(record);
 
-        if has_user_preflight {
+        if has_user_preflight
+            && reusable_choice_keys.insert(reusable_choice_signature(record, &answered_params))
+        {
             proposals.push(reusable_choice_proposal(
                 record,
                 &unit_label,
@@ -339,6 +775,22 @@ fn generate_learning_proposals_from_records(
         }
     }
     proposals
+}
+
+fn reusable_choice_signature(record: &ExecutionRecord, answered_params: &[String]) -> String {
+    let mut sorted_params = answered_params.to_vec();
+    sorted_params.sort();
+    format!(
+        "{}\0{}\0{}\0{}",
+        record
+            .canonical_id
+            .as_deref()
+            .or(record.unit_id.as_deref())
+            .unwrap_or(record.kind.as_str()),
+        record.provider_plugin.as_deref().unwrap_or_default(),
+        record.param_hash.as_deref().unwrap_or(record.id.as_str()),
+        sorted_params.join(",")
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -467,10 +919,32 @@ fn stable_proposal_id(kind: &str, record: &ExecutionRecord) -> String {
     let mut hasher = Sha256::new();
     hasher.update(kind.as_bytes());
     hasher.update(b"\0");
-    hasher.update(record.id.as_bytes());
-    hasher.update(b"\0");
-    if let Some(param_hash) = record.param_hash.as_deref() {
-        hasher.update(param_hash.as_bytes());
+
+    if kind == "reusable_choice" {
+        let unit_key = record
+            .canonical_id
+            .as_deref()
+            .or(record.unit_id.as_deref())
+            .or(record.provider_plugin.as_deref())
+            .unwrap_or(&record.kind);
+        hasher.update(unit_key.as_bytes());
+        hasher.update(b"\0");
+        if let Some(param_hash) = record.param_hash.as_deref() {
+            hasher.update(param_hash.as_bytes());
+        } else {
+            // Without a parameter signature we cannot safely deduplicate across
+            // runs; fall back to the specific record to avoid collapsing
+            // unrelated user choices.
+            hasher.update(record.id.as_bytes());
+        }
+    } else {
+        // Archive proposals are intentionally record-specific: each successful
+        // run may produce a distinct result folder/provenance bundle.
+        hasher.update(record.id.as_bytes());
+        hasher.update(b"\0");
+        if let Some(param_hash) = record.param_hash.as_deref() {
+            hasher.update(param_hash.as_bytes());
+        }
     }
     let digest = hasher.finalize();
     let short = digest
@@ -595,6 +1069,15 @@ fn sort_proposals(proposals: &mut [LearningProposal]) {
     });
 }
 
+fn sort_apply_records(records: &mut [LearningApplyRecord]) {
+    records.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
 fn status_rank(status: &LearningProposalStatus) -> u8 {
     match status {
         LearningProposalStatus::Proposed => 0,
@@ -678,6 +1161,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_deduplicates_reusable_choices_by_unit_and_param_signature() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (record_id, run_dir) in [
+            ("execrec_first", ".omiga/runs/plot_1"),
+            ("execrec_second", ".omiga/runs/plot_2"),
+        ] {
+            crate::domain::execution_records::record_execution_with_id(
+                tmp.path(),
+                record_id.to_string(),
+                ExecutionRecordInput {
+                    kind: "template".to_string(),
+                    unit_id: Some("visualization-r/scatter".to_string()),
+                    canonical_id: Some("plugin/template/visualization-r/scatter".to_string()),
+                    provider_plugin: Some("visualization-r".to_string()),
+                    status: "succeeded".to_string(),
+                    session_id: Some("session-plot".to_string()),
+                    parent_execution_id: None,
+                    started_at: Some("2026-05-09T00:00:00Z".to_string()),
+                    ended_at: Some("2026-05-09T00:00:01Z".to_string()),
+                    input_hash: Some("sha256:input".to_string()),
+                    param_hash: Some("sha256:shared-style".to_string()),
+                    output_summary_json: Some(json!({
+                        "outputs": [{"path": format!("{run_dir}/figure.png")}]
+                    })),
+                    runtime_json: None,
+                    metadata_json: Some(json!({
+                        "runDir": run_dir,
+                        "paramSources": {
+                            "palette": "user_preflight",
+                            "point_size": "user_preflight"
+                        },
+                        "preflight": {
+                            "answeredParams": [
+                                {"param": "palette"},
+                                {"param": "point_size"}
+                            ]
+                        }
+                    })),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let listed = refresh_and_list_learning_proposals(tmp.path(), 50, false)
+            .await
+            .unwrap();
+        let reusable_choices = listed
+            .proposals
+            .iter()
+            .filter(|proposal| proposal.kind == LearningProposalKind::ReusableChoice)
+            .count();
+        let archive_results = listed
+            .proposals
+            .iter()
+            .filter(|proposal| proposal.kind == LearningProposalKind::ArchiveResult)
+            .count();
+
+        assert_eq!(reusable_choices, 1);
+        assert_eq!(archive_results, 2);
+        assert_eq!(listed.summary.generated_count, 3);
+    }
+
+    #[tokio::test]
     async fn decision_updates_proposal_status_and_notification() {
         let tmp = tempfile::tempdir().unwrap();
         record_execution(
@@ -723,5 +1270,119 @@ mod tests {
         assert_eq!(pending.summary.pending_count, 0);
         let all = list_learning_proposals(tmp.path(), true).unwrap();
         assert_eq!(all.summary.approved_count, 1);
+    }
+
+    #[tokio::test]
+    async fn apply_writes_preference_candidates_and_archive_markers_idempotently() {
+        let tmp = tempfile::tempdir().unwrap();
+        record_execution(
+            tmp.path(),
+            ExecutionRecordInput {
+                kind: "operator".to_string(),
+                unit_id: Some("demo".to_string()),
+                canonical_id: Some("plugin/operator/demo".to_string()),
+                provider_plugin: Some("omics".to_string()),
+                status: "succeeded".to_string(),
+                session_id: None,
+                parent_execution_id: None,
+                started_at: Some("2026-05-10T00:00:00Z".to_string()),
+                ended_at: Some("2026-05-10T00:00:02Z".to_string()),
+                input_hash: None,
+                param_hash: Some("sha256:param".to_string()),
+                output_summary_json: Some(json!({
+                    "outputs": {
+                        "report": {"path": "report.html"}
+                    }
+                })),
+                runtime_json: None,
+                metadata_json: Some(json!({
+                    "runDir": ".omiga/runs/oprun_2",
+                    "provenancePath": ".omiga/runs/oprun_2/provenance.json",
+                    "paramSources": {"method": "user_preflight"},
+                    "preflight": {"answeredParams": [{"param": "method"}]}
+                })),
+            },
+        )
+        .await
+        .unwrap();
+
+        let listed = refresh_and_list_learning_proposals(tmp.path(), 50, false)
+            .await
+            .unwrap();
+        let reusable_id = listed
+            .proposals
+            .iter()
+            .find(|proposal| proposal.kind == LearningProposalKind::ReusableChoice)
+            .unwrap()
+            .id
+            .clone();
+        let archive_id = listed
+            .proposals
+            .iter()
+            .find(|proposal| proposal.kind == LearningProposalKind::ArchiveResult)
+            .unwrap()
+            .id
+            .clone();
+
+        let unapproved = apply_learning_proposal(tmp.path(), &reusable_id, false, None);
+        assert!(unapproved
+            .unwrap_err()
+            .contains("must be approved before apply"));
+
+        decide_learning_proposal(
+            tmp.path(),
+            &reusable_id,
+            LearningProposalDecision::Approve,
+            Some("confirm reuse".to_string()),
+        )
+        .unwrap();
+        let applied = apply_learning_proposal(
+            tmp.path(),
+            &reusable_id,
+            false,
+            Some("solidify reusable choice".to_string()),
+        )
+        .unwrap();
+        assert_eq!(applied.proposal.status, LearningProposalStatus::Applied);
+        assert_eq!(
+            applied.apply_record.targets[0].target_type,
+            "preference_candidate"
+        );
+        assert!(applied.notification.contains("已固化学习建议"));
+
+        let preferences = load_json_or_default::<LearningPreferenceCandidateStore>(
+            &learning_preference_candidates_path(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(preferences.candidates.len(), 1);
+        assert_eq!(preferences.candidates[0].answered_params, vec!["method"]);
+
+        apply_learning_proposal(tmp.path(), &reusable_id, false, None).unwrap();
+        let apply_store =
+            load_json_or_default::<LearningApplyStore>(&learning_applied_path(tmp.path())).unwrap();
+        assert_eq!(apply_store.records.len(), 1);
+
+        decide_learning_proposal(
+            tmp.path(),
+            &archive_id,
+            LearningProposalDecision::Approve,
+            None,
+        )
+        .unwrap();
+        let archive_applied =
+            apply_learning_proposal(tmp.path(), &archive_id, false, None).unwrap();
+        assert_eq!(
+            archive_applied.apply_record.targets[0].target_type,
+            "archive_marker"
+        );
+        let archive_markers = load_json_or_default::<LearningArchiveMarkerStore>(
+            &learning_archive_markers_path(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(archive_markers.markers.len(), 1);
+        assert_eq!(
+            archive_markers.markers[0].provenance_path.as_deref(),
+            Some(".omiga/runs/oprun_2/provenance.json")
+        );
     }
 }

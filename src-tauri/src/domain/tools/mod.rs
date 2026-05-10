@@ -22,6 +22,7 @@ pub mod file_read;
 pub mod file_write;
 pub mod glob;
 pub mod grep;
+pub mod learning_proposal_apply;
 pub mod learning_proposal_decide;
 pub mod learning_proposal_list;
 pub mod list_mcp_resources;
@@ -97,6 +98,7 @@ pub enum ToolKind {
     ExecutionArchiveAdvisor,
     LearningProposalList,
     LearningProposalDecide,
+    LearningProposalApply,
     ExecutionLineageReport,
     ExecutionRecordList,
     Visualization,
@@ -160,6 +162,7 @@ impl fmt::Display for ToolKind {
             ToolKind::ExecutionArchiveAdvisor => write!(f, "execution_archive_advisor"),
             ToolKind::LearningProposalList => write!(f, "learning_proposal_list"),
             ToolKind::LearningProposalDecide => write!(f, "learning_proposal_decide"),
+            ToolKind::LearningProposalApply => write!(f, "learning_proposal_apply"),
             ToolKind::ExecutionLineageReport => write!(f, "execution_lineage_report"),
             ToolKind::ExecutionRecordList => write!(f, "execution_record_list"),
             ToolKind::Visualization => write!(f, "visualization"),
@@ -213,6 +216,7 @@ pub enum Tool {
     ExecutionArchiveAdvisor(execution_archive_advisor::ExecutionArchiveAdvisorArgs),
     LearningProposalList(learning_proposal_list::LearningProposalListArgs),
     LearningProposalDecide(learning_proposal_decide::LearningProposalDecideArgs),
+    LearningProposalApply(learning_proposal_apply::LearningProposalApplyArgs),
     ExecutionLineageReport(execution_lineage_report::ExecutionLineageReportArgs),
     ExecutionRecordList(execution_record_list::ExecutionRecordListArgs),
     Visualization(visualization::VisualizationArgs),
@@ -267,6 +271,7 @@ impl Tool {
             Tool::ExecutionArchiveAdvisor(_) => ToolKind::ExecutionArchiveAdvisor,
             Tool::LearningProposalList(_) => ToolKind::LearningProposalList,
             Tool::LearningProposalDecide(_) => ToolKind::LearningProposalDecide,
+            Tool::LearningProposalApply(_) => ToolKind::LearningProposalApply,
             Tool::ExecutionLineageReport(_) => ToolKind::ExecutionLineageReport,
             Tool::ExecutionRecordList(_) => ToolKind::ExecutionRecordList,
             Tool::Visualization(_) => ToolKind::Visualization,
@@ -318,6 +323,7 @@ impl Tool {
             Tool::ExecutionArchiveAdvisor(_) => "execution_archive_advisor",
             Tool::LearningProposalList(_) => "learning_proposal_list",
             Tool::LearningProposalDecide(_) => "learning_proposal_decide",
+            Tool::LearningProposalApply(_) => "learning_proposal_apply",
             Tool::ExecutionLineageReport(_) => "execution_lineage_report",
             Tool::ExecutionRecordList(_) => "execution_record_list",
             Tool::Visualization(_) => "Visualization",
@@ -369,6 +375,7 @@ impl Tool {
             Tool::ExecutionArchiveAdvisor(_) => execution_archive_advisor::DESCRIPTION,
             Tool::LearningProposalList(_) => learning_proposal_list::DESCRIPTION,
             Tool::LearningProposalDecide(_) => learning_proposal_decide::DESCRIPTION,
+            Tool::LearningProposalApply(_) => learning_proposal_apply::DESCRIPTION,
             Tool::ExecutionLineageReport(_) => execution_lineage_report::DESCRIPTION,
             Tool::ExecutionRecordList(_) => execution_record_list::DESCRIPTION,
             Tool::Visualization(_) => visualization::DESCRIPTION,
@@ -436,6 +443,9 @@ impl Tool {
             }
             Tool::LearningProposalDecide(args) => {
                 learning_proposal_decide::LearningProposalDecideTool::execute(ctx, args).await?
+            }
+            Tool::LearningProposalApply(args) => {
+                learning_proposal_apply::LearningProposalApplyTool::execute(ctx, args).await?
             }
             Tool::ExecutionLineageReport(args) => {
                 execution_lineage_report::ExecutionLineageReportTool::execute(ctx, args).await?
@@ -656,6 +666,12 @@ impl Tool {
                 })?;
                 Ok(Tool::LearningProposalDecide(args))
             }
+            ToolKind::LearningProposalApply => {
+                let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
+                    message: format!("Invalid learning_proposal_apply arguments: {}", e),
+                })?;
+                Ok(Tool::LearningProposalApply(args))
+            }
             ToolKind::ExecutionLineageReport => {
                 let args = serde_json::from_str(json).map_err(|e| ToolError::InvalidArguments {
                     message: format!("Invalid execution_lineage_report arguments: {}", e),
@@ -826,6 +842,7 @@ impl Tool {
             "learning_proposal_decide" | "LearningProposalDecide" => {
                 ToolKind::LearningProposalDecide
             }
+            "learning_proposal_apply" | "LearningProposalApply" => ToolKind::LearningProposalApply,
             "execution_lineage_report" | "ExecutionLineageReport" => {
                 ToolKind::ExecutionLineageReport
             }
@@ -1468,6 +1485,7 @@ pub fn all_tool_schemas(include_skill: bool) -> Vec<ToolSchema> {
         execution_archive_advisor::schema(),
         learning_proposal_list::schema(),
         learning_proposal_decide::schema(),
+        learning_proposal_apply::schema(),
         execution_lineage_report::schema(),
         execution_record_list::schema(),
         visualization::schema(),
@@ -1537,6 +1555,7 @@ fn tool_schema_model_order(name: &str) -> (u8, u8) {
         "todo_write" => (2, 3),
         "template_execute" => (2, 4),
         "learning_proposal_decide" => (2, 5),
+        "learning_proposal_apply" => (2, 6),
 
         // Orchestration and app-specific tools.
         "agent" | "Agent" => (3, 0),
@@ -1834,6 +1853,13 @@ mod tool_enum_tests {
         )
         .unwrap();
         assert!(matches!(t, Tool::LearningProposalDecide(_)));
+
+        let t = Tool::from_json_str(
+            "learning_proposal_apply",
+            r#"{"proposalId":"learn_1","note":"confirmed"}"#,
+        )
+        .unwrap();
+        assert!(matches!(t, Tool::LearningProposalApply(_)));
 
         let t = Tool::from_json_str("environment_profile_check", r#"{"envRef":"r-bioc"}"#).unwrap();
         assert!(matches!(t, Tool::EnvironmentProfileCheck(_)));

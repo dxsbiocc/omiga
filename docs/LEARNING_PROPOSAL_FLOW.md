@@ -43,6 +43,22 @@ Operator、Template、Skill 或归档结果目录。
 `approve` 代表用户确认“值得固化”；真正落到 Template、项目偏好或归档目录仍属于后续
 apply 流程，避免后台静默改写核心实现。
 
+### `learning_proposal_apply`
+
+将已批准的建议写入项目级固化记录。默认要求建议已经 `approve`，除非显式传入
+`allowUnapproved=true`。
+
+当前 apply 仍保持保守边界：它只写入可审计的学习记录，不静默改写 Operator、Template、
+Skill，也不移动或删除产物文件。
+
+写入位置：
+
+- `.omiga/learning/applied.json`：统一 apply 记录，描述本次固化的来源和目标。
+- `.omiga/learning/preference-candidates.json`：参数/工作流偏好候选；后续可提升为项目偏好
+  或 Template 默认值。
+- `.omiga/learning/archive-markers.json`：结果封存标记；记录 runDir、provenance 和产物路径，
+  后续可由归档 agent 执行真实搬运/复制/清理。
+
 ## 产品原则
 
 - 面向用户：提示“发现可固化经验，是否保存？”，而不是展示 trace 细节。
@@ -53,10 +69,7 @@ apply 流程，避免后台静默改写核心实现。
 
 ## 后续提升
 
-1. 将 `approved` 建议接入真正的 apply 流程：
-   - 保存为项目偏好；
-   - 写入 Template 默认值候选/示例；
-   - 封存成功结果目录。
-2. 前端接入轻量弹窗/通知，只展示 `userMessage` 和确认按钮。
-3. 学习 agent 周期性查看 `.omiga/learning/proposals.json`，自动给出合并、忽略或 apply
+1. 前端接入轻量弹窗/通知，只展示 `userMessage` 和确认按钮。
+2. 学习 agent 周期性查看 `.omiga/learning/proposals.json`，自动给出合并、忽略或 apply
    建议。
+3. 将 preference candidates 升级为真实项目偏好或 Template 默认值时，继续要求可审计确认。
