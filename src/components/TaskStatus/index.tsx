@@ -24,6 +24,8 @@ import {
   WarningAmber,
   Groups,
   Search,
+  History,
+  AutoAwesome,
 } from "@mui/icons-material";
 import {
   useSessionStore,
@@ -39,6 +41,8 @@ import { normalizeAgentDisplayName } from "../../state/agentStore";
 import { formatExecutionElapsedFixed } from "../ExecutionStepPanel";
 import { PlanTodoList, type PlanTodoItem } from "./PlanTodoList";
 import { ReactStepList } from "./ReactStepList";
+import { ExecutionRecordBrowser } from "./ExecutionRecordBrowser";
+import { SelfEvolutionDraftBrowser } from "./SelfEvolutionDraftBrowser";
 import { SchedulerPlanPanel } from "./SchedulerPlanPanel";
 import {
   RunningTaskCard,
@@ -639,7 +643,35 @@ export function TaskStatus() {
   const hasBackground = backgroundJobs.length > 0;
   const hasTodos = todoItems.length > 0;
   const hasSchedulerPlan = schedulerPlan && schedulerPlan.subtasks.length > 1;
-  const schedulerTabIndex = hasTodos && hasExecution ? 2 : hasTodos || hasExecution ? 1 : 0;
+  const hasExecutionRecordBrowser = Boolean(projectRoot);
+  const hasSelfEvolutionDraftBrowser = Boolean(projectRoot);
+  const mainTabs = useMemo(
+    () =>
+      [
+        hasTodos ? "todos" : null,
+        hasExecution ? "execution" : null,
+        hasSchedulerPlan ? "scheduler" : null,
+        hasExecutionRecordBrowser ? "records" : null,
+        hasSelfEvolutionDraftBrowser ? "drafts" : null,
+      ].filter((tab): tab is "todos" | "execution" | "scheduler" | "records" | "drafts" =>
+        Boolean(tab),
+      ),
+    [
+      hasExecution,
+      hasExecutionRecordBrowser,
+      hasSchedulerPlan,
+      hasSelfEvolutionDraftBrowser,
+      hasTodos,
+    ],
+  );
+  const activeMainTab = mainTabs[activeTab] ?? mainTabs[0] ?? null;
+  const schedulerTabIndex = mainTabs.indexOf("scheduler");
+
+  useEffect(() => {
+    if (activeTab >= mainTabs.length) {
+      setActiveTab(0);
+    }
+  }, [activeTab, mainTabs.length]);
 
   // 判断当前模式
   const isPlanMode = composerAgentType === "Plan";
@@ -1446,7 +1478,7 @@ export function TaskStatus() {
   };
 
   const handleInspectOrchestration = () => {
-    if (hasSchedulerPlan) {
+    if (hasSchedulerPlan && schedulerTabIndex >= 0) {
       setActiveTab(schedulerTabIndex);
       return;
     }
@@ -1512,7 +1544,7 @@ export function TaskStatus() {
     if (!action) return;
     switch (action.type) {
       case "plan":
-        if (hasSchedulerPlan) {
+        if (hasSchedulerPlan && schedulerTabIndex >= 0) {
           setActiveTab(schedulerTabIndex);
         } else {
           setStatusPanelTab(0);
@@ -1577,7 +1609,7 @@ export function TaskStatus() {
       return;
     }
 
-    if (hasSchedulerPlan) {
+    if (hasSchedulerPlan && schedulerTabIndex >= 0) {
       setActiveTab(schedulerTabIndex);
     }
   };
@@ -2449,7 +2481,7 @@ export function TaskStatus() {
       </Box>
 
       {/* Tab 导航 - 当有多个视图时显示 */}
-      {(hasTodos || hasExecution || hasSchedulerPlan) && (
+      {mainTabs.length > 1 && (
         <Tabs
           value={activeTab}
           onChange={(_, v) => setActiveTab(v)}
@@ -2488,13 +2520,32 @@ export function TaskStatus() {
               iconPosition="start"
             />
           )}
+          {hasExecutionRecordBrowser && (
+            <Tab
+              label="运行记录"
+              icon={<History sx={{ fontSize: 14 }} />}
+              iconPosition="start"
+            />
+          )}
+          {hasSelfEvolutionDraftBrowser && (
+            <Tab
+              label="演化草稿"
+              icon={<AutoAwesome sx={{ fontSize: 14 }} />}
+              iconPosition="start"
+            />
+          )}
         </Tabs>
       )}
 
       {/* 内容区 */}
       <Box sx={{ flex: 1, overflow: "auto", minHeight: 0 }}>
         {/* Research 模式：独立于通用编排 Trace/Timeline 的研究任务摘要 */}
-        {hasResearchSurface && !hasTodos && !hasExecution && !hasSchedulerPlan && (
+        {hasResearchSurface &&
+          activeMainTab !== "records" &&
+          activeMainTab !== "drafts" &&
+          !hasTodos &&
+          !hasExecution &&
+          !hasSchedulerPlan && (
           <ResearchTaskPanel
             commandBody={latestResearchCommand?.body}
             events={researchEvents}
@@ -2504,6 +2555,8 @@ export function TaskStatus() {
 
         {/* Plan 模式空状态：仍保持 ToDo 语义，避免掉回通用编排/空状态 */}
         {hasPlanSurface &&
+          activeMainTab !== "records" &&
+          activeMainTab !== "drafts" &&
           !hasTodos &&
           !hasExecution &&
           !hasSchedulerPlan &&
@@ -2528,7 +2581,7 @@ export function TaskStatus() {
           )}
 
         {/* Plan 模式：待办列表 */}
-        {hasTodos && activeTab === 0 && (
+        {hasTodos && activeMainTab === "todos" && (
           <Box sx={{ p: 1.5 }}>
             {runningAgentCards.length > 0 && (
               <Box sx={{ mb: 2 }}>
@@ -2679,7 +2732,7 @@ export function TaskStatus() {
         )}
 
         {/* ReAct 模式：执行步骤 */}
-        {hasExecution && activeTab === (hasTodos ? 1 : 0) && (
+        {hasExecution && activeMainTab === "execution" && (
           <Box sx={{ p: 1.5 }}>
             <ReactStepList
               steps={executionSteps}
@@ -2690,13 +2743,7 @@ export function TaskStatus() {
         )}
 
         {/* 调度计划视图 */}
-        {hasSchedulerPlan &&
-          activeTab ===
-            (hasTodos && hasExecution
-              ? 2
-              : hasTodos || hasExecution
-                ? 1
-                : 0) && (
+        {hasSchedulerPlan && activeMainTab === "scheduler" && (
             <Box sx={{ p: 1.5 }}>
               <SchedulerPlanPanel
                 plan={schedulerPlan}
@@ -2708,8 +2755,33 @@ export function TaskStatus() {
             </Box>
           )}
 
+        {hasExecutionRecordBrowser && activeMainTab === "records" && (
+          <Box sx={{ p: 1.5 }}>
+            <ExecutionRecordBrowser
+              projectRoot={projectRoot}
+              sessionId={currentSession?.id ?? null}
+              refreshToken={dashboardRefreshTick}
+            />
+          </Box>
+        )}
+
+        {hasSelfEvolutionDraftBrowser && activeMainTab === "drafts" && (
+          <Box sx={{ p: 1.5 }}>
+            <SelfEvolutionDraftBrowser
+              projectRoot={projectRoot}
+              refreshToken={dashboardRefreshTick}
+            />
+          </Box>
+        )}
+
         {/* 空状态 — show skeleton while switching, idle message otherwise */}
-        {!hasTodos && !hasExecution && !hasSchedulerPlan && !hasResearchSurface && !hasPlanSurface && (
+        {!hasTodos &&
+          !hasExecution &&
+          !hasSchedulerPlan &&
+          !hasExecutionRecordBrowser &&
+          !hasSelfEvolutionDraftBrowser &&
+          !hasResearchSurface &&
+          !hasPlanSurface && (
           isSwitchingSession ? (
             <TaskStatusSkeleton />
           ) : (

@@ -143,6 +143,33 @@ pub async fn list_recent_execution_records(
     .map_err(|err| format!("list execution records: {err}"))
 }
 
+pub async fn get_execution_record(
+    project_root: &Path,
+    record_id: &str,
+) -> Result<Option<ExecutionRecord>, String> {
+    if !execution_db_path(project_root).is_file() {
+        return Ok(None);
+    }
+    let pool = open_execution_db(project_root)
+        .await
+        .map_err(|err| format!("open execution db: {err}"))?;
+    sqlx::query_as::<_, ExecutionRecord>(
+        r#"
+        SELECT
+          id, kind, unit_id, canonical_id, provider_plugin, status, session_id,
+          parent_execution_id, started_at, ended_at, input_hash, param_hash,
+          output_summary_json, runtime_json, metadata_json
+        FROM executions
+        WHERE id = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(record_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|err| format!("get execution record: {err}"))
+}
+
 pub async fn list_child_execution_records(
     project_root: &Path,
     parent_execution_id: &str,
