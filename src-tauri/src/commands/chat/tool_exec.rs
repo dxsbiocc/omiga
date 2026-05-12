@@ -1651,6 +1651,10 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
             crate::domain::computer_use::ComputerUseSettings::from_stored_json(
                 settings_raw.as_deref(),
             );
+        let _ = crate::domain::computer_use::prune_audit_retention(
+            project_root,
+            computer_use_settings.log_retention_days,
+        );
         let mcp_pool_legacy: Option<
             std::sync::Arc<
                 tokio::sync::Mutex<
@@ -1723,6 +1727,7 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                         crate::domain::computer_use::app_policy_violation_from_backend_result(
                             &computer_use_settings,
                             &safe_validation_result,
+                            true,
                         )
                     {
                         let output_value = crate::domain::computer_use::app_not_allowed_output(
@@ -1844,6 +1849,7 @@ async fn execute_one_tool(request: SingleToolExecution) -> (String, String, bool
                     crate::domain::computer_use::app_policy_violation_from_backend_result(
                         &computer_use_settings,
                         &safe_backend_result,
+                        facade_tool.backend_result_requires_target_identity(),
                     )
                 {
                     let output_value = crate::domain::computer_use::app_not_allowed_output(

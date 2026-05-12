@@ -23,9 +23,11 @@ src-tauri/target/
 # Logs & debug
 *.log
 npm-debug.log*
+__pycache__/
 
 # Rust
 **/*.rs.bk
+src-tauri/bundled_plugins/plugins/computer-use/bin/computer-use-sidecar
 
 # codex
 .codex/

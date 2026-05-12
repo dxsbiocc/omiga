@@ -175,6 +175,7 @@ pub fn run() {
             commands::chat::run_existing_agent_plan,
             commands::chat::cancel_agent_schedule,
             commands::computer_use::computer_use_audit_summary,
+            commands::computer_use::computer_use_backend_status,
             commands::computer_use::computer_use_clear_audit,
             commands::computer_use::computer_use_permission_status,
             commands::computer_use::computer_use_stop_active_run,

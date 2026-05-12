@@ -20,6 +20,11 @@ type ComputerUseSettingsTabProps = {
   onOpenPlugins?: () => void;
 };
 
+type ComputerUseSettingsPanelProps = ComputerUseSettingsTabProps & {
+  showIntro?: boolean;
+  showPluginButton?: boolean;
+};
+
 type ComputerUseSettings = {
   allowedApps: string[];
   logRetentionDays: number;
@@ -30,8 +35,18 @@ type ComputerUseAuditSummary = {
   auditRoot: string;
   runsRoot: string;
   runCount: number;
+  flowCount: number;
   actionCount: number;
+  resultOkCount: number;
+  resultBlockedCount: number;
+  resultNeedsAttentionCount: number;
+  resultStoppedCount: number;
+  resultUnknownCount: number;
   bytes: number;
+  retentionDays?: number | null;
+  prunedRunCount: number;
+  prunedTempDirCount: number;
+  prunedBytes: number;
 };
 
 type ComputerUsePermissionStatus = {
@@ -39,6 +54,18 @@ type ComputerUsePermissionStatus = {
   supported: boolean;
   accessibility: string;
   screenRecording: string;
+  message: string;
+};
+
+type ComputerUseBackendStatus = {
+  platform: string;
+  runtime: string;
+  wrapperPath: string;
+  wrapperInstalled: boolean;
+  wrapperExecutable: boolean;
+  pythonBackendPath: string;
+  pythonBackendInstalled: boolean;
+  pythonBackendExecutable: boolean;
   message: string;
 };
 
@@ -94,10 +121,12 @@ function statusColor(status: string): "success" | "warning" | "default" {
   return "default";
 }
 
-export function ComputerUseSettingsTab({
+export function ComputerUseSettingsPanel({
   projectPath,
   onOpenPlugins,
-}: ComputerUseSettingsTabProps) {
+  showIntro = true,
+  showPluginButton = Boolean(onOpenPlugins),
+}: ComputerUseSettingsPanelProps) {
   const [settings, setSettings] =
     useState<ComputerUseSettings>(DEFAULT_SETTINGS);
   const [allowedAppsText, setAllowedAppsText] = useState(
@@ -106,7 +135,11 @@ export function ComputerUseSettingsTab({
   const [audit, setAudit] = useState<ComputerUseAuditSummary | null>(null);
   const [permissionStatus, setPermissionStatus] =
     useState<ComputerUsePermissionStatus | null>(null);
+  const [backendStatus, setBackendStatus] =
+    useState<ComputerUseBackendStatus | null>(null);
   const [loading, setLoading] = useState(false);
+  const [permissionLoading, setPermissionLoading] = useState(false);
+  const [backendLoading, setBackendLoading] = useState(false);
   const [message, setMessage] = useState<{
     type: "success" | "error" | "info";
     text: string;
@@ -121,17 +154,44 @@ export function ComputerUseSettingsTab({
     [allowedAppsText, settings],
   );
 
-  const loadAudit = useCallback(async () => {
+  const loadAudit = useCallback(async (retentionDays?: number) => {
     if (!hasProject) {
       setAudit(null);
       return;
     }
     const summary = await invoke<ComputerUseAuditSummary>(
       "computer_use_audit_summary",
-      { projectRoot: projectPath },
+      { projectRoot: projectPath, retentionDays },
     );
     setAudit(summary);
   }, [hasProject, projectPath]);
+
+  const loadBackendStatus = useCallback(async (showMessage = false) => {
+    setBackendLoading(true);
+    if (showMessage) setMessage(null);
+    try {
+      const status = await invoke<ComputerUseBackendStatus>(
+        "computer_use_backend_status",
+      );
+      setBackendStatus(status);
+      if (showMessage) {
+        setMessage({
+          type: "info",
+          text: "已刷新 Computer Use backend 状态；该操作不会触发权限探测或启动后端进程。",
+        });
+      }
+    } catch (error) {
+      setBackendStatus(null);
+      if (showMessage) {
+        setMessage({
+          type: "error",
+          text: `刷新 Computer Use backend 状态失败：${String(error)}`,
+        });
+      }
+    } finally {
+      setBackendLoading(false);
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -143,15 +203,8 @@ export function ComputerUseSettingsTab({
       const next = parseSettings(raw);
       setSettings(next);
       setAllowedAppsText(next.allowedApps.join("\n"));
-      try {
-        const status = await invoke<ComputerUsePermissionStatus>(
-          "computer_use_permission_status",
-        );
-        setPermissionStatus(status);
-      } catch {
-        setPermissionStatus(null);
-      }
-      await loadAudit();
+      await loadAudit(next.logRetentionDays);
+      await loadBackendStatus(false);
     } catch (error) {
       setMessage({
         type: "error",
@@ -160,11 +213,34 @@ export function ComputerUseSettingsTab({
     } finally {
       setLoading(false);
     }
-  }, [loadAudit]);
+  }, [loadAudit, loadBackendStatus]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  const checkPermissionStatus = useCallback(async () => {
+    setPermissionLoading(true);
+    setMessage(null);
+    try {
+      const status = await invoke<ComputerUsePermissionStatus>(
+        "computer_use_permission_status",
+      );
+      setPermissionStatus(status);
+      setMessage({
+        type: "info",
+        text: "已完成 Computer Use 权限检测。Screen Recording 检测只在你点击检测时运行。",
+      });
+    } catch (error) {
+      setPermissionStatus(null);
+      setMessage({
+        type: "error",
+        text: `检测 Computer Use 权限失败：${String(error)}`,
+      });
+    } finally {
+      setPermissionLoading(false);
+    }
+  }, []);
 
   const saveSettings = async () => {
     setLoading(true);
@@ -196,10 +272,10 @@ export function ComputerUseSettingsTab({
         "computer_use_clear_audit",
         { projectRoot: projectPath },
       );
-      await loadAudit();
+      await loadAudit(normalizedSettings.logRetentionDays);
       setMessage({
         type: "success",
-        text: `已清理 ${cleared.runCount} 个 Computer Use 运行记录。`,
+        text: `已清理 ${cleared.runCount} 个 Computer Use 结果留痕。`,
       });
     } catch (error) {
       setMessage({
@@ -213,10 +289,12 @@ export function ComputerUseSettingsTab({
 
   return (
     <Stack spacing={2.25}>
-      <Alert severity="info" sx={{ borderRadius: 2 }}>
-        Computer Use 是可选本机自动化扩展。插件安装/启用只代表能力可用；每条任务仍需要在聊天输入区显式开启
-        Task 或 Session 模式。
-      </Alert>
+      {showIntro && (
+        <Alert severity="info" sx={{ borderRadius: 2 }}>
+          Computer Use 是可选本机自动化扩展。插件安装/启用只代表能力可用；每条任务仍需要在聊天输入区显式开启
+          Task 或 Session 模式。
+        </Alert>
+      )}
 
       {message && (
         <Alert severity={message.type} sx={{ borderRadius: 2 }}>
@@ -248,18 +326,89 @@ export function ComputerUseSettingsTab({
             />
           </Stack>
           <Stack direction="row" spacing={1}>
-            <Button variant="outlined" onClick={onOpenPlugins}>
-              打开插件设置
-            </Button>
+            {showPluginButton && onOpenPlugins && (
+              <Button variant="outlined" onClick={onOpenPlugins}>
+                打开插件设置
+              </Button>
+            )}
             <Button
               variant="text"
               startIcon={<Refresh />}
               disabled={loading}
               onClick={() => void load()}
             >
-              刷新
+              刷新设置/记录
+            </Button>
+            <Button
+              variant="text"
+              startIcon={<Refresh />}
+              disabled={permissionLoading}
+              onClick={() => void checkPermissionStatus()}
+            >
+              检测权限
+            </Button>
+            <Button
+              variant="text"
+              startIcon={<Refresh />}
+              disabled={backendLoading}
+              onClick={() => void loadBackendStatus(true)}
+            >
+              刷新后端状态
             </Button>
           </Stack>
+          <Stack spacing={1}>
+            <Typography variant="subtitle2" fontWeight={700}>
+              Backend 诊断
+            </Typography>
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              <Chip
+                label="Runtime: Python"
+                color="success"
+                variant="outlined"
+              />
+              <Chip
+                label={`Wrapper: ${
+                  backendStatus?.wrapperExecutable
+                    ? "ready"
+                    : backendStatus?.wrapperInstalled
+                      ? "not executable"
+                      : "missing"
+                }`}
+                variant="outlined"
+              />
+              <Chip
+                label={`Python backend: ${
+                  backendStatus?.pythonBackendExecutable
+                    ? "executable"
+                    : backendStatus?.pythonBackendInstalled
+                      ? "not executable"
+                      : "missing"
+                }`}
+                variant="outlined"
+              />
+            </Stack>
+            {backendStatus?.message && (
+              <Typography variant="caption" color="text.secondary">
+                {backendStatus.message}
+              </Typography>
+            )}
+            <Typography
+              component="code"
+              sx={{
+                display: "block",
+                p: 1,
+                borderRadius: 1,
+                bgcolor: "action.hover",
+                fontSize: 12,
+                overflowWrap: "anywhere",
+              }}
+            >
+              Python backend:{" "}
+              {backendStatus?.pythonBackendPath ??
+                "src-tauri/bundled_plugins/plugins/computer-use/bin/computer-use-macos.py"}
+            </Typography>
+          </Stack>
+          <Divider />
           <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
             <Chip
               label={`Accessibility: ${permissionStatus?.accessibility ?? "unknown"}`}
@@ -277,6 +426,9 @@ export function ComputerUseSettingsTab({
               {permissionStatus.message}
             </Typography>
           )}
+          <Typography variant="caption" color="text.secondary">
+            为避免后台窥屏，Settings 不会自动检测 Screen Recording；只有点击“检测权限”时才会执行一次系统权限探测，临时截图文件会立即删除。
+          </Typography>
         </Stack>
       </Card>
 
@@ -324,6 +476,11 @@ export function ComputerUseSettingsTab({
             }
             label="允许保存 observation 截图到本地审计记录"
           />
+          <Typography variant="caption" color="text.secondary">
+            UI 默认只关注任务结果与本地留痕路径，不展示截图或逐步操作流程。
+            computer_type 会优先使用 macOS 直接按键输入；只有普通文本在直接输入不可用时才使用受控剪贴板 fallback。疑似
+            secret/token/password 会禁用剪贴板 fallback，避免被剪贴板历史工具记录。
+          </Typography>
           <Box>
             <Button
               variant="contained"
@@ -340,13 +497,52 @@ export function ComputerUseSettingsTab({
       <Card variant="outlined" sx={{ p: 2, borderRadius: 2.5 }}>
         <Stack spacing={1.5}>
           <Typography variant="subtitle1" fontWeight={700}>
-            本项目运行记录
+            本项目结果留痕
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            这里不展示截图、逐步操作流程或输入内容。用户主要查看结果；如需审计或排障，只保留本机留痕路径。
           </Typography>
           <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-            <Chip label={`Runs: ${audit?.runCount ?? 0}`} />
-            <Chip label={`Actions: ${audit?.actionCount ?? 0}`} />
-            <Chip label={`Size: ${formatBytes(audit?.bytes ?? 0)}`} />
+            <Chip label={`Result records: ${audit?.runCount ?? 0}`} />
+            <Chip
+              label={`OK: ${audit?.resultOkCount ?? 0}`}
+              color={(audit?.resultOkCount ?? 0) > 0 ? "success" : "default"}
+              variant="outlined"
+            />
+            <Chip
+              label={`Needs attention: ${audit?.resultNeedsAttentionCount ?? 0}`}
+              color={
+                (audit?.resultNeedsAttentionCount ?? 0) > 0
+                  ? "warning"
+                  : "default"
+              }
+              variant="outlined"
+            />
+            <Chip
+              label={`Blocked: ${audit?.resultBlockedCount ?? 0}`}
+              color={(audit?.resultBlockedCount ?? 0) > 0 ? "warning" : "default"}
+              variant="outlined"
+            />
+            <Chip label={`Stopped: ${audit?.resultStoppedCount ?? 0}`} />
+            <Chip label={`Evidence size: ${formatBytes(audit?.bytes ?? 0)}`} />
+            <Chip
+              label={`Retention: ${audit?.retentionDays ?? settings.logRetentionDays}d`}
+            />
+            {(audit?.resultUnknownCount ?? 0) > 0 && (
+              <Chip
+                label={`Unknown: ${audit?.resultUnknownCount ?? 0}`}
+                variant="outlined"
+              />
+            )}
           </Stack>
+          {((audit?.prunedRunCount ?? 0) > 0 ||
+            (audit?.prunedTempDirCount ?? 0) > 0) && (
+            <Typography variant="caption" color="text.secondary">
+              本次刷新已按保留策略清理 {audit?.prunedRunCount ?? 0} 个旧 run、
+              {audit?.prunedTempDirCount ?? 0} 个临时截图目录，释放{" "}
+              {formatBytes(audit?.prunedBytes ?? 0)}。
+            </Typography>
+          )}
           <Typography
             component="code"
             sx={{
@@ -358,6 +554,7 @@ export function ComputerUseSettingsTab({
               overflowWrap: "anywhere",
             }}
           >
+            Evidence path:{" "}
             {audit?.runsRoot ?? "<project>/.omiga/computer-use/runs"}
           </Typography>
           <Divider />
@@ -366,9 +563,9 @@ export function ComputerUseSettingsTab({
               variant="outlined"
               startIcon={<Refresh />}
               disabled={loading || !hasProject}
-              onClick={() => void loadAudit()}
+              onClick={() => void loadAudit(normalizedSettings.logRetentionDays)}
             >
-              刷新记录
+              刷新结果留痕
             </Button>
             <Button
               color="error"
@@ -377,11 +574,15 @@ export function ComputerUseSettingsTab({
               disabled={loading || !hasProject || (audit?.runCount ?? 0) === 0}
               onClick={() => void clearAudit()}
             >
-              清理运行记录
+              清理结果留痕
             </Button>
           </Stack>
         </Stack>
       </Card>
     </Stack>
   );
+}
+
+export function ComputerUseSettingsTab(props: ComputerUseSettingsTabProps) {
+  return <ComputerUseSettingsPanel {...props} />;
 }

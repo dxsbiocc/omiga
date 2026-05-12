@@ -830,7 +830,10 @@ export const ChatComposer = memo(function ChatComposer({
     if (!sessionId) return;
     setComputerUseStopPending(true);
     try {
-      await invoke("computer_use_stop_active_run", { sessionId });
+      await invoke("computer_use_stop_active_run", {
+        sessionId,
+        projectRoot: workspacePath || ".",
+      });
       setComputerUseMode("off");
       setComputerUseAnchor(null);
     } catch (error) {
@@ -838,7 +841,7 @@ export const ChatComposer = memo(function ChatComposer({
     } finally {
       setComputerUseStopPending(false);
     }
-  }, [sessionId, setComputerUseMode]);
+  }, [sessionId, setComputerUseMode, workspacePath]);
 
   // 沙箱 / SSH 二级菜单：与 SessionList「Language」相同（定时器 + 嵌套 Menu + pointerEvents），避免 Popover 与一级 Menu 模态层事件死循环
   const sandboxSubmenuLeaveTimerRef = useRef<ReturnType<
