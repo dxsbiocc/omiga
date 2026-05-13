@@ -1883,8 +1883,23 @@ template:
     }
 
     #[test]
-    fn discovers_bundled_visualization_r_templates() {
-        let plugin = bundled_loaded_plugin("visualization-r", "R Visualization");
+    fn discovers_omiga_plugin_visualization_r_templates() {
+        let plugin = LoadedPlugin {
+            id: "visualization-r@omiga-curated".to_string(),
+            manifest_name: Some("visualization-r".to_string()),
+            display_name: Some("R Visualization".to_string()),
+            description: None,
+            root: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("repo root")
+                .join(".omiga/plugins/visualization-r"),
+            enabled: true,
+            skill_roots: Vec::new(),
+            mcp_servers: HashMap::new(),
+            apps: Vec::new(),
+            retrieval: None,
+            error: None,
+        };
         let candidates = discover_template_candidates_from_plugins([&plugin]);
         let ids = candidates
             .iter()
@@ -1975,7 +1990,7 @@ template:
     }
 
     #[tokio::test]
-    async fn execute_bundled_visualization_r_template_smoke() {
+    async fn execute_omiga_plugin_visualization_r_template_smoke() {
         let r_ready = std::process::Command::new("Rscript")
             .args([
                 "-e",
@@ -1989,8 +2004,10 @@ template:
             return;
         }
 
-        let plugin_root =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("bundled_plugins/plugins/visualization-r");
+        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join(".omiga/plugins/visualization-r");
         let template_dir = plugin_root.join("templates/scatter/basic");
         let template = load_template_manifest(
             &template_dir.join("template.yaml"),

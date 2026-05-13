@@ -34,7 +34,7 @@ Use this skill when building Omiga-native plugins, not Codex `.codex-plugin` bun
 1. Inspect nearby examples first:
    - `src-tauri/bundled_plugins/plugins/*/plugin.json`
    - `src-tauri/bundled_plugins/plugins/operator-seqtk/operators/*/operator.yaml`
-   - `src-tauri/bundled_plugins/plugins/visualization-r/templates/*/*/template.yaml`
+   - `.omiga/plugins/visualization-r/templates/*/*/template.yaml`
 2. Decide the plugin boundary:
    - Same provider or same workflow stage goes in one plugin.
    - Atomic unit granularity remains at Operator/Template level.

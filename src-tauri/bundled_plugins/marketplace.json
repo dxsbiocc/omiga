@@ -29,18 +29,6 @@
       "category": "Operator"
     },
     {
-      "name": "visualization-r",
-      "source": {
-        "source": "local",
-        "path": "./plugins/visualization-r"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_USE"
-      },
-      "category": "Visualization"
-    },
-    {
       "name": "resource-ncbi",
       "source": {
         "source": "local",

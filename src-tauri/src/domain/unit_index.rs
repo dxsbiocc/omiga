@@ -1206,7 +1206,9 @@ mod tests {
     #[test]
     fn indexes_visualization_r_templates_as_template_units() {
         let plugin_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("bundled_plugins/plugins/visualization-r");
+            .parent()
+            .expect("repo root")
+            .join(".omiga/plugins/visualization-r");
         let template = crate::domain::templates::load_template_manifest(
             &plugin_root
                 .join("templates")
@@ -1240,7 +1242,9 @@ mod tests {
     #[test]
     fn template_descriptions_include_executable_argument_skeleton() {
         let plugin_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("bundled_plugins/plugins/visualization-r");
+            .parent()
+            .expect("repo root")
+            .join(".omiga/plugins/visualization-r");
         let template = crate::domain::templates::load_template_manifest(
             &plugin_root
                 .join("templates")

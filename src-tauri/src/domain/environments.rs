@@ -784,9 +784,11 @@ metadata:
     }
 
     #[test]
-    fn discovers_bundled_visualization_r_environment_profile() {
-        let plugin_root =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("bundled_plugins/plugins/visualization-r");
+    fn discovers_omiga_plugin_visualization_r_environment_profile() {
+        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join(".omiga/plugins/visualization-r");
         let plugin = loaded_plugin("visualization-r@omiga-curated", &plugin_root);
 
         let profiles = discover_environment_profiles_from_plugins([&plugin]);

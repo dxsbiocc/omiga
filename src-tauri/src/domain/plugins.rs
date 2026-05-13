@@ -5408,8 +5408,11 @@ mod tests {
     }
 
     #[test]
-    fn bundled_marketplace_exposes_visualization_r_plugin_and_skill() {
-        let marketplace_path = dev_builtin_marketplace_path();
+    fn project_marketplace_exposes_visualization_r_omiga_plugin_and_skill() {
+        let marketplace_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join(".omiga/plugins/marketplace.json");
         let marketplace = read_marketplace(&marketplace_path).unwrap();
         let entry = marketplace
             .plugins
