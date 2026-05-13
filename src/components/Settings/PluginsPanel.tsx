@@ -22,6 +22,7 @@ import {
   TextField,
   Tooltip,
   Typography,
+  type ChipProps,
 } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
 import {
@@ -47,6 +48,7 @@ import {
   summarizeOperatorRunResult,
   type EnvironmentCheckResult,
   type OperatorManifestDiagnostic,
+  type OperatorRuntimeResourceProfile,
   type OperatorRunCleanupRequest,
   type OperatorRunDetail,
   type OperatorRunVerification,
@@ -1324,6 +1326,109 @@ export function operatorSmokeTestSummary(
   return description ? `${label}: ${description}${extra}` : `${label}${extra}`;
 }
 
+function stringRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function numberField(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stringFieldValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function stringArrayField(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
+export function operatorResourceProfile(operator: OperatorSummary): OperatorRuntimeResourceProfile | null {
+  const runtime = stringRecord(operator.runtime);
+  const profile = stringRecord(runtime?.resourceProfile);
+  if (!profile) return null;
+  return {
+    tier: stringFieldValue(profile.tier),
+    localPolicy: stringFieldValue(profile.localPolicy),
+    minCpu: numberField(profile.minCpu),
+    recommendedCpu: numberField(profile.recommendedCpu),
+    minMemoryGb: numberField(profile.minMemoryGb),
+    recommendedMemoryGb: numberField(profile.recommendedMemoryGb),
+    diskGb: numberField(profile.diskGb),
+    notes: stringArrayField(profile.notes),
+  };
+}
+
+function normalizedResourceTier(profile: OperatorRuntimeResourceProfile | null): string {
+  return profile?.tier?.trim().toLowerCase().replace(/_/g, "-") ?? "";
+}
+
+function normalizedLocalPolicy(profile: OperatorRuntimeResourceProfile | null): string {
+  return profile?.localPolicy?.trim().toLowerCase().replace(/_/g, "-") ?? "";
+}
+
+export function operatorResourceProfileLabel(operator: OperatorSummary): string | null {
+  const tier = normalizedResourceTier(operatorResourceProfile(operator));
+  if (!tier || tier === "local-ok") return null;
+  if (tier === "hpc-required") return "HPC required";
+  if (tier === "hpc-recommended" || tier === "server-recommended") return "HPC recommended";
+  if (tier === "local-warn") return "Local warning";
+  if (tier === "heavy") return "Heavy";
+  return capabilityLabel(tier);
+}
+
+function operatorResourceProfileColor(operator: OperatorSummary): ChipProps["color"] {
+  const tier = normalizedResourceTier(operatorResourceProfile(operator));
+  if (tier === "hpc-required") return "error";
+  if (tier === "heavy" || tier === "hpc-recommended" || tier === "server-recommended" || tier === "local-warn") {
+    return "warning";
+  }
+  return "default";
+}
+
+export function operatorResourceProfileSummary(operator: OperatorSummary): string | null {
+  const profile = operatorResourceProfile(operator);
+  const label = operatorResourceProfileLabel(operator);
+  if (!profile || !label) return null;
+  const parts = [label];
+  if (profile.recommendedCpu) parts.push(`${profile.recommendedCpu} CPU recommended`);
+  if (profile.recommendedMemoryGb) parts.push(`${profile.recommendedMemoryGb} GB RAM recommended`);
+  if (profile.diskGb) parts.push(`${profile.diskGb} GB disk`);
+  const notes = profile.notes?.slice(0, 2).join(" ");
+  return notes ? `${parts.join(" · ")}. ${notes}` : parts.join(" · ");
+}
+
+export function operatorShouldWarnBeforeLocalRun(operator: OperatorSummary): boolean {
+  const profile = operatorResourceProfile(operator);
+  const policy = normalizedLocalPolicy(profile);
+  const tier = normalizedResourceTier(profile);
+  return (
+    policy === "warn" ||
+    policy === "block" ||
+    tier === "heavy" ||
+    tier === "local-warn" ||
+    tier === "hpc-recommended" ||
+    tier === "server-recommended" ||
+    tier === "hpc-required"
+  );
+}
+
+function operatorResourceProfileChip(operator: OperatorSummary) {
+  const label = operatorResourceProfileLabel(operator);
+  if (!label) return null;
+  return (
+    <Chip
+      size="small"
+      color={operatorResourceProfileColor(operator)}
+      variant="outlined"
+      label={`⚡ ${label}`}
+    />
+  );
+}
+
 function runtimeAxisValues(runtime: unknown, axis: string): string[] {
   if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) return [];
   const value = (runtime as Record<string, unknown>)[axis];
@@ -2483,6 +2588,7 @@ function PluginUnitControls({
                       {operatorDisplayName(operator)}
                     </Typography>
                     <Chip size="small" variant="outlined" label="Operator" />
+                    {operatorResourceProfileChip(operator)}
                     {envRef && (
                       <Chip
                         size="small"
@@ -3843,10 +3949,21 @@ function OperatorDetailsDialog({
               variant={operator.exposed ? "filled" : "outlined"}
               label={operator.exposed ? "Registered" : "Not registered"}
             />
+            {operatorResourceProfileChip(operator)}
           </Stack>
           <Typography variant="body2" color="text.secondary">
             {operator.description?.trim() || "Plugin-defined tool callable by agents."}
           </Typography>
+          {operatorResourceProfileSummary(operator) && (
+            <Alert severity={operatorResourceProfileColor(operator) === "error" ? "error" : "warning"} sx={{ borderRadius: 2 }}>
+              <Typography variant="body2">
+                {operatorResourceProfileSummary(operator)}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                Prefer SSH/server/HPC execution for production-size inputs. Local smoke fixtures remain OK.
+              </Typography>
+            </Alert>
+          )}
           <Stack spacing={0.5}>
             <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
               Owning plugin: {operator.sourcePlugin}
@@ -4506,6 +4623,7 @@ function OperatorCatalogSection({
                           <Chip size="small" variant="outlined" label={`alias ${alias}`} />
                         )}
                         <Chip size="small" variant="outlined" label={operator.sourcePlugin} />
+                        {operatorResourceProfileChip(operator)}
                         {smokeCount > 0 && (
                           <Chip
                             size="small"
@@ -5084,6 +5202,20 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     const alias = operatorPrimaryAlias(operator);
     const smokeTest = operatorSmokeTestForRun(operator, smokeTestId);
     setMessage(null);
+    if (
+      (operatorSurface.executionEnvironment ?? "local") === "local" &&
+      operatorShouldWarnBeforeLocalRun(operator)
+    ) {
+      const summary = operatorResourceProfileSummary(operator)
+        ?? `${operatorDisplayName(operator)} is marked as resource intensive.`;
+      const confirmed = window.confirm(
+        `${summary}\n\nLocal execution may be slow, memory-intensive, or fail on production-size inputs. Prefer SSH/server/HPC execution when available.\n\nContinue locally?`,
+      );
+      if (!confirmed) {
+        setMessage(`Canceled local run for ${operatorDisplayName(operator)}. Switch execution to SSH/server/HPC to run it remotely.`);
+        return;
+      }
+    }
     try {
       const response = await runOperator(
         alias,

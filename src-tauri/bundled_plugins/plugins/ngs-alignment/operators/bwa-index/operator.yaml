@@ -46,6 +46,17 @@ runtime:
     supported: [local, ssh]
   container:
     supported: [none]
+  resourceProfile:
+    tier: heavy
+    localPolicy: warn
+    minCpu: 2
+    recommendedCpu: 8
+    minMemoryGb: 8
+    recommendedMemoryGb: 32
+    diskGb: 50
+    notes:
+      - Large reference indexing can be slow on laptops.
+      - Small references can run locally.
 resources:
   cpu:
     default: 2

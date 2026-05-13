@@ -44,6 +44,17 @@ runtime:
     supported: [local, ssh]
   container:
     supported: [none]
+  resourceProfile:
+    tier: heavy
+    localPolicy: warn
+    minCpu: 4
+    recommendedCpu: 16
+    minMemoryGb: 16
+    recommendedMemoryGb: 64
+    diskGb: 80
+    notes:
+      - Transcriptome-aware genome indexing can be memory intensive.
+      - Small references can run locally.
 resources:
   cpu:
     default: 4

@@ -60,6 +60,17 @@ runtime:
     supported: [local, ssh]
   container:
     supported: [none]
+  resourceProfile:
+    tier: hpc-recommended
+    localPolicy: warn
+    minCpu: 4
+    recommendedCpu: 16
+    minMemoryGb: 8
+    recommendedMemoryGb: 32
+    diskGb: 100
+    notes:
+      - Production FASTQ alignment can produce large SAM/BAM outputs.
+      - Use SSH/server/HPC for multi-sample or whole-genome runs.
 resources:
   cpu:
     default: 4

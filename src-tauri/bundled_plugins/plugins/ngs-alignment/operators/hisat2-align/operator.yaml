@@ -60,6 +60,17 @@ runtime:
     supported: [local, ssh]
   container:
     supported: [none]
+  resourceProfile:
+    tier: hpc-recommended
+    localPolicy: warn
+    minCpu: 4
+    recommendedCpu: 16
+    minMemoryGb: 16
+    recommendedMemoryGb: 64
+    diskGb: 100
+    notes:
+      - Spliced RNA-seq alignment is CPU and disk intensive for production datasets.
+      - Use SSH/server/HPC for multi-sample runs.
 resources:
   cpu:
     default: 4

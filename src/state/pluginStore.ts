@@ -232,6 +232,17 @@ export interface OperatorSummary {
   unavailableReason?: string | null;
 }
 
+export interface OperatorRuntimeResourceProfile {
+  tier?: string | null;
+  localPolicy?: string | null;
+  minCpu?: number | null;
+  recommendedCpu?: number | null;
+  minMemoryGb?: number | null;
+  recommendedMemoryGb?: number | null;
+  diskGb?: number | null;
+  notes?: string[];
+}
+
 export interface OperatorFieldSpec {
   kind?: string | null;
   required?: boolean;

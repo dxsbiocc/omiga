@@ -60,6 +60,17 @@ runtime:
     supported: [local, ssh]
   container:
     supported: [none]
+  resourceProfile:
+    tier: hpc-recommended
+    localPolicy: warn
+    minCpu: 8
+    recommendedCpu: 32
+    minMemoryGb: 32
+    recommendedMemoryGb: 128
+    diskGb: 200
+    notes:
+      - STAR alignment against whole-genome indices is not recommended on laptops.
+      - Use SSH/server/HPC for production RNA-seq runs.
 resources:
   cpu:
     default: 8

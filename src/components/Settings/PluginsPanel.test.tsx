@@ -10,6 +10,9 @@ import {
   operatorDisplayName,
   operatorEnvironmentRef,
   operatorPrimaryAlias,
+  operatorResourceProfile,
+  operatorResourceProfileLabel,
+  operatorResourceProfileSummary,
   operatorRuntimeSummary,
   operatorRunBelongsToOperator,
   operatorRunDiagnosisSummary,
@@ -26,6 +29,7 @@ import {
   operatorRunStatusColor,
   operatorRunTitle,
   operatorSmokeRunArguments,
+  operatorShouldWarnBeforeLocalRun,
   operatorSupportsSmokeRun,
   operatorRunsForOperator,
   operatorToolName,
@@ -1316,6 +1320,36 @@ describe("PluginsPanel diagnostics helpers", () => {
     expect(pluginEnvironmentDisplayName(environment)).toBe("BWA");
     expect(pluginEnvironmentStatusColor(environment.availabilityStatus)).toBe("warning");
     expect(pluginEnvironmentRuntimeFileLabel(environment)).toBe("conda.yaml");
+  });
+
+  it("surfaces resource-heavy operator runtime profiles", () => {
+    const operator = operatorSummary({
+      id: "star_align_reads",
+      runtime: {
+        envRef: "ngs-star",
+        resourceProfile: {
+          tier: "hpc-recommended",
+          localPolicy: "warn",
+          recommendedCpu: 32,
+          recommendedMemoryGb: 128,
+          diskGb: 200,
+          notes: ["STAR alignment against whole-genome indices is not recommended on laptops."],
+        },
+      },
+    });
+
+    expect(operatorResourceProfile(operator)).toMatchObject({
+      tier: "hpc-recommended",
+      localPolicy: "warn",
+      recommendedCpu: 32,
+      recommendedMemoryGb: 128,
+      diskGb: 200,
+    });
+    expect(operatorResourceProfileLabel(operator)).toBe("HPC recommended");
+    expect(operatorResourceProfileSummary(operator)).toContain("32 CPU recommended");
+    expect(operatorResourceProfileSummary(operator)).toContain("128 GB RAM recommended");
+    expect(operatorShouldWarnBeforeLocalRun(operator)).toBe(true);
+    expect(operatorShouldWarnBeforeLocalRun(operatorSummary())).toBe(false);
   });
 
   it("recognizes manifest-declared smoke tests and builds deterministic smoke args", () => {

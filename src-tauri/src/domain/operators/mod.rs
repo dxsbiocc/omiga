@@ -1367,7 +1367,7 @@ pub fn enabled_operator_tool_schemas() -> Vec<ToolSchema> {
 
 pub fn operator_tool_schema(operator: ResolvedOperator) -> ToolSchema {
     let name = format!("{OPERATOR_TOOL_PREFIX}{}", operator.alias);
-    let description = operator
+    let mut description = operator
         .spec
         .metadata
         .description
@@ -1379,11 +1379,60 @@ pub fn operator_tool_schema(operator: ResolvedOperator) -> ToolSchema {
                 operator.spec.metadata.id, operator.spec.metadata.version
             )
         });
+    if let Some(resource_note) = operator_resource_profile_description(&operator.spec) {
+        description.push_str("\n\nResource note: ");
+        description.push_str(&resource_note);
+    }
     ToolSchema::new(
         name,
         description,
         operator_parameters_schema(&operator.spec),
     )
+}
+
+fn operator_resource_profile_description(spec: &OperatorSpec) -> Option<String> {
+    let profile = spec.runtime.as_ref()?.get("resourceProfile")?.as_object()?;
+    let tier = profile
+        .get("tier")
+        .and_then(JsonValue::as_str)
+        .map(|value| value.trim().to_ascii_lowercase().replace('_', "-"))
+        .filter(|value| !value.is_empty())?;
+    if tier == "local-ok" {
+        return None;
+    }
+    let label = match tier.as_str() {
+        "hpc-required" => "HPC required",
+        "hpc-recommended" | "server-recommended" => "HPC/server recommended",
+        "heavy" => "resource-heavy",
+        "local-warn" => "local warning",
+        _ => tier.as_str(),
+    };
+    let mut parts = vec![label.to_string()];
+    if let Some(cpu) = profile.get("recommendedCpu").and_then(JsonValue::as_u64) {
+        parts.push(format!("{cpu} CPU recommended"));
+    }
+    if let Some(memory) = profile
+        .get("recommendedMemoryGb")
+        .and_then(JsonValue::as_u64)
+    {
+        parts.push(format!("{memory} GB RAM recommended"));
+    }
+    if let Some(disk) = profile.get("diskGb").and_then(JsonValue::as_u64) {
+        parts.push(format!("{disk} GB disk"));
+    }
+    let mut out = parts.join("; ");
+    if let Some(note) = profile
+        .get("notes")
+        .and_then(JsonValue::as_array)
+        .and_then(|notes| notes.iter().find_map(JsonValue::as_str))
+        .map(str::trim)
+        .filter(|note| !note.is_empty())
+    {
+        out.push_str(". ");
+        out.push_str(note);
+    }
+    out.push_str(" Prefer SSH/server/HPC execution for production-size inputs; local smoke fixtures are acceptable.");
+    Some(out)
 }
 
 pub fn operator_parameters_schema(spec: &OperatorSpec) -> JsonValue {
@@ -8241,6 +8290,33 @@ mod tests {
             resources: BTreeMap::new(),
             metadata: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn operator_tool_schema_surfaces_resource_profile_warning() {
+        let tmp = TempDir::new().unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["/bin/echo", "ok"]);
+        spec.metadata.description = Some("Align reads".to_string());
+        spec.runtime = Some(json!({
+            "resourceProfile": {
+                "tier": "hpc-recommended",
+                "localPolicy": "warn",
+                "recommendedCpu": 32,
+                "recommendedMemoryGb": 128,
+                "diskGb": 200,
+                "notes": ["Use SSH/server/HPC for production RNA-seq runs."]
+            }
+        }));
+
+        let schema = operator_tool_schema(ResolvedOperator {
+            alias: "align".to_string(),
+            spec,
+        });
+
+        assert!(schema.description.contains("Resource note"));
+        assert!(schema.description.contains("HPC/server recommended"));
+        assert!(schema.description.contains("32 CPU recommended"));
+        assert!(schema.description.contains("128 GB RAM recommended"));
     }
 
     #[tokio::test]

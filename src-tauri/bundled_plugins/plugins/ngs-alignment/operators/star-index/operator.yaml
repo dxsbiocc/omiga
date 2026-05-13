@@ -49,6 +49,17 @@ runtime:
     supported: [local, ssh]
   container:
     supported: [none]
+  resourceProfile:
+    tier: hpc-recommended
+    localPolicy: warn
+    minCpu: 8
+    recommendedCpu: 32
+    minMemoryGb: 32
+    recommendedMemoryGb: 128
+    diskGb: 250
+    notes:
+      - STAR genomeGenerate can require very high RAM for mammalian genomes.
+      - Use SSH/server/HPC unless using a tiny test reference.
 resources:
   cpu:
     default: 8

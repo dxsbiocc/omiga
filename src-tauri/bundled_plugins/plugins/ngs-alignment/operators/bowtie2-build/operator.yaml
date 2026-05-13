@@ -44,6 +44,17 @@ runtime:
     supported: [local, ssh]
   container:
     supported: [none]
+  resourceProfile:
+    tier: heavy
+    localPolicy: warn
+    minCpu: 4
+    recommendedCpu: 16
+    minMemoryGb: 8
+    recommendedMemoryGb: 32
+    diskGb: 50
+    notes:
+      - Large reference indexing is CPU and disk intensive.
+      - Small microbial/test references can run locally.
 resources:
   cpu:
     default: 4

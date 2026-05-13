@@ -64,6 +64,17 @@ runtime:
     supported: [local, ssh]
   container:
     supported: [none]
+  resourceProfile:
+    tier: heavy
+    localPolicy: warn
+    minCpu: 2
+    recommendedCpu: 8
+    minMemoryGb: 8
+    recommendedMemoryGb: 32
+    diskGb: 100
+    notes:
+      - Large BAM/CRAM sort/view/index operations can consume significant disk and RAM.
+      - Use SSH/server/HPC for production BAMs.
 resources:
   cpu:
     default: 4

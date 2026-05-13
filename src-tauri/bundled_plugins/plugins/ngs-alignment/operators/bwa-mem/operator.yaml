@@ -61,6 +61,17 @@ runtime:
     supported: [local, ssh]
   container:
     supported: [none]
+  resourceProfile:
+    tier: hpc-recommended
+    localPolicy: warn
+    minCpu: 4
+    recommendedCpu: 16
+    minMemoryGb: 16
+    recommendedMemoryGb: 64
+    diskGb: 100
+    notes:
+      - Whole-genome FASTQ alignment can generate very large intermediate/output files.
+      - Use SSH/server/HPC for production samples.
 resources:
   cpu:
     default: 4
