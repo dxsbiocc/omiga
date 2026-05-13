@@ -337,6 +337,7 @@ describe("usePluginStore operator actions", () => {
       operatorRuns: [],
       retrievalStatuses: [],
       processPoolStatuses: [],
+      remoteMarketplaceChecks: [],
       isLoading: false,
       isMutating: false,
       error: null,
@@ -483,6 +484,7 @@ describe("usePluginStore operator actions", () => {
       "list_omiga_plugin_marketplaces",
       expect.anything(),
     );
+    expect(usePluginStore.getState().remoteMarketplaceChecks).toEqual(result);
     expect(usePluginStore.getState().isMutating).toBe(false);
   });
 

@@ -486,6 +486,7 @@ interface PluginState {
   operatorRuns: OperatorRunSummary[];
   retrievalStatuses: PluginRetrievalRouteStatus[];
   processPoolStatuses: PluginProcessPoolRouteStatus[];
+  remoteMarketplaceChecks: MarketplaceRemoteCheckResult[];
   isLoading: boolean;
   isMutating: boolean;
   error: string | null;
@@ -968,6 +969,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
   operatorRuns: [],
   retrievalStatuses: [],
   processPoolStatuses: [],
+  remoteMarketplaceChecks: [],
   isLoading: false,
   isMutating: false,
   error: null,
@@ -1231,7 +1233,7 @@ export const usePluginStore = create<PluginState>((set, get) => ({
         "check_omiga_remote_plugin_marketplaces",
         { projectRoot },
       );
-      set({ isMutating: false });
+      set({ remoteMarketplaceChecks: result, isMutating: false });
       return result;
     } catch (e) {
       const error = extractErrorMessage(e);

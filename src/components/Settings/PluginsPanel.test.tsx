@@ -41,8 +41,11 @@ import {
   pluginEnvironmentDisplayName,
   pluginEnvironmentRuntimeFileLabel,
   pluginEnvironmentStatusColor,
+  pluginHasRemoteMarketplaceUpdate,
   pluginRuntimeSummary,
   processPoolStatusDiagnostic,
+  remoteMarketplaceChangedPluginNames,
+  remoteMarketplaceCheckSignature,
   retrievalStatusDiagnostic,
   shouldShowPluginRuntimeSummaryCard,
   unknownRetrievalRuntimePluginIds,
@@ -54,6 +57,7 @@ import {
 import type {
   OperatorRunSummary,
   OperatorSummary,
+  MarketplaceRemoteCheckResult,
   PluginEnvironmentSummary,
   PluginProcessPoolRouteStatus,
   PluginRetrievalRouteStatus,
@@ -133,6 +137,27 @@ function operatorRunSummary(
   };
 }
 
+function remoteMarketplaceCheck(
+  overrides: Partial<MarketplaceRemoteCheckResult> = {},
+): MarketplaceRemoteCheckResult {
+  return {
+    name: "omiga-curated",
+    path: "/project/.omiga/plugins/marketplace.json",
+    remote: {
+      url: "https://raw.githubusercontent.com/dxsbiocc/omiga-plugins/main/marketplace.json",
+    },
+    state: "updateAvailable",
+    label: "Remote update available",
+    message: "Remote marketplace differs.",
+    localDigest: "sha256:local",
+    remoteDigest: "sha256:remote",
+    remotePluginCount: 2,
+    changedPlugins: ["alignment", "transcriptomics"],
+    checkedAt: "2026-05-13T00:00:00Z",
+    ...overrides,
+  };
+}
+
 describe("PluginsPanel diagnostics helpers", () => {
   it("keeps raw tool registry and run diagnostics behind the development diagnostics gate", () => {
     const source = readFileSync(new URL("./PluginsPanel.tsx", import.meta.url), "utf8");
@@ -170,6 +195,67 @@ describe("PluginsPanel diagnostics helpers", () => {
     expect(source).not.toContain("Operator details");
     expect(source).not.toContain("<OperatorBundleContentList operators={operators}");
     expect(source).not.toContain("Included content");
+  });
+
+  it("summarizes remote marketplace updates as durable UI state", () => {
+    const checks = [
+      remoteMarketplaceCheck({ changedPlugins: ["alignment", "transcriptomics", "alignment"] }),
+      remoteMarketplaceCheck({
+        name: "secondary",
+        path: "/secondary.json",
+        changedPlugins: ["r-visualization"],
+      }),
+      remoteMarketplaceCheck({
+        name: "stable",
+        path: "/stable.json",
+        state: "upToDate",
+        changedPlugins: ["ignored"],
+      }),
+    ];
+
+    const changedPlugins = remoteMarketplaceChangedPluginNames(checks);
+
+    expect([...changedPlugins].sort()).toEqual([
+      "alignment",
+      "r-visualization",
+      "transcriptomics",
+    ]);
+    expect(
+      pluginHasRemoteMarketplaceUpdate(
+        pluginSummary({
+          id: "alignment@omiga-curated",
+          name: "alignment",
+        }),
+        changedPlugins,
+      ),
+    ).toBe(true);
+    expect(
+      pluginHasRemoteMarketplaceUpdate(
+        pluginSummary({
+          id: "unrelated@omiga-curated",
+          name: "unrelated",
+        }),
+        changedPlugins,
+      ),
+    ).toBe(false);
+  });
+
+  it("builds stable remote marketplace check signatures to suppress repeated toasts", () => {
+    const left = [
+      remoteMarketplaceCheck({ name: "b", changedPlugins: ["star", "bwa"] }),
+      remoteMarketplaceCheck({ name: "a", path: "/a.json", changedPlugins: ["transcriptomics"] }),
+    ];
+    const right = [
+      remoteMarketplaceCheck({ name: "a", path: "/a.json", changedPlugins: ["transcriptomics"] }),
+      remoteMarketplaceCheck({ name: "b", changedPlugins: ["bwa", "star"] }),
+    ];
+
+    expect(remoteMarketplaceCheckSignature(left)).toBe(remoteMarketplaceCheckSignature(right));
+    expect(
+      remoteMarketplaceCheckSignature([
+        remoteMarketplaceCheck({ name: "b", changedPlugins: ["bwa", "star", "hisat2"] }),
+      ]),
+    ).not.toBe(remoteMarketplaceCheckSignature([remoteMarketplaceCheck({ name: "b", changedPlugins: ["bwa", "star"] })]));
   });
 
   it("anchors the plugin details dialog while troubleshooting accordions expand", () => {

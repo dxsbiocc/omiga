@@ -1658,6 +1658,49 @@ function remoteMarketplaceCheckMessage(results: MarketplaceRemoteCheckResult[]):
   return "All remote marketplaces are up to date.";
 }
 
+export function remoteMarketplaceChangedPluginNames(
+  results: MarketplaceRemoteCheckResult[],
+): Set<string> {
+  const names = new Set<string>();
+  for (const result of results) {
+    if (result.state !== "updateAvailable") continue;
+    for (const pluginName of result.changedPlugins) {
+      const normalized = pluginName.trim();
+      if (normalized.length > 0) names.add(normalized);
+    }
+  }
+  return names;
+}
+
+export function remoteMarketplaceCheckSignature(
+  results: MarketplaceRemoteCheckResult[],
+): string {
+  return results
+    .map((result) =>
+      [
+        result.name,
+        result.path,
+        result.state,
+        result.localDigest ?? "",
+        result.remoteDigest ?? "",
+        [...result.changedPlugins].sort((left, right) => left.localeCompare(right)).join(","),
+      ].join("|")
+    )
+    .sort((left, right) => left.localeCompare(right))
+    .join("||");
+}
+
+export function pluginHasRemoteMarketplaceUpdate(
+  plugin: PluginSummary,
+  changedPluginNames: Set<string>,
+): boolean {
+  return (
+    changedPluginNames.has(plugin.name) ||
+    changedPluginNames.has(plugin.id) ||
+    changedPluginNames.has(plugin.id.split("@")[0])
+  );
+}
+
 function pluginEnvironmentByRef(
   environments: PluginEnvironmentSummary[],
 ): Map<string, PluginEnvironmentSummary> {
@@ -1986,6 +2029,7 @@ function PluginCard({
   plugin,
   retrievalStatuses = [],
   operators = [],
+  remoteUpdateAvailable = false,
   busy,
   onInstall,
   onToggle,
@@ -1996,6 +2040,7 @@ function PluginCard({
   retrievalStatuses?: PluginRetrievalRouteStatus[];
   processPoolStatuses?: PluginProcessPoolRouteStatus[];
   operators?: OperatorSummary[];
+  remoteUpdateAvailable?: boolean;
   busy: boolean;
   onInstall: (plugin: PluginSummary) => void;
   onToggle: (plugin: PluginSummary, enabled: boolean) => void;
@@ -2101,6 +2146,17 @@ function PluginCard({
           >
             {displayName(plugin)}
           </Typography>
+          {remoteUpdateAvailable && (
+            <Tooltip title="Remote marketplace has an update for this plugin">
+              <Chip
+                size="small"
+                color="warning"
+                variant="outlined"
+                label="Update"
+                sx={{ height: 22, flexShrink: 0 }}
+              />
+            </Tooltip>
+          )}
           {pluginResourceProfileChip(operators, true)}
         </Stack>
         <Typography variant="body2" color="text.secondary" noWrap title={subtitle} sx={{ mt: 0.15 }}>
@@ -2178,6 +2234,7 @@ function PluginCatalogGroupList({
   retrievalStatusesByPlugin,
   processPoolStatusesByPlugin,
   operatorsByPlugin,
+  remoteChangedPluginNames,
   busy,
   busyPluginIds,
   onInstall,
@@ -2189,6 +2246,7 @@ function PluginCatalogGroupList({
   retrievalStatusesByPlugin: Map<string, PluginRetrievalRouteStatus[]>;
   processPoolStatusesByPlugin: Map<string, PluginProcessPoolRouteStatus[]>;
   operatorsByPlugin: Map<string, OperatorSummary[]>;
+  remoteChangedPluginNames: Set<string>;
   busy: boolean;
   busyPluginIds: Set<string>;
   onInstall: (plugin: PluginSummary) => void;
@@ -2242,6 +2300,7 @@ function PluginCatalogGroupList({
                             retrievalStatuses={retrievalStatusesByPlugin.get(plugin.id)}
                             processPoolStatuses={processPoolStatusesByPlugin.get(plugin.id)}
                             operators={pluginOperators}
+                            remoteUpdateAvailable={pluginHasRemoteMarketplaceUpdate(plugin, remoteChangedPluginNames)}
                             busy={busy || busyPluginIds.has(plugin.id)}
                             onInstall={onInstall}
                             onToggle={onToggle}
@@ -2958,6 +3017,7 @@ function PluginDetailsDialog({
   retrievalStatuses = [],
   processPoolStatuses = [],
   operators = [],
+  remoteUpdateAvailable = false,
   busy,
   onClose,
   onInstall,
@@ -2981,6 +3041,7 @@ function PluginDetailsDialog({
   retrievalStatuses?: PluginRetrievalRouteStatus[];
   processPoolStatuses?: PluginProcessPoolRouteStatus[];
   operators?: OperatorSummary[];
+  remoteUpdateAvailable?: boolean;
   busy: boolean;
   onClose: () => void;
   onInstall: (plugin: PluginSummary) => void;
@@ -3184,6 +3245,15 @@ function PluginDetailsDialog({
                     variant={plugin.sync.state === "conflictRisk" ? "filled" : "outlined"}
                     label={plugin.sync.label}
                     title={plugin.sync.message}
+                  />
+                )}
+                {remoteUpdateAvailable && (
+                  <Chip
+                    size="small"
+                    color="warning"
+                    variant="outlined"
+                    label="Remote update"
+                    title="Remote marketplace has an update for this plugin"
                   />
                 )}
                 {declaredRetrievalResources.length > 0 && (
@@ -4847,6 +4917,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     operatorRuns,
     retrievalStatuses,
     processPoolStatuses,
+    remoteMarketplaceChecks,
     isLoading,
     isMutating,
     error,
@@ -4910,6 +4981,11 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     () => marketplaces.filter((marketplace) => marketplace.remote?.url?.trim()).length,
     [marketplaces],
   );
+  const remoteChangedPluginNames = useMemo(
+    () => remoteMarketplaceChangedPluginNames(remoteMarketplaceChecks),
+    [remoteMarketplaceChecks],
+  );
+  const remoteChangedPluginCount = remoteChangedPluginNames.size;
   const exposedOperators = useMemo(
     () => operators.filter((operator) => operator.exposed),
     [operators],
@@ -5081,9 +5157,13 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   const handleCheckRemoteMarketplaces = async () => {
     setMessage(null);
     setCheckingRemoteMarketplaces(true);
+    const previousSignature = remoteMarketplaceCheckSignature(remoteMarketplaceChecks);
     try {
       const results = await checkRemoteMarketplaces(projectRoot);
-      setMessage(remoteMarketplaceCheckMessage(results));
+      const nextSignature = remoteMarketplaceCheckSignature(results);
+      if (remoteMarketplaceChecks.length === 0 || nextSignature !== previousSignature) {
+        setMessage(remoteMarketplaceCheckMessage(results));
+      }
     } catch {
       // Store exposes the error banner.
     } finally {
@@ -5568,23 +5648,37 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           </Stack>
           <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap alignItems="center">
             {[
-              ["Enabled", enabledPlugins.length],
-              ["Installable", availablePlugins.length],
-              ["Registered", exposedOperators.length],
-              ["Runs", operatorRuns.length],
-              ["Issues", quarantinedRouteCount + degradedRouteCount],
-              ["Pooled", processPoolStatuses.length],
-              ["Remote", remoteMarketplaceCount],
-            ].map(([label, value]) => (
-              <Box key={label} sx={{ display: "inline-flex", alignItems: "baseline", gap: 0.5 }}>
-                <Typography variant="subtitle2" fontWeight={850}>
-                  {value}
-                </Typography>
-                <Typography variant="caption" color="text.secondary" fontWeight={700}>
-                  {label}
-                </Typography>
-              </Box>
-            ))}
+              { label: "Enabled", value: enabledPlugins.length },
+              { label: "Installable", value: availablePlugins.length },
+              { label: "Registered", value: exposedOperators.length },
+              { label: "Runs", value: operatorRuns.length },
+              { label: "Issues", value: quarantinedRouteCount + degradedRouteCount },
+              { label: "Pooled", value: processPoolStatuses.length },
+              { label: "Remote", value: remoteMarketplaceCount },
+              { label: "Updates", value: remoteChangedPluginCount },
+            ].map(({ label, value }) => {
+              if (label === "Updates" && value > 0) {
+                return (
+                  <Chip
+                    key={label}
+                    size="small"
+                    color="warning"
+                    variant="outlined"
+                    label={`${value} update${value === 1 ? "" : "s"}`}
+                  />
+                );
+              }
+              return (
+                <Box key={label} sx={{ display: "inline-flex", alignItems: "baseline", gap: 0.5 }}>
+                  <Typography variant="subtitle2" fontWeight={850}>
+                    {value}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" fontWeight={700}>
+                    {label}
+                  </Typography>
+                </Box>
+              );
+            })}
             {quarantinedRouteCount > 0 && (
               <Chip size="small" color="error" variant="filled" label={`${quarantinedRouteCount} quarantined`} />
             )}
@@ -5663,6 +5757,9 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         retrievalStatuses={detailPlugin ? retrievalStatusesByPlugin.get(detailPlugin.id) : undefined}
         processPoolStatuses={detailPlugin ? processPoolStatusesByPlugin.get(detailPlugin.id) : undefined}
         operators={detailPluginOperators}
+        remoteUpdateAvailable={
+          detailPlugin ? pluginHasRemoteMarketplaceUpdate(detailPlugin, remoteChangedPluginNames) : false
+        }
         busy={isMutating || (detailPlugin ? busyPluginIds.has(detailPlugin.id) : false)}
         onClose={() => setDetailPluginId(null)}
         onInstall={(plugin) => void handleInstall(plugin)}
@@ -5892,6 +5989,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
           retrievalStatusesByPlugin={retrievalStatusesByPlugin}
           processPoolStatusesByPlugin={processPoolStatusesByPlugin}
           operatorsByPlugin={operatorsByPlugin}
+          remoteChangedPluginNames={remoteChangedPluginNames}
           busy={isMutating}
           busyPluginIds={busyPluginIds}
           onInstall={(plugin) => void handleInstall(plugin)}
