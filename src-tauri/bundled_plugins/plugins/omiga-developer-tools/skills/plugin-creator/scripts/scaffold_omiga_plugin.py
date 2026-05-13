@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scaffold an Omiga-native bundled plugin.
+"""Scaffold an Omiga-native project plugin.
 
 This helper intentionally creates small placeholders only. The agent must still fill
 real Operator/Template implementations before claiming product readiness.
@@ -309,7 +309,7 @@ From: ubuntu:22.04
 
 
 def update_marketplace(repo: Path, args: argparse.Namespace) -> None:
-    marketplace = repo / "src-tauri" / "bundled_plugins" / "marketplace.json"
+    marketplace = repo / ".omiga" / "plugins" / "marketplace.json"
     if not marketplace.exists():
         raise SystemExit(f"Marketplace not found: {marketplace}")
     data = json.loads(marketplace.read_text(encoding="utf-8"))
@@ -329,8 +329,8 @@ def update_marketplace(repo: Path, args: argparse.Namespace) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Scaffold an Omiga bundled plugin")
-    parser.add_argument("--repo", default=".", help="Repository root containing src-tauri/bundled_plugins")
+    parser = argparse.ArgumentParser(description="Scaffold an Omiga project plugin")
+    parser.add_argument("--repo", default=".", help="Repository root containing .omiga/plugins")
     parser.add_argument("--plugin-id", required=True, help="Stable plugin id, e.g. ngs-alignment")
     parser.add_argument("--display-name", required=True, help="Human display name, e.g. Alignment")
     parser.add_argument("--category", required=True, help="Top-level product category")
@@ -350,19 +350,20 @@ def main() -> int:
     parser.add_argument("--with-environments", action="store_true")
     parser.add_argument("--env-ref", default="", help="Optional envRef to add to generated operators and environment profile")
     parser.add_argument("--env-runtime", choices=["conda", "docker", "singularity"], default="conda", help="Runtime profile type for --with-environments")
-    parser.add_argument("--marketplace", action="store_true", help="Add/update bundled marketplace entry")
+    parser.add_argument("--marketplace", action="store_true", help="Add/update project marketplace entry")
     parser.add_argument("--force", action="store_true", help="Overwrite generated placeholder files")
     args = parser.parse_args()
 
     args.plugin_id = slug(args.plugin_id)
     repo = Path(args.repo).resolve()
-    plugins_root = repo / "src-tauri" / "bundled_plugins" / "plugins"
+    plugins_root = repo / ".omiga" / "plugins"
     if not plugins_root.is_dir():
-        raise SystemExit(f"Bundled plugin root not found: {plugins_root}")
+        raise SystemExit(f"Project plugin root not found: {plugins_root}")
     plugin_root = plugins_root / args.plugin_id
     plugin_root.mkdir(parents=True, exist_ok=True)
 
-    json_dump(plugin_root / "plugin.json", plugin_manifest(args), force=args.force or not (plugin_root / "plugin.json").exists())
+    manifest_path = plugin_root / ".omiga-plugin" / "plugin.json"
+    json_dump(manifest_path, plugin_manifest(args), force=args.force or not manifest_path.exists())
     operator_env_ref = slug(args.env_ref or f"{args.plugin_id}-env") if args.with_environments else slug(args.env_ref)
 
     for op in split_items(args.operator):

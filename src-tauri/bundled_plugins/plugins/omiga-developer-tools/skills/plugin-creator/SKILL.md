@@ -1,6 +1,6 @@
 ---
 name: plugin-creator
-description: Create or update Omiga-native plugins under src-tauri/bundled_plugins, including marketplace entries, Operator units, Template units, plugin-carried Skills, environments, and UI taxonomy alignment.
+description: Create or update Omiga-native plugins under .omiga/plugins, including marketplace entries, Operator units, Template units, plugin-carried Skills, environments, and UI taxonomy alignment.
 ---
 
 # Omiga Plugin Creator
@@ -15,7 +15,7 @@ Use this skill when building Omiga-native plugins, not Codex `.codex-plugin` bun
 - For executable Operators, prefer `runtime.envRef` plus an Environment profile. Keep file conventions strict: conda/mamba/micromamba use `conda.yaml` or `conda.yml`; Docker uses `Dockerfile`; Singularity/Apptainer uses `singularity.def`.
 - The executor detects required managers/runtimes in the active PATH after base/virtual-env activation. Missing micromamba/mamba/conda, Docker, or Singularity/Apptainer should produce actionable install guidance instead of silently falling back to the host shell.
 - Do not duplicate public Operator and Template versions of the same workflow unless explicitly keeping a migration fallback; prefer the Template version when scripts are meant to be edited/rendered.
-- No new dependencies unless requested. Reuse existing shell/Python/R patterns in nearby bundled plugins.
+- No new dependencies unless requested. Reuse existing shell/Python/R patterns in nearby project plugins.
 - Keep scaffolds small, reviewable, and reversible. Replace TODO placeholders before claiming feature completion.
 
 ## Taxonomy guidance
@@ -32,9 +32,9 @@ Use this skill when building Omiga-native plugins, not Codex `.codex-plugin` bun
 ## Workflow
 
 1. Inspect nearby examples first:
-   - `src-tauri/bundled_plugins/plugins/*/plugin.json`
-   - `src-tauri/bundled_plugins/plugins/operator-seqtk/operators/*/operator.yaml`
-   - `src-tauri/bundled_plugins/plugins/visualization-r/templates/*/*/template.yaml`
+   - `.omiga/plugins/*/.omiga-plugin/plugin.json`
+   - `.omiga/plugins/operator-seqtk/operators/*/operator.yaml`
+   - `.omiga/plugins/visualization-r/templates/*/*/template.yaml`
 2. Decide the plugin boundary:
    - Same provider or same workflow stage goes in one plugin.
    - Atomic unit granularity remains at Operator/Template level.
@@ -74,7 +74,7 @@ Use this skill when building Omiga-native plugins, not Codex `.codex-plugin` bun
    - `src/components/Settings/PluginsPanel.tsx`
    - `src/components/Settings/PluginsPanel.test.tsx`
 6. Verify before reporting:
-   - `python3 -m json.tool src-tauri/bundled_plugins/marketplace.json >/dev/null`
+   - `python3 -m json.tool .omiga/plugins/marketplace.json >/dev/null`
    - Parse or load new manifests with targeted Rust tests when available.
    - `bun run test src/components/Settings/PluginsPanel.test.tsx src/state/pluginStore.test.ts` for UI grouping changes.
    - `bun run build` for frontend/type integration.
@@ -82,9 +82,9 @@ Use this skill when building Omiga-native plugins, not Codex `.codex-plugin` bun
 
 ## Checklist before completion
 
-- Plugin directory exists under `src-tauri/bundled_plugins/plugins/<plugin-id>`.
+- Plugin directory exists under `.omiga/plugins/<plugin-id>`.
 - `plugin.json` has concise display name, category, capabilities, prompt, and correct contribution paths.
-- Marketplace entry exists only if it should be user-installable.
+- Marketplace entry exists in `.omiga/plugins/marketplace.json` only if it should be user-installable.
 - Each Operator/Template is atomic and has a unique unit id.
 - Executable Operators declare `runtime.envRef` when they need tool isolation.
 - Environment files follow one convention per runtime: `conda.yaml|conda.yml`, `Dockerfile`, or `singularity.def`; do not invent mixed names such as `requirements.txt` for conda envs or `docker.yaml` for container builds.

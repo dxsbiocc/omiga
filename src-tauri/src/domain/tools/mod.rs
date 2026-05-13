@@ -8,9 +8,11 @@
 // Keep public module names flat for compatibility while storing same-family
 // tool implementations in subdirectories.
 pub mod agent;
+#[path = "interaction/ask_user_question.rs"]
 pub mod ask_user_question;
 pub mod bash;
 pub mod connector;
+#[path = "plan/enter_mode.rs"]
 pub mod enter_plan_mode;
 pub mod env_store;
 #[path = "environment/profile_check.rs"]
@@ -27,12 +29,18 @@ pub mod execution_lineage_report;
 pub mod execution_record_detail;
 #[path = "execution/record_list.rs"]
 pub mod execution_record_list;
+#[path = "plan/exit_mode.rs"]
 pub mod exit_plan_mode;
 pub mod fetch;
+#[path = "file/edit.rs"]
 pub mod file_edit;
+#[path = "file/read.rs"]
 pub mod file_read;
+#[path = "file/write.rs"]
 pub mod file_write;
+#[path = "file/glob.rs"]
 pub mod glob;
+#[path = "file/grep.rs"]
 pub mod grep;
 #[path = "learning/preference_candidate_list.rs"]
 pub mod learning_preference_candidate_list;
@@ -50,18 +58,24 @@ pub mod learning_self_evolution_creator;
 pub mod learning_self_evolution_draft_write;
 #[path = "learning/self_evolution_report.rs"]
 pub mod learning_self_evolution_report;
+#[path = "mcp/list_resources.rs"]
 pub mod list_mcp_resources;
+#[path = "skill/list.rs"]
 pub mod list_skills;
+#[path = "notebook/edit.rs"]
 pub mod notebook_edit;
 #[path = "operator/describe.rs"]
 pub mod operator_describe;
 #[path = "operator/list.rs"]
 pub mod operator_list;
 pub mod query;
+#[path = "mcp/read_resource.rs"]
 pub mod read_mcp_resource;
 pub mod recall;
 pub mod search;
+#[path = "interaction/send_user_message.rs"]
 pub mod send_user_message;
+#[path = "file/shell_ops.rs"]
 pub mod shell_file_ops;
 #[path = "skill/config.rs"]
 pub mod skill_config;
@@ -72,6 +86,7 @@ pub mod skill_manage;
 #[path = "skill/view.rs"]
 pub mod skill_view;
 pub mod sleep;
+#[path = "file/ssh_paths.rs"]
 pub mod ssh_paths;
 #[path = "task/create.rs"]
 pub mod task_create;
