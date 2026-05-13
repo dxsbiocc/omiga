@@ -202,7 +202,17 @@ customize_plot <- function(p, df, config) { p }
 
 save_faceted_grob_outputs <- function(plot, outdir, prefix = "figure", width = 8, height = 6, dpi = 300) {
   outdir <- ensure_dir(outdir)
-  grob <- ggplot2::ggplotGrob(plot)
+  # ggplotGrob() may ask grid for device metrics. In headless Rscript this can
+  # otherwise open the implicit default PDF device and leave Rplots.pdf in cwd.
+  metric_device <- tempfile(fileext = ".pdf")
+  grDevices::pdf(metric_device, width = width, height = height, bg = "white", onefile = FALSE)
+  grob <- tryCatch(
+    ggplot2::ggplotGrob(plot),
+    finally = {
+      grDevices::dev.off()
+      unlink(metric_device)
+    }
+  )
   axis_b_indices <- grep("axis-b", grob$layout$name)
   if (length(axis_b_indices) > 1) {
     for (index in axis_b_indices[-1]) {
@@ -211,10 +221,26 @@ save_faceted_grob_outputs <- function(plot, outdir, prefix = "figure", width = 8
   }
 
   pdf_path <- file.path(outdir, paste0(prefix, ".pdf"))
-  ggplot2::ggsave(pdf_path, plot = grob, width = width, height = height, units = "in", device = "pdf", bg = "white")
+  grDevices::pdf(pdf_path, width = width, height = height, bg = "white", onefile = FALSE)
+  tryCatch(
+    grid::grid.draw(grob),
+    finally = grDevices::dev.off()
+  )
 
   png_path <- file.path(outdir, paste0(prefix, ".png"))
-  ggplot2::ggsave(png_path, plot = grob, width = width, height = height, units = "in", dpi = normalize_png_dpi(dpi), device = "png", bg = "white")
+  png_dpi <- normalize_png_dpi(dpi)
+  grDevices::png(
+    png_path,
+    width = width * png_dpi,
+    height = height * png_dpi,
+    res = png_dpi,
+    units = "px",
+    bg = "white"
+  )
+  tryCatch(
+    grid::grid.draw(grob),
+    finally = grDevices::dev.off()
+  )
 
   invisible(c(png_path, pdf_path))
 }

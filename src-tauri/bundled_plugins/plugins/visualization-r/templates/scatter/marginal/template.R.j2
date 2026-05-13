@@ -192,6 +192,19 @@ marginal_right_plot <- function(prepared, config, palette) {
     )
 }
 
+with_grid_metric_device <- function(expr) {
+  # ggplotGrob() can open R's implicit default PDF device in headless Rscript
+  # while resolving grid metrics. Use an explicit disposable device instead so
+  # template runs never leave Rplots.pdf in the working directory.
+  metric_device <- tempfile(fileext = ".pdf")
+  grDevices::pdf(metric_device, width = 7, height = 7, bg = "white", onefile = FALSE)
+  on.exit({
+    grDevices::dev.off()
+    unlink(metric_device)
+  }, add = TRUE)
+  force(expr)
+}
+
 assemble_plot <- function(scatter, top, right, config) {
   if (!requireNamespace("gtable", quietly = TRUE)) {
     stop("scatter/marginal requires the gtable package, installed with ggplot2.", call. = FALSE)
@@ -205,10 +218,10 @@ assemble_plot <- function(scatter, top, right, config) {
   layout <- gtable::gtable_add_grob(layout, white_bg(), t = 1, l = 2, name = "bg-spacer", z = -Inf)
   layout <- gtable::gtable_add_grob(layout, white_bg(), t = 2, l = 1, name = "bg-scatter", z = -Inf)
   layout <- gtable::gtable_add_grob(layout, white_bg(), t = 2, l = 2, name = "bg-right", z = -Inf)
-  layout <- gtable::gtable_add_grob(layout, ggplot2::ggplotGrob(top), t = 1, l = 1, name = "top")
+  layout <- gtable::gtable_add_grob(layout, with_grid_metric_device(ggplot2::ggplotGrob(top)), t = 1, l = 1, name = "top")
   layout <- gtable::gtable_add_grob(layout, grid::nullGrob(), t = 1, l = 2, name = "spacer")
-  layout <- gtable::gtable_add_grob(layout, ggplot2::ggplotGrob(scatter), t = 2, l = 1, name = "scatter")
-  layout <- gtable::gtable_add_grob(layout, ggplot2::ggplotGrob(right), t = 2, l = 2, name = "right")
+  layout <- gtable::gtable_add_grob(layout, with_grid_metric_device(ggplot2::ggplotGrob(scatter)), t = 2, l = 1, name = "scatter")
+  layout <- gtable::gtable_add_grob(layout, with_grid_metric_device(ggplot2::ggplotGrob(right)), t = 2, l = 2, name = "right")
   layout
 }
 
