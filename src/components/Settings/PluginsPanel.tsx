@@ -1429,6 +1429,52 @@ function operatorResourceProfileChip(operator: OperatorSummary) {
   );
 }
 
+function operatorResourceProfilePriority(operator: OperatorSummary): number {
+  const tier = normalizedResourceTier(operatorResourceProfile(operator));
+  if (tier === "hpc-required") return 4;
+  if (tier === "hpc-recommended" || tier === "server-recommended") return 3;
+  if (tier === "heavy" || tier === "local-warn") return 2;
+  return 0;
+}
+
+function pluginRepresentativeResourceOperator(operators: OperatorSummary[]): OperatorSummary | null {
+  return operators
+    .filter((operator) => operatorResourceProfileLabel(operator))
+    .sort((left, right) =>
+      operatorResourceProfilePriority(right) - operatorResourceProfilePriority(left)
+      || operatorDisplayName(left).localeCompare(operatorDisplayName(right)),
+    )[0] ?? null;
+}
+
+function pluginResourceProfileChip(operators: OperatorSummary[], compact = false) {
+  const representative = pluginRepresentativeResourceOperator(operators);
+  if (!representative) return null;
+  const label = operatorResourceProfileLabel(representative);
+  if (!label) return null;
+  const profiledCount = operators.filter((operator) => operatorResourceProfileLabel(operator)).length;
+  const tier = normalizedResourceTier(operatorResourceProfile(representative));
+  const compactLabel =
+    tier === "hpc-required"
+      ? "HPC required"
+      : tier === "hpc-recommended" || tier === "server-recommended"
+        ? "HPC"
+        : label;
+  const title = [
+    `${profiledCount} resource-marked operator${profiledCount === 1 ? "" : "s"}.`,
+    operatorResourceProfileSummary(representative) ?? label,
+  ].join(" ");
+  return (
+    <Tooltip title={title}>
+      <Chip
+        size="small"
+        color={operatorResourceProfileColor(representative)}
+        variant="outlined"
+        label={`⚡ ${compact ? compactLabel : label}${!compact && profiledCount > 1 ? ` · ${profiledCount}` : ""}`}
+      />
+    </Tooltip>
+  );
+}
+
 function runtimeAxisValues(runtime: unknown, axis: string): string[] {
   if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) return [];
   const value = (runtime as Record<string, unknown>)[axis];
@@ -2027,9 +2073,18 @@ function PluginCard({
       </Box>
 
       <Box sx={{ minWidth: 0, flex: 1 }}>
-        <Typography variant="subtitle2" fontWeight={800} noWrap title={displayName(plugin)}>
-          {displayName(plugin)}
-        </Typography>
+        <Stack direction="row" gap={0.75} alignItems="center" sx={{ minWidth: 0 }}>
+          <Typography
+            variant="subtitle2"
+            fontWeight={800}
+            noWrap
+            title={displayName(plugin)}
+            sx={{ minWidth: 0 }}
+          >
+            {displayName(plugin)}
+          </Typography>
+          {pluginResourceProfileChip(operators, true)}
+        </Stack>
         <Typography variant="body2" color="text.secondary" noWrap title={subtitle} sx={{ mt: 0.15 }}>
           {subtitle}
         </Typography>
@@ -2157,7 +2212,11 @@ function PluginCatalogGroupList({
                     </Typography>
                     <Box sx={pluginCardGridSx}>
                       {section.plugins.map((plugin) => {
-                        const pluginOperators = operatorsByPlugin.get(plugin.id) ?? operatorsByPlugin.get(plugin.name);
+                        const pluginOperators =
+                          operatorsByPlugin.get(plugin.id)
+                          ?? operatorsByPlugin.get(plugin.name)
+                          ?? plugin.operators
+                          ?? [];
                         return (
                           <PluginCard
                             key={plugin.id}
@@ -3107,6 +3166,7 @@ function PluginDetailsDialog({
                     label={`${plugin.environments?.length ?? 0} env${plugin.environments?.length === 1 ? "" : "s"}`}
                   />
                 )}
+                {pluginResourceProfileChip(operators)}
                 {chips.map((chip) => (
                   <Chip key={chip} size="small" variant="outlined" label={capabilityLabel(chip)} />
                 ))}
@@ -4846,7 +4906,10 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   }, [allPlugins]);
   const detailPlugin = detailPluginId ? pluginsById.get(detailPluginId) ?? null : null;
   const detailPluginOperators = detailPlugin
-    ? operatorsByPlugin.get(detailPlugin.id) ?? operatorsByPlugin.get(detailPlugin.name) ?? []
+    ? operatorsByPlugin.get(detailPlugin.id)
+      ?? operatorsByPlugin.get(detailPlugin.name)
+      ?? detailPlugin.operators
+      ?? []
     : [];
   const installedPlugins = useMemo(
     () => allPlugins.filter((plugin) => plugin.installed),

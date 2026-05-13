@@ -18,8 +18,8 @@ mod web;
 
 pub const DESCRIPTION: &str = r#"Fetch one document/detail from a typed data source and return formatted JSON.
 
-- `category` is required. Categories: `literature`, `dataset` (`data` alias), `knowledge` (use `query` for structured knowledge records and `recall` for local knowledge), `web`, `social`.
-- `source` is optional and defaults to `auto`. Concrete sources: `web.auto`, `literature.pubmed|arxiv|crossref|openalex|biorxiv|medrxiv|semantic_scholar`, `dataset.geo|ena|ena_run|ena_experiment|ena_sample|ena_analysis|ena_assembly|ena_sequence|cbioportal|gtex|ncbi_datasets|arrayexpress|biosample`, optional `social.wechat`.
+- `category` is required. Categories: `literature`, `dataset` (`data` alias), `knowledge` (use `query` for structured knowledge records and `recall` for local knowledge), `web`, `social`; installed plugins can add more categories.
+- `source` is optional and defaults to `auto`. Concrete sources: `web.auto`, `literature.pubmed|arxiv|crossref|openalex|biorxiv|medrxiv|semantic_scholar`, `dataset.geo|ena|ena_run|ena_experiment|ena_sample|ena_analysis|ena_assembly|ena_sequence|cbioportal|gtex|ncbi_datasets|arrayexpress|biosample`, optional `social.wechat`; installed plugins may expose additional sources.
 - `subcategory` is optional for dataset routing. Prefer `query(category="dataset", operation="fetch", …)` for structured dataset/database record lookup; this dataset path remains as a compatibility fetch wrapper.
 - Locate the document with one of: `url`, `id` + `source`, or a full `result` object returned by `search`.
 - `web` fetch sends a safe public HTTP(S) GET, follows public-safe redirects, blocks private/loopback targets, converts HTML to text, and pretty-prints JSON.
@@ -167,11 +167,11 @@ pub fn schema() -> ToolSchema {
             "properties": {
                 "category": {
                     "type": "string",
-                    "description": "Source category. Supports literature, dataset (alias: data), web, social. Knowledge records use query(category=knowledge, operation=fetch); local knowledge uses recall."
+                    "description": "Source category. Supports literature, dataset (alias: data), web, social, and categories exposed by installed plugins. Knowledge records use query(category=knowledge, operation=fetch); local knowledge uses recall."
                 },
                 "source": {
                     "type": "string",
-                    "description": "Source within the category. Defaults to auto. Literature supports pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar. Dataset supports geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, cbioportal, gtex, ncbi_datasets, arrayexpress, biosample."
+                    "description": "Source within the category. Defaults to auto. Literature supports pubmed, arxiv, crossref, openalex, biorxiv, medrxiv, semantic_scholar. Dataset supports geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, cbioportal, gtex, ncbi_datasets, arrayexpress, biosample. Installed plugins may expose additional sources."
                 },
                 "subcategory": {
                     "type": "string",

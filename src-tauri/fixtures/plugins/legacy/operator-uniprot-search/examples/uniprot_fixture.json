@@ -1,0 +1,48 @@
+{
+  "results": [
+    {
+      "primaryAccession": "P04637",
+      "uniProtkbId": "P53_HUMAN",
+      "entryType": "UniProtKB reviewed (Swiss-Prot)",
+      "proteinDescription": {
+        "recommendedName": {
+          "fullName": {"value": "Cellular tumor antigen p53"}
+        }
+      },
+      "genes": [
+        {"geneName": {"value": "TP53"}}
+      ],
+      "organism": {
+        "scientificName": "Homo sapiens",
+        "commonName": "Human",
+        "taxonId": 9606
+      },
+      "sequence": {"length": 393, "molWeight": 43653},
+      "comments": [
+        {"commentType": "FUNCTION", "texts": [{"value": "Acts as a tumor suppressor in many tumor types."}]}
+      ]
+    },
+    {
+      "primaryAccession": "P38398",
+      "uniProtkbId": "BRCA1_HUMAN",
+      "entryType": "UniProtKB reviewed (Swiss-Prot)",
+      "proteinDescription": {
+        "recommendedName": {
+          "fullName": {"value": "Breast cancer type 1 susceptibility protein"}
+        }
+      },
+      "genes": [
+        {"geneName": {"value": "BRCA1"}}
+      ],
+      "organism": {
+        "scientificName": "Homo sapiens",
+        "commonName": "Human",
+        "taxonId": 9606
+      },
+      "sequence": {"length": 1863, "molWeight": 207732},
+      "comments": [
+        {"commentType": "FUNCTION", "texts": [{"value": "E3 ubiquitin-protein ligase that regulates DNA repair."}]}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "operator-uniprot-search",
+  "version": "0.1.0",
+  "description": "UniProtKB protein search with structured TSV/JSON outputs.",
+  "operators": "./operators",
+  "interface": {
+    "displayName": "UniProt Search",
+    "shortDescription": "UniProtKB protein search with structured outputs",
+    "longDescription": "Searches UniProtKB and saves structured TSV/JSON outputs. Existing retrieval tools remain available as compatibility fallback.",
+    "developerName": "Omiga",
+    "category": "Knowledge",
+    "capabilities": [
+      "Retrieval",
+      "Search",
+      "Knowledge",
+      "UniProt",
+      "External Network",
+      "Offline Fixture"
+    ],
+    "brandColor": "#10B981",
+    "defaultPrompt": [
+      "Search UniProtKB and save structured protein results."
+    ]
+  }
+}

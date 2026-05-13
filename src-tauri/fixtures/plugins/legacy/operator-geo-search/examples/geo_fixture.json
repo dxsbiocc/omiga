@@ -1,0 +1,28 @@
+{
+  "records": [
+    {
+      "uid": "200123456",
+      "accession": "GSE123456",
+      "title": "RNA-seq profiling of TP53 perturbation in breast cancer cells",
+      "summary": "Example GEO fixture for deterministic operator tests.",
+      "gdsType": "Expression profiling by high throughput sequencing",
+      "taxon": "Homo sapiens",
+      "n_samples": 12,
+      "platform": "GPL20301",
+      "pdat": "2024/01/02",
+      "url": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE123456"
+    },
+    {
+      "uid": "200123457",
+      "accession": "GSE123457",
+      "title": "Single-cell expression atlas for immune checkpoint response",
+      "summary": "Second deterministic GEO fixture row.",
+      "gdsType": "Expression profiling by high throughput sequencing",
+      "taxon": "Mus musculus",
+      "n_samples": 24,
+      "platform": "GPL24247",
+      "pdat": "2023/12/15",
+      "url": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE123457"
+    }
+  ]
+}

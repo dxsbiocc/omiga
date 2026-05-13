@@ -1,0 +1,94 @@
+{
+  "name": "retrieval-knowledge-uniprot",
+  "version": "0.1.0",
+  "description": "Runs UniProtKB search/query/fetch through Omiga local subprocess routing.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./scripts/retrieval_knowledge_uniprot.py",
+      "args": [],
+      "env": {
+        "OMIGA_RETRIEVAL_SOURCE_IDS": "uniprot",
+        "OMIGA_RETRIEVAL_PLUGIN_NAME": "retrieval-knowledge-uniprot"
+      },
+      "cwd": ".",
+      "idleTtlMs": 60000,
+      "requestTimeoutMs": 30000,
+      "cancelGraceMs": 750,
+      "concurrency": 1
+    },
+    "resources": [
+      {
+        "id": "uniprot",
+        "category": "knowledge",
+        "label": "UniProt",
+        "description": "Protein function, sequence, GO, and cross-reference metadata via UniProtKB REST APIs.",
+        "aliases": [
+          "uni_prot",
+          "uniprotkb",
+          "uniprot_kb",
+          "protein",
+          "proteins"
+        ],
+        "subcategories": [
+          "protein"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public UniProt REST API; no credentials required."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "organism",
+            "type": "string",
+            "description": "Optional organism-name filter."
+          },
+          {
+            "name": "taxon_id",
+            "type": "string",
+            "description": "Optional organism_id filter."
+          },
+          {
+            "name": "reviewed",
+            "type": "boolean",
+            "description": "Filter reviewed/Swiss-Prot records."
+          },
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum UniProtKB records to request."
+          }
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "UniProt Retrieval Resource",
+    "shortDescription": "UniProt as a local retrieval plugin",
+    "longDescription": "Runs UniProtKB search/query/fetch through Omiga local subprocess routing.",
+    "developerName": "Omiga",
+    "category": "Retrieval",
+    "capabilities": [
+      "Knowledge",
+      "Retrieval",
+      "Local Subprocess",
+      "Search",
+      "Query",
+      "Fetch"
+    ],
+    "brandColor": "#16A34A",
+    "defaultPrompt": [
+      "Search UniProt for reviewed BRCA1 proteins.",
+      "Fetch a UniProt accession through the plugin."
+    ]
+  }
+}

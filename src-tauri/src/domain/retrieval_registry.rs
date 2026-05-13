@@ -263,6 +263,56 @@ pub fn normalize_enabled_map(
     kind: RegistryEntryKind,
 ) -> HashMap<String, Vec<String>> {
     let mut out = HashMap::new();
+    let categories = category_ids();
+    let known = categories.iter().copied().collect::<HashSet<_>>();
+    for (category, items) in values {
+        let category = normalize_id(&category);
+        if category.is_empty() {
+            continue;
+        }
+        if known.contains(category.as_str()) {
+            out.insert(
+                category.clone(),
+                normalize_enabled_ids(&category, &items, kind, false),
+            );
+        } else {
+            out.insert(category, normalize_unregistered_enabled_ids(&items));
+        }
+    }
+    out
+}
+
+pub fn normalize_unregistered_enabled_ids(values: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in values {
+        let id = normalize_id(value);
+        if !id.is_empty() && !out.iter().any(|item| item == &id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+pub fn configured_extra_enabled_categories(
+    values: &HashMap<String, Vec<String>>,
+) -> HashMap<String, Vec<String>> {
+    let known = category_ids().iter().copied().collect::<HashSet<_>>();
+    let mut out = HashMap::new();
+    for (category, items) in values {
+        let category = normalize_id(category);
+        if category.is_empty() || known.contains(category.as_str()) {
+            continue;
+        }
+        out.insert(category, normalize_unregistered_enabled_ids(items));
+    }
+    out
+}
+
+pub fn normalize_builtin_enabled_map(
+    values: HashMap<String, Vec<String>>,
+    kind: RegistryEntryKind,
+) -> HashMap<String, Vec<String>> {
+    let mut out = HashMap::new();
     for category in category_ids() {
         if let Some(items) = values.get(category) {
             out.insert(
@@ -1825,6 +1875,36 @@ mod tests {
                 RetrievalSourceStatus::Available => {}
             }
         }
+    }
+
+    #[test]
+    fn enabled_source_normalization_preserves_plugin_categories() {
+        let normalized = normalize_enabled_map(
+            HashMap::from([
+                (
+                    "drug".to_string(),
+                    vec![
+                        "ChEMBL".to_string(),
+                        "chembl".to_string(),
+                        "Drug Bank".to_string(),
+                    ],
+                ),
+                (
+                    "dataset".to_string(),
+                    vec!["ncbi-biosample".to_string(), "unknown".to_string()],
+                ),
+            ]),
+            RegistryEntryKind::Source,
+        );
+
+        assert_eq!(
+            normalized.get("drug"),
+            Some(&vec!["chembl".to_string(), "drug_bank".to_string()])
+        );
+        assert_eq!(
+            normalized.get("dataset"),
+            Some(&vec!["biosample".to_string()])
+        );
     }
 
     #[test]

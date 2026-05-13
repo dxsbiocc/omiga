@@ -1524,16 +1524,44 @@ mod tests {
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap, HashSet};
 
+    fn repo_plugin_root(plugin_name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join(".omiga/plugins")
+            .join(plugin_name)
+    }
+
+    fn legacy_plugin_root(plugin_name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/plugins/legacy")
+            .join(plugin_name)
+    }
+
     fn bundled_loaded_plugin(plugin_name: &str, display_name: &str) -> LoadedPlugin {
-        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("bundled_plugins/plugins")
-            .join(plugin_name);
+        let plugin_root = legacy_plugin_root(plugin_name);
         LoadedPlugin {
             id: format!("{plugin_name}@omiga-curated"),
             manifest_name: Some(plugin_name.to_string()),
             display_name: Some(display_name.to_string()),
             description: None,
             root: plugin_root,
+            enabled: true,
+            skill_roots: Vec::new(),
+            mcp_servers: HashMap::new(),
+            apps: Vec::new(),
+            retrieval: None,
+            error: None,
+        }
+    }
+
+    fn project_loaded_plugin(plugin_name: &str, display_name: &str) -> LoadedPlugin {
+        LoadedPlugin {
+            id: format!("{plugin_name}@omiga-curated"),
+            manifest_name: Some(plugin_name.to_string()),
+            display_name: Some(display_name.to_string()),
+            description: None,
+            root: repo_plugin_root(plugin_name),
             enabled: true,
             skill_roots: Vec::new(),
             mcp_servers: HashMap::new(),
@@ -1551,9 +1579,7 @@ mod tests {
         TemplateSpecWithSource,
         crate::domain::operators::OperatorSpec,
     ) {
-        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("bundled_plugins/plugins")
-            .join(plugin_name);
+        let plugin_root = legacy_plugin_root(plugin_name);
         let template = load_template_manifest(
             &plugin_root
                 .join("templates")
@@ -1836,7 +1862,7 @@ template:
 
     #[test]
     fn discovers_aggregated_transcriptomics_analysis_templates() {
-        let plugin = bundled_loaded_plugin("transcriptomics", "Transcriptomics");
+        let plugin = project_loaded_plugin("transcriptomics", "Transcriptomics");
         let candidates = discover_template_candidates_from_plugins([&plugin]);
         let by_id = candidates
             .iter()
@@ -1884,22 +1910,7 @@ template:
 
     #[test]
     fn discovers_omiga_plugin_visualization_r_templates() {
-        let plugin = LoadedPlugin {
-            id: "visualization-r@omiga-curated".to_string(),
-            manifest_name: Some("visualization-r".to_string()),
-            display_name: Some("R Visualization".to_string()),
-            description: None,
-            root: Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("repo root")
-                .join(".omiga/plugins/visualization-r"),
-            enabled: true,
-            skill_roots: Vec::new(),
-            mcp_servers: HashMap::new(),
-            apps: Vec::new(),
-            retrieval: None,
-            error: None,
-        };
+        let plugin = project_loaded_plugin("visualization-r", "R Visualization");
         let candidates = discover_template_candidates_from_plugins([&plugin]);
         let ids = candidates
             .iter()
@@ -2939,6 +2950,24 @@ migrationTarget: local_fallback_report
     #[tokio::test]
     async fn execute_template_via_migration_target_reuses_operator_runtime() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let fixture_root = legacy_plugin_root("operator-smoke");
+        let operator_dir = tmp.path().join("operators").join("write-text-report");
+        let script_dir = tmp.path().join("scripts");
+        fs::create_dir_all(&operator_dir).expect("operator dir");
+        fs::create_dir_all(&script_dir).expect("script dir");
+        fs::copy(
+            fixture_root
+                .join("operators")
+                .join("write-text-report")
+                .join("operator.yaml"),
+            operator_dir.join("operator.yaml"),
+        )
+        .expect("operator fixture");
+        fs::copy(
+            fixture_root.join("scripts").join("write_text_report.sh"),
+            script_dir.join("write_text_report.sh"),
+        )
+        .expect("operator script fixture");
         let template = TemplateSpecWithSource {
             spec: TemplateSpec {
                 api_version: TEMPLATE_API_VERSION_V1ALPHA1.to_string(),

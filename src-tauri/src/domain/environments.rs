@@ -805,9 +805,11 @@ metadata:
     }
 
     #[test]
-    fn discovers_bundled_ngs_alignment_conda_environment_profiles() {
-        let plugin_root =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("bundled_plugins/plugins/ngs-alignment");
+    fn discovers_project_ngs_alignment_conda_environment_profiles() {
+        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root")
+            .join(".omiga/plugins/ngs-alignment");
         let plugin = loaded_plugin("ngs-alignment@omiga-curated", &plugin_root);
 
         let profiles = discover_environment_profiles_from_plugins([&plugin]);

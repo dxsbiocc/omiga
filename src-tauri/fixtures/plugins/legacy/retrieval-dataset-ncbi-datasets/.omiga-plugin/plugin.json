@@ -1,0 +1,86 @@
+{
+  "name": "retrieval-dataset-ncbi-datasets",
+  "version": "0.1.0",
+  "description": "Runs NCBI Datasets genome search/query/fetch through Omiga local subprocess routing.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./scripts/retrieval_dataset_ncbi_datasets.py",
+      "args": [],
+      "env": {
+        "OMIGA_RETRIEVAL_SOURCE_IDS": "ncbi_datasets",
+        "OMIGA_RETRIEVAL_PLUGIN_NAME": "retrieval-dataset-ncbi-datasets"
+      },
+      "cwd": ".",
+      "idleTtlMs": 60000,
+      "requestTimeoutMs": 30000,
+      "cancelGraceMs": 750,
+      "concurrency": 1
+    },
+    "resources": [
+      {
+        "id": "ncbi_datasets",
+        "category": "dataset",
+        "label": "NCBI Datasets",
+        "description": "Genome assembly reports and download summaries via NCBI Datasets v2.",
+        "aliases": [
+          "ncbi_dataset",
+          "ncbi_genome",
+          "ncbi_genomes",
+          "ncbi_assembly",
+          "genome_datasets"
+        ],
+        "subcategories": [
+          "genome"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [
+          "pubmed_api_key"
+        ],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only NCBI Datasets API; optional My NCBI API key is projected as an API header only when configured."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "mode",
+            "type": "string",
+            "description": "Lookup mode: accession, taxon, bioproject, biosample, wgs, or assembly_name."
+          },
+          {
+            "name": "page_size",
+            "type": "number",
+            "description": "Maximum genome assembly reports to request."
+          }
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "NCBI Datasets Retrieval Resource",
+    "shortDescription": "NCBI Datasets genome metadata as a local retrieval plugin",
+    "longDescription": "Runs NCBI Datasets genome search/query/fetch through Omiga local subprocess routing.",
+    "developerName": "Omiga",
+    "category": "Retrieval",
+    "capabilities": [
+      "Dataset",
+      "Retrieval",
+      "Local Subprocess",
+      "Search",
+      "Query",
+      "Fetch"
+    ],
+    "brandColor": "#0891B2",
+    "defaultPrompt": [
+      "Search NCBI Datasets for RefSeq assemblies.",
+      "Preview an NCBI Datasets genome package."
+    ]
+  }
+}

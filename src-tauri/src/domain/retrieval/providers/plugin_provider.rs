@@ -534,7 +534,7 @@ mod tests {
         )
     }
 
-    fn bundled_source_plugin_cases() -> Vec<(&'static str, &'static str, &'static str)> {
+    fn source_plugin_cases() -> Vec<(&'static str, &'static str, &'static str)> {
         vec![
             ("dataset", "geo", "resource-ncbi"),
             ("dataset", "biosample", "resource-ncbi"),
@@ -561,8 +561,8 @@ mod tests {
         ]
     }
 
-    fn bundled_source_plugin_registrations() -> Vec<PluginRetrievalRegistration> {
-        let mut plugin_dirs = bundled_source_plugin_cases()
+    fn source_plugin_registrations() -> Vec<PluginRetrievalRegistration> {
+        let mut plugin_dirs = source_plugin_cases()
             .into_iter()
             .map(|(_, _, plugin_dir)| plugin_dir)
             .collect::<Vec<_>>();
@@ -571,25 +571,30 @@ mod tests {
         plugin_dirs
             .into_iter()
             .map(|plugin_dir| {
-                bundled_registration(&format!("{plugin_dir}@omiga-curated"), plugin_dir)
+                source_registration(&format!("{plugin_dir}@omiga-curated"), plugin_dir)
             })
             .collect()
     }
 
-    fn bundled_registration(plugin_id: &str, plugin_dir: &str) -> PluginRetrievalRegistration {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("bundled_plugins/plugins")
-            .join(plugin_dir);
-        let plugin_json: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(root.join("plugin.json")).unwrap()).unwrap();
-        let manifest = load_plugin_retrieval_manifest(
-            &root,
-            plugin_json
-                .get("retrieval")
-                .cloned()
-                .expect("retrieval manifest"),
-        )
-        .unwrap();
+    fn source_registration(plugin_id: &str, plugin_dir: &str) -> PluginRetrievalRegistration {
+        let root = match plugin_dir {
+            "resource-ncbi"
+            | "resource-embl-ebi"
+            | "retrieval-dataset-gtex"
+            | "retrieval-dataset-cbioportal"
+            | "retrieval-literature-semantic-scholar"
+            | "retrieval-knowledge-uniprot" => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("repo root")
+                .join(".omiga/plugins")
+                .join(plugin_dir),
+            _ => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/plugins/legacy")
+                .join(plugin_dir),
+        };
+        let manifest = crate::domain::plugins::load_plugin_manifest(&root)
+            .and_then(|manifest| manifest.retrieval)
+            .expect("retrieval manifest");
         PluginRetrievalRegistration {
             plugin_id: plugin_id.to_string(),
             plugin_root: root,
@@ -678,12 +683,12 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
-    async fn provider_executes_bundled_replacement_resource_plugins_when_enabled() {
+    async fn provider_executes_replacement_resource_plugins_when_enabled() {
         let provider = PluginRetrievalProvider::new_with_lifecycle_state(
-            bundled_source_plugin_registrations(),
+            source_plugin_registrations(),
             PluginLifecycleState::default(),
         );
-        for (category, source, plugin_dir) in bundled_source_plugin_cases() {
+        for (category, source, plugin_dir) in source_plugin_cases() {
             for (tool, operation) in [
                 (RetrievalTool::Search, RetrievalOperation::Search),
                 (RetrievalTool::Query, RetrievalOperation::Query),

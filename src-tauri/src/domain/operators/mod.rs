@@ -1332,30 +1332,66 @@ pub fn list_operator_summaries() -> Vec<OperatorCandidateSummary> {
                     candidate.source.source_plugin.clone(),
                 ))
                 .unwrap_or_default();
-            OperatorCandidateSummary {
-                id: candidate.metadata.id,
-                version: candidate.metadata.version,
-                name: candidate.metadata.name,
-                description: candidate.metadata.description,
-                tags: candidate.metadata.tags,
-                source_plugin: candidate.source.source_plugin,
-                manifest_path: candidate
-                    .source
-                    .manifest_path
-                    .to_string_lossy()
-                    .into_owned(),
-                interface: candidate.interface,
-                execution: candidate.execution,
-                preflight: candidate.preflight,
-                runtime: candidate.runtime,
-                resources: candidate.resources,
-                smoke_tests: candidate.smoke_tests,
-                exposed: !aliases.is_empty(),
-                enabled_aliases: aliases,
-                unavailable_reason: None,
-            }
+            operator_candidate_summary(candidate, aliases)
         })
         .collect()
+}
+
+pub fn list_operator_summaries_for_plugin_root(
+    source_plugin: &str,
+    plugin_root: &Path,
+) -> Vec<OperatorCandidateSummary> {
+    let mut candidates = discover_manifest_paths(plugin_root)
+        .into_iter()
+        .filter_map(|manifest_path| {
+            load_operator_manifest(
+                &manifest_path,
+                source_plugin.to_string(),
+                plugin_root.to_path_buf(),
+            )
+            .ok()
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.metadata
+            .id
+            .cmp(&right.metadata.id)
+            .then_with(|| left.metadata.version.cmp(&right.metadata.version))
+            .then_with(|| left.source.source_plugin.cmp(&right.source.source_plugin))
+    });
+    candidates
+        .into_iter()
+        .map(|candidate| operator_candidate_summary(candidate, Vec::new()))
+        .collect()
+}
+
+fn operator_candidate_summary(
+    candidate: OperatorSpec,
+    enabled_aliases: Vec<String>,
+) -> OperatorCandidateSummary {
+    let exposed = !enabled_aliases.is_empty();
+    OperatorCandidateSummary {
+        id: candidate.metadata.id,
+        version: candidate.metadata.version,
+        name: candidate.metadata.name,
+        description: candidate.metadata.description,
+        tags: candidate.metadata.tags,
+        source_plugin: candidate.source.source_plugin,
+        manifest_path: candidate
+            .source
+            .manifest_path
+            .to_string_lossy()
+            .into_owned(),
+        interface: candidate.interface,
+        execution: candidate.execution,
+        preflight: candidate.preflight,
+        runtime: candidate.runtime,
+        resources: candidate.resources,
+        smoke_tests: candidate.smoke_tests,
+        exposed,
+        enabled_aliases,
+        unavailable_reason: None,
+    }
 }
 
 pub fn enabled_operator_tool_schemas() -> Vec<ToolSchema> {
@@ -8180,11 +8216,16 @@ mod tests {
         plugin_name: &str,
         operator_dir: &str,
     ) -> (PathBuf, PathBuf) {
-        let plugin_root = crate::domain::plugins::dev_builtin_marketplace_path()
-            .parent()
-            .unwrap()
-            .join("plugins")
-            .join(plugin_name);
+        let plugin_root = match plugin_name {
+            "operator-seqtk" | "ngs-alignment" => Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("repo root")
+                .join(".omiga/plugins")
+                .join(plugin_name),
+            _ => Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/plugins/legacy")
+                .join(plugin_name),
+        };
         let manifest = plugin_root
             .join("operators")
             .join(operator_dir)
@@ -8810,11 +8851,10 @@ execution:
 
     #[test]
     fn transcriptomics_analysis_plugin_does_not_expose_operator_units() {
-        let plugin_root = crate::domain::plugins::dev_builtin_marketplace_path()
+        let plugin_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .unwrap()
-            .join("plugins")
-            .join("transcriptomics");
+            .expect("repo root")
+            .join(".omiga/plugins/transcriptomics");
         assert!(
             !plugin_root.join("operators").exists(),
             "transcriptomics keeps template-only public units"

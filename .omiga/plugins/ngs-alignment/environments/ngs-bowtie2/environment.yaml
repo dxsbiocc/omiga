@@ -1,0 +1,19 @@
+apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: ngs-bowtie2
+  version: 0.1.0
+  name: Bowtie2
+  description: Conda environment for Bowtie2 indexing/alignment; includes samtools for SAM/BAM conversion, sorting, and indexing.
+  tags: [bioinformatics, ngs, alignment, bowtie2]
+runtime:
+  type: conda
+  condaEnvFile: ./conda.yaml
+requirements:
+  system:
+    - micromamba or mamba or conda
+  notes:
+    - Environment is created under .omiga/operator-envs/conda and reused by hash.
+diagnostics:
+  checkCommand: [bowtie2, --version]
+  installHint: Install the official micromamba binary at $HOME/.omiga/bin/micromamba or set OMIGA_MICROMAMBA; Omiga can create this env from conda.yaml/conda.yml.

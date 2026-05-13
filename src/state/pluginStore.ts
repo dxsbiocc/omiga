@@ -171,6 +171,7 @@ export interface PluginSummary {
   authPolicy: PluginAuthPolicy;
   interface?: PluginInterface | null;
   retrieval?: PluginRetrievalSummary | null;
+  operators?: OperatorSummary[];
   templates?: PluginTemplateSummary | null;
   environments?: PluginEnvironmentSummary[];
   sync?: PluginSyncSummary | null;

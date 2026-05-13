@@ -1,0 +1,5 @@
+interface:
+  display_name: "Omiga Plugin Creator"
+  short_description: "Scaffold Omiga-native plugin bundles"
+  brand_color: "#2563EB"
+  default_prompt: "Use $plugin-creator to scaffold an Omiga plugin with marketplace metadata and atomic units."

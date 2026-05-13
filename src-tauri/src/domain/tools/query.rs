@@ -21,6 +21,7 @@ Use `query` when the user wants database-native lookup/query semantics rather th
 - `category="knowledge", source="ncbi_gene"` searches/fetches NCBI Gene via official NCBI E-utilities (`db=gene`).
 - `category="knowledge", source="ensembl"` searches/fetches Ensembl genes/transcripts/variations through the public Ensembl REST API.
 - `category="knowledge", source="uniprot"` searches/fetches UniProtKB protein entries through the public UniProt REST API.
+- Installed plugins can expose additional categories and sources without requiring core tool-code changes.
 - `operation="search"` searches records by keyword or database query string. `operation="fetch"`/`"get"` retrieves one record by accession, URL, or search result. `operation="download_summary"` previews NCBI Datasets genome package size/files without downloading.
 - `source="auto"` chooses a source from `subcategory` for search or from the identifier for fetch. Dataset subcategories: `expression` → GEO, `sequencing` → ENA run, `genomics` → ENA assembly, `sample_metadata` → ENA sample/BioSample by id, `multi_omics` → cBioPortal.
 - `params` may carry database-specific filters; GTEx accepts `endpoint` (`gene`, `median_expression`, `tissues`, `top_expressed`), `datasetId`, `gencodeId`, and `tissueSiteDetailId`; NCBI Datasets accepts genome lookup/download options; ArrayExpress accepts `organism` and `study_type`; BioSample accepts `organism` and `taxon_id`; NCBI Gene accepts `organism`, `taxon_id`, `ret_start`, and `sort`; Ensembl accepts `species` and `object_type`; UniProt accepts `organism`, `taxon_id`, and `reviewed`.
@@ -88,11 +89,11 @@ pub fn schema() -> ToolSchema {
             "properties": {
                 "category": {
                     "type": "string",
-                    "description": "Database category. Supports dataset (alias: data) and knowledge."
+                    "description": "Database category. Supports dataset (alias: data), knowledge, and categories exposed by installed plugins."
                 },
                 "source": {
                     "type": "string",
-                    "description": "Database source. Dataset supports auto, geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, cbioportal, gtex, ncbi_datasets, arrayexpress, biosample. Knowledge supports ncbi_gene, ensembl, and uniprot."
+                    "description": "Database source. Dataset supports auto, geo, ena, ena_run, ena_experiment, ena_sample, ena_analysis, ena_assembly, ena_sequence, cbioportal, gtex, ncbi_datasets, arrayexpress, biosample. Knowledge supports ncbi_gene, ensembl, and uniprot. Installed plugins may expose additional sources."
                 },
                 "operation": {
                     "type": "string",

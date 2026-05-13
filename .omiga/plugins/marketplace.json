@@ -15,6 +15,144 @@
         "authentication": "ON_USE"
       },
       "category": "Visualization"
+    },
+    {
+      "name": "transcriptomics",
+      "source": {
+        "source": "local",
+        "path": "./plugins/transcriptomics"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Analysis"
+    },
+    {
+      "name": "operator-seqtk",
+      "source": {
+        "source": "local",
+        "path": "./plugins/operator-seqtk"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Operator"
+    },
+    {
+      "name": "computer-use",
+      "source": {
+        "source": "local",
+        "path": "./plugins/computer-use"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Automation"
+    },
+    {
+      "name": "omiga-developer-tools",
+      "source": {
+        "source": "local",
+        "path": "./plugins/omiga-developer-tools"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Tools"
+    },
+    {
+      "name": "ngs-alignment",
+      "source": {
+        "source": "local",
+        "path": "./plugins/ngs-alignment"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Bioinformatics"
+    },
+    {
+      "name": "resource-ncbi",
+      "source": {
+        "source": "local",
+        "path": "./plugins/resource-ncbi"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "resource-embl-ebi",
+      "source": {
+        "source": "local",
+        "path": "./plugins/resource-embl-ebi"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-dataset-gtex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retrieval-dataset-gtex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-dataset-cbioportal",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retrieval-dataset-cbioportal"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-literature-semantic-scholar",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retrieval-literature-semantic-scholar"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
+    },
+    {
+      "name": "retrieval-knowledge-uniprot",
+      "source": {
+        "source": "local",
+        "path": "./plugins/retrieval-knowledge-uniprot"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Retrieval"
     }
-  ]
+  ],
+  "remote": {
+    "provider": "github",
+    "url": "https://raw.githubusercontent.com/dxsbiocc/omiga-plugins/main/marketplace.json",
+    "repositoryUrl": "https://github.com/dxsbiocc/omiga-plugins",
+    "changelogUrl": "https://github.com/dxsbiocc/omiga-plugins/releases"
+  }
 }

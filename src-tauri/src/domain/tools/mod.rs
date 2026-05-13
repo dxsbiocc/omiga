@@ -5,18 +5,27 @@
 //! - Each tool implements the Tool trait with associated types for arguments/results
 //! - Tool execution produces StreamOutput for unified streaming interface
 
+// Keep public module names flat for compatibility while storing same-family
+// tool implementations in subdirectories.
 pub mod agent;
 pub mod ask_user_question;
 pub mod bash;
 pub mod connector;
 pub mod enter_plan_mode;
 pub mod env_store;
+#[path = "environment/profile_check.rs"]
 pub mod environment_profile_check;
+#[path = "environment/profile_prepare_plan.rs"]
 pub mod environment_profile_prepare_plan;
+#[path = "execution/archive_advisor.rs"]
 pub mod execution_archive_advisor;
+#[path = "execution/archive_suggestion_write.rs"]
 pub mod execution_archive_suggestion_write;
+#[path = "execution/lineage_report.rs"]
 pub mod execution_lineage_report;
+#[path = "execution/record_detail.rs"]
 pub mod execution_record_detail;
+#[path = "execution/record_list.rs"]
 pub mod execution_record_list;
 pub mod exit_plan_mode;
 pub mod fetch;
@@ -25,18 +34,28 @@ pub mod file_read;
 pub mod file_write;
 pub mod glob;
 pub mod grep;
+#[path = "learning/preference_candidate_list.rs"]
 pub mod learning_preference_candidate_list;
+#[path = "learning/preference_candidate_promote.rs"]
 pub mod learning_preference_candidate_promote;
+#[path = "learning/proposal_apply.rs"]
 pub mod learning_proposal_apply;
+#[path = "learning/proposal_decide.rs"]
 pub mod learning_proposal_decide;
+#[path = "learning/proposal_list.rs"]
 pub mod learning_proposal_list;
+#[path = "learning/self_evolution_creator.rs"]
 pub mod learning_self_evolution_creator;
+#[path = "learning/self_evolution_draft_write.rs"]
 pub mod learning_self_evolution_draft_write;
+#[path = "learning/self_evolution_report.rs"]
 pub mod learning_self_evolution_report;
 pub mod list_mcp_resources;
 pub mod list_skills;
 pub mod notebook_edit;
+#[path = "operator/describe.rs"]
 pub mod operator_describe;
+#[path = "operator/list.rs"]
 pub mod operator_list;
 pub mod query;
 pub mod read_mcp_resource;
@@ -44,24 +63,38 @@ pub mod recall;
 pub mod search;
 pub mod send_user_message;
 pub mod shell_file_ops;
+#[path = "skill/config.rs"]
 pub mod skill_config;
+#[path = "skill/invoke.rs"]
 pub mod skill_invoke;
+#[path = "skill/manage.rs"]
 pub mod skill_manage;
+#[path = "skill/view.rs"]
 pub mod skill_view;
 pub mod sleep;
 pub mod ssh_paths;
+#[path = "task/create.rs"]
 pub mod task_create;
+#[path = "task/get.rs"]
 pub mod task_get;
+#[path = "task/list.rs"]
 pub mod task_list;
+#[path = "task/output.rs"]
 pub mod task_output;
+#[path = "task/stop.rs"]
 pub mod task_stop;
+#[path = "task/update.rs"]
 pub mod task_update;
 pub mod template_execute;
 pub mod todo_write;
 pub mod tool_search;
+#[path = "unit/authoring_validate.rs"]
 pub mod unit_authoring_validate;
+#[path = "unit/describe.rs"]
 pub mod unit_describe;
+#[path = "unit/list.rs"]
 pub mod unit_list;
+#[path = "unit/search.rs"]
 pub mod unit_search;
 pub mod visualization;
 pub mod web_safety;
@@ -1187,12 +1220,16 @@ impl WebSearchApiKeys {
             .as_ref()
             .and_then(|map| map.get(&category))
         {
-            return retrieval_registry::normalize_enabled_ids(
-                &category,
-                values,
-                RegistryEntryKind::Source,
-                false,
-            );
+            return if retrieval_registry::category_ids().contains(&category.as_str()) {
+                retrieval_registry::normalize_enabled_ids(
+                    &category,
+                    values,
+                    RegistryEntryKind::Source,
+                    false,
+                )
+            } else {
+                retrieval_registry::normalize_unregistered_enabled_ids(values)
+            };
         }
 
         match category.as_str() {
@@ -1253,6 +1290,11 @@ impl WebSearchApiKeys {
 
     pub fn enabled_sources_by_category(&self) -> HashMap<String, Vec<String>> {
         let mut out = retrieval_registry::defaults_by_category(RegistryEntryKind::Source);
+        if let Some(values) = self.enabled_sources_by_category.as_ref() {
+            out.extend(retrieval_registry::configured_extra_enabled_categories(
+                values,
+            ));
+        }
         for category in retrieval_registry::category_ids() {
             out.insert(
                 category.to_string(),

@@ -465,13 +465,23 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/retrieval-plugins/basic")
     }
 
-    fn bundled_retrieval_plugin_root(plugin_name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("bundled_plugins/plugins")
-            .join(plugin_name)
+    fn retrieval_plugin_root(plugin_name: &str) -> PathBuf {
+        match plugin_name {
+            "retrieval-dataset-gtex"
+            | "retrieval-dataset-cbioportal"
+            | "retrieval-literature-semantic-scholar"
+            | "retrieval-knowledge-uniprot" => Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("repo root")
+                .join(".omiga/plugins")
+                .join(plugin_name),
+            _ => Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/plugins/legacy")
+                .join(plugin_name),
+        }
     }
 
-    fn bundled_retrieval_plugin_cases() -> Vec<(&'static str, Vec<&'static str>)> {
+    fn retrieval_plugin_cases() -> Vec<(&'static str, Vec<&'static str>)> {
         vec![
             ("retrieval-dataset-geo", vec!["dataset.geo"]),
             (
@@ -567,11 +577,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validates_bundled_individual_retrieval_resource_plugins_with_offline_smoke() {
-        for (plugin_name, expected_routes) in bundled_retrieval_plugin_cases() {
+    async fn validates_individual_retrieval_resource_plugins_with_offline_smoke() {
+        for (plugin_name, expected_routes) in retrieval_plugin_cases() {
             let report =
-                validate_retrieval_plugin_root(&bundled_retrieval_plugin_root(plugin_name), true)
-                    .await;
+                validate_retrieval_plugin_root(&retrieval_plugin_root(plugin_name), true).await;
 
             assert!(report.valid, "{plugin_name} report: {report:?}");
             assert_eq!(report.plugin_name.as_deref(), Some(plugin_name));

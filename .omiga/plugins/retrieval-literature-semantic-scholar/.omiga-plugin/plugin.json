@@ -1,0 +1,84 @@
+{
+  "name": "retrieval-literature-semantic-scholar",
+  "version": "0.1.0",
+  "description": "Runs Semantic Scholar Graph API search/query/fetch through Omiga local subprocess routing.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./scripts/retrieval_literature_semantic_scholar.py",
+      "args": [],
+      "env": {
+        "OMIGA_RETRIEVAL_SOURCE_IDS": "semantic_scholar",
+        "OMIGA_RETRIEVAL_PLUGIN_NAME": "retrieval-literature-semantic-scholar"
+      },
+      "cwd": ".",
+      "idleTtlMs": 60000,
+      "requestTimeoutMs": 30000,
+      "cancelGraceMs": 750,
+      "concurrency": 1
+    },
+    "resources": [
+      {
+        "id": "semantic_scholar",
+        "category": "literature",
+        "label": "Semantic Scholar",
+        "description": "Paper search and detail metadata via the Semantic Scholar Graph API.",
+        "aliases": [
+          "semanticscholar",
+          "s2",
+          "semantic_scholar_graph"
+        ],
+        "subcategories": [
+          "scholarly_literature"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [
+          "semantic_scholar_api_key"
+        ],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only Semantic Scholar Graph API; optional API key is projected as x-api-key only when configured."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum Semantic Scholar papers to request."
+          },
+          {
+            "name": "fields",
+            "type": "string",
+            "description": "Optional comma-separated Semantic Scholar fields override."
+          }
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "Semantic Scholar Retrieval Resource",
+    "shortDescription": "Semantic Scholar as a local retrieval plugin",
+    "longDescription": "Runs Semantic Scholar Graph API search/query/fetch through Omiga local subprocess routing.",
+    "developerName": "Omiga",
+    "category": "Retrieval",
+    "capabilities": [
+      "Literature",
+      "Retrieval",
+      "Local Subprocess",
+      "Search",
+      "Query",
+      "Fetch"
+    ],
+    "brandColor": "#6366F1",
+    "defaultPrompt": [
+      "Search Semantic Scholar for CRISPR single-cell papers.",
+      "Fetch a Semantic Scholar paper ID."
+    ]
+  }
+}

@@ -2,6 +2,7 @@
 
 use crate::commands::CommandResult;
 use crate::domain::computer_use::{ComputerUseAuditSummary, ComputerUseStopStatus};
+use crate::domain::plugins::{active_plugin_root, PluginId};
 use crate::errors::AppError;
 use serde::Serialize;
 use serde_json::json;
@@ -139,9 +140,28 @@ pub async fn computer_use_backend_status() -> CommandResult<ComputerUseBackendSt
 }
 
 fn read_backend_status() -> ComputerUseBackendStatus {
+    let plugin_dir = installed_computer_use_plugin_root();
+    backend_status_for_plugin_root(plugin_dir)
+}
+
+fn installed_computer_use_plugin_root() -> PathBuf {
+    PluginId::new("computer-use", "omiga-curated")
+        .ok()
+        .and_then(|plugin_id| active_plugin_root(&plugin_id))
+        .unwrap_or_else(|| plugin_store_placeholder_root("computer-use"))
+}
+
+fn plugin_store_placeholder_root(plugin_name: &str) -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".omiga")
+        .join("plugins")
+        .join("tools")
+        .join(plugin_name)
+}
+
+fn backend_status_for_plugin_root(plugin_dir: PathBuf) -> ComputerUseBackendStatus {
     let platform = std::env::consts::OS.to_string();
-    let plugin_dir =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("bundled_plugins/plugins/computer-use");
     let bin_dir = plugin_dir.join("bin");
     let wrapper_path = bin_dir.join("computer-use");
     let python_backend_path = bin_dir.join("computer-use-macos.py");
@@ -151,7 +171,12 @@ fn read_backend_status() -> ComputerUseBackendStatus {
     let python_backend_installed = python_backend_path.is_file();
     let python_backend_executable = is_executable_file(&python_backend_path);
 
-    let message = "Python Computer Use backend is active.".to_string();
+    let message = if wrapper_installed && python_backend_installed {
+        "Python Computer Use backend is installed.".to_string()
+    } else {
+        "Install and enable the `computer-use` plugin to use the Python Computer Use backend."
+            .to_string()
+    };
 
     ComputerUseBackendStatus {
         platform,
@@ -243,5 +268,51 @@ fn read_permission_status() -> ComputerUsePermissionStatus {
         accessibility: "unsupported".to_string(),
         screen_recording: "unsupported".to_string(),
         message: "Computer Use Phase 10 backend supports macOS only.".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn backend_status_reads_files_from_resolved_plugin_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugin_root = tmp
+            .path()
+            .join(".omiga")
+            .join("plugins")
+            .join("tools")
+            .join("computer-use")
+            .join("local");
+        let bin_dir = plugin_root.join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        fs::write(bin_dir.join("computer-use"), "#!/bin/sh\n").expect("wrapper");
+        fs::write(
+            bin_dir.join("computer-use-macos.py"),
+            "#!/usr/bin/env python3\n",
+        )
+        .expect("python backend");
+
+        let status = backend_status_for_plugin_root(plugin_root.clone());
+
+        assert!(status.wrapper_installed);
+        assert!(status.python_backend_installed);
+        assert!(status
+            .wrapper_path
+            .starts_with(&plugin_root.to_string_lossy().to_string()));
+        assert!(status
+            .python_backend_path
+            .starts_with(&plugin_root.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn backend_status_missing_placeholder_uses_plugin_store_shape() {
+        let status = backend_status_for_plugin_root(plugin_store_placeholder_root("computer-use"));
+
+        assert!(status
+            .wrapper_path
+            .contains(".omiga/plugins/tools/computer-use/bin/computer-use"));
     }
 }

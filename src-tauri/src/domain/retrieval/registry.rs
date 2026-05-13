@@ -111,12 +111,16 @@ impl RetrievalRouteRegistry {
             });
         }
         if !is_enabled(keys, &selected) {
+            let settings_target = match selected.provider {
+                RetrievalProviderKind::Builtin => "Settings → Search",
+                RetrievalProviderKind::Plugin => "Settings → Plugins",
+            };
             return Err(RetrievalError::SourceDisabled {
                 category: selected.category.clone(),
                 source_id: selected.id.clone(),
                 message: format!(
-                    "{}.{} is disabled. Enable it in Settings → Search.",
-                    selected.category, selected.id
+                    "{}.{} is disabled. Enable it in {settings_target}.",
+                    selected.category, selected.id,
                 ),
             });
         }
@@ -258,16 +262,18 @@ fn is_plugin_source_explicitly_enabled(
     keys: &WebSearchApiKeys,
     source: &SourceRegistration,
 ) -> bool {
-    keys.enabled_sources_by_category
+    if let Some(values) = keys
+        .enabled_sources_by_category
         .as_ref()
         .and_then(|map| map.get(&source.category))
-        .map(|values| {
-            values
-                .iter()
-                .map(|value| normalize_id(value))
-                .any(|id| id == source.id)
-        })
-        .unwrap_or(source.default_enabled)
+    {
+        return values
+            .iter()
+            .map(|value| normalize_id(value))
+            .any(|id| id == source.id);
+    }
+
+    source.default_enabled
 }
 
 #[cfg(test)]
@@ -300,6 +306,14 @@ mod tests {
     }
 
     fn plugin_registration(source_id: &str, replaces_builtin: bool) -> PluginRetrievalRegistration {
+        plugin_registration_in("dataset", source_id, replaces_builtin)
+    }
+
+    fn plugin_registration_in(
+        category: &str,
+        source_id: &str,
+        replaces_builtin: bool,
+    ) -> PluginRetrievalRegistration {
         PluginRetrievalRegistration {
             plugin_id: "mock@tests".to_string(),
             plugin_root: PathBuf::from("/tmp/mock"),
@@ -317,7 +331,7 @@ mod tests {
                 },
                 resources: vec![PluginRetrievalResource {
                     id: source_id.to_string(),
-                    category: "dataset".to_string(),
+                    category: category.to_string(),
                     label: source_id.to_string(),
                     description: String::new(),
                     aliases: vec![],
@@ -373,6 +387,55 @@ mod tests {
             .unwrap();
         assert_eq!(enabled.provider, RetrievalProviderKind::Plugin);
         assert_eq!(enabled.plugin_id.as_deref(), Some("mock@tests"));
+    }
+
+    #[test]
+    fn plugin_only_category_requires_explicit_enablement_or_config_default() {
+        let registry = RetrievalRouteRegistry::new(vec![plugin_registration_in(
+            "external_domain",
+            "external_source",
+            false,
+        )]);
+        assert!(registry.errors().is_empty());
+
+        let disabled_by_default = registry.resolve_request(
+            &request(
+                "external_domain",
+                "external_source",
+                RetrievalOperation::Search,
+            ),
+            &WebSearchApiKeys::default(),
+        );
+        assert!(matches!(
+            disabled_by_default,
+            Err(RetrievalError::SourceDisabled { .. })
+        ));
+
+        let enabled = registry
+            .resolve_request(
+                &request(
+                    "external_domain",
+                    "external_source",
+                    RetrievalOperation::Search,
+                ),
+                &keys_with_enabled("external_domain", &["external_source"]),
+            )
+            .unwrap();
+        assert_eq!(enabled.provider, RetrievalProviderKind::Plugin);
+        assert_eq!(enabled.plugin_id.as_deref(), Some("mock@tests"));
+
+        let disabled = registry.resolve_request(
+            &request(
+                "external_domain",
+                "external_source",
+                RetrievalOperation::Search,
+            ),
+            &keys_with_enabled("external_domain", &[]),
+        );
+        assert!(matches!(
+            disabled,
+            Err(RetrievalError::SourceDisabled { .. })
+        ));
     }
 
     #[test]
