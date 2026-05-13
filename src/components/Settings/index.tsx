@@ -632,6 +632,38 @@ const KNOWLEDGE_DATABASE_OPTIONS: QuerySourceOption[] = [
     available: true,
     badge: "无需 API",
   },
+  {
+    id: "reactome",
+    label: "Reactome",
+    helper: "通路、反应网络与富集分析",
+    defaultEnabled: false,
+    available: true,
+    badge: "无需 API",
+  },
+  {
+    id: "gene_ontology",
+    label: "Gene Ontology",
+    helper: "GO biological process / molecular function / cellular component",
+    defaultEnabled: false,
+    available: true,
+    badge: "无需 API",
+  },
+  {
+    id: "msigdb",
+    label: "MSigDB",
+    helper: "GSEA gene-set collections and signatures",
+    defaultEnabled: false,
+    available: true,
+    badge: "无需 API",
+  },
+  {
+    id: "kegg",
+    label: "KEGG",
+    helper: "KEGG pathways, modules, compounds, and ID mapping",
+    defaultEnabled: false,
+    available: true,
+    badge: "学术使用",
+  },
 ];
 
 const DEFAULT_QUERY_DATASET_TYPES = DATASET_TYPE_OPTIONS.filter(

@@ -19,7 +19,15 @@ const QUERY_DATASET_SOURCE_IDS = [
   "arrayexpress",
   "biosample",
 ] as const;
-const QUERY_KNOWLEDGE_SOURCE_IDS = ["ncbi_gene", "ensembl", "uniprot"] as const;
+const QUERY_KNOWLEDGE_SOURCE_IDS = [
+  "ncbi_gene",
+  "ensembl",
+  "uniprot",
+  "reactome",
+  "gene_ontology",
+  "msigdb",
+  "kegg",
+] as const;
 
 const DEFAULT_QUERY_DATASET_TYPES = [
   "expression",
@@ -57,6 +65,10 @@ const CATEGORY_SOURCE_IDS: Record<string, readonly string[]> = {
     "ncbi_gene",
     "ensembl",
     "uniprot",
+    "reactome",
+    "gene_ontology",
+    "msigdb",
+    "kegg",
   ],
   web: ["tavily", "ddg", "google", "bing", "exa", "firecrawl", "parallel"],
   social: ["wechat"],

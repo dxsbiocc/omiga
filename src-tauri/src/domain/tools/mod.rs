@@ -1199,7 +1199,15 @@ pub const QUERY_DATASET_SOURCE_IDS: &[&str] = &[
 ];
 pub const DEFAULT_QUERY_DATASET_SOURCE_IDS: &[&str] = &["geo", "ena"];
 
-pub const QUERY_KNOWLEDGE_SOURCE_IDS: &[&str] = &["ncbi_gene", "ensembl", "uniprot"];
+pub const QUERY_KNOWLEDGE_SOURCE_IDS: &[&str] = &[
+    "ncbi_gene",
+    "ensembl",
+    "uniprot",
+    "reactome",
+    "gene_ontology",
+    "msigdb",
+    "kegg",
+];
 pub const DEFAULT_QUERY_KNOWLEDGE_SOURCE_IDS: &[&str] = &["ncbi_gene"];
 
 fn normalize_query_setting_id(value: &str) -> String {
