@@ -24,7 +24,7 @@ import {
   Typography,
   type ChipProps,
 } from "@mui/material";
-import { alpha, useTheme } from "@mui/material/styles";
+import { alpha, useTheme, type Theme } from "@mui/material/styles";
 import {
   AddRounded,
   ClearRounded,
@@ -1429,6 +1429,24 @@ function operatorResourceProfileChip(operator: OperatorSummary) {
   );
 }
 
+type PluginUnitKind = "operator" | "template";
+
+function pluginUnitKindColor(kind: PluginUnitKind): NonNullable<ChipProps["color"]> {
+  return kind === "operator" ? "primary" : "secondary";
+}
+
+function pluginUnitKindChipSx(kind: PluginUnitKind): ChipProps["sx"] {
+  return (theme: Theme) => {
+    const tone = kind === "operator" ? theme.palette.primary.main : theme.palette.secondary.main;
+    return {
+      bgcolor: alpha(tone, theme.palette.mode === "dark" ? 0.14 : 0.07),
+      borderColor: alpha(tone, theme.palette.mode === "dark" ? 0.62 : 0.38),
+      color: tone,
+      fontWeight: 800,
+    };
+  };
+}
+
 function operatorResourceProfilePriority(operator: OperatorSummary): number {
   const tier = normalizedResourceTier(operatorResourceProfile(operator));
   if (tier === "hpc-required") return 4;
@@ -2537,14 +2555,18 @@ function PluginUnitControls({
         {operators.length > 0 && (
           <Chip
             size="small"
+            color={pluginUnitKindColor("operator")}
             variant="outlined"
+            sx={pluginUnitKindChipSx("operator")}
             label={`${operators.filter((operator) => operator.exposed).length}/${operators.length} operators on`}
           />
         )}
         {templates.length > 0 && (
           <Chip
             size="small"
+            color={pluginUnitKindColor("template")}
             variant="outlined"
+            sx={pluginUnitKindChipSx("template")}
             label={`${templates.filter(templateEnabled).length}/${templates.length} templates on`}
           />
         )}
@@ -2646,7 +2668,13 @@ function PluginUnitControls({
                     <Typography variant="subtitle2" fontWeight={800}>
                       {operatorDisplayName(operator)}
                     </Typography>
-                    <Chip size="small" variant="outlined" label="Operator" />
+                    <Chip
+                      size="small"
+                      color={pluginUnitKindColor("operator")}
+                      variant="outlined"
+                      sx={pluginUnitKindChipSx("operator")}
+                      label="Operator"
+                    />
                     {operatorResourceProfileChip(operator)}
                     {envRef && (
                       <Chip
@@ -2702,7 +2730,13 @@ function PluginUnitControls({
                     <Typography variant="subtitle2" fontWeight={800}>
                       {templateDisplayName(template)}
                     </Typography>
-                    <Chip size="small" variant="outlined" label="Template" />
+                    <Chip
+                      size="small"
+                      color={pluginUnitKindColor("template")}
+                      variant="outlined"
+                      sx={pluginUnitKindChipSx("template")}
+                      label="Template"
+                    />
                     <Chip size="small" variant="outlined" label={template.groupTitle} />
                   </Stack>
                   <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25, lineHeight: 1.45 }}>
