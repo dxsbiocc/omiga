@@ -120,4 +120,52 @@ describe("ReactStepList", () => {
     expect(html).toContain("成功调用（最近优先）");
     expect(html).toContain("1 次成功");
   });
+
+  it("renders execution record insights inside the task execution step list", () => {
+    const html = renderSteps([
+      {
+        id: "tool-record-detail",
+        title: "execution_record_detail",
+        status: "done",
+        toolName: "execution_record_detail",
+        toolOutput: JSON.stringify({
+          found: true,
+          recordId: "execrec_parent",
+          record: {
+            id: "execrec_parent",
+            unitId: "bulk_de",
+            kind: "template",
+            status: "success",
+          },
+          parsed: {
+            metadata: {
+              paramSources: {
+                method: "user_preflight",
+                fdr: "default",
+              },
+              preflight: {
+                answeredParams: [{ param: "method" }],
+              },
+            },
+            outputSummary: {
+              outputs: {
+                table: ["de.tsv"],
+              },
+            },
+          },
+          lineage: {
+            parentExecutionId: null,
+            childCount: 1,
+          },
+          children: [{ id: "execrec_child" }],
+        }),
+      },
+    ]);
+
+    expect(html).toContain("Execution record detail");
+    expect(html).toContain("Execution detail");
+    expect(html).toContain("paramSources user_preflight: 1");
+    expect(html).toContain("1 answered question");
+    expect(html).toContain("table: 1");
+  });
 });

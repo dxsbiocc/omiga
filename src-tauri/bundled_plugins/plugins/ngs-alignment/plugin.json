@@ -1,0 +1,32 @@
+{
+  "name": "ngs-alignment",
+  "version": "0.1.0",
+  "description": "NGS alignment and post-alignment operators for BWA, Bowtie2, STAR, HISAT2, and standalone samtools utilities.",
+  "interface": {
+    "displayName": "Alignment",
+    "shortDescription": "BWA, Bowtie2, STAR, HISAT2, and samtools utilities",
+    "longDescription": "Bundles atomic Bioinformatics > NGS alignment operators for building genome indexes and mapping FASTQ reads with BWA, Bowtie2, STAR, and HISAT2, plus a standalone samtools utility operator for post-alignment SAM/BAM/CRAM operations. Alignment operators keep their own samtools dependency for fused align-sort-index pipelines; the standalone samtools operator is for separate non-alignment work.",
+    "developerName": "Omiga",
+    "category": "Bioinformatics",
+    "capabilities": [
+      "Bioinformatics",
+      "NGS",
+      "Alignment",
+      "FASTQ",
+      "FASTA",
+      "SAM/BAM",
+      "Samtools",
+      "Genome Index",
+      "Operator",
+      "Local Execution",
+      "SSH Execution"
+    ],
+    "brandColor": "#2563EB",
+    "defaultPrompt": [
+      "Use Alignment to index a reference genome, align FASTQ reads with BWA, Bowtie2, STAR, or HISAT2, or run standalone samtools post-alignment utilities."
+    ]
+  },
+  "operators": "./operators",
+  "environments": "./environments",
+  "changelog": "./CHANGELOG.md"
+}

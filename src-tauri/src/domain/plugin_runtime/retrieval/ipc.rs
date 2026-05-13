@@ -82,8 +82,8 @@ pub struct IpcResponseEnvelope {
     pub message_type: String,
     #[serde(default)]
     pub protocol_version: Option<u32>,
-    #[serde(default)]
-    pub sources: Vec<IpcInitializedSource>,
+    #[serde(default, alias = "sources")]
+    pub resources: Vec<IpcInitializedResource>,
     #[serde(default)]
     pub response: Option<PluginExecutionResponse>,
     #[serde(default)]
@@ -92,7 +92,7 @@ pub struct IpcResponseEnvelope {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct IpcInitializedSource {
+pub struct IpcInitializedResource {
     pub category: String,
     pub id: String,
     #[serde(default)]

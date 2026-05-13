@@ -1,0 +1,13 @@
+time	survival	group	lower	upper	censor
+0	1.00	Low risk	1.00	1.00	0
+6	0.92	Low risk	0.86	0.98	1
+12	0.86	Low risk	0.78	0.94	0
+18	0.78	Low risk	0.68	0.88	1
+24	0.71	Low risk	0.59	0.83	0
+30	0.63	Low risk	0.50	0.76	1
+0	1.00	High risk	1.00	1.00	0
+6	0.84	High risk	0.75	0.93	0
+12	0.70	High risk	0.58	0.82	1
+18	0.58	High risk	0.45	0.71	0
+24	0.45	High risk	0.31	0.59	1
+30	0.34	High risk	0.20	0.48	0

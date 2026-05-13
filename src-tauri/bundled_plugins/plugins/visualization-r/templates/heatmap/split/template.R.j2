@@ -1,0 +1,211 @@
+#!/usr/bin/env Rscript
+# Template: heatmap/split
+# Purpose: Two-set correlation heatmap for anchors versus target variables.
+#
+# Migration note:
+#   This template directly implements the OmicsAgent heatmap/two visual as
+#   editable ggplot2 code instead of carrying forward ggcor JSON DSL runtime.
+#   The original data.json has been converted to example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template heatmap/split
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default) {
+  raw <- tolower(arg_or(index, as.character(default)))
+  if (raw %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (raw %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default = "") {
+  raw <- arg_or(index, default)
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    anchors = parse_csv_arg(3, "YAP1,WWTR1,TEAD1,TEAD2,TEAD3,TEAD4,SMAD1,SMAD2,SMAD3,SMAD4"),
+    targets = parse_csv_arg(4, ""),
+    feature = arg_or(5, "")
+  ),
+  method = arg_or(6, "spearman"),
+  alpha = parse_number_arg(7, 0.05),
+  star_threshold = parse_number_arg(8, 0.3),
+  labels = list(title = arg_or(9, "Split Heatmap")),
+  style = list(
+    low = arg_or(10, "#009dd3"),
+    mid = arg_or(11, "#ffffff"),
+    high = arg_or(12, "#f29c98"),
+    cross = arg_or(13, "#f5e797"),
+    base_size = parse_number_arg(14, 9),
+    show_values = parse_logical_arg(15, FALSE)
+  )
+)
+delimiter <- arg_or(16, "auto")
+width <- parse_number_arg(17, 7)
+height <- parse_number_arg(18, 7.2)
+dpi <- parse_integer_arg(19, 300)
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+prepare_data <- function(df, config) {
+  feature_col <- resolve_optional_column(df, config$columns$feature)
+  candidate_cols <- setdiff(colnames(df), feature_col %||% character())
+  missing_anchors <- setdiff(config$columns$anchors, candidate_cols)
+  if (length(missing_anchors) > 0) {
+    stop(sprintf("heatmap/split missing anchor column(s): %s", paste(missing_anchors, collapse = ", ")), call. = FALSE)
+  }
+  target_cols <- config$columns$targets
+  if (length(target_cols) == 0) target_cols <- setdiff(candidate_cols, config$columns$anchors)
+  missing_targets <- setdiff(target_cols, candidate_cols)
+  if (length(missing_targets) > 0) {
+    stop(sprintf("heatmap/split missing target column(s): %s", paste(missing_targets, collapse = ", ")), call. = FALSE)
+  }
+  if (length(target_cols) < 1) stop("heatmap/split requires at least one target column.", call. = FALSE)
+  used_cols <- unique(c(config$columns$anchors, target_cols))
+  converted <- lapply(df[used_cols], function(x) suppressWarnings(as.numeric(x)))
+  bad_cols <- used_cols[vapply(converted, function(x) any(is.na(x)), logical(1))]
+  if (length(bad_cols) > 0) {
+    stop(sprintf("heatmap/split numeric column(s) contain non-numeric values: %s", paste(bad_cols, collapse = ", ")), call. = FALSE)
+  }
+  matrix_df <- as.data.frame(converted, check.names = FALSE)
+  names(matrix_df) <- used_cols
+  list(matrix = matrix_df, anchors = config$columns$anchors, targets = target_cols)
+}
+
+valid_method <- function(method) {
+  method <- tolower(method)
+  if (!method %in% c("pearson", "spearman", "kendall")) stop(sprintf("Unsupported correlation method: %s", method), call. = FALSE)
+  method
+}
+
+correlation_pvalue <- function(x, y, method) {
+  ok <- is.finite(x) & is.finite(y)
+  if (sum(ok) < 3 || length(unique(x[ok])) < 2 || length(unique(y[ok])) < 2) return(NA_real_)
+  result <- try(suppressWarnings(stats::cor.test(x[ok], y[ok], method = method)), silent = TRUE)
+  if (inherits(result, "try-error") || is.null(result$p.value)) return(NA_real_)
+  as.numeric(result$p.value)
+}
+
+significance_label <- function(pvalue) {
+  ifelse(is.na(pvalue), "", ifelse(pvalue < 0.001, "***", ifelse(pvalue < 0.01, "**", ifelse(pvalue < 0.05, "*", ""))))
+}
+
+correlation_grid <- function(prepared, config) {
+  method <- valid_method(config$method)
+  out <- do.call(rbind, lapply(prepared$targets, function(target) {
+    do.call(rbind, lapply(prepared$anchors, function(anchor) {
+      r <- suppressWarnings(stats::cor(prepared$matrix[[target]], prepared$matrix[[anchor]], method = method, use = "pairwise.complete.obs"))
+      pvalue <- correlation_pvalue(prepared$matrix[[target]], prepared$matrix[[anchor]], method)
+      data.frame(target = target, anchor = anchor, correlation = r, pvalue = pvalue, stringsAsFactors = FALSE)
+    }))
+  }))
+  out$anchor_index <- match(out$anchor, prepared$anchors)
+  out$target_index <- match(out$target, rev(prepared$targets))
+  out$abs_correlation <- abs(out$correlation)
+  out$star <- significance_label(out$pvalue)
+  out$value_label <- sprintf("%.2f", out$correlation)
+  out
+}
+
+make_plot <- function(prepared, config) {
+  plot_df <- correlation_grid(prepared, config)
+  star_df <- plot_df[!is.na(plot_df$pvalue) & plot_df$pvalue < config$alpha & plot_df$abs_correlation >= config$star_threshold, , drop = FALSE]
+  cross_df <- plot_df[is.na(plot_df$pvalue) | plot_df$pvalue >= config$alpha, , drop = FALSE]
+
+  p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = anchor_index, y = target_index)) +
+    ggplot2::geom_tile(ggplot2::aes(fill = correlation), color = "white", linewidth = 0.45, width = 0.96, height = 0.96) +
+    ggplot2::geom_text(
+      data = star_df,
+      ggplot2::aes(label = star, size = abs_correlation),
+      color = "grey14",
+      fontface = "bold",
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_segment(
+      data = cross_df,
+      ggplot2::aes(x = anchor_index - 0.26, xend = anchor_index + 0.26, y = target_index - 0.26, yend = target_index + 0.26),
+      color = config$style$cross,
+      linewidth = 0.55,
+      alpha = 0.95
+    ) +
+    ggplot2::geom_segment(
+      data = cross_df,
+      ggplot2::aes(x = anchor_index - 0.26, xend = anchor_index + 0.26, y = target_index + 0.26, yend = target_index - 0.26),
+      color = config$style$cross,
+      linewidth = 0.55,
+      alpha = 0.95
+    ) +
+    ggplot2::scale_fill_gradientn(
+      colours = grDevices::colorRampPalette(c(config$style$low, config$style$mid, config$style$high))(50),
+      limits = c(-1, 1),
+      name = "Correlation"
+    ) +
+    ggplot2::scale_size_continuous(range = c(2.4, 4.8), limits = c(0, 1)) +
+    ggplot2::scale_x_continuous(breaks = seq_along(prepared$anchors), labels = prepared$anchors, position = "top", expand = ggplot2::expansion(mult = 0.01)) +
+    ggplot2::scale_y_continuous(breaks = seq_along(prepared$targets), labels = rev(prepared$targets), expand = ggplot2::expansion(mult = 0.01)) +
+    ggplot2::coord_equal(clip = "off") +
+    ggplot2::labs(title = config$labels$title, x = NULL, y = NULL) +
+    theme_visualization(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.key = ggplot2::element_rect(fill = "white", color = NA),
+      panel.grid = ggplot2::element_blank(),
+      axis.text.x = ggplot2::element_text(angle = 45, hjust = 0, vjust = 0, face = "bold"),
+      axis.text.y = ggplot2::element_text(face = "bold"),
+      axis.ticks = ggplot2::element_blank(),
+      legend.position = "right",
+      plot.title = ggplot2::element_text(face = "bold", hjust = 0.5)
+    )
+
+  if (isTRUE(config$style$show_values)) {
+    p <- p + ggplot2::geom_text(ggplot2::aes(label = value_label), size = 2.1, color = "grey20")
+  }
+  p
+}
+
+customize_plot <- function(p, prepared, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  prepared <- prepare_data(df, config)
+  plot_df <- correlation_grid(prepared, config)
+  p <- customize_plot(make_plot(prepared, config), prepared, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  significant_pairs <- sum(!is.na(plot_df$pvalue) & plot_df$pvalue < config$alpha)
+  write_tsv(
+    data.frame(
+      metric = c("template", "targets", "anchors", "method", "significant_pairs"),
+      value = c("heatmap/split", length(prepared$targets), length(prepared$anchors), config$method, significant_pairs)
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "heatmap/split", targets = length(prepared$targets), anchors = length(prepared$anchors), method = config$method, significant_pairs = significant_pairs))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

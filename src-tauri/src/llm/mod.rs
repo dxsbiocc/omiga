@@ -244,6 +244,13 @@ pub struct LlmConfig {
     pub model: String,
     /// Maximum tokens to generate
     pub max_tokens: u32,
+    /// Maximum context window capacity for this model, in tokens.
+    ///
+    /// This is distinct from `max_tokens`: `max_tokens` is the output budget, while
+    /// `context_window_tokens` is the provider/model input+output capacity used by
+    /// auto-compaction heuristics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u32>,
     /// Temperature (0.0 - 2.0)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -286,6 +293,7 @@ impl LlmConfig {
             base_url: None,
             model,
             max_tokens: 4096,
+            context_window_tokens: None,
             temperature: None,
             system_prompt: None,
             timeout_secs: 600,
@@ -401,6 +409,7 @@ impl Default for LlmConfig {
             base_url: None,
             model: LlmProvider::Anthropic.default_model(),
             max_tokens: 4096,
+            context_window_tokens: None,
             temperature: None,
             system_prompt: None,
             timeout_secs: 600,
@@ -567,6 +576,11 @@ pub fn load_config_from_env() -> Result<LlmConfig, ApiError> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(4096u32);
+    let context_window_tokens = env::var("LLM_CONTEXT_WINDOW_TOKENS")
+        .or_else(|_| env::var("LLM_CONTEXT_WINDOW"))
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|n| *n >= 8_192);
     let timeout_secs = env::var("LLM_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -581,6 +595,7 @@ pub fn load_config_from_env() -> Result<LlmConfig, ApiError> {
         base_url,
         model,
         max_tokens,
+        context_window_tokens,
         temperature,
         system_prompt,
         timeout_secs,

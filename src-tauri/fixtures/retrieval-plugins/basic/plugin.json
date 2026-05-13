@@ -13,7 +13,7 @@
       "cancelGraceMs": 500,
       "concurrency": 1
     },
-    "sources": [
+    "resources": [
       {
         "id": "example_dataset",
         "category": "dataset",

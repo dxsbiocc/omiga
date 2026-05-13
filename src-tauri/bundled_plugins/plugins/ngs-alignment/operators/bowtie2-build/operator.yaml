@@ -1,0 +1,63 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: bowtie2_build_reference
+  version: 0.1.0
+  name: Bowtie2 Build Reference
+  description: Build Bowtie2 index files for a FASTA reference genome.
+  tags: [bioinformatics, ngs, alignment, bowtie2, fasta, index]
+interface:
+  inputs:
+    reference:
+      kind: file
+      required: true
+      description: FASTA reference genome.
+  params:
+    prefix:
+      kind: string
+      default: reference
+      non_empty: true
+    threads:
+      kind: integer
+      default: 4
+      minimum: 1
+      maximum: 128
+    extra:
+      kind: string
+      default: ""
+      description: Additional bowtie2-build arguments.
+  outputs:
+    index_archive:
+      kind: file
+      glob: bowtie2-index.tar.gz
+      required: true
+    index_manifest:
+      kind: file
+      glob: index-manifest.json
+      required: true
+    summary:
+      kind: json
+      required: true
+runtime:
+  envRef: ngs-bowtie2
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+resources:
+  cpu:
+    default: 4
+    exposed: true
+  walltime:
+    default: 1800s
+    exposed: true
+execution:
+  argv:
+    - python3
+    - ./scripts/ngs_alignment.py
+    - bowtie2-build
+    - ${inputs.reference}
+    - ${outdir}
+    - ${params.prefix}
+    - ${params.threads}
+    - ${params.extra}

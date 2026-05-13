@@ -119,6 +119,10 @@ import {
   shouldShowPostTurnSuggestionsGeneratingPlaceholder,
   shouldStartPostTurnSuggestionsIndicator,
 } from "./postTurnSuggestionsState";
+import {
+  resolveMarkdownImageReference,
+  type MarkdownImageReference,
+} from "./markdownImage";
 import { BackgroundAgentTranscriptDrawer } from "./BackgroundAgentTranscriptDrawer";
 import { SessionSwitchSkeleton } from "./SessionSwitchSkeleton";
 import { AgentSessionStatus } from "./AgentSessionStatus";
@@ -1774,54 +1778,114 @@ function LazyMarkdownBlockFallback({ label = "正在加载内容…" }: { label?
   );
 }
 
-const MARKDOWN_LOCAL_IMAGE_EXT_RE =
-  /\.(?:png|jpe?g|gif|webp|svg|bmp|ico|tiff?|avif)(?:[?#].*)?$/i;
-
-function hasUrlScheme(value: string): boolean {
-  return /^[a-z][a-z0-9+.-]*:/i.test(value);
+interface ImageReadResponse {
+  data: string;
+  mime_type: string;
 }
 
-function isAbsoluteLocalPath(value: string): boolean {
-  return value.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(value);
+function markdownImageSrcFromReference(reference: MarkdownImageReference): string {
+  if (reference.kind === "local") {
+    return `${convertFileSrc(reference.localPath)}${reference.suffix}`;
+  }
+  if (reference.kind === "remote") {
+    return reference.src;
+  }
+  return "";
 }
 
-function stripFileQueryAndHash(value: string): {
-  path: string;
-  suffix: string;
-} {
-  const index = value.search(/[?#]/);
-  if (index === -1) return { path: value, suffix: "" };
-  return { path: value.slice(0, index), suffix: value.slice(index) };
+function markdownImagePathLabel(reference: MarkdownImageReference): string {
+  if (reference.kind === "local") return reference.localPath;
+  if (reference.kind === "remote") return reference.src;
+  return reference.rawSrc;
 }
 
-function resolveMarkdownImageSrc(src: string, workspacePath: string): string {
-  const raw = src.trim();
-  if (!raw) return "";
-  if (/^data:image\/[^;]+;base64,/i.test(raw)) return "";
+function MarkdownImage({
+  reference,
+  src,
+  alt,
+  sessionId,
+  onImageClick,
+}: {
+  reference: MarkdownImageReference;
+  src: string;
+  alt: string;
+  sessionId?: string;
+  onImageClick: (src: string, alt: string) => void;
+}) {
+  const [fallbackSrc, setFallbackSrc] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const displaySrc = fallbackSrc ?? src;
+  const localPath = reference.kind === "local" ? reference.localPath : "";
 
-  if (/^(?:https?|blob|asset|tauri):/i.test(raw)) return raw;
+  useEffect(() => {
+    setFallbackSrc(null);
+    setLoadError(null);
+  }, [reference.kind, reference.rawSrc, localPath, src]);
 
-  if (/^file:\/\//i.test(raw)) {
-    try {
-      return convertFileSrc(decodeURIComponent(new URL(raw).pathname));
-    } catch {
-      return raw;
+  const handleError = useCallback(() => {
+    if (fallbackSrc || reference.kind !== "local" || !localPath) {
+      setLoadError(`图片无法加载：${markdownImagePathLabel(reference)}`);
+      return;
     }
+
+    if (!sessionId) {
+      setLoadError(`图片无法加载：缺少会话上下文，无法读取 ${localPath}`);
+      return;
+    }
+
+    void invoke<ImageReadResponse>("read_image_base64", {
+      path: localPath,
+      sessionId,
+    })
+      .then((res) => {
+        if (!res.data || !res.mime_type) {
+          throw new Error("empty image response");
+        }
+        setFallbackSrc(`data:${res.mime_type};base64,${res.data}`);
+      })
+      .catch((error) => {
+        setLoadError(`图片无法加载：${String(error)}`);
+      });
+  }, [fallbackSrc, localPath, reference, sessionId]);
+
+  if (loadError) {
+    return (
+      <Alert severity="warning" sx={{ my: 1 }}>
+        {loadError}
+        {localPath ? (
+          <>
+            <br />
+            请确认 Markdown 引用了完整输出路径，而不是只写{" "}
+            <Box component="code" sx={{ fontFamily: "monospace" }}>
+              figure.png
+            </Box>
+            。
+          </>
+        ) : null}
+      </Alert>
+    );
   }
 
-  if (isAbsoluteLocalPath(raw)) {
-    const { path, suffix } = stripFileQueryAndHash(raw);
-    return `${convertFileSrc(path)}${suffix}`;
-  }
-
-  if (!hasUrlScheme(raw) && workspacePath && MARKDOWN_LOCAL_IMAGE_EXT_RE.test(raw)) {
-    const base = workspacePath.replace(/[\\/]+$/, "");
-    const relative = raw.replace(/^\.?[\\/]+/, "");
-    const { path, suffix } = stripFileQueryAndHash(`${base}/${relative}`);
-    return `${convertFileSrc(path)}${suffix}`;
-  }
-
-  return raw;
+  return (
+    <Box
+      component="img"
+      src={displaySrc}
+      alt={alt}
+      onClick={() => onImageClick(displaySrc, alt)}
+      onError={handleError}
+      sx={{
+        display: "block",
+        maxWidth: "100%",
+        height: "auto",
+        borderRadius: 1,
+        my: 1,
+        mx: "auto",
+        cursor: "pointer",
+        transition: "opacity 0.2s",
+        "&:hover": { opacity: 0.92 },
+      }}
+    />
+  );
 }
 
 function buildMarkdownComponents(
@@ -1831,6 +1895,7 @@ function buildMarkdownComponents(
   onImageClick: (src: string, alt: string) => void,
   onNodeClick?: (text: string) => void,
   workspacePath = "",
+  sessionId = "",
 ) {
   return {
   code({
@@ -2068,7 +2133,8 @@ function buildMarkdownComponents(
   },
   img({ src, alt }) {
     const url = typeof src === "string" ? src : "";
-    const resolvedUrl = resolveMarkdownImageSrc(url, workspacePath);
+    const reference = resolveMarkdownImageReference(url, workspacePath);
+    const resolvedUrl = markdownImageSrcFromReference(reference);
     if (!resolvedUrl) {
       return (
         <Alert severity="warning" sx={{ my: 1 }}>
@@ -2081,23 +2147,12 @@ function buildMarkdownComponents(
       );
     }
     return (
-      <Box
-        component="img"
+      <MarkdownImage
+        reference={reference}
         src={resolvedUrl}
         alt={typeof alt === "string" ? alt : ""}
-        onClick={() =>
-          onImageClick(resolvedUrl, typeof alt === "string" ? alt : "")
-        }
-        sx={{
-          display: "block",
-          maxWidth: "100%",
-          height: "auto",
-          borderRadius: 1,
-          my: 1,
-          cursor: "pointer",
-          transition: "opacity 0.2s",
-          "&:hover": { opacity: 0.92 },
-        }}
+        sessionId={sessionId}
+        onImageClick={onImageClick}
       />
     );
   },
@@ -7138,6 +7193,7 @@ export function Chat({ sessionId }: ChatProps) {
         handleMarkdownImageClick,
         handleNodeClick,
         markdownImageWorkspacePath,
+        sessionId,
       ),
     [
       theme,
@@ -7145,6 +7201,7 @@ export function Chat({ sessionId }: ChatProps) {
       handleMarkdownImageClick,
       handleNodeClick,
       markdownImageWorkspacePath,
+      sessionId,
     ],
   );
   const handleCopyUserMessage = useCallback(

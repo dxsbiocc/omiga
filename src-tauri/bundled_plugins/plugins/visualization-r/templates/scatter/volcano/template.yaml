@@ -2,9 +2,9 @@ apiVersion: omiga.ai/unit/v1alpha1
 kind: Template
 metadata:
   id: viz_scatter_volcano
-  version: 0.1.0
+  version: 0.2.0
   name: Volcano Plot
-  description: Volcano plot for differential-result tables; an omics preset within the general visualization library.
+  description: Publication-style volcano plot migrated from the OmicsAgent high-quality volcano visual; renders differential-result tables without the legacy JSON DSL.
   tags:
     - visualization
     - r
@@ -38,13 +38,17 @@ interface:
   params:
     log2fc_column:
       kind: string
-      default: log2FoldChange
+      default: log2FC
     pvalue_column:
       kind: string
-      default: padj
+      default: qvalue
     label_column:
       kind: string
-      default: gene
+      default: symbol
+    group_column:
+      kind: string
+      default: group
+      description: Optional regulation/group column. If missing or blank, groups are derived from thresholds.
     log2fc_threshold:
       kind: number
       default: 1
@@ -53,17 +57,25 @@ interface:
       default: 0.05
     title:
       kind: string
-      default: Volcano plot
+      default: Yap1-KO
+    top_label_count:
+      kind: integer
+      default: 10
+      description: Number of top significant labels to show per log2FC direction.
+    x_limit:
+      kind: number
+      default: 12
+      description: Symmetric x-axis limit used for the publication-style volcano layout.
     delimiter:
       kind: enum
       enum: [auto, tab, comma]
       default: auto
     width:
       kind: number
-      default: 7.5
+      default: 8
     height:
       kind: number
-      default: 5.5
+      default: 6
     dpi:
       kind: integer
       default: 300
@@ -112,9 +124,12 @@ execution:
     - ${params.log2fc_column}
     - ${params.pvalue_column}
     - ${params.label_column}
+    - ${params.group_column}
     - ${params.log2fc_threshold}
     - ${params.pvalue_threshold}
     - ${params.title}
+    - ${params.top_label_count}
+    - ${params.x_limit}
     - ${params.delimiter}
     - ${params.width}
     - ${params.height}

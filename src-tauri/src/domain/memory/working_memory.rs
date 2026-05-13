@@ -102,6 +102,10 @@ pub struct WorkingMemoryState {
     #[serde(default)]
     pub last_refreshed_turn: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pre_compact_turn: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pre_compact_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_refreshed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
@@ -187,10 +191,20 @@ pub async fn prepare_for_auto_compact(
     }
     summarize_pre_compaction_tail(&mut state, messages);
     cleanup_state(&mut state);
+    state.last_pre_compact_turn = Some(state.user_turn_count);
+    state.last_pre_compact_at = Some(now_rfc3339());
     state.updated_at = Some(now_rfc3339());
     repo.upsert_session_working_memory(session_id, &state)
         .await?;
     Ok(state)
+}
+
+pub async fn should_prepare_for_auto_compact(
+    repo: &SessionRepository,
+    session_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let state = load_state(repo, session_id).await?;
+    Ok(state.should_prepare_for_auto_compact())
 }
 
 pub async fn sync_after_turn(
@@ -250,6 +264,10 @@ pub async fn render_context(
 }
 
 impl WorkingMemoryState {
+    pub fn should_prepare_for_auto_compact(&self) -> bool {
+        self.last_pre_compact_turn != Some(self.user_turn_count)
+    }
+
     pub fn item_count(&self) -> usize {
         [
             self.decisions.len(),
@@ -1259,6 +1277,20 @@ mod tests {
         assert_eq!(state.working_facts.len(), 1);
         assert!(state.working_facts[0].text.contains("Pre-compact recap"));
         assert!(state.working_facts[0].text.contains("recall"));
+    }
+
+    #[test]
+    fn auto_compact_preparation_runs_once_per_user_turn() {
+        let mut state = WorkingMemoryState {
+            user_turn_count: 7,
+            ..WorkingMemoryState::default()
+        };
+
+        assert!(state.should_prepare_for_auto_compact());
+        state.last_pre_compact_turn = Some(7);
+        assert!(!state.should_prepare_for_auto_compact());
+        state.user_turn_count = 8;
+        assert!(state.should_prepare_for_auto_compact());
     }
 
     #[test]

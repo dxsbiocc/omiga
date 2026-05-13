@@ -17,7 +17,7 @@
       "cancelGraceMs": 750,
       "concurrency": 1
     },
-    "sources": [
+    "resources": [
       {
         "id": "pubmed",
         "category": "literature",
@@ -58,7 +58,7 @@
     ]
   },
   "interface": {
-    "displayName": "PubMed Retrieval Source",
+    "displayName": "PubMed Retrieval Resource",
     "shortDescription": "PubMed as a local retrieval plugin",
     "longDescription": "Runs PubMed search/query/fetch through Omiga local subprocess routing.",
     "developerName": "Omiga",

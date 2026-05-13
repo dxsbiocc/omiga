@@ -89,7 +89,7 @@ def main() -> int:
                 "id": message_id,
                 "type": "initialized",
                 "protocolVersion": PROTOCOL_VERSION,
-                "sources": [SOURCE],
+                "resources": [SOURCE],
             })
         elif message_type == "execute":
             write(handle_execute(message))

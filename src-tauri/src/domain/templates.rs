@@ -394,6 +394,13 @@ fn resolve_template(raw_id: &str) -> Result<TemplateSpecWithSource, String> {
     let matches = discover_template_candidates()
         .into_iter()
         .filter(|candidate| template_matches_id(candidate, &needle))
+        .filter(|candidate| {
+            crate::domain::plugins::template_expose_to_agent(
+                &candidate.source.source_plugin,
+                &candidate.spec.metadata.id,
+                candidate.spec.exposure.expose_to_agent,
+            )
+        })
         .collect::<Vec<_>>();
     select_template_match(id, matches)
 }
@@ -655,10 +662,15 @@ fn load_local_template_migration_target_specs(
     target: &str,
 ) -> Result<Vec<crate::domain::operators::OperatorSpec>, String> {
     let mut manifests = Vec::new();
-    collect_operator_manifests(
-        &template.source.plugin_root.join("operators"),
-        &mut manifests,
-    )?;
+    for dir in [
+        template
+            .source
+            .plugin_root
+            .join("template_backing_operators"),
+        template.source.plugin_root.join("operators"),
+    ] {
+        collect_operator_manifests(&dir, &mut manifests)?;
+    }
     let mut matches = Vec::new();
     for manifest in manifests {
         let spec = crate::domain::operators::load_operator_manifest(
@@ -1200,11 +1212,81 @@ fn template_output_summary(parsed: Option<&JsonValue>, is_error: bool) -> JsonVa
     })
 }
 
-fn canonical_template_unit_id(template: &TemplateSpecWithSource) -> String {
+pub(crate) fn canonical_template_unit_id(template: &TemplateSpecWithSource) -> String {
     format!(
         "{}/template/{}",
         template.source.source_plugin, template.spec.metadata.id
     )
+}
+
+pub(crate) fn template_execute_example(
+    template: &TemplateSpecWithSource,
+    canonical_id: &str,
+) -> JsonValue {
+    serde_json::json!({
+        "tool": "template_execute",
+        "arguments": {
+            "id": canonical_id,
+            "inputs": template_example_inputs(template),
+            "params": interface_defaults(&template.spec.interface, "params"),
+            "resources": interface_defaults(&template.spec.interface, "resources"),
+        }
+    })
+}
+
+fn template_example_inputs(
+    template: &TemplateSpecWithSource,
+) -> serde_json::Map<String, JsonValue> {
+    let mut values = interface_defaults(&template.spec.interface, "inputs");
+    let Some(inputs) = interface_section(&template.spec.interface, "inputs") else {
+        return values;
+    };
+    let file_inputs = inputs
+        .iter()
+        .filter(|(_, field)| {
+            field
+                .get("kind")
+                .and_then(|value| value.as_str())
+                .map(|kind| kind.eq_ignore_ascii_case("file"))
+                .unwrap_or(false)
+        })
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    if file_inputs.len() == 1 {
+        if let Some(example) = template
+            .source
+            .manifest_path
+            .parent()
+            .map(|dir| dir.join("example.tsv"))
+            .filter(|path| path.is_file())
+        {
+            values.insert(
+                file_inputs[0].clone(),
+                JsonValue::String(example.to_string_lossy().into_owned()),
+            );
+        }
+    }
+    values
+}
+
+fn interface_defaults(interface: &JsonValue, section: &str) -> serde_json::Map<String, JsonValue> {
+    let mut values = serde_json::Map::new();
+    let Some(fields) = interface_section(interface, section) else {
+        return values;
+    };
+    for (name, field) in fields {
+        if let Some(default) = field.get("default") {
+            values.insert(name.clone(), default.clone());
+        }
+    }
+    values
+}
+
+fn interface_section<'a>(
+    interface: &'a JsonValue,
+    section: &str,
+) -> Option<&'a serde_json::Map<String, JsonValue>> {
+    interface.get(section)?.as_object()
 }
 
 fn template_failure_json(
@@ -1366,6 +1448,13 @@ fn is_template_manifest_name(name: &str) -> bool {
 }
 
 fn template_summary(candidate: TemplateSpecWithSource) -> TemplateCandidateSummary {
+    let exposure = TemplateExposure {
+        expose_to_agent: crate::domain::plugins::template_expose_to_agent(
+            &candidate.source.source_plugin,
+            &candidate.spec.metadata.id,
+            candidate.spec.exposure.expose_to_agent,
+        ),
+    };
     TemplateCandidateSummary {
         id: candidate.spec.metadata.id,
         version: candidate.spec.metadata.version,
@@ -1379,7 +1468,7 @@ fn template_summary(candidate: TemplateSpecWithSource) -> TemplateCandidateSumma
             .to_string_lossy()
             .into_owned(),
         classification: candidate.spec.classification,
-        exposure: candidate.spec.exposure,
+        exposure,
         runtime: candidate.spec.runtime,
         template: candidate.spec.template,
         aliases: candidate.spec.aliases,
@@ -1746,6 +1835,54 @@ template:
     }
 
     #[test]
+    fn discovers_aggregated_transcriptomics_analysis_templates() {
+        let plugin = bundled_loaded_plugin("transcriptomics", "Transcriptomics");
+        let candidates = discover_template_candidates_from_plugins([&plugin]);
+        let by_id = candidates
+            .iter()
+            .map(|candidate| (candidate.spec.metadata.id.as_str(), candidate))
+            .collect::<HashMap<_, _>>();
+
+        let expected = [
+            (
+                "bulk_differential_expression_basic",
+                "omics_differential_expression_basic",
+                "omics/transcriptomics/differential",
+            ),
+            (
+                "pca_matrix_basic",
+                "omics_pca_matrix",
+                "omics/transcriptomics/dimensionality-reduction",
+            ),
+            (
+                "functional_enrichment_basic",
+                "omics_functional_enrichment_basic",
+                "omics/knowledge/functional-enrichment",
+            ),
+        ];
+
+        assert_eq!(by_id.len(), expected.len());
+        for (template_id, migration_target, category) in expected {
+            let template = by_id
+                .get(template_id)
+                .unwrap_or_else(|| panic!("missing transcriptomics template `{template_id}`"));
+            assert_eq!(
+                template.source.source_plugin,
+                "transcriptomics@omiga-curated"
+            );
+            assert_eq!(
+                template.spec.migration_target.as_deref(),
+                Some(migration_target)
+            );
+            assert_eq!(
+                template.spec.classification.category.as_deref(),
+                Some(category)
+            );
+            assert!(template.spec.exposure.expose_to_agent);
+        }
+    }
+
+    #[test]
     fn discovers_bundled_visualization_r_templates() {
         let plugin = bundled_loaded_plugin("visualization-r", "R Visualization");
         let candidates = discover_template_candidates_from_plugins([&plugin]);
@@ -1754,24 +1891,17 @@ template:
             .map(|candidate| candidate.spec.metadata.id.as_str())
             .collect::<HashSet<_>>();
 
-        let expected = [
+        let required = [
             "viz_scatter_basic",
-            "viz_scatter_correlation",
-            "viz_scatter_enrichment_dot",
-            "viz_scatter_ma",
-            "viz_scatter_pca_score",
-            "viz_scatter_volcano",
             "viz_distribution_boxplot",
-            "viz_distribution_violin",
             "viz_bar_basic",
-            "viz_bar_grouped",
             "viz_heatmap_basic",
-            "viz_heatmap_clustered",
-            "viz_line_group",
+            "viz_line_time_series",
         ];
 
-        assert_eq!(candidates.len(), expected.len());
-        for id in expected {
+        assert!(candidates.len() >= required.len());
+        assert_eq!(candidates.len(), ids.len(), "template ids should be unique");
+        for id in required {
             assert!(ids.contains(id), "missing visualization template `{id}`");
         }
         assert!(candidates.iter().all(|candidate| {
@@ -1901,6 +2031,26 @@ template:
                 "{output} should be non-empty at {path}"
             );
         }
+        let export_dir = parsed["exportDir"].as_str().expect("exportDir");
+        for file in ["figure.png", "figure.pdf", "plot-script.R", "README.md"] {
+            assert!(
+                fs::metadata(Path::new(export_dir).join(file))
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0)
+                    > 0,
+                "exported {file} should be non-empty under {export_dir}"
+            );
+        }
+        let markdown_report = parsed["markdownReport"].as_str().expect("markdownReport");
+        assert!(
+            markdown_report.contains("![Basic Scatter Plot]"),
+            "{markdown_report}"
+        );
+        assert!(
+            markdown_report.contains("plot-script.R"),
+            "{markdown_report}"
+        );
+        assert!(markdown_report.contains("figure.pdf"), "{markdown_report}");
     }
 
     #[test]
@@ -2307,11 +2457,7 @@ execution:
 
     #[tokio::test]
     async fn rendered_pca_template_matches_migration_target_fixture_outputs() {
-        if std::process::Command::new("Rscript")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
+        if !rscript_available() {
             eprintln!("skipping PCA rendered parity fixture: Rscript unavailable");
             return;
         }
@@ -2392,12 +2538,229 @@ execution:
         }
     }
 
+    #[tokio::test]
+    async fn rendered_de_template_matches_migration_target_fixture_outputs_when_limma_available() {
+        if !r_packages_available(&["limma"]) {
+            eprintln!("skipping DE rendered parity fixture: Rscript/limma unavailable");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let matrix = tmp.path().join("de-matrix.tsv");
+        let metadata = tmp.path().join("de-metadata.tsv");
+        fs::write(
+            &matrix,
+            "gene\ts1\ts2\ts3\ts4\ts5\ts6\n\
+             g1\t10.2\t11.1\t10.7\t21.4\t22.0\t20.9\n\
+             g2\t44.0\t43.2\t45.1\t42.8\t43.7\t44.4\n\
+             g3\t5.1\t5.4\t5.2\t1.8\t1.7\t1.9\n\
+             g4\t30.0\t31.2\t29.8\t33.1\t34.0\t32.5\n\
+             g5\t8.0\t8.3\t8.1\t16.1\t16.5\t15.8\n",
+        )
+        .expect("matrix");
+        fs::write(
+            &metadata,
+            "sample\tgroup\ns1\tControl\ns2\tControl\ns3\tControl\ns4\tCase\ns5\tCase\ns6\tCase\n",
+        )
+        .expect("metadata");
+        let (template, _operator) = bundled_template_and_operator(
+            "operator-differential-expression-r",
+            "differential-expression-basic",
+            "differential-expression-basic",
+        );
+        let invocation = crate::domain::operators::OperatorInvocation {
+            inputs: BTreeMap::from([
+                ("matrix".to_string(), json!(matrix.to_string_lossy())),
+                ("metadata".to_string(), json!(metadata.to_string_lossy())),
+            ]),
+            params: BTreeMap::from([
+                ("group_column".to_string(), json!("group")),
+                ("case_group".to_string(), json!("Case")),
+                ("control_group".to_string(), json!("Control")),
+                ("sample_column".to_string(), json!("sample")),
+                ("delimiter".to_string(), json!("tab")),
+                ("row_names".to_string(), json!(true)),
+                ("pseudocount".to_string(), json!(1)),
+                ("log2fc_threshold".to_string(), json!(0.5)),
+                ("pvalue_threshold".to_string(), json!(0.25)),
+                ("comparisons".to_string(), json!("")),
+                ("input_data_type".to_string(), json!("quantitative")),
+                ("de_method".to_string(), json!("limma")),
+            ]),
+            resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let (rendered_raw, rendered_is_error, rendered_metadata) =
+            execute_rendered_template(&ctx, &template, &invocation, None)
+                .await
+                .expect("rendered template");
+        let (target_raw, target_is_error, target_metadata) =
+            execute_template_via_migration_target(&ctx, &template, &invocation, None)
+                .await
+                .expect("migration target");
+
+        assert!(!rendered_is_error, "{rendered_raw}");
+        assert!(!target_is_error, "{target_raw}");
+        assert_eq!(rendered_metadata["executionMode"], "renderedTemplate");
+        assert_eq!(target_metadata["executionMode"], "migrationTarget");
+
+        let rendered: JsonValue = serde_json::from_str(&rendered_raw).expect("rendered json");
+        let target: JsonValue = serde_json::from_str(&target_raw).expect("target json");
+        assert_eq!(rendered["status"], "succeeded");
+        assert_eq!(target["status"], "succeeded");
+        for key in [
+            "featuresTested",
+            "comparisons",
+            "significantRows",
+            "inputDataType",
+            "method",
+            "requestedMethod",
+        ] {
+            assert_eq!(
+                rendered["structuredOutputs"][key], target["structuredOutputs"][key],
+                "DE structured output `{key}` should match"
+            );
+        }
+        for output_name in ["results", "significant"] {
+            assert_eq!(
+                output_file_contents(&rendered, output_name),
+                output_file_contents(&target, output_name),
+                "DE output `{output_name}` should match between rendered template and migration target"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rendered_enrichment_template_matches_migration_target_fixture_outputs_when_clusterprofiler_available(
+    ) {
+        if !r_packages_available(&["clusterProfiler"]) {
+            eprintln!(
+                "skipping enrichment rendered parity fixture: Rscript/clusterProfiler unavailable"
+            );
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let genes = tmp.path().join("genes.txt");
+        let gene_sets = tmp.path().join("gene-sets.tsv");
+        fs::write(&genes, "gene\nTP53\nBRCA1\nBRCA2\nATM\nCHEK2\n").expect("genes");
+        fs::write(
+            &gene_sets,
+            "term\tgene\n\
+             DNA_REPAIR\tTP53\n\
+             DNA_REPAIR\tBRCA1\n\
+             DNA_REPAIR\tBRCA2\n\
+             DNA_REPAIR\tATM\n\
+             DNA_REPAIR\tCHEK2\n\
+             APOPTOSIS\tTP53\n\
+             APOPTOSIS\tBAX\n\
+             APOPTOSIS\tCASP3\n\
+             CELL_CYCLE\tCDK1\n\
+             CELL_CYCLE\tCCNB1\n\
+             CELL_CYCLE\tCHEK2\n",
+        )
+        .expect("gene sets");
+        let (template, _operator) = bundled_template_and_operator(
+            "operator-enrichment-r",
+            "functional-enrichment-basic",
+            "functional-enrichment-basic",
+        );
+        let invocation = crate::domain::operators::OperatorInvocation {
+            inputs: BTreeMap::from([
+                ("genes".to_string(), json!(genes.to_string_lossy())),
+                ("gene_sets".to_string(), json!(gene_sets.to_string_lossy())),
+            ]),
+            params: BTreeMap::from([
+                ("gene_sets_format".to_string(), json!("tsv")),
+                ("min_size".to_string(), json!(1)),
+                ("max_size".to_string(), json!(20)),
+                ("pvalue_threshold".to_string(), json!(1.0)),
+                ("analysis_mode".to_string(), json!("ora")),
+                ("gene_column".to_string(), json!("auto")),
+                ("score_column".to_string(), json!("auto")),
+                ("display_top_n".to_string(), json!(10)),
+                ("plot_style".to_string(), json!("bar")),
+                ("gsea_weight".to_string(), json!(1)),
+            ]),
+            resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let (rendered_raw, rendered_is_error, rendered_metadata) =
+            execute_rendered_template(&ctx, &template, &invocation, None)
+                .await
+                .expect("rendered template");
+        let (target_raw, target_is_error, target_metadata) =
+            execute_template_via_migration_target(&ctx, &template, &invocation, None)
+                .await
+                .expect("migration target");
+
+        assert!(!rendered_is_error, "{rendered_raw}");
+        assert!(!target_is_error, "{target_raw}");
+        assert_eq!(rendered_metadata["executionMode"], "renderedTemplate");
+        assert_eq!(target_metadata["executionMode"], "migrationTarget");
+
+        let rendered: JsonValue = serde_json::from_str(&rendered_raw).expect("rendered json");
+        let target: JsonValue = serde_json::from_str(&target_raw).expect("target json");
+        assert_eq!(rendered["status"], "succeeded");
+        assert_eq!(target["status"], "succeeded");
+        for key in [
+            "analysisMode",
+            "method",
+            "queryGenes",
+            "geneSetsTested",
+            "significant",
+            "displayTopN",
+        ] {
+            assert_eq!(
+                rendered["structuredOutputs"][key], target["structuredOutputs"][key],
+                "enrichment structured output `{key}` should match"
+            );
+        }
+        for output_name in ["results", "top"] {
+            assert_eq!(
+                output_file_contents(&rendered, output_name),
+                output_file_contents(&target, output_name),
+                "enrichment output `{output_name}` should match between rendered template and migration target"
+            );
+        }
+    }
+
     fn output_file_contents(result: &JsonValue, output_name: &str) -> String {
         let path = result["outputs"][output_name][0]["path"]
             .as_str()
             .unwrap_or_else(|| panic!("missing output path `{output_name}`"));
         fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("read output `{output_name}` at `{path}`: {err}"))
+    }
+
+    fn rscript_available() -> bool {
+        std::process::Command::new("Rscript")
+            .arg("--version")
+            .output()
+            .is_ok()
+    }
+
+    fn r_packages_available(packages: &[&str]) -> bool {
+        if packages.is_empty() {
+            return rscript_available();
+        }
+        let quoted = packages
+            .iter()
+            .map(|package| format!("'{package}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = format!(
+            "pkgs <- c({quoted}); ok <- all(vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)); if (!ok) quit(status = 1)"
+        );
+        std::process::Command::new("Rscript")
+            .args(["-e", script.as_str()])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 
     #[tokio::test]

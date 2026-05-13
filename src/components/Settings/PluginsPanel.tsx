@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Accordion,
   AccordionDetails,
@@ -19,6 +20,7 @@ import {
   Stack,
   Switch,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
@@ -28,11 +30,14 @@ import {
   CloseRounded,
   ContentCopyRounded,
   DeleteOutlineRounded,
+  DescriptionOutlined,
   ExtensionRounded,
   ExpandMoreRounded,
   PlayArrowRounded,
   RefreshRounded,
   SearchRounded,
+  SettingsRounded,
+  SyncRounded,
   TroubleshootRounded,
 } from "@mui/icons-material";
 import {
@@ -40,6 +45,7 @@ import {
   buildRetrievalRuntimeDiagnostics,
   flattenMarketplacePlugins,
   summarizeOperatorRunResult,
+  type EnvironmentCheckResult,
   type OperatorManifestDiagnostic,
   type OperatorRunCleanupRequest,
   type OperatorRunDetail,
@@ -47,15 +53,23 @@ import {
   type OperatorRunLog,
   type OperatorRunSummary,
   type OperatorSummary,
+  type MarketplaceRemoteCheckResult,
+  type PluginEnvironmentSummary,
   type PluginProcessPoolRouteStatus,
   type PluginRetrievalLifecycleState,
   type PluginRetrievalRouteStatus,
+  type PluginRetrievalResourceSummary,
   type PluginSummary,
+  type PluginTemplateSummary,
   usePluginStore,
 } from "../../state/pluginStore";
 import { useChatComposerStore } from "../../state/chatComposerStore";
 import { useSessionStore } from "../../state/sessionStore";
+import { ComputerUseSettingsPanel } from "./ComputerUseSettingsTab";
 import { NotebookViewerSettingsPanel } from "./NotebookSettingsTab";
+import { extractErrorMessage } from "../../utils/errorMessage";
+
+const SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS = import.meta.env.DEV;
 
 const pluginCardGridSx = {
   display: "grid",
@@ -107,6 +121,39 @@ const compactAccordionSummarySx = {
   "& .MuiAccordionSummary-content.Mui-expanded": { my: 1 },
 };
 
+export const pluginDetailsDialogSx = {
+  "& .MuiDialog-container": {
+    alignItems: "flex-start",
+  },
+  "& .MuiDialog-paper": {
+    mt: { xs: 2, sm: 6 },
+    mb: { xs: 2, sm: 6 },
+    maxHeight: { xs: "calc(100% - 32px)", sm: "calc(100% - 96px)" },
+  },
+};
+
+export const pluginDetailsTechnicalSectionSx = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 1.25,
+  pt: 1.25,
+};
+
+export const visualizationRExecuteSkeletonSx = {
+  m: 0,
+  p: 0.85,
+  borderRadius: 1.5,
+  color: "text.secondary",
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+  fontSize: 11,
+  lineHeight: 1.45,
+  overflow: "auto",
+  overflowWrap: "anywhere",
+  wordBreak: "break-word",
+  maxHeight: 180,
+  whiteSpace: "pre-wrap",
+};
+
 const capabilityLabel = (value: string): string =>
   value
     .replace(/[-_]+/g, " ")
@@ -119,8 +166,11 @@ export function displayName(plugin: PluginSummary): string {
 function cleanPluginDisplayName(value: string): string {
   return value
     .replace(/\s+Retrieval\s+Source$/i, "")
+    .replace(/\s+Retrieval\s+Resource$/i, "")
     .replace(/\s+Source$/i, "")
     .replace(/\s+Operator$/i, "")
+    .replace(/\s+Templates?$/i, "")
+    .replace(/\s+Skills?$/i, "")
     .trim() || value;
 }
 
@@ -135,7 +185,21 @@ function description(plugin: PluginSummary): string {
 function capabilityChips(plugin: PluginSummary) {
   const caps = plugin.interface?.capabilities ?? [];
   const category = plugin.interface?.category;
-  return Array.from(new Set([category, ...caps].filter(Boolean) as string[])).slice(0, 6);
+  return Array.from(new Set([category, ...caps].filter(Boolean) as string[]))
+    .filter((value) => !isInternalContributionLabel(value))
+    .slice(0, 6);
+}
+
+function isInternalContributionLabel(value: string): boolean {
+  const normalized = value.trim().toLowerCase().replace(/[-_]+/g, " ");
+  return [
+    "operator",
+    "operators",
+    "template",
+    "templates",
+    "skill",
+    "skills",
+  ].includes(normalized);
 }
 
 function pluginClassificationTerms(plugin: PluginSummary): string[] {
@@ -156,6 +220,74 @@ function pluginHasTerm(plugin: PluginSummary, terms: string[]): boolean {
 
 function isOperatorPlugin(plugin: PluginSummary): boolean {
   return pluginHasTerm(plugin, ["operator", "operators"]);
+}
+
+function isTemplatePlugin(plugin: PluginSummary): boolean {
+  return pluginHasTerm(plugin, ["template", "templates"]);
+}
+
+function isAnalysisPlugin(plugin: PluginSummary): boolean {
+  return pluginHasTerm(plugin, [
+    "analysis",
+    "omics analysis",
+    "transcriptomics",
+    "genomics",
+    "metabolomics",
+    "proteomics",
+  ]);
+}
+
+function isAutomationPlugin(plugin: PluginSummary): boolean {
+  return pluginHasTerm(plugin, [
+    "automation",
+    "computer use",
+    "computer observe",
+    "computer input",
+    "computer accessibility",
+    "agent callable",
+  ]);
+}
+
+function isVisualizationPlugin(plugin: PluginSummary): boolean {
+  return pluginHasTerm(plugin, ["visualization", "visualisation", "figure", "plot"]);
+}
+
+function isRVisualizationPlugin(plugin: PluginSummary): boolean {
+  const haystack = [
+    plugin.id,
+    plugin.name,
+    plugin.interface?.displayName,
+  ]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes("visualization-r") || haystack.includes("r visualization");
+}
+
+function resourceCategoryFromTerms(plugin: PluginSummary): string | null {
+  if (pluginHasTerm(plugin, ["literature", "pubmed", "semantic scholar", "paper", "papers"])) {
+    return "literature";
+  }
+  if (pluginHasTerm(plugin, ["knowledge", "ensembl", "uniprot", "gene"])) {
+    return "knowledge";
+  }
+  if (pluginHasTerm(plugin, [
+    "dataset",
+    "datasets",
+    "geo",
+    "gtex",
+    "ena",
+    "arrayexpress",
+    "biosample",
+    "cbioportal",
+    "ncbi datasets",
+  ])) {
+    return "dataset";
+  }
+  if (pluginHasTerm(plugin, ["resource", "resources", "source", "retrieval", "search", "query", "fetch"])) {
+    return "other";
+  }
+  return null;
 }
 
 type OperatorPluginIconKind = "r" | "cpp" | "python" | "c" | "shell" | "operator";
@@ -243,7 +375,43 @@ function isNotebookPlugin(plugin: PluginSummary): boolean {
   return pluginHasTerm(plugin, ["notebook", "jupyter", "ipynb"]);
 }
 
-export type PluginCatalogGroupId = "operator" | "tools" | "source" | "other";
+function isComputerUsePlugin(plugin: PluginSummary): boolean {
+  return pluginHasTerm(plugin, [
+    "computer use",
+    "computer observe",
+    "computer input",
+    "computer accessibility",
+  ]);
+}
+
+function isBioinformaticsPlugin(plugin: PluginSummary): boolean {
+  return pluginHasTerm(plugin, [
+    "bioinformatics",
+    "omics",
+    "transcriptomics",
+    "genomics",
+    "metabolomics",
+    "proteomics",
+    "ngs",
+    "next generation sequencing",
+    "sequencing",
+    "alignment",
+    "aligner",
+    "fastq",
+    "fasta",
+    "sam/bam",
+    "genome index",
+  ]);
+}
+
+export type PluginCatalogGroupId =
+  | "analysis"
+  | "bioinformatics"
+  | "visualization"
+  | "operator"
+  | "tools"
+  | "resource"
+  | "other";
 
 export interface PluginCatalogGroup {
   id: PluginCatalogGroupId;
@@ -259,20 +427,30 @@ export interface PluginCatalogSection {
 }
 
 export function pluginCatalogGroupId(plugin: PluginSummary): PluginCatalogGroupId {
+  if (isBioinformaticsPlugin(plugin)) return "bioinformatics";
+  if (isAnalysisPlugin(plugin)) return "analysis";
+  if (isResourcePlugin(plugin)) return "resource";
+  if (isAutomationPlugin(plugin)) return "operator";
   if (isOperatorPlugin(plugin)) return "operator";
+  if (isVisualizationPlugin(plugin)) return "visualization";
   if (isFunctionPlugin(plugin)) return "tools";
-  if (isRetrievalPlugin(plugin)) return "source";
   return "other";
 }
 
 function pluginCatalogGroupLabel(group: PluginCatalogGroupId): string {
   switch (group) {
+    case "analysis":
+      return "Analysis";
+    case "bioinformatics":
+      return "Bioinformatics";
+    case "visualization":
+      return "Visualization";
     case "operator":
-      return "Operators";
+      return "Automation";
     case "tools":
       return "Tools";
-    case "source":
-      return "Source";
+    case "resource":
+      return "Resources";
     default:
       return "Others";
   }
@@ -280,19 +458,33 @@ function pluginCatalogGroupLabel(group: PluginCatalogGroupId): string {
 
 function pluginCatalogGroupDescription(group: PluginCatalogGroupId): string {
   switch (group) {
+    case "analysis":
+      return "Analysis plugins that bundle atomic Operator/Template units by domain.";
+    case "bioinformatics":
+      return "Bioinformatics plugins grouped by workflow stage while preserving atomic units.";
+    case "visualization":
+      return "Plugins for creating, editing, or reviewing visual outputs.";
     case "operator":
-      return "Plugin bundles that contribute operator manifests and agent-callable operator tools.";
+      return "Plugins that add agent-callable automation capabilities.";
     case "tools":
       return "Plugin bundles that expose model-callable functions or custom tool surfaces.";
-    case "source":
-      return "Search / Query / Fetch data-source plugins grouped by source type.";
+    case "resource":
+      return "Search / Query / Fetch external resource plugins grouped by resource type.";
     default:
       return "Notebook, workflow, and other plugin bundles.";
   }
 }
 
 export function groupPluginsByCatalogGroup(plugins: PluginSummary[]): PluginCatalogGroup[] {
-  const order: PluginCatalogGroupId[] = ["operator", "tools", "source", "other"];
+  const order: PluginCatalogGroupId[] = [
+    "analysis",
+    "bioinformatics",
+    "visualization",
+    "resource",
+    "operator",
+    "tools",
+    "other",
+  ];
   const grouped = new Map<PluginCatalogGroupId, PluginSummary[]>();
   for (const plugin of plugins) {
     const group = pluginCatalogGroupId(plugin);
@@ -311,17 +503,29 @@ export function groupPluginsByCatalogGroup(plugins: PluginSummary[]): PluginCata
 }
 
 function pluginCatalogSectionId(groupId: PluginCatalogGroupId, plugin: PluginSummary): string {
+  if (groupId === "analysis") return `analysis:${primaryAnalysisCategory(plugin)}`;
+  if (groupId === "bioinformatics") return `bioinformatics:${primaryBioinformaticsCategory(plugin)}`;
+  if (groupId === "visualization") return `visualization:${primaryVisualizationCategory(plugin)}`;
   if (groupId === "operator") return "operator";
   if (groupId === "tools") return "function";
-  if (groupId === "source") return `source:${primaryRetrievalCategory(plugin)}`;
+  if (groupId === "resource") return `resource:${primaryResourceCategory(plugin)}`;
   return `category:${plugin.interface?.category?.trim().toLowerCase() || "other"}`;
 }
 
 function pluginCatalogSectionLabel(groupId: PluginCatalogGroupId, sectionId: string): string {
-  if (groupId === "operator") return "Operator plugins";
+  if (groupId === "analysis" && sectionId.startsWith("analysis:")) {
+    return analysisCategoryLabel(sectionId.slice("analysis:".length));
+  }
+  if (groupId === "bioinformatics" && sectionId.startsWith("bioinformatics:")) {
+    return bioinformaticsCategoryLabel(sectionId.slice("bioinformatics:".length));
+  }
+  if (groupId === "visualization" && sectionId.startsWith("visualization:")) {
+    return visualizationCategoryLabel(sectionId.slice("visualization:".length));
+  }
+  if (groupId === "operator") return "Automation plugins";
   if (groupId === "tools") return "Function tools";
-  if (groupId === "source" && sectionId.startsWith("source:")) {
-    return retrievalCategoryLabel(sectionId.slice("source:".length));
+  if (groupId === "resource" && sectionId.startsWith("resource:")) {
+    return resourceCategoryLabel(sectionId.slice("resource:".length));
   }
   const category = sectionId.slice("category:".length);
   return category === "other" ? "Other plugins" : capabilityLabel(category);
@@ -342,7 +546,63 @@ export function groupPluginsByCatalogSection(
       title: pluginCatalogSectionLabel(groupId, sectionId),
       plugins: sectionPlugins.sort((left, right) => displayName(left).localeCompare(displayName(right))),
     }))
-    .sort((left, right) => left.title.localeCompare(right.title));
+    .sort((left, right) => {
+      const orderDelta =
+        pluginCatalogSectionOrder(groupId, left.id) - pluginCatalogSectionOrder(groupId, right.id);
+      return orderDelta || left.title.localeCompare(right.title);
+    });
+}
+
+function pluginCatalogSectionOrder(groupId: PluginCatalogGroupId, sectionId: string): number {
+  if (groupId === "analysis" && sectionId.startsWith("analysis:")) {
+    switch (sectionId.slice("analysis:".length)) {
+      case "workflow":
+        return 0;
+      case "statistics":
+        return 10;
+      default:
+        return 40;
+    }
+  }
+  if (groupId === "bioinformatics" && sectionId.startsWith("bioinformatics:")) {
+    switch (sectionId.slice("bioinformatics:".length)) {
+      case "ngs":
+        return 0;
+      case "transcriptomics":
+        return 10;
+      case "genomics":
+        return 20;
+      case "proteomics":
+        return 30;
+      case "metabolomics":
+        return 40;
+      default:
+        return 60;
+    }
+  }
+  if (groupId === "visualization" && sectionId.startsWith("visualization:")) {
+    switch (sectionId.slice("visualization:".length)) {
+      case "r":
+        return 0;
+      case "python":
+        return 10;
+      default:
+        return 40;
+    }
+  }
+  if (groupId !== "resource" || !sectionId.startsWith("resource:")) return 50;
+  switch (sectionId.slice("resource:".length)) {
+    case "provider":
+      return 0;
+    case "dataset":
+      return 10;
+    case "knowledge":
+      return 20;
+    case "literature":
+      return 30;
+    default:
+      return 40;
+  }
 }
 
 function retrievalStateColor(
@@ -369,7 +629,7 @@ function formatDuration(ms: number): string {
 }
 
 function processPoolStatusLabel(status: PluginProcessPoolRouteStatus): string {
-  return `${capabilityLabel(status.category)}:${status.sourceId} · idle ${formatDuration(status.remainingMs)}`;
+  return `${capabilityLabel(status.category)}:${status.resourceId} · idle ${formatDuration(status.remainingMs)}`;
 }
 
 export function retrievalStatusDiagnostic(status: PluginRetrievalRouteStatus): {
@@ -377,7 +637,7 @@ export function retrievalStatusDiagnostic(status: PluginRetrievalRouteStatus): {
   detail: string;
   lastError: string | null;
 } {
-  const title = status.route || `${status.category}.${status.sourceId}`;
+  const title = status.route || `${status.category}.${status.resourceId}`;
   const lastError = status.lastError?.trim() || null;
   if (status.quarantined) {
     return {
@@ -406,7 +666,7 @@ export function processPoolStatusDiagnostic(status: PluginProcessPoolRouteStatus
   pluginRoot: string;
 } {
   return {
-    title: status.route || `${status.category}.${status.sourceId}`,
+    title: status.route || `${status.category}.${status.resourceId}`,
     detail: `Warm child process will idle for ${formatDuration(status.remainingMs)} before shutdown.`,
     pluginRoot: status.pluginRoot,
   };
@@ -426,8 +686,8 @@ export function unknownRetrievalRuntimePluginIds(
     .sort((left, right) => left.localeCompare(right));
 }
 
-function isRetrievalPlugin(plugin: PluginSummary): boolean {
-  return Boolean(plugin.retrieval?.sources.length);
+function isResourcePlugin(plugin: PluginSummary): boolean {
+  return Boolean(plugin.retrieval?.resources.length) || resourceCategoryFromTerms(plugin) !== null;
 }
 
 export type PluginCatalogFilter =
@@ -435,9 +695,12 @@ export type PluginCatalogFilter =
   | "available"
   | "installed"
   | "enabled"
+  | "analysis"
+  | "bioinformatics"
+  | "visualization"
   | "operators"
   | "tools"
-  | "data-sources"
+  | "resources"
   | "general";
 
 const pluginCatalogFilterOptions: Array<{ value: PluginCatalogFilter; label: string }> = [
@@ -445,21 +708,24 @@ const pluginCatalogFilterOptions: Array<{ value: PluginCatalogFilter; label: str
   { value: "available", label: "Available" },
   { value: "installed", label: "Installed" },
   { value: "enabled", label: "Enabled" },
-  { value: "operators", label: "Operators" },
+  { value: "analysis", label: "Analysis" },
+  { value: "bioinformatics", label: "Bioinformatics" },
+  { value: "visualization", label: "Visualization" },
+  { value: "operators", label: "Automation" },
   { value: "tools", label: "Tools" },
-  { value: "data-sources", label: "Source" },
+  { value: "resources", label: "Resources" },
   { value: "general", label: "Others" },
 ];
 
 function pluginSearchText(plugin: PluginSummary): string {
-  const retrievalText = (plugin.retrieval?.sources ?? [])
-    .flatMap((source) => [
-      source.id,
-      source.category,
-      source.label,
-      source.description,
-      ...source.subcategories,
-      ...source.capabilities,
+  const retrievalText = (plugin.retrieval?.resources ?? [])
+    .flatMap((resource) => [
+      resource.id,
+      resource.category,
+      resource.label,
+      resource.description,
+      ...resource.subcategories,
+      ...resource.capabilities,
     ])
     .join(" ");
   const interfaceText = plugin.interface
@@ -473,6 +739,19 @@ function pluginSearchText(plugin: PluginSummary): string {
         ...plugin.interface.defaultPrompt,
       ].join(" ")
     : "";
+  const environmentText = (plugin.environments ?? [])
+    .flatMap((environment) => [
+      environment.id,
+      environment.canonicalId,
+      environment.name,
+      environment.description,
+      environment.runtimeType,
+      environment.runtimeFile,
+      environment.runtimeFileKind,
+      environment.availabilityStatus,
+      environment.availabilityManager,
+    ])
+    .join(" ");
   return [
     plugin.id,
     plugin.name,
@@ -481,6 +760,7 @@ function pluginSearchText(plugin: PluginSummary): string {
     plugin.installedPath,
     interfaceText,
     retrievalText,
+    environmentText,
   ]
     .filter(Boolean)
     .join(" ")
@@ -498,12 +778,18 @@ function pluginMatchesCatalogFilter(
       return plugin.installed;
     case "enabled":
       return plugin.installed && plugin.enabled;
+    case "analysis":
+      return pluginCatalogGroupId(plugin) === "analysis";
+    case "bioinformatics":
+      return pluginCatalogGroupId(plugin) === "bioinformatics";
+    case "visualization":
+      return pluginCatalogGroupId(plugin) === "visualization";
     case "operators":
       return pluginCatalogGroupId(plugin) === "operator";
     case "tools":
       return pluginCatalogGroupId(plugin) === "tools";
-    case "data-sources":
-      return pluginCatalogGroupId(plugin) === "source";
+    case "resources":
+      return pluginCatalogGroupId(plugin) === "resource";
     case "general":
       return pluginCatalogGroupId(plugin) === "other";
     default:
@@ -530,20 +816,113 @@ export function filterPluginsForCatalog(
   });
 }
 
-function primaryRetrievalCategory(plugin: PluginSummary): string {
-  return plugin.retrieval?.sources[0]?.category || "other";
+function primaryResourceCategory(plugin: PluginSummary): string {
+  const categories = Array.from(
+    new Set((plugin.retrieval?.resources ?? []).map((resource) => resource.category).filter(Boolean)),
+  );
+  if (categories.length > 1) return "provider";
+  return categories[0] || resourceCategoryFromTerms(plugin) || "other";
 }
 
-function retrievalCategoryLabel(category: string): string {
+function resourceCategoryLabel(category: string): string {
   switch (category) {
+    case "provider":
+      return "Provider resources";
     case "dataset":
-      return "Dataset sources";
+      return "Dataset resources";
     case "literature":
-      return "Literature sources";
+      return "Literature resources";
     case "knowledge":
-      return "Knowledge sources";
+      return "Knowledge resources";
     default:
-      return `${capabilityLabel(category)} sources`;
+      return `${capabilityLabel(category)} resources`;
+  }
+}
+
+function primaryAnalysisCategory(plugin: PluginSummary): string {
+  if (pluginHasTerm(plugin, ["statistical", "statistics", "stats"])) return "statistics";
+  if (pluginHasTerm(plugin, ["workflow", "pipeline"])) return "workflow";
+  return "general";
+}
+
+function analysisCategoryLabel(category: string): string {
+  switch (category) {
+    case "statistics":
+      return "Statistical analysis";
+    case "workflow":
+      return "Analysis workflows";
+    default:
+      return "General analysis";
+  }
+}
+
+function primaryBioinformaticsCategory(plugin: PluginSummary): string {
+  if (
+    pluginHasTerm(plugin, [
+      "ngs",
+      "next generation sequencing",
+      "fastq",
+      "sam/bam",
+      "alignment",
+      "aligner",
+      "bowtie2",
+      "bwa",
+      "star",
+      "hisat2",
+    ])
+  ) {
+    return "ngs";
+  }
+  if (pluginHasTerm(plugin, ["transcriptomics", "rna seq", "rna-seq", "differential expression"])) {
+    return "transcriptomics";
+  }
+  if (pluginHasTerm(plugin, ["genomics", "variant", "annotation", "assembly"])) {
+    return "genomics";
+  }
+  if (pluginHasTerm(plugin, ["proteomics", "protein", "peptide"])) {
+    return "proteomics";
+  }
+  if (pluginHasTerm(plugin, ["metabolomics", "metabolite"])) {
+    return "metabolomics";
+  }
+  return "other";
+}
+
+function bioinformaticsCategoryLabel(category: string): string {
+  switch (category) {
+    case "ngs":
+      return "NGS";
+    case "transcriptomics":
+      return "Transcriptomics";
+    case "genomics":
+      return "Genomics";
+    case "proteomics":
+      return "Proteomics";
+    case "metabolomics":
+      return "Metabolomics";
+    default:
+      return capabilityLabel(category);
+  }
+}
+
+function primaryVisualizationCategory(plugin: PluginSummary): string {
+  if (isRVisualizationPlugin(plugin) || pluginHasTerm(plugin, ["rscript", "ggplot", "ggplot2"])) {
+    return "r";
+  }
+  if (pluginHasTerm(plugin, ["python", "matplotlib", "seaborn", "plotly"])) {
+    return "python";
+  }
+  return "template";
+}
+
+function visualizationCategoryLabel(category: string): string {
+  switch (category) {
+    case "r":
+      return "R visualization";
+    case "python":
+      return "Python visualization";
+    default:
+      return "Visualization templates";
   }
 }
 
@@ -563,7 +942,7 @@ export function pluginRuntimeSummary(
     return {
       state: "not-installed",
       label: "Not installed",
-      routeCount: plugin.retrieval?.sources.length ?? 0,
+      routeCount: plugin.retrieval?.resources.length ?? 0,
       issueCount: 0,
       pooledCount: 0,
       lastError: null,
@@ -573,7 +952,7 @@ export function pluginRuntimeSummary(
     return {
       state: "disabled",
       label: "Disabled",
-      routeCount: plugin.retrieval?.sources.length ?? 0,
+      routeCount: plugin.retrieval?.resources.length ?? 0,
       issueCount: 0,
       pooledCount: processPoolStatuses.length,
       lastError: null,
@@ -591,7 +970,7 @@ export function pluginRuntimeSummary(
     return {
       state: "quarantined",
       label: "Quarantined",
-      routeCount: retrievalStatuses.length || (plugin.retrieval?.sources.length ?? 0),
+      routeCount: retrievalStatuses.length || (plugin.retrieval?.resources.length ?? 0),
       issueCount: issueStatuses.length,
       pooledCount: processPoolStatuses.length,
       lastError,
@@ -601,17 +980,17 @@ export function pluginRuntimeSummary(
     return {
       state: "degraded",
       label: "Needs attention",
-      routeCount: retrievalStatuses.length || (plugin.retrieval?.sources.length ?? 0),
+      routeCount: retrievalStatuses.length || (plugin.retrieval?.resources.length ?? 0),
       issueCount: issueStatuses.length,
       pooledCount: processPoolStatuses.length,
       lastError,
     };
   }
-  if (retrievalStatuses.length === 0 && (plugin.retrieval?.sources.length ?? 0) > 0) {
+  if (retrievalStatuses.length === 0 && (plugin.retrieval?.resources.length ?? 0) > 0) {
     return {
       state: "idle",
       label: "No calls yet",
-      routeCount: plugin.retrieval?.sources.length ?? 0,
+      routeCount: plugin.retrieval?.resources.length ?? 0,
       issueCount: 0,
       pooledCount: processPoolStatuses.length,
       lastError: null,
@@ -620,27 +999,268 @@ export function pluginRuntimeSummary(
   return {
     state: "healthy",
     label: "Healthy",
-    routeCount: retrievalStatuses.length || (plugin.retrieval?.sources.length ?? 0),
+    routeCount: retrievalStatuses.length || (plugin.retrieval?.resources.length ?? 0),
     issueCount: 0,
     pooledCount: processPoolStatuses.length,
     lastError: null,
   };
 }
 
+type PluginRuntimeSummary = ReturnType<typeof pluginRuntimeSummary>;
+
+export interface VisualizationRTemplateGroup {
+  id: string;
+  title: string;
+  count: number;
+  items: string[];
+  templates: VisualizationRTemplateSummary[];
+}
+
+export interface VisualizationRTemplateSummary {
+  id: string;
+  name: string;
+  description?: string | null;
+  execute?: unknown;
+}
+
+export interface VisualizationRCompletionOverview {
+  totalTemplates: number;
+  supportedGroups: VisualizationRTemplateGroup[];
+  quickStarts: VisualizationRTemplateSummary[];
+  outputs: string[];
+  runtime: string;
+  workflow: Array<{
+    title: string;
+    detail: string;
+  }>;
+  pending: string[];
+}
+
+const defaultVisualizationRTemplateGroups: VisualizationRTemplateGroup[] = [];
+
+function visualizationRTemplateGroups(
+  templates?: PluginTemplateSummary | null,
+): VisualizationRTemplateGroup[] {
+  if (!templates?.groups?.length) return defaultVisualizationRTemplateGroups;
+  return templates.groups.map((group) => {
+    const groupTemplates = group.templates.map((template) => {
+      const summary: VisualizationRTemplateSummary = {
+        id: template.id,
+        name: template.name,
+        description: template.description,
+      };
+      if (template.execute !== undefined && template.execute !== null) {
+        summary.execute = template.execute;
+      }
+      return summary;
+    });
+    return {
+      id: group.id,
+      title: group.title,
+      count: group.count,
+      items: groupTemplates.map((template) => template.name),
+      templates: groupTemplates,
+    };
+  });
+}
+
+function selectVisualizationRQuickStarts(
+  groups: VisualizationRTemplateGroup[],
+): VisualizationRTemplateSummary[] {
+  return groups.flatMap((group) => group.templates).slice(0, 3);
+}
+
+export function visualizationRTemplatePrompt(template: VisualizationRTemplateSummary): string {
+  return `Use the visualization-r Template \`${template.id}\` (${template.name}) to generate an editable R/ggplot2 static figure from my CSV/TSV data. First confirm the required columns, then call template_execute with my data file and suitable params.`;
+}
+
+export function visualizationRTemplateToolCall(template: VisualizationRTemplateSummary): string {
+  const fallback = {
+    tool: "template_execute",
+    arguments: {
+      id: template.id,
+      inputs: {
+        table: "path/to/data.tsv",
+      },
+      params: {},
+      resources: {},
+    },
+  };
+  return JSON.stringify(
+    template.execute ?? fallback,
+    null,
+    2,
+  );
+}
+
+export function visualizationRCompletionOverview(
+  templates?: PluginTemplateSummary | null,
+): VisualizationRCompletionOverview {
+  const supportedGroups = visualizationRTemplateGroups(templates);
+  return {
+    totalTemplates: templates?.count ?? supportedGroups.reduce((count, group) => count + group.count, 0),
+    supportedGroups,
+    quickStarts: selectVisualizationRQuickStarts(supportedGroups),
+    outputs: ["PNG", "PDF", "editable R script"],
+    runtime: "Rscript + ggplot2; table-driven CSV/TSV inputs",
+    workflow: [
+      {
+        title: "1. Prepare table",
+        detail: "Use CSV/TSV data matching the selected template columns.",
+      },
+      {
+        title: "2. Generate figure",
+        detail: "Choose an exact viz_* Template ID, then ask the agent to call template_execute.",
+      },
+      {
+        title: "3. Refine source",
+        detail: "Edit or promote the generated R script for reusable style preferences.",
+      },
+    ],
+    pending: [],
+  };
+}
+
+export function shouldShowPluginRuntimeSummaryCard(
+  plugin: PluginSummary,
+  runtimeSummary: PluginRuntimeSummary,
+  declaredRetrievalResources: unknown[] = [],
+  processPoolStatuses: unknown[] = [],
+): boolean {
+  const hasActionableRuntimeState =
+    runtimeSummary.state !== "healthy"
+    || runtimeSummary.issueCount > 0
+    || Boolean(runtimeSummary.lastError)
+    || processPoolStatuses.length > 0;
+  return hasActionableRuntimeState || (declaredRetrievalResources.length > 0 && !plugin.enabled);
+}
+
 export function pluginCardSubtitle(plugin: PluginSummary): string {
-  const sources = plugin.retrieval?.sources ?? [];
-  if (sources.length === 1) {
-    return sources[0].label || `${capabilityLabel(sources[0].category)} source`;
+  const resources = plugin.retrieval?.resources ?? [];
+  if (resources.length === 1) {
+    return resources[0].label || `${capabilityLabel(resources[0].category)} resource`;
   }
-  if (sources.length > 1) {
-    const category = capabilityLabel(sources[0].category);
-    return `${sources.length} ${category} routes`;
+  if (resources.length > 1) {
+    const categories = Array.from(new Set(resources.map((resource) => resource.category).filter(Boolean)));
+    if (categories.length > 1) {
+      return `${resources.length} routes: ${previewList(resources.map((resource) => resource.label || resource.id), 4)}`;
+    }
+    const category = capabilityLabel(resources[0].category);
+    return `${resources.length} ${category} routes`;
   }
   return description(plugin);
 }
 
+export interface PluginContentOverviewItem {
+  id: "visualization" | "library" | "automation" | "routes" | "tools" | "prompt" | "bundle";
+  title: string;
+  detail: string;
+  meta: string;
+}
+
+function previewList(values: string[], limit = 3): string {
+  const cleaned = values
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (cleaned.length === 0) return "";
+  const visible = cleaned.slice(0, limit).join(", ");
+  const hidden = cleaned.length - limit;
+  return hidden > 0 ? `${visible} · +${hidden} more` : visible;
+}
+
+export function pluginContentOverview(
+  plugin: PluginSummary,
+  operators: OperatorSummary[] = [],
+): PluginContentOverviewItem[] {
+  const items: PluginContentOverviewItem[] = [];
+  const resources = plugin.retrieval?.resources ?? [];
+  const primaryPrompt = plugin.interface?.defaultPrompt?.[0]?.trim();
+
+  if (isVisualizationPlugin(plugin)) {
+    items.push({
+      id: "visualization",
+      title: "Visualization",
+      detail: "Create editable figures and publication-style plots from human-editable R artifacts.",
+      meta: "Figures",
+    });
+  } else if (isTemplatePlugin(plugin)) {
+    items.push({
+      id: "library",
+      title: "Reusable library",
+      detail: "Provides reusable workflows for generated artifacts.",
+      meta: "Library",
+    });
+  }
+
+  if (operators.length > 0) {
+    items.push({
+      id: "automation",
+      title: "Automation",
+      detail: previewList(operators.map(operatorDisplayName)) || "Agent-callable capabilities.",
+      meta: `${operators.length}`,
+    });
+  }
+
+  if (resources.length > 0) {
+    items.push({
+      id: "routes",
+      title: "Search / Query / Fetch routes",
+      detail:
+        previewList(
+          resources.map((resource) => resource.label || `${capabilityLabel(resource.category)} ${resource.id}`),
+        ) || "Plugin-defined retrieval routes.",
+      meta: `${resources.length}`,
+    });
+  }
+
+  if (isFunctionPlugin(plugin)) {
+    items.push({
+      id: "tools",
+      title: "Tool surface",
+      detail: "Model-callable functions or custom tool integrations declared by this plugin.",
+      meta: "Tools",
+    });
+  }
+
+  if (primaryPrompt && items.length === 0) {
+    items.push({
+      id: "prompt",
+      title: "Suggested use",
+      detail: primaryPrompt,
+      meta: "Prompt",
+    });
+  }
+
+  if (items.length === 0) {
+    items.push({
+      id: "bundle",
+      title: "Plugin bundle",
+      detail: "Contributes workflows, automation, metadata, or connector references. Technical files stay hidden unless needed for troubleshooting.",
+      meta: "Bundle",
+    });
+  }
+
+  return items;
+}
+
 export function operatorDisplayName(operator: OperatorSummary): string {
   return operator.name?.trim() || operator.id;
+}
+
+function templateDisplayName(template: PluginTemplateSummary["groups"][number]["templates"][number]): string {
+  return template.name?.trim() || template.id;
+}
+
+function templateEnabled(template: PluginTemplateSummary["groups"][number]["templates"][number]): boolean {
+  return template.exposed !== false;
+}
+
+function retrievalResourceEnabled(source: PluginRetrievalResourceSummary): boolean {
+  return source.exposed !== false;
+}
+
+function retrievalResourceDisplayName(source: PluginRetrievalResourceSummary): string {
+  return source.label?.trim() || capabilityLabel(source.id);
 }
 
 export function operatorPrimaryAlias(operator: OperatorSummary): string {
@@ -704,15 +1324,6 @@ export function operatorSmokeTestSummary(
   return description ? `${label}: ${description}${extra}` : `${label}${extra}`;
 }
 
-function previewValue(value: unknown): string {
-  if (value == null) return "null";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  const raw = JSON.stringify(value);
-  if (!raw) return String(value);
-  return raw.length > 80 ? `${raw.slice(0, 77)}…` : raw;
-}
-
 function runtimeAxisValues(runtime: unknown, axis: string): string[] {
   if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) return [];
   const value = (runtime as Record<string, unknown>)[axis];
@@ -767,6 +1378,138 @@ export function operatorRuntimeSummary(operator: OperatorSummary): string {
   return parts.join(" · ") || "runtime: user environment";
 }
 
+function runtimeStringValue(runtime: unknown, key: string): string | null {
+  if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) return null;
+  const value = (runtime as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+export function operatorEnvironmentRef(operator: OperatorSummary): string | null {
+  return (
+    runtimeStringValue(operator.runtime, "envRef")
+    ?? runtimeStringValue(operator.runtime, "environmentRef")
+    ?? runtimeStringValue(operator.runtime, "environment")
+  );
+}
+
+export function pluginEnvironmentDisplayName(environment: PluginEnvironmentSummary): string {
+  return environment.name?.trim() || environment.id;
+}
+
+export function pluginEnvironmentStatusColor(
+  status: string,
+): "success" | "warning" | "error" | "info" | "default" {
+  switch (status.trim().toLowerCase()) {
+    case "available":
+    case "ready":
+    case "ok":
+      return "success";
+    case "missing":
+    case "not_found":
+    case "not-found":
+    case "unavailable":
+      return "warning";
+    case "failed":
+    case "error":
+    case "invalid":
+      return "error";
+    case "not_run":
+    case "not-run":
+    case "pending":
+      return "info";
+    default:
+      return "default";
+  }
+}
+
+function pathBasename(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
+export function pluginEnvironmentRuntimeFileLabel(environment: PluginEnvironmentSummary): string {
+  const kind = environment.runtimeFileKind?.trim() || `${environment.runtimeType || "runtime"} file`;
+  if (!environment.runtimeFile?.trim()) return `${kind}: not declared`;
+  const filename = pathBasename(environment.runtimeFile);
+  const kindAlternatives = kind.split("|").map((item) => item.trim()).filter(Boolean);
+  if (kind === filename || kindAlternatives.includes(filename)) return filename;
+  return `${kind}: ${filename}`;
+}
+
+function pluginEnvironmentRuntimeKey(environment: PluginEnvironmentSummary): string {
+  return environment.runtimeType.trim().toLowerCase() || "system";
+}
+
+function pluginSyncNeedsAction(plugin: PluginSummary): boolean {
+  return Boolean(
+    plugin.installed &&
+    plugin.sync &&
+    !["upToDate"].includes(plugin.sync.state),
+  );
+}
+
+function pluginSyncButtonLabel(plugin: PluginSummary): string {
+  const state = plugin.sync?.state;
+  if (state === "conflictRisk" || state === "localModified") return "Review sync";
+  if (state === "unknown") return "Track sync";
+  return "Sync";
+}
+
+function pluginCanForceSync(plugin: PluginSummary): boolean {
+  return Boolean(plugin.installed && plugin.sync && plugin.sync.state !== "upToDate");
+}
+
+function pluginSyncChipColor(state?: string): "default" | "info" | "warning" | "error" | "success" {
+  switch (state) {
+    case "upToDate":
+      return "success";
+    case "updateAvailable":
+      return "info";
+    case "localModified":
+      return "warning";
+    case "conflictRisk":
+      return "error";
+    case "unknown":
+      return "warning";
+    default:
+      return "default";
+  }
+}
+
+function remoteMarketplaceCheckMessage(results: MarketplaceRemoteCheckResult[]): string {
+  if (results.length === 0) return "No remote marketplace is configured yet.";
+  const errors = results.filter((result) => result.state === "error");
+  const updates = results.filter((result) => result.state === "updateAvailable");
+  if (errors.length > 0) {
+    return `${errors.length} remote marketplace check${errors.length === 1 ? "" : "s"} failed.`;
+  }
+  if (updates.length > 0) {
+    const changed = updates.reduce((total, result) => total + result.changedPlugins.length, 0);
+    return `${updates.length} remote marketplace update${updates.length === 1 ? "" : "s"} available${changed > 0 ? ` · ${changed} plugin${changed === 1 ? "" : "s"} changed` : ""}.`;
+  }
+  return "All remote marketplaces are up to date.";
+}
+
+function pluginEnvironmentByRef(
+  environments: PluginEnvironmentSummary[],
+): Map<string, PluginEnvironmentSummary> {
+  const byRef = new Map<string, PluginEnvironmentSummary>();
+  for (const environment of environments) {
+    byRef.set(environment.id, environment);
+    byRef.set(environment.canonicalId, environment);
+  }
+  return byRef;
+}
+
+type PluginEnvironmentCheckState = {
+  loading: boolean;
+  result?: EnvironmentCheckResult | null;
+  error?: string | null;
+};
+
+function pluginEnvironmentKey(environment: PluginEnvironmentSummary): string {
+  return environment.canonicalId || environment.id;
+}
+
 export function operatorSchemaStats(operator: OperatorSummary): {
   inputs: number;
   requiredInputs: number;
@@ -785,25 +1528,6 @@ export function operatorSchemaStats(operator: OperatorSummary): {
     outputs: Object.keys(operator.interface?.outputs ?? {}).length,
     resources: Object.values(operator.resources ?? {}).filter((resource) => resource.exposed !== false).length,
   };
-}
-
-function operatorExecutionCommand(operator: OperatorSummary): string {
-  const argv = operator.execution?.argv ?? [];
-  if (argv.length === 0) return "No execution argv declared";
-  const command = argv.join(" ");
-  return command.length > 180 ? `${command.slice(0, 177)}…` : command;
-}
-
-function operatorFieldEntries(
-  fields: Record<string, { kind?: string | null; required?: boolean; default?: unknown; description?: string | null }> | undefined,
-): Array<[string, { kind?: string | null; required?: boolean; default?: unknown; description?: string | null }]> {
-  return Object.entries(fields ?? {}).sort(([left], [right]) => left.localeCompare(right));
-}
-
-function operatorResourceEntries(operator: OperatorSummary) {
-  return Object.entries(operator.resources ?? {})
-    .filter(([, resource]) => resource.exposed !== false)
-    .sort(([left], [right]) => left.localeCompare(right));
 }
 
 function operatorCatalogKey(operator: OperatorSummary): string {
@@ -1223,7 +1947,7 @@ function PluginCard({
             checked={operatorRegistrationChecked}
             disabled={busy || !plugin.enabled}
             onChange={(event) => onOperatorRegistrationChange(operators, event.target.checked)}
-            inputProps={{ "aria-label": `${operatorRegistrationChecked ? "Unregister" : "Register"} ${displayName(plugin)} operators` }}
+            inputProps={{ "aria-label": `${operatorRegistrationChecked ? "Unregister" : "Register"} ${displayName(plugin)} tools` }}
           />
         </Stack>
       ) : plugin.installed ? (
@@ -1298,81 +2022,61 @@ function PluginCatalogGroupList({
 
   return (
     <>
-      {groups.map((group) => (
-        <Accordion
-          key={group.id}
-          disableGutters
-          elevation={0}
-          defaultExpanded={groups.length === 1 || group.id !== "other"}
-          sx={nestedAccordionSx}
-        >
-          <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
-            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-              <Typography variant="subtitle2" fontWeight={800}>
-                {group.title}
-              </Typography>
-              <Chip size="small" variant="outlined" label={`${group.plugins.length} plugins`} />
-            </Stack>
-          </AccordionSummary>
-          <AccordionDetails sx={{ px: 1.5, pt: 0.75, pb: 1.5 }}>
-            <Stack spacing={1.5} useFlexGap>
-              <Typography variant="caption" color="text.secondary">
-                {group.description}
-              </Typography>
-              {groupPluginsByCatalogSection(group.id, group.plugins).map((section) => (
-                <Box key={section.id}>
-                  <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
-                    {section.title}
-                  </Typography>
-                  <Box sx={pluginCardGridSx}>
-                    {section.plugins.map((plugin) => {
-                      const pluginOperators = operatorsByPlugin.get(plugin.id) ?? operatorsByPlugin.get(plugin.name);
-                      return (
-                        <PluginCard
-                          key={plugin.id}
-                          plugin={plugin}
-                          retrievalStatuses={retrievalStatusesByPlugin.get(plugin.id)}
-                          processPoolStatuses={processPoolStatusesByPlugin.get(plugin.id)}
-                          operators={pluginOperators}
-                          busy={busy || busyPluginIds.has(plugin.id)}
-                          onInstall={onInstall}
-                          onToggle={onToggle}
-                          onOperatorRegistrationChange={onOperatorRegistrationChange}
-                          onOpenDetails={onOpenDetails}
-                        />
-                      );
-                    })}
+      {groups.map((group) => {
+        const sections = groupPluginsByCatalogSection(group.id, group.plugins);
+        return (
+          <Accordion
+            key={group.id}
+            disableGutters
+            elevation={0}
+            defaultExpanded={groups.length === 1 || group.id !== "other"}
+            sx={nestedAccordionSx}
+          >
+            <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={nestedAccordionSummarySx}>
+              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                <Typography variant="subtitle2" fontWeight={800}>
+                  {group.title}
+                </Typography>
+                <Chip size="small" variant="outlined" label={`${group.plugins.length} plugins`} />
+              </Stack>
+            </AccordionSummary>
+            <AccordionDetails sx={{ px: 1.5, pt: 0.75, pb: 1.5 }}>
+              <Stack spacing={1.5} useFlexGap>
+                <Typography variant="caption" color="text.secondary">
+                  {group.description}
+                </Typography>
+                {sections.map((section) => (
+                  <Box key={section.id}>
+                    <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+                      {section.title}
+                    </Typography>
+                    <Box sx={pluginCardGridSx}>
+                      {section.plugins.map((plugin) => {
+                        const pluginOperators = operatorsByPlugin.get(plugin.id) ?? operatorsByPlugin.get(plugin.name);
+                        return (
+                          <PluginCard
+                            key={plugin.id}
+                            plugin={plugin}
+                            retrievalStatuses={retrievalStatusesByPlugin.get(plugin.id)}
+                            processPoolStatuses={processPoolStatusesByPlugin.get(plugin.id)}
+                            operators={pluginOperators}
+                            busy={busy || busyPluginIds.has(plugin.id)}
+                            onInstall={onInstall}
+                            onToggle={onToggle}
+                            onOperatorRegistrationChange={onOperatorRegistrationChange}
+                            onOpenDetails={onOpenDetails}
+                          />
+                        );
+                      })}
+                    </Box>
                   </Box>
-                </Box>
-              ))}
-            </Stack>
-          </AccordionDetails>
-        </Accordion>
-      ))}
+                ))}
+              </Stack>
+            </AccordionDetails>
+          </Accordion>
+        );
+      })}
     </>
-  );
-}
-
-function OperatorMetricCard({ label, value }: { label: string; value: string | number }) {
-  return (
-    <Box
-      sx={{
-        px: 1.15,
-        py: 0.85,
-        minWidth: 0,
-        borderRadius: 1.75,
-        bgcolor: "background.paper",
-        border: 1,
-        borderColor: "divider",
-      }}
-    >
-      <Typography variant="subtitle2" fontWeight={900} sx={{ lineHeight: 1.1 }}>
-        {value}
-      </Typography>
-      <Typography variant="caption" color="text.secondary" fontWeight={750}>
-        {label}
-      </Typography>
-    </Box>
   );
 }
 
@@ -1403,341 +2107,648 @@ function OperatorMetaLine({ label, value }: { label: string; value: string }) {
   );
 }
 
-type OperatorSchemaEntry = [string, { kind?: string | null; required?: boolean; default?: unknown; description?: string | null }];
-
-function OperatorSchemaAccordion({
-  title,
-  entries,
-  count,
-  requiredCount,
-  defaultExpanded = false,
-  emptyLabel = "None declared",
-}: {
-  title: string;
-  entries: OperatorSchemaEntry[];
-  count: number;
-  requiredCount?: number;
-  defaultExpanded?: boolean;
-  emptyLabel?: string;
-}) {
-  return (
-    <Accordion
-      disableGutters
-      elevation={0}
-      defaultExpanded={defaultExpanded}
-      sx={{
-        border: 1,
-        borderColor: "divider",
-        borderRadius: 2,
-        overflow: "hidden",
-        bgcolor: "background.paper",
-        "&:before": { display: "none" },
-        "&.Mui-expanded": { m: 0 },
-      }}
-    >
-      <AccordionSummary
-        expandIcon={<ExpandMoreRounded />}
-        sx={{
-          px: 1.1,
-          minHeight: 44,
-          "&.Mui-expanded": { minHeight: 44 },
-          "& .MuiAccordionSummary-content": { my: 0.8 },
-          "& .MuiAccordionSummary-content.Mui-expanded": { my: 0.8 },
-        }}
-      >
-        <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-          <Typography variant="caption" color="text.secondary" fontWeight={900} sx={{ textTransform: "uppercase", letterSpacing: 0.4 }}>
-            {title}
-          </Typography>
-          <Chip size="small" variant="outlined" label={`${count} item${count === 1 ? "" : "s"}`} sx={{ height: 22 }} />
-          {requiredCount != null && requiredCount > 0 && (
-            <Chip size="small" color="warning" variant="outlined" label={`${requiredCount} required`} sx={{ height: 22 }} />
-          )}
-        </Stack>
-      </AccordionSummary>
-      <AccordionDetails sx={{ px: 1.1, pt: 0, pb: 1.1 }}>
-        <Stack
-          spacing={0.6}
-          sx={{
-            maxHeight: 172,
-            overflowY: "auto",
-            pr: 0.4,
-          }}
-        >
-          {entries.length > 0 ? entries.map(([name, field]) => (
-            <Box
-              key={name}
-              sx={{
-                display: "grid",
-                gridTemplateColumns: "minmax(0, 1fr) auto",
-                gap: 0.75,
-                alignItems: "center",
-                px: 0.75,
-                py: 0.6,
-                borderRadius: 1.4,
-                bgcolor: "action.hover",
-              }}
-            >
-              <Box sx={{ minWidth: 0 }}>
-                <Typography
-                  variant="caption"
-                  fontWeight={850}
-                  sx={{
-                    display: "block",
-                    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                  title={name}
-                >
-                  {name}
-                </Typography>
-                {field.description?.trim() ? (
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    sx={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                    title={field.description}
-                  >
-                    {field.description}
-                  </Typography>
-                ) : null}
-              </Box>
-              <Stack direction="row" spacing={0.45} alignItems="center" sx={{ justifySelf: "end" }}>
-                {field.kind && <Chip size="small" variant="outlined" label={field.kind} sx={{ height: 22 }} />}
-                {field.required && <Chip size="small" color="warning" variant="outlined" label="required" sx={{ height: 22 }} />}
-                {field.default !== undefined && field.default !== null && (
-                  <Chip size="small" variant="outlined" label={`=${previewValue(field.default)}`} sx={{ height: 22 }} />
-                )}
-              </Stack>
-            </Box>
-          )) : (
-            <Typography variant="caption" color="text.secondary" sx={{ py: 0.75 }}>
-              {emptyLabel}
-            </Typography>
-          )}
-        </Stack>
-      </AccordionDetails>
-    </Accordion>
-  );
-}
-
-function OperatorResourceAccordion({
-  entries,
-  defaultExpanded = false,
-}: {
-  entries: ReturnType<typeof operatorResourceEntries>;
-  defaultExpanded?: boolean;
-}) {
-  return (
-    <Accordion
-      disableGutters
-      elevation={0}
-      defaultExpanded={defaultExpanded}
-      sx={{
-        border: 1,
-        borderColor: "divider",
-        borderRadius: 2,
-        overflow: "hidden",
-        bgcolor: "background.paper",
-        "&:before": { display: "none" },
-        "&.Mui-expanded": { m: 0 },
-      }}
-    >
-      <AccordionSummary
-        expandIcon={<ExpandMoreRounded />}
-        sx={{
-          px: 1.1,
-          minHeight: 44,
-          "&.Mui-expanded": { minHeight: 44 },
-          "& .MuiAccordionSummary-content": { my: 0.8 },
-          "& .MuiAccordionSummary-content.Mui-expanded": { my: 0.8 },
-        }}
-      >
-        <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-          <Typography variant="caption" color="text.secondary" fontWeight={900} sx={{ textTransform: "uppercase", letterSpacing: 0.4 }}>
-            Resources
-          </Typography>
-          <Chip size="small" variant="outlined" label={`${entries.length} item${entries.length === 1 ? "" : "s"}`} sx={{ height: 22 }} />
-        </Stack>
-      </AccordionSummary>
-      <AccordionDetails sx={{ px: 1.1, pt: 0, pb: 1.1 }}>
-        <Stack spacing={0.6} sx={{ maxHeight: 172, overflowY: "auto", pr: 0.4 }}>
-          {entries.length > 0 ? entries.map(([name, resource]) => (
-            <Box
-              key={name}
-              sx={{
-                display: "flex",
-                justifyContent: "space-between",
-                gap: 1,
-                alignItems: "center",
-                px: 0.75,
-                py: 0.6,
-                borderRadius: 1.4,
-                bgcolor: "action.hover",
-              }}
-            >
-              <Typography variant="caption" fontWeight={850} sx={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
-                {name}
-              </Typography>
-              <Stack direction="row" spacing={0.45} flexWrap="wrap" justifyContent="flex-end">
-                {resource.default != null && <Chip size="small" variant="outlined" label={`default ${previewValue(resource.default)}`} sx={{ height: 22 }} />}
-                {resource.min != null && <Chip size="small" variant="outlined" label={`min ${previewValue(resource.min)}`} sx={{ height: 22 }} />}
-                {resource.max != null && <Chip size="small" variant="outlined" label={`max ${previewValue(resource.max)}`} sx={{ height: 22 }} />}
-              </Stack>
-            </Box>
-          )) : (
-            <Typography variant="caption" color="text.secondary" sx={{ py: 0.75 }}>
-              No exposed resources.
-            </Typography>
-          )}
-        </Stack>
-      </AccordionDetails>
-    </Accordion>
-  );
-}
-
-function OperatorBundleContentList({ operators }: { operators: OperatorSummary[] }) {
+function VisualizationRDetailOverview({ templates }: { templates?: PluginTemplateSummary | null }) {
   const theme = useTheme();
-  const sorted = [...operators].sort((left, right) =>
-    operatorDisplayName(left).localeCompare(operatorDisplayName(right)),
-  );
+  const overview = visualizationRCompletionOverview(templates);
+  const [copiedTemplateId, setCopiedTemplateId] = useState<string | null>(null);
+  const copyQuickStart = (template: VisualizationRTemplateSummary) => {
+    const text = [
+      visualizationRTemplatePrompt(template),
+      "",
+      "Tool-call skeleton:",
+      visualizationRTemplateToolCall(template),
+    ].join("\n");
+    void globalThis.navigator?.clipboard?.writeText(text);
+    setCopiedTemplateId(template.id);
+    window.setTimeout(() => setCopiedTemplateId((current) => (current === template.id ? null : current)), 1500);
+  };
+
   return (
-    <Stack spacing={1.25} sx={{ p: 1.25 }}>
-      {sorted.map((operator) => {
-        const stats = operatorSchemaStats(operator);
-        const script = operatorTemplateScript(operator);
-        const inputEntries = operatorFieldEntries(operator.interface?.inputs);
-        const paramEntries = operatorFieldEntries(operator.interface?.params);
-        const outputEntries = operatorFieldEntries(operator.interface?.outputs);
-        const resourceEntries = operatorResourceEntries(operator);
-        const icon = operatorImplementationIconSpec(operator);
-        const iconTone = icon.color ?? theme.palette.text.secondary;
-        return (
+    <Stack spacing={1.25}>
+      <Stack
+        direction={{ xs: "column", sm: "row" }}
+        spacing={1}
+        alignItems={{ xs: "flex-start", sm: "center" }}
+        justifyContent="space-between"
+      >
+        <Box sx={{ minWidth: 0 }}>
+          <Typography variant="subtitle1" fontWeight={850}>
+            Supported figure types
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.35, lineHeight: 1.45 }}>
+            Current bundle ships {overview.totalTemplates} table-driven R/ggplot2 templates. Runs export {overview.outputs.join(", ")} for publication-style editing and handoff.
+          </Typography>
+        </Box>
+        <Chip size="small" color="success" variant="outlined" label={`${overview.totalTemplates} templates ready`} />
+      </Stack>
+
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: { xs: "1fr", md: "repeat(2, minmax(0, 1fr))" },
+          gap: 1,
+        }}
+      >
+        {overview.supportedGroups.map((group) => (
           <Paper
-            key={operatorCatalogKey(operator)}
+            key={group.id}
             variant="outlined"
             sx={{
-              p: 1.5,
-              borderRadius: 2.75,
-              overflow: "hidden",
-              bgcolor: alpha(theme.palette.background.paper, theme.palette.mode === "dark" ? 0.52 : 0.9),
-              borderColor: alpha(iconTone, theme.palette.mode === "dark" ? 0.28 : 0.18),
-              background: `linear-gradient(135deg, ${alpha(iconTone, theme.palette.mode === "dark" ? 0.15 : 0.09)}, transparent 42%)`,
+              p: 1.25,
+              borderRadius: 2.25,
+              bgcolor: alpha(theme.palette.background.default, theme.palette.mode === "dark" ? 0.36 : 0.55),
             }}
           >
-            <Stack spacing={1.35}>
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={1.35} alignItems={{ xs: "stretch", sm: "flex-start" }}>
+            <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+              <Typography variant="subtitle2" fontWeight={850}>
+                {group.title}
+              </Typography>
+              <Chip size="small" variant="outlined" label={`${group.count}`} />
+            </Stack>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 0.65, lineHeight: 1.45 }}>
+              {group.items.join(", ")}
+            </Typography>
+            <Stack direction="row" gap={0.6} flexWrap="wrap" sx={{ mt: 0.9 }}>
+              {group.templates.map((template) => (
+                <Chip
+                  key={template.id}
+                  size="small"
+                  variant="outlined"
+                  label={`${template.name} · ${template.id}`}
+                  sx={{
+                    maxWidth: "100%",
+                    "& .MuiChip-label": {
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    },
+                  }}
+                />
+              ))}
+            </Stack>
+          </Paper>
+        ))}
+      </Box>
+
+      <Paper
+        variant="outlined"
+        sx={{
+          p: 1.25,
+          borderRadius: 2.25,
+          bgcolor: alpha(theme.palette.success.main, theme.palette.mode === "dark" ? 0.11 : 0.045),
+        }}
+      >
+        <Stack spacing={1}>
+          <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+            <Typography variant="subtitle2" fontWeight={850}>
+              How to use
+            </Typography>
+            <Chip size="small" color="success" variant="outlined" label={overview.outputs.join(" + ")} />
+          </Stack>
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: { xs: "1fr", md: "repeat(3, minmax(0, 1fr))" },
+              gap: 1,
+            }}
+          >
+            {overview.workflow.map((step) => (
+              <Box key={step.title} sx={{ minWidth: 0 }}>
+                <Typography variant="caption" fontWeight={850} color="text.primary">
+                  {step.title}
+                </Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25, lineHeight: 1.45 }}>
+                  {step.detail}
+                </Typography>
+              </Box>
+            ))}
+          </Box>
+        </Stack>
+      </Paper>
+
+      <Paper
+        variant="outlined"
+        sx={{
+          p: 1.25,
+          borderRadius: 2.25,
+          bgcolor: alpha(theme.palette.info.main, theme.palette.mode === "dark" ? 0.12 : 0.045),
+        }}
+      >
+        <Stack spacing={1}>
+          <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+            <Typography variant="subtitle2" fontWeight={850}>
+              Execution shortcuts
+            </Typography>
+            <Chip size="small" color="info" variant="outlined" label="template_execute" />
+          </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.45 }}>
+            Pick an exact Template ID from the chips above, or copy one of these starter prompts into chat. The agent can inspect details with <Box component="span" sx={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>unit_describe</Box> before running.
+          </Typography>
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: { xs: "1fr", md: "repeat(3, minmax(0, 1fr))" },
+              gap: 1,
+            }}
+          >
+            {overview.quickStarts.map((template) => (
+              <Paper
+                key={template.id}
+                variant="outlined"
+                sx={{ p: 1, borderRadius: 2, bgcolor: "background.paper", minWidth: 0 }}
+              >
+                <Stack spacing={0.75}>
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography variant="caption" fontWeight={850} color="text.primary">
+                      {template.name}
+                    </Typography>
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{
+                        display: "block",
+                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                        overflowWrap: "anywhere",
+                      }}
+                    >
+                      {template.id}
+                    </Typography>
+                  </Box>
+                  <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.45 }}>
+                    {visualizationRTemplatePrompt(template)}
+                  </Typography>
+                  <Box
+                    component="pre"
+                    sx={{
+                      ...visualizationRExecuteSkeletonSx,
+                      bgcolor: alpha(theme.palette.text.primary, theme.palette.mode === "dark" ? 0.12 : 0.06),
+                    }}
+                  >
+                    {visualizationRTemplateToolCall(template)}
+                  </Box>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<ContentCopyRounded />}
+                    onClick={() => copyQuickStart(template)}
+                    sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: "flex-start" }}
+                  >
+                    {copiedTemplateId === template.id ? "Copied" : "Copy prompt"}
+                  </Button>
+                </Stack>
+              </Paper>
+            ))}
+          </Box>
+        </Stack>
+      </Paper>
+
+      {overview.pending.length > 0 ? (
+        <Paper
+          variant="outlined"
+          sx={{
+            p: 1.25,
+            borderRadius: 2.25,
+            bgcolor: alpha(theme.palette.warning.main, theme.palette.mode === "dark" ? 0.12 : 0.05),
+          }}
+        >
+          <Stack spacing={0.8}>
+            <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+              <Typography variant="subtitle2" fontWeight={850}>
+                Planned / not implemented yet
+              </Typography>
+              <Chip size="small" color="warning" variant="outlined" label="roadmap" />
+            </Stack>
+            <Stack direction="row" gap={0.75} flexWrap="wrap">
+              {overview.pending.map((item) => (
+                <Chip key={item} size="small" variant="outlined" label={item} />
+              ))}
+            </Stack>
+            <Typography variant="caption" color="text.secondary">
+              Runtime scope: {overview.runtime}. First-phase templates intentionally avoid auto-installing R packages.
+            </Typography>
+          </Stack>
+        </Paper>
+      ) : null}
+    </Stack>
+  );
+}
+
+function PluginUnitControls({
+  plugin,
+  operators,
+  busy,
+  onOperatorToggle,
+  onTemplateToggle,
+  onRetrievalResourceToggle,
+}: {
+  plugin: PluginSummary;
+  operators: OperatorSummary[];
+  busy: boolean;
+  onOperatorToggle: (operator: OperatorSummary, enabled: boolean) => void;
+  onTemplateToggle: (plugin: PluginSummary, templateId: string, enabled: boolean) => void;
+  onRetrievalResourceToggle: (
+    plugin: PluginSummary,
+    category: string,
+    resourceId: string,
+    enabled: boolean,
+  ) => void;
+}) {
+  const retrievalResources = plugin.retrieval?.resources ?? [];
+  const templates = plugin.templates?.groups.flatMap((group) =>
+    group.templates.map((template) => ({
+      ...template,
+      groupTitle: group.title,
+    })),
+  ) ?? [];
+  const environmentsByRef = pluginEnvironmentByRef(plugin.environments ?? []);
+  const totalUnits = operators.length + templates.length + retrievalResources.length;
+  if (totalUnits === 0) return null;
+
+  const disabled = busy || !plugin.installed || !plugin.enabled;
+  return (
+    <Stack spacing={1.25}>
+      <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+        <Typography variant="subtitle1" fontWeight={850}>
+          Included units
+        </Typography>
+        {operators.length > 0 && (
+          <Chip
+            size="small"
+            variant="outlined"
+            label={`${operators.filter((operator) => operator.exposed).length}/${operators.length} operators on`}
+          />
+        )}
+        {templates.length > 0 && (
+          <Chip
+            size="small"
+            variant="outlined"
+            label={`${templates.filter(templateEnabled).length}/${templates.length} templates on`}
+          />
+        )}
+        {retrievalResources.length > 0 && (
+          <Chip
+            size="small"
+            variant="outlined"
+            label={`${retrievalResources.filter(retrievalResourceEnabled).length}/${retrievalResources.length} routes on`}
+          />
+        )}
+      </Stack>
+      <Paper variant="outlined" sx={{ borderRadius: 2.5, overflow: "hidden" }}>
+        <Stack divider={<Box sx={{ height: 1, bgcolor: "divider" }} />}>
+          {retrievalResources.map((resource) => {
+            const checked = retrievalResourceEnabled(resource);
+            const resourceName = retrievalResourceDisplayName(resource);
+            return (
+              <Stack
+                key={`retrieval:${resource.category}:${resource.id}`}
+                direction="row"
+                spacing={1.25}
+                alignItems="center"
+                sx={{ p: 1.15 }}
+              >
                 <Box
                   sx={{
-                    width: 44,
-                    height: 44,
-                    borderRadius: 2.2,
+                    width: 32,
+                    height: 32,
+                    borderRadius: 1.75,
                     display: "inline-flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    bgcolor: alpha(iconTone, theme.palette.mode === "dark" ? 0.18 : 0.1),
-                    color: iconTone,
-                    border: `1px solid ${alpha(iconTone, theme.palette.mode === "dark" ? 0.28 : 0.18)}`,
+                    bgcolor: "action.hover",
+                    color: "text.secondary",
                     flexShrink: 0,
                   }}
                 >
-                  {icon.body ? (
-                    <Box
-                      component="svg"
-                      viewBox="0 0 24 24"
-                      aria-label={`${icon.label} operator`}
-                      sx={{ width: 27, height: 27, display: "block" }}
-                      dangerouslySetInnerHTML={{ __html: icon.body }}
-                    />
-                  ) : (
-                    <ExtensionRounded fontSize="small" />
-                  )}
+                  <SearchRounded fontSize="small" />
                 </Box>
                 <Box sx={{ flex: 1, minWidth: 0 }}>
                   <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
-                    <Typography variant="subtitle1" fontWeight={900} sx={{ lineHeight: 1.2 }}>
-                      {operatorDisplayName(operator)}
+                    <Typography variant="subtitle2" fontWeight={800}>
+                      {resourceName}
                     </Typography>
-                    <Chip size="small" variant="outlined" label={operator.id} sx={{ maxWidth: 360 }} />
-                    <Chip size="small" variant="outlined" label={`v${operator.version}`} />
-                    <Chip
-                      size="small"
-                      color={operator.exposed ? "success" : "default"}
-                      variant={operator.exposed ? "filled" : "outlined"}
-                      label={operator.exposed ? "Exposed" : "Not exposed"}
-                    />
+                    <Chip size="small" variant="outlined" label="Route" />
+                    <Chip size="small" variant="outlined" label={capabilityLabel(resource.category)} />
                   </Stack>
-                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.45, lineHeight: 1.5, wordBreak: "break-word" }}>
-                    {operator.description?.trim() || "Plugin-defined operator callable by agents as a tool."}
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25, lineHeight: 1.45 }}>
+                    {resource.description?.trim() || `Retrieval route ID: ${resource.category}.${resource.id}`}
                   </Typography>
                 </Box>
+                <Switch
+                  size="small"
+                  checked={checked}
+                  disabled={disabled}
+                  onChange={(event) =>
+                    onRetrievalResourceToggle(
+                      plugin,
+                      resource.category,
+                      resource.id,
+                      event.target.checked,
+                    )
+                  }
+                  inputProps={{ "aria-label": `${checked ? "Disable" : "Enable"} ${resourceName} route` }}
+                />
               </Stack>
-
-              <Box
-                sx={{
-                  display: "grid",
-                  gridTemplateColumns: { xs: "repeat(2, minmax(0, 1fr))", md: "repeat(5, minmax(0, 1fr))" },
-                  gap: 0.75,
-                }}
+            );
+          })}
+          {operators.map((operator) => {
+            const checked = operator.exposed;
+            const alias = operatorPrimaryAlias(operator);
+            const envRef = operatorEnvironmentRef(operator);
+            const environment = envRef ? environmentsByRef.get(envRef) : null;
+            return (
+              <Stack
+                key={`operator:${operator.sourcePlugin}:${operator.id}:${operator.version}`}
+                direction="row"
+                spacing={1.25}
+                alignItems="center"
+                sx={{ p: 1.15 }}
               >
-                <OperatorMetricCard label="inputs" value={`${stats.inputs}/${stats.requiredInputs}`} />
-                <OperatorMetricCard label="params" value={stats.params} />
-                <OperatorMetricCard label="outputs" value={stats.outputs} />
-                <OperatorMetricCard label="resources" value={stats.resources} />
-                <OperatorMetricCard label="smoke" value={operator.smokeTests?.length ?? 0} />
-              </Box>
-
-              <Paper
-                variant="outlined"
-                sx={{
-                  p: 1.15,
-                  borderRadius: 2,
-                  bgcolor: alpha(theme.palette.common.black, theme.palette.mode === "dark" ? 0.12 : 0.03),
-                  borderColor: alpha(theme.palette.divider, 0.8),
-                }}
+                <Box
+                  sx={{
+                    width: 32,
+                    height: 32,
+                    borderRadius: 1.75,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    bgcolor: "action.hover",
+                    color: "text.secondary",
+                    flexShrink: 0,
+                  }}
+                >
+                  <ExtensionRounded fontSize="small" />
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+                    <Typography variant="subtitle2" fontWeight={800}>
+                      {operatorDisplayName(operator)}
+                    </Typography>
+                    <Chip size="small" variant="outlined" label="Operator" />
+                    {envRef && (
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        color={environment ? pluginEnvironmentStatusColor(environment.availabilityStatus) : "default"}
+                        label={`env: ${environment ? pluginEnvironmentDisplayName(environment) : envRef}`}
+                      />
+                    )}
+                    {checked && <Chip size="small" color="success" variant="outlined" label={operatorToolName(alias)} />}
+                  </Stack>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25, lineHeight: 1.45 }}>
+                    {operator.description?.trim() || `Atomic operator ID: ${operator.id}`}
+                  </Typography>
+                </Box>
+                <Switch
+                  size="small"
+                  checked={checked}
+                  disabled={disabled}
+                  onChange={(event) => onOperatorToggle(operator, event.target.checked)}
+                  inputProps={{ "aria-label": `${checked ? "Disable" : "Enable"} ${operatorDisplayName(operator)} operator` }}
+                />
+              </Stack>
+            );
+          })}
+          {templates.map((template) => {
+            const checked = templateEnabled(template);
+            return (
+              <Stack
+                key={`template:${template.id}`}
+                direction="row"
+                spacing={1.25}
+                alignItems="center"
+                sx={{ p: 1.15 }}
               >
-                <Stack spacing={0.65}>
-                  <OperatorMetaLine label="Script" value={script || "not declared"} />
-                  <OperatorMetaLine label="Environment" value={operatorRuntimeSummary(operator)} />
-                  <OperatorMetaLine label="Command" value={operatorExecutionCommand(operator)} />
-                  <OperatorMetaLine label="Manifest" value={operator.manifestPath} />
+                <Box
+                  sx={{
+                    width: 32,
+                    height: 32,
+                    borderRadius: 1.75,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    bgcolor: "action.hover",
+                    color: "text.secondary",
+                    flexShrink: 0,
+                  }}
+                >
+                  <DescriptionOutlined fontSize="small" />
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+                    <Typography variant="subtitle2" fontWeight={800}>
+                      {templateDisplayName(template)}
+                    </Typography>
+                    <Chip size="small" variant="outlined" label="Template" />
+                    <Chip size="small" variant="outlined" label={template.groupTitle} />
+                  </Stack>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25, lineHeight: 1.45 }}>
+                    {template.description?.trim() || `Template ID: ${template.id}`}
+                  </Typography>
+                </Box>
+                <Switch
+                  size="small"
+                  checked={checked}
+                  disabled={disabled}
+                  onChange={(event) => onTemplateToggle(plugin, template.id, event.target.checked)}
+                  inputProps={{ "aria-label": `${checked ? "Disable" : "Enable"} ${templateDisplayName(template)} template` }}
+                />
+              </Stack>
+            );
+          })}
+        </Stack>
+      </Paper>
+      {disabled && (
+        <Typography variant="caption" color="text.secondary">
+          Install and enable the plugin to change individual units.
+        </Typography>
+      )}
+    </Stack>
+  );
+}
+
+function PluginEnvironmentOverview({
+  plugin,
+  environments,
+  busy,
+  checkStates,
+  onConfigure,
+  onTest,
+  onEnvironmentToggle,
+}: {
+  plugin: PluginSummary;
+  environments?: PluginEnvironmentSummary[];
+  busy: boolean;
+  checkStates: Record<string, PluginEnvironmentCheckState | undefined>;
+  onConfigure: (plugin: PluginSummary, environment: PluginEnvironmentSummary) => void;
+  onTest: (plugin: PluginSummary, environment: PluginEnvironmentSummary) => void;
+  onEnvironmentToggle: (plugin: PluginSummary, environment: PluginEnvironmentSummary, enabled: boolean) => void;
+}) {
+  const theme = useTheme();
+  const visible = (environments ?? []).filter((environment) => environment.id.trim().length > 0);
+  if (visible.length === 0) return null;
+  const availableCount = visible.filter(
+    (environment) => pluginEnvironmentStatusColor(environment.availabilityStatus) === "success",
+  ).length;
+  return (
+    <Stack spacing={1.25}>
+      <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+        <Typography variant="subtitle1" fontWeight={850}>
+          Runtime environments
+        </Typography>
+        <Chip size="small" variant="outlined" label={`${visible.length} profiles`} />
+        <Chip
+          size="small"
+          color={availableCount === visible.length ? "success" : availableCount > 0 ? "warning" : "default"}
+          variant="outlined"
+          label={`${availableCount}/${visible.length} detected`}
+        />
+      </Stack>
+      <Paper variant="outlined" sx={{ borderRadius: 2.5, overflow: "hidden" }}>
+        <Stack divider={<Box sx={{ height: 1, bgcolor: "divider" }} />}>
+          {visible.map((environment) => {
+            const color = pluginEnvironmentStatusColor(environment.availabilityStatus);
+            const runtimeKey = pluginEnvironmentRuntimeKey(environment);
+            const checkState = checkStates[pluginEnvironmentKey(environment)];
+            const checkColor = checkState?.result
+              ? pluginEnvironmentStatusColor(checkState.result.status)
+              : checkState?.error
+                ? "error"
+                : null;
+            const configureDisabled = busy || !plugin.installed || !plugin.installedPath;
+            const environmentEnabled = environment.exposed !== false;
+            const switchDisabled = busy || !plugin.installed || !plugin.enabled;
+            const configureEnvLabel = "Configure env";
+            const testEnvLabel = "Test env";
+            return (
+              <Stack
+                key={`${environment.canonicalId}:${environment.manifestPath}`}
+                direction="row"
+                spacing={1.25}
+                alignItems="flex-start"
+                sx={{ p: 1.15 }}
+              >
+                <Box
+                  sx={{
+                    width: 32,
+                    height: 32,
+                    borderRadius: 1.75,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    bgcolor: alpha(theme.palette.text.primary, theme.palette.mode === "dark" ? 0.12 : 0.06),
+                    color: "text.secondary",
+                    flexShrink: 0,
+                  }}
+                >
+                  <TroubleshootRounded fontSize="small" />
+                </Box>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+                    <Typography variant="subtitle2" fontWeight={800}>
+                      {pluginEnvironmentDisplayName(environment)}
+                    </Typography>
+                    <Chip size="small" variant="outlined" label={runtimeKey} />
+                    <Chip
+                      size="small"
+                      color={color}
+                      variant={color === "success" ? "filled" : "outlined"}
+                      label={environment.availabilityManager || environment.availabilityStatus}
+                    />
+                    <Chip size="small" variant="outlined" label={pluginEnvironmentRuntimeFileLabel(environment)} />
+                  </Stack>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.35, lineHeight: 1.45 }}>
+                    {environment.description?.trim() || `Environment profile ID: ${environment.id}`}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5, wordBreak: "break-word" }}>
+                    {environment.availabilityMessage}
+                  </Typography>
+                  {environment.installHint?.trim() && color !== "success" && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.35, wordBreak: "break-word" }}>
+                      Install hint: {environment.installHint}
+                    </Typography>
+                  )}
+                  {environment.checkCommand.length > 0 && (
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{
+                        display: "block",
+                        mt: 0.35,
+                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      Check: {environment.checkCommand.join(" ")}
+                    </Typography>
+                  )}
+                  {checkState?.result && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.35, wordBreak: "break-word" }}>
+                      Last test: {checkState.result.status}
+                      {typeof checkState.result.exitCode === "number" ? ` · exit ${checkState.result.exitCode}` : ""}
+                      {checkState.result.error ? ` · ${checkState.result.error}` : ""}
+                    </Typography>
+                  )}
+                  {checkState?.error && (
+                    <Typography variant="caption" color="error" sx={{ display: "block", mt: 0.35, wordBreak: "break-word" }}>
+                      Test failed: {checkState.error}
+                    </Typography>
+                  )}
+                </Box>
+                <Stack direction="row" spacing={0.5} alignItems="center" sx={{ flexShrink: 0 }}>
+                  {checkColor && (
+                    <Chip
+                      size="small"
+                      color={checkColor}
+                      variant={checkColor === "success" ? "filled" : "outlined"}
+                      label={checkState?.result?.status || "error"}
+                    />
+                  )}
+                  <Tooltip
+                    title={
+                      configureDisabled
+                        ? "Install the plugin first; environment edits are only allowed in the user plugin copy."
+                        : "Reveal the user-copy environment file for editing."
+                    }
+                  >
+                    <span>
+                      <IconButton
+                        size="small"
+                        disabled={configureDisabled}
+                        onClick={() => onConfigure(plugin, environment)}
+                        aria-label={`${configureEnvLabel}: ${pluginEnvironmentDisplayName(environment)}`}
+                        sx={{ border: 1, borderColor: "divider", borderRadius: 1.5 }}
+                      >
+                        <SettingsRounded fontSize="small" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                  <Tooltip title="Prepare/reuse the isolated runtime when needed, then run the profile check command.">
+                    <span>
+                      <IconButton
+                        size="small"
+                        disabled={busy || checkState?.loading}
+                        onClick={() => onTest(plugin, environment)}
+                        aria-label={`${testEnvLabel}: ${pluginEnvironmentDisplayName(environment)}`}
+                        sx={{ border: 1, borderColor: "divider", borderRadius: 1.5 }}
+                      >
+                        {checkState?.loading ? <CircularProgress size={16} /> : <TroubleshootRounded fontSize="small" />}
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                  <Switch
+                    size="small"
+                    checked={environmentEnabled}
+                    disabled={switchDisabled}
+                    onChange={(event) => onEnvironmentToggle(plugin, environment, event.target.checked)}
+                    inputProps={{
+                      "aria-label": `${environmentEnabled ? "Disable" : "Enable"} ${pluginEnvironmentDisplayName(environment)} environment`,
+                    }}
+                  />
                 </Stack>
-              </Paper>
-
-              <Box
-                sx={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr",
-                  gap: 1,
-                }}
-              >
-                <OperatorSchemaAccordion
-                  title="Inputs"
-                  entries={inputEntries}
-                  count={stats.inputs}
-                  requiredCount={stats.requiredInputs}
-                  defaultExpanded
-                />
-                <OperatorSchemaAccordion
-                  title="Params"
-                  entries={paramEntries}
-                  count={stats.params}
-                  requiredCount={stats.requiredParams}
-                />
-                <OperatorSchemaAccordion
-                  title="Outputs"
-                  entries={outputEntries}
-                  count={stats.outputs}
-                  requiredCount={outputEntries.filter(([, field]) => field.required).length}
-                />
-                <OperatorResourceAccordion entries={resourceEntries} />
-              </Box>
-            </Stack>
-          </Paper>
-        );
-      })}
+              </Stack>
+            );
+          })}
+        </Stack>
+      </Paper>
     </Stack>
   );
 }
@@ -1752,11 +2763,22 @@ function PluginDetailsDialog({
   onClose,
   onInstall,
   onUninstall,
+  onSync,
+  onForceSync,
   onToggle,
+  onOperatorToggle,
+  onTemplateToggle,
+  onRetrievalResourceToggle,
+  onConfigureEnvironment,
+  onTestEnvironment,
+  onEnvironmentToggle,
+  environmentCheckStates,
   onCopyDiagnostics,
+  projectPath,
 }: {
   plugin: PluginSummary | null;
   open: boolean;
+  projectPath: string;
   retrievalStatuses?: PluginRetrievalRouteStatus[];
   processPoolStatuses?: PluginProcessPoolRouteStatus[];
   operators?: OperatorSummary[];
@@ -1764,7 +2786,25 @@ function PluginDetailsDialog({
   onClose: () => void;
   onInstall: (plugin: PluginSummary) => void;
   onUninstall: (plugin: PluginSummary) => void;
+  onSync: (plugin: PluginSummary) => void;
+  onForceSync: (plugin: PluginSummary) => void;
   onToggle: (plugin: PluginSummary, enabled: boolean) => void;
+  onOperatorToggle: (operator: OperatorSummary, enabled: boolean) => void;
+  onTemplateToggle: (plugin: PluginSummary, templateId: string, enabled: boolean) => void;
+  onRetrievalResourceToggle: (
+    plugin: PluginSummary,
+    category: string,
+    resourceId: string,
+    enabled: boolean,
+  ) => void;
+  onConfigureEnvironment: (plugin: PluginSummary, environment: PluginEnvironmentSummary) => void;
+  onTestEnvironment: (plugin: PluginSummary, environment: PluginEnvironmentSummary) => void;
+  onEnvironmentToggle: (
+    plugin: PluginSummary,
+    environment: PluginEnvironmentSummary,
+    enabled: boolean,
+  ) => void;
+  environmentCheckStates: Record<string, PluginEnvironmentCheckState | undefined>;
   onCopyDiagnostics: (
     plugin: PluginSummary,
     retrievalStatuses: PluginRetrievalRouteStatus[],
@@ -1775,10 +2815,11 @@ function PluginDetailsDialog({
   if (!plugin) return null;
 
   const chips = capabilityChips(plugin).slice(0, 2);
-  const declaredRetrievalSources = plugin.retrieval?.sources ?? [];
-  const hasOperatorContent = operators.length > 0;
+  const declaredRetrievalResources = plugin.retrieval?.resources ?? [];
   const installable = plugin.installPolicy !== "NOT_AVAILABLE";
   const isNotebookHelper = isNotebookPlugin(plugin);
+  const isComputerUse = isComputerUsePlugin(plugin);
+  const hasVisualizationCompletionOverview = isRVisualizationPlugin(plugin);
   const primaryPrompt = plugin.interface?.defaultPrompt?.[0] ?? null;
   const runtimeSummary = pluginRuntimeSummary(
     plugin,
@@ -1789,9 +2830,27 @@ function PluginDetailsDialog({
   const detailIconTone = operatorIcon?.color
     ?? (plugin.installed && plugin.enabled ? theme.palette.success.main : theme.palette.text.secondary);
   const hasRuntimeDetails =
-    retrievalStatuses.length > 0 || processPoolStatuses.length > 0 || runtimeSummary.lastError;
+    runtimeSummary.issueCount > 0 || processPoolStatuses.length > 0 || Boolean(runtimeSummary.lastError);
+  const showRuntimeSummaryCard = shouldShowPluginRuntimeSummaryCard(
+    plugin,
+    runtimeSummary,
+    declaredRetrievalResources,
+    processPoolStatuses,
+  );
   const action = plugin.installed ? (
     <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" justifyContent="flex-end">
+      {pluginSyncNeedsAction(plugin) && (
+        <Button
+          variant="outlined"
+          size="small"
+          startIcon={busy ? <CircularProgress size={14} /> : <SyncRounded />}
+          disabled={busy}
+          onClick={() => onSync(plugin)}
+          sx={{ textTransform: "none", borderRadius: 1.5 }}
+        >
+          {pluginSyncButtonLabel(plugin)}
+        </Button>
+      )}
       <Stack direction="row" spacing={1} alignItems="center">
         <Typography variant="body2" color="text.secondary">
           Enabled
@@ -1829,7 +2888,15 @@ function PluginDetailsDialog({
   );
 
   return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md" aria-labelledby="plugin-details-title">
+    <Dialog
+      open={open}
+      onClose={onClose}
+      fullWidth
+      maxWidth="md"
+      scroll="paper"
+      aria-labelledby="plugin-details-title"
+      sx={pluginDetailsDialogSx}
+    >
       <DialogTitle id="plugin-details-title" sx={{ px: 3, py: 2, pr: 7 }}>
         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
           <Typography variant="body2" color="text.secondary">
@@ -1882,9 +2949,25 @@ function PluginDetailsDialog({
             </Box>
 
             <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Typography variant="h5" fontWeight={850} sx={{ lineHeight: 1.15 }}>
-                {displayName(plugin)}
-              </Typography>
+              <Stack direction="row" gap={0.9} alignItems="center" flexWrap="wrap">
+                <Typography variant="h5" fontWeight={850} sx={{ lineHeight: 1.15 }}>
+                  {displayName(plugin)}
+                </Typography>
+                <Chip
+                  size="small"
+                  color={
+                    runtimeSummary.state === "healthy"
+                      ? "success"
+                      : runtimeSummary.state === "degraded"
+                        ? "warning"
+                        : runtimeSummary.state === "quarantined"
+                          ? "error"
+                          : "default"
+                  }
+                  variant={runtimeSummary.state === "healthy" ? "filled" : "outlined"}
+                  label={runtimeSummary.label}
+                />
+              </Stack>
               <Typography variant="body1" color="text.secondary" sx={{ mt: 0.6, lineHeight: 1.45 }}>
                 {description(plugin)}
               </Typography>
@@ -1895,11 +2978,27 @@ function PluginDetailsDialog({
                   color={plugin.installed ? (plugin.enabled ? "success" : "default") : "primary"}
                   variant={plugin.installed && plugin.enabled ? "filled" : "outlined"}
                 />
-                {declaredRetrievalSources.length > 0 && (
+                {pluginSyncNeedsAction(plugin) && plugin.sync && (
+                  <Chip
+                    size="small"
+                    color={pluginSyncChipColor(plugin.sync.state)}
+                    variant={plugin.sync.state === "conflictRisk" ? "filled" : "outlined"}
+                    label={plugin.sync.label}
+                    title={plugin.sync.message}
+                  />
+                )}
+                {declaredRetrievalResources.length > 0 && (
                   <Chip
                     size="small"
                     variant="outlined"
-                    label={`${declaredRetrievalSources.length} route${declaredRetrievalSources.length === 1 ? "" : "s"}`}
+                    label={`${declaredRetrievalResources.length} route${declaredRetrievalResources.length === 1 ? "" : "s"}`}
+                  />
+                )}
+                {(plugin.environments?.length ?? 0) > 0 && (
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`${plugin.environments?.length ?? 0} env${plugin.environments?.length === 1 ? "" : "s"}`}
                   />
                 )}
                 {chips.map((chip) => (
@@ -1913,19 +3012,109 @@ function PluginDetailsDialog({
             </Box>
           </Stack>
 
-          <Paper
-            variant="outlined"
-            sx={{
-              p: 1.5,
-              borderRadius: 2.5,
-              bgcolor: alpha(theme.palette.background.default, theme.palette.mode === "dark" ? 0.42 : 0.72),
-            }}
-          >
-            <Stack
-              direction={{ xs: "column", md: "row" }}
-              spacing={1.25}
-              alignItems={{ xs: "stretch", md: "center" }}
-              justifyContent="space-between"
+          {pluginSyncNeedsAction(plugin) && plugin.sync && (
+            <Alert
+              severity={plugin.sync.state === "conflictRisk" ? "warning" : "info"}
+              sx={{ borderRadius: 2 }}
+              action={
+                <Stack direction="row" spacing={0.75}>
+                  <Button
+                    color="inherit"
+                    size="small"
+                    startIcon={<SyncRounded />}
+                    disabled={busy}
+                    onClick={() => onSync(plugin)}
+                    sx={{ textTransform: "none" }}
+                  >
+                    {pluginSyncButtonLabel(plugin)}
+                  </Button>
+                  {pluginCanForceSync(plugin) && (
+                    <Button
+                      color="inherit"
+                      size="small"
+                      disabled={busy}
+                      onClick={() => onForceSync(plugin)}
+                      sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+                    >
+                      Force overwrite
+                    </Button>
+                  )}
+                </Stack>
+              }
+            >
+              <Typography variant="body2" fontWeight={800}>
+                {plugin.sync.label}
+              </Typography>
+              <Typography variant="body2">
+                {plugin.sync.message} {plugin.sync.changedCount} upstream change{plugin.sync.changedCount === 1 ? "" : "s"},
+                {" "}{plugin.sync.localModifiedCount} local edit{plugin.sync.localModifiedCount === 1 ? "" : "s"},
+                {" "}{plugin.sync.conflictCount} conflict{plugin.sync.conflictCount === 1 ? "" : "s"}.
+              </Typography>
+            </Alert>
+          )}
+
+          {plugin.changelog?.entries?.length ? (
+            <Accordion disableGutters elevation={0} sx={accordionSx}>
+              <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={accordionSummarySx}>
+                <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap">
+                  <Typography variant="subtitle2" fontWeight={800}>
+                    Changelog
+                  </Typography>
+                  {plugin.changelog.latestVersion && (
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label={`v${plugin.changelog.latestVersion}`}
+                    />
+                  )}
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`${plugin.changelog.entries.length} entr${plugin.changelog.entries.length === 1 ? "y" : "ies"}`}
+                  />
+                </Stack>
+              </AccordionSummary>
+              <AccordionDetails sx={{ px: 2, pt: 0.5, pb: 2 }}>
+                <Stack spacing={1.25}>
+                  {plugin.changelog.entries.slice(0, 5).map((entry, index) => (
+                    <Paper
+                      key={`${entry.title}:${index}`}
+                      variant="outlined"
+                      sx={{ p: 1.25, borderRadius: 2, bgcolor: "action.hover" }}
+                    >
+                      <Stack spacing={0.5}>
+                        <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+                          <Typography variant="body2" fontWeight={850}>
+                            {entry.title}
+                          </Typography>
+                          {entry.version && <Chip size="small" variant="outlined" label={`v${entry.version}`} />}
+                          {entry.date && <Chip size="small" variant="outlined" label={entry.date} />}
+                        </Stack>
+                        {entry.body && (
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ whiteSpace: "pre-line" }}
+                          >
+                            {entry.body}
+                          </Typography>
+                        )}
+                      </Stack>
+                    </Paper>
+                  ))}
+                </Stack>
+              </AccordionDetails>
+            </Accordion>
+          ) : null}
+
+          {showRuntimeSummaryCard && (
+            <Paper
+              variant="outlined"
+              sx={{
+                p: 1.5,
+                borderRadius: 2.5,
+                bgcolor: alpha(theme.palette.background.default, theme.palette.mode === "dark" ? 0.42 : 0.72),
+              }}
             >
               <Stack direction="row" gap={1} flexWrap="wrap" alignItems="center">
                 <Chip
@@ -1942,7 +3131,7 @@ function PluginDetailsDialog({
                   variant={runtimeSummary.state === "healthy" ? "filled" : "outlined"}
                   label={runtimeSummary.label}
                 />
-                {declaredRetrievalSources.length > 0 && (
+                {declaredRetrievalResources.length > 0 && (
                   <Chip
                     size="small"
                     variant="outlined"
@@ -1966,27 +3155,17 @@ function PluginDetailsDialog({
                   />
                 )}
               </Stack>
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={<ContentCopyRounded />}
-                disabled={busy}
-                onClick={() => onCopyDiagnostics(plugin, retrievalStatuses, processPoolStatuses)}
-                sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: { xs: "flex-start", md: "center" } }}
-              >
-                Copy diagnostics
-              </Button>
-            </Stack>
-            {runtimeSummary.lastError && (
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ display: "block", mt: 1, wordBreak: "break-word" }}
-              >
-                Last error: {runtimeSummary.lastError}
-              </Typography>
-            )}
-          </Paper>
+              {runtimeSummary.lastError && (
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "block", mt: 1, wordBreak: "break-word" }}
+                >
+                  Last error: {runtimeSummary.lastError}
+                </Typography>
+              )}
+            </Paper>
+          )}
 
           {primaryPrompt && (
             <Paper
@@ -2022,25 +3201,59 @@ function PluginDetailsDialog({
             </Stack>
           )}
 
-          <Stack spacing={1.25}>
-            <Typography variant="subtitle1" fontWeight={850}>
-              {declaredRetrievalSources.length > 0 ? "Routes" : hasOperatorContent ? "Operators" : "Included content"}
-            </Typography>
-            <Paper variant="outlined" sx={{ borderRadius: 2.5, overflow: "hidden" }}>
-              <Stack divider={<Box sx={{ height: 1, bgcolor: "divider" }} />}>
-                {declaredRetrievalSources.length > 0 ? (
-                  declaredRetrievalSources.map((source) => (
-                    <Stack key={`${source.category}:${source.id}`} direction="row" spacing={1.25} alignItems="center" sx={{ p: 1.25 }}>
+          <PluginUnitControls
+            plugin={plugin}
+            operators={operators}
+            busy={busy}
+            onOperatorToggle={onOperatorToggle}
+            onTemplateToggle={onTemplateToggle}
+            onRetrievalResourceToggle={onRetrievalResourceToggle}
+          />
+
+          <PluginEnvironmentOverview
+            plugin={plugin}
+            environments={plugin.environments}
+            busy={busy}
+            checkStates={environmentCheckStates}
+            onConfigure={onConfigureEnvironment}
+            onTest={onTestEnvironment}
+            onEnvironmentToggle={onEnvironmentToggle}
+          />
+
+          {isComputerUse && (
+            <Stack spacing={1.25}>
+              <Typography variant="subtitle1" fontWeight={850}>
+                Safety, permissions, and audit
+              </Typography>
+              <ComputerUseSettingsPanel
+                projectPath={projectPath}
+                showIntro={false}
+                showPluginButton={false}
+              />
+            </Stack>
+          )}
+
+          {hasVisualizationCompletionOverview ? (
+            <VisualizationRDetailOverview templates={plugin.templates} />
+          ) : (
+            <Stack spacing={1.25}>
+              <Typography variant="subtitle1" fontWeight={850}>
+                Capabilities
+              </Typography>
+              <Paper variant="outlined" sx={{ borderRadius: 2.5, overflow: "hidden" }}>
+                <Stack divider={<Box sx={{ height: 1, bgcolor: "divider" }} />}>
+                  {pluginContentOverview(plugin, operators).map((item) => (
+                    <Stack key={item.id} direction="row" spacing={1.25} alignItems="center" sx={{ p: 1.25 }}>
                       <Box
                         sx={{
-                          width: 32,
-                          height: 32,
+                          width: 34,
+                          height: 34,
                           borderRadius: "50%",
                           display: "inline-flex",
                           alignItems: "center",
                           justifyContent: "center",
-                          bgcolor: alpha(theme.palette.warning.main, theme.palette.mode === "dark" ? 0.16 : 0.08),
-                          color: "warning.main",
+                          bgcolor: "action.hover",
+                          color: "text.secondary",
                           flexShrink: 0,
                         }}
                       >
@@ -2049,86 +3262,93 @@ function PluginDetailsDialog({
                       <Box sx={{ flex: 1, minWidth: 0 }}>
                         <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
                           <Typography variant="subtitle2" fontWeight={800}>
-                            {source.label || source.id}
+                            {item.title}
                           </Typography>
-                          <Chip size="small" variant="outlined" label={`source=${source.id}`} />
-                          {source.capabilities.slice(0, 3).map((capability) => (
-                            <Chip key={capability} size="small" variant="outlined" label={capabilityLabel(capability)} />
-                          ))}
+                          <Chip size="small" variant="outlined" label={item.meta} />
                         </Stack>
-                        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>
-                          {capabilityLabel(source.category)}
-                          {source.replacesBuiltin ? " · replaces built-in route" : ""}
+                        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25, lineHeight: 1.45 }}>
+                          {item.detail}
                         </Typography>
                       </Box>
                     </Stack>
-                  ))
-                ) : hasOperatorContent ? (
-                  <OperatorBundleContentList operators={operators} />
-                ) : (
-                  <Stack direction="row" spacing={1.4} alignItems="center" sx={{ p: 1.5 }}>
-                    <Box
-                      sx={{
-                        width: 34,
-                        height: 34,
-                        borderRadius: "50%",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        bgcolor: "action.hover",
-                        color: "text.secondary",
-                        flexShrink: 0,
-                      }}
-                    >
-                      <ExtensionRounded fontSize="small" />
-                    </Box>
-                    <Box sx={{ minWidth: 0 }}>
-                      <Typography variant="subtitle2" fontWeight={800}>
-                        Plugin bundle
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        Skills, workflows, metadata, or connector references declared by this plugin.
-                      </Typography>
-                    </Box>
-                  </Stack>
-                )}
-              </Stack>
-            </Paper>
-          </Stack>
+                  ))}
+                </Stack>
+              </Paper>
+            </Stack>
+          )}
 
-          {(declaredRetrievalSources.length > 0 || hasRuntimeDetails) && (
+          <Box sx={pluginDetailsTechnicalSectionSx}>
             <Accordion disableGutters elevation={0} sx={accordionSx}>
               <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={compactAccordionSummarySx}>
                 <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
                   <Typography variant="subtitle1" fontWeight={850}>
-                    Route diagnostics
+                    Developer & troubleshooting
                   </Typography>
-                  {retrievalStatuses.length > 0 && <Chip size="small" variant="outlined" label={`${retrievalStatuses.length} route status`} />}
-                  {processPoolStatuses.length > 0 && <Chip size="small" color="info" variant="outlined" label={`${processPoolStatuses.length} pooled`} />}
+                  <Chip size="small" variant="outlined" label="paths" />
                 </Stack>
               </AccordionSummary>
               <AccordionDetails sx={{ px: 1.5, pt: 0, pb: 1.5 }}>
-                <Stack spacing={1.1}>
-                  {retrievalStatuses.length > 0 && (
-                    <Stack spacing={0.85}>
-                      {retrievalStatuses.map((status) => {
-                        const diagnostic = retrievalStatusDiagnostic(status);
-                        return (
-                          <Box
-                            key={`${status.category}:${status.sourceId}`}
-                            sx={{
-                              p: 1,
-                              borderRadius: 1.5,
-                              bgcolor:
-                                status.state === "healthy"
-                                  ? "action.hover"
-                                  : alpha(
-                                      status.state === "quarantined"
-                                        ? theme.palette.error.main
-                                        : theme.palette.warning.main,
-                                      theme.palette.mode === "dark" ? 0.13 : 0.06,
-                                    ),
-                            }}
+                <Stack spacing={1.15}>
+                  <Typography variant="body2" color="text.secondary">
+                    Source code, manifests, schemas, and examples are not previewed here. Developers can inspect the plugin path directly when needed.
+                  </Typography>
+                  <Paper variant="outlined" sx={{ p: 1.15, borderRadius: 2, bgcolor: "background.paper" }}>
+                    <Stack spacing={0.65}>
+                      <OperatorMetaLine label="Plugin ID" value={plugin.id} />
+                      <OperatorMetaLine label="Source path" value={plugin.sourcePath || "not available"} />
+                      {plugin.installedPath?.trim() && (
+                        <OperatorMetaLine label="Installed" value={plugin.installedPath} />
+                      )}
+                      <OperatorMetaLine label="Marketplace" value={plugin.marketplaceName} />
+                    </Stack>
+                  </Paper>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<ContentCopyRounded />}
+                    disabled={busy}
+                    onClick={() => onCopyDiagnostics(plugin, retrievalStatuses, processPoolStatuses)}
+                    sx={{ textTransform: "none", borderRadius: 1.5, alignSelf: "flex-start" }}
+                  >
+                    Copy diagnostics
+                  </Button>
+                </Stack>
+              </AccordionDetails>
+            </Accordion>
+
+            {hasRuntimeDetails && (
+              <Accordion disableGutters elevation={0} sx={accordionSx}>
+                <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={compactAccordionSummarySx}>
+                  <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
+                    <Typography variant="subtitle1" fontWeight={850}>
+                      Route diagnostics
+                    </Typography>
+                    {retrievalStatuses.length > 0 && <Chip size="small" variant="outlined" label={`${retrievalStatuses.length} route status`} />}
+                    {processPoolStatuses.length > 0 && <Chip size="small" color="info" variant="outlined" label={`${processPoolStatuses.length} pooled`} />}
+                  </Stack>
+                </AccordionSummary>
+                <AccordionDetails sx={{ px: 1.5, pt: 0, pb: 1.5 }}>
+                  <Stack spacing={1.1}>
+                    {retrievalStatuses.length > 0 && (
+                      <Stack spacing={0.85}>
+                        {retrievalStatuses.map((status) => {
+                          const diagnostic = retrievalStatusDiagnostic(status);
+                          return (
+                            <Box
+                              key={`${status.category}:${status.resourceId}`}
+                              sx={{
+                                p: 1,
+                                borderRadius: 1.5,
+                                bgcolor:
+                                  status.state === "healthy"
+                                    ? "action.hover"
+                                    : alpha(
+                                        status.state === "quarantined"
+                                          ? theme.palette.error.main
+                                          : theme.palette.warning.main,
+                                        theme.palette.mode === "dark" ? 0.13 : 0.06,
+                                      ),
+                              }}
                           >
                             <Stack spacing={0.6}>
                               <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
@@ -2159,7 +3379,7 @@ function PluginDetailsDialog({
                       })}
                     </Stack>
                   )}
-                  {declaredRetrievalSources.length > 0 && retrievalStatuses.length === 0 && (
+                  {declaredRetrievalResources.length > 0 && retrievalStatuses.length === 0 && (
                     <Alert severity={plugin.installed ? "info" : "warning"} sx={{ borderRadius: 1.5 }}>
                       {plugin.installed
                         ? "No live route status yet. Enable this plugin route and run a Search / Query / Fetch call to populate diagnostics."
@@ -2171,7 +3391,7 @@ function PluginDetailsDialog({
                       {processPoolStatuses.map((status) => {
                         const diagnostic = processPoolStatusDiagnostic(status);
                         return (
-                          <Box key={`${status.category}:${status.sourceId}:${status.pluginRoot}`} sx={{ p: 1, borderRadius: 1.5, bgcolor: alpha(theme.palette.info.main, theme.palette.mode === "dark" ? 0.12 : 0.05) }}>
+                          <Box key={`${status.category}:${status.resourceId}:${status.pluginRoot}`} sx={{ p: 1, borderRadius: 1.5, bgcolor: alpha(theme.palette.info.main, theme.palette.mode === "dark" ? 0.12 : 0.05) }}>
                             <Stack spacing={0.5}>
                               <Stack direction="row" gap={0.75} alignItems="center" flexWrap="wrap">
                                 <Typography variant="body2" fontWeight={800} sx={{ wordBreak: "break-all" }}>
@@ -2195,6 +3415,8 @@ function PluginDetailsDialog({
               </AccordionDetails>
             </Accordion>
           )}
+
+          </Box>
 
         </Stack>
       </DialogContent>
@@ -2252,7 +3474,7 @@ function OperatorRunDetailsDialog({
           </Typography>
         </Stack>
         <IconButton
-          aria-label="Close operator run details"
+          aria-label="Close tool run details"
           onClick={onClose}
           sx={{ position: "absolute", right: 12, top: 10 }}
         >
@@ -2310,7 +3532,7 @@ function OperatorRunDetailsDialog({
             <Alert severity="info" sx={{ borderRadius: 2 }}>
               <Stack spacing={0.5}>
                 <Typography variant="body2" fontWeight={850}>
-                  Reused a previous operator result
+                Reused a previous tool result
                 </Typography>
                 <Typography variant="caption" sx={{ wordBreak: "break-all" }}>
                   Source run: {cacheState.sourceRunId || "unknown"}
@@ -2600,7 +3822,7 @@ function OperatorDetailsDialog({
           </Typography>
         </Stack>
         <IconButton
-          aria-label="Close operator details"
+          aria-label="Close tool details"
           onClick={onClose}
           sx={{ position: "absolute", right: 12, top: 10 }}
         >
@@ -2619,15 +3841,15 @@ function OperatorDetailsDialog({
               size="small"
               color={operator.exposed ? "success" : "default"}
               variant={operator.exposed ? "filled" : "outlined"}
-              label={operator.exposed ? "Exposed" : "Not exposed"}
+              label={operator.exposed ? "Registered" : "Not registered"}
             />
           </Stack>
           <Typography variant="body2" color="text.secondary">
-            {operator.description?.trim() || "Plugin-defined operator callable by agents as a tool."}
+            {operator.description?.trim() || "Plugin-defined tool callable by agents."}
           </Typography>
           <Stack spacing={0.5}>
             <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-              Source plugin: {operator.sourcePlugin}
+              Owning plugin: {operator.sourcePlugin}
             </Typography>
             <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
               Manifest: {operator.manifestPath}
@@ -2674,7 +3896,7 @@ function OperatorDetailsDialog({
                 </Typography>
               ) : (
                 <Typography variant="caption" color="text.secondary">
-                  No runs recorded for this operator on the current execution surface.
+                  No runs recorded for this tool on the current execution surface.
                 </Typography>
               )}
               {stats.latestSmokeRun && (
@@ -2809,7 +4031,7 @@ function OperatorDetailsDialog({
           <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 2 }}>
             <Stack spacing={1}>
               <Typography variant="caption" fontWeight={850}>
-                Recent operator runs
+                Recent tool runs
               </Typography>
               {operatorRuns.length === 0 ? (
                 <Typography variant="caption" color="text.secondary">
@@ -2977,9 +4199,9 @@ function OperatorCatalogSection({
       <Accordion disableGutters elevation={0} sx={accordionSx}>
       <AccordionSummary expandIcon={<ExpandMoreRounded />} sx={accordionSummarySx}>
         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-          <Typography variant="subtitle2" fontWeight={700}>Operators</Typography>
-          <Chip size="small" variant="outlined" label={`${exposedCount} exposed`} />
-          <Chip size="small" variant="outlined" label={`${operators.length} discovered`} />
+          <Typography variant="subtitle2" fontWeight={700}>Agent tools</Typography>
+          <Chip size="small" variant="outlined" label={`${exposedCount} registered`} />
+          <Chip size="small" variant="outlined" label={`${operators.length} available`} />
           {diagnosticIssueCount > 0 && (
             <Chip size="small" color="warning" variant="filled" label={`${diagnosticIssueCount} manifest issues`} />
           )}
@@ -3000,7 +4222,7 @@ function OperatorCatalogSection({
       <AccordionDetails sx={{ px: 2, pt: 0.75, pb: 2 }}>
         <Stack spacing={1.25} useFlexGap>
           <Typography variant="body2" color="text.secondary">
-            Operators are plugin-defined tools that agents can call directly after exposure. Runtime follows the current session environment; the registry stays local.
+            Advanced controls for plugin-defined tools agents can call directly after registration. Runtime follows the current session environment; the registry stays local.
           </Typography>
           {registryPath && (
             <Typography variant="caption" color="text.secondary" sx={{ wordBreak: "break-all" }}>
@@ -3011,7 +4233,7 @@ function OperatorCatalogSection({
             <Alert severity="warning" sx={{ borderRadius: 2 }}>
               <Stack spacing={0.75}>
                 <Typography variant="body2" fontWeight={800}>
-                  Some operator manifests failed static validation.
+                  Some tool manifests failed static validation.
                 </Typography>
                 {diagnostics.slice(0, 4).map((diagnostic) => (
                   <Box key={`${diagnostic.sourcePlugin}:${diagnostic.manifestPath}:${diagnostic.message}`}>
@@ -3078,7 +4300,7 @@ function OperatorCatalogSection({
               </Stack>
               {runs.length === 0 ? (
                 <Typography variant="body2" color="text.secondary">
-                  No operator run records yet. SSH/sandbox operator artifacts stay on the selected remote execution environment and are referenced from the tool result.
+                  No tool run records yet. SSH/sandbox artifacts stay on the selected remote execution environment and are referenced from the tool result.
                 </Typography>
               ) : (
                 <Stack spacing={0.75} useFlexGap>
@@ -3172,11 +4394,11 @@ function OperatorCatalogSection({
             <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, textAlign: "center" }}>
               <ExtensionRounded sx={{ color: "text.secondary", mb: 1 }} />
               <Typography variant="body2" color="text.secondary">
-                No operators discovered from enabled plugins yet.
+                No agent tools discovered from enabled plugins yet.
               </Typography>
             </Paper>
           ) : (
-            <Box sx={pluginCardGridSx} role="region" aria-label="Plugin operator list">
+            <Box sx={pluginCardGridSx} role="region" aria-label="Plugin tool list">
               {sortedOperators.map((operator) => {
                 const alias = operatorPrimaryAlias(operator);
                 const aliases = operator.enabledAliases.filter((value) => value.trim().length > 0);
@@ -3252,7 +4474,7 @@ function OperatorCatalogSection({
                           disabled={busy}
                           onClick={(event) => event.stopPropagation()}
                           onChange={(event) => onToggle(operator, event.target.checked)}
-                          inputProps={{ "aria-label": `${operator.exposed ? "Disable" : "Expose"} operator ${operator.id}` }}
+                          inputProps={{ "aria-label": `${operator.exposed ? "Unregister" : "Register"} tool ${operator.id}` }}
                         />
                       </Stack>
 
@@ -3261,7 +4483,7 @@ function OperatorCatalogSection({
                         color="text.secondary"
                         sx={{ minHeight: 20 }}
                       >
-                        {operator.description?.trim() || "Plugin-defined operator callable by agents as a tool."}
+                        {operator.description?.trim() || "Plugin-defined tool callable by agents."}
                       </Typography>
 
                       <Stack direction="row" gap={0.75} flexWrap="wrap">
@@ -3269,7 +4491,7 @@ function OperatorCatalogSection({
                           size="small"
                           color={operator.exposed ? "success" : "default"}
                           variant={operator.exposed ? "filled" : "outlined"}
-                          label={operator.exposed ? "Exposed" : "Not exposed"}
+                          label={operator.exposed ? "Registered" : "Not registered"}
                         />
                         {operator.exposed ? (
                           aliases.map((enabledAlias) => (
@@ -3381,7 +4603,7 @@ function OperatorCatalogSection({
                             }}
                             sx={{ alignSelf: { xs: "flex-start", sm: "center" }, textTransform: "none", borderRadius: 1.5 }}
                           >
-                            {operator.exposed ? `Run ${smokeLabel}` : "Expose to run smoke test"}
+                            {operator.exposed ? `Run ${smokeLabel}` : "Register to run smoke test"}
                           </Button>
                         </Stack>
                       )}
@@ -3424,9 +4646,15 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     cleanupOperatorRuns,
     clearProcessPool,
     installPlugin,
+    syncPlugin,
+    checkRemoteMarketplaces,
     uninstallPlugin,
     setPluginEnabled,
     setOperatorEnabled,
+    setTemplateEnabled,
+    setRetrievalResourceEnabled,
+    setEnvironmentEnabled,
+    checkPluginEnvironment,
     runOperator,
   } = usePluginStore();
   const [message, setMessage] = useState<string | null>(null);
@@ -3443,6 +4671,8 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   const [pluginFilter, setPluginFilter] = useState<PluginCatalogFilter>("all");
   const [dismissedFeedbackKey, setDismissedFeedbackKey] = useState<string | null>(null);
   const [installingPluginId, setInstallingPluginId] = useState<string | null>(null);
+  const [checkingRemoteMarketplaces, setCheckingRemoteMarketplaces] = useState(false);
+  const [environmentCheckStates, setEnvironmentCheckStates] = useState<Record<string, PluginEnvironmentCheckState | undefined>>({});
   const projectRoot = projectPath.trim() || undefined;
   const theme = useTheme();
   const sessionId = useSessionStore((state) => state.currentSession?.id ?? null);
@@ -3464,6 +4694,10 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
   }, [loadPlugins, operatorSurface, projectRoot]);
 
   const allPlugins = useMemo(() => flattenMarketplacePlugins(marketplaces), [marketplaces]);
+  const remoteMarketplaceCount = useMemo(
+    () => marketplaces.filter((marketplace) => marketplace.remote?.url?.trim()).length,
+    [marketplaces],
+  );
   const exposedOperators = useMemo(
     () => operators.filter((operator) => operator.exposed),
     [operators],
@@ -3581,11 +4815,108 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     setInstallingPluginId(plugin.id);
     try {
       await installPlugin(plugin, projectRoot);
+      await loadPlugins(projectRoot, operatorSurface);
       setMessage(`Installed ${displayName(plugin)}`);
     } catch {
       // Store exposes the error banner.
     } finally {
       setInstallingPluginId((current) => (current === plugin.id ? null : current));
+    }
+  };
+
+  const handleSyncPlugin = async (plugin: PluginSummary) => {
+    setMessage(null);
+    setInstallingPluginId(plugin.id);
+    try {
+      const result = await syncPlugin(plugin, projectRoot);
+      await loadPlugins(projectRoot, operatorSurface);
+      const changed = result.updated.length + result.added.length + result.removed.length;
+      setMessage(
+        result.conflicts.length > 0
+          ? `Synced ${displayName(plugin)} with ${result.conflicts.length} conflict${result.conflicts.length === 1 ? "" : "s"} kept local`
+          : changed > 0
+            ? `Synced ${displayName(plugin)} (${changed} file${changed === 1 ? "" : "s"})`
+            : `${displayName(plugin)} is up to date`,
+      );
+    } catch {
+      // Store exposes the error banner.
+    } finally {
+      setInstallingPluginId((current) => (current === plugin.id ? null : current));
+    }
+  };
+
+  const handleForceSyncPlugin = async (plugin: PluginSummary) => {
+    if (!window.confirm(`Force overwrite ${displayName(plugin)} from the marketplace source? Local plugin edits will be replaced.`)) return;
+    setMessage(null);
+    setInstallingPluginId(plugin.id);
+    try {
+      const result = await syncPlugin(plugin, projectRoot, { force: true });
+      await loadPlugins(projectRoot, operatorSurface);
+      const changed = result.updated.length + result.added.length + result.removed.length;
+      setMessage(
+        `Force synced ${displayName(plugin)}${changed > 0 ? ` (${changed} file${changed === 1 ? "" : "s"})` : ""}`,
+      );
+    } catch {
+      // Store exposes the error banner.
+    } finally {
+      setInstallingPluginId((current) => (current === plugin.id ? null : current));
+    }
+  };
+
+  const handleCheckRemoteMarketplaces = async () => {
+    setMessage(null);
+    setCheckingRemoteMarketplaces(true);
+    try {
+      const results = await checkRemoteMarketplaces(projectRoot);
+      setMessage(remoteMarketplaceCheckMessage(results));
+    } catch {
+      // Store exposes the error banner.
+    } finally {
+      setCheckingRemoteMarketplaces(false);
+    }
+  };
+
+  const handleConfigureEnvironment = async (
+    plugin: PluginSummary,
+    environment: PluginEnvironmentSummary,
+  ) => {
+    if (!plugin.installed) {
+      setMessage("Install the plugin first; environment edits happen only in the user plugin copy.");
+      return;
+    }
+    const target = environment.runtimeFile?.trim() || environment.manifestPath;
+    try {
+      await revealItemInDir(target);
+      setMessage(`Opened environment file for ${pluginEnvironmentDisplayName(environment)}`);
+    } catch (err) {
+      setMessage(null);
+      usePluginStore.setState({ error: extractErrorMessage(err) });
+    }
+  };
+
+  const handleTestEnvironment = async (
+    plugin: PluginSummary,
+    environment: PluginEnvironmentSummary,
+  ) => {
+    const key = pluginEnvironmentKey(environment);
+    setMessage(null);
+    setEnvironmentCheckStates((current) => ({
+      ...current,
+      [key]: { loading: true, result: current[key]?.result ?? null, error: null },
+    }));
+    try {
+      const result = await checkPluginEnvironment(plugin, environment.id, projectRoot);
+      setEnvironmentCheckStates((current) => ({
+        ...current,
+        [key]: { loading: false, result: result.check, error: null },
+      }));
+      setMessage(`${pluginEnvironmentDisplayName(environment)} environment test: ${result.check.status}`);
+    } catch (err) {
+      const error = extractErrorMessage(err);
+      setEnvironmentCheckStates((current) => ({
+        ...current,
+        [key]: { loading: false, result: current[key]?.result ?? null, error },
+      }));
     }
   };
 
@@ -3628,8 +4959,53 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
       const toolName = operatorToolName(alias);
       setMessage(
         enabled
-          ? `Exposed ${operatorDisplayName(operator)} as ${toolName}`
-          : `Disabled ${toolName}`,
+          ? `Registered ${operatorDisplayName(operator)} as ${toolName}`
+          : `Unregistered ${toolName}`,
+      );
+    } catch {
+      // Store exposes the error banner.
+    }
+  };
+
+  const handleTemplateToggle = async (
+    plugin: PluginSummary,
+    templateId: string,
+    enabled: boolean,
+  ) => {
+    setMessage(null);
+    try {
+      await setTemplateEnabled(plugin.id, templateId, enabled, projectRoot);
+      setMessage(`${enabled ? "Enabled" : "Disabled"} template ${templateId}`);
+    } catch {
+      // Store exposes the error banner.
+    }
+  };
+
+  const handleRetrievalResourceToggle = async (
+    plugin: PluginSummary,
+    category: string,
+    resourceId: string,
+    enabled: boolean,
+  ) => {
+    setMessage(null);
+    try {
+      await setRetrievalResourceEnabled(plugin.id, category, resourceId, enabled, projectRoot);
+      setMessage(`${enabled ? "Enabled" : "Disabled"} route ${category}.${resourceId}`);
+    } catch {
+      // Store exposes the error banner.
+    }
+  };
+
+  const handleEnvironmentToggle = async (
+    plugin: PluginSummary,
+    environment: PluginEnvironmentSummary,
+    enabled: boolean,
+  ) => {
+    setMessage(null);
+    try {
+      await setEnvironmentEnabled(plugin.id, environment.id, enabled, projectRoot);
+      setMessage(
+        `${enabled ? "Enabled" : "Disabled"} environment ${pluginEnvironmentDisplayName(environment)}`,
       );
     } catch {
       // Store exposes the error banner.
@@ -3658,7 +5034,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         );
       }
       setMessage(
-        `${enabled ? "Registered" : "Unregistered"} ${targetOperators.length} operator${targetOperators.length === 1 ? "" : "s"}`,
+        `${enabled ? "Registered" : "Unregistered"} ${targetOperators.length} tool${targetOperators.length === 1 ? "" : "s"}`,
       );
     } catch {
       // Store exposes the error banner.
@@ -3744,7 +5120,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
     setMessage(null);
     try {
       await loadOperatorRuns(projectRoot, operatorSurface);
-      setMessage("Refreshed operator runs");
+      setMessage("Refreshed tool runs");
     } catch {
       // Store exposes the error banner.
     }
@@ -3786,7 +5162,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         ? `\n… and ${preview.candidates.length - 8} more`
         : "";
       const confirmed = window.confirm(
-        `Delete ${preview.matchedCount} operator run director${preview.matchedCount === 1 ? "y" : "ies"}${scopeLabel} from the current ${preview.location} workspace?\n\n` +
+        `Delete ${preview.matchedCount} tool run director${preview.matchedCount === 1 ? "y" : "ies"}${scopeLabel} from the current ${preview.location} workspace?\n\n` +
         `Runs root: ${preview.runsRoot}\n` +
         `Estimated space: ${formatBytes(preview.estimatedBytes)}\n\n` +
         `${candidateLines}${remaining}\n\n` +
@@ -3802,7 +5178,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         operatorSurface,
       );
       setMessage(
-        `Deleted ${result.deletedCount} operator run director${result.deletedCount === 1 ? "y" : "ies"}${scopeLabel}${result.skippedCount > 0 ? ` · ${result.skippedCount} skipped` : ""} · ${formatBytes(result.estimatedBytes)} estimated`,
+        `Deleted ${result.deletedCount} tool run director${result.deletedCount === 1 ? "y" : "ies"}${scopeLabel}${result.skippedCount > 0 ? ` · ${result.skippedCount} skipped` : ""} · ${formatBytes(result.estimatedBytes)} estimated`,
       );
     } catch {
       // Store exposes the error banner.
@@ -3932,19 +5308,34 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                   Plugins
                 </Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 880 }}>
-                  Install local tools and data-source routes. Details and diagnostics stay one click away.
+                  Install visualization, automation, tools, and external resource capabilities. Details and diagnostics stay one click away.
                 </Typography>
               </Box>
             </Stack>
-            <Button
-              variant="outlined"
-              startIcon={isLoading ? <CircularProgress size={16} /> : <RefreshRounded />}
-              disabled={isLoading || isMutating}
-              onClick={() => void loadPlugins(projectRoot, operatorSurface)}
-              sx={{ textTransform: "none", borderRadius: 2, minHeight: 40, alignSelf: { xs: "flex-start", md: "center" } }}
-            >
-              Refresh
-            </Button>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" sx={{ alignSelf: { xs: "flex-start", md: "center" } }}>
+              <Tooltip title={remoteMarketplaceCount > 0 ? "Check configured remote marketplace manifests" : "No remote marketplace configured"}>
+                <span>
+                  <Button
+                    variant="outlined"
+                    startIcon={checkingRemoteMarketplaces ? <CircularProgress size={16} /> : <SyncRounded />}
+                    disabled={isLoading || isMutating || checkingRemoteMarketplaces || remoteMarketplaceCount === 0}
+                    onClick={() => void handleCheckRemoteMarketplaces()}
+                    sx={{ textTransform: "none", borderRadius: 2, minHeight: 40 }}
+                  >
+                    Check updates
+                  </Button>
+                </span>
+              </Tooltip>
+              <Button
+                variant="outlined"
+                startIcon={isLoading ? <CircularProgress size={16} /> : <RefreshRounded />}
+                disabled={isLoading || isMutating}
+                onClick={() => void loadPlugins(projectRoot, operatorSurface)}
+                sx={{ textTransform: "none", borderRadius: 2, minHeight: 40 }}
+              >
+                Refresh
+              </Button>
+            </Stack>
           </Stack>
           <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap alignItems="center">
             {[
@@ -3954,6 +5345,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
               ["Runs", operatorRuns.length],
               ["Issues", quarantinedRouteCount + degradedRouteCount],
               ["Pooled", processPoolStatuses.length],
+              ["Remote", remoteMarketplaceCount],
             ].map(([label, value]) => (
               <Box key={label} sx={{ display: "inline-flex", alignItems: "baseline", gap: 0.5 }}>
                 <Typography variant="subtitle2" fontWeight={850}>
@@ -3975,7 +5367,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
             <TextField
               value={pluginSearch}
               onChange={(event) => setPluginSearch(event.target.value)}
-              placeholder="Search plugins, data sources, routes..."
+              placeholder="Search plugins, resources, routes..."
               size="small"
               fullWidth
               inputProps={{ "aria-label": "Search Omiga plugins" }}
@@ -4038,6 +5430,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
       <PluginDetailsDialog
         plugin={detailPlugin}
         open={Boolean(detailPlugin)}
+        projectPath={projectPath}
         retrievalStatuses={detailPlugin ? retrievalStatusesByPlugin.get(detailPlugin.id) : undefined}
         processPoolStatuses={detailPlugin ? processPoolStatusesByPlugin.get(detailPlugin.id) : undefined}
         operators={detailPluginOperators}
@@ -4045,7 +5438,20 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         onClose={() => setDetailPluginId(null)}
         onInstall={(plugin) => void handleInstall(plugin)}
         onUninstall={(plugin) => void handleUninstall(plugin)}
+        onSync={(plugin) => void handleSyncPlugin(plugin)}
+        onForceSync={(plugin) => void handleForceSyncPlugin(plugin)}
         onToggle={(plugin, enabled) => void handleToggle(plugin, enabled)}
+        onOperatorToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
+        onTemplateToggle={(plugin, templateId, enabled) => void handleTemplateToggle(plugin, templateId, enabled)}
+        onRetrievalResourceToggle={(plugin, category, resourceId, enabled) =>
+          void handleRetrievalResourceToggle(plugin, category, resourceId, enabled)
+        }
+        onConfigureEnvironment={(plugin, environment) => void handleConfigureEnvironment(plugin, environment)}
+        onTestEnvironment={(plugin, environment) => void handleTestEnvironment(plugin, environment)}
+        onEnvironmentToggle={(plugin, environment, enabled) =>
+          void handleEnvironmentToggle(plugin, environment, enabled)
+        }
+        environmentCheckStates={environmentCheckStates}
         onCopyDiagnostics={handleCopyDiagnostics}
       />
 
@@ -4155,7 +5561,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                   const plugin = pluginsById.get(status.pluginId);
                   return (
                     <Paper
-                      key={`${status.pluginId}:${status.category}:${status.sourceId}`}
+                      key={`${status.pluginId}:${status.category}:${status.resourceId}`}
                       variant="outlined"
                       sx={{
                         p: 1,
@@ -4218,7 +5624,7 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
                         <Stack direction="row" gap={0.75} flexWrap="wrap">
                           {statuses.map((status) => (
                             <Chip
-                              key={`${status.category}:${status.sourceId}:${status.pluginRoot}`}
+                              key={`${status.category}:${status.resourceId}:${status.pluginRoot}`}
                               size="small"
                               color="info"
                               variant="outlined"
@@ -4236,20 +5642,6 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
         </AccordionDetails>
       </Accordion>
       )}
-
-      <OperatorCatalogSection
-        operators={operators}
-        diagnostics={operatorDiagnostics}
-        runs={operatorRuns}
-        registryPath={operatorRegistryPath}
-        busy={isMutating}
-        onToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
-        onSmokeRun={(operator, smokeTestId) => void handleOperatorSmokeRun(operator, smokeTestId)}
-        onRefreshRuns={() => void handleRefreshOperatorRuns()}
-        onCleanupRuns={(operator) => void handleCleanupOperatorRuns(operator)}
-        onOpenRun={(run) => void handleOpenOperatorRun(run)}
-        onCopy={(text, successMessage) => void copyToClipboard(text, successMessage)}
-      />
 
       {marketplaces.length === 0 || allPlugins.length === 0 ? (
         <Paper variant="outlined" sx={{ p: 3, borderRadius: 2, textAlign: "center" }}>
@@ -4279,6 +5671,22 @@ export function PluginsPanel({ projectPath }: { projectPath: string }) {
             void handleOperatorRegistrationChange(targetOperators, enabled)
           }
           onOpenDetails={(selectedPlugin) => setDetailPluginId(selectedPlugin.id)}
+        />
+      )}
+
+      {SHOW_PLUGIN_DEVELOPER_DIAGNOSTICS && (
+        <OperatorCatalogSection
+          operators={operators}
+          diagnostics={operatorDiagnostics}
+          runs={operatorRuns}
+          registryPath={operatorRegistryPath}
+          busy={isMutating}
+          onToggle={(operator, enabled) => void handleOperatorToggle(operator, enabled)}
+          onSmokeRun={(operator, smokeTestId) => void handleOperatorSmokeRun(operator, smokeTestId)}
+          onRefreshRuns={() => void handleRefreshOperatorRuns()}
+          onCleanupRuns={(operator) => void handleCleanupOperatorRuns(operator)}
+          onOpenRun={(run) => void handleOpenOperatorRun(run)}
+          onCopy={(text, successMessage) => void copyToClipboard(text, successMessage)}
         />
       )}
     </Stack>

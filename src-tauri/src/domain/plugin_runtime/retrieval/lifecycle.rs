@@ -95,6 +95,7 @@ pub enum PluginLifecycleRouteState {
 pub struct PluginLifecycleRouteStatus {
     pub plugin_id: String,
     pub category: String,
+    #[serde(rename = "resourceId")]
     pub source_id: String,
     pub route: String,
     pub state: PluginLifecycleRouteState,

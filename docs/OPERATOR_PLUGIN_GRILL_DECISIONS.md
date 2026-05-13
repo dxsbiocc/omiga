@@ -20,7 +20,7 @@ Non-goal for MVP: full DAG workflow orchestration, Snakemake/Nextflow parity, sc
 8. **Versioning**: Agent cannot choose versions in tool args; registry resolves the enabled version and run metadata locks it.
 9. **Registry**: operator install/enable/version state is user-scoped and read from the local Omiga app/user registry. The current session execution surface decides where the operator runs; SSH execution does not require a separate remote registry for schema exposure.
 10. **Plugin distribution**: existing plugins are the distribution layer; `OperatorRegistry` is the runtime capability index.
-11. **Gating**: exposed operator requires source plugin enabled, operator enabled, version resolvable, and no unresolved conflict.
+11. **Gating**: exposed operator requires resource plugin enabled, operator enabled, version resolvable, and no unresolved conflict.
 12. **Conflicts**: short flat names are used by default; same-id conflicts are not auto-overridden and require explicit source or alias selection.
 13. **Manifest schema**: manifests must include `apiVersion: omiga.ai/operator/v1alpha1` and `kind: Operator`, parsed into stable internal `OperatorSpec`.
 14. **Rich schema**: manifest uses Omiga-specific rich input/param/output/resource schema; Agent/UI receive generated JSON Schema.

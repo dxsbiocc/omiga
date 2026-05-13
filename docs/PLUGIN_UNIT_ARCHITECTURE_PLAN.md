@@ -4,7 +4,7 @@ Date: 2026-05-08
 
 ## Executive summary
 
-Omiga should stop treating `plugin` as a synonym for `operator`, `retrieval source`, or any other concrete executable unit.
+Omiga should stop treating `plugin` as a synonym for `operator`, `retrieval resource`, or any other concrete executable unit.
 
 The target model is:
 
@@ -39,7 +39,7 @@ Current implementation problems:
 
 3. **Retrieval is a parallel subsystem**
    - `retrieval_*` plugins are mostly thin wrappers.
-   - Real code is hidden in shared `source_runners`.
+   - Real code is hidden in shared `resource_runners`.
    - Long-term, thin data-retrieval APIs should become external-network Operators with versioned cache.
 
 4. **Directory layout is noisy but should not become the main project**
@@ -431,7 +431,7 @@ Preferred path:
 
 1. Keep current retrieval and built-in tool functions unchanged except for
    compatibility fixes required by `plugin.json` loading.
-2. Add new API wrapper Operators for thin public-data-source calls:
+2. Add new API wrapper Operators for thin public-resource calls:
    - GEO
    - PubMed
    - UniProt
@@ -703,8 +703,9 @@ Deferred beyond the third version:
 - Full fixture-based numeric/artifact parity for DE and enrichment independent
   rendered bodies once deterministic Bioconductor test environments are
   available.
-- Automatic environment preparation for conda/docker/singularity/module/system
-  profiles.
+- Automatic environment preparation beyond the current Operator runner support
+  for conda/mamba/micromamba plus local Dockerfile/Singularity definition
+  builds; module/system profiles remain diagnostic/manual.
 - retrieval-to-Operator migration for GEO / PubMed / UniProt.
 - self-evolution graph mining and auto-registration.
 
@@ -719,6 +720,11 @@ Completed in the fourth version:
   - V4 checks are intentionally allowlisted version/probe commands only; they do
     not install packages, create conda environments, pull containers, or mutate
     runtime state.
+  - added `environment_profile_prepare_plan` as the follow-up plan-only
+    preparation surface: it records requirements, install hints, optional check
+    output, and manual action items into
+    `.omiga/environments/prepare-plans/` without performing installs or runtime
+    mutations.
 - Authoring validation entrypoint:
   - added `unit_authoring_validate` to validate installed Operator, Template,
     and Environment manifests from one tool call.
@@ -771,14 +777,185 @@ Completed in the fourth version:
 
 Deferred beyond the fourth version:
 
-- GEO and UniProt retrieval-as-Operator pilots.
-- versioned cache policy and recorded live-output fixtures for external-network
-  Operators.
 - deterministic Bioconductor-backed parity fixtures for DE and enrichment.
 - opt-in environment preparation after profile checks are stable.
 - Computer Use run-history browser hardening and native macOS backend progression.
 - self-evolution reports that propose new Operator / Template candidates from
   ExecutionRecord lineage.
+
+### Focused follow-up status: Operator/Template execution visibility and retrieval pilots, 2026-05-10
+
+Completed in this focused follow-up:
+
+- Added a chat tool-card execution insight panel for Operator/Template runs and
+  execution-inspection tools:
+  - summarizes `paramSources`, selected preflight params, run ids, run
+    directories, template parent ids, output keys, lineage buckets, and archive
+    advisor recommendations before the raw JSON payload.
+  - keeps raw tool output available below the summary for auditability.
+- Added additive retrieval-as-Operator pilots for:
+  - `operator-geo-search` / `geo_search`
+  - `operator-uniprot-search` / `uniprot_search`
+  - both preserve existing retrieval tools as compatibility fallbacks.
+- Added deterministic offline fixtures and offline execution tests for GEO and
+  UniProt, matching the PubMed pilot pattern.
+- Added enabled external-network cache policy metadata to PubMed, GEO, and
+  UniProt Operator manifests.
+- Extended `unit_authoring_validate` authoring diagnostics so external-network
+  Operators warn when they lack either an enabled cache policy or deterministic
+  `mode=offline_fixture` plus `fixture_json` support.
+- Added deterministic Bioconductor-backed parity tests for DE and enrichment
+  Template execution against their migration targets. Tests run when the
+  required R packages are installed and skip only when the local environment
+  cannot execute the dependency-backed fixture.
+- Added `execution_archive_suggestion_write`, which persists human-reviewable
+  archive suggestions as Markdown plus JSON under
+  `.omiga/execution/archive-suggestions/` while explicitly avoiding artifact
+  deletion, movement, or mutation.
+- Added `environment_profile_prepare_plan`, a plan-only opt-in preparation
+  tool that resolves an Environment profile, optionally runs the allowlisted
+  diagnostic check, and can write Markdown/JSON preparation checklists under
+  `.omiga/environments/prepare-plans/` without installing packages, creating
+  environments, pulling containers, or loading modules.
+- Added `learning_self_evolution_report`, a report-only crystallization pass
+  over recent Operator/Template ExecutionRecords. It proposes Template,
+  project-preference, and archive follow-ups from lineage, repeated unit
+  signatures, preflight choices, and artifact provenance, writing Markdown/JSON
+  under `.omiga/learning/self-evolution-reports/` without creating or modifying
+  units, defaults, skills, or archives.
+- Added `learning_self_evolution_draft_write`, which converts report
+  candidates into inert scaffold files under
+  `.omiga/learning/self-evolution-drafts/`. Drafts include review checklists,
+  candidate JSON, and kind-specific `.draft` files; they are not loaded by the
+  Unit Index and require a separate reviewed change to become active.
+- Added `learning_self_evolution_creator`, a dedicated bootstrap tool that
+  creates or refreshes the project Skill `self-evolution-unit-creator` under
+  `.omiga/skills/`. The Skill guides agents through Operator-vs-Template
+  selection, review-only draft authoring, deterministic validation planning,
+  and promotion-gate handoff. The same tool can also create inert
+  Operator/Template draft packages under
+  `.omiga/learning/self-evolution-drafts/` with `candidate.json`, `DRAFT.md`,
+  schema-aligned kind-specific manifest drafts, and fixture/script placeholders.
+  Creator packages are kept as `creator-batch-*` review folders so companion
+  `.draft` files are visible but never loaded as active unit content.
+  It still does not write active unit targets, register units, change defaults,
+  or mutate archives.
+- Added `execution_record_detail`, a read-only single-record inspection tool
+  that returns one ExecutionRecord, parsed metadata/runtime/output summary JSON,
+  and optional direct children for future run-detail and trace review panes.
+- Extended the task execution step panel with the same execution-insight
+  affordance used by chat tool cards, so completed Operator/Template and
+  ExecutionRecord inspection steps show `paramSources`, preflight decisions,
+  lineage, output keys, archive recommendations, environment plans, and
+  self-evolution summaries before a user has to inspect raw JSON.
+- Added Unit Index stage inference to `unit_search`: callers can pass file
+  paths/names such as count matrices, sample metadata, DE result tables,
+  ranked gene lists, GMT gene sets, enrichment outputs, or figure outputs.
+  The search response reports inferred stages and uses them to narrow
+  Operator/Template candidates when no explicit `stage` filter is supplied.
+  For project-local files, the inference also reads a small, bounded table
+  preview to detect sample metadata, differential-statistics, enrichment, gene
+  score, count, and expression-matrix headers.
+- Added a read-only ExecutionRecord Browser surface in the task panel. It uses
+  new IPC commands (`list_execution_records`, `read_execution_record`) to list
+  recent project/session records, open parsed metadata/runtime/output details,
+  show child records, and reuse the execution-insight summary without deleting,
+  archiving, promoting, or mutating artifacts.
+- Added a read-only self-evolution draft review surface in the task panel. It
+  uses new IPC commands (`list_self_evolution_drafts`,
+  `read_self_evolution_draft`) to browse draft batches under
+  `.omiga/learning/self-evolution-drafts/`, inspect candidate JSON and
+  reviewer checklists, and show a review-only diff preview for specialized
+  `.draft` files without applying, promoting, registering units, updating
+  defaults, or mutating archives/artifacts.
+- Added a promotion patch dry-run for self-evolution drafts. The backend IPC
+  command (`preview_self_evolution_draft_promotion`) resolves only draft-local
+  content and optional project-local target paths, then returns proposed target,
+  risk notes, required review steps, and a unified diff preview. The task-panel
+  draft browser displays that dry-run evidence with `wouldWrite=false` /
+  `applied=false`, and lets reviewers enter an optional project-relative
+  `targetPath` to preview an explicit target. No target files are written and no
+  promotion is performed. Creator-generated companion drafts are surfaced in
+  the risk notes/checklist because the single-file promotion path carries only
+  the selected manifest payload.
+- Added `save_self_evolution_draft_promotion_artifact`, which writes only inert
+  review evidence under
+  `.omiga/review/self-evolution-promotions/artifacts/`: `promotion.patch`,
+  `proposed-target.content`, `manifest.json`, and `README.md`. The manifest
+  records the full proposed-content sha256 so a future apply path can use this
+  immutable payload instead of a bounded/truncated diff preview. The UI exposes
+  this as "保存审阅 patch" and reports the saved artifact paths/hashes while
+  keeping the proposed Operator/Template target untouched.
+- Creator companion drafts are now copied into inert
+  `companion-payloads/` files inside the saved promotion artifact with
+  source path, role, byte count, and sha256 metadata. Readiness planning
+  hash-verifies these payloads and blocks stale pre-payload artifacts until
+  they are re-saved, preserving scripts/fixtures/examples as review evidence
+  without extending the single-file apply path.
+- Added a reviewed multi-file promotion planning step for saved companion
+  payloads. Reviewers can assign explicit project-local active targets for
+  each companion file; the backend validates target safety, uniqueness,
+  manifest-target separation, payload hashes, target existence/current hashes,
+  and dry-run diffs, then can save inert
+  `multi-file-promotion-plan.json` plus `MULTI_FILE_PROMOTION_PLAN.md` inside
+  the existing artifact. This remains plan-only: no companion files are
+  written and no multi-file apply command is exposed.
+- The saved multi-file plan now includes a reviewed patch application checklist
+  and the task-panel UI derives a copyable "Reviewed companion patch plan" from
+  the dry-run evidence. The UI also surfaces per-companion blocked reasons,
+  target create-vs-merge status, and whether a diff preview is available, so
+  reviewers can turn the plan into a separate patch without hidden writes.
+- Added `list_self_evolution_draft_promotion_artifacts` and a task-panel recent
+  artifacts list so saved review patches remain visible after refresh without
+  requiring any real promotion/apply path.
+- Added `plan_self_evolution_draft_promotion_apply`, a non-writing readiness
+  gate for saved review artifacts. It validates manifest/patch readability,
+  project-local target safety, inert-review-path avoidance, target suffix vs.
+  candidate kind, required confirmations, immutable payload hash, and suggested
+  test gates. It also carries any creator companion draft list forward and adds
+  a companion-handling confirmation before apply. The task panel renders the
+  readiness gate and enables the narrow apply button only after all required
+  checks pass.
+- Added `read_self_evolution_draft_promotion_artifact` plus saved-artifact
+  selection in the task panel. Reviewers can reopen a saved artifact, inspect
+  bounded `promotion.patch` / `proposed-target.content` / `manifest.json` /
+  `README.md` previews, and run the readiness gate for that selected artifact
+  before any explicit single-file apply.
+- Added explicit blocked-path coverage for readiness artifacts that still point
+  at the default inert review holding path. Those artifacts remain useful as
+  review evidence, but the gate reports `blocked` until the reviewer saves a
+  new artifact with an explicit active project target.
+- Added `save_self_evolution_draft_promotion_apply_plan`, which persists the
+  readiness gate result as inert `apply-readiness.json` and
+  `APPLY_READINESS.md` files inside the saved review artifact. The task panel
+  can save and reopen this evidence before any explicit apply.
+- Added `validate_self_evolution_draft_promotion_apply_request`, a non-writing
+  confirmation gate that checks exact candidate id, exact target path,
+  deterministic-test confirmation, separate-reviewed-branch confirmation, and
+  companion-file handling when the saved artifact recorded companion drafts.
+  Passing the gate reports `ready_for_explicit_apply`; no target write occurs
+  during validation.
+- Added `apply_self_evolution_draft_promotion`, a deliberately narrow
+  single-file apply command. It revalidates the saved readiness gate, exact
+  candidate/target confirmations, exact proposed-content sha256, and current
+  target sha256 for replacements, then writes exactly the confirmed target file
+  from immutable `proposed-target.content`. It does not register units, update
+  defaults, or mutate archives.
+- Added hash evidence to the readiness/request gates: `promotion.patch` sha256,
+  immutable `proposed-target.content` sha256, target existence, and current
+  target sha256 when a target file already exists. This creates payload and
+  before-state audit evidence for a reviewed apply.
+
+Remaining after this follow-up:
+
+- module/system installer backends remain deferred behind explicit future
+  approval. Operator runs now prepare isolated conda/mamba/micromamba envs and
+  local Docker/Singularity images when an Environment profile declares
+  `runtime.envRef` with `conda.yaml|conda.yml`, `Dockerfile`, or
+  `singularity.def`.
+- promotion from self-evolution reports into real Operator/Template files
+  now has a first single-file apply path, but post-apply registration/default
+  management and richer merge workflows remain explicit follow-up work.
 
 ### Focused follow-up status: ask/preflight hardening, 2026-05-09
 
@@ -811,10 +988,10 @@ Completed in this focused follow-up:
 
 Next focused improvements:
 
-- Add a small UI/trace affordance that renders `paramSources` and
-  `metadata.preflight` in the task/record detail pane.
-- Extend GEO/UniProt API-wrapper pilots as Operators without changing existing
-  built-in retrieval tool behavior.
+- Extend the execution insight affordance into the task/record detail pane if a
+  dedicated ExecutionRecord browser is added.
+- Continue with deterministic DE/enrichment parity fixtures and opt-in
+  environment preparation.
 
 ### Focused follow-up status: execution archive advisor, 2026-05-09
 
@@ -836,13 +1013,44 @@ Completed in this focused follow-up:
     indicate reusable user-selected analysis choices.
 - The advisor intentionally does not mutate the workspace: no deletion, no
   artifact moves, and no automatic Operator/Template registration.
+- Added `execution_archive_suggestion_write`, a non-destructive report writer
+  that snapshots advisor output into
+  `.omiga/execution/archive-suggestions/*.md` and `*.json` for human review.
 
 Next focused improvements:
 
-- Add a UI/trace affordance that renders advisor recommendations alongside
-  `paramSources` and `metadata.preflight` in the task/record detail pane.
-- Add an explicit report-writing command that saves human-reviewable archive
-  suggestions under `.omiga/execution/archive-suggestions/` after confirmation.
+- If a dedicated ExecutionRecord browser is added, reuse the existing
+  execution-insight summarizer there as well; chat cards and the task execution
+  step panel already render advisor recommendations alongside `paramSources`
+  and `metadata.preflight`.
+
+### Product rule: background style analysis is opt-in by signal, not automatic
+
+Background analysis must stay assistive rather than noisy. The runtime should
+not invoke advisor or style-learning analysis after every visualization run.
+Instead, use a cheap eligibility check and ask the user before running heavier
+analysis unless the user explicitly requested learning/promotion.
+
+Recommended trigger signals:
+
+- A visualization run succeeded and produced editable artifacts.
+- The same template or script family was customized repeatedly in the current
+  project.
+- Execution provenance shows user-selected reusable choices in
+  `paramSources` / `metadata.preflight`.
+- The user says to save, remember, learn, promote, or reuse the style.
+- No equivalent analysis has been dismissed or completed recently for the same
+  template/style signature.
+
+Suppress prompts for failed runs, smoke tests, first-run defaults, one-off
+exploration, and already-dismissed signatures. The prompt should describe the
+human outcome, not the JSON: for example, "This plot style looks reusable.
+Analyze it and suggest whether to save it as a project preference?"
+
+After analysis, show a concise bottom-right message with the conclusion and
+next action: save as project preference, save as user preference, view details,
+or ignore. Developer builds may expose diagnostics and JSON; release builds
+should keep JSON as agent/runtime input only.
 
 ## Non-goals for MVP
 
@@ -871,6 +1079,8 @@ After MVP:
 2. **Stage inference**
    - infer data stage from file types and file internals
    - use stage to narrow Unit Index candidates
+   - implemented for filename/extension inference and bounded project-local
+     table previews through `unit_search.files`.
 
 3. **Two-stage Agent routing**
    - inject a small category/tag/stage index first
@@ -879,7 +1089,9 @@ After MVP:
 4. **Environment resolver**
    - build on the V3 diagnostic `envRef` resolver
    - support conda/docker/singularity/module/system profiles
-   - add explicit, opt-in automatic preparation and package checks
+   - prepare conda/mamba/micromamba envs and local Docker/Singularity images
+     only when an Operator declares `runtime.envRef`
+   - keep checks and prepare plans side-effect free outside Operator execution
    - keep runtime binding unit-level; do not create a plugin-wide environment
 
 5. **Crystallization reports**

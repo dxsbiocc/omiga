@@ -75,7 +75,7 @@ pub(crate) fn has_plugin_source(
     request: &RetrievalRequest,
 ) -> bool {
     registrations.iter().any(|registration| {
-        registration.retrieval.sources.iter().any(|source| {
+        registration.retrieval.resources.iter().any(|source| {
             source.category == request.category
                 && source.id == request.source
                 && source
@@ -98,7 +98,7 @@ fn capability_supports_operation(capability: &str, operation: RetrievalOperation
 mod tests {
     use super::*;
     use crate::domain::plugin_runtime::retrieval::manifest::{
-        PluginRetrievalManifest, PluginRetrievalRuntime, PluginRetrievalSource,
+        PluginRetrievalManifest, PluginRetrievalResource, PluginRetrievalRuntime,
     };
     use crate::domain::retrieval::types::RetrievalTool;
     use crate::domain::tools::WebSearchApiKeys;
@@ -140,7 +140,7 @@ mod tests {
                     cancel_grace_ms: None,
                     concurrency: 1,
                 },
-                sources: vec![PluginRetrievalSource {
+                resources: vec![PluginRetrievalResource {
                     id: source_id.to_string(),
                     category: "dataset".to_string(),
                     label: source_id.to_string(),

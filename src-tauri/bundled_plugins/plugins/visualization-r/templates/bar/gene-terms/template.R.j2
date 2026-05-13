@@ -1,0 +1,207 @@
+#!/usr/bin/env Rscript
+# Template: bar/gene-terms
+# Purpose: Enrichment term bars grouped by direction with inline term and gene labels.
+#
+# Migration note:
+#   Migrates OmicsAgent backend/scripts/visual/bar/enrichment_genes from
+#   JSON ggplot DSL to direct, editable R/ggplot2. Source data.json is bundled
+#   as example.tsv.
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    term = arg_or(3, "Description"),
+    pvalue = arg_or(4, "p.adjust"),
+    genes = arg_or(5, "geneID"),
+    group = arg_or(6, "Change")
+  ),
+  labels = list(
+    title = arg_or(7, ""),
+    x = arg_or(8, "-log10(p.adjust)"),
+    y = ""
+  ),
+  group_order = parse_csv_arg(9, "Positive,Negative"),
+  style = list(
+    palette = parse_csv_arg(10, "#79ceb8,#e95f5c"),
+    pvalue_floor = parse_number_arg(11, 1e-8),
+    max_log10_pvalue = parse_number_arg(12, 8),
+    x_breaks = parse_csv_arg(13, "auto"),
+    label_x = parse_number_arg(14, 0.1),
+    term_size = parse_number_arg(15, 4),
+    gene_size = parse_number_arg(16, 3.2),
+    gene_label_max_chars = parse_integer_arg(17, 88),
+    bar_width = parse_number_arg(18, 0.68),
+    bar_alpha = parse_number_arg(19, 0.58),
+    base_size = parse_number_arg(20, 12)
+  )
+)
+delimiter <- arg_or(21, "auto")
+width <- parse_number_arg(22, 8)
+height <- parse_number_arg(23, 6)
+dpi <- parse_integer_arg(24, 300)
+
+extend_palette <- function(values, palette) {
+  values <- unique(as.character(values))
+  if (length(palette) == 0) palette <- c("#79ceb8", "#e95f5c")
+  if (length(values) > length(palette)) {
+    palette <- grDevices::colorRampPalette(palette)(length(values))
+  } else {
+    palette <- palette[seq_along(values)]
+  }
+  stats::setNames(palette, values)
+}
+
+ordered_values <- function(values, preferred_order) {
+  values <- unique(as.character(values))
+  if (length(preferred_order) == 0) return(values)
+  ordered <- preferred_order[preferred_order %in% values]
+  c(ordered, setdiff(values, ordered))
+}
+
+truncate_label <- function(value, max_chars) {
+  value <- as.character(value)
+  if (is.na(value)) return("")
+  if (max_chars <= 0 || nchar(value, type = "width") <= max_chars) return(value)
+  paste0(substr(value, 1, max(1, max_chars - 1)), "…")
+}
+
+gene_count <- function(value) {
+  genes <- trimws(strsplit(as.character(value), "/", fixed = TRUE)[[1]])
+  sum(nzchar(genes))
+}
+
+prepare_data <- function(df, config) {
+  required <- c(config$columns$term, config$columns$pvalue, config$columns$genes, config$columns$group)
+  validate_columns(df, required, "bar/gene-terms input")
+  df <- ensure_numeric_columns(df, config$columns$pvalue, "bar/gene-terms input")
+  df$.term_raw <- as.character(df[[config$columns$term]])
+  df$.gene_raw <- as.character(df[[config$columns$genes]])
+  df$.group_raw <- as.character(df[[config$columns$group]])
+  df$.pvalue <- df[[config$columns$pvalue]]
+  df <- df[is.finite(df$.pvalue) & nzchar(df$.term_raw) & nzchar(df$.gene_raw) & nzchar(df$.group_raw), , drop = FALSE]
+  if (!nrow(df)) stop("bar/gene-terms input has no plottable rows.", call. = FALSE)
+
+  groups <- ordered_values(df$.group_raw, config$group_order)
+  df$.group <- factor(df$.group_raw, levels = groups)
+  df$.log10_pvalue <- -log10(pmax(df$.pvalue, config$style$pvalue_floor))
+  df$.log10_pvalue <- pmin(df$.log10_pvalue, config$style$max_log10_pvalue)
+  df$.gene_label <- vapply(df$.gene_raw, truncate_label, character(1), max_chars = config$style$gene_label_max_chars)
+  df$.gene_count <- vapply(df$.gene_raw, gene_count, integer(1))
+  df <- df[order(df$.group, df$.log10_pvalue, df$.term_raw), , drop = FALSE]
+  df$.row <- seq_len(nrow(df))
+  df$.row <- max(df$.row) - df$.row + 1
+  df
+}
+
+gene_terms_theme <- function(config) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base + ggplot2::theme(
+    axis.text.y = ggplot2::element_blank(),
+    axis.ticks.y = ggplot2::element_blank(),
+    axis.line.y = ggplot2::element_blank(),
+    axis.title.y = ggplot2::element_blank(),
+    legend.position = "top",
+    legend.direction = "horizontal",
+    legend.title = ggplot2::element_blank(),
+    plot.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.background = ggplot2::element_rect(fill = "white", color = NA),
+    panel.grid.major.y = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    plot.title = ggplot2::element_text(hjust = 0.5, face = "bold")
+  )
+}
+
+make_plot <- function(df, config) {
+  groups <- levels(df$.group)
+  palette <- extend_palette(groups, config$style$palette)
+  x_breaks <- suppressWarnings(as.numeric(config$style$x_breaks))
+  x_breaks <- x_breaks[is.finite(x_breaks)]
+  if (!length(x_breaks)) x_breaks <- pretty(c(0, max(df$.log10_pvalue, na.rm = TRUE)), n = 4)
+  x_max <- max(max(x_breaks, na.rm = TRUE), max(df$.log10_pvalue, na.rm = TRUE)) * 1.08
+
+  ggplot2::ggplot(df, ggplot2::aes(y = .row, fill = .group, colour = .group)) +
+    ggplot2::geom_col(
+      ggplot2::aes(x = .log10_pvalue),
+      orientation = "y",
+      width = config$style$bar_width,
+      alpha = config$style$bar_alpha,
+      show.legend = TRUE
+    ) +
+    ggplot2::geom_text(
+      ggplot2::aes(x = config$style$label_x, y = .row + 0.14, label = .term_raw),
+      inherit.aes = TRUE,
+      hjust = 0,
+      size = config$style$term_size,
+      color = "#111111",
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_text(
+      ggplot2::aes(x = config$style$label_x, y = .row - 0.22, label = .gene_label, colour = .group),
+      hjust = 0,
+      size = config$style$gene_size,
+      fontface = "italic",
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_fill_manual(values = palette) +
+    ggplot2::scale_colour_manual(values = palette) +
+    ggplot2::scale_x_continuous(limits = c(0, x_max), breaks = x_breaks, expand = ggplot2::expansion(mult = c(0, 0.08))) +
+    ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0.05, 0.08))) +
+    ggplot2::coord_cartesian(clip = "off") +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    gene_terms_theme(config)
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "groups", "max_log10_pvalue", "max_gene_count"),
+      value = c("bar/gene-terms", nrow(plot_df), paste(levels(plot_df$.group), collapse = ","), max(plot_df$.log10_pvalue, na.rm = TRUE), max(plot_df$.gene_count, na.rm = TRUE))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "bar/gene-terms", rows = nrow(plot_df), groups = paste(levels(plot_df$.group), collapse = ","), max_log10_pvalue = max(plot_df$.log10_pvalue, na.rm = TRUE), max_gene_count = max(plot_df$.gene_count, na.rm = TRUE)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s
+", outdir))
+}
+main()

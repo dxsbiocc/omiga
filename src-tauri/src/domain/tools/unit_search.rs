@@ -24,6 +24,9 @@ pub struct UnitSearchArgs {
     /// Optional stageInput/stageOutput substring.
     #[serde(default)]
     pub stage: Option<String>,
+    /// Optional file paths or names used to infer likely input stages.
+    #[serde(default)]
+    pub files: Vec<String>,
     /// Optional maximum number of entries to return.
     #[serde(default)]
     pub limit: Option<usize>,
@@ -44,6 +47,11 @@ impl ToolImpl for UnitSearchTool {
         let kind = super::unit_list::parse_kind(args.kind.as_deref())?;
         let skills = super::unit_list::load_skills(ctx).await;
         let units = crate::domain::unit_index::build_unit_index(&skills);
+        let inferred_stages = crate::domain::unit_index::infer_stages_from_paths_with_root(
+            Some(&ctx.project_root),
+            &args.files,
+        );
+        let stage_filters = crate::domain::unit_index::inferred_stage_terms(&inferred_stages);
         let matches = crate::domain::unit_index::filter_units(
             &units,
             &crate::domain::unit_index::UnitFilter {
@@ -52,6 +60,7 @@ impl ToolImpl for UnitSearchTool {
                 category: args.category.clone(),
                 tag: args.tag.clone(),
                 stage: args.stage.clone(),
+                stages: stage_filters.clone(),
                 limit: args.limit.or(Some(50)),
             },
         );
@@ -61,6 +70,9 @@ impl ToolImpl for UnitSearchTool {
             "category": args.category,
             "tag": args.tag,
             "stage": args.stage,
+            "files": args.files,
+            "inferredStages": inferred_stages,
+            "stageFilters": stage_filters,
             "count": matches.len(),
             "units": matches,
             "note": "Use unit_describe with canonicalId for the full manifest/spec after narrowing candidates. Prefer template_execute for Template units and operator__* for atomic Operator units."
@@ -98,6 +110,11 @@ pub fn schema() -> ToolSchema {
                 "stage": {
                     "type": "string",
                     "description": "Optional stageInput/stageOutput substring, e.g. count_matrix or diff_results."
+                },
+                "files": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional file paths or names used to infer likely stageInput values when stage is omitted, e.g. counts.tsv, sample_metadata.csv, de_results.tsv, genes.rnk."
                 },
                 "limit": {
                     "type": "integer",

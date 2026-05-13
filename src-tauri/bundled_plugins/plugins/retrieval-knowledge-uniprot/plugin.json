@@ -17,7 +17,7 @@
       "cancelGraceMs": 750,
       "concurrency": 1
     },
-    "sources": [
+    "resources": [
       {
         "id": "uniprot",
         "category": "knowledge",
@@ -72,7 +72,7 @@
     ]
   },
   "interface": {
-    "displayName": "UniProt Retrieval Source",
+    "displayName": "UniProt Retrieval Resource",
     "shortDescription": "UniProt as a local retrieval plugin",
     "longDescription": "Runs UniProtKB search/query/fetch through Omiga local subprocess routing.",
     "developerName": "Omiga",

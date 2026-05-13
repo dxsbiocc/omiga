@@ -208,7 +208,7 @@ impl RetrievalResponse {
 pub enum RetrievalError {
     #[error("invalid retrieval request: {message}")]
     InvalidRequest { message: String },
-    #[error("retrieval source disabled: {category}.{source_id}: {message}")]
+    #[error("retrieval resource disabled: {category}.{source_id}: {message}")]
     SourceDisabled {
         category: String,
         source_id: String,

@@ -1,0 +1,66 @@
+#!/usr/bin/env Rscript
+# Template: line/time-series
+# Purpose: Multi-series time-course line plot with optional interval ribbons.
+#
+# Input example:
+#   See example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template line/time-series
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(time = arg_or(3, "time"), value = arg_or(4, "value"), series = arg_or(5, "series"), lower = arg_or(6, "lower"), upper = arg_or(7, "upper")),
+  labels = list(title = arg_or(8, "Time series line plot")),
+  style = list(base_size = 12)
+)
+delimiter <- arg_or(9, "auto"); width <- as.numeric(arg_or(10, "8")); height <- as.numeric(arg_or(11, "5")); dpi <- as.integer(arg_or(12, "300"))
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$time, config$columns$value, config$columns$series), "line/time-series input")
+  interval_cols <- c(resolve_optional_column(df, config$columns$lower), resolve_optional_column(df, config$columns$upper))
+  df <- ensure_numeric_columns(df, c(config$columns$time, config$columns$value, interval_cols), "line/time-series input")
+  df[order(df[[config$columns$series]], df[[config$columns$time]]), , drop = FALSE]
+}
+
+make_plot <- function(df, config) {
+  lower_col <- resolve_optional_column(df, config$columns$lower)
+  upper_col <- resolve_optional_column(df, config$columns$upper)
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .data[[config$columns$time]], y = .data[[config$columns$value]], color = .data[[config$columns$series]], group = .data[[config$columns$series]]))
+  if (!is.null(lower_col) && !is.null(upper_col)) {
+    p <- p + ggplot2::geom_ribbon(ggplot2::aes(ymin = .data[[lower_col]], ymax = .data[[upper_col]], fill = .data[[config$columns$series]]), alpha = 0.16, color = NA, show.legend = FALSE)
+  }
+  p +
+    ggplot2::geom_line(linewidth = 0.85) +
+    ggplot2::geom_point(size = 2.2) +
+    ggplot2::scale_colour_manual(values = visualization_palette(length(unique(df[[config$columns$series]])))) +
+    ggplot2::scale_fill_manual(values = visualization_palette(length(unique(df[[config$columns$series]])))) +
+    ggplot2::labs(title = config$labels$title, x = config$columns$time, y = config$columns$value, color = config$columns$series) +
+    theme_visualization(base_size = config$style$base_size)
+}
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "rows"), value = c("line/time-series", nrow(plot_df))), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "line/time-series", rows = nrow(plot_df)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

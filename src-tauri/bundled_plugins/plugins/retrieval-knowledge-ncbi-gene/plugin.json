@@ -17,7 +17,7 @@
       "cancelGraceMs": 750,
       "concurrency": 1
     },
-    "sources": [
+    "resources": [
       {
         "id": "ncbi_gene",
         "category": "knowledge",
@@ -69,7 +69,7 @@
     ]
   },
   "interface": {
-    "displayName": "NCBI Gene Retrieval Source",
+    "displayName": "NCBI Gene Retrieval Resource",
     "shortDescription": "NCBI Gene as a local retrieval plugin",
     "longDescription": "Runs NCBI Gene search/query/fetch through Omiga local subprocess routing.",
     "developerName": "Omiga",

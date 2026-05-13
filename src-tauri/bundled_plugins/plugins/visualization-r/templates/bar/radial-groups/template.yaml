@@ -1,0 +1,169 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_bar_radial_groups
+  version: 0.1.0
+  name: Radial Groups
+  description: Grouped radial bar chart with gene labels and inner group bands, migrated from OmicsAgent bar/radial_groups.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - bar
+    - radial
+    - polar
+    - grouped
+    - table
+classification:
+  category: visualization/bar
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - bar
+    - radial
+    - polar
+    - grouped
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: CSV/TSV table with label, group, and value columns. See example.tsv converted from OmicsAgent data.json.
+  params:
+    label_column:
+      kind: string
+      default: gene
+    group_column:
+      kind: string
+      default: group
+    value_column:
+      kind: string
+      default: count
+    title:
+      kind: string
+      default: ""
+    group_order:
+      kind: string
+      default: auto
+      description: Comma-separated group order, or auto to preserve input order.
+    palette:
+      kind: string
+      default: "#009392,#39b185,#9ccb86,#e9e29c,#eeb479,#e88471,#cf597e"
+    inner_radius:
+      kind: number
+      default: -100
+    max_value:
+      kind: string
+      default: 120
+      description: Outer radial limit. Use auto or numeric value.
+    label_offset:
+      kind: number
+      default: 18
+    group_label_radius:
+      kind: number
+      default: -45
+    group_band_min:
+      kind: number
+      default: -7
+    group_band_max:
+      kind: number
+      default: -3
+    spacer_rows:
+      kind: integer
+      default: 1
+      description: Blank rows inserted between groups to create radial gaps.
+    bar_width:
+      kind: number
+      default: 0.82
+    label_size:
+      kind: number
+      default: 3.2
+    group_label_size:
+      kind: number
+      default: 4.2
+    base_size:
+      kind: number
+      default: 12
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 10
+    height:
+      kind: number
+      default: 9
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - radial_groups
+  - grouped_radial
+  - grouped_polar_bar
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.label_column}
+    - ${params.group_column}
+    - ${params.value_column}
+    - ${params.title}
+    - ${params.group_order}
+    - ${params.palette}
+    - ${params.inner_radius}
+    - ${params.max_value}
+    - ${params.label_offset}
+    - ${params.group_label_radius}
+    - ${params.group_band_min}
+    - ${params.group_band_max}
+    - ${params.spacer_rows}
+    - ${params.bar_width}
+    - ${params.label_size}
+    - ${params.group_label_size}
+    - ${params.base_size}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

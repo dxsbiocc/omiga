@@ -1,0 +1,100 @@
+#!/usr/bin/env Rscript
+# Template: scatter/bubble
+# Purpose: Bubble plot for three numeric variables plus optional grouping.
+#
+# Input example:
+#   See example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/bubble
+#
+# Personalization:
+#   This Rscript template emits plot-script.R and rerun.sh by default.
+#   For one-off customization, edit the emitted source artifact and rerun/render it.
+#   To save a reusable style, use scripts/promote_visual_template.py.
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+
+config <- list(
+  columns = list(
+    x = arg_or(3, "x_value"),
+    y = arg_or(4, "y_value"),
+    size = arg_or(5, "size_value"),
+    group = arg_or(6, "group"),
+    label = arg_or(7, "label")
+  ),
+  labels = list(title = arg_or(8, "Bubble plot")),
+  style = list(base_size = 12)
+)
+delimiter <- arg_or(9, "auto"); width <- as.numeric(arg_or(10, "7.5")); height <- as.numeric(arg_or(11, "5.5")); dpi <- as.integer(arg_or(12, "300"))
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$x, config$columns$y, config$columns$size), "scatter/bubble input")
+  df <- ensure_numeric_columns(df, c(config$columns$x, config$columns$y, config$columns$size), "scatter/bubble input")
+  df
+}
+
+make_plot <- function(df, config) {
+  group_col <- resolve_optional_column(df, config$columns$group)
+  label_col <- resolve_optional_column(df, config$columns$label)
+  mapping <- ggplot2::aes(
+    x = .data[[config$columns$x]],
+    y = .data[[config$columns$y]],
+    size = .data[[config$columns$size]]
+  )
+  if (!is.null(group_col)) mapping$colour <- ggplot2::expr(.data[[group_col]])
+  p <- ggplot2::ggplot(df, mapping) +
+    ggplot2::geom_point(alpha = 0.72) +
+    ggplot2::scale_size_continuous(range = c(2.5, 12)) +
+    ggplot2::labs(
+      title = config$labels$title,
+      x = config$columns$x,
+      y = config$columns$y,
+      size = config$columns$size,
+      colour = group_col
+    ) +
+    theme_visualization(base_size = config$style$base_size)
+  if (!is.null(group_col)) p <- p + ggplot2::scale_colour_manual(values = visualization_palette(length(unique(df[[group_col]]))))
+  if (!is.null(label_col)) {
+    labels <- df[nzchar(as.character(df[[label_col]])), , drop = FALSE]
+    p <- p + ggplot2::geom_text(
+      data = labels,
+      ggplot2::aes(label = .data[[label_col]]),
+      vjust = -0.8,
+      size = 3,
+      check_overlap = TRUE,
+      show.legend = FALSE
+    )
+  }
+  p
+}
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- make_plot(plot_df, config)
+  p <- customize_plot(p, plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "rows"), value = c("scatter/bubble", nrow(plot_df))), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "scatter/bubble", rows = nrow(plot_df)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+
+main()

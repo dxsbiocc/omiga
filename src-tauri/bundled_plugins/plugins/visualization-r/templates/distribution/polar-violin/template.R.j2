@@ -1,0 +1,234 @@
+#!/usr/bin/env Rscript
+# Template: distribution/polar-violin
+# Purpose: Polar/radial violin plot for ordered category distributions.
+#
+# Migration note:
+#   This template migrates OmicsAgent backend/scripts/visual/boxplot/polar
+#   from the private JSON ggplot2 DSL into direct, editable R/ggplot2 code.
+#   The source data.json is bundled as example.tsv.
+#
+# Input example:
+#   See example.tsv with month/shap columns.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template distribution/polar-violin
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default) {
+  raw <- tolower(arg_or(index, if (default) "true" else "false"))
+  if (raw %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (raw %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+parse_auto_number <- function(raw, values, fallback_fun) {
+  if (is.null(raw) || !nzchar(raw) || tolower(raw) == "auto") return(fallback_fun(values))
+  parsed <- suppressWarnings(as.numeric(raw))
+  if (is.na(parsed)) fallback_fun(values) else parsed
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    category = arg_or(3, "month"),
+    value = arg_or(4, "shap")
+  ),
+  labels = list(title = arg_or(5, "")),
+  category_order = parse_csv_arg(6, "Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec"),
+  style = list(
+    palette = parse_csv_arg(7, "#ed6ca4,#fbb05b,#acd372,#7bc4e2"),
+    start_angle = parse_number_arg(8, -1.047198),
+    end_angle = parse_number_arg(9, 1.047198),
+    radial_min_raw = arg_or(10, "auto"),
+    radial_max_raw = arg_or(11, "auto"),
+    ring_breaks = parse_csv_arg(12, "auto"),
+    violin_width = parse_number_arg(13, 0.86),
+    violin_alpha = parse_number_arg(14, 0.85),
+    axis_color = arg_or(15, "grey50"),
+    ring_color = arg_or(16, "grey55"),
+    label_size = parse_number_arg(17, 3.5),
+    base_size = parse_number_arg(18, 11)
+  ),
+  show_category_labels = parse_logical_arg(19, TRUE)
+)
+delimiter <- arg_or(20, "auto")
+width <- parse_number_arg(21, 8)
+height <- parse_number_arg(22, 6)
+dpi <- parse_integer_arg(23, 300)
+
+extend_palette <- function(values, palette) {
+  values <- unique(as.character(values))
+  if (length(palette) == 0) palette <- c("#ed6ca4", "#fbb05b", "#acd372", "#7bc4e2")
+  if (length(values) > length(palette)) {
+    palette <- grDevices::colorRampPalette(palette)(length(values))
+  } else {
+    palette <- palette[seq_along(values)]
+  }
+  stats::setNames(palette, values)
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$category, config$columns$value), "distribution/polar-violin input")
+  df <- ensure_numeric_columns(df, config$columns$value, "distribution/polar-violin input")
+  df$.category_raw <- as.character(df[[config$columns$category]])
+  df$.value <- df[[config$columns$value]]
+  df <- df[is.finite(df$.value) & nzchar(df$.category_raw), , drop = FALSE]
+  categories <- unique(df$.category_raw)
+  if (length(config$category_order) > 0) {
+    ordered <- config$category_order[config$category_order %in% categories]
+    categories <- c(ordered, setdiff(categories, ordered))
+  }
+  if (length(categories) < 2) {
+    stop("distribution/polar-violin requires at least two categories.", call. = FALSE)
+  }
+  df$.category <- factor(df$.category_raw, levels = categories)
+  df <- df[!is.na(df$.category), , drop = FALSE]
+  df$.x <- as.numeric(df$.category)
+  df
+}
+
+axis_config <- function(df, config) {
+  y_min_floor <- floor(min(df$.value, na.rm = TRUE))
+  y_max_ceiling <- ceiling(max(df$.value, na.rm = TRUE))
+  lower <- parse_auto_number(config$style$radial_min_raw, df$.value, function(values) min(-2, floor(min(values, na.rm = TRUE))))
+  upper <- parse_auto_number(config$style$radial_max_raw, df$.value, function(values) y_max_ceiling + 1)
+  breaks <- suppressWarnings(as.numeric(config$style$ring_breaks))
+  breaks <- breaks[is.finite(breaks) & breaks >= lower & breaks <= upper]
+  if (length(breaks) == 0) breaks <- unique(seq(y_min_floor, y_max_ceiling, length.out = 5))
+  breaks <- breaks[breaks >= lower & breaks <= upper]
+  if (length(breaks) == 0) breaks <- pretty(c(lower, upper), n = 5)
+  list(lower = lower, upper = upper, breaks = unique(breaks), label_y = upper - (upper - lower) * 0.04)
+}
+
+guide_data <- function(df, axis, config) {
+  categories <- levels(df$.category)
+  list(
+    segments = data.frame(.x = seq_along(categories), y = axis$lower, yend = axis$upper),
+    rings = data.frame(yintercept = axis$breaks),
+    labels = data.frame(.x = seq_along(categories), .category = categories, y = axis$label_y)
+  )
+}
+
+plot_theme <- function(config) {
+  ggplot2::theme_minimal(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      axis.text.x = ggplot2::element_blank(),
+      axis.text.y = ggplot2::element_text(face = "bold"),
+      axis.title = ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_blank(),
+      axis.line = ggplot2::element_blank(),
+      panel.grid.major = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"),
+      legend.position = "none",
+      plot.margin = ggplot2::margin(10, 28, 10, 28)
+    )
+}
+
+make_plot <- function(df, config) {
+  categories <- levels(df$.category)
+  palette <- extend_palette(categories, config$style$palette)
+  axis <- axis_config(df, config)
+  guides <- guide_data(df, axis, config)
+  boundary <- data.frame(.x = c(0.5, length(categories) + 0.5), y = axis$lower, yend = axis$upper)
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .x, y = .value, fill = .category, group = .category)) +
+    ggplot2::geom_segment(
+      data = guides$segments,
+      ggplot2::aes(x = .x, xend = .x, y = y, yend = yend),
+      inherit.aes = FALSE,
+      linetype = "dashed",
+      color = config$style$axis_color,
+      linewidth = 0.35
+    ) +
+    ggplot2::geom_segment(
+      data = boundary,
+      ggplot2::aes(x = .x, xend = .x, y = y, yend = yend),
+      inherit.aes = FALSE,
+      color = config$style$axis_color,
+      linewidth = 0.45
+    ) +
+    ggplot2::geom_hline(
+      data = guides$rings,
+      ggplot2::aes(yintercept = yintercept),
+      inherit.aes = FALSE,
+      color = config$style$ring_color,
+      linewidth = 0.35
+    ) +
+    ggplot2::geom_violin(
+      width = config$style$violin_width,
+      alpha = config$style$violin_alpha,
+      color = "white",
+      linewidth = 0.25,
+      show.legend = FALSE,
+      trim = TRUE
+    ) +
+    ggplot2::scale_fill_manual(values = palette, guide = "none") +
+    ggplot2::scale_x_continuous(limits = c(0.5, length(categories) + 0.5), breaks = seq_along(categories), labels = categories, expand = c(0, 0)) +
+    ggplot2::scale_y_continuous(limits = c(axis$lower, axis$upper), breaks = axis$breaks, expand = c(0, 0)) +
+    ggplot2::coord_radial(start = config$style$start_angle, end = config$style$end_angle, clip = "off") +
+    ggplot2::labs(title = config$labels$title, x = "", y = "") +
+    plot_theme(config)
+
+  if (isTRUE(config$show_category_labels)) {
+    p <- p + ggplot2::geom_text(
+      data = guides$labels,
+      ggplot2::aes(x = .x, y = y, label = .category),
+      inherit.aes = FALSE,
+      vjust = 1.5,
+      size = config$style$label_size,
+      fontface = "bold",
+      color = "#111827",
+      show.legend = FALSE
+    )
+  }
+  p
+}
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "categories", "min_value", "max_value"),
+      value = c("distribution/polar-violin", nrow(plot_df), length(levels(plot_df$.category)), min(plot_df$.value, na.rm = TRUE), max(plot_df$.value, na.rm = TRUE))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "distribution/polar-violin", rows = nrow(plot_df), categories = levels(plot_df$.category), min_value = min(plot_df$.value, na.rm = TRUE), max_value = max(plot_df$.value, na.rm = TRUE)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

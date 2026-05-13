@@ -1,0 +1,175 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_distribution_polar_violin
+  version: 0.1.0
+  name: Polar Violin Plot
+  description: Polar/radial violin plot for distributions across ordered categories, migrated from OmicsAgent boxplot/polar.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - distribution
+    - violin
+    - polar
+    - radial
+    - table
+classification:
+  category: visualization/distribution
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - distribution
+    - violin
+    - polar
+    - radial
+    - ordered-categories
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Long-form CSV/TSV table with ordered category and numeric value columns. See example.tsv converted from OmicsAgent data.json.
+  params:
+    category_column:
+      kind: string
+      default: month
+    value_column:
+      kind: string
+      default: shap
+    title:
+      kind: string
+      default: ""
+    category_order:
+      kind: string
+      default: Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec
+      description: Comma-separated category order, or auto.
+    palette:
+      kind: string
+      default: "#ed6ca4,#fbb05b,#acd372,#7bc4e2"
+      description: Comma-separated colors; interpolated when there are more categories.
+    start_angle:
+      kind: number
+      default: -1.047198
+      description: Start angle in radians for coord_radial.
+    end_angle:
+      kind: number
+      default: 1.047198
+      description: End angle in radians for coord_radial.
+    radial_min:
+      kind: string
+      default: auto
+      description: Lower radial limit. Use auto or a numeric value.
+    radial_max:
+      kind: string
+      default: auto
+      description: Upper radial limit. Use auto or a numeric value.
+    ring_breaks:
+      kind: string
+      default: auto
+      description: Comma-separated radial guide values, or auto.
+    violin_width:
+      kind: number
+      default: 0.86
+    violin_alpha:
+      kind: number
+      default: 0.85
+    axis_color:
+      kind: string
+      default: grey50
+    ring_color:
+      kind: string
+      default: grey55
+    label_size:
+      kind: number
+      default: 3.5
+    base_size:
+      kind: number
+      default: 11
+    show_category_labels:
+      kind: boolean
+      default: true
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 8
+    height:
+      kind: number
+      default: 6
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - polar_violin
+  - radial_violin
+  - polar_boxplot
+  - boxplot_polar
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.category_column}
+    - ${params.value_column}
+    - ${params.title}
+    - ${params.category_order}
+    - ${params.palette}
+    - ${params.start_angle}
+    - ${params.end_angle}
+    - ${params.radial_min}
+    - ${params.radial_max}
+    - ${params.ring_breaks}
+    - ${params.violin_width}
+    - ${params.violin_alpha}
+    - ${params.axis_color}
+    - ${params.ring_color}
+    - ${params.label_size}
+    - ${params.base_size}
+    - ${params.show_category_labels}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

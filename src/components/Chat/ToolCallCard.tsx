@@ -29,6 +29,10 @@ import {
   toolDisplayOutputText,
   type ToolCallLike,
 } from "./ToolFoldSummary";
+import {
+  summarizeExecutionInsight,
+  type ExecutionInsight,
+} from "./executionInsight";
 
 type ChatTokens = ReturnType<typeof getChatTokens>;
 
@@ -145,6 +149,79 @@ function computerUsePanelTitle(toolName: string, input: string | undefined): str
   return toolName;
 }
 
+interface ExecutionInsightPanelProps {
+  insight: ExecutionInsight;
+  chat: ChatTokens;
+}
+
+function ExecutionInsightPanel({ insight, chat }: ExecutionInsightPanelProps) {
+  return (
+    <Box
+      sx={{
+        mb: 1,
+        borderRadius: "8px",
+        border: `1px solid ${alpha(chat.accent, 0.22)}`,
+        bgcolor: alpha(chat.accent, 0.055),
+        p: 1,
+      }}
+    >
+      <Stack direction="column" spacing={0.8}>
+        <Stack direction="row" alignItems="center" spacing={0.75} flexWrap="wrap">
+          <Typography
+            sx={{
+              fontSize: 11,
+              fontWeight: 700,
+              color: chat.textPrimary,
+              mr: 0.25,
+            }}
+          >
+            {insight.title}
+          </Typography>
+          {insight.chips.map((chip) => (
+            <Chip
+              key={chip}
+              size="small"
+              label={chip}
+              variant="outlined"
+              sx={{ height: 20, fontSize: 10 }}
+            />
+          ))}
+        </Stack>
+        {insight.sections.map((section) => (
+          <Box key={section.label}>
+            <Typography
+              sx={{
+                fontSize: 10,
+                color: chat.labelMuted,
+                fontWeight: 700,
+                mb: 0.35,
+              }}
+            >
+              {section.label}
+            </Typography>
+            <Stack component="ul" spacing={0.25} sx={{ m: 0, pl: 2 }}>
+              {section.items.map((item) => (
+                <Typography
+                  key={item}
+                  component="li"
+                  sx={{
+                    fontSize: 10,
+                    color: chat.textMuted,
+                    lineHeight: 1.35,
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {item}
+                </Typography>
+              ))}
+            </Stack>
+          </Box>
+        ))}
+      </Stack>
+    </Box>
+  );
+}
+
 export interface ToolCallCardProps {
   foldId: string;
   messageId: string;
@@ -180,6 +257,7 @@ export const ToolCallCard = memo(function ToolCallCard({
     toolCall,
   );
   const structuredError = parseStructuredToolErrorHint(displayOutput);
+  const executionInsight = summarizeExecutionInsight(toolCall.name, displayOutput);
   const isComputerTool = isComputerUseTool(toolCall.name);
   const displayInput = isComputerTool
     ? computerUseInputSummary(toolCall.name, toolCall.input)
@@ -389,6 +467,10 @@ export const ToolCallCard = memo(function ToolCallCard({
                 )}
                 {hasOutput && (
                   <Box>
+                    {executionInsight && (
+                      <ExecutionInsightPanel insight={executionInsight} chat={chat} />
+                    )}
+
                     {structuredError && (
                       <Box
                         sx={{
@@ -492,7 +574,7 @@ export const ToolCallCard = memo(function ToolCallCard({
                         fontWeight: 400,
                       }}
                     >
-                      {structuredError ? "Raw output" : "Output"}
+                      {structuredError || executionInsight ? "Raw output" : "Output"}
                     </Typography>
                     <Box
                       sx={{

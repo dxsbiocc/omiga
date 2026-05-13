@@ -17,7 +17,7 @@
       "cancelGraceMs": 750,
       "concurrency": 1
     },
-    "sources": [
+    "resources": [
       {
         "id": "ena",
         "category": "dataset",
@@ -254,7 +254,7 @@
     ]
   },
   "interface": {
-    "displayName": "ENA Retrieval Source",
+    "displayName": "ENA Retrieval Resource",
     "shortDescription": "ENA study/run/sample/assembly routes as one local retrieval plugin",
     "longDescription": "Runs European Nucleotide Archive search/query/fetch routes through Omiga local subprocess routing.",
     "developerName": "Omiga",

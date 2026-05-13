@@ -1,0 +1,242 @@
+#!/usr/bin/env Rscript
+# Template: scatter/group-jitter
+# Purpose: Grouped differential jitter scatter with category bands and top labels.
+#
+# Migration note:
+#   This template migrates OmicsAgent scatter/jitter_group from a private JSON
+#   ggplot2 DSL into direct, editable R/ggplot2 code. The original data.json
+#   has been converted to example.tsv. It avoids project-specific geoms such as
+#   geom_round_col, geom_round_tile, and geom_text_repel.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/group-jitter
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_csv_arg <- function(index, default = "") {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    category = arg_or(3, "cate"),
+    value = arg_or(4, "logFC"),
+    sign = arg_or(5, "sign"),
+    pvalue = arg_or(6, "adj.P.Val"),
+    label = arg_or(7, "symbol")
+  ),
+  levels = list(
+    categories = parse_csv_arg(8, ""),
+    signs = parse_csv_arg(9, "Down,Up")
+  ),
+  labels = list(title = arg_or(10, "Yap1 Overexpression and Knockout"), y = arg_or(11, "log2FC")),
+  style = list(
+    sign_palette = parse_csv_arg(12, "#2dde98,#ff6c5f"),
+    tile_palette = parse_csv_arg(13, "#3be8b0,#1aafd0,#6a67ce,#ffb900,#fc636b"),
+    label_colors = parse_csv_arg(14, "#595d7a,#595d7a,#c5c5c5,#595d7a,#595d7a"),
+    background_fill = arg_or(15, "#ebf3f5"),
+    link_color = arg_or(16, "#8a8b8c"),
+    jitter_width = parse_number_arg(17, 0.4),
+    point_size = parse_number_arg(18, 1.7),
+    point_alpha = parse_number_arg(19, 0.72),
+    top_k = parse_integer_arg(20, 5),
+    tile_height = parse_number_arg(21, 1.4),
+    background_width = parse_number_arg(22, 0.8),
+    random_seed = parse_integer_arg(23, 1234),
+    base_size = parse_number_arg(24, 12)
+  )
+)
+delimiter <- arg_or(25, "auto")
+width <- parse_number_arg(26, 8)
+height <- parse_number_arg(27, 6)
+dpi <- parse_integer_arg(28, 300)
+
+first_seen <- function(x) unique(as.character(x))
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$category, config$columns$value, config$columns$sign, config$columns$pvalue, config$columns$label), "scatter/group-jitter input")
+  df <- ensure_numeric_columns(df, c(config$columns$value, config$columns$pvalue), "scatter/group-jitter input")
+  df <- df[stats::complete.cases(df[, c(config$columns$category, config$columns$value, config$columns$sign, config$columns$pvalue, config$columns$label), drop = FALSE]), , drop = FALSE]
+  category_levels <- config$levels$categories
+  if (length(category_levels) == 0) category_levels <- first_seen(df[[config$columns$category]])
+  sign_levels <- config$levels$signs
+  if (length(sign_levels) == 0) sign_levels <- first_seen(df[[config$columns$sign]])
+  sign_levels <- c(sign_levels[sign_levels %in% as.character(df[[config$columns$sign]])], setdiff(first_seen(df[[config$columns$sign]]), sign_levels))
+  df <- df[as.character(df[[config$columns$category]]) %in% category_levels & as.character(df[[config$columns$sign]]) %in% sign_levels, , drop = FALSE]
+  df[[config$columns$category]] <- factor(as.character(df[[config$columns$category]]), levels = category_levels)
+  df[[config$columns$sign]] <- factor(as.character(df[[config$columns$sign]]), levels = sign_levels)
+  set.seed(config$style$random_seed)
+  df$.category_index <- as.numeric(df[[config$columns$category]])
+  df$.x <- df$.category_index + stats::runif(nrow(df), -config$style$jitter_width, config$style$jitter_width)
+  df$.neg_log10_p <- -log10(pmax(df[[config$columns$pvalue]], .Machine$double.xmin))
+
+  extent_rows <- lapply(category_levels, function(category) {
+    subset <- df[as.character(df[[config$columns$category]]) == category, , drop = FALSE]
+    values <- subset[[config$columns$value]]
+    data.frame(
+      category = category,
+      .category_index = match(category, category_levels),
+      ymin = min(0, min(values, na.rm = TRUE)),
+      ymax = max(0, max(values, na.rm = TRUE)),
+      stringsAsFactors = FALSE
+    )
+  })
+  extent_df <- do.call(rbind, extent_rows)
+
+  tile_df <- data.frame(
+    category = factor(category_levels, levels = category_levels),
+    .category_index = seq_along(category_levels),
+    stringsAsFactors = FALSE
+  )
+
+  label_rows <- list()
+  for (category in category_levels) {
+    for (direction in c(FALSE, TRUE)) {
+      subset <- df[as.character(df[[config$columns$category]]) == category & (df[[config$columns$value]] > 0) == direction, , drop = FALSE]
+      if (nrow(subset) == 0) next
+      subset <- subset[order(-abs(subset[[config$columns$value]]), subset[[config$columns$pvalue]]), , drop = FALSE]
+      label_rows[[length(label_rows) + 1]] <- utils::head(subset, config$style$top_k)
+    }
+  }
+  label_df <- if (length(label_rows) == 0) df[FALSE, , drop = FALSE] else do.call(rbind, label_rows)
+  label_df$.label_y <- label_df[[config$columns$value]] + ifelse(label_df[[config$columns$value]] >= 0, 0.5, -0.5)
+  label_df$.label_x <- label_df$.x + ifelse(label_df$.x >= label_df$.category_index, 0.08, -0.08)
+  list(points = df, extents = extent_df, tiles = tile_df, labels = label_df, category_levels = category_levels, sign_levels = sign_levels)
+}
+
+make_plot <- function(prepared, config) {
+  points <- prepared$points
+  extents <- prepared$extents
+  tiles <- prepared$tiles
+  labels <- prepared$labels
+  category_levels <- prepared$category_levels
+  sign_levels <- prepared$sign_levels
+  sign_palette <- config$style$sign_palette
+  if (length(sign_palette) < length(sign_levels)) sign_palette <- rep(sign_palette, length.out = length(sign_levels))
+  sign_palette <- stats::setNames(sign_palette[seq_along(sign_levels)], sign_levels)
+  tile_palette <- config$style$tile_palette
+  if (length(tile_palette) < length(category_levels)) tile_palette <- rep(tile_palette, length.out = length(category_levels))
+  tile_palette <- stats::setNames(tile_palette[seq_along(category_levels)], category_levels)
+  label_colors <- config$style$label_colors
+  if (length(label_colors) < length(category_levels)) label_colors <- rep(label_colors, length.out = length(category_levels))
+  label_colors <- stats::setNames(label_colors[seq_along(category_levels)], category_levels)
+
+  ggplot2::ggplot() +
+    ggplot2::geom_rect(
+      data = extents,
+      ggplot2::aes(
+        xmin = .category_index - config$style$background_width / 2,
+        xmax = .category_index + config$style$background_width / 2,
+        ymin = ymin,
+        ymax = ymax
+      ),
+      inherit.aes = FALSE,
+      fill = config$style$background_fill,
+      alpha = 0.6,
+      colour = NA
+    ) +
+    ggplot2::geom_point(
+      data = points,
+      ggplot2::aes(x = .x, y = .data[[config$columns$value]], colour = .data[[config$columns$sign]]),
+      size = config$style$point_size,
+      alpha = config$style$point_alpha
+    ) +
+    ggplot2::geom_tile(
+      data = tiles,
+      ggplot2::aes(x = .category_index, y = 0, fill = category),
+      height = config$style$tile_height,
+      width = 0.8,
+      colour = "black",
+      linewidth = 0.35,
+      alpha = 0.72,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_text(
+      data = tiles,
+      ggplot2::aes(x = .category_index, y = 0, label = category, colour = category),
+      size = 3.5,
+      fontface = "bold",
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_segment(
+      data = labels,
+      ggplot2::aes(x = .x, xend = .label_x, y = .data[[config$columns$value]], yend = .label_y),
+      inherit.aes = FALSE,
+      linewidth = 0.24,
+      color = config$style$link_color,
+      alpha = 0.75,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_text(
+      data = labels,
+      ggplot2::aes(x = .label_x, y = .label_y, label = .data[[config$columns$label]]),
+      inherit.aes = FALSE,
+      size = 2.7,
+      color = "grey20",
+      check_overlap = TRUE,
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_colour_manual(values = c(sign_palette, label_colors), breaks = sign_levels, name = "Change") +
+    ggplot2::scale_fill_manual(values = tile_palette) +
+    ggplot2::scale_x_continuous(breaks = seq_along(category_levels), labels = rep("", length(category_levels)), expand = ggplot2::expansion(mult = c(0.04, 0.04))) +
+    ggplot2::labs(title = config$labels$title, x = NULL, y = config$labels$y) +
+    theme_visualization(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.grid = ggplot2::element_blank(),
+      axis.title = ggplot2::element_text(size = 13, colour = "black", face = "bold"),
+      axis.line.y = ggplot2::element_line(colour = "black", linewidth = 0.85),
+      axis.line.x = ggplot2::element_blank(),
+      axis.text.x = ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_blank(),
+      legend.title = ggplot2::element_text(size = 12, face = "bold"),
+      legend.text = ggplot2::element_text(size = 11),
+      plot.title = ggplot2::element_text(face = "bold", hjust = 0.5)
+    )
+}
+
+customize_plot <- function(p, prepared, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  prepared <- prepare_data(df, config)
+  p <- customize_plot(make_plot(prepared, config), prepared, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "categories", "signs", "labels"),
+      value = c("scatter/group-jitter", nrow(prepared$points), length(prepared$category_levels), paste(prepared$sign_levels, collapse = ","), nrow(prepared$labels))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "scatter/group-jitter", rows = nrow(prepared$points), categories = length(prepared$category_levels), signs = prepared$sign_levels, labels = nrow(prepared$labels)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

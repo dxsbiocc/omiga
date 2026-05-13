@@ -1,0 +1,225 @@
+#!/usr/bin/env Rscript
+# Template: bar/waterfall
+# Purpose: Publication-style waterfall chart for ordered total/change rows.
+#
+# Migration note:
+#   This template migrates OmicsAgent backend/scripts/visual/bar/waterfall
+#   from the private JSON plotting DSL into direct, editable R/ggplot2 code.
+#   The bundled example.tsv is converted from the source data.json.
+#
+# Input example:
+#   See example.tsv with ordered desc/amount rows. By default the first and
+#   last rows are treated as absolute total bars and intermediate rows as deltas.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template bar/waterfall
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default) {
+  value <- tolower(arg_or(index, if (default) "true" else "false"))
+  if (value %in% c("1", "true", "yes", "y")) TRUE else if (value %in% c("0", "false", "no", "n")) FALSE else default
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    label = arg_or(3, "desc"),
+    amount = arg_or(4, "amount"),
+    type = arg_or(5, "")
+  ),
+  total_mode = tolower(arg_or(6, "first_last")),
+  labels = list(
+    title = arg_or(7, "Waterfall plot"),
+    x = arg_or(8, ""),
+    y = arg_or(9, "Amount")
+  ),
+  style = list(
+    palette = c(increase = "#2A9D8F", decrease = "#E76F51", total = "#3B82F6"),
+    base_size = 12,
+    bar_width = 0.72,
+    connector_color = "#6B7280",
+    connector_linewidth = 0.45,
+    label_size = 3.4,
+    label_padding_fraction = 0.035
+  ),
+  value_labels = parse_logical_arg(10, TRUE)
+)
+delimiter <- arg_or(11, "auto")
+width <- parse_number_arg(12, 8)
+height <- parse_number_arg(13, 5.5)
+dpi <- parse_integer_arg(14, 300)
+
+if (!config$total_mode %in% c("first_last", "none")) {
+  stop("total_mode must be one of: first_last, none", call. = FALSE)
+}
+
+classify_row_types <- function(df, config) {
+  n <- nrow(df)
+  explicit_type <- resolve_optional_column(df, config$columns$type)
+  if (!is.null(explicit_type)) {
+    type <- tolower(trimws(as.character(df[[explicit_type]])))
+    type[type %in% c("absolute", "subtotal", "net", "ending")] <- "total"
+    type[type %in% c("delta", "change", "relative")] <- "change"
+    type[!type %in% c("total", "change")] <- "change"
+    return(type)
+  }
+  type <- rep("change", n)
+  if (config$total_mode == "first_last" && n >= 2) {
+    type[c(1, n)] <- "total"
+  }
+  type
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$label, config$columns$amount), "bar/waterfall input")
+  df <- ensure_numeric_columns(df, config$columns$amount, "bar/waterfall input")
+  df$.label <- as.character(df[[config$columns$label]])
+  df$.amount <- df[[config$columns$amount]]
+  if (any(!is.finite(df$.amount))) {
+    stop("bar/waterfall input amount column contains non-finite values", call. = FALSE)
+  }
+  if (any(!nzchar(df$.label))) {
+    stop("bar/waterfall input label column contains empty values", call. = FALSE)
+  }
+
+  df$.index <- seq_len(nrow(df))
+  df$.type <- classify_row_types(df, config)
+  df$.start <- 0
+  df$.end <- 0
+  cumulative <- 0
+  for (i in seq_len(nrow(df))) {
+    if (df$.type[[i]] == "total") {
+      df$.start[[i]] <- 0
+      df$.end[[i]] <- df$.amount[[i]]
+      cumulative <- df$.amount[[i]]
+    } else {
+      df$.start[[i]] <- cumulative
+      cumulative <- cumulative + df$.amount[[i]]
+      df$.end[[i]] <- cumulative
+    }
+  }
+  df$.ymin <- pmin(df$.start, df$.end)
+  df$.ymax <- pmax(df$.start, df$.end)
+  df$.direction <- ifelse(df$.type == "total", "total", ifelse(df$.amount >= 0, "increase", "decrease"))
+  df$.x <- df$.index
+  df$.xmin <- df$.x - config$style$bar_width / 2
+  df$.xmax <- df$.x + config$style$bar_width / 2
+  df$.label_value <- ifelse(df$.type == "total", df$.end, df$.amount)
+  df$.label_y <- ifelse(df$.label_value >= 0, df$.ymax, df$.ymin)
+  df$.label_vjust <- ifelse(df$.label_value >= 0, -0.35, 1.25)
+  df
+}
+
+connector_data <- function(df, config) {
+  if (nrow(df) < 2) return(data.frame())
+  data.frame(
+    x = head(df$.xmax, -1),
+    xend = tail(df$.xmin, -1),
+    y = head(df$.end, -1),
+    yend = head(df$.end, -1)
+  )
+}
+
+format_waterfall_value <- function(x) {
+  formatted <- format(round(x, 2), big.mark = ",", trim = TRUE, scientific = FALSE)
+  ifelse(x > 0, paste0("+", formatted), formatted)
+}
+
+make_plot <- function(df, config) {
+  connectors <- connector_data(df, config)
+  value_range <- range(c(df$.ymin, df$.ymax, 0), finite = TRUE)
+  padding <- diff(value_range) * config$style$label_padding_fraction
+  if (!is.finite(padding) || padding == 0) padding <- max(abs(value_range), 1) * config$style$label_padding_fraction
+
+  p <- ggplot2::ggplot(df) +
+    ggplot2::geom_hline(yintercept = 0, linewidth = 0.35, color = "#9CA3AF")
+  if (nrow(connectors) > 0) {
+    p <- p + ggplot2::geom_segment(
+      data = connectors,
+      ggplot2::aes(x = x, xend = xend, y = y, yend = yend),
+      inherit.aes = FALSE,
+      linewidth = config$style$connector_linewidth,
+      color = config$style$connector_color,
+      linetype = "dashed"
+    )
+  }
+  p <- p +
+    ggplot2::geom_rect(
+      ggplot2::aes(xmin = .xmin, xmax = .xmax, ymin = .ymin, ymax = .ymax, fill = .direction),
+      color = "white",
+      linewidth = 0.35
+    ) +
+    ggplot2::scale_fill_manual(
+      values = config$style$palette,
+      breaks = c("increase", "decrease", "total"),
+      labels = c("Increase", "Decrease", "Total"),
+      name = NULL
+    ) +
+    ggplot2::scale_x_continuous(
+      breaks = df$.x,
+      labels = df$.label,
+      expand = ggplot2::expansion(add = 0.45)
+    ) +
+    ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0.08, 0.12))) +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    theme_visualization(base_size = config$style$base_size) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(angle = 35, hjust = 1, vjust = 1),
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      legend.position = "top"
+    )
+  if (isTRUE(config$value_labels)) {
+    label_df <- df
+    label_df$.label_y <- ifelse(label_df$.label_value >= 0, label_df$.label_y + padding, label_df$.label_y - padding)
+    p <- p + ggplot2::geom_text(
+      data = label_df,
+      ggplot2::aes(x = .x, y = .label_y, label = format_waterfall_value(.label_value), vjust = .label_vjust),
+      inherit.aes = FALSE,
+      size = config$style$label_size,
+      color = "#111827"
+    )
+  }
+  p
+}
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "total_mode", "final_value"),
+      value = c("bar/waterfall", nrow(plot_df), config$total_mode, tail(plot_df$.end, 1))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "bar/waterfall", rows = nrow(plot_df), total_mode = config$total_mode, final_value = tail(plot_df$.end, 1)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

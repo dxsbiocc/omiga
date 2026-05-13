@@ -11,7 +11,7 @@ pub const SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 pub struct PluginRetrievalManifest {
     pub protocol_version: u32,
     pub runtime: PluginRetrievalRuntime,
-    pub sources: Vec<PluginRetrievalSource>,
+    pub resources: Vec<PluginRetrievalResource>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -29,7 +29,7 @@ pub struct PluginRetrievalRuntime {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct PluginRetrievalSource {
+pub struct PluginRetrievalResource {
     pub id: String,
     pub category: String,
     pub label: String,
@@ -52,8 +52,8 @@ struct RawPluginRetrievalManifest {
     #[serde(default, alias = "protocol_version")]
     protocol_version: Option<u32>,
     runtime: RawPluginRetrievalRuntime,
-    #[serde(default)]
-    sources: Vec<RawPluginRetrievalSource>,
+    #[serde(default, alias = "sources")]
+    resources: Vec<RawPluginRetrievalResource>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -78,7 +78,7 @@ struct RawPluginRetrievalRuntime {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RawPluginRetrievalSource {
+struct RawPluginRetrievalResource {
     id: String,
     category: String,
     #[serde(default)]
@@ -127,17 +127,17 @@ pub fn load_plugin_retrieval_manifest(
             "unsupported retrieval protocol version `{protocol_version}`; expected `{SUPPORTED_PROTOCOL_VERSION}`"
         ));
     }
-    if raw.sources.is_empty() {
-        return Err("retrieval.sources must contain at least one source".to_string());
+    if raw.resources.is_empty() {
+        return Err("retrieval.resources must contain at least one resource".to_string());
     }
 
     Ok(PluginRetrievalManifest {
         protocol_version,
         runtime: validate_runtime(plugin_root, raw.runtime)?,
-        sources: raw
-            .sources
+        resources: raw
+            .resources
             .into_iter()
-            .map(validate_source)
+            .map(validate_resource)
             .collect::<Result<Vec<_>, _>>()?,
     })
 }
@@ -181,15 +181,15 @@ fn validate_runtime(
     })
 }
 
-fn validate_source(raw: RawPluginRetrievalSource) -> Result<PluginRetrievalSource, String> {
+fn validate_resource(raw: RawPluginRetrievalResource) -> Result<PluginRetrievalResource, String> {
     let id = normalize_id(&raw.id);
     let category = normalize_category(&raw.category);
     if id.is_empty() {
-        return Err("retrieval.sources[].id must not be empty".to_string());
+        return Err("retrieval.resources[].id must not be empty".to_string());
     }
     if category.is_empty() {
         return Err(format!(
-            "retrieval source `{id}` category must not be empty"
+            "retrieval resource `{id}` category must not be empty"
         ));
     }
     let capabilities = raw
@@ -200,7 +200,7 @@ fn validate_source(raw: RawPluginRetrievalSource) -> Result<PluginRetrievalSourc
         .collect::<Vec<_>>();
     if capabilities.is_empty() {
         return Err(format!(
-            "retrieval source `{category}.{id}` must declare at least one capability"
+            "retrieval resource `{category}.{id}` must declare at least one capability"
         ));
     }
     for capability in &capabilities {
@@ -208,27 +208,27 @@ fn validate_source(raw: RawPluginRetrievalSource) -> Result<PluginRetrievalSourc
             "search" | "fetch" | "query" => {}
             other => {
                 return Err(format!(
-                    "retrieval source `{category}.{id}` has unsupported capability `{other}`"
+                    "retrieval resource `{category}.{id}` has unsupported capability `{other}`"
                 ))
             }
         }
     }
     if raw.default_enabled {
         return Err(format!(
-            "retrieval source `{category}.{id}` must not be default-enabled in this version"
+            "retrieval resource `{category}.{id}` must not be default-enabled in this version"
         ));
     }
 
     let required_credential_refs = normalize_and_validate_credential_refs(
-        &format!("retrieval source `{category}.{id}` requiredCredentialRefs"),
+        &format!("retrieval resource `{category}.{id}` requiredCredentialRefs"),
         raw.required_credential_refs,
     )?;
     let optional_credential_refs = normalize_and_validate_credential_refs(
-        &format!("retrieval source `{category}.{id}` optionalCredentialRefs"),
+        &format!("retrieval resource `{category}.{id}` optionalCredentialRefs"),
         raw.optional_credential_refs,
     )?;
 
-    Ok(PluginRetrievalSource {
+    Ok(PluginRetrievalResource {
         label: raw.label.unwrap_or_else(|| id.clone()),
         description: raw.description.unwrap_or_default(),
         aliases: raw.aliases.into_iter().map(|v| normalize_id(&v)).collect(),
@@ -346,7 +346,7 @@ mod tests {
                     "requestTimeoutMs": 5000,
                     "concurrency": 1
                 },
-                "sources": [{
+                "resources": [{
                     "id": "Mock-Source",
                     "category": "data",
                     "label": "Mock Source",
@@ -366,15 +366,18 @@ mod tests {
         assert_eq!(manifest.protocol_version, 1);
         assert_eq!(manifest.runtime.command, dir.path().join("mock_plugin.py"));
         assert_eq!(manifest.runtime.args, vec!["--stdio".to_string()]);
-        assert_eq!(manifest.sources[0].id, "mock_source");
-        assert_eq!(manifest.sources[0].category, "dataset");
-        assert_eq!(manifest.sources[0].aliases, vec!["mock_source".to_string()]);
+        assert_eq!(manifest.resources[0].id, "mock_source");
+        assert_eq!(manifest.resources[0].category, "dataset");
         assert_eq!(
-            manifest.sources[0].subcategories,
+            manifest.resources[0].aliases,
+            vec!["mock_source".to_string()]
+        );
+        assert_eq!(
+            manifest.resources[0].subcategories,
             vec!["sample_metadata".to_string()]
         );
         assert_eq!(
-            manifest.sources[0].required_credential_refs,
+            manifest.resources[0].required_credential_refs,
             vec!["pubmed_api_key".to_string()]
         );
     }
@@ -399,20 +402,20 @@ mod tests {
         assert_eq!(manifest.runtime.idle_ttl_ms, Some(30_000));
         assert_eq!(manifest.runtime.request_timeout_ms, Some(5_000));
         assert_eq!(manifest.runtime.cancel_grace_ms, Some(500));
-        assert_eq!(manifest.sources.len(), 1);
-        assert_eq!(manifest.sources[0].category, "dataset");
-        assert_eq!(manifest.sources[0].id, "example_dataset");
+        assert_eq!(manifest.resources.len(), 1);
+        assert_eq!(manifest.resources[0].category, "dataset");
+        assert_eq!(manifest.resources[0].id, "example_dataset");
         assert_eq!(
-            manifest.sources[0].capabilities,
+            manifest.resources[0].capabilities,
             vec![
                 "search".to_string(),
                 "query".to_string(),
                 "fetch".to_string()
             ]
         );
-        assert!(!manifest.sources[0].default_enabled);
+        assert!(!manifest.resources[0].default_enabled);
         assert_eq!(
-            manifest.sources[0].optional_credential_refs,
+            manifest.resources[0].optional_credential_refs,
             vec!["pubmed_email".to_string()]
         );
     }
@@ -424,7 +427,7 @@ mod tests {
             dir.path(),
             json!({
                 "runtime": {"command": "../bad", "concurrency": 1},
-                "sources": [{"id":"mock", "category":"dataset", "capabilities":["search"]}]
+                "resources": [{"id":"mock", "category":"dataset", "capabilities":["search"]}]
             }),
         )
         .unwrap_err();
@@ -439,7 +442,7 @@ mod tests {
             dir.path(),
             json!({
                 "runtime": {"command": "./mock_plugin.py", "concurrency": 1},
-                "sources": [{
+                "resources": [{
                     "id":"mock",
                     "category":"dataset",
                     "capabilities":["search"],
@@ -459,7 +462,7 @@ mod tests {
             dir.path(),
             json!({
                 "runtime": {"command": "./mock_plugin.py", "concurrency": 2},
-                "sources": [{"id":"mock", "category":"dataset", "capabilities":["search"]}]
+                "resources": [{"id":"mock", "category":"dataset", "capabilities":["search"]}]
             }),
         )
         .unwrap_err();

@@ -1,0 +1,228 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_bar_enrichment_groups
+  version: 0.1.0
+  name: Enrich Groups
+  description: Multi-group enrichment bar plot with pathway labels, gene labels, count bubbles, and category strips, migrated from OmicsAgent bar/enrichment_groups.
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - bar
+  - enrichment
+  - pathway
+  - multi-group
+  - table
+classification:
+  category: visualization/bar
+  tags:
+  - visualization
+  - r
+  - ggplot2
+  - bar
+  - enrichment
+  - pathway
+  - multi-group
+  stageInput:
+  - table
+  stageOutput:
+  - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Enrichment result CSV/TSV with row index, ontology/category, term label, adjusted p-value, genes, and count columns. See example.tsv converted from OmicsAgent data.json.
+  params:
+    index_column:
+      kind: string
+      default: index
+    ontology_column:
+      kind: string
+      default: ONTOLOGY
+    term_column:
+      kind: string
+      default: Description
+    pvalue_column:
+      kind: string
+      default: p.adjust
+    gene_column:
+      kind: string
+      default: geneID
+    count_column:
+      kind: string
+      default: Count
+    title:
+      kind: string
+      default: ''
+    x_label:
+      kind: string
+      default: -log10(p.adjust)
+    ontology_order:
+      kind: string
+      default: auto
+      description: Comma-separated ontology/category order, or auto to preserve input order.
+    palette:
+      kind: string
+      default: '#7bc4e2,#acd372,#fbb05b,#ed6ca4'
+      description: Comma-separated category colors; interpolated when there are more categories.
+    pvalue_floor:
+      kind: number
+      default: 1e-8
+      description: Minimum adjusted p-value used before -log10 transform; prevents Inf for zero p-values.
+    max_log10_pvalue:
+      kind: number
+      default: 8
+      description: Cap for -log10(p.adjust), matching the default right-side axis.
+    x_min:
+      kind: number
+      default: -1.6
+    x_max:
+      kind: number
+      default: 8.6
+    x_breaks:
+      kind: string
+      default: 0,2,4,6,8
+      description: Comma-separated positive x-axis breaks, or auto.
+    label_x:
+      kind: number
+      default: 0.05
+    gene_label_x:
+      kind: number
+      default: 0.1
+    count_x:
+      kind: number
+      default: -0.5
+    strip_xmin:
+      kind: number
+      default: -1.5
+    strip_xmax:
+      kind: number
+      default: -1.0
+    term_label_size:
+      kind: number
+      default: 5
+    gene_label_size:
+      kind: number
+      default: 3.5
+    gene_label_max_chars:
+      kind: integer
+      default: 92
+      description: Maximum displayed gene-label characters; use 0 to disable truncation.
+    count_label_size:
+      kind: number
+      default: 3.4
+    count_size_min:
+      kind: number
+      default: 5
+    count_size_max:
+      kind: number
+      default: 16
+    bar_width:
+      kind: number
+      default: 0.62
+    bar_alpha:
+      kind: number
+      default: 0.45
+    strip_alpha:
+      kind: number
+      default: 0.95
+    base_size:
+      kind: number
+      default: 12
+    delimiter:
+      kind: enum
+      enum:
+      - auto
+      - tab
+      - comma
+      default: auto
+    width:
+      kind: number
+      default: 10
+    height:
+      kind: number
+      default: 9
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+- enrichment_groups
+- grouped_enrichment_bar
+- multi_group_enrichment_bar
+- pathway_group_bar
+execution:
+  interpreter: Rscript
+  argv:
+  - ${inputs.table}
+  - ${outdir}
+  - ${params.index_column}
+  - ${params.ontology_column}
+  - ${params.term_column}
+  - ${params.pvalue_column}
+  - ${params.gene_column}
+  - ${params.count_column}
+  - ${params.title}
+  - ${params.x_label}
+  - ${params.ontology_order}
+  - ${params.palette}
+  - ${params.pvalue_floor}
+  - ${params.max_log10_pvalue}
+  - ${params.x_min}
+  - ${params.x_max}
+  - ${params.x_breaks}
+  - ${params.label_x}
+  - ${params.gene_label_x}
+  - ${params.count_x}
+  - ${params.strip_xmin}
+  - ${params.strip_xmax}
+  - ${params.term_label_size}
+  - ${params.gene_label_size}
+  - ${params.gene_label_max_chars}
+  - ${params.count_label_size}
+  - ${params.count_size_min}
+  - ${params.count_size_max}
+  - ${params.bar_width}
+  - ${params.bar_alpha}
+  - ${params.strip_alpha}
+  - ${params.base_size}
+  - ${params.delimiter}
+  - ${params.width}
+  - ${params.height}
+  - ${params.dpi}

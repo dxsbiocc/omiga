@@ -1,0 +1,187 @@
+#!/usr/bin/env Rscript
+# Template: heatmap/shape-overlay
+# Purpose: Correlation heatmap with star/shape markers overlaid on the lower triangle.
+#
+# Migration note:
+#   This template directly implements the high-quality OmicsAgent heatmap/shape
+#   visual without carrying forward linkET-specific JSON ggplot2 DSL runtime.
+#
+# Input example:
+#   See example.tsv, converted from OmicsAgent data.json.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template heatmap/shape-overlay
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default) {
+  raw <- tolower(arg_or(index, as.character(default)))
+  if (raw %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (raw %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(feature = arg_or(3, "")),
+  method = arg_or(4, "pearson"),
+  triangle = arg_or(5, "lower"),
+  alpha = parse_number_arg(6, 0.05),
+  labels = list(title = arg_or(7, "")),
+  style = list(
+    marker = arg_or(8, "star"),
+    low = arg_or(9, "#acd372"),
+    mid = arg_or(10, "#ffffffff"),
+    high = arg_or(11, "#ed6ca4"),
+    significant = arg_or(12, "black"),
+    ns = arg_or(13, "grey80"),
+    base_size = parse_number_arg(14, 11),
+    min_marker_size = parse_number_arg(15, 1.6),
+    max_marker_size = parse_number_arg(16, 4.2),
+    show_values = parse_logical_arg(17, FALSE)
+  )
+)
+delimiter <- arg_or(18, "auto")
+width <- parse_number_arg(19, 6)
+height <- parse_number_arg(20, 5)
+dpi <- parse_integer_arg(21, 300)
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+prepare_data <- function(df, config) {
+  feature_col <- resolve_optional_column(df, config$columns$feature)
+  numeric_cols <- setdiff(colnames(df), feature_col %||% character())
+  converted <- lapply(df[numeric_cols], function(x) suppressWarnings(as.numeric(x)))
+  numeric_ok <- vapply(converted, function(x) !all(is.na(x)), logical(1))
+  numeric_cols <- numeric_cols[numeric_ok]
+  if (length(numeric_cols) < 2) {
+    stop("heatmap/shape-overlay input requires at least two numeric columns after excluding feature_column.", call. = FALSE)
+  }
+  matrix_df <- as.data.frame(converted[numeric_ok], check.names = FALSE)
+  names(matrix_df) <- numeric_cols
+  matrix_df
+}
+
+correlation_pvalue <- function(x, y, method) {
+  ok <- is.finite(x) & is.finite(y)
+  if (sum(ok) < 3 || length(unique(x[ok])) < 2 || length(unique(y[ok])) < 2) return(NA_real_)
+  result <- try(suppressWarnings(stats::cor.test(x[ok], y[ok], method = method)), silent = TRUE)
+  if (inherits(result, "try-error") || is.null(result$p.value)) return(NA_real_)
+  as.numeric(result$p.value)
+}
+
+correlation_long <- function(matrix_df, config) {
+  method <- tolower(config$method)
+  if (!method %in% c("pearson", "spearman", "kendall")) stop(sprintf("Unsupported correlation method: %s", method), call. = FALSE)
+  cor_mat <- stats::cor(matrix_df, method = method, use = "pairwise.complete.obs")
+  variables <- colnames(cor_mat)
+  p_mat <- matrix(NA_real_, nrow = length(variables), ncol = length(variables), dimnames = list(variables, variables))
+  for (i in seq_along(variables)) {
+    for (j in seq_along(variables)) {
+      p_mat[i, j] <- if (i == j) 0 else correlation_pvalue(matrix_df[[variables[[i]]]], matrix_df[[variables[[j]]]], method)
+    }
+  }
+  out <- as.data.frame(as.table(cor_mat), stringsAsFactors = FALSE)
+  colnames(out) <- c("x", "y", "correlation")
+  out$pvalue <- as.vector(p_mat)
+  out$x_index <- match(out$x, variables)
+  out$y_index <- match(out$y, variables)
+  triangle <- tolower(config$triangle)
+  if (triangle == "lower") out <- out[out$y_index >= out$x_index, , drop = FALSE]
+  if (triangle == "upper") out <- out[out$y_index <= out$x_index, , drop = FALSE]
+  out$x <- factor(out$x, levels = variables)
+  out$y <- factor(out$y, levels = rev(variables))
+  out$abs_correlation <- abs(out$correlation)
+  out$significance <- ifelse(!is.na(out$pvalue) & out$pvalue < config$alpha, paste0("P < ", config$alpha), "NS")
+  out$value_label <- sprintf("%.2f", out$correlation)
+  out
+}
+
+marker_shape_code <- function(marker) {
+  marker <- tolower(marker)
+  switch(marker,
+    star = 8,
+    diamond = 23,
+    circle = 21,
+    square = 22,
+    triangle = 24,
+    8
+  )
+}
+
+make_plot <- function(df, config) {
+  plot_df <- correlation_long(df, config)
+  marker_shape <- marker_shape_code(config$style$marker)
+  p <- ggplot2::ggplot(plot_df, ggplot2::aes(x = x, y = y)) +
+    ggplot2::geom_tile(ggplot2::aes(fill = correlation), color = "white", linewidth = 0.55) +
+    ggplot2::geom_point(
+      ggplot2::aes(size = abs_correlation, color = significance),
+      shape = marker_shape,
+      fill = "white",
+      stroke = 1.05,
+      alpha = 0.95
+    ) +
+    ggplot2::scale_fill_gradientn(
+      colours = grDevices::colorRampPalette(c(config$style$low, config$style$mid, config$style$high))(50),
+      limits = c(-1, 1),
+      name = "Correlation"
+    ) +
+    ggplot2::scale_color_manual(
+      values = stats::setNames(c(config$style$significant, config$style$ns), c(paste0("P < ", config$alpha), "NS")),
+      name = "Correlation test"
+    ) +
+    ggplot2::scale_size_continuous(range = c(config$style$min_marker_size, config$style$max_marker_size), limits = c(0, 1), name = "|Correlation|") +
+    ggplot2::scale_x_discrete(position = "top", drop = FALSE) +
+    ggplot2::scale_y_discrete(drop = FALSE) +
+    ggplot2::coord_equal() +
+    ggplot2::labs(title = config$labels$title, x = NULL, y = NULL) +
+    theme_visualization(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.key = ggplot2::element_rect(fill = "white", color = NA),
+      panel.grid = ggplot2::element_blank(),
+      axis.text = ggplot2::element_text(face = "bold", size = 8),
+      axis.text.x = ggplot2::element_text(angle = 45, hjust = 0, vjust = 0),
+      axis.ticks = ggplot2::element_blank(),
+      legend.position = "right"
+    )
+  if (isTRUE(config$style$show_values)) {
+    p <- p + ggplot2::geom_text(ggplot2::aes(label = value_label), size = 2.2, color = "grey20")
+  }
+  p
+}
+
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  matrix_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(matrix_df, config), matrix_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "variables", "method"), value = c("heatmap/shape-overlay", ncol(matrix_df), config$method)), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "heatmap/shape-overlay", variables = ncol(matrix_df), method = config$method))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

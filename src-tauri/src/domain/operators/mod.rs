@@ -874,7 +874,11 @@ pub fn list_operator_manifest_diagnostics() -> Vec<OperatorManifestDiagnostic> {
 pub fn list_operator_authoring_diagnostics() -> Vec<OperatorManifestDiagnostic> {
     let mut diagnostics = discover_operator_candidates()
         .iter()
-        .flat_map(operator_preflight_authoring_diagnostics)
+        .flat_map(|spec| {
+            operator_preflight_authoring_diagnostics(spec)
+                .into_iter()
+                .chain(operator_external_network_authoring_diagnostics(spec))
+        })
         .collect::<Vec<_>>();
     diagnostics.sort_by(|left, right| {
         left.source_plugin
@@ -919,6 +923,77 @@ fn operator_preflight_authoring_diagnostics(
         }];
     }
     Vec::new()
+}
+
+fn operator_external_network_authoring_diagnostics(
+    spec: &OperatorSpec,
+) -> Vec<OperatorManifestDiagnostic> {
+    if !operator_declares_external_network(spec) {
+        return Vec::new();
+    }
+
+    let mut diagnostics = Vec::new();
+    if !cache_config_enabled(spec.cache.as_ref()) {
+        diagnostics.push(OperatorManifestDiagnostic {
+            source_plugin: spec.source.source_plugin.clone(),
+            manifest_path: spec.source.manifest_path.to_string_lossy().into_owned(),
+            severity: "warning".to_string(),
+            message: format!(
+                "operator `{}` declares external_network permissions but has no enabled cache policy; add cache.enabled plus policy metadata for repeatable network runs",
+                spec.metadata.id
+            ),
+        });
+    }
+
+    let mode_supports_offline_fixture = spec
+        .interface
+        .params
+        .get("mode")
+        .filter(|field| matches!(field.kind, OperatorFieldKind::Enum))
+        .map(|field| {
+            field.enum_values.iter().any(|value| {
+                value
+                    .as_str()
+                    .map(|value| value == "offline_fixture")
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    let fixture_param_exists = spec.interface.params.contains_key("fixture_json");
+    if !mode_supports_offline_fixture || !fixture_param_exists {
+        diagnostics.push(OperatorManifestDiagnostic {
+            source_plugin: spec.source.source_plugin.clone(),
+            manifest_path: spec.source.manifest_path.to_string_lossy().into_owned(),
+            severity: "warning".to_string(),
+            message: format!(
+                "operator `{}` declares external_network permissions but does not expose both mode=offline_fixture and fixture_json params for deterministic offline validation",
+                spec.metadata.id
+            ),
+        });
+    }
+
+    diagnostics
+}
+
+fn operator_declares_external_network(spec: &OperatorSpec) -> bool {
+    spec.metadata
+        .tags
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case("external-network"))
+        || spec
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.get("sideEffects"))
+            .and_then(JsonValue::as_array)
+            .map(|side_effects| {
+                side_effects.iter().any(|value| {
+                    value
+                        .as_str()
+                        .map(|value| value.eq_ignore_ascii_case("external_network"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
 }
 
 fn preflight_question_mentions_method_choice(question: &OperatorPreflightQuestionSpec) -> bool {
@@ -2158,6 +2233,8 @@ struct OperatorRunResult {
     provenance_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     export_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    markdown_report: Option<String>,
     outputs: BTreeMap<String, Vec<ArtifactRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     structured_outputs: Option<JsonValue>,
@@ -2653,6 +2730,7 @@ async fn record_operator_success_best_effort(
         "runDir": result.run_dir,
         "provenancePath": result.provenance_path,
         "exportDir": result.export_dir,
+        "markdownReport": result.markdown_report,
         "operatorAlias": result.operator.alias,
         "runContext": result.run_context,
         "paramSources": result.param_sources,
@@ -3312,6 +3390,18 @@ async fn record_operator_cache_hit(
             .map_err(|error| error.with_run_dir(run_dir))?,
         )
     };
+    let markdown_report =
+        operator_result_markdown_report(resolved, export_dir.as_deref(), &hit.result.outputs);
+    if let (Some(export_dir), Some(report)) = (export_dir.as_deref(), markdown_report.as_deref()) {
+        if surface.kind == OperatorExecutionSurfaceKind::Local {
+            write_local_operator_result_readme(export_dir, report)
+                .map_err(|error| error.with_run_dir(run_dir))?;
+        } else {
+            write_environment_operator_result_readme(ctx, export_dir, report)
+                .await
+                .map_err(|error| error.with_run_dir(run_dir))?;
+        }
+    }
     let result = OperatorRunResult {
         status: "succeeded".to_string(),
         run_id: run_id.to_string(),
@@ -3328,6 +3418,7 @@ async fn record_operator_cache_hit(
             format!("{run_dir}/provenance.json")
         }),
         export_dir,
+        markdown_report,
         outputs: hit.result.outputs.clone(),
         structured_outputs: hit.result.structured_outputs.clone(),
         effective_inputs,
@@ -3493,6 +3584,21 @@ impl OperatorContainerKind {
 struct OperatorContainerSelection {
     kind: OperatorContainerKind,
     image: String,
+    prepare: Option<OperatorContainerImagePrepare>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OperatorContainerImagePrepare {
+    Dockerfile {
+        dockerfile: String,
+        context: String,
+        tag: String,
+    },
+    SingularityDefinition {
+        definition: String,
+        sif: String,
+        hash: String,
+    },
 }
 
 fn selected_direct_container(
@@ -3507,6 +3613,7 @@ fn selected_direct_container(
             .map(|kind| OperatorContainerSelection {
                 kind,
                 image: runtime_container_image(runtime, kind),
+                prepare: None,
             });
     }
 
@@ -3518,6 +3625,7 @@ fn selected_direct_container(
         .map(|kind| OperatorContainerSelection {
             kind,
             image: runtime_container_image(runtime, kind),
+            prepare: None,
         })
 }
 
@@ -4600,6 +4708,15 @@ async fn execute_local(
             return Err(error);
         }
     };
+    let markdown_report =
+        operator_result_markdown_report(resolved, export_dir.as_deref(), &outputs);
+    if let (Some(export_dir), Some(report)) = (export_dir.as_deref(), markdown_report.as_deref()) {
+        if let Err(error) = write_local_operator_result_readme(export_dir, report) {
+            let error = error.with_run_dir(run_dir);
+            update_local_status(&run_path, "failed", Some(&error), Some(&status_metadata))?;
+            return Err(error);
+        }
+    }
     let provenance_path = run_path.join("provenance.json");
     let result = OperatorRunResult {
         status: "succeeded".to_string(),
@@ -4610,6 +4727,7 @@ async fn execute_local(
         run_context,
         provenance_path: Some(provenance_path.to_string_lossy().into_owned()),
         export_dir,
+        markdown_report,
         outputs,
         structured_outputs,
         effective_inputs,
@@ -4757,6 +4875,17 @@ async fn execute_in_environment(
                 return Err(error);
             }
         };
+    let markdown_report =
+        operator_result_markdown_report(resolved, export_dir.as_deref(), &outputs);
+    if let (Some(export_dir), Some(report)) = (export_dir.as_deref(), markdown_report.as_deref()) {
+        if let Err(error) = write_environment_operator_result_readme(ctx, export_dir, report).await
+        {
+            let error = error.with_run_dir(run_dir);
+            update_environment_status(ctx, run_dir, "failed", Some(&error), Some(&status_metadata))
+                .await?;
+            return Err(error);
+        }
+    }
     let result = OperatorRunResult {
         status: "succeeded".to_string(),
         run_id: run_id.to_string(),
@@ -4766,6 +4895,7 @@ async fn execute_in_environment(
         run_context,
         provenance_path: Some(format!("{run_dir}/provenance.json")),
         export_dir,
+        markdown_report,
         outputs,
         structured_outputs,
         effective_inputs,
@@ -4925,6 +5055,14 @@ fn operator_execution_command(
     inputs: &BTreeMap<String, JsonValue>,
 ) -> String {
     let Some(selection) = operator_container_for_command(ctx, spec, surface_kind) else {
+        if let Some(command) =
+            operator_conda_environment_command(ctx, spec, surface_kind, run_dir, argv)
+        {
+            return command;
+        }
+        if let Some(command) = operator_environment_ref_error_command(ctx, spec, surface_kind) {
+            return command;
+        }
         return command_with_log_capture(argv);
     };
     containerized_operator_command(ctx, spec, selection, surface_kind, run_dir, argv, inputs)
@@ -4941,6 +5079,608 @@ fn operator_container_for_command(
     spec.runtime
         .as_ref()
         .and_then(|runtime| selected_direct_container(ctx, runtime))
+        .or_else(|| operator_container_from_environment_profile(ctx, spec, surface_kind))
+}
+
+fn operator_container_from_environment_profile(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    surface_kind: OperatorExecutionSurfaceKind,
+) -> Option<OperatorContainerSelection> {
+    operator_environment_container_selection(ctx, spec, surface_kind)
+        .ok()
+        .flatten()
+}
+
+fn operator_environment_container_selection(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    surface_kind: OperatorExecutionSurfaceKind,
+) -> Result<Option<OperatorContainerSelection>, String> {
+    let Some(profile) = operator_environment_profile(spec) else {
+        return Ok(None);
+    };
+    let kind = profile
+        .runtime
+        .kind
+        .as_deref()
+        .unwrap_or("system")
+        .trim()
+        .to_ascii_lowercase();
+    let Some(container_kind) = container_kind_from_name(&kind) else {
+        return Ok(None);
+    };
+    if let Some(image) = operator_environment_profile_image(&profile) {
+        return Ok(Some(OperatorContainerSelection {
+            kind: container_kind,
+            image,
+            prepare: None,
+        }));
+    }
+    if surface_kind != OperatorExecutionSurfaceKind::Local {
+        return Err(format!(
+            "Environment profile `{}` uses `{kind}` without runtime.image. File-based `{kind}` builds are only supported for local Operator runs; build the image on the target system and set runtime.image.",
+            profile.canonical_id
+        ));
+    }
+    match container_kind {
+        OperatorContainerKind::Docker => {
+            let dockerfile = operator_dockerfile_from_environment_profile(&profile)?;
+            let context =
+                operator_docker_build_context_from_environment_profile(&profile, &dockerfile);
+            let dockerfile_bytes = fs::read(&dockerfile).map_err(|err| {
+                format!(
+                    "Read Dockerfile for environment profile `{}` at `{}`: {err}",
+                    profile.canonical_id,
+                    dockerfile.display()
+                )
+            })?;
+            let env_hash = sha256_hex(&dockerfile_bytes);
+            let tag = format!(
+                "omiga-env-{}:{}",
+                safe_operator_env_component(&profile.canonical_id).to_ascii_lowercase(),
+                &env_hash[..12]
+            );
+            Ok(Some(OperatorContainerSelection {
+                kind: OperatorContainerKind::Docker,
+                image: tag.clone(),
+                prepare: Some(OperatorContainerImagePrepare::Dockerfile {
+                    dockerfile: dockerfile.to_string_lossy().into_owned(),
+                    context: context.to_string_lossy().into_owned(),
+                    tag,
+                }),
+            }))
+        }
+        OperatorContainerKind::Singularity => {
+            let definition = operator_singularity_definition_from_environment_profile(&profile)?;
+            let definition_bytes = fs::read(&definition).map_err(|err| {
+                format!(
+                    "Read Singularity definition for environment profile `{}` at `{}`: {err}",
+                    profile.canonical_id,
+                    definition.display()
+                )
+            })?;
+            let env_hash = sha256_hex(&definition_bytes);
+            let env_key = format!(
+                "{}-{}",
+                safe_operator_env_component(&profile.canonical_id),
+                &env_hash[..12]
+            );
+            let sif = ctx
+                .project_root
+                .join(".omiga/operator-envs/singularity")
+                .join(format!("{env_key}.sif"))
+                .to_string_lossy()
+                .into_owned();
+            Ok(Some(OperatorContainerSelection {
+                kind: OperatorContainerKind::Singularity,
+                image: sif.clone(),
+                prepare: Some(OperatorContainerImagePrepare::SingularityDefinition {
+                    definition: definition.to_string_lossy().into_owned(),
+                    sif,
+                    hash: env_hash,
+                }),
+            }))
+        }
+    }
+}
+
+fn operator_environment_ref_error_command(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    surface_kind: OperatorExecutionSurfaceKind,
+) -> Option<String> {
+    if surface_kind == OperatorExecutionSurfaceKind::Sandbox {
+        return None;
+    }
+    let env_ref = operator_runtime_env_ref(spec)?;
+    let Some(profile) = operator_environment_profile(spec) else {
+        return None;
+    };
+    let kind = profile
+        .runtime
+        .kind
+        .as_deref()
+        .unwrap_or("system")
+        .trim()
+        .to_ascii_lowercase();
+    let message = if matches!(kind.as_str(), "docker" | "singularity") {
+        match operator_environment_container_selection(ctx, spec, surface_kind) {
+            Ok(Some(_)) | Ok(None) => return None,
+            Err(message) => message,
+        }
+    } else if matches!(
+        kind.as_str(),
+        "system" | "local" | "host" | "conda" | "mamba" | "micromamba"
+    ) {
+        return None;
+    } else {
+        format!(
+            "Operator environment envRef `{env_ref}` resolved to unsupported runtime.type `{kind}`. Supported environment runtimes are system/local/host, conda/mamba/micromamba, docker, and singularity."
+        )
+    };
+    Some(command_with_log_capture(&[
+        "/bin/sh".to_string(),
+        "-lc".to_string(),
+        format!("printf '%s\\n' {} >&2; exit 127", sh_quote(&message)),
+    ]))
+}
+
+fn operator_environment_profile_image(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+) -> Option<String> {
+    profile
+        .runtime
+        .image
+        .clone()
+        .or_else(|| {
+            profile
+                .runtime
+                .extra
+                .get("image")
+                .and_then(JsonValue::as_str)
+                .map(str::to_string)
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn operator_dockerfile_from_environment_profile(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+) -> Result<PathBuf, String> {
+    if let Some(raw) = profile_runtime_extra_str(profile, &["dockerfile", "dockerFile"]) {
+        let path = operator_profile_relative_path(profile, raw)?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if file_name != "Dockerfile" {
+            return Err(format!(
+                "Docker environment profile `{}` must use a standard `Dockerfile`; got `{}`.",
+                profile.canonical_id,
+                path.display()
+            ));
+        }
+        if !path.is_file() {
+            return Err(format!(
+                "Docker environment profile `{}` declares Dockerfile `{}` but it does not exist.",
+                profile.canonical_id,
+                path.display()
+            ));
+        }
+        return Ok(path);
+    }
+    let manifest_dir = operator_environment_manifest_dir(profile)?;
+    let candidate = manifest_dir.join("Dockerfile");
+    if candidate.is_file() {
+        return Ok(candidate);
+    }
+    Err(format!(
+        "Docker environment profile `{}` requires runtime.image or a standard `Dockerfile` next to environment.yaml.",
+        profile.canonical_id
+    ))
+}
+
+fn operator_docker_build_context_from_environment_profile(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+    dockerfile: &Path,
+) -> PathBuf {
+    profile_runtime_extra_str(profile, &["context", "buildContext", "build_context"])
+        .and_then(|raw| operator_profile_relative_path(profile, raw).ok())
+        .unwrap_or_else(|| {
+            dockerfile
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        })
+}
+
+fn operator_singularity_definition_from_environment_profile(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+) -> Result<PathBuf, String> {
+    if let Some(raw) = profile_runtime_extra_str(
+        profile,
+        &[
+            "definitionFile",
+            "definition_file",
+            "singularityDef",
+            "singularity_def",
+        ],
+    ) {
+        let path = operator_profile_relative_path(profile, raw)?;
+        if path.extension().and_then(|ext| ext.to_str()) != Some("def") {
+            return Err(format!(
+                "Singularity environment profile `{}` must use a `.def` definition file; got `{}`.",
+                profile.canonical_id,
+                path.display()
+            ));
+        }
+        if !path.is_file() {
+            return Err(format!(
+                "Singularity environment profile `{}` declares definition file `{}` but it does not exist.",
+                profile.canonical_id,
+                path.display()
+            ));
+        }
+        return Ok(path);
+    }
+    let manifest_dir = operator_environment_manifest_dir(profile)?;
+    let candidate = manifest_dir.join("singularity.def");
+    if candidate.is_file() {
+        return Ok(candidate);
+    }
+    Err(format!(
+        "Singularity environment profile `{}` requires runtime.image or a standard `singularity.def` next to environment.yaml.",
+        profile.canonical_id
+    ))
+}
+
+fn profile_runtime_extra_str<'a>(
+    profile: &'a crate::domain::environments::EnvironmentProfileSummary,
+    keys: &[&str],
+) -> Option<&'a str> {
+    keys.iter().find_map(|key| {
+        profile
+            .runtime
+            .extra
+            .get(*key)
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn operator_profile_relative_path(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+    raw: &str,
+) -> Result<PathBuf, String> {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    Ok(operator_environment_manifest_dir(profile)?.join(path))
+}
+
+fn operator_environment_manifest_dir(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+) -> Result<PathBuf, String> {
+    let manifest = PathBuf::from(&profile.manifest_path);
+    manifest.parent().map(Path::to_path_buf).ok_or_else(|| {
+        format!(
+            "Environment profile `{}` has no manifest parent directory.",
+            profile.canonical_id
+        )
+    })
+}
+
+fn operator_conda_environment_command(
+    ctx: &crate::domain::tools::ToolContext,
+    spec: &OperatorSpec,
+    surface_kind: OperatorExecutionSurfaceKind,
+    run_dir: &str,
+    argv: &[String],
+) -> Option<String> {
+    if surface_kind == OperatorExecutionSurfaceKind::Sandbox {
+        return None;
+    }
+    let Some(env_ref) = operator_runtime_env_ref(spec) else {
+        return None;
+    };
+    let Some(profile) = operator_environment_profile(spec) else {
+        return Some(command_with_log_capture(&[
+            "/bin/sh".to_string(),
+            "-lc".to_string(),
+            format!(
+                "printf '%s\\n' {} >&2; exit 127",
+                sh_quote(&format!(
+                    "Operator environment envRef `{env_ref}` did not resolve for plugin `{}`.",
+                    spec.source.source_plugin
+                ))
+            ),
+        ]));
+    };
+    let kind = profile
+        .runtime
+        .kind
+        .as_deref()
+        .unwrap_or("system")
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(kind.as_str(), "conda" | "mamba" | "micromamba") {
+        return None;
+    }
+    match operator_conda_environment_selection(ctx, &profile, surface_kind) {
+        Ok(selection) => {
+            let shell_script =
+                conda_environment_shell_script(&selection, run_dir, &shell_join(argv));
+            Some(command_with_log_capture(&[
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                shell_script,
+            ]))
+        }
+        Err(message) => Some(command_with_log_capture(&[
+            "/bin/sh".to_string(),
+            "-lc".to_string(),
+            format!("printf '%s\\n' {} >&2; exit 127", sh_quote(&message)),
+        ])),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OperatorCondaEnvironmentSelection {
+    env_prefix: String,
+    env_yaml_b64: String,
+    env_hash: String,
+    env_vars: BTreeMap<String, String>,
+}
+
+fn operator_conda_environment_selection(
+    ctx: &crate::domain::tools::ToolContext,
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+    surface_kind: OperatorExecutionSurfaceKind,
+) -> Result<OperatorCondaEnvironmentSelection, String> {
+    let conda_file = operator_conda_environment_file(profile)?;
+    let bytes = fs::read(&conda_file).map_err(|err| {
+        format!(
+            "Read conda environment file `{}`: {err}",
+            conda_file.display()
+        )
+    })?;
+    let env_hash = sha256_hex(&bytes);
+    let env_key = format!(
+        "{}-{}",
+        safe_operator_env_component(&profile.canonical_id),
+        &env_hash[..12]
+    );
+    let env_prefix = operator_conda_env_prefix(ctx, surface_kind, &env_key);
+    use base64::{engine::general_purpose, Engine as _};
+    Ok(OperatorCondaEnvironmentSelection {
+        env_prefix,
+        env_yaml_b64: general_purpose::STANDARD.encode(bytes),
+        env_hash,
+        env_vars: profile.runtime.env.clone(),
+    })
+}
+
+fn operator_conda_environment_file(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+) -> Result<PathBuf, String> {
+    for key in [
+        "condaEnvFile",
+        "conda_env_file",
+        "condaFile",
+        "conda_file",
+        "environmentFile",
+        "environment_file",
+    ] {
+        if let Some(raw) = profile_runtime_extra_str(profile, &[key]) {
+            let path = operator_profile_relative_path(profile, raw)?;
+            validate_conda_environment_yaml_path(profile, &path)?;
+            if !path.is_file() {
+                return Err(format!(
+                    "Environment profile `{}` declares conda YAML file `{}` but it does not exist.",
+                    profile.canonical_id,
+                    path.display()
+                ));
+            }
+            return Ok(path);
+        }
+    }
+    let manifest_dir = operator_environment_manifest_dir(profile)?;
+    for name in ["conda.yaml", "conda.yml"] {
+        let candidate = manifest_dir.join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "Environment profile `{}` does not declare or contain a standard conda YAML file. Use `runtime.condaEnvFile: ./conda.yaml` or `./conda.yml`.",
+        profile.canonical_id
+    ))
+}
+
+fn validate_conda_environment_yaml_path(
+    profile: &crate::domain::environments::EnvironmentProfileSummary,
+    path: &Path,
+) -> Result<(), String> {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase());
+    if !matches!(extension.as_deref(), Some("yaml" | "yml")) {
+        return Err(format!(
+            "Conda/mamba environment profile `{}` must use a `.yaml` or `.yml` file; got `{}`.",
+            profile.canonical_id,
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn operator_conda_env_prefix(
+    ctx: &crate::domain::tools::ToolContext,
+    surface_kind: OperatorExecutionSurfaceKind,
+    env_key: &str,
+) -> String {
+    let rel = format!(".omiga/operator-envs/conda/{env_key}");
+    if surface_kind == OperatorExecutionSurfaceKind::Local {
+        return ctx.project_root.join(rel).to_string_lossy().into_owned();
+    }
+    crate::domain::tools::env_store::remote_path(ctx, &rel)
+}
+
+fn conda_environment_shell_script(
+    selection: &OperatorCondaEnvironmentSelection,
+    run_dir: &str,
+    inner_command: &str,
+) -> String {
+    let env_yaml = format!("{run_dir}/env/conda-environment.yaml");
+    let exports = shell_export_lines(&selection.env_vars);
+    format!(
+        r#"set -e
+OMIGA_CONDA_PREFIX={env_prefix}
+OMIGA_CONDA_YAML={env_yaml}
+OMIGA_CONDA_HASH={env_hash}
+OMIGA_MICROMAMBA="${{OMIGA_MICROMAMBA:-$HOME/.omiga/bin/micromamba}}"
+mkdir -p "$(dirname "$OMIGA_CONDA_YAML")" "$(dirname "$OMIGA_CONDA_PREFIX")"
+printf %s {env_yaml_b64} | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' > "$OMIGA_CONDA_YAML"
+omiga_find_conda_manager() {{
+  OMIGA_CONDA_MANAGER_KIND=
+  OMIGA_CONDA_BIN=
+  if [ -n "${{OMIGA_MICROMAMBA:-}}" ] && [ -x "$OMIGA_MICROMAMBA" ]; then
+    OMIGA_CONDA_MANAGER_KIND=micromamba
+    OMIGA_CONDA_BIN=$OMIGA_MICROMAMBA
+    return 0
+  fi
+  if command -v micromamba >/dev/null 2>&1; then
+    OMIGA_CONDA_MANAGER_KIND=micromamba
+    OMIGA_CONDA_BIN=$(command -v micromamba)
+    return 0
+  fi
+  if command -v mamba >/dev/null 2>&1; then
+    OMIGA_CONDA_MANAGER_KIND=mamba
+    OMIGA_CONDA_BIN=$(command -v mamba)
+    return 0
+  fi
+  if command -v conda >/dev/null 2>&1; then
+    OMIGA_CONDA_MANAGER_KIND=conda
+    OMIGA_CONDA_BIN=$(command -v conda)
+    return 0
+  fi
+  return 1
+}}
+omiga_missing_conda_manager() {{
+  cat >&2 <<'OMIGA_CONDA_HINT'
+No micromamba, mamba, or conda executable was found in the active PATH/base environment/virtual environment.
+Recommended: install the official micromamba binary at $HOME/.omiga/bin/micromamba, or set OMIGA_MICROMAMBA=/absolute/path/to/micromamba.
+Then rerun the Operator; Omiga will create and reuse the isolated env from conda.yaml/conda.yml under .omiga/operator-envs/conda.
+OMIGA_CONDA_HINT
+  exit 127
+}}
+omiga_find_conda_manager || true
+if [ ! -f "$OMIGA_CONDA_PREFIX/.omiga-env-hash" ] || [ "$(cat "$OMIGA_CONDA_PREFIX/.omiga-env-hash" 2>/dev/null || true)" != "$OMIGA_CONDA_HASH" ]; then
+  if [ -z "$OMIGA_CONDA_BIN" ]; then
+    omiga_missing_conda_manager
+  fi
+  rm -rf "$OMIGA_CONDA_PREFIX"
+  case "$OMIGA_CONDA_MANAGER_KIND" in
+    micromamba)
+      "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
+      ;;
+    mamba)
+      "$OMIGA_CONDA_BIN" env create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML" || "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
+      ;;
+    conda)
+      "$OMIGA_CONDA_BIN" env create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML" || "$OMIGA_CONDA_BIN" create -y -p "$OMIGA_CONDA_PREFIX" -f "$OMIGA_CONDA_YAML"
+      ;;
+  esac
+  printf '%s' "$OMIGA_CONDA_HASH" > "$OMIGA_CONDA_PREFIX/.omiga-env-hash"
+fi
+{exports}
+case "${{OMIGA_CONDA_MANAGER_KIND:-}}" in
+  micromamba)
+    "$OMIGA_CONDA_BIN" run -p "$OMIGA_CONDA_PREFIX" /bin/sh -lc {inner}
+    ;;
+  mamba)
+    "$OMIGA_CONDA_BIN" run -p "$OMIGA_CONDA_PREFIX" /bin/sh -lc {inner}
+    ;;
+  conda)
+    "$OMIGA_CONDA_BIN" run -p "$OMIGA_CONDA_PREFIX" /bin/sh -lc {inner}
+    ;;
+  *)
+    PATH="$OMIGA_CONDA_PREFIX/bin:$PATH" /bin/sh -lc {inner}
+    ;;
+esac"#,
+        env_prefix = sh_quote(&selection.env_prefix),
+        env_yaml = sh_quote(&env_yaml),
+        env_hash = sh_quote(&selection.env_hash),
+        env_yaml_b64 = sh_quote(&selection.env_yaml_b64),
+        exports = exports,
+        inner = sh_quote(inner_command),
+    )
+}
+
+fn shell_export_lines(env: &BTreeMap<String, String>) -> String {
+    env.iter()
+        .filter(|(key, _)| is_safe_shell_identifier(key))
+        .map(|(key, value)| format!("export {key}={}", sh_quote(value)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_safe_shell_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn operator_runtime_env_ref(spec: &OperatorSpec) -> Option<&str> {
+    let runtime = spec.runtime.as_ref()?;
+    runtime
+        .get("envRef")
+        .or_else(|| runtime.get("env_ref"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn operator_environment_profile(
+    spec: &OperatorSpec,
+) -> Option<crate::domain::environments::EnvironmentProfileSummary> {
+    let env_ref = operator_runtime_env_ref(spec)?;
+    let resolved = crate::domain::environments::resolve_environment_ref(
+        Some(env_ref),
+        &spec.source.source_plugin,
+        &spec.source.plugin_root,
+    );
+    resolved.profile
+}
+
+fn safe_operator_env_component(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.trim().chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches('-').trim_matches('.');
+    if out.is_empty() {
+        "environment".to_string()
+    } else {
+        out.to_string()
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    format!("{digest:x}")
 }
 
 fn containerized_operator_command(
@@ -4954,7 +5694,8 @@ fn containerized_operator_command(
 ) -> String {
     let inner = command_with_log_capture(argv);
     let mounts = operator_container_mounts(ctx, spec, surface_kind, run_dir, inputs);
-    match selection.kind {
+    let kind = selection.kind;
+    let container_command = match selection.kind {
         OperatorContainerKind::Docker => {
             let mut tokens = vec!["docker".to_string(), "run".to_string(), "--rm".to_string()];
             for mount in mounts {
@@ -4964,7 +5705,7 @@ fn containerized_operator_command(
             tokens.extend([
                 "-w".to_string(),
                 run_dir.to_string(),
-                selection.image,
+                selection.image.clone(),
                 "/bin/sh".to_string(),
                 "-lc".to_string(),
                 inner,
@@ -4984,13 +5725,104 @@ fn containerized_operator_command(
                 tokens.push(container_bind_spec(&mount.path, mount.writable));
             }
             tokens.extend([
-                selection.image,
+                selection.image.clone(),
                 "/bin/sh".to_string(),
                 "-lc".to_string(),
                 inner,
             ]);
             shell_join(&tokens)
         }
+    };
+    container_runtime_shell_script(kind, selection.prepare.as_ref(), &container_command)
+}
+
+fn container_runtime_shell_script(
+    kind: OperatorContainerKind,
+    prepare: Option<&OperatorContainerImagePrepare>,
+    container_command: &str,
+) -> String {
+    let preflight = container_runtime_preflight_script(kind);
+    let prepare = prepare
+        .map(container_runtime_prepare_script)
+        .unwrap_or_default();
+    format!(
+        r#"set -e
+mkdir -p logs
+omiga_container_runtime_missing() {{
+  message=$1
+  printf '%s\n' "$message" >&2
+  printf '%s\n' "$message" >> logs/stderr.txt
+  printf '\n__OMIGA_OPERATOR_EXIT_CODE=127\n'
+  exit 127
+}}
+{preflight}
+{prepare}
+set +e
+{container_command} >> logs/stdout.txt 2>> logs/stderr.txt
+code=$?
+printf '\n__OMIGA_OPERATOR_EXIT_CODE=%s\n' "$code"
+exit "$code""#
+    )
+}
+
+fn container_runtime_preflight_script(kind: OperatorContainerKind) -> &'static str {
+    match kind {
+        OperatorContainerKind::Docker => {
+            r#"if ! command -v docker >/dev/null 2>&1; then
+  omiga_container_runtime_missing 'Docker runtime is required for this Operator environment but `docker` was not found in the active PATH/base environment/virtual environment. Install Docker Desktop/Engine, make the `docker` CLI available, and retry.'
+fi
+if ! docker version >/dev/null 2>&1; then
+  omiga_container_runtime_missing 'Docker CLI was found, but `docker version` failed. Start Docker Desktop/daemon or fix Docker permissions, then retry.'
+fi"#
+        }
+        OperatorContainerKind::Singularity => {
+            r#"if command -v singularity >/dev/null 2>&1; then
+  :
+elif command -v apptainer >/dev/null 2>&1; then
+  singularity() { apptainer "$@"; }
+else
+  omiga_container_runtime_missing 'Singularity/Apptainer runtime is required for this Operator environment but neither `singularity` nor `apptainer` was found in the active PATH/base environment/virtual environment. Install SingularityCE or Apptainer and retry.'
+fi"#
+        }
+    }
+}
+
+fn container_runtime_prepare_script(prepare: &OperatorContainerImagePrepare) -> String {
+    match prepare {
+        OperatorContainerImagePrepare::Dockerfile {
+            dockerfile,
+            context,
+            tag,
+        } => format!(
+            r#"OMIGA_DOCKERFILE={dockerfile}
+OMIGA_DOCKER_CONTEXT={context}
+OMIGA_DOCKER_IMAGE={tag}
+if ! docker image inspect "$OMIGA_DOCKER_IMAGE" >/dev/null 2>&1; then
+  docker build -t "$OMIGA_DOCKER_IMAGE" -f "$OMIGA_DOCKERFILE" "$OMIGA_DOCKER_CONTEXT" >> logs/stdout.txt 2>> logs/stderr.txt
+fi"#,
+            dockerfile = sh_quote(dockerfile),
+            context = sh_quote(context),
+            tag = sh_quote(tag),
+        ),
+        OperatorContainerImagePrepare::SingularityDefinition {
+            definition,
+            sif,
+            hash,
+        } => format!(
+            r#"OMIGA_SINGULARITY_DEF={definition}
+OMIGA_SINGULARITY_SIF={sif}
+OMIGA_SINGULARITY_HASH={hash}
+mkdir -p "$(dirname "$OMIGA_SINGULARITY_SIF")"
+if [ ! -f "$OMIGA_SINGULARITY_SIF" ] || [ "$(cat "$OMIGA_SINGULARITY_SIF.omiga-env-hash" 2>/dev/null || true)" != "$OMIGA_SINGULARITY_HASH" ]; then
+  rm -f "$OMIGA_SINGULARITY_SIF.tmp"
+  singularity build "$OMIGA_SINGULARITY_SIF.tmp" "$OMIGA_SINGULARITY_DEF" >> logs/stdout.txt 2>> logs/stderr.txt
+  mv "$OMIGA_SINGULARITY_SIF.tmp" "$OMIGA_SINGULARITY_SIF"
+  printf '%s' "$OMIGA_SINGULARITY_HASH" > "$OMIGA_SINGULARITY_SIF.omiga-env-hash"
+fi"#,
+            definition = sh_quote(definition),
+            sif = sh_quote(sif),
+            hash = sh_quote(hash),
+        ),
     }
 }
 
@@ -5442,6 +6274,169 @@ async fn export_environment_operator_results(
         .with_suggested_action("Check session workspace write permissions and retry."));
     }
     Ok(export_dir)
+}
+
+fn operator_result_markdown_report(
+    resolved: &ResolvedOperator,
+    export_dir: Option<&str>,
+    outputs: &BTreeMap<String, Vec<ArtifactRef>>,
+) -> Option<String> {
+    let export_dir = export_dir?.trim();
+    if export_dir.is_empty() {
+        return None;
+    }
+    let title = resolved
+        .spec
+        .metadata
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(resolved.alias.as_str());
+    let mut lines = vec![
+        format!("# {title}"),
+        String::new(),
+        "Generated artifacts are exported together in this folder so the final reply can reference static files directly instead of embedding JSON, HTML, or base64 payloads.".to_string(),
+        "Use the PNG Markdown image below in the final reply; Omiga renders it through the chat image component. Keep the full path inside `<...>` and do not shorten it to `figure.png`. PNG exports are generated at 300 DPI minimum.".to_string(),
+        String::new(),
+    ];
+
+    if let Some(path) =
+        first_exported_artifact_path(export_dir, outputs, &["figure_png", "plot_png", "png"])
+    {
+        lines.push(format!("![{title}](<{path}>)"));
+        lines.push(String::new());
+    }
+
+    let mut primary_links = Vec::new();
+    if let Some(path) =
+        first_exported_artifact_path(export_dir, outputs, &["figure_pdf", "plot_pdf", "pdf"])
+    {
+        primary_links.push(format!("[PDF](<{path}>)"));
+    }
+    if let Some(path) =
+        first_exported_artifact_path(export_dir, outputs, &["plot_script", "script", "r_script"])
+    {
+        primary_links.push(format!("[plot-script.R](<{path}>)"));
+    }
+    if let Some(path) =
+        first_exported_artifact_path(export_dir, outputs, &["rerun_script", "rerun"])
+    {
+        primary_links.push(format!("[rerun.sh](<{path}>)"));
+    }
+    primary_links.push(format!("[Result folder](<{export_dir}>)"));
+    lines.push(format!("Primary files: {}", primary_links.join(" · ")));
+    lines.push(String::new());
+    lines.push("## Files".to_string());
+
+    let mut seen = std::collections::BTreeSet::new();
+    for (name, artifacts) in outputs {
+        for artifact in artifacts {
+            let path = exported_artifact_path(export_dir, &artifact.path);
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let size = artifact
+                .size
+                .map(|value| format!(" — {} bytes", value))
+                .unwrap_or_default();
+            lines.push(format!(
+                "- `{name}`: [{file}](<{path}>){size}",
+                file = exported_artifact_label(&path)
+            ));
+        }
+    }
+    if seen.is_empty() {
+        lines.push("- No declared output artifacts were exported.".to_string());
+    }
+    Some(lines.join("\n"))
+}
+
+fn first_exported_artifact_path(
+    export_dir: &str,
+    outputs: &BTreeMap<String, Vec<ArtifactRef>>,
+    preferred_output_names: &[&str],
+) -> Option<String> {
+    for preferred in preferred_output_names {
+        if let Some(path) = outputs
+            .get(*preferred)
+            .and_then(|artifacts| artifacts.first())
+            .map(|artifact| exported_artifact_path(export_dir, &artifact.path))
+        {
+            return Some(path);
+        }
+    }
+    for (name, artifacts) in outputs {
+        let lower_name = name.to_ascii_lowercase();
+        if preferred_output_names
+            .iter()
+            .any(|preferred| lower_name.contains(preferred.trim_matches('_')))
+        {
+            if let Some(path) = artifacts
+                .first()
+                .map(|artifact| exported_artifact_path(export_dir, &artifact.path))
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn exported_artifact_path(export_dir: &str, source_path: &str) -> String {
+    let file = exported_artifact_label(source_path);
+    if export_dir.ends_with('/') || export_dir.ends_with('\\') {
+        format!("{export_dir}{file}")
+    } else if export_dir.contains('\\') && !export_dir.contains('/') {
+        format!("{export_dir}\\{file}")
+    } else {
+        format!("{export_dir}/{file}")
+    }
+}
+
+fn exported_artifact_label(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn write_local_operator_result_readme(
+    export_dir: &str,
+    markdown: &str,
+) -> Result<(), OperatorToolError> {
+    fs::write(Path::new(export_dir).join("README.md"), markdown).map_err(|err| {
+        OperatorToolError::new(
+            "result_export_failed",
+            false,
+            format!("write result README.md: {err}"),
+        )
+        .with_suggested_action("Check session workspace write permissions and retry.")
+    })
+}
+
+async fn write_environment_operator_result_readme(
+    ctx: &crate::domain::tools::ToolContext,
+    export_dir: &str,
+    markdown: &str,
+) -> Result<(), OperatorToolError> {
+    use base64::{engine::general_purpose, Engine as _};
+    let encoded = general_purpose::STANDARD.encode(markdown.as_bytes());
+    let target = format!("{}/README.md", export_dir.trim_end_matches('/'));
+    let command = format!(
+        "mkdir -p {} && printf %s {} | base64 -d > {}",
+        sh_quote(export_dir),
+        sh_quote(&encoded),
+        sh_quote(&target),
+    );
+    execute_env_command(ctx, &operator_environment_cwd(ctx), &command, 30)
+        .await
+        .map(|_| ())
+        .map_err(|err| {
+            OperatorToolError::new("result_export_failed", true, err.message)
+                .with_suggested_action("Check session workspace write permissions and retry.")
+        })
 }
 
 fn read_local_structured_outputs(
@@ -7640,6 +8635,13 @@ execution:
                 "pubmed_search",
                 "python3",
             ),
+            ("operator-geo-search", "geo-search", "geo_search", "python3"),
+            (
+                "operator-uniprot-search",
+                "uniprot-search",
+                "uniprot_search",
+                "python3",
+            ),
         ];
 
         for (plugin_name, operator_dir, operator_id, first_argv) in cases {
@@ -7728,6 +8730,42 @@ execution:
                 format!("{plugin_name}@omiga-curated")
             );
         }
+    }
+
+    #[test]
+    fn transcriptomics_analysis_plugin_does_not_expose_operator_units() {
+        let plugin_root = crate::domain::plugins::dev_builtin_marketplace_path()
+            .parent()
+            .unwrap()
+            .join("plugins")
+            .join("transcriptomics");
+        assert!(
+            !plugin_root.join("operators").exists(),
+            "transcriptomics keeps template-only public units"
+        );
+        assert!(
+            plugin_root.join("template_backing_operators").is_dir(),
+            "private backing specs preserve template validation without exposing operators"
+        );
+        let plugin = crate::domain::plugins::LoadedPlugin {
+            id: "transcriptomics@omiga-curated".to_string(),
+            manifest_name: Some("transcriptomics".to_string()),
+            display_name: Some("Transcriptomics".to_string()),
+            description: None,
+            root: plugin_root,
+            enabled: true,
+            skill_roots: Vec::new(),
+            mcp_servers: HashMap::new(),
+            apps: Vec::new(),
+            retrieval: None,
+            error: None,
+        };
+
+        let candidates = discover_operator_candidates_from_plugins([&plugin]);
+        assert!(
+            candidates.is_empty(),
+            "Transcriptomics should expose templates only; operator versions are private backing specs"
+        );
     }
 
     #[test]
@@ -8012,6 +9050,52 @@ execution:
                 "Which analysis method?",
             ));
         assert!(operator_preflight_authoring_diagnostics(&spec).is_empty());
+    }
+
+    #[test]
+    fn external_network_authoring_diagnostics_require_cache_and_fixture_mode() {
+        let tmp = TempDir::new().unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["true"]);
+        spec.metadata.id = "network_operator".to_string();
+        spec.metadata.tags.push("external-network".to_string());
+        spec.permissions = Some(json!({
+            "sideEffects": ["external_network"],
+            "network": {"hosts": ["example.test"], "mode": "read_only"}
+        }));
+
+        let diagnostics = operator_external_network_authoring_diagnostics(&spec);
+
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("cache.enabled")));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("offline_fixture")));
+
+        spec.cache = Some(json!({
+            "enabled": true,
+            "policyVersion": "external-network/v1"
+        }));
+        spec.interface.params.insert(
+            "mode".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::Enum,
+                enum_values: vec![json!("auto"), json!("live"), json!("offline_fixture")],
+                default: Some(json!("auto")),
+                ..OperatorFieldSpec::default()
+            },
+        );
+        spec.interface.params.insert(
+            "fixture_json".to_string(),
+            OperatorFieldSpec {
+                kind: OperatorFieldKind::String,
+                default: Some(json!("")),
+                ..OperatorFieldSpec::default()
+            },
+        );
+
+        assert!(operator_external_network_authoring_diagnostics(&spec).is_empty());
     }
 
     fn test_preflight_question(
@@ -8785,6 +9869,286 @@ execution:
         assert!(command.contains("logs/stdout.txt"));
     }
 
+    fn write_conda_environment_profile(plugin_root: &Path, id: &str) {
+        let env_dir = plugin_root.join("environments").join(id);
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("environment.yaml"),
+            format!(
+                r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: {id}
+  version: 0.1.0
+runtime:
+  type: conda
+  condaEnvFile: ./conda.yaml
+diagnostics:
+  checkCommand: [bwa, --version]
+"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            env_dir.join("conda.yaml"),
+            "channels:\n  - conda-forge\n  - bioconda\ndependencies:\n  - bwa =0.7.17\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn local_operator_command_wraps_conda_environment_ref() {
+        let tmp = TempDir::new().unwrap();
+        write_conda_environment_profile(tmp.path(), "ngs-bwa");
+        let mut spec = argv_operator_spec(&tmp, &["bwa", "index", "ref.fa"]);
+        spec.runtime = Some(json!({
+            "envRef": "ngs-bwa",
+            "placement": { "supported": ["local"] },
+            "container": { "supported": ["none"] }
+        }));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let command = operator_execution_command(
+            &ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            "/tmp/oprun_conda",
+            &spec.execution.argv,
+            &BTreeMap::new(),
+        );
+
+        assert!(command.contains("$HOME/.omiga/bin/micromamba"));
+        assert!(command.contains("OMIGA_MICROMAMBA"));
+        assert!(command.contains("active PATH/base environment/virtual environment"));
+        assert!(command.contains("env create -y -p"));
+        assert!(command.contains("run -p"));
+        assert!(command.contains(".omiga/operator-envs/conda"));
+        assert!(command.contains("bwa"));
+        assert!(command.contains("ref.fa"));
+    }
+
+    #[test]
+    fn conda_environment_ref_rejects_non_yaml_environment_file() {
+        let tmp = TempDir::new().unwrap();
+        let env_dir = tmp.path().join("environments").join("bad-conda");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("environment.yaml"),
+            r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: bad-conda
+  version: 0.1.0
+runtime:
+  type: conda
+  condaEnvFile: ./requirements.txt
+"#,
+        )
+        .unwrap();
+        fs::write(env_dir.join("requirements.txt"), "bwa\n").unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["bwa", "index", "ref.fa"]);
+        spec.runtime = Some(json!({
+            "envRef": "bad-conda",
+            "placement": { "supported": ["local"] }
+        }));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let command = operator_execution_command(
+            &ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            "/tmp/oprun_bad_conda",
+            &spec.execution.argv,
+            &BTreeMap::new(),
+        );
+
+        assert!(command.contains("must use a `.yaml` or `.yml` file"));
+        assert!(command.contains("requirements.txt"));
+    }
+
+    #[test]
+    fn environment_profile_can_select_container_runtime() {
+        let tmp = TempDir::new().unwrap();
+        let env_dir = tmp.path().join("environments").join("docker-env");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("environment.yaml"),
+            r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: docker-env
+  version: 0.1.0
+runtime:
+  type: docker
+  image: alpine:3.19
+"#,
+        )
+        .unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["echo", "hello"]);
+        spec.runtime = Some(json!({
+            "envRef": "docker-env",
+            "placement": { "supported": ["local"] }
+        }));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let selection =
+            operator_container_for_command(&ctx, &spec, OperatorExecutionSurfaceKind::Local)
+                .expect("container selection");
+
+        assert_eq!(selection.kind, OperatorContainerKind::Docker);
+        assert_eq!(selection.image, "alpine:3.19");
+    }
+
+    #[test]
+    fn docker_environment_profile_builds_from_standard_dockerfile() {
+        let tmp = TempDir::new().unwrap();
+        let env_dir = tmp.path().join("environments").join("docker-env");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("environment.yaml"),
+            r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: docker-env
+  version: 0.1.0
+runtime:
+  type: docker
+  dockerfile: ./Dockerfile
+"#,
+        )
+        .unwrap();
+        fs::write(env_dir.join("Dockerfile"), "FROM alpine:3.19\n").unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["echo", "hello"]);
+        spec.runtime = Some(json!({
+            "envRef": "docker-env",
+            "placement": { "supported": ["local"] }
+        }));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let command = operator_execution_command(
+            &ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            "/tmp/oprun_docker_env",
+            &spec.execution.argv,
+            &BTreeMap::new(),
+        );
+
+        assert!(command.contains("command -v docker"));
+        assert!(command.contains("docker version"));
+        assert!(command.contains("docker build -t"));
+        assert!(command.contains("'docker' 'run'"));
+        assert!(command.contains("omiga-env-"));
+        assert!(command.contains("docker-env"));
+        assert!(command.contains("logs/stderr.txt"));
+    }
+
+    #[test]
+    fn singularity_environment_profile_builds_from_standard_definition() {
+        let tmp = TempDir::new().unwrap();
+        let env_dir = tmp.path().join("environments").join("singularity-env");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("environment.yaml"),
+            r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: singularity-env
+  version: 0.1.0
+runtime:
+  type: singularity
+  definitionFile: ./singularity.def
+"#,
+        )
+        .unwrap();
+        fs::write(
+            env_dir.join("singularity.def"),
+            "Bootstrap: docker\nFrom: alpine:3.19\n",
+        )
+        .unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["echo", "hello"]);
+        spec.runtime = Some(json!({
+            "envRef": "singularity-env",
+            "placement": { "supported": ["local"] }
+        }));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let command = operator_execution_command(
+            &ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            "/tmp/oprun_singularity_env",
+            &spec.execution.argv,
+            &BTreeMap::new(),
+        );
+
+        assert!(command.contains("command -v singularity"));
+        assert!(command.contains("command -v apptainer"));
+        assert!(command.contains("singularity build"));
+        assert!(command.contains("'singularity' 'exec'"));
+        assert!(command.contains(".omiga/operator-envs/singularity"));
+    }
+
+    #[test]
+    fn container_environment_profile_without_image_or_file_reports_guidance() {
+        let tmp = TempDir::new().unwrap();
+        let env_dir = tmp.path().join("environments").join("docker-env");
+        fs::create_dir_all(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("environment.yaml"),
+            r#"apiVersion: omiga.ai/environment/v1alpha1
+kind: Environment
+metadata:
+  id: docker-env
+  version: 0.1.0
+runtime:
+  type: docker
+"#,
+        )
+        .unwrap();
+        let mut spec = argv_operator_spec(&tmp, &["echo", "hello"]);
+        spec.runtime = Some(json!({
+            "envRef": "docker-env",
+            "placement": { "supported": ["local"] }
+        }));
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let command = operator_execution_command(
+            &ctx,
+            &spec,
+            OperatorExecutionSurfaceKind::Local,
+            "/tmp/oprun_missing_container_env",
+            &spec.execution.argv,
+            &BTreeMap::new(),
+        );
+
+        assert!(command.contains("requires runtime.image or a standard `Dockerfile`"));
+        assert!(!command.contains("'echo' 'hello' > logs/stdout.txt"));
+    }
+
+    #[test]
+    fn ngs_alignment_wrapper_smoke_fixture_runs_with_mock_tools() {
+        let (plugin_root, _) = bundled_plugin_operator_manifest_path("ngs-alignment", "bwa-index");
+        let script = plugin_root
+            .join("scripts")
+            .join("test_ngs_alignment_smoke.py");
+
+        let output = std::process::Command::new("python3")
+            .arg(&script)
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .current_dir(plugin_root)
+            .output()
+            .expect("run ngs alignment smoke test");
+
+        assert!(
+            output.status.success(),
+            "ngs alignment smoke failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("smoke fixture passed"));
+    }
+
     #[test]
     fn local_runtime_prefers_no_container_when_manifest_allows_none() {
         let tmp = TempDir::new().unwrap();
@@ -9418,6 +10782,120 @@ execution:
         let results = fs::read_to_string(results_path).expect("results");
         assert!(results.contains("31452104"));
         assert!(results.contains("25772236"));
+    }
+
+    #[tokio::test]
+    async fn executes_geo_operator_with_offline_fixture() {
+        let tmp = TempDir::new().unwrap();
+        let (plugin_root, manifest) =
+            bundled_plugin_operator_manifest_path("operator-geo-search", "geo-search");
+        let spec = load_operator_manifest(
+            &manifest,
+            "operator-geo-search@omiga-curated",
+            plugin_root.clone(),
+        )
+        .unwrap();
+        let fixture = plugin_root.join("examples").join("geo_fixture.json");
+        let invocation = OperatorInvocation {
+            inputs: BTreeMap::new(),
+            params: BTreeMap::from([
+                ("query".to_string(), json!("TP53 cancer")),
+                ("limit".to_string(), json!(2)),
+                ("mode".to_string(), json!("offline_fixture")),
+                (
+                    "fixture_json".to_string(),
+                    json!(fixture.to_string_lossy().to_string()),
+                ),
+                ("email".to_string(), json!("")),
+            ]),
+            resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let result = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "geo_search".to_string(),
+                spec,
+            },
+            invocation,
+            Some(OperatorRunContext {
+                kind: Some("operator-pilot".to_string()),
+                smoke_test_id: Some("offline-fixture".to_string()),
+                smoke_test_name: Some("GEO offline fixture".to_string()),
+                parent_execution_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, "succeeded");
+        let structured_outputs = result.structured_outputs.as_ref().unwrap();
+        assert_eq!(structured_outputs["summary"]["count"], 2);
+        assert_eq!(structured_outputs["summary"]["mode"], "offline_fixture");
+        let results_path = Path::new(&result.outputs["results"][0].path);
+        let results = fs::read_to_string(results_path).expect("results");
+        assert!(results.contains("GSE123456"));
+        assert!(results.contains("GSE123457"));
+    }
+
+    #[tokio::test]
+    async fn executes_uniprot_operator_with_offline_fixture() {
+        let tmp = TempDir::new().unwrap();
+        let (plugin_root, manifest) =
+            bundled_plugin_operator_manifest_path("operator-uniprot-search", "uniprot-search");
+        let spec = load_operator_manifest(
+            &manifest,
+            "operator-uniprot-search@omiga-curated",
+            plugin_root.clone(),
+        )
+        .unwrap();
+        let fixture = plugin_root.join("examples").join("uniprot_fixture.json");
+        let invocation = OperatorInvocation {
+            inputs: BTreeMap::new(),
+            params: BTreeMap::from([
+                ("query".to_string(), json!("TP53")),
+                ("limit".to_string(), json!(2)),
+                ("mode".to_string(), json!("offline_fixture")),
+                (
+                    "fixture_json".to_string(),
+                    json!(fixture.to_string_lossy().to_string()),
+                ),
+                ("organism".to_string(), json!("")),
+                ("taxon_id".to_string(), json!("9606")),
+                ("reviewed".to_string(), json!("true")),
+            ]),
+            resources: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+        };
+        let ctx = crate::domain::tools::ToolContext::new(tmp.path());
+
+        let result = execute_resolved_operator(
+            &ctx,
+            ResolvedOperator {
+                alias: "uniprot_search".to_string(),
+                spec,
+            },
+            invocation,
+            Some(OperatorRunContext {
+                kind: Some("operator-pilot".to_string()),
+                smoke_test_id: Some("offline-fixture".to_string()),
+                smoke_test_name: Some("UniProt offline fixture".to_string()),
+                parent_execution_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.status, "succeeded");
+        let structured_outputs = result.structured_outputs.as_ref().unwrap();
+        assert_eq!(structured_outputs["summary"]["count"], 2);
+        assert_eq!(structured_outputs["summary"]["mode"], "offline_fixture");
+        let results_path = Path::new(&result.outputs["results"][0].path);
+        let results = fs::read_to_string(results_path).expect("results");
+        assert!(results.contains("P04637"));
+        assert!(results.contains("P38398"));
     }
 
     #[tokio::test]

@@ -275,6 +275,7 @@ Preferred type for each scenario:
 Rules:
 - Do NOT wrap the `visualization` output inside a normal markdown ` ```json ` block in your final text; the tool already returns the correct ` ```visualization ` block.
 - Prefer local artifacts first: for saved PNG/JPG/SVG/WebP outputs, render the file with Markdown image syntax: `![short label](<absolute/or/workspace-relative/path.png>)`. For PDFs, link the file: `[PDF](<path/to/file.pdf>)`.
+- When `template_execute` returns `exportDir`, `markdownReport`, or PNG/PDF/script artifacts, do not paste the raw JSON as the final answer. Prefer copying the PNG line from `markdownReport` exactly; never shorten an exported image path to a bare filename like `figure.png` unless that file is actually in the workspace root. Use the exported PNG in Markdown so Omiga renders it through the image component, link the exported PDF and `plot-script.R`, and mention the result folder. For static figure PNGs, use DPI >= 300; if a lower `dpi` is requested or returned, rerun/adjust to at least 300 before final delivery.
 - Use `visualization`, HTML, or JavaScript for genuinely interactive outputs such as protein/3D structures, explorable graphs, dashboards, or cases where no suitable static artifact exists. Never use base64 as an image transport.
 - For `echarts` / `plotly`, keep the data payload small and focused; omit unnecessary styling defaults.
 - For `three` / `html`, keep code self-contained and avoid loading remote scripts when possible (the iframe is sandboxed).
@@ -414,6 +415,8 @@ mod tests {
         assert!(s.contains("only after `recall` has returned no relevant results"));
         assert!(s.contains("Never paste image bytes"));
         assert!(s.contains("Markdown image syntax"));
+        assert!(s.contains("template_execute"));
+        assert!(s.contains("markdownReport"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use super::manifest::{
-    load_plugin_retrieval_manifest, PluginRetrievalManifest, PluginRetrievalSource,
+    load_plugin_retrieval_manifest, PluginRetrievalManifest, PluginRetrievalResource,
 };
 use super::process::PluginProcess;
 use crate::domain::retrieval::types::{RetrievalOperation, RetrievalRequest, RetrievalTool};
@@ -31,9 +31,9 @@ pub struct PluginValidationCheck {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct PluginRetrievalValidationSourceSummary {
+pub struct PluginRetrievalValidationResourceSummary {
     pub category: String,
-    pub source_id: String,
+    pub resource_id: String,
     pub label: String,
     pub capabilities: Vec<String>,
     pub required_credential_refs: Vec<String>,
@@ -46,15 +46,15 @@ pub struct PluginRetrievalValidationSummary {
     pub protocol_version: u32,
     pub runtime_command: String,
     pub runtime_cwd: String,
-    pub source_count: usize,
-    pub sources: Vec<PluginRetrievalValidationSourceSummary>,
+    pub resource_count: usize,
+    pub resources: Vec<PluginRetrievalValidationResourceSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginRetrievalSmokeResult {
     pub category: String,
-    pub source_id: String,
+    pub resource_id: String,
     pub operation: String,
     pub status: PluginValidationCheckStatus,
     pub message: String,
@@ -289,13 +289,13 @@ fn summary_for_manifest(manifest: &PluginRetrievalManifest) -> PluginRetrievalVa
         protocol_version: manifest.protocol_version,
         runtime_command: manifest.runtime.command.to_string_lossy().into_owned(),
         runtime_cwd: manifest.runtime.cwd.to_string_lossy().into_owned(),
-        source_count: manifest.sources.len(),
-        sources: manifest
-            .sources
+        resource_count: manifest.resources.len(),
+        resources: manifest
+            .resources
             .iter()
-            .map(|source| PluginRetrievalValidationSourceSummary {
+            .map(|source| PluginRetrievalValidationResourceSummary {
                 category: source.category.clone(),
-                source_id: source.id.clone(),
+                resource_id: source.id.clone(),
                 label: source.label.clone(),
                 capabilities: source.capabilities.clone(),
                 required_credential_refs: source.required_credential_refs.clone(),
@@ -309,19 +309,19 @@ async fn smoke_manifest(
     plugin_id: &str,
     manifest: PluginRetrievalManifest,
 ) -> Vec<PluginRetrievalSmokeResult> {
-    let operations = smoke_operations(&manifest.sources);
+    let operations = smoke_operations(&manifest.resources);
     if operations.is_empty() {
         return manifest
-            .sources
+            .resources
             .iter()
             .filter(|source| !source.required_credential_refs.is_empty())
             .map(|source| PluginRetrievalSmokeResult {
                 category: source.category.clone(),
-                source_id: source.id.clone(),
+                resource_id: source.id.clone(),
                 operation: "initialize".to_string(),
                 status: PluginValidationCheckStatus::Skipped,
                 message: format!(
-                    "source requires credentials: {}",
+                    "resource requires credentials: {}",
                     source.required_credential_refs.join(", ")
                 ),
                 item_count: 0,
@@ -339,7 +339,7 @@ async fn smoke_manifest(
                     .into_iter()
                     .map(|(source, operation)| PluginRetrievalSmokeResult {
                         category: source.category,
-                        source_id: source.id,
+                        resource_id: source.id,
                         operation: operation.as_str().to_string(),
                         status: PluginValidationCheckStatus::Failed,
                         message: format!("initialize plugin process: {err}"),
@@ -359,7 +359,7 @@ async fn smoke_manifest(
         {
             Ok(response) => results.push(PluginRetrievalSmokeResult {
                 category: source.category,
-                source_id: source.id,
+                resource_id: source.id,
                 operation: operation.as_str().to_string(),
                 status: PluginValidationCheckStatus::Passed,
                 message: "smoke operation returned a valid retrieval response".to_string(),
@@ -368,7 +368,7 @@ async fn smoke_manifest(
             }),
             Err(err) => results.push(PluginRetrievalSmokeResult {
                 category: source.category,
-                source_id: source.id,
+                resource_id: source.id,
                 operation: operation.as_str().to_string(),
                 status: PluginValidationCheckStatus::Failed,
                 message: err.to_string(),
@@ -382,9 +382,9 @@ async fn smoke_manifest(
 }
 
 fn smoke_operations(
-    sources: &[PluginRetrievalSource],
-) -> Vec<(PluginRetrievalSource, RetrievalOperation)> {
-    sources
+    resources: &[PluginRetrievalResource],
+) -> Vec<(PluginRetrievalResource, RetrievalOperation)> {
+    resources
         .iter()
         .filter(|source| source.required_credential_refs.is_empty())
         .flat_map(|source| {
@@ -402,7 +402,7 @@ fn smoke_operations(
 }
 
 fn smoke_request(
-    source: &PluginRetrievalSource,
+    source: &PluginRetrievalResource,
     operation: RetrievalOperation,
 ) -> RetrievalRequest {
     RetrievalRequest {
@@ -520,7 +520,7 @@ mod tests {
             Some("retrieval-protocol-example")
         );
         assert_eq!(
-            report.retrieval.as_ref().map(|item| item.source_count),
+            report.retrieval.as_ref().map(|item| item.resource_count),
             Some(1)
         );
         assert!(report.smoke_results.is_empty());
@@ -567,7 +567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validates_bundled_individual_retrieval_source_plugins_with_offline_smoke() {
+    async fn validates_bundled_individual_retrieval_resource_plugins_with_offline_smoke() {
         for (plugin_name, expected_routes) in bundled_retrieval_plugin_cases() {
             let report =
                 validate_retrieval_plugin_root(&bundled_retrieval_plugin_root(plugin_name), true)
@@ -576,11 +576,11 @@ mod tests {
             assert!(report.valid, "{plugin_name} report: {report:?}");
             assert_eq!(report.plugin_name.as_deref(), Some(plugin_name));
             let retrieval = report.retrieval.as_ref().expect("retrieval summary");
-            assert_eq!(retrieval.source_count, expected_routes.len());
+            assert_eq!(retrieval.resource_count, expected_routes.len());
             let routes = retrieval
-                .sources
+                .resources
                 .iter()
-                .map(|source| format!("{}.{}", source.category, source.source_id))
+                .map(|source| format!("{}.{}", source.category, source.resource_id))
                 .collect::<Vec<_>>();
             assert_eq!(routes, expected_routes);
             let smoke = report
@@ -589,7 +589,7 @@ mod tests {
                 .map(|result| {
                     format!(
                         "{}.{}:{}",
-                        result.category, result.source_id, result.operation
+                        result.category, result.resource_id, result.operation
                     )
                 })
                 .collect::<Vec<_>>();

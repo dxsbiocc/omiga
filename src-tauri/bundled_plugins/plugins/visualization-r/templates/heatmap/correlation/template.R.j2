@@ -1,0 +1,74 @@
+#!/usr/bin/env Rscript
+# Template: heatmap/correlation
+# Purpose: Correlation heatmap from a numeric matrix-style table.
+#
+# Input example:
+#   See example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template heatmap/correlation
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") { if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default }
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(columns = list(feature = arg_or(3, "feature")), method = arg_or(4, "pearson"), labels = list(title = arg_or(5, "Correlation heatmap")), style = list(base_size = 12))
+delimiter <- arg_or(6, "auto"); width <- as.numeric(arg_or(7, "6")); height <- as.numeric(arg_or(8, "5.5")); dpi <- as.integer(arg_or(9, "300"))
+
+prepare_data <- function(df, config) {
+  feature_col <- resolve_optional_column(df, config$columns$feature)
+  numeric_cols <- setdiff(colnames(df), feature_col %||% character())
+  converted <- lapply(df[numeric_cols], function(x) suppressWarnings(as.numeric(x)))
+  numeric_ok <- vapply(converted, function(x) !all(is.na(x)), logical(1))
+  numeric_cols <- numeric_cols[numeric_ok]
+  if (length(numeric_cols) < 2) stop("heatmap/correlation input requires at least two numeric columns after excluding feature_column.", call. = FALSE)
+  matrix_df <- as.data.frame(converted[numeric_ok], check.names = FALSE)
+  bad_cols <- names(matrix_df)[vapply(matrix_df, function(x) any(is.na(x)), logical(1))]
+  if (length(bad_cols) > 0) stop(sprintf("heatmap/correlation numeric column(s) contain non-numeric values: %s", paste(bad_cols, collapse = ", ")), call. = FALSE)
+  matrix_df
+}
+
+correlation_long <- function(matrix_df, method) {
+  method <- tolower(method)
+  if (!method %in% c("pearson", "spearman", "kendall")) stop(sprintf("Unsupported correlation method: %s", method), call. = FALSE)
+  cor_mat <- stats::cor(matrix_df, method = method, use = "pairwise.complete.obs")
+  out <- as.data.frame(as.table(cor_mat), stringsAsFactors = FALSE)
+  colnames(out) <- c("x", "y", "correlation")
+  out$x <- factor(out$x, levels = colnames(cor_mat))
+  out$y <- factor(out$y, levels = rev(colnames(cor_mat)))
+  out
+}
+
+make_plot <- function(df, config) {
+  plot_df <- correlation_long(df, config$method)
+  ggplot2::ggplot(plot_df, ggplot2::aes(x = x, y = y, fill = correlation)) +
+    ggplot2::geom_tile(color = "white", linewidth = 0.25) +
+    ggplot2::geom_text(ggplot2::aes(label = sprintf("%.2f", correlation)), size = 3) +
+    ggplot2::scale_fill_gradient2(low = "#2563EB", mid = "white", high = "#DC2626", limits = c(-1, 1)) +
+    ggplot2::coord_equal() +
+    ggplot2::labs(title = config$labels$title, x = NULL, y = NULL, fill = config$method) +
+    theme_visualization(base_size = config$style$base_size) +
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
+}
+customize_plot <- function(p, df, config) { p }
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  matrix_df <- prepare_data(df, config)
+  p <- customize_plot(make_plot(matrix_df, config), matrix_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(data.frame(metric = c("template", "variables"), value = c("heatmap/correlation", ncol(matrix_df))), file.path(outdir, "summary.tsv"))
+  write_outputs_json(outdir, list(template = "heatmap/correlation", variables = ncol(matrix_df)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

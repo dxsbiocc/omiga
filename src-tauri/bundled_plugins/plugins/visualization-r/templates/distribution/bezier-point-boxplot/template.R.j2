@@ -1,0 +1,304 @@
+#!/usr/bin/env Rscript
+# Template: distribution/bezier-point-boxplot
+# Purpose: Faceted grouped boxplot with overlaid points and smooth Bezier
+#          connection curves between paired/group-matched observations.
+#
+# Migration note:
+#   This template migrates OmicsAgent backend/scripts/visual/boxplot/bezier_point
+#   from the private JSON ggplot2 DSL into direct, editable R/ggplot2 code.
+#   The source data.json is bundled as example.tsv.
+#
+# Input example:
+#   See example.tsv with gene/exprs/group columns.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template distribution/bezier-point-boxplot
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default) {
+  raw <- tolower(arg_or(index, if (default) "true" else "false"))
+  if (raw %in% c("true", "t", "1", "yes", "y")) return(TRUE)
+  if (raw %in% c("false", "f", "0", "no", "n")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default) {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    facet = arg_or(3, "gene"),
+    group = arg_or(4, "group"),
+    value = arg_or(5, "exprs"),
+    pair = arg_or(6, "auto")
+  ),
+  labels = list(
+    title = arg_or(7, ""),
+    x = arg_or(8, ""),
+    y = arg_or(9, "Gene expression level")
+  ),
+  group_order = parse_csv_arg(10, "Normal,Tumor"),
+  facet_order = parse_csv_arg(11, "auto"),
+  style = list(
+    palette = parse_csv_arg(12, "#ed6ca4,#fbb05b,#acd372,#7bc4e2"),
+    box_width = parse_number_arg(13, 0.62),
+    point_size = parse_number_arg(14, 3.0),
+    point_alpha = parse_number_arg(15, 0.70),
+    point_jitter_width = parse_number_arg(16, 0.0),
+    curve_alpha = parse_number_arg(17, 0.70),
+    curve_width = parse_number_arg(18, 0.45),
+    curve_color = arg_or(19, "#caccd1"),
+    curve_control_offset = parse_number_arg(20, 0.30),
+    curve_steps = max(8, parse_integer_arg(21, 30)),
+    strip_fill = arg_or(22, "#a0c44387"),
+    base_size = parse_number_arg(23, 11)
+  ),
+  show_curves = parse_logical_arg(24, TRUE),
+  significance = list(
+    enabled = parse_logical_arg(25, TRUE),
+    alpha = parse_number_arg(26, 0.05),
+    test = arg_or(27, "wilcox.test")
+  ),
+  random_seed = parse_integer_arg(28, 7)
+)
+delimiter <- arg_or(29, "auto")
+width <- parse_number_arg(30, 7)
+height <- parse_number_arg(31, 5.5)
+dpi <- parse_integer_arg(32, 300)
+
+if (!config$significance$test %in% c("wilcox.test", "t.test")) {
+  stop("test must be one of: wilcox.test, t.test", call. = FALSE)
+}
+
+format_signif <- function(p) {
+  if (is.na(p)) return("ns")
+  if (p <= 0.0001) return("****")
+  if (p <= 0.001) return("***")
+  if (p <= 0.01) return("**")
+  if (p <= 0.05) return("*")
+  "ns"
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$facet, config$columns$group, config$columns$value), "distribution/bezier-point-boxplot input")
+  df <- ensure_numeric_columns(df, config$columns$value, "distribution/bezier-point-boxplot input")
+  df$.facet_raw <- as.character(df[[config$columns$facet]])
+  df$.group_raw <- as.character(df[[config$columns$group]])
+  df$.value <- df[[config$columns$value]]
+  df <- df[is.finite(df$.value) & nzchar(df$.facet_raw) & nzchar(df$.group_raw), , drop = FALSE]
+
+  groups <- unique(df$.group_raw)
+  if (length(config$group_order) > 0) {
+    ordered <- config$group_order[config$group_order %in% groups]
+    groups <- c(ordered, setdiff(groups, ordered))
+  }
+  if (length(groups) != 2) {
+    stop("distribution/bezier-point-boxplot currently expects exactly two groups for Bezier connections.", call. = FALSE)
+  }
+  facets <- unique(df$.facet_raw)
+  if (length(config$facet_order) > 0) {
+    ordered_facets <- config$facet_order[config$facet_order %in% facets]
+    facets <- c(ordered_facets, setdiff(facets, ordered_facets))
+  }
+  df$.group <- factor(df$.group_raw, levels = groups)
+  df$.facet <- factor(df$.facet_raw, levels = facets)
+  df <- df[!is.na(df$.group) & !is.na(df$.facet), , drop = FALSE]
+
+  if (!tolower(config$columns$pair) %in% c("", "auto") && config$columns$pair %in% names(df)) {
+    df$.pair <- as.character(df[[config$columns$pair]])
+  } else {
+    df$.pair <- ave(seq_len(nrow(df)), df$.facet, df$.group, FUN = seq_along)
+  }
+
+  set.seed(config$random_seed)
+  df$.x <- as.numeric(df$.group)
+  if (config$style$point_jitter_width > 0) {
+    df$.x_point <- df$.x + stats::runif(nrow(df), -config$style$point_jitter_width, config$style$point_jitter_width)
+  } else {
+    df$.x_point <- df$.x
+  }
+  df
+}
+
+cubic_bezier <- function(x0, y0, x1, y1, x2, y2, x3, y3, steps) {
+  t <- seq(0, 1, length.out = steps)
+  data.frame(
+    .x = (1 - t)^3 * x0 + 3 * (1 - t)^2 * t * x1 + 3 * (1 - t) * t^2 * x2 + t^3 * x3,
+    .y = (1 - t)^3 * y0 + 3 * (1 - t)^2 * t * y1 + 3 * (1 - t) * t^2 * y2 + t^3 * y3
+  )
+}
+
+bezier_curve_data <- function(df, config) {
+  groups <- levels(df$.group)
+  left <- df[df$.group == groups[[1]], c(".facet", ".pair", ".x_point", ".value"), drop = FALSE]
+  right <- df[df$.group == groups[[2]], c(".facet", ".pair", ".x_point", ".value"), drop = FALSE]
+  colnames(left) <- c(".facet", ".pair", "x0", "y0")
+  colnames(right) <- c(".facet", ".pair", "x3", "y3")
+  pairs <- merge(left, right, by = c(".facet", ".pair"), all = FALSE, sort = FALSE)
+  if (nrow(pairs) == 0) return(data.frame())
+  pieces <- vector("list", nrow(pairs))
+  offset <- config$style$curve_control_offset
+  for (i in seq_len(nrow(pairs))) {
+    row <- pairs[i, ]
+    segment <- cubic_bezier(
+      row$x0, row$y0,
+      row$x0 + offset, row$y0,
+      row$x3 - offset, row$y3,
+      row$x3, row$y3,
+      config$style$curve_steps
+    )
+    segment$.curve_id <- paste(row$.facet, row$.pair, sep = "__")
+    segment$.facet <- row$.facet
+    pieces[[i]] <- segment
+  }
+  do.call(rbind, pieces)
+}
+
+safe_p <- function(x, y, test) {
+  result <- try({
+    if (identical(test, "t.test")) stats::t.test(x, y) else stats::wilcox.test(x, y, exact = FALSE)
+  }, silent = TRUE)
+  if (inherits(result, "try-error") || is.null(result$p.value)) return(NA_real_)
+  as.numeric(result$p.value)
+}
+
+significance_data <- function(df, config) {
+  if (!isTRUE(config$significance$enabled)) return(data.frame())
+  groups <- levels(df$.group)
+  rows <- lapply(levels(df$.facet), function(facet) {
+    facet_df <- df[df$.facet == facet, , drop = FALSE]
+    x <- facet_df$.value[facet_df$.group == groups[[1]]]
+    y <- facet_df$.value[facet_df$.group == groups[[2]]]
+    p <- safe_p(x, y, config$significance$test)
+    label <- format_signif(p)
+    if (is.na(p) || p > config$significance$alpha) return(NULL)
+    y_range <- diff(range(facet_df$.value, na.rm = TRUE))
+    if (!is.finite(y_range) || y_range == 0) y_range <- 1
+    data.frame(.facet = facet, x = 1.5, y = max(facet_df$.value, na.rm = TRUE) + y_range * 0.10, label = label, p = p)
+  })
+  rows <- Filter(Negate(is.null), rows)
+  if (length(rows) == 0) return(data.frame())
+  do.call(rbind, rows)
+}
+
+plot_theme <- function(config) {
+  ggplot2::theme_bw(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      axis.text = ggplot2::element_text(face = "bold", size = 8),
+      axis.title.y = ggplot2::element_text(size = 10, face = "bold"),
+      axis.title.x = ggplot2::element_text(size = 10, face = "bold"),
+      strip.text = ggplot2::element_text(face = "bold"),
+      strip.background = ggplot2::element_rect(fill = config$style$strip_fill, color = "grey70"),
+      panel.grid = ggplot2::element_blank(),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.position = "none",
+      plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"),
+      plot.margin = ggplot2::margin(10, 14, 10, 10)
+    )
+}
+
+make_plot <- function(df, config) {
+  groups <- levels(df$.group)
+  palette <- config$style$palette
+  if (length(palette) < length(groups)) palette <- rep(palette, length.out = length(groups))
+  palette <- stats::setNames(palette[seq_along(groups)], groups)
+  curve_df <- if (isTRUE(config$show_curves)) bezier_curve_data(df, config) else data.frame()
+  sig_df <- significance_data(df, config)
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .x, y = .value)) +
+    ggplot2::geom_boxplot(
+      ggplot2::aes(group = .group, color = .group),
+      width = config$style$box_width,
+      outlier.shape = NA,
+      fill = NA,
+      linewidth = 0.65,
+      show.legend = FALSE
+    )
+
+  if (nrow(curve_df) > 0) {
+    p <- p + ggplot2::geom_path(
+      data = curve_df,
+      ggplot2::aes(x = .x, y = .y, group = .curve_id),
+      inherit.aes = FALSE,
+      color = config$style$curve_color,
+      alpha = config$style$curve_alpha,
+      linewidth = config$style$curve_width,
+      show.legend = FALSE
+    )
+  }
+
+  p <- p +
+    ggplot2::geom_point(
+      ggplot2::aes(x = .x_point, y = .value, color = .group),
+      inherit.aes = FALSE,
+      size = config$style$point_size,
+      alpha = config$style$point_alpha,
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_color_manual(values = palette, guide = "none") +
+    ggplot2::scale_x_continuous(breaks = seq_along(groups), labels = groups, expand = ggplot2::expansion(add = 0.35)) +
+    ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0.06, 0.16))) +
+    ggplot2::facet_wrap(stats::as.formula("~ .facet"), nrow = 1, scales = "free_x") +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    plot_theme(config)
+
+  if (nrow(sig_df) > 0) {
+    p <- p + ggplot2::geom_text(
+      data = sig_df,
+      ggplot2::aes(x = x, y = y, label = label),
+      inherit.aes = FALSE,
+      size = 3.5,
+      fontface = "bold",
+      show.legend = FALSE
+    )
+  }
+  p
+}
+customize_plot <- function(p, df, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  plot_df <- prepare_data(df, config)
+  curve_df <- if (isTRUE(config$show_curves)) bezier_curve_data(plot_df, config) else data.frame()
+  p <- customize_plot(make_plot(plot_df, config), plot_df, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  curve_count <- if (nrow(curve_df) > 0) nrow(unique(curve_df[c(".curve_id", ".facet")])) else 0
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "facets", "groups", "curves", "test"),
+      value = c("distribution/bezier-point-boxplot", nrow(plot_df), length(levels(plot_df$.facet)), paste(levels(plot_df$.group), collapse = ","), curve_count, config$significance$test)
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "distribution/bezier-point-boxplot", rows = nrow(plot_df), facets = levels(plot_df$.facet), groups = levels(plot_df$.group), curves = curve_count))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

@@ -3,7 +3,9 @@ use super::ipc::{
     PluginExecuteRequest, ShutdownRequest,
 };
 use super::lifecycle::PluginLifecyclePolicy;
-use super::manifest::{PluginRetrievalManifest, PluginRetrievalSource, SUPPORTED_PROTOCOL_VERSION};
+use super::manifest::{
+    PluginRetrievalManifest, PluginRetrievalResource, SUPPORTED_PROTOCOL_VERSION,
+};
 use crate::domain::retrieval::types::{
     RetrievalError, RetrievalProviderKind, RetrievalRequest, RetrievalResponse,
 };
@@ -182,29 +184,29 @@ impl PluginProcess {
                 message: "plugin initialized with unsupported protocol version".to_string(),
             });
         }
-        self.validate_initialized_sources(&response)
+        self.validate_initialized_resources(&response)
     }
 
-    fn validate_initialized_sources(
+    fn validate_initialized_resources(
         &self,
         response: &IpcResponseEnvelope,
     ) -> Result<(), RetrievalError> {
         let initialized = response
-            .sources
+            .resources
             .iter()
             .map(|source| (source.category.as_str(), source.id.as_str()))
             .collect::<HashSet<_>>();
-        for source in &self.manifest.sources {
+        for source in &self.manifest.resources {
             if !initialized.contains(&(source.category.as_str(), source.id.as_str())) {
                 return Err(RetrievalError::Protocol {
                     plugin: Some(self.plugin_id.clone()),
                     message: format!(
-                        "plugin did not initialize declared retrieval source {}.{}",
+                        "plugin did not initialize declared retrieval resource {}.{}",
                         source.category, source.id
                     ),
                 });
             }
-            validate_source_capabilities(&self.plugin_id, source, response)?;
+            validate_resource_capabilities(&self.plugin_id, source, response)?;
         }
         Ok(())
     }
@@ -396,19 +398,19 @@ impl Drop for PluginProcess {
     }
 }
 
-fn validate_source_capabilities(
+fn validate_resource_capabilities(
     plugin_id: &str,
-    source: &PluginRetrievalSource,
+    source: &PluginRetrievalResource,
     response: &IpcResponseEnvelope,
 ) -> Result<(), RetrievalError> {
-    let Some(initialized_source) = response
-        .sources
+    let Some(initialized_resource) = response
+        .resources
         .iter()
         .find(|item| item.category == source.category && item.id == source.id)
     else {
         return Ok(());
     };
-    let capabilities = initialized_source
+    let capabilities = initialized_resource
         .capabilities
         .iter()
         .map(|capability| {
@@ -485,7 +487,7 @@ mod tests {
                     "cancelGraceMs": 10,
                     "concurrency": 1
                 },
-                "sources": [{
+                "resources": [{
                     "id": "mock_source",
                     "category": "dataset",
                     "capabilities": ["search", "fetch", "query"]
@@ -572,7 +574,7 @@ for line in sys.stdin:
             "id": msg["id"],
             "type": "initialized",
             "protocolVersion": 1,
-            "sources": [{
+            "resources": [{
                 "category": "dataset",
                 "id": "mock_source",
                 "capabilities": ["search", "fetch", "query"]

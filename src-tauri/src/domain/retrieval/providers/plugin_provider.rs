@@ -66,6 +66,7 @@ pub type PluginProcessProvider = PluginRetrievalProvider;
 pub struct PluginProcessPoolRouteStatus {
     pub plugin_id: String,
     pub category: String,
+    #[serde(rename = "resourceId")]
     pub source_id: String,
     pub route: String,
     pub plugin_root: String,
@@ -92,7 +93,7 @@ impl RetrievalProvider for PluginRetrievalProvider {
         if route.provider != RetrievalProviderKind::Plugin {
             return Err(RetrievalError::ProviderUnavailable {
                 message: format!(
-                    "retrieval source {}.{} is handled by the built-in provider",
+                    "retrieval resource {}.{} is handled by the built-in provider",
                     route.category, route.id
                 ),
             });
@@ -519,7 +520,7 @@ mod tests {
                     "cancelGraceMs": 10,
                     "concurrency": 1
                 },
-                "sources": [source]
+                "resources": [source]
             }),
         )
         .unwrap();
@@ -535,31 +536,27 @@ mod tests {
 
     fn bundled_source_plugin_cases() -> Vec<(&'static str, &'static str, &'static str)> {
         vec![
-            ("dataset", "geo", "retrieval-dataset-geo"),
-            ("dataset", "ena", "retrieval-dataset-ena"),
-            ("dataset", "ena_run", "retrieval-dataset-ena"),
-            ("dataset", "ena_experiment", "retrieval-dataset-ena"),
-            ("dataset", "ena_sample", "retrieval-dataset-ena"),
-            ("dataset", "ena_analysis", "retrieval-dataset-ena"),
-            ("dataset", "ena_assembly", "retrieval-dataset-ena"),
-            ("dataset", "ena_sequence", "retrieval-dataset-ena"),
-            ("dataset", "biosample", "retrieval-dataset-biosample"),
-            ("dataset", "arrayexpress", "retrieval-dataset-arrayexpress"),
-            (
-                "dataset",
-                "ncbi_datasets",
-                "retrieval-dataset-ncbi-datasets",
-            ),
+            ("dataset", "geo", "resource-ncbi"),
+            ("dataset", "biosample", "resource-ncbi"),
+            ("dataset", "ncbi_datasets", "resource-ncbi"),
+            ("literature", "pubmed", "resource-ncbi"),
+            ("knowledge", "ncbi_gene", "resource-ncbi"),
+            ("dataset", "ena", "resource-embl-ebi"),
+            ("dataset", "ena_run", "resource-embl-ebi"),
+            ("dataset", "ena_experiment", "resource-embl-ebi"),
+            ("dataset", "ena_sample", "resource-embl-ebi"),
+            ("dataset", "ena_analysis", "resource-embl-ebi"),
+            ("dataset", "ena_assembly", "resource-embl-ebi"),
+            ("dataset", "ena_sequence", "resource-embl-ebi"),
+            ("dataset", "arrayexpress", "resource-embl-ebi"),
+            ("knowledge", "ensembl", "resource-embl-ebi"),
             ("dataset", "gtex", "retrieval-dataset-gtex"),
             ("dataset", "cbioportal", "retrieval-dataset-cbioportal"),
-            ("literature", "pubmed", "retrieval-literature-pubmed"),
             (
                 "literature",
                 "semantic_scholar",
                 "retrieval-literature-semantic-scholar",
             ),
-            ("knowledge", "ncbi_gene", "retrieval-knowledge-ncbi-gene"),
-            ("knowledge", "ensembl", "retrieval-knowledge-ensembl"),
             ("knowledge", "uniprot", "retrieval-knowledge-uniprot"),
         ]
     }
@@ -614,7 +611,7 @@ for line in sys.stdin:
             "id": msg["id"],
             "type": "initialized",
             "protocolVersion": 1,
-            "sources": [{
+            "resources": [{
                 "category": "dataset",
                 "id": "mock_source",
                 "capabilities": ["search", "fetch", "query"]
@@ -681,7 +678,7 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
-    async fn provider_executes_individual_bundled_replacement_source_plugins_when_enabled() {
+    async fn provider_executes_bundled_replacement_resource_plugins_when_enabled() {
         let provider = PluginRetrievalProvider::new_with_lifecycle_state(
             bundled_source_plugin_registrations(),
             PluginLifecycleState::default(),
@@ -957,7 +954,7 @@ for line in sys.stdin:
                     "requestTimeoutMs": 5_000,
                     "concurrency": 1
                 },
-                "sources": [{
+                "resources": [{
                     "id": "mock_source",
                     "category": "dataset",
                     "capabilities": ["search"]
@@ -987,7 +984,7 @@ for line in sys.stdin:
             "id": msg["id"],
             "type": "initialized",
             "protocolVersion": 1,
-            "sources": [{
+            "resources": [{
                 "category": "dataset",
                 "id": "mock_source",
                 "capabilities": ["search"]
@@ -1052,7 +1049,7 @@ for line in sys.stdin:
                     "cancelGraceMs": 10,
                     "concurrency": 1
                 },
-                "sources": [{
+                "resources": [{
                     "id": "mock_source",
                     "category": "dataset",
                     "capabilities": ["search"]
@@ -1083,7 +1080,7 @@ for line in sys.stdin:
             "id": msg["id"],
             "type": "initialized",
             "protocolVersion": 1,
-            "sources": [{
+            "resources": [{
                 "category": "dataset",
                 "id": "mock_source",
                 "capabilities": ["search"]

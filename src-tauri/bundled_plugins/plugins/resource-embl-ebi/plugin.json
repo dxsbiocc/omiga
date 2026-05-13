@@ -1,0 +1,365 @@
+{
+  "name": "resource-embl-ebi",
+  "version": "0.1.0",
+  "description": "Aggregates EMBL-EBI public dataset and knowledge retrieval routes behind one Resource plugin while each route remains independently addressable.",
+  "retrieval": {
+    "protocolVersion": 1,
+    "runtime": {
+      "command": "./scripts/retrieval_provider_router.py",
+      "args": [],
+      "env": {
+        "OMIGA_RETRIEVAL_SOURCE_IDS": "ena,ena_run,ena_experiment,ena_sample,ena_analysis,ena_assembly,ena_sequence,arrayexpress,ensembl",
+        "OMIGA_RETRIEVAL_PLUGIN_NAME": "resource-embl-ebi",
+        "OMIGA_RETRIEVAL_RUNNERS": "public_dataset_sources.py,public_knowledge_sources.py"
+      },
+      "cwd": ".",
+      "idleTtlMs": 60000,
+      "requestTimeoutMs": 30000,
+      "cancelGraceMs": 750,
+      "concurrency": 1
+    },
+    "resources": [
+      {
+        "id": "ena",
+        "category": "dataset",
+        "label": "ENA read studies",
+        "description": "European Nucleotide Archive read-study records via the ENA Portal API.",
+        "aliases": [
+          "ena_study",
+          "study",
+          "read_study",
+          "european_nucleotide_archive"
+        ],
+        "subcategories": [
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA records to request."
+          }
+        ]
+      },
+      {
+        "id": "ena_run",
+        "category": "dataset",
+        "label": "ENA raw read runs",
+        "description": "European Nucleotide Archive raw read runs with FASTQ/SRA file metadata.",
+        "aliases": [
+          "run",
+          "read_run"
+        ],
+        "subcategories": [
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA run records to request."
+          }
+        ]
+      },
+      {
+        "id": "ena_experiment",
+        "category": "dataset",
+        "label": "ENA read experiments",
+        "description": "European Nucleotide Archive experiment records.",
+        "aliases": [
+          "experiment",
+          "read_experiment"
+        ],
+        "subcategories": [
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA experiment records to request."
+          }
+        ]
+      },
+      {
+        "id": "ena_sample",
+        "category": "dataset",
+        "label": "ENA samples",
+        "description": "European Nucleotide Archive sample metadata records.",
+        "aliases": [
+          "sample",
+          "read_sample"
+        ],
+        "subcategories": [
+          "sample_metadata",
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA sample records to request."
+          }
+        ]
+      },
+      {
+        "id": "ena_analysis",
+        "category": "dataset",
+        "label": "ENA analyses",
+        "description": "European Nucleotide Archive analysis records and generated/submitted file metadata.",
+        "aliases": [
+          "analysis"
+        ],
+        "subcategories": [
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA analysis records to request."
+          }
+        ]
+      },
+      {
+        "id": "ena_assembly",
+        "category": "dataset",
+        "label": "ENA assemblies",
+        "description": "European Nucleotide Archive assembly records.",
+        "aliases": [
+          "assembly"
+        ],
+        "subcategories": [
+          "genome",
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA assembly records to request."
+          }
+        ]
+      },
+      {
+        "id": "ena_sequence",
+        "category": "dataset",
+        "label": "ENA nucleotide sequences",
+        "description": "European Nucleotide Archive sequence records.",
+        "aliases": [
+          "sequence"
+        ],
+        "subcategories": [
+          "sequence",
+          "sequencing"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI ENA APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ENA sequence records to request."
+          }
+        ]
+      },
+      {
+        "id": "arrayexpress",
+        "category": "dataset",
+        "label": "ArrayExpress",
+        "description": "Functional genomics studies via EMBL-EBI BioStudies ArrayExpress collection.",
+        "aliases": [
+          "array_express",
+          "ae",
+          "ebi_arrayexpress",
+          "biostudies_arrayexpress",
+          "functional_genomics"
+        ],
+        "subcategories": [
+          "expression"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public EMBL-EBI BioStudies APIs."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum ArrayExpress/BioStudies records to request."
+          }
+        ]
+      },
+      {
+        "id": "ensembl",
+        "category": "knowledge",
+        "label": "Ensembl",
+        "description": "Gene, transcript, stable ID, and variant lookup via the public Ensembl REST API.",
+        "aliases": [
+          "ensembl_gene",
+          "ensembl_transcript",
+          "gene_annotation",
+          "transcript",
+          "transcripts",
+          "variation",
+          "variant",
+          "variants"
+        ],
+        "subcategories": [
+          "gene",
+          "variant"
+        ],
+        "capabilities": [
+          "search",
+          "query",
+          "fetch"
+        ],
+        "requiredCredentialRefs": [],
+        "optionalCredentialRefs": [],
+        "riskLevel": "low",
+        "riskNotes": [
+          "Read-only public Ensembl REST API; no credential projection required."
+        ],
+        "defaultEnabled": false,
+        "replacesBuiltin": true,
+        "parameters": [
+          {
+            "name": "species",
+            "type": "string",
+            "description": "Ensembl species, default homo_sapiens."
+          },
+          {
+            "name": "object_type",
+            "type": "string",
+            "description": "Ensembl xref object type, default gene."
+          },
+          {
+            "name": "limit",
+            "type": "number",
+            "description": "Maximum matching stable IDs to resolve."
+          }
+        ]
+      }
+    ]
+  },
+  "interface": {
+    "displayName": "EMBL-EBI",
+    "shortDescription": "ENA, ArrayExpress, and Ensembl retrieval",
+    "longDescription": "Aggregates EMBL-EBI public dataset and knowledge retrieval routes behind one Resource plugin while each route remains independently addressable.",
+    "developerName": "Omiga",
+    "category": "Retrieval",
+    "capabilities": [
+      "Provider",
+      "EMBL-EBI",
+      "Dataset",
+      "Knowledge",
+      "Retrieval",
+      "Local Subprocess",
+      "Search",
+      "Query",
+      "Fetch"
+    ],
+    "brandColor": "#0F766E",
+    "defaultPrompt": [
+      "Search ENA, ArrayExpress, or Ensembl through the EMBL-EBI resource plugin."
+    ]
+  }
+}

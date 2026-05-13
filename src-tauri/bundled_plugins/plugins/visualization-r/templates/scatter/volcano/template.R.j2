@@ -1,9 +1,14 @@
 #!/usr/bin/env Rscript
 # Template: scatter/volcano
-# Purpose: Volcano plot for differential-result tables.
+# Purpose: Publication-style volcano plot for differential-result tables.
+#
+# Migration note:
+#   This template directly implements the high-quality OmicsAgent volcano
+#   styling from backend/scripts/visual/scatter/volcano/meta.json. The old
+#   private JSON ggplot2 DSL is intentionally not used at runtime.
 #
 # Input example:
-#   See example.tsv.
+#   See example.tsv, converted from OmicsAgent data.json.
 #
 # Smoke test:
 #   Rscript scripts/smoke_templates.R --template scatter/volcano
@@ -26,25 +31,208 @@ args <- commandArgs(trailingOnly = TRUE)
 arg_or <- function(index, default = "") {
   if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
 }
-parse_formats <- function(value) {
-  value <- arg_or(value, "png,pdf")
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
 }
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+
 input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
 outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
 
-config <- list(columns = list(log2fc = arg_or(3, "log2FoldChange"), pvalue = arg_or(4, "padj"), label = arg_or(5, "gene")), thresholds = list(log2fc = as.numeric(arg_or(6, "1")), pvalue = as.numeric(arg_or(7, "0.05"))), labels = list(title = arg_or(8, "Volcano plot")), style = list(up = "#DC2626", down = "#2563EB", ns = "#9CA3AF", base_size = 12))
-delimiter <- arg_or(9, "auto"); width <- as.numeric(arg_or(10, "7.5")); height <- as.numeric(arg_or(11, "5.5")); dpi <- as.integer(arg_or(12, "300"))
+config <- list(
+  columns = list(
+    log2fc = arg_or(3, "log2FC"),
+    pvalue = arg_or(4, "qvalue"),
+    label = arg_or(5, "symbol"),
+    group = arg_or(6, "group")
+  ),
+  thresholds = list(
+    log2fc = parse_number_arg(7, 1),
+    pvalue = parse_number_arg(8, 0.05),
+    min_pvalue = 1e-30
+  ),
+  labels = list(
+    title = arg_or(9, "Yap1-KO"),
+    x = "log2FC",
+    y = "-log10(p.adjust)",
+    color = "Regulation"
+  ),
+  style = list(
+    down = "#a3ad62",
+    none = "grey70",
+    up = "#df91a3",
+    gradient = c("#DFE1B8", "#FFFFFF", "#F3D7CE"),
+    gradient_steps = 1000,
+    point_alpha = 0.8,
+    point_size_range = c(1, 8),
+    label_color = "#000000",
+    base_size = 12,
+    guide_ticks = c(10, 20, 30)
+  ),
+  label = list(
+    top_n_per_direction = parse_integer_arg(10, 10)
+  ),
+  axis = list(
+    x_limit = parse_number_arg(11, 12)
+  )
+)
+
+delimiter <- arg_or(12, "auto")
+width <- parse_number_arg(13, 8)
+height <- parse_number_arg(14, 6)
+dpi <- parse_integer_arg(15, 300)
+
+normalize_group <- function(values) {
+  values <- trimws(as.character(values))
+  values[is.na(values) | values == ""] <- "None"
+  values <- ifelse(tolower(values) %in% c("ns", "none", "no", "not_significant"), "None", values)
+  values <- ifelse(tolower(values) == "up", "Up", values)
+  values <- ifelse(tolower(values) == "down", "Down", values)
+  factor(values, levels = c("Down", "None", "Up"))
+}
+
+derive_group <- function(log2fc, pvalue, config) {
+  group <- ifelse(
+    log2fc >= config$thresholds$log2fc & pvalue <= config$thresholds$pvalue,
+    "Up",
+    ifelse(
+      log2fc <= -config$thresholds$log2fc & pvalue <= config$thresholds$pvalue,
+      "Down",
+      "None"
+    )
+  )
+  normalize_group(group)
+}
+
+select_label_rows <- function(df, config) {
+  candidates <- df[df$.pvalue <= config$thresholds$pvalue, , drop = FALSE]
+  if (nrow(candidates) == 0 || config$label$top_n_per_direction <= 0) {
+    return(candidates[FALSE, , drop = FALSE])
+  }
+  selected <- list()
+  for (direction in c(FALSE, TRUE)) {
+    subset <- candidates[(candidates$.log2fc < 0) == direction, , drop = FALSE]
+    if (nrow(subset) == 0) next
+    subset <- subset[order(-abs(subset$.log2fc), subset$.pvalue), , drop = FALSE]
+    selected[[length(selected) + 1]] <- utils::head(subset, config$label$top_n_per_direction)
+  }
+  if (length(selected) == 0) return(candidates[FALSE, , drop = FALSE])
+  unique(do.call(rbind, selected))
+}
+
+volcano_theme <- function(config) {
+  base <- if (requireNamespace("ggprism", quietly = TRUE)) {
+    ggprism::theme_prism(base_size = config$style$base_size)
+  } else {
+    theme_visualization(base_size = config$style$base_size)
+  }
+  base +
+    ggplot2::theme(
+      axis.line.y = ggplot2::element_blank(),
+      axis.ticks.y = ggplot2::element_blank(),
+      axis.text.y = ggplot2::element_blank(),
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_blank(),
+      legend.background = ggplot2::element_rect(fill = "white", color = NA),
+      legend.position = "right"
+    )
+}
+
 prepare_data <- function(df, config) {
-  validate_columns(df, c(config$columns$log2fc, config$columns$pvalue, config$columns$label), "scatter/volcano input")
+  required <- c(config$columns$log2fc, config$columns$pvalue, config$columns$label)
+  validate_columns(df, required, "scatter/volcano input")
   df <- ensure_numeric_columns(df, c(config$columns$log2fc, config$columns$pvalue), "scatter/volcano input")
-  df$.log2fc <- df[[config$columns$log2fc]]; df$.pvalue <- pmax(df[[config$columns$pvalue]], .Machine$double.xmin); df$.neglog10 <- -log10(df$.pvalue)
-  df$.regulation <- ifelse(df$.log2fc >= config$thresholds$log2fc & df$.pvalue <= config$thresholds$pvalue, "Up", ifelse(df$.log2fc <= -config$thresholds$log2fc & df$.pvalue <= config$thresholds$pvalue, "Down", "NS"))
-  df$.regulation <- factor(df$.regulation, levels = c("Down", "NS", "Up")); df
+  df$.log2fc <- df[[config$columns$log2fc]]
+  df$.pvalue <- pmax(df[[config$columns$pvalue]], config$thresholds$min_pvalue)
+  df$.neglog10 <- -log10(df$.pvalue)
+  df$.abs_log2fc <- abs(df$.log2fc)
+  if (nzchar(config$columns$group) && config$columns$group %in% names(df)) {
+    df$.regulation <- normalize_group(df[[config$columns$group]])
+  } else {
+    df$.regulation <- derive_group(df$.log2fc, df$.pvalue, config)
+  }
+  stats::na.omit(df)
 }
+
 make_plot <- function(df, config) {
-  label_df <- utils::head(df[df$.regulation != "NS", ][order(df[df$.regulation != "NS", ]$.pvalue, -abs(df[df$.regulation != "NS", ]$.log2fc)), , drop = FALSE], 8)
-  ggplot2::ggplot(df, ggplot2::aes(x = .log2fc, y = .neglog10, color = .regulation)) + ggplot2::geom_point(alpha = 0.78, size = 2.1) + ggplot2::geom_vline(xintercept = c(-config$thresholds$log2fc, config$thresholds$log2fc), linetype = "dashed", linewidth = 0.35) + ggplot2::geom_hline(yintercept = -log10(config$thresholds$pvalue), linetype = "dashed", linewidth = 0.35) + ggplot2::geom_text(data = label_df, ggplot2::aes(label = .data[[config$columns$label]]), vjust = -0.7, size = 3, show.legend = FALSE) + ggplot2::scale_color_manual(values = c(Down = config$style$down, NS = config$style$ns, Up = config$style$up)) + ggplot2::labs(title = config$labels$title, x = "log2 fold change", y = "-log10 adjusted p-value", color = "Regulation") + theme_visualization(base_size = config$style$base_size)
+  label_df <- select_label_rows(df, config)
+  grad_cols <- grDevices::colorRampPalette(config$style$gradient)(config$style$gradient_steps)
+  gradient <- grDevices::as.raster(matrix(grad_cols, nrow = 1))
+  tick_df <- data.frame(y = config$style$guide_ticks)
+  x_limit <- abs(config$axis$x_limit)
+
+  p <- ggplot2::ggplot(df, ggplot2::aes(x = .log2fc, y = .neglog10, color = .regulation)) +
+    ggplot2::annotation_raster(
+      gradient,
+      xmin = -Inf,
+      xmax = Inf,
+      ymin = -Inf,
+      ymax = Inf,
+      interpolate = FALSE
+    ) +
+    ggplot2::geom_point(
+      ggplot2::aes(size = .abs_log2fc),
+      alpha = config$style$point_alpha,
+      stroke = 0
+    ) +
+    ggplot2::geom_vline(xintercept = 0, linewidth = 1) +
+    ggplot2::geom_segment(
+      data = tick_df,
+      ggplot2::aes(x = -0.2, xend = 0, y = y, yend = y),
+      inherit.aes = FALSE,
+      linewidth = 1
+    ) +
+    ggplot2::geom_text(
+      data = tick_df,
+      ggplot2::aes(x = -0.3, y = y, label = y),
+      inherit.aes = FALSE,
+      hjust = 1,
+      color = "black",
+      size = 3.3
+    ) +
+    ggplot2::scale_color_manual(
+      values = c(Down = config$style$down, None = config$style$none, Up = config$style$up),
+      drop = FALSE
+    ) +
+    ggplot2::scale_size_continuous(range = config$style$point_size_range, guide = "none") +
+    ggplot2::scale_x_continuous(limits = c(-x_limit, x_limit)) +
+    ggplot2::scale_y_continuous(expand = ggplot2::expansion(mult = c(0.05, 0.05))) +
+    ggplot2::guides(color = ggplot2::guide_legend(override.aes = list(size = 6))) +
+    ggplot2::labs(
+      title = config$labels$title,
+      x = config$labels$x,
+      y = config$labels$y,
+      color = config$labels$color
+    ) +
+    volcano_theme(config)
+
+  if (nrow(label_df) > 0 && requireNamespace("ggrepel", quietly = TRUE)) {
+    p <- p + ggrepel::geom_text_repel(
+      data = label_df,
+      ggplot2::aes(label = .data[[config$columns$label]]),
+      color = config$style$label_color,
+      show.legend = FALSE,
+      max.overlaps = Inf,
+      size = 3
+    )
+  } else if (nrow(label_df) > 0) {
+    p <- p + ggplot2::geom_text(
+      data = label_df,
+      ggplot2::aes(label = .data[[config$columns$label]]),
+      color = config$style$label_color,
+      show.legend = FALSE,
+      vjust = -0.7,
+      size = 3
+    )
+  }
+
+  p
 }
+
 customize_plot <- function(p, df, config) { p }
 
 main <- function() {
@@ -54,7 +242,19 @@ main <- function() {
   p <- make_plot(plot_df, config)
   p <- customize_plot(p, plot_df, config)
   save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
-  write_tsv(data.frame(metric = c("template", "rows"), value = c("scatter/volcano", nrow(plot_df))), file.path(outdir, "summary.tsv"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "up", "down", "none"),
+      value = c(
+        "scatter/volcano",
+        nrow(plot_df),
+        sum(plot_df$.regulation == "Up", na.rm = TRUE),
+        sum(plot_df$.regulation == "Down", na.rm = TRUE),
+        sum(plot_df$.regulation == "None", na.rm = TRUE)
+      )
+    ),
+    file.path(outdir, "summary.tsv")
+  )
   write_outputs_json(outdir, list(template = "scatter/volcano", rows = nrow(plot_df)))
   write_working_artifacts(outdir, get_current_script(), args)
   cat(sprintf("Saved visualization outputs to %s\n", outdir))

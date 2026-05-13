@@ -9,6 +9,10 @@ use crate::domain::skills::{SkillEntry, SkillSource};
 use crate::domain::templates::{TemplateCandidateSummary, TemplateSpecWithSource};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+const STAGE_INFERENCE_READ_LIMIT_BYTES: u64 = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,7 +91,16 @@ pub struct UnitFilter {
     pub category: Option<String>,
     pub tag: Option<String>,
     pub stage: Option<String>,
+    pub stages: Vec<String>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageInference {
+    pub path: String,
+    pub stages: Vec<String>,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,6 +128,12 @@ pub fn filter_units(units: &[UnitIndexEntry], filter: &UnitFilter) -> Vec<UnitIn
     let category = normalize_optional(&filter.category);
     let tag = normalize_optional(&filter.tag);
     let stage = normalize_optional(&filter.stage);
+    let inferred_stages = filter
+        .stages
+        .iter()
+        .map(|value| normalize(value))
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>();
 
     let mut out = units
         .iter()
@@ -159,6 +178,21 @@ pub fn filter_units(units: &[UnitIndexEntry], filter: &UnitFilter) -> Vec<UnitIn
                 })
                 .unwrap_or(true)
         })
+        .filter(|unit| {
+            if inferred_stages.is_empty() || stage.is_some() {
+                return true;
+            }
+            unit.classification
+                .stage_input
+                .iter()
+                .chain(unit.classification.stage_output.iter())
+                .map(|candidate| normalize(candidate))
+                .any(|candidate| {
+                    inferred_stages
+                        .iter()
+                        .any(|needle| candidate.contains(needle))
+                })
+        })
         .cloned()
         .collect::<Vec<_>>();
 
@@ -167,6 +201,398 @@ pub fn filter_units(units: &[UnitIndexEntry], filter: &UnitFilter) -> Vec<UnitIn
         out.truncate(limit);
     }
     out
+}
+
+pub fn infer_stages_from_paths(paths: &[String]) -> Vec<StageInference> {
+    infer_stages_from_paths_with_root(None, paths)
+}
+
+pub fn infer_stages_from_paths_with_root(
+    project_root: Option<&Path>,
+    paths: &[String],
+) -> Vec<StageInference> {
+    paths
+        .iter()
+        .filter_map(|path| {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let lower = trimmed.to_ascii_lowercase();
+            let filename = std::path::Path::new(trimmed)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(trimmed)
+                .to_ascii_lowercase();
+            let extension = std::path::Path::new(trimmed)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let has_de_token = filename
+                .split(|ch: char| !ch.is_ascii_alphanumeric())
+                .any(|part| part == "de");
+            let mut stages = Vec::new();
+            let mut reasons = Vec::new();
+
+            if matches!(extension.as_str(), "tsv" | "csv" | "txt") {
+                push_stage_reason(&mut stages, &mut reasons, "table", "tabular file extension");
+            }
+            if matches!(extension.as_str(), "rnk") {
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "ranked_gene_table",
+                    ".rnk ranked-list file",
+                );
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "gene_list",
+                    ".rnk gene-list compatible file",
+                );
+            }
+            if matches!(extension.as_str(), "gmt" | "gmx") {
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "gene_sets",
+                    "gene-set file extension",
+                );
+            }
+            if matches!(extension.as_str(), "gct" | "loom" | "h5ad") {
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "expression_matrix",
+                    "expression matrix extension",
+                );
+            }
+            if matches!(
+                extension.as_str(),
+                "png" | "jpg" | "jpeg" | "svg" | "pdf" | "webp"
+            ) {
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "static_figure",
+                    "static figure extension",
+                );
+            }
+
+            if filename.contains("count") || filename.contains("counts") {
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "count_matrix",
+                    "filename mentions counts",
+                );
+            }
+            if filename.contains("expr")
+                || filename.contains("expression")
+                || filename.contains("matrix")
+            {
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "expression_matrix",
+                    "filename mentions expression/matrix",
+                );
+            }
+            if filename.contains("sample")
+                || filename.contains("metadata")
+                || filename.contains("coldata")
+                || filename.contains("phenodata")
+            {
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "sample_metadata",
+                    "filename suggests sample metadata",
+                );
+            }
+            if has_de_token
+                || filename.contains("diff")
+                || filename.contains("differential")
+                || filename.contains("limma")
+                || filename.contains("deseq")
+                || filename.contains("marker")
+            {
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "diff_results",
+                    "filename suggests differential results",
+                );
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "ranked_gene_table",
+                    "differential results can seed ranked-gene workflows",
+                );
+            }
+            if filename.contains("rank")
+                || filename.contains("gene_list")
+                || filename.contains("genelist")
+            {
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "ranked_gene_table",
+                    "filename suggests ranked gene table",
+                );
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "gene_list",
+                    "filename suggests gene list",
+                );
+            } else if filename.contains("gene") {
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "gene_list",
+                    "filename mentions genes",
+                );
+            }
+            if lower.contains("enrichment")
+                || filename.contains("pathway")
+                || filename.contains("kegg")
+                || filename.contains("go_")
+                || filename.starts_with("go")
+            {
+                push_stage_reason(
+                    &mut stages,
+                    &mut reasons,
+                    "enrichment_results",
+                    "filename suggests enrichment results",
+                );
+            }
+
+            if let Some(root) = project_root {
+                append_stage_inference_from_file(root, trimmed, &mut stages, &mut reasons);
+            }
+            dedup_strings(&mut stages);
+            dedup_strings(&mut reasons);
+            Some(StageInference {
+                path: trimmed.to_string(),
+                stages,
+                reasons,
+            })
+        })
+        .collect()
+}
+
+fn push_stage_reason(
+    stages: &mut Vec<String>,
+    reasons: &mut Vec<String>,
+    stage: &str,
+    reason: &str,
+) {
+    push_unique(stages, stage);
+    push_unique(reasons, reason);
+}
+
+fn append_stage_inference_from_file(
+    project_root: &Path,
+    raw_path: &str,
+    stages: &mut Vec<String>,
+    reasons: &mut Vec<String>,
+) {
+    let Some(path) = resolve_project_file_for_stage_inference(project_root, raw_path) else {
+        return;
+    };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return;
+    };
+    let mut bytes = Vec::new();
+    if file
+        .by_ref()
+        .take(STAGE_INFERENCE_READ_LIMIT_BYTES)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    infer_stages_from_table_preview(&text, stages, reasons);
+}
+
+fn resolve_project_file_for_stage_inference(
+    project_root: &Path,
+    raw_path: &str,
+) -> Option<PathBuf> {
+    let root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let raw = Path::new(raw_path);
+    let candidate = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        root.join(raw)
+    };
+    let candidate = candidate.canonicalize().ok()?;
+    if candidate.is_file() && candidate.starts_with(&root) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn infer_stages_from_table_preview(
+    text: &str,
+    stages: &mut Vec<String>,
+    reasons: &mut Vec<String>,
+) {
+    let rows = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .take(3)
+        .collect::<Vec<_>>();
+    let Some(header_line) = rows.first() else {
+        return;
+    };
+    let delimiter = if header_line.matches('\t').count() >= header_line.matches(',').count() {
+        '\t'
+    } else {
+        ','
+    };
+    let header = split_table_line(header_line, delimiter)
+        .into_iter()
+        .map(|field| normalize_header_token(&field))
+        .collect::<Vec<_>>();
+    let data = rows
+        .get(1)
+        .map(|line| split_table_line(line, delimiter))
+        .unwrap_or_default();
+
+    let has = |needles: &[&str]| -> bool {
+        header
+            .iter()
+            .any(|field| needles.iter().any(|needle| field.contains(needle)))
+    };
+    if has(&[
+        "sample",
+        "condition",
+        "group",
+        "treatment",
+        "batch",
+        "phenotype",
+    ]) {
+        push_stage_reason(
+            stages,
+            reasons,
+            "sample_metadata",
+            "table header suggests sample metadata",
+        );
+    }
+    if has(&[
+        "log2fc",
+        "logfc",
+        "foldchange",
+        "pvalue",
+        "p_val",
+        "padj",
+        "adjp",
+        "fdr",
+    ]) {
+        push_stage_reason(
+            stages,
+            reasons,
+            "diff_results",
+            "table header contains differential-statistics columns",
+        );
+        push_stage_reason(
+            stages,
+            reasons,
+            "ranked_gene_table",
+            "differential statistics can seed ranked-gene workflows",
+        );
+    }
+    if has(&[
+        "term",
+        "pathway",
+        "description",
+        "generatio",
+        "bgratio",
+        "qvalue",
+        "ontology",
+    ]) {
+        push_stage_reason(
+            stages,
+            reasons,
+            "enrichment_results",
+            "table header suggests enrichment results",
+        );
+    }
+    if has(&["score", "stat", "rank"]) && has(&["gene", "symbol", "feature", "id"]) {
+        push_stage_reason(
+            stages,
+            reasons,
+            "ranked_gene_table",
+            "table header suggests ranked gene scores",
+        );
+        push_stage_reason(
+            stages,
+            reasons,
+            "gene_list",
+            "ranked gene scores can be consumed as a gene list",
+        );
+    }
+
+    let numeric_data_columns = data
+        .iter()
+        .skip(1)
+        .filter(|value| value.trim().parse::<f64>().is_ok())
+        .count();
+    if data.len() >= 3 && numeric_data_columns >= 2 {
+        if has(&["count", "counts"]) {
+            push_stage_reason(
+                stages,
+                reasons,
+                "count_matrix",
+                "numeric table header/data suggests count matrix",
+            );
+        } else if has(&["gene", "symbol", "feature", "id"]) || header.len() >= 3 {
+            push_stage_reason(
+                stages,
+                reasons,
+                "expression_matrix",
+                "numeric table preview suggests expression matrix",
+            );
+        }
+    }
+}
+
+fn split_table_line(line: &str, delimiter: char) -> Vec<String> {
+    line.split(delimiter)
+        .map(|field| {
+            field
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string()
+        })
+        .collect()
+}
+
+fn normalize_header_token(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect()
+}
+
+pub fn inferred_stage_terms(inferences: &[StageInference]) -> Vec<String> {
+    let mut stages = inferences
+        .iter()
+        .flat_map(|inference| inference.stages.iter().cloned())
+        .collect::<Vec<_>>();
+    dedup_strings(&mut stages);
+    stages
 }
 
 pub fn find_unit_matches(units: &[UnitIndexEntry], raw_id: &str) -> Vec<UnitIndexEntry> {
@@ -392,7 +818,7 @@ fn describe_template_unit(unit: UnitIndexEntry) -> Option<UnitDescription> {
                 &candidate.spec.metadata.id,
             ) == unit.canonical_id
         })?;
-    let execute = template_execute_example(&template, &unit.canonical_id);
+    let execute = crate::domain::templates::template_execute_example(&template, &unit.canonical_id);
     Some(UnitDescription {
         unit,
         details: serde_json::json!({
@@ -402,79 +828,6 @@ fn describe_template_unit(unit: UnitIndexEntry) -> Option<UnitDescription> {
             "note": "Execute this Template with template_execute."
         }),
     })
-}
-
-fn template_execute_example(
-    template: &TemplateSpecWithSource,
-    canonical_id: &str,
-) -> serde_json::Value {
-    serde_json::json!({
-        "tool": "template_execute",
-        "arguments": {
-            "id": canonical_id,
-            "inputs": template_example_inputs(template),
-            "params": interface_defaults(&template.spec.interface, "params"),
-            "resources": interface_defaults(&template.spec.interface, "resources"),
-        }
-    })
-}
-
-fn template_example_inputs(
-    template: &TemplateSpecWithSource,
-) -> serde_json::Map<String, serde_json::Value> {
-    let mut values = interface_defaults(&template.spec.interface, "inputs");
-    let Some(inputs) = interface_section(&template.spec.interface, "inputs") else {
-        return values;
-    };
-    let file_inputs = inputs
-        .iter()
-        .filter(|(_, field)| {
-            field
-                .get("kind")
-                .and_then(|value| value.as_str())
-                .map(|kind| kind.eq_ignore_ascii_case("file"))
-                .unwrap_or(false)
-        })
-        .map(|(name, _)| name)
-        .collect::<Vec<_>>();
-    if file_inputs.len() == 1 {
-        if let Some(example) = template
-            .source
-            .manifest_path
-            .parent()
-            .map(|dir| dir.join("example.tsv"))
-            .filter(|path| path.is_file())
-        {
-            values.insert(
-                file_inputs[0].clone(),
-                serde_json::Value::String(example.to_string_lossy().into_owned()),
-            );
-        }
-    }
-    values
-}
-
-fn interface_defaults(
-    interface: &serde_json::Value,
-    section: &str,
-) -> serde_json::Map<String, serde_json::Value> {
-    let mut values = serde_json::Map::new();
-    let Some(fields) = interface_section(interface, section) else {
-        return values;
-    };
-    for (name, field) in fields {
-        if let Some(default) = field.get("default") {
-            values.insert(name.clone(), default.clone());
-        }
-    }
-    values
-}
-
-fn interface_section<'a>(
-    interface: &'a serde_json::Value,
-    section: &str,
-) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
-    interface.get(section)?.as_object()
 }
 
 fn describe_skill_unit(unit: UnitIndexEntry, skills: &[SkillEntry]) -> Option<UnitDescription> {
@@ -710,12 +1063,100 @@ mod tests {
                 category: Some("transcriptomics".to_string()),
                 tag: Some("rna".to_string()),
                 stage: Some("diff_results".to_string()),
+                stages: Vec::new(),
                 limit: None,
             },
         );
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].id, "bulk_de");
+    }
+
+    #[test]
+    fn infers_stage_filters_from_common_omics_file_names() {
+        let inferences = infer_stages_from_paths(&[
+            "data/raw_counts.tsv".to_string(),
+            "sample_metadata.csv".to_string(),
+            "results/de_results.tsv".to_string(),
+            "msigdb.gmt".to_string(),
+        ]);
+        let stages = inferred_stage_terms(&inferences);
+
+        assert!(stages.iter().any(|stage| stage == "count_matrix"));
+        assert!(stages.iter().any(|stage| stage == "sample_metadata"));
+        assert!(stages.iter().any(|stage| stage == "diff_results"));
+        assert!(stages.iter().any(|stage| stage == "ranked_gene_table"));
+        assert!(stages.iter().any(|stage| stage == "gene_sets"));
+        assert!(
+            !inferences[1]
+                .stages
+                .iter()
+                .any(|stage| stage == "diff_results"),
+            "metadata should not be treated as a DE-result token"
+        );
+    }
+
+    #[test]
+    fn inferred_stage_filters_narrow_unit_candidates_when_explicit_stage_is_absent() {
+        let units = vec![
+            unit(
+                "bulk_de",
+                UnitKind::Template,
+                "omics/transcriptomics/differential",
+                &["rna", "differential"],
+                &["count_matrix", "sample_metadata"],
+                &["diff_results"],
+            ),
+            unit(
+                "enrich",
+                UnitKind::Template,
+                "omics/enrichment",
+                &["enrichment"],
+                &["gene_list"],
+                &["enrichment_results"],
+            ),
+        ];
+
+        let matches = filter_units(
+            &units,
+            &UnitFilter {
+                kind: Some(UnitKind::Template),
+                stages: vec!["count_matrix".to_string()],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, "bulk_de");
+    }
+
+    #[test]
+    fn infers_stages_from_project_scoped_table_headers() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("mystery.tsv"),
+            "gene\tlog2FoldChange\tpadj\nA\t1.2\t0.01\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("samples.csv"),
+            "sample_id,condition,batch\nS1,treated,B1\n",
+        )
+        .unwrap();
+
+        let inferences = infer_stages_from_paths_with_root(
+            Some(tmp.path()),
+            &["mystery.tsv".to_string(), "samples.csv".to_string()],
+        );
+        let stages = inferred_stage_terms(&inferences);
+
+        assert!(stages.iter().any(|stage| stage == "diff_results"));
+        assert!(stages.iter().any(|stage| stage == "ranked_gene_table"));
+        assert!(stages.iter().any(|stage| stage == "sample_metadata"));
+        assert!(inferences[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("differential-statistics")));
     }
 
     #[test]
@@ -811,7 +1252,7 @@ mod tests {
         )
         .expect("visualization-r template");
 
-        let execute = template_execute_example(
+        let execute = crate::domain::templates::template_execute_example(
             &template,
             "visualization-r@omiga-curated/template/viz_scatter_basic",
         );

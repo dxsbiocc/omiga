@@ -96,14 +96,14 @@ impl RetrievalRouteRegistry {
         };
         let Some(entry) = self.entries.get(&key) else {
             return Err(RetrievalError::InvalidRequest {
-                message: format!("Unsupported retrieval source: {category}.{source}"),
+                message: format!("Unsupported retrieval resource: {category}.{source}"),
             });
         };
         let selected = entry.select(keys);
         if !selected.supports_operation(request.operation) {
             return Err(RetrievalError::InvalidRequest {
                 message: format!(
-                    "retrieval source `{}.{}` does not support {}",
+                    "retrieval resource `{}.{}` does not support {}",
                     selected.category,
                     selected.id,
                     request.operation.as_str()
@@ -124,7 +124,7 @@ impl RetrievalRouteRegistry {
     }
 
     fn insert_plugin_registration(&mut self, plugin: PluginRetrievalRegistration) {
-        for source in plugin.retrieval.sources.clone() {
+        for source in plugin.retrieval.resources.clone() {
             let registration = SourceRegistration::from_plugin(&plugin, source);
             let key = registration.key();
             match self.entries.get(&key).cloned() {
@@ -138,7 +138,7 @@ impl RetrievalRouteRegistry {
                     );
                 }
                 Some(_) => self.errors.push(format!(
-                    "plugin retrieval source `{}` from `{}` conflicts with an existing source; set replacesBuiltin=true only for intentional replacements",
+                    "plugin retrieval resource `{}` from `{}` conflicts with an existing resource; set replacesBuiltin=true only for intentional replacements",
                     key.display(), plugin.plugin_id
                 )),
                 None => {
@@ -202,7 +202,7 @@ impl SourceRegistration {
 
     fn from_plugin(
         plugin: &PluginRetrievalRegistration,
-        source: crate::domain::plugin_runtime::retrieval::manifest::PluginRetrievalSource,
+        source: crate::domain::plugin_runtime::retrieval::manifest::PluginRetrievalResource,
     ) -> Self {
         Self {
             category: source.category,
@@ -274,7 +274,7 @@ fn is_plugin_source_explicitly_enabled(
 mod tests {
     use super::*;
     use crate::domain::plugin_runtime::retrieval::manifest::{
-        PluginRetrievalManifest, PluginRetrievalRuntime, PluginRetrievalSource,
+        PluginRetrievalManifest, PluginRetrievalResource, PluginRetrievalRuntime,
     };
     use crate::domain::retrieval::types::{RetrievalRequest, RetrievalTool};
     use std::collections::HashMap;
@@ -315,7 +315,7 @@ mod tests {
                     cancel_grace_ms: None,
                     concurrency: 1,
                 },
-                sources: vec![PluginRetrievalSource {
+                resources: vec![PluginRetrievalResource {
                     id: source_id.to_string(),
                     category: "dataset".to_string(),
                     label: source_id.to_string(),
@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn unsupported_operation_is_rejected() {
         let mut plugin = plugin_registration("mock_source", false);
-        plugin.retrieval.sources[0].capabilities = vec!["search".to_string()];
+        plugin.retrieval.resources[0].capabilities = vec!["search".to_string()];
         let registry = RetrievalRouteRegistry::new(vec![plugin]);
         let err = registry
             .resolve_request(

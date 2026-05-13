@@ -1,0 +1,69 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: star_generate_genome_index
+  version: 0.1.0
+  name: STAR Generate Genome Index
+  description: Generate a STAR genome index from FASTA, optionally with GTF splice junction annotation.
+  tags: [bioinformatics, ngs, alignment, star, rna-seq, fasta, gtf, index]
+interface:
+  inputs:
+    reference:
+      kind: file
+      required: true
+      description: FASTA reference genome.
+    gtf:
+      kind: file
+      required: false
+      description: Optional GTF annotation for splice junction database generation.
+  params:
+    threads:
+      kind: integer
+      default: 8
+      minimum: 1
+      maximum: 128
+    sjdb_overhang:
+      kind: integer
+      default: 100
+      minimum: 1
+      maximum: 1000
+    extra:
+      kind: string
+      default: ""
+      description: Additional STAR genomeGenerate arguments.
+  outputs:
+    index_archive:
+      kind: file
+      glob: star-index.tar.gz
+      required: true
+    index_manifest:
+      kind: file
+      glob: index-manifest.json
+      required: true
+    summary:
+      kind: json
+      required: true
+runtime:
+  envRef: ngs-star
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+resources:
+  cpu:
+    default: 8
+    exposed: true
+  walltime:
+    default: 14400s
+    exposed: true
+execution:
+  argv:
+    - python3
+    - ./scripts/ngs_alignment.py
+    - star-index
+    - ${inputs.reference}
+    - ${inputs.gtf}
+    - ${outdir}
+    - ${params.threads}
+    - ${params.sjdb_overhang}
+    - ${params.extra}

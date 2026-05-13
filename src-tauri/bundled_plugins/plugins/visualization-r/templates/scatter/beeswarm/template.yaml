@@ -1,0 +1,163 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_scatter_beeswarm
+  version: 0.1.0
+  name: Beeswarm
+  description: Beeswarm-style grouped expression scatter with deterministic packed jitter, quartile bars, and median markers.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+    - beeswarm
+    - distribution
+classification:
+  category: visualization/scatter
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+    - beeswarm
+    - distribution
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Long-form CSV/TSV table. See example.tsv converted from OmicsAgent scatter/beeswarm data.json.
+  params:
+    category_column:
+      kind: string
+      default: name
+    value_column:
+      kind: string
+      default: value
+    group_column:
+      kind: string
+      default: group
+      description: Optional grouping/color column. Use an empty string for a single beeswarm.
+    category_order:
+      kind: string
+      default: ''
+      description: Optional comma-separated category order. Empty keeps first-seen order from the table.
+    group_order:
+      kind: string
+      default: ''
+      description: Optional comma-separated group order. Empty keeps first-seen order from the table.
+    title:
+      kind: string
+      default: Beeswarm
+    y_label:
+      kind: string
+      default: Expression level (log2 TPM)
+    palette:
+      kind: string
+      default: '#f784b6,#79ceb8,#8da0cb,#fc8d62,#66c2a5'
+    point_size:
+      kind: number
+      default: 3
+    point_alpha:
+      kind: number
+      default: 0.6
+    swarm_width:
+      kind: number
+      default: 0.15
+    dodge_width:
+      kind: number
+      default: 0.8
+    bins:
+      kind: integer
+      default: 45
+    median_size:
+      kind: number
+      default: 4
+    summary_width:
+      kind: number
+      default: 0.16
+    base_size:
+      kind: number
+      default: 12
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 8
+    height:
+      kind: number
+      default: 6
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - scatter_beeswarm
+  - beeswarm_plot
+  - quasirandom_scatter
+  - grouped_beeswarm
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.category_column}
+    - ${params.value_column}
+    - ${params.group_column}
+    - ${params.category_order}
+    - ${params.group_order}
+    - ${params.title}
+    - ${params.y_label}
+    - ${params.palette}
+    - ${params.point_size}
+    - ${params.point_alpha}
+    - ${params.swarm_width}
+    - ${params.dodge_width}
+    - ${params.bins}
+    - ${params.median_size}
+    - ${params.summary_width}
+    - ${params.base_size}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

@@ -1,17 +1,8 @@
 /**
- * OmigaLogo — theme-adaptive Organic brushstroke icon.
+ * OmigaLogo - theme-adaptive omega hub mark.
  *
- * The shape matches the organic.svg design: a dramatic S-curve brushstroke
- * with watercolor wash and ripple arcs, topped by a pulsing inspiration dot.
- *
- * Colors are derived from the active MUI palette so the icon responds
- * automatically to accent preset changes and light/dark mode switches.
- * Contrast logic ensures the icon is always distinguishable from its background.
- *
- * Props:
- *   size       — pixel size of the bounding box (default 40)
- *   animated   — whether the top circle pulses (default true)
- *   primaryOverride / secondaryOverride — bypass the theme colors
+ * The mark combines an omega-shaped workbench outline with a compact
+ * orchestration graph: one kernel connected to three agent nodes.
  */
 
 import { useId } from "react";
@@ -40,17 +31,16 @@ export function OmigaLogo({
 
   const color = primaryOverride ?? theme.palette.primary.main;
   const accent = secondaryOverride ?? theme.palette.secondary.main;
+  const node = isDark ? theme.palette.info.light : theme.palette.info.main;
+  const kernel = isDark ? theme.palette.warning.light : theme.palette.warning.main;
 
-  // Contrast plate: subtle contrasting backdrop so the icon never blends
-  // into the background. In dark mode a faint white wash; in light mode a
-  // faint dark wash.
-  const plateColor = isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)";
-
-  // Watercolor wash opacity — slightly stronger in light mode for visibility
-  const washOpacity = isDark ? 0.42 : 0.55;
+  const plateColor = isDark ? "rgba(255,255,255,0.07)" : "rgba(8,18,31,0.05)";
+  const plateStroke = isDark ? "rgba(255,255,255,0.14)" : "rgba(8,18,31,0.08)";
+  const washOpacity = isDark ? 0.28 : 0.24;
 
   const gradBg = `omiga-grad-bg-${uid}`;
-  const gradStroke = `omiga-grad-stroke-${uid}`;
+  const gradOmega = `omiga-grad-omega-${uid}`;
+  const gradLink = `omiga-grad-link-${uid}`;
 
   return (
     <svg
@@ -63,67 +53,69 @@ export function OmigaLogo({
       className={className}
     >
       <defs>
-        {/* Watercolor wash behind the stroke */}
-        <radialGradient id={gradBg} cx="50%" cy="50%" r="50%">
+        <radialGradient id={gradBg} cx="50%" cy="45%" r="54%">
           <stop offset="0%" stopColor={color} stopOpacity={washOpacity} />
           <stop offset="100%" stopColor={color} stopOpacity="0" />
         </radialGradient>
 
-        {/* Stroke gradient: primary → secondary → primary */}
-        <linearGradient id={gradStroke} x1="0%" y1="0%" x2="100%" y2="0%">
+        <linearGradient id={gradOmega} x1="18%" y1="20%" x2="86%" y2="82%">
           <stop offset="0%" stopColor={color} />
-          <stop offset="50%" stopColor={accent} />
-          <stop offset="100%" stopColor={color} />
+          <stop offset="56%" stopColor={accent} />
+          <stop offset="100%" stopColor={node} />
+        </linearGradient>
+
+        <linearGradient id={gradLink} x1="28%" y1="30%" x2="72%" y2="70%">
+          <stop offset="0%" stopColor={node} />
+          <stop offset="100%" stopColor={kernel} />
         </linearGradient>
       </defs>
 
-      {/* Contrast plate — keeps icon legible on any background */}
-      <circle cx="50" cy="50" r="45" fill={plateColor} />
-
-      {/* Watercolor background wash */}
+      <circle cx="50" cy="50" r="45" fill={plateColor} stroke={plateStroke} strokeWidth="1" />
       <circle cx="50" cy="50" r="45" fill={`url(#${gradBg})`} />
 
-      {/* Main brushstroke — organic S-curve from edge to edge */}
       <path
-        d="M5 85 Q 40 78, 45 30 Q 50 5, 55 30 Q 60 78, 95 85"
+        d="M24 72H37V63C27 57 22 48 22 38C22 23 34 14 50 14C66 14 78 23 78 38C78 48 73 57 63 63V72H76"
         fill="none"
-        stroke={`url(#${gradStroke})`}
-        strokeWidth="6"
+        stroke={`url(#${gradOmega})`}
+        strokeWidth="7.5"
         strokeLinecap="round"
+        strokeLinejoin="round"
         opacity="0.92"
       />
 
-      {/* Upper ripple arc */}
       <path
-        d="M38 65 Q 50 58, 62 65"
-        stroke={accent}
-        strokeWidth="2"
+        d="M50 44L37 35M50 44L63 35M50 44V59"
+        stroke={`url(#${gradLink})`}
+        strokeWidth="2.5"
         fill="none"
         strokeLinecap="round"
-        opacity={isDark ? 0.72 : 0.65}
+        strokeLinejoin="round"
+        opacity={isDark ? 0.78 : 0.7}
       />
 
-      {/* Lower ripple arc */}
-      <path
-        d="M42 75 Q 50 71, 58 75"
-        stroke={accent}
-        strokeWidth="1.5"
-        fill="none"
-        strokeLinecap="round"
-        opacity={isDark ? 0.52 : 0.45}
-      />
+      <circle cx="37" cy="35" r="4.2" fill={node} />
+      <circle cx="63" cy="35" r="4.2" fill={accent} />
+      <circle cx="50" cy="59" r="4.2" fill={color} />
 
-      {/* Top inspiration dot */}
-      <circle cx="50" cy="12" r="2.5" fill={color} opacity={isDark ? 0.9 : 0.85}>
+      <rect
+        x="45.5"
+        y="39.5"
+        width="9"
+        height="9"
+        rx="2.3"
+        fill={kernel}
+        transform="rotate(45 50 44)"
+        opacity={isDark ? 0.96 : 0.94}
+      >
         {animated && (
           <animate
             attributeName="opacity"
-            values={isDark ? "0.4;1;0.4" : "0.5;0.9;0.5"}
-            dur="3s"
+            values={isDark ? "0.65;1;0.65" : "0.72;0.96;0.72"}
+            dur="2.8s"
             repeatCount="indefinite"
           />
         )}
-      </circle>
+      </rect>
     </svg>
   );
 }

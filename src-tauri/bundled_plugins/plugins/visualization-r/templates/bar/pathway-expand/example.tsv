@@ -1,0 +1,20 @@
+category	Description	p.adjust	Count
+Metabolism	Inositol phosphate metabolism	0.0002	19
+Environmental Information Processing	ErbB signaling pathway	0.0002	21
+Genetic Information Processing	Polycomb repressive complex	0	22
+Cellular Processes	Adherens junction	0.0002	22
+Environmental Information Processing	TGF-beta signaling pathway	0.0001	25
+Genetic Information Processing	Nucleocytoplasmic transport	6.1948e-06	28
+Organismal Systems	Neurotrophin signaling pathway	0	28
+Genetic Information Processing	ATP-dependent chromatin remodeling	7.8693e-06	29
+Genetic Information Processing	Ubiquitin mediated proteolysis	7.119e-09	39
+Metabolism	Cysteine and methionine metabolism	0.0377	2
+Metabolism	Tryptophan metabolism	0.0276	2
+Cellular Processes	Endocytosis	1.7841e-08	54
+Metabolism	Biosynthesis of amino acids	0.0072	3
+Metabolism	Glycine, serine and threonine metabolism	0.0013	3
+Organismal Systems	Cholesterol metabolism	0.0026	3
+Metabolism	Carbon metabolism	0.0002	5
+Organismal Systems	Cardiac muscle contraction	2.6638e-06	6
+Metabolism	Oxidative phosphorylation	1.4792e-12	12
+Organismal Systems	Thermogenesis	4.6901e-10	12

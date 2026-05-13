@@ -209,4 +209,64 @@ describe("ToolCallCard", () => {
     expect(html).not.toContain("hunter2");
     expect(html).not.toContain("password=hunter2");
   });
+
+  it("renders operator/template execution insight before raw output", () => {
+    const html = renderToStaticMarkup(
+      <ToolCallCard
+        foldId="rf-template"
+        messageId="tool-template"
+        content=""
+        timestamp={1000}
+        toolCall={{
+          name: "template_execute",
+          status: "completed",
+          input: JSON.stringify({ id: "bulk_differential_expression_basic" }),
+          output: JSON.stringify({
+            status: "succeeded",
+            runId: "oprun_1",
+            runDir: "/tmp/oprun_1",
+            operator: {
+              alias: "bulk_de",
+              id: "omics_differential_expression_basic",
+              version: "0.1.0",
+            },
+            runContext: {
+              kind: "template",
+              parentExecutionId: "execrec_parent",
+            },
+            paramSources: {
+              method: "user_preflight",
+              fdr: "default",
+            },
+            preflight: {
+              answeredParams: [{ param: "method", question: "Choose method" }],
+              paramsBySource: {
+                method: "user_preflight",
+              },
+            },
+            selectedParams: {
+              method: "DESeq2",
+            },
+            outputs: {
+              table: [{ path: "/tmp/oprun_1/out/table.tsv" }],
+            },
+          }),
+          completedAt: 1100,
+        }}
+        previousAssistantHasText
+        nestedOpen
+        showAskUserPanel={false}
+        chat={chat}
+        components={{}}
+        onToggle={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Template execution");
+    expect(html).toContain("Template run");
+    expect(html).toContain("parent: execrec_parent");
+    expect(html).toContain("paramSources user_preflight: 1");
+    expect(html).toContain("selected: method=DESeq2");
+    expect(html).toContain("Raw output");
+  });
 });

@@ -17,7 +17,7 @@
       "cancelGraceMs": 750,
       "concurrency": 1
     },
-    "sources": [
+    "resources": [
       {
         "id": "biosample",
         "category": "dataset",
@@ -60,7 +60,7 @@
     ]
   },
   "interface": {
-    "displayName": "BioSample Retrieval Source",
+    "displayName": "BioSample Retrieval Resource",
     "shortDescription": "NCBI BioSample as a local retrieval plugin",
     "longDescription": "Runs NCBI BioSample search/query/fetch through Omiga local subprocess routing.",
     "developerName": "Omiga",

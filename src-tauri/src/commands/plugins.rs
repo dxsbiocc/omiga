@@ -6,7 +6,9 @@ use crate::domain::plugin_runtime::retrieval::lifecycle::PluginLifecycleRouteSta
 use crate::domain::plugin_runtime::retrieval::validation::{
     validate_retrieval_plugin_root, PluginRetrievalValidationReport,
 };
-use crate::domain::plugins::{self, PluginDetail, PluginInstallResult, PluginMarketplaceEntry};
+use crate::domain::plugins::{
+    self, PluginDetail, PluginEnvironmentCheckResult, PluginInstallResult, PluginMarketplaceEntry,
+};
 use crate::domain::retrieval::providers::plugin_provider::{
     clear_global_plugin_process_pool, global_plugin_process_pool_statuses,
     PluginProcessPoolRouteStatus,
@@ -94,6 +96,37 @@ pub async fn install_omiga_plugin(
 }
 
 #[tauri::command]
+pub async fn sync_omiga_plugin(
+    app_state: State<'_, OmigaAppState>,
+    plugin_id: String,
+    marketplace_path: String,
+    plugin_name: Option<String>,
+    force: Option<bool>,
+    project_root: Option<String>,
+) -> CommandResult<plugins::PluginSyncResult> {
+    let _root = resolve_optional_project_root(project_root);
+    let result = plugins::sync_plugin(
+        &plugin_id,
+        Path::new(&marketplace_path),
+        plugin_name.as_deref(),
+        force.unwrap_or(false),
+    )
+    .map_err(plugin_error)?;
+    invalidate_plugin_dependent_caches(&app_state).await;
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn check_omiga_remote_plugin_marketplaces(
+    app: tauri::AppHandle,
+    project_root: Option<String>,
+) -> CommandResult<Vec<plugins::MarketplaceRemoteCheckResult>> {
+    let root = resolve_optional_project_root(project_root);
+    let resource_dir = app.path().resource_dir().ok();
+    Ok(plugins::check_remote_plugin_marketplaces(root.as_deref(), resource_dir.as_deref()).await)
+}
+
+#[tauri::command]
 pub async fn uninstall_omiga_plugin(
     app_state: State<'_, OmigaAppState>,
     plugin_id: String,
@@ -118,6 +151,75 @@ pub async fn set_omiga_plugin_enabled(
     plugins::set_plugin_enabled(&plugin_id, enabled).map_err(plugin_error)?;
     invalidate_plugin_dependent_caches(&app_state).await;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn set_omiga_template_enabled(
+    app_state: State<'_, OmigaAppState>,
+    plugin_id: String,
+    template_id: String,
+    enabled: bool,
+    project_root: Option<String>,
+) -> CommandResult<()> {
+    let _root = resolve_optional_project_root(project_root);
+    plugins::set_template_enabled(&plugin_id, &template_id, enabled).map_err(plugin_error)?;
+    invalidate_plugin_dependent_caches(&app_state).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_omiga_retrieval_resource_enabled(
+    app_state: State<'_, OmigaAppState>,
+    plugin_id: String,
+    category: String,
+    resource_id: String,
+    enabled: bool,
+    project_root: Option<String>,
+) -> CommandResult<()> {
+    let _root = resolve_optional_project_root(project_root);
+    clear_global_plugin_process_pool().await;
+    plugins::set_retrieval_resource_enabled(&plugin_id, &category, &resource_id, enabled)
+        .map_err(plugin_error)?;
+    invalidate_plugin_dependent_caches(&app_state).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_omiga_environment_enabled(
+    app_state: State<'_, OmigaAppState>,
+    plugin_id: String,
+    environment_id: String,
+    enabled: bool,
+    project_root: Option<String>,
+) -> CommandResult<()> {
+    let _root = resolve_optional_project_root(project_root);
+    plugins::set_environment_enabled(&plugin_id, &environment_id, enabled).map_err(plugin_error)?;
+    invalidate_plugin_dependent_caches(&app_state).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn check_omiga_plugin_environment(
+    plugin_id: String,
+    marketplace_path: Option<String>,
+    plugin_name: Option<String>,
+    env_ref: String,
+    project_root: Option<String>,
+) -> CommandResult<PluginEnvironmentCheckResult> {
+    let root = resolve_optional_project_root(project_root);
+    let marketplace_path = marketplace_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    plugins::check_plugin_environment(
+        &plugin_id,
+        marketplace_path.as_deref(),
+        plugin_name.as_deref(),
+        &env_ref,
+        root.as_deref(),
+    )
+    .map_err(plugin_error)
 }
 
 #[tauri::command]

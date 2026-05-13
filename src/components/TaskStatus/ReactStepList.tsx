@@ -23,6 +23,10 @@ import {
   type ExecutionSurfaceContext,
 } from "../../utils/executionSurfaceLabel";
 import { compactLabel } from "../../utils/compactLabel";
+import {
+  summarizeExecutionInsight,
+  type ExecutionInsight,
+} from "../Chat/executionInsight";
 
 const ACCENT = "#6366f1";
 const BACKGROUND_RUNNING_ACCENT = "#f97316";
@@ -46,6 +50,7 @@ interface StepDisplayRow {
   completedAt?: number;
   durationMs?: number;
   output?: string;
+  toolName?: string;
 }
 
 function isBackgroundOperationStep(step: ExecutionStep): boolean {
@@ -105,6 +110,7 @@ function buildDisplayRows(
       completedAt: step.completedAt,
       ...(durationMs !== undefined ? { durationMs } : {}),
       output: step.toolOutput,
+      toolName: step.toolName,
     });
   }
   return rows;
@@ -138,11 +144,77 @@ function buildGroupedFailureRows(steps: ExecutionStep[]): StepDisplayRow[] {
       completedAt: step.completedAt,
       ...(durationMs !== undefined ? { durationMs } : {}),
       output: step.toolOutput,
+      toolName: step.toolName,
     };
     byLabel.set(label, row);
     rows.push(row);
   }
   return rows;
+}
+
+function stepExecutionInsight(row: StepDisplayRow): ExecutionInsight | null {
+  if (!row.output) return null;
+  return summarizeExecutionInsight(row.toolName ?? row.label, row.output);
+}
+
+function StepExecutionInsightPanel({ insight }: { insight: ExecutionInsight }) {
+  return (
+    <Box
+      sx={{
+        mt: 0.45,
+        p: 0.75,
+        borderRadius: 1,
+        border: `1px solid ${alpha(ACCENT, 0.18)}`,
+        bgcolor: alpha(ACCENT, 0.045),
+      }}
+    >
+      <Stack spacing={0.55}>
+        <Stack direction="row" spacing={0.45} alignItems="center" flexWrap="wrap" useFlexGap>
+          <Typography variant="caption" sx={{ fontSize: 9.5, fontWeight: 800 }}>
+            {insight.title}
+          </Typography>
+          {insight.chips.slice(0, 5).map((chip) => (
+            <Chip
+              key={chip}
+              size="small"
+              label={chip}
+              variant="outlined"
+              sx={{ height: 16, fontSize: 8.5, "& .MuiChip-label": { px: 0.55 } }}
+            />
+          ))}
+        </Stack>
+        {insight.sections.slice(0, 3).map((section) => (
+          <Box key={section.label}>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: "block", fontSize: 8.5, fontWeight: 800, mb: 0.15 }}
+            >
+              {section.label}
+            </Typography>
+            <Stack component="ul" spacing={0.15} sx={{ m: 0, pl: 1.75 }}>
+              {section.items.slice(0, 4).map((item) => (
+                <Typography
+                  key={item}
+                  component="li"
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{
+                    display: "list-item",
+                    fontSize: 8.8,
+                    lineHeight: 1.35,
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {item}
+                </Typography>
+              ))}
+            </Stack>
+          </Box>
+        ))}
+      </Stack>
+    </Box>
+  );
 }
 
 interface ReactStepListProps {
@@ -192,6 +264,7 @@ export function ReactStepList({
           row.status === "running"
             ? formatStepElapsedLabel(row.startedAt, row.completedAt)
             : formatDurationMsCompact(row.durationMs);
+        const insight = stepExecutionInsight(row);
         return (
           <ListItem
             key={row.id}
@@ -291,22 +364,27 @@ export function ReactStepList({
               }
               secondary={
                 row.failed && row.output ? (
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    sx={{
-                      display: "block",
-                      fontSize: 9,
-                      lineHeight: 1.35,
-                      mt: 0.1,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                    title={row.output}
-                  >
-                    {compactLabel(row.output, 84)}
-                  </Typography>
+                  <>
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{
+                        display: "block",
+                        fontSize: 9,
+                        lineHeight: 1.35,
+                        mt: 0.1,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={row.output}
+                    >
+                      {compactLabel(row.output, 84)}
+                    </Typography>
+                    {insight ? <StepExecutionInsightPanel insight={insight} /> : null}
+                  </>
+                ) : insight ? (
+                  <StepExecutionInsightPanel insight={insight} />
                 ) : undefined
               }
             />

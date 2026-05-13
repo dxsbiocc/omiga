@@ -1,0 +1,293 @@
+#!/usr/bin/env Rscript
+# Template: scatter/one-to-many
+# Purpose: One-to-many correlation scatter with curved links.
+#
+# Migration note:
+#   This template migrates OmicsAgent scatter/one2many from a private JSON
+#   ggplot2/ggforce DSL into direct, editable R/ggplot2 code. The original
+#   data.json has been converted to example.tsv. Curved links are generated
+#   as cubic Bezier paths in base R, avoiding the legacy JSON runtime.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/one-to-many
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_logical_arg <- function(index, default = TRUE) {
+  raw <- tolower(trimws(arg_or(index, if (isTRUE(default)) "true" else "false")))
+  if (raw %in% c("1", "true", "yes", "y", "on")) return(TRUE)
+  if (raw %in% c("0", "false", "no", "n", "off")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default = "") {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    label = arg_or(3, "label"),
+    category = arg_or(4, "category"),
+    correlation = arg_or(5, "correlation")
+  ),
+  category_order = parse_csv_arg(6, ""),
+  labels = list(
+    title = arg_or(7, "One-to-Many Scatter Plot"),
+    center = arg_or(8, "ethyl glucuronide")
+  ),
+  style = list(
+    category_palette = parse_csv_arg(9, "#d7689d,#f3d337,#a0c443,#66b5ae,#5da4dc,#40769e"),
+    negative_curve_color = arg_or(10, "#84afa2"),
+    positive_curve_color = arg_or(11, "#f29556"),
+    center_color = arg_or(12, "#2B393B"),
+    point_size_min = parse_number_arg(13, 2),
+    point_size_max = parse_number_arg(14, 7),
+    curve_width = parse_number_arg(15, 0.4),
+    label_size = parse_number_arg(16, 4),
+    label_nudge = parse_number_arg(17, 0.2),
+    center_label_size = parse_number_arg(18, 6),
+    center_label_x = parse_number_arg(19, 1.5),
+    bezier_adjust = parse_number_arg(20, 0.5),
+    x_limit = parse_number_arg(21, 3),
+    show_direction_labels = parse_logical_arg(22, TRUE),
+    base_size = parse_number_arg(23, 12)
+  )
+)
+delimiter <- arg_or(24, "auto")
+width <- parse_number_arg(25, 7)
+height <- parse_number_arg(26, 7)
+dpi <- parse_integer_arg(27, 300)
+
+first_seen <- function(x) unique(as.character(x))
+make_palette <- function(values, levels) {
+  if (!length(values)) values <- visualization_palette(length(levels))
+  if (length(values) < length(levels)) values <- rep(values, length.out = length(levels))
+  stats::setNames(values[seq_along(levels)], levels)
+}
+rescale_size <- function(x, min_size, max_size) {
+  if (!length(x)) return(numeric())
+  rng <- range(x, na.rm = TRUE)
+  if (!all(is.finite(rng)) || diff(rng) == 0) return(rep((min_size + max_size) / 2, length(x)))
+  min_size + (x - rng[1]) / diff(rng) * (max_size - min_size)
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$label, config$columns$category, config$columns$correlation), "scatter/one-to-many input")
+  df <- ensure_numeric_columns(df, config$columns$correlation, "scatter/one-to-many input")
+  df$.label <- as.character(df[[config$columns$label]])
+  df$.category_raw <- as.character(df[[config$columns$category]])
+  df$.correlation <- df[[config$columns$correlation]]
+  df <- df[is.finite(df$.correlation) & nzchar(df$.label) & nzchar(df$.category_raw), , drop = FALSE]
+  if (nrow(df) == 0) stop("scatter/one-to-many input has no usable rows.", call. = FALSE)
+
+  category_levels <- config$category_order
+  if (length(category_levels) == 0) category_levels <- first_seen(df$.category_raw)
+  category_levels <- c(category_levels[category_levels %in% df$.category_raw], setdiff(first_seen(df$.category_raw), category_levels))
+  df <- df[df$.category_raw %in% category_levels, , drop = FALSE]
+  df$.category <- factor(df$.category_raw, levels = category_levels)
+  df <- df[order(df$.category, df$.label), , drop = FALSE]
+  n <- nrow(df)
+  df$.x <- ifelse(df$.correlation < 0, -1, 1)
+  df$.y <- rev(seq_len(n))
+  df$.y <- df$.y - mean(df$.y)
+  df$.direction <- factor(ifelse(df$.correlation < 0, "Negative", "Positive"), levels = c("Negative", "Positive"))
+  df$.abs_correlation <- abs(df$.correlation)
+  df$.point_size <- rescale_size(df$.abs_correlation, config$style$point_size_min, config$style$point_size_max)
+  df$.label_hjust <- ifelse(df$.x > 0, 0, 1)
+  df$.label_x <- df$.x + ifelse(df$.x > 0, config$style$label_nudge, -config$style$label_nudge)
+  list(points = df, category_levels = category_levels)
+}
+
+bezier_points <- function(x0, y0, x1, y1, side, adjust, n = 60) {
+  t <- seq(0, 1, length.out = n)
+  cx1 <- side * adjust
+  cy1 <- 0
+  cx2 <- x1 - side * adjust
+  cy2 <- y1
+  data.frame(
+    x = (1 - t)^3 * x0 + 3 * (1 - t)^2 * t * cx1 + 3 * (1 - t) * t^2 * cx2 + t^3 * x1,
+    y = (1 - t)^3 * y0 + 3 * (1 - t)^2 * t * cy1 + 3 * (1 - t) * t^2 * cy2 + t^3 * y1
+  )
+}
+
+curve_data <- function(df, config) {
+  rows <- vector("list", nrow(df))
+  for (i in seq_len(nrow(df))) {
+    side <- ifelse(df$.x[[i]] < 0, -1, 1)
+    path <- bezier_points(0, 0, df$.x[[i]], df$.y[[i]], side, config$style$bezier_adjust)
+    path$.row <- i
+    path$.direction <- df$.direction[[i]]
+    rows[[i]] <- path
+  }
+  do.call(rbind, rows)
+}
+
+direction_guides <- function(prepared, config) {
+  y_min <- min(prepared$points$.y, na.rm = TRUE)
+  guide_y <- y_min - 1.4
+  label_y <- y_min - 2.25
+  list(
+    arrows = data.frame(
+      x = c(-0.5, 0.5),
+      xend = c(-2.5, 2.5),
+      y = guide_y,
+      yend = guide_y,
+      direction = c("Negative", "Positive"),
+      stringsAsFactors = FALSE
+    ),
+    labels = data.frame(
+      x = c(-2.3, 2.3),
+      y = label_y,
+      label = c("Negative correlation", "Positive correlation"),
+      hjust = c(0, 1),
+      stringsAsFactors = FALSE
+    )
+  )
+}
+
+make_plot <- function(prepared, config) {
+  df <- prepared$points
+  category_levels <- prepared$category_levels
+  category_palette <- make_palette(config$style$category_palette, category_levels)
+  curve_palette <- c(Negative = config$style$negative_curve_color, Positive = config$style$positive_curve_color)
+  curves <- curve_data(df, config)
+  guides <- direction_guides(prepared, config)
+  x_limit <- abs(config$style$x_limit)
+  if (!is.finite(x_limit) || x_limit < 2) x_limit <- 3
+  y_range <- range(c(df$.y, guides$labels$y), na.rm = TRUE)
+  y_pad <- max(1, diff(y_range) * 0.08)
+
+  p <- ggplot2::ggplot() +
+    ggplot2::geom_path(
+      data = curves,
+      ggplot2::aes(x = x, y = y, group = .row, colour = .direction),
+      linewidth = config$style$curve_width,
+      show.legend = FALSE
+    ) +
+    ggplot2::annotate("point", x = 0, y = 0, size = 8, colour = config$style$center_color) +
+    ggplot2::annotate(
+      "text",
+      x = config$style$center_label_x,
+      y = 0,
+      label = config$labels$center,
+      size = config$style$center_label_size,
+      hjust = 0.5,
+      vjust = 0.5,
+      colour = config$style$center_color,
+      fontface = "italic"
+    ) +
+    ggplot2::geom_point(
+      data = df,
+      ggplot2::aes(x = .x, y = .y, size = .abs_correlation),
+      colour = "white",
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_point(
+      data = df,
+      ggplot2::aes(x = .x, y = .y, fill = .category, size = .abs_correlation),
+      shape = 21,
+      colour = "#2B393B",
+      stroke = 0.35,
+      show.legend = TRUE
+    ) +
+    ggplot2::geom_text(
+      data = df,
+      ggplot2::aes(x = .label_x, y = .y, label = .label, hjust = .label_hjust),
+      vjust = 0.5,
+      size = config$style$label_size,
+      alpha = 0.8,
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_colour_manual(values = curve_palette, guide = "none") +
+    ggplot2::scale_fill_manual(name = "Category", values = category_palette) +
+    ggplot2::scale_size_continuous(name = "Correlation", range = c(config$style$point_size_min, config$style$point_size_max)) +
+    ggplot2::scale_x_continuous(limits = c(-x_limit, x_limit), expand = c(0, 0)) +
+    ggplot2::scale_y_continuous(limits = c(y_range[1] - y_pad, y_range[2] + y_pad), expand = c(0, 0)) +
+    ggplot2::labs(title = config$labels$title, x = NULL, y = NULL) +
+    ggplot2::theme_void(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", colour = NA),
+      panel.background = ggplot2::element_rect(fill = "white", colour = NA),
+      plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"),
+      legend.position = "top",
+      legend.background = ggplot2::element_rect(fill = "white", colour = NA)
+    ) +
+    ggplot2::guides(
+      fill = ggplot2::guide_legend(override.aes = list(size = 3), order = 1),
+      size = ggplot2::guide_legend(order = 2)
+    )
+
+  if (isTRUE(config$style$show_direction_labels)) {
+    p <- p +
+      ggplot2::geom_segment(
+        data = guides$arrows,
+        ggplot2::aes(x = x, xend = xend, y = y, yend = yend, colour = direction),
+        inherit.aes = FALSE,
+        arrow = grid::arrow(angle = 25, length = grid::unit(0.03, "npc"), type = "closed"),
+        linewidth = 0.45,
+        show.legend = FALSE
+      ) +
+      ggplot2::geom_text(
+        data = guides$labels,
+        ggplot2::aes(x = x, y = y, label = label, hjust = hjust),
+        inherit.aes = FALSE,
+        size = config$style$base_size * 0.27,
+        color = "#2B393B",
+        show.legend = FALSE
+      )
+  }
+  p
+}
+
+customize_plot <- function(p, prepared, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  prepared <- prepare_data(df, config)
+  p <- customize_plot(make_plot(prepared, config), prepared, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "categories", "negative", "positive", "correlation_min", "correlation_max"),
+      value = c(
+        "scatter/one-to-many",
+        nrow(prepared$points),
+        length(prepared$category_levels),
+        sum(prepared$points$.correlation < 0),
+        sum(prepared$points$.correlation >= 0),
+        min(prepared$points$.correlation),
+        max(prepared$points$.correlation)
+      )
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "scatter/one-to-many", rows = nrow(prepared$points), categories = length(prepared$category_levels), negative = sum(prepared$points$.correlation < 0), positive = sum(prepared$points$.correlation >= 0)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s
+", outdir))
+}
+main()

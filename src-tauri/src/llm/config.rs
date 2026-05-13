@@ -294,6 +294,10 @@ pub struct ProviderConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
 
+    /// Model context window capacity, in tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u32>,
+
     /// Temperature
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -432,6 +436,9 @@ impl LlmConfigFile {
         if let Some(tokens) = provider_config.max_tokens {
             config.max_tokens = tokens;
         }
+        if let Some(tokens) = provider_config.context_window_tokens {
+            config.context_window_tokens = Some(tokens);
+        }
         if let Some(temp) = provider_config.temperature {
             config.temperature = Some(temp);
         }
@@ -535,6 +542,7 @@ impl LlmConfigFile {
                 api_key: Some("${DEEPSEEK_API_KEY}".to_string()),
                 model: Some("deepseek-v4-flash".to_string()),
                 max_tokens: Some(4096),
+                context_window_tokens: Some(1_000_000),
                 temperature: Some(0.7),
                 thinking: Some(false),
                 ..Default::default()
@@ -867,6 +875,9 @@ fn format_provider_yaml(name: &str, cfg: &ProviderConfig) -> String {
     }
     if let Some(tokens) = cfg.max_tokens {
         lines.push(format!("    max_tokens: {}", tokens));
+    }
+    if let Some(tokens) = cfg.context_window_tokens {
+        lines.push(format!("    context_window_tokens: {}", tokens));
     }
     if let Some(temp) = cfg.temperature {
         lines.push(format!("    temperature: {}", temp));
@@ -1215,6 +1226,7 @@ mod tests {
                 provider_type: "deepseek".to_string(),
                 api_key: Some("sk-second".to_string()),
                 model: Some("deepseek-v4-flash".to_string()),
+                context_window_tokens: Some(1_000_000),
                 enabled: true,
                 ..Default::default()
             },
@@ -1238,6 +1250,7 @@ mod tests {
         assert_eq!(second.provider, LlmProvider::Deepseek);
         assert_eq!(second.api_key, "sk-second");
         assert_eq!(second.model, "deepseek-v4-flash");
+        assert_eq!(second.context_window_tokens, Some(1_000_000));
         assert_eq!(validated.provider, LlmProvider::Deepseek);
     }
 

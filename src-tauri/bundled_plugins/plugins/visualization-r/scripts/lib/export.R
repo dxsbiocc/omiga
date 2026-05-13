@@ -36,13 +36,19 @@ write_outputs_json <- function(outdir, summary = list()) {
   writeLines(raw, file.path(outdir, 'outputs.json'))
 }
 
+normalize_png_dpi <- function(dpi, minimum = 300L) {
+  value <- suppressWarnings(as.integer(dpi))
+  if (is.na(value) || value < minimum) minimum else value
+}
+
 save_ggplot_outputs <- function(plot, outdir, prefix = 'figure', width = 8, height = 6, dpi = 300, formats = c('png', 'pdf')) {
   outdir <- ensure_dir(outdir)
+  png_dpi <- normalize_png_dpi(dpi, 300L)
   paths <- character()
   for (fmt in tolower(formats)) {
     path <- file.path(outdir, paste0(prefix, '.', fmt))
     if (fmt == 'png') {
-      ggplot2::ggsave(path, plot = plot, width = width, height = height, units = 'in', dpi = dpi, device = 'png')
+      ggplot2::ggsave(path, plot = plot, width = width, height = height, units = 'in', dpi = png_dpi, device = 'png')
     } else if (fmt == 'pdf') {
       ggplot2::ggsave(path, plot = plot, width = width, height = height, units = 'in', device = 'pdf')
     } else if (fmt == 'svg') {

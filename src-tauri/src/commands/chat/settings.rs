@@ -25,6 +25,7 @@ pub struct SetLlmConfigRequest {
     app_id: Option<String>,
     model: Option<String>,
     base_url: Option<String>,
+    context_window_tokens: Option<u32>,
     thinking: Option<bool>,
 }
 
@@ -37,6 +38,7 @@ pub struct SaveLlmSettingsRequest {
     app_id: Option<String>,
     model: Option<String>,
     base_url: Option<String>,
+    context_window_tokens: Option<u32>,
     thinking: Option<bool>,
     timeout: Option<u64>,
 }
@@ -66,6 +68,7 @@ pub async fn set_llm_config(
     if let Some(url) = request.base_url {
         config.base_url = Some(url);
     }
+    config.context_window_tokens = request.context_window_tokens.filter(|n| *n >= 8_192);
     // Moonshot/Custom: always keep an explicit bool in memory (default false) so runtime matches API.
     // DeepSeek and others do not use `thinking`.
     match provider_enum {
@@ -155,6 +158,7 @@ pub async fn save_llm_settings_to_config(
         app_id: aid_opt.clone(),
         base_url: bu_opt.clone(),
         model: Some(model_str.clone()),
+        context_window_tokens: request.context_window_tokens.filter(|n| *n >= 8_192),
         thinking: thinking_resolved,
         enabled: true,
         ..Default::default()
@@ -185,6 +189,7 @@ pub async fn save_llm_settings_to_config(
     config.secret_key = sk_opt;
     config.app_id = aid_opt;
     config.base_url = bu_opt;
+    config.context_window_tokens = request.context_window_tokens.filter(|n| *n >= 8_192);
     config.thinking = thinking_resolved;
     if let Some(t) = request.timeout {
         config.timeout_secs = t;
@@ -334,6 +339,7 @@ pub async fn get_llm_config_state(
         },
         model: Some(config.model.clone()),
         base_url: config.base_url.clone(),
+        context_window_tokens: config.context_window_tokens,
         thinking: config.thinking,
     }))
 }
@@ -346,6 +352,7 @@ pub struct LlmConfigResponse {
     pub api_key_preview: String,
     pub model: Option<String>,
     pub base_url: Option<String>,
+    pub context_window_tokens: Option<u32>,
     pub thinking: Option<bool>,
 }
 
@@ -1476,6 +1483,9 @@ pub struct ProviderConfigEntry {
     pub model: String,
     pub api_key_preview: String,
     pub base_url: Option<String>,
+    /// Model context window capacity, in tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u32>,
     /// Moonshot / Custom / DeepSeek: request `thinking` object and stream `reasoning_content`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,

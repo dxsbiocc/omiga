@@ -1,0 +1,175 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_scatter_region_dumbbell
+  version: 0.1.0
+  name: Region Dumbbell
+  description: Region dumbbell plot comparing two groups across categories with mean ± SD background bands, mean lines, paired category links, and endpoint dots.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+    - dumbbell
+    - region
+classification:
+  category: visualization/scatter
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+    - dumbbell
+    - region
+    - paired
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Long-form CSV/TSV table with category, numeric value, and two-level group columns. See example.tsv converted from OmicsAgent scatter/dumbbell_region data.json.
+  params:
+    category_column:
+      kind: string
+      default: age_group
+    value_column:
+      kind: string
+      default: mean_prev
+    group_column:
+      kind: string
+      default: Sex
+    category_order:
+      kind: string
+      default: ''
+      description: Optional comma-separated category order. Empty keeps first-seen order.
+    group_order:
+      kind: string
+      default: Male,Female
+      description: Comma-separated group order. Empty keeps first-seen order.
+    title:
+      kind: string
+      default: Mean Prevalence of obesity
+    x_label:
+      kind: string
+      default: ''
+    y_label:
+      kind: string
+      default: ''
+    point_palette:
+      kind: string
+      default: '#f784b6,#79ceb8'
+    region_palette:
+      kind: string
+      default: '#FFDEEA,#E5FAED'
+    link_color:
+      kind: string
+      default: '#cba7a2'
+    region_alpha:
+      kind: number
+      default: 0.28
+    mean_line_width:
+      kind: number
+      default: 0.55
+    link_width:
+      kind: number
+      default: 0.6
+    point_size_outer:
+      kind: number
+      default: 5
+    point_size_inner:
+      kind: number
+      default: 3
+    stroke:
+      kind: number
+      default: 0.9
+    label_size:
+      kind: number
+      default: 3
+    base_size:
+      kind: number
+      default: 12
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 6
+    height:
+      kind: number
+      default: 6
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - scatter_dumbbell_region
+  - dumbbell_region
+  - region_dumbbell
+  - regional_dumbbell
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.category_column}
+    - ${params.value_column}
+    - ${params.group_column}
+    - ${params.category_order}
+    - ${params.group_order}
+    - ${params.title}
+    - ${params.x_label}
+    - ${params.y_label}
+    - ${params.point_palette}
+    - ${params.region_palette}
+    - ${params.link_color}
+    - ${params.region_alpha}
+    - ${params.mean_line_width}
+    - ${params.link_width}
+    - ${params.point_size_outer}
+    - ${params.point_size_inner}
+    - ${params.stroke}
+    - ${params.label_size}
+    - ${params.base_size}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

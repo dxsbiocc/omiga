@@ -28,6 +28,7 @@ pub struct SaveProviderConfigRequest {
     secret_key: Option<String>,
     app_id: Option<String>,
     base_url: Option<String>,
+    context_window_tokens: Option<u32>,
     set_as_default: Option<bool>,
     thinking: Option<bool>,
     /// DeepSeek only: "high" or "max" (only meaningful when thinking = true).
@@ -90,6 +91,7 @@ pub async fn list_provider_configs(
                 model: config.model.clone().unwrap_or_default(),
                 api_key_preview,
                 base_url: config.base_url.clone(),
+                context_window_tokens: config.context_window_tokens,
                 thinking: config.thinking,
                 reasoning_effort: config.reasoning_effort.clone(),
                 enabled: config.enabled,
@@ -161,6 +163,9 @@ pub async fn switch_provider(
     if let Some(tokens) = provider_config.max_tokens {
         config.max_tokens = tokens;
     }
+    config.context_window_tokens = provider_config
+        .context_window_tokens
+        .filter(|n| *n >= 8_192);
     if let Some(temp) = provider_config.temperature {
         config.temperature = Some(temp);
     }
@@ -194,6 +199,7 @@ pub async fn switch_provider(
         },
         model: Some(config.model),
         base_url: config.base_url,
+        context_window_tokens: config.context_window_tokens,
         thinking: config.thinking,
     })
 }
@@ -283,6 +289,7 @@ pub async fn save_provider_config(
         secret_key: request.secret_key,
         app_id: request.app_id,
         base_url: request.base_url,
+        context_window_tokens: request.context_window_tokens.filter(|n| *n >= 8_192),
         model: Some(request.model),
         enabled: true,
         thinking: thinking_for_entry,
@@ -304,6 +311,7 @@ pub async fn save_provider_config(
         if let Some(url) = &saved.base_url {
             new_config.base_url = Some(expand_env_vars(url));
         }
+        new_config.context_window_tokens = saved.context_window_tokens.filter(|n| *n >= 8_192);
         new_config.thinking = match provider_enum {
             LlmProvider::Moonshot | LlmProvider::Custom | LlmProvider::Deepseek => {
                 Some(saved.thinking.unwrap_or(false))
@@ -449,6 +457,9 @@ pub(crate) async fn apply_named_provider_runtime(
     if let Some(url) = &provider_config.base_url {
         config.base_url = Some(expand_env_vars(url));
     }
+    config.context_window_tokens = provider_config
+        .context_window_tokens
+        .filter(|n| *n >= 8_192);
     match provider_enum {
         LlmProvider::Moonshot | LlmProvider::Custom | LlmProvider::Deepseek => {
             config.thinking = Some(provider_config.thinking.unwrap_or(false));
@@ -475,6 +486,7 @@ pub(crate) async fn apply_named_provider_runtime(
         },
         model: Some(config.model),
         base_url: config.base_url,
+        context_window_tokens: config.context_window_tokens,
         thinking: config.thinking,
     })
 }

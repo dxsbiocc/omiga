@@ -1,0 +1,208 @@
+#!/usr/bin/env Rscript
+# Template: scatter/radial-lollipop
+# Purpose: Radial fan lollipop plot for ordered category values.
+#
+# Migration note:
+#   This template migrates OmicsAgent scatter/lollipop_radial from a private
+#   JSON ggplot2 DSL into direct, editable R/ggplot2 code. The original
+#   data.json has been converted to example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/radial-lollipop
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_bool_arg <- function(index, default = TRUE) {
+  raw <- tolower(trimws(arg_or(index, if (isTRUE(default)) "true" else "false")))
+  if (raw %in% c("1", "true", "yes", "y", "on")) return(TRUE)
+  if (raw %in% c("0", "false", "no", "n", "off")) return(FALSE)
+  default
+}
+parse_csv_arg <- function(index, default = "") {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+parse_numeric_csv_arg <- function(index, default = "") {
+  values <- suppressWarnings(as.numeric(parse_csv_arg(index, default)))
+  values[is.finite(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    category = arg_or(3, "age_group"),
+    value = arg_or(4, "mean_prev"),
+    group = arg_or(5, "group")
+  ),
+  levels = list(
+    categories = parse_csv_arg(6, ""),
+    groups = parse_csv_arg(7, "Low,Medium,High")
+  ),
+  labels = list(title = arg_or(8, "Radial Lollipop Plot")),
+  style = list(
+    palette = parse_csv_arg(9, "#1aafd0,#2dde98,#ffc168"),
+    start_angle = parse_number_arg(10, -1.256637),
+    end_angle = parse_number_arg(11, 1.256637),
+    inner_radius = parse_number_arg(12, 0.4),
+    ring_values = parse_numeric_csv_arg(13, "0,0.1,0.2"),
+    outer_limit = parse_number_arg(14, 0.3),
+    segment_width = parse_number_arg(15, 0.7),
+    point_size_outer = parse_number_arg(16, 5),
+    point_size_inner = parse_number_arg(17, 3),
+    stroke = parse_number_arg(18, 0.8),
+    show_category_labels = parse_bool_arg(19, TRUE),
+    category_label_size = parse_number_arg(20, 8),
+    base_size = parse_number_arg(21, 12),
+    panel_fill = arg_or(22, "#f3ead833"),
+    ring_color = arg_or(23, "grey90")
+  )
+)
+delimiter <- arg_or(24, "auto")
+width <- parse_number_arg(25, 5)
+height <- parse_number_arg(26, 5)
+dpi <- parse_integer_arg(27, 300)
+
+first_seen <- function(x) unique(as.character(x))
+make_palette <- function(values, levels) {
+  if (!length(values)) values <- c("#1aafd0", "#2dde98", "#ffc168")
+  if (length(values) < length(levels)) values <- rep(values, length.out = length(levels))
+  stats::setNames(values[seq_along(levels)], levels)
+}
+
+prepare_data <- function(df, config) {
+  required <- c(config$columns$category, config$columns$value)
+  group_col <- resolve_optional_column(df, config$columns$group)
+  if (!is.null(group_col)) required <- c(required, group_col)
+  validate_columns(df, required, "scatter/radial-lollipop input")
+  df <- ensure_numeric_columns(df, config$columns$value, "scatter/radial-lollipop input")
+  df$.category_raw <- as.character(df[[config$columns$category]])
+  df$.value <- df[[config$columns$value]]
+  if (is.null(group_col)) {
+    df$.group_raw <- "Value"
+  } else {
+    df$.group_raw <- as.character(df[[group_col]])
+  }
+  df <- df[is.finite(df$.value) & nzchar(df$.category_raw) & nzchar(df$.group_raw), , drop = FALSE]
+  if (nrow(df) == 0) stop("scatter/radial-lollipop input has no usable rows.", call. = FALSE)
+
+  category_levels <- config$levels$categories
+  if (length(category_levels) == 0) category_levels <- first_seen(df$.category_raw)
+  group_levels <- config$levels$groups
+  if (length(group_levels) == 0) group_levels <- first_seen(df$.group_raw)
+  group_levels <- c(group_levels[group_levels %in% df$.group_raw], setdiff(first_seen(df$.group_raw), group_levels))
+
+  df <- df[df$.category_raw %in% category_levels & df$.group_raw %in% group_levels, , drop = FALSE]
+  if (nrow(df) == 0) stop("scatter/radial-lollipop input has no rows after level filtering.", call. = FALSE)
+  df$.category <- factor(df$.category_raw, levels = category_levels)
+  df$.group <- factor(df$.group_raw, levels = group_levels)
+  df$.x <- as.numeric(df$.category)
+
+  outer_limit <- config$style$outer_limit
+  if (!is.finite(outer_limit) || outer_limit <= max(df$.value, na.rm = TRUE)) {
+    outer_limit <- max(df$.value, na.rm = TRUE) * 1.25
+  }
+  list(points = df, category_levels = category_levels, group_levels = group_levels, outer_limit = outer_limit)
+}
+
+make_radial_coord <- function(config) {
+  if (!"coord_radial" %in% getNamespaceExports("ggplot2")) {
+    stop("scatter/radial-lollipop requires ggplot2 with coord_radial support.", call. = FALSE)
+  }
+  do.call(
+    ggplot2::coord_radial,
+    list(
+      start = config$style$start_angle,
+      end = config$style$end_angle,
+      inner.radius = config$style$inner_radius,
+      clip = "off"
+    )
+  )
+}
+
+make_plot <- function(prepared, config) {
+  df <- prepared$points
+  category_levels <- prepared$category_levels
+  group_levels <- prepared$group_levels
+  n <- length(category_levels)
+  palette <- make_palette(config$style$palette, group_levels)
+  ring_values <- config$style$ring_values
+  if (length(ring_values) == 0) ring_values <- pretty(c(0, prepared$outer_limit), n = 3)
+  x_labels <- if (isTRUE(config$style$show_category_labels)) category_levels else rep("", n)
+
+  ggplot2::ggplot(df, ggplot2::aes(x = .x, y = .value, colour = .group)) +
+    ggplot2::geom_hline(yintercept = ring_values, colour = config$style$ring_color, linewidth = 0.45) +
+    ggplot2::geom_segment(
+      ggplot2::aes(xend = .x, y = 0, yend = .value),
+      linewidth = config$style$segment_width,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_point(
+      shape = 21,
+      size = config$style$point_size_outer,
+      stroke = config$style$stroke,
+      fill = "white",
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_point(size = config$style$point_size_inner, show.legend = FALSE) +
+    ggplot2::scale_colour_manual(values = palette, guide = "none") +
+    ggplot2::scale_x_continuous(limits = c(0.5, n + 0.5), breaks = seq_len(n), labels = x_labels, expand = c(0, 0)) +
+    ggplot2::scale_y_continuous(limits = c(0, prepared$outer_limit), expand = ggplot2::expansion(mult = c(0, 0.10))) +
+    make_radial_coord(config) +
+    ggplot2::labs(title = config$labels$title, x = NULL, y = NULL) +
+    ggplot2::theme_minimal(base_size = config$style$base_size) +
+    ggplot2::theme(
+      panel.background = ggplot2::element_rect(fill = config$style$panel_fill, colour = NA),
+      plot.background = ggplot2::element_rect(fill = "white", colour = NA),
+      panel.grid.major = ggplot2::element_line(colour = config$style$ring_color, linewidth = 0.35),
+      panel.grid.minor = ggplot2::element_blank(),
+      axis.title = ggplot2::element_blank(),
+      axis.ticks = ggplot2::element_blank(),
+      axis.text.x = ggplot2::element_text(size = config$style$category_label_size, colour = "#374151"),
+      axis.text.y = ggplot2::element_text(size = config$style$base_size * 0.75, colour = "#6b7280"),
+      plot.title = ggplot2::element_text(size = config$style$base_size * 1.15, hjust = 0.5, face = "bold"),
+      legend.position = "none"
+    )
+}
+
+customize_plot <- function(p, prepared, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  prepared <- prepare_data(df, config)
+  p <- customize_plot(make_plot(prepared, config), prepared, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "categories", "groups", "value_min", "value_max"),
+      value = c("scatter/radial-lollipop", nrow(prepared$points), length(prepared$category_levels), length(prepared$group_levels), min(prepared$points$.value), max(prepared$points$.value))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "scatter/radial-lollipop", rows = nrow(prepared$points), categories = length(prepared$category_levels), groups = length(prepared$group_levels), value_min = min(prepared$points$.value), value_max = max(prepared$points$.value)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s
+", outdir))
+}
+main()

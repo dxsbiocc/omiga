@@ -46,6 +46,13 @@ runtime:
     supported: [local, ssh]
   container:
     supported: [none]
+cache:
+  enabled: true
+  policyVersion: external-network/v1
+  fixtureParam: fixture_json
+  modeParam: mode
+  offlineMode: offline_fixture
+  recordedFixture: ./examples/pubmed_fixture.json
 resources:
   cpu:
     default: 1

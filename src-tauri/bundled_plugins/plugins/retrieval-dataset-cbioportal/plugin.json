@@ -17,7 +17,7 @@
       "cancelGraceMs": 750,
       "concurrency": 1
     },
-    "sources": [
+    "resources": [
       {
         "id": "cbioportal",
         "category": "dataset",
@@ -56,7 +56,7 @@
     ]
   },
   "interface": {
-    "displayName": "cBioPortal Retrieval Source",
+    "displayName": "cBioPortal Retrieval Resource",
     "shortDescription": "cBioPortal cancer study metadata as a local retrieval plugin",
     "longDescription": "Runs cBioPortal study search/query/fetch through Omiga local subprocess routing.",
     "developerName": "Omiga",

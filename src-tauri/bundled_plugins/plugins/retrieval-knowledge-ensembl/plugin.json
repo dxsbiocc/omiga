@@ -17,7 +17,7 @@
       "cancelGraceMs": 750,
       "concurrency": 1
     },
-    "sources": [
+    "resources": [
       {
         "id": "ensembl",
         "category": "knowledge",
@@ -71,7 +71,7 @@
     ]
   },
   "interface": {
-    "displayName": "Ensembl Retrieval Source",
+    "displayName": "Ensembl Retrieval Resource",
     "shortDescription": "Ensembl as a local retrieval plugin",
     "longDescription": "Runs Ensembl search/query/fetch through Omiga local subprocess routing.",
     "developerName": "Omiga",

@@ -17,7 +17,7 @@
       "cancelGraceMs": 750,
       "concurrency": 1
     },
-    "sources": [
+    "resources": [
       {
         "id": "arrayexpress",
         "category": "dataset",
@@ -57,7 +57,7 @@
     ]
   },
   "interface": {
-    "displayName": "ArrayExpress Retrieval Source",
+    "displayName": "ArrayExpress Retrieval Resource",
     "shortDescription": "ArrayExpress/BioStudies as a local retrieval plugin",
     "longDescription": "Runs ArrayExpress/BioStudies search/query/fetch through Omiga local subprocess routing.",
     "developerName": "Omiga",

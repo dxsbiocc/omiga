@@ -1,0 +1,157 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_heatmap_signif
+  version: 0.1.0
+  name: Signif Heatmap
+  description: Correlation heatmap with lower-triangle tiles, upper-triangle circles, significance stars, and weak-correlation crosses.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - heatmap
+    - correlation
+    - significance
+classification:
+  category: visualization/heatmap
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - heatmap
+    - correlation
+    - significance
+  stageInput:
+    - numeric_matrix
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Wide numeric CSV/TSV table. See example.tsv converted from OmicsAgent heatmap/signif data.json.
+  params:
+    feature_column:
+      kind: string
+      default: ''
+      description: Optional row-label column excluded from correlation. Leave empty if all columns are numeric.
+    variable_columns:
+      kind: string
+      default: ''
+      description: Optional comma-separated numeric columns to include and order; empty uses all numeric columns.
+    method:
+      kind: enum
+      enum: [pearson, spearman, kendall]
+      default: spearman
+    alpha:
+      kind: number
+      default: 0.05
+    mark_threshold:
+      kind: number
+      default: 0.3
+      description: Minimum absolute correlation to mark with significance stars.
+    weak_threshold:
+      kind: number
+      default: 0.5
+      description: Absolute-correlation cutoff below which weak lower-triangle cells receive an X mark.
+    title:
+      kind: string
+      default: Signif Heatmap
+    low_color:
+      kind: string
+      default: '#1cc7d0'
+    mid_color:
+      kind: string
+      default: '#ffffff'
+    high_color:
+      kind: string
+      default: '#fbb05b'
+    base_size:
+      kind: number
+      default: 10
+    min_circle_size:
+      kind: number
+      default: 2
+    max_circle_size:
+      kind: number
+      default: 8
+    show_values:
+      kind: boolean
+      default: false
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 6
+    height:
+      kind: number
+      default: 5.2
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - heatmap_signif
+  - signif_heatmap
+  - significance_heatmap
+  - marked_correlation_heatmap
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.feature_column}
+    - ${params.variable_columns}
+    - ${params.method}
+    - ${params.alpha}
+    - ${params.mark_threshold}
+    - ${params.weak_threshold}
+    - ${params.title}
+    - ${params.low_color}
+    - ${params.mid_color}
+    - ${params.high_color}
+    - ${params.base_size}
+    - ${params.min_circle_size}
+    - ${params.max_circle_size}
+    - ${params.show_values}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}

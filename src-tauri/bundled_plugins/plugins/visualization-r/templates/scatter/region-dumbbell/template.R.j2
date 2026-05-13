@@ -1,0 +1,213 @@
+#!/usr/bin/env Rscript
+# Template: scatter/region-dumbbell
+# Purpose: Region dumbbell plot with group mean ± SD bands.
+#
+# Migration note:
+#   This template migrates OmicsAgent scatter/dumbbell_region from a private
+#   JSON ggplot2 DSL into direct, editable R/ggplot2 code. The original
+#   data.json has been converted to example.tsv.
+#
+# Smoke test:
+#   Rscript scripts/smoke_templates.R --template scatter/region-dumbbell
+
+plugin_root <- "{{ template.pluginRoot }}"
+manifest_dir <- "{{ template.manifestDir }}"
+source(file.path(plugin_root, "scripts", "lib", "bootstrap.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "io.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "schema.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "theme.R"))
+source_if_exists(file.path(plugin_root, "scripts", "lib", "export.R"))
+load_packages(c("ggplot2"))
+
+args <- commandArgs(trailingOnly = TRUE)
+arg_or <- function(index, default = "") {
+  if (length(args) >= index && nzchar(args[[index]])) args[[index]] else default
+}
+parse_number_arg <- function(index, default) {
+  value <- suppressWarnings(as.numeric(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_integer_arg <- function(index, default) {
+  value <- suppressWarnings(as.integer(arg_or(index, as.character(default))))
+  if (is.na(value)) default else value
+}
+parse_csv_arg <- function(index, default = "") {
+  raw <- arg_or(index, default)
+  if (!nzchar(raw) || tolower(raw) == "auto") return(character())
+  values <- trimws(strsplit(raw, ",", fixed = TRUE)[[1]])
+  values[nzchar(values)]
+}
+
+input <- arg_or(1, file.path(manifest_dir, "example.tsv"))
+outdir <- arg_or(2, file.path(tempdir(), "visualization-r-output"))
+config <- list(
+  columns = list(
+    category = arg_or(3, "age_group"),
+    value = arg_or(4, "mean_prev"),
+    group = arg_or(5, "Sex")
+  ),
+  levels = list(
+    categories = parse_csv_arg(6, ""),
+    groups = parse_csv_arg(7, "Male,Female")
+  ),
+  labels = list(
+    title = arg_or(8, "Mean Prevalence of obesity"),
+    x = arg_or(9, ""),
+    y = arg_or(10, "")
+  ),
+  style = list(
+    point_palette = parse_csv_arg(11, "#f784b6,#79ceb8"),
+    region_palette = parse_csv_arg(12, "#FFDEEA,#E5FAED"),
+    link_color = arg_or(13, "#cba7a2"),
+    region_alpha = parse_number_arg(14, 0.28),
+    mean_line_width = parse_number_arg(15, 0.55),
+    link_width = parse_number_arg(16, 0.6),
+    point_size_outer = parse_number_arg(17, 5),
+    point_size_inner = parse_number_arg(18, 3),
+    stroke = parse_number_arg(19, 0.9),
+    label_size = parse_number_arg(20, 3),
+    base_size = parse_number_arg(21, 12)
+  )
+)
+delimiter <- arg_or(22, "auto")
+width <- parse_number_arg(23, 6)
+height <- parse_number_arg(24, 6)
+dpi <- parse_integer_arg(25, 300)
+
+first_seen <- function(x) unique(as.character(x))
+
+summarize_regions <- function(df) {
+  groups <- levels(df$.group)
+  rows <- lapply(groups, function(group) {
+    values <- df$.value[df$.group == group]
+    mu <- mean(values, na.rm = TRUE)
+    sd_value <- stats::sd(values, na.rm = TRUE)
+    if (!is.finite(sd_value)) sd_value <- 0
+    data.frame(.group = group, mu = mu, sd = sd_value, lower = mu - sd_value, upper = mu + sd_value, stringsAsFactors = FALSE)
+  })
+  out <- do.call(rbind, rows)
+  out$.group <- factor(out$.group, levels = groups)
+  out
+}
+
+prepare_data <- function(df, config) {
+  validate_columns(df, c(config$columns$category, config$columns$value, config$columns$group), "scatter/region-dumbbell input")
+  df <- ensure_numeric_columns(df, config$columns$value, "scatter/region-dumbbell input")
+  df$.category_raw <- as.character(df[[config$columns$category]])
+  df$.group_raw <- as.character(df[[config$columns$group]])
+  df$.value <- df[[config$columns$value]]
+  df <- df[is.finite(df$.value) & nzchar(df$.category_raw) & nzchar(df$.group_raw), , drop = FALSE]
+  if (nrow(df) == 0) stop("scatter/region-dumbbell input has no usable rows.", call. = FALSE)
+  category_levels <- config$levels$categories
+  if (length(category_levels) == 0) category_levels <- first_seen(df$.category_raw)
+  group_levels <- config$levels$groups
+  if (length(group_levels) == 0) group_levels <- first_seen(df$.group_raw)
+  group_levels <- c(group_levels[group_levels %in% df$.group_raw], setdiff(first_seen(df$.group_raw), group_levels))
+  if (length(group_levels) < 2) stop("scatter/region-dumbbell requires at least two groups.", call. = FALSE)
+  df <- df[df$.category_raw %in% category_levels & df$.group_raw %in% group_levels, , drop = FALSE]
+  df$.category <- factor(df$.category_raw, levels = category_levels)
+  df$.group <- factor(df$.group_raw, levels = group_levels)
+  df$.y <- as.numeric(df$.category)
+  list(points = df, regions = summarize_regions(df), category_levels = category_levels, group_levels = group_levels)
+}
+
+make_plot <- function(prepared, config) {
+  df <- prepared$points
+  regions <- prepared$regions
+  category_levels <- prepared$category_levels
+  group_levels <- prepared$group_levels
+  point_palette <- config$style$point_palette
+  region_palette <- config$style$region_palette
+  if (length(point_palette) < length(group_levels)) point_palette <- rep(point_palette, length.out = length(group_levels))
+  if (length(region_palette) < length(group_levels)) region_palette <- rep(region_palette, length.out = length(group_levels))
+  point_palette <- stats::setNames(point_palette[seq_along(group_levels)], group_levels)
+  region_palette <- stats::setNames(region_palette[seq_along(group_levels)], group_levels)
+  label_y <- length(category_levels)
+  label_df <- do.call(rbind, lapply(seq_len(nrow(regions)), function(i) {
+    data.frame(
+      .group = regions$.group[[i]],
+      label = c("MEAN", "STDEV"),
+      x = c(regions$mu[[i]], regions$upper[[i]]),
+      y = label_y + 0.25 + (i - 1) * 0.32,
+      stringsAsFactors = FALSE
+    )
+  }))
+  label_df$.group <- factor(label_df$.group, levels = group_levels)
+
+  ggplot2::ggplot(df, ggplot2::aes(x = .value, y = .category, colour = .group)) +
+    ggplot2::geom_rect(
+      data = regions,
+      ggplot2::aes(xmin = lower, xmax = upper, ymin = -Inf, ymax = Inf, fill = .group),
+      inherit.aes = FALSE,
+      alpha = config$style$region_alpha,
+      colour = NA,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_vline(
+      data = regions,
+      ggplot2::aes(xintercept = mu, colour = .group),
+      linewidth = config$style$mean_line_width,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_line(
+      ggplot2::aes(group = .category),
+      linewidth = config$style$link_width,
+      colour = config$style$link_color,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_point(
+      shape = 21,
+      size = config$style$point_size_outer,
+      stroke = config$style$stroke,
+      fill = "white",
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_point(size = config$style$point_size_inner) +
+    ggplot2::geom_text(
+      data = label_df,
+      ggplot2::aes(x = x, y = y, label = label, colour = .group),
+      inherit.aes = FALSE,
+      angle = 90,
+      size = config$style$label_size,
+      vjust = -0.15,
+      show.legend = FALSE
+    ) +
+    ggplot2::scale_colour_manual(values = point_palette, name = config$columns$group) +
+    ggplot2::scale_fill_manual(values = region_palette, guide = "none") +
+    ggplot2::scale_y_discrete(expand = ggplot2::expansion(mult = c(0.1, 0.13))) +
+    ggplot2::scale_x_continuous(expand = ggplot2::expansion(mult = c(0.08, 0.08))) +
+    ggplot2::labs(title = config$labels$title, x = config$labels$x, y = config$labels$y) +
+    theme_visualization(base_size = config$style$base_size) +
+    ggplot2::theme(
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      axis.line = ggplot2::element_blank(),
+      axis.ticks.y = ggplot2::element_blank(),
+      axis.title.y = ggplot2::element_blank(),
+      legend.position = "top",
+      panel.grid.major.y = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      plot.title = ggplot2::element_text(face = "bold", hjust = 0.5)
+    )
+}
+
+customize_plot <- function(p, prepared, config) { p }
+
+main <- function() {
+  outdir <- ensure_dir(outdir)
+  df <- read_table_auto(input, delimiter)
+  prepared <- prepare_data(df, config)
+  p <- customize_plot(make_plot(prepared, config), prepared, config)
+  save_ggplot_outputs(p, outdir, prefix = "figure", width = width, height = height, dpi = dpi, formats = c("png", "pdf"))
+  write_tsv(
+    data.frame(
+      metric = c("template", "rows", "categories", "groups", "value_min", "value_max"),
+      value = c("scatter/region-dumbbell", nrow(prepared$points), length(prepared$category_levels), length(prepared$group_levels), min(prepared$points$.value), max(prepared$points$.value))
+    ),
+    file.path(outdir, "summary.tsv")
+  )
+  write_outputs_json(outdir, list(template = "scatter/region-dumbbell", rows = nrow(prepared$points), categories = length(prepared$category_levels), groups = prepared$group_levels, value_min = min(prepared$points$.value), value_max = max(prepared$points$.value)))
+  write_working_artifacts(outdir, get_current_script(), args)
+  cat(sprintf("Saved visualization outputs to %s\n", outdir))
+}
+main()

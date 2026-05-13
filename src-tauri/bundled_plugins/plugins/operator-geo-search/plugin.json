@@ -1,0 +1,25 @@
+{
+  "name": "operator-geo-search",
+  "version": "0.1.0",
+  "description": "NCBI GEO DataSets search with structured TSV/JSON outputs.",
+  "operators": "./operators",
+  "interface": {
+    "displayName": "GEO Search",
+    "shortDescription": "NCBI GEO DataSets search with structured outputs",
+    "longDescription": "Searches NCBI GEO DataSets and saves structured TSV/JSON outputs. Existing retrieval tools remain available as compatibility fallback.",
+    "developerName": "Omiga",
+    "category": "Dataset",
+    "capabilities": [
+      "Retrieval",
+      "Search",
+      "Dataset",
+      "GEO",
+      "External Network",
+      "Offline Fixture"
+    ],
+    "brandColor": "#0EA5E9",
+    "defaultPrompt": [
+      "Search NCBI GEO and save structured dataset results."
+    ]
+  }
+}

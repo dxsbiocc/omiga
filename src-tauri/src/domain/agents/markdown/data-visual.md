@@ -48,7 +48,8 @@ If a figure fails to render:
 After generating a figure:
 1. Report the file path(s) produced
 2. Briefly describe what the figure shows and what can be concluded from it
-3. For saved PNG/JPG/SVG/WebP outputs, show the image with Markdown: `![short label](<path/to/figure.png>)`
-4. For PDFs, provide a normal Markdown link: `[PDF](<path/to/figure.pdf>)`
-5. Never paste image bytes or `data:image/...;base64,...` into chat
-6. Use `visualization` for interactive 3D/protein/graph/dashboard views; it renders inline — no file path needed
+3. For saved PNG/JPG/SVG/WebP outputs, show the image with Markdown so Omiga renders the image component: `![short label](<path/to/figure.png>)`. Use the full exported path from the tool/`markdownReport`; do not replace it with a bare `figure.png`.
+4. For static figure PNGs, ensure DPI is at least 300 before final delivery
+5. For PDFs, provide a normal Markdown link: `[PDF](<path/to/figure.pdf>)`
+6. Never paste image bytes or `data:image/...;base64,...` into chat
+7. Use `visualization` for interactive 3D/protein/graph/dashboard views; it renders inline — no file path needed

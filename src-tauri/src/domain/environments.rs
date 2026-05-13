@@ -1,9 +1,9 @@
 //! Unit-level Environment profile discovery and resolution.
 //!
 //! Environment profiles are plugin contributions referenced by executable units
-//! through `runtime.envRef`. V3 keeps this resolver diagnostic-only: it resolves
-//! the profile, records requirements and hints, but does not install packages or
-//! mutate the user's runtime.
+//! through `runtime.envRef`. The resolver itself stays side-effect free; the
+//! Operator executor consumes the resolved profile to prepare isolated conda,
+//! Docker, or Singularity runtimes when a run actually needs them.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -237,7 +237,15 @@ pub fn discover_environment_profiles_from_plugins<'a>(
         for manifest_path in discover_environment_manifest_paths(&plugin.root) {
             match load_environment_manifest(&manifest_path, plugin.id.clone(), plugin.root.clone())
             {
-                Ok(profile) => out.push(profile),
+                Ok(profile)
+                    if crate::domain::plugins::environment_profile_enabled(
+                        &plugin.id,
+                        &profile.spec.metadata.id,
+                    ) =>
+                {
+                    out.push(profile)
+                }
+                Ok(_) => {}
                 Err(err) => tracing::warn!(
                     plugin_id = %plugin.id,
                     manifest = %manifest_path.display(),
@@ -320,6 +328,12 @@ pub fn resolve_environment_ref(
         if let Ok(profile) =
             load_environment_manifest(&manifest_path, source_plugin.to_string(), plugin_root)
         {
+            if !crate::domain::plugins::environment_profile_enabled(
+                &profile.source.source_plugin,
+                &profile.spec.metadata.id,
+            ) {
+                continue;
+            }
             let canonical = canonical_environment_id(&profile);
             if !profiles
                 .iter()
@@ -482,7 +496,7 @@ pub fn check_environment_profile(profile: &EnvironmentProfileSummary) -> Environ
     }
 }
 
-fn environment_summary(profile: EnvironmentSpecWithSource) -> EnvironmentProfileSummary {
+pub fn environment_summary(profile: EnvironmentSpecWithSource) -> EnvironmentProfileSummary {
     let canonical_id = canonical_environment_id(&profile);
     EnvironmentProfileSummary {
         id: profile.spec.metadata.id,
@@ -786,5 +800,39 @@ metadata:
             profile.spec.diagnostics.check_command,
             vec!["Rscript".to_string(), "--version".to_string()]
         );
+    }
+
+    #[test]
+    fn discovers_bundled_ngs_alignment_conda_environment_profiles() {
+        let plugin_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("bundled_plugins/plugins/ngs-alignment");
+        let plugin = loaded_plugin("ngs-alignment@omiga-curated", &plugin_root);
+
+        let profiles = discover_environment_profiles_from_plugins([&plugin]);
+        let ids = profiles
+            .iter()
+            .map(|profile| profile.spec.metadata.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            vec![
+                "ngs-bowtie2",
+                "ngs-bwa",
+                "ngs-hisat2",
+                "ngs-samtools",
+                "ngs-star"
+            ]
+        );
+        assert!(profiles
+            .iter()
+            .all(|profile| profile.spec.runtime.kind.as_deref() == Some("conda")));
+        assert!(profiles.iter().all(|profile| profile
+            .source
+            .manifest_path
+            .parent()
+            .unwrap()
+            .join("conda.yaml")
+            .is_file()));
     }
 }

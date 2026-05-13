@@ -1,0 +1,88 @@
+apiVersion: omiga.ai/operator/v1alpha1
+kind: Operator
+metadata:
+  id: uniprot_search
+  version: 0.1.0
+  name: UniProt Search
+  description: Additive Operator pilot for UniProtKB REST search with offline fixture parity support.
+  tags: [retrieval, knowledge, uniprot, protein, external-network, operator-pilot]
+interface:
+  inputs: {}
+  params:
+    query:
+      kind: string
+      required: true
+      non_empty: true
+      description: UniProtKB query text.
+    limit:
+      kind: integer
+      default: 10
+      minimum: 1
+      maximum: 25
+      description: Maximum records to return.
+    mode:
+      kind: enum
+      enum: [auto, live, offline_fixture]
+      default: auto
+      description: auto uses fixture_json when supplied, otherwise live UniProt REST; offline_fixture requires fixture_json.
+    fixture_json:
+      kind: string
+      default: ""
+      description: Optional offline fixture JSON path for deterministic tests or recorded comparisons.
+    organism:
+      kind: string
+      default: ""
+      description: Optional organism text filter for live UniProt queries.
+    taxon_id:
+      kind: string
+      default: ""
+      description: Optional NCBI taxonomy id filter for live UniProt queries.
+    reviewed:
+      kind: enum
+      enum: [any, "true", "false"]
+      default: any
+      description: Optional reviewed Swiss-Prot filter for live UniProt queries.
+  outputs:
+    results:
+      kind: file
+      glob: uniprot-results.tsv
+      required: true
+    summary:
+      kind: json
+      required: true
+runtime:
+  placement:
+    supported: [local, ssh]
+  container:
+    supported: [none]
+cache:
+  enabled: true
+  policyVersion: external-network/v1
+  fixtureParam: fixture_json
+  modeParam: mode
+  offlineMode: offline_fixture
+  recordedFixture: ./examples/uniprot_fixture.json
+resources:
+  cpu:
+    default: 1
+    exposed: true
+  walltime:
+    default: 120s
+    exposed: true
+permissions:
+  sideEffects: [external_network]
+  network:
+    hosts: [rest.uniprot.org]
+    mode: read_only
+execution:
+  argv:
+    - python3
+    - ./scripts/uniprot_search.py
+    - ${outdir}
+    - ${params.query}
+    - ${params.limit}
+    - ${params.mode}
+    - ${params.fixture_json}
+    - ${params.organism}
+    - ${params.taxon_id}
+    - ${params.reviewed}

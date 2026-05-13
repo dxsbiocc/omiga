@@ -1,0 +1,186 @@
+apiVersion: omiga.ai/unit/v1alpha1
+kind: Template
+metadata:
+  id: viz_scatter_polar_lollipop
+  version: 0.1.0
+  name: Polar Lollipop
+  description: Polar lollipop plot for ordered category values with radial guide rings, grouped endpoint colors, outside category labels, and value labels.
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+    - lollipop
+    - polar
+classification:
+  category: visualization/scatter
+  tags:
+    - visualization
+    - r
+    - ggplot2
+    - scatter
+    - lollipop
+    - polar
+    - radial
+  stageInput:
+    - table
+  stageOutput:
+    - static_figure
+exposure:
+  exposeToAgent: true
+interface:
+  inputs:
+    table:
+      kind: file
+      required: true
+      description: Long-form CSV/TSV table with category, numeric value, and optional group columns. See example.tsv converted from OmicsAgent scatter/lollipop_polar data.json.
+  params:
+    category_column:
+      kind: string
+      default: age_group
+    value_column:
+      kind: string
+      default: mean_prev
+    group_column:
+      kind: string
+      default: group
+      description: Optional endpoint color/group column. Use an empty string for one color.
+    category_order:
+      kind: string
+      default: ''
+      description: Optional comma-separated category order. Empty keeps first-seen order.
+    group_order:
+      kind: string
+      default: Low,Medium,High
+      description: Optional comma-separated group order. Empty keeps first-seen order.
+    title:
+      kind: string
+      default: Polar Lollipop Plot
+    palette:
+      kind: string
+      default: '#1aafd0,#2dde98,#ffc168'
+    ring_values:
+      kind: string
+      default: '0,0.1,0.2'
+      description: Comma-separated radial guide ring values.
+    inner_radius:
+      kind: number
+      default: -0.1
+    outer_limit:
+      kind: number
+      default: 0.3
+      description: Radial upper limit. Use 0 for automatic max-based limit.
+    inner_fill:
+      kind: string
+      default: '#81947a'
+    inner_alpha:
+      kind: number
+      default: 0.5
+    segment_width:
+      kind: number
+      default: 0.7
+    point_size_outer:
+      kind: number
+      default: 5
+    point_size_inner:
+      kind: number
+      default: 3
+    stroke:
+      kind: number
+      default: 0.9
+    category_label_size:
+      kind: number
+      default: 3
+    value_label_size:
+      kind: number
+      default: 3
+    center_label:
+      kind: string
+      default: Age
+    center_label_size:
+      kind: number
+      default: 6
+    base_size:
+      kind: number
+      default: 12
+    delimiter:
+      kind: enum
+      enum: [auto, tab, comma]
+      default: auto
+    width:
+      kind: number
+      default: 5
+    height:
+      kind: number
+      default: 5
+    dpi:
+      kind: integer
+      default: 300
+  outputs:
+    figure_png:
+      kind: file
+      glob: figure.png
+      required: true
+      description: PNG figure.
+    figure_pdf:
+      kind: file
+      glob: figure.pdf
+      required: true
+      description: PDF figure.
+    plot_script:
+      kind: file
+      glob: plot-script.R
+      required: true
+      description: Default rendered Rscript source artifact for one-off customization.
+    rerun_script:
+      kind: file
+      glob: rerun.sh
+      required: true
+      description: Default helper to rerun the rendered Rscript source with the same arguments.
+    summary_tsv:
+      kind: file
+      glob: summary.tsv
+      required: false
+    summary:
+      kind: json
+      required: false
+runtime:
+  envRef: r-base
+template:
+  engine: jinja2
+  entry: ./template.R.j2
+aliases:
+  - scatter_lollipop_polar
+  - lollipop_polar
+  - polar_lollipop
+  - radial_lollipop
+execution:
+  interpreter: Rscript
+  argv:
+    - ${inputs.table}
+    - ${outdir}
+    - ${params.category_column}
+    - ${params.value_column}
+    - ${params.group_column}
+    - ${params.category_order}
+    - ${params.group_order}
+    - ${params.title}
+    - ${params.palette}
+    - ${params.ring_values}
+    - ${params.inner_radius}
+    - ${params.outer_limit}
+    - ${params.inner_fill}
+    - ${params.inner_alpha}
+    - ${params.segment_width}
+    - ${params.point_size_outer}
+    - ${params.point_size_inner}
+    - ${params.stroke}
+    - ${params.category_label_size}
+    - ${params.value_label_size}
+    - ${params.center_label}
+    - ${params.center_label_size}
+    - ${params.base_size}
+    - ${params.delimiter}
+    - ${params.width}
+    - ${params.height}
+    - ${params.dpi}
