@@ -5,6 +5,7 @@ use crate::commands::CommandResult;
 use crate::errors::AppError;
 use serde::Serialize;
 use sqlx::FromRow;
+use std::str::FromStr;
 use tauri::State;
 
 /// Internal row type for sqlx deserialization.
@@ -65,27 +66,31 @@ pub async fn list_cron_jobs(
     Ok(rows.into_iter().map(CronJobSummary::from).collect())
 }
 
-/// Create a new cron job.
+/// Create a new enabled cron job. Returns the created job summary.
 #[tauri::command]
 pub async fn create_cron_job(
     state: State<'_, OmigaAppState>,
     schedule: String,
-    task_description: String,
-    session_id: Option<String>,
+    task: String,
 ) -> CommandResult<CronJobSummary> {
-    let pool = state.repo.pool();
+    if schedule.trim().is_empty() {
+        return Err(AppError::Unknown("schedule must not be empty".into()));
+    }
+    if task.trim().is_empty() {
+        return Err(AppError::Unknown("task must not be empty".into()));
+    }
+    cron::Schedule::from_str(&schedule)
+        .map_err(|e| AppError::Unknown(format!("invalid cron expression: {e}")))?;
+
     let id = uuid::Uuid::new_v4().to_string();
     let created_at = chrono::Utc::now().to_rfc3339();
+    let pool = state.repo.pool();
     sqlx::query(
-        r#"
-        INSERT INTO cron_jobs (id, schedule, task_description, session_id, created_at, enabled)
-        VALUES (?, ?, ?, ?, ?, 1)
-        "#,
+        "INSERT INTO cron_jobs (id, schedule, task_description, enabled, created_at) VALUES (?, ?, ?, 1, ?)",
     )
     .bind(&id)
     .bind(&schedule)
-    .bind(&task_description)
-    .bind(&session_id)
+    .bind(&task)
     .bind(&created_at)
     .execute(pool)
     .await
@@ -94,8 +99,8 @@ pub async fn create_cron_job(
     Ok(CronJobSummary {
         id,
         schedule,
-        task: task_description,
-        session_id,
+        task,
+        session_id: None,
         created_at,
     })
 }
@@ -110,10 +115,9 @@ pub async fn delete_cron_job(
     let result = sqlx::query(
         "UPDATE cron_jobs SET enabled = 0 WHERE id = ? AND enabled = 1",
     )
-    .bind(id)
+    .bind(&id)
     .execute(pool)
     .await
     .map_err(db_err)?;
-
     Ok(result.rows_affected() > 0)
 }
