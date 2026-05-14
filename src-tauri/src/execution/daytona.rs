@@ -85,6 +85,10 @@ impl DaytonaEnvironment {
         url: Option<String>,
         key: Option<String>,
     ) -> Result<(String, String), ExecutionError> {
+        if let (Some(url), Some(key)) = (url.as_ref(), key.as_ref()) {
+            return Ok((url.clone(), key.clone()));
+        }
+
         // 从统一配置文件读取
         let config = crate::llm::config::load_config_file()
             .map_err(|e| ExecutionError::DaytonaError(format!("Failed to load config: {}", e)))?;

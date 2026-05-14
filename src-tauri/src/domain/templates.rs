@@ -803,7 +803,7 @@ async fn execute_rendered_template(
         permissions: backing.and_then(|spec| spec.permissions),
         source: crate::domain::operators::OperatorSource {
             source_plugin: template.source.source_plugin.clone(),
-            plugin_root: rendered.render_root.clone(),
+            plugin_root: template.source.plugin_root.clone(),
             manifest_path: template.source.manifest_path.clone(),
         },
     };

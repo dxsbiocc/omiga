@@ -1,7 +1,9 @@
 use super::{ToolContext, ToolError, ToolImpl, ToolSchema};
 use crate::domain::environments::{
-    check_environment_profile, discover_environment_profiles,
+    canonical_environment_id, check_environment_profile, discover_environment_manifest_paths,
+    discover_environment_profiles, load_environment_manifest,
     resolve_environment_ref_from_profiles, EnvironmentProfileSummary, EnvironmentResolution,
+    EnvironmentSpecWithSource,
 };
 use crate::infrastructure::streaming::{stream_single, StreamOutputItem};
 use async_trait::async_trait;
@@ -53,7 +55,7 @@ impl ToolImpl for EnvironmentProfilePreparePlanTool {
         ctx: &ToolContext,
         args: Self::Args,
     ) -> Result<crate::infrastructure::streaming::StreamOutputBox, ToolError> {
-        let profiles = discover_environment_profiles();
+        let profiles = discover_prepare_plan_profiles(ctx, args.provider_plugin.as_deref());
         let provider = args.provider_plugin.as_deref().unwrap_or_default();
         let resolution = resolve_environment_ref_from_profiles(&args.env_ref, provider, &profiles);
         let check = if args.run_check {
@@ -134,6 +136,54 @@ impl ToolImpl for EnvironmentProfilePreparePlanTool {
             serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string()),
         )))
     }
+}
+
+fn discover_prepare_plan_profiles(
+    ctx: &ToolContext,
+    provider_plugin: Option<&str>,
+) -> Vec<EnvironmentSpecWithSource> {
+    let mut profiles = discover_environment_profiles();
+    let Some(provider_plugin) = provider_plugin
+        .map(str::trim)
+        .filter(|provider_plugin| !provider_plugin.is_empty())
+    else {
+        return profiles;
+    };
+    if profiles
+        .iter()
+        .any(|profile| profile.source.source_plugin == provider_plugin)
+    {
+        return profiles;
+    }
+
+    let Some(plugin_root) = crate::domain::plugins::marketplace_plugin_source_root(
+        provider_plugin,
+        Some(&ctx.project_root),
+        None,
+    ) else {
+        return profiles;
+    };
+    for manifest_path in discover_environment_manifest_paths(&plugin_root) {
+        let Ok(profile) =
+            load_environment_manifest(&manifest_path, provider_plugin.to_string(), &plugin_root)
+        else {
+            continue;
+        };
+        if !crate::domain::plugins::environment_profile_enabled(
+            &profile.source.source_plugin,
+            &profile.spec.metadata.id,
+        ) {
+            continue;
+        }
+        let canonical = canonical_environment_id(&profile);
+        if !profiles
+            .iter()
+            .any(|existing| canonical_environment_id(existing) == canonical)
+        {
+            profiles.push(profile);
+        }
+    }
+    profiles
 }
 
 pub fn schema() -> ToolSchema {

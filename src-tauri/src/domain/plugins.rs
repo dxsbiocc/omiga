@@ -933,6 +933,28 @@ pub fn marketplace_paths(project_root: Option<&Path>, resource_dir: Option<&Path
     paths
 }
 
+pub fn marketplace_plugin_source_root(
+    plugin_id: &str,
+    project_root: Option<&Path>,
+    resource_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let plugin_id = PluginId::parse(plugin_id).ok()?;
+    for path in marketplace_paths(project_root, resource_dir) {
+        let Ok(marketplace) = read_marketplace(&path) else {
+            continue;
+        };
+        if marketplace.name != plugin_id.marketplace {
+            continue;
+        }
+        for entry in &marketplace.plugins {
+            if entry.name == plugin_id.name {
+                return resolve_marketplace_source_path(&path, &entry.source).ok();
+            }
+        }
+    }
+    None
+}
+
 fn marketplace_root_dir(marketplace_path: &Path) -> PathBuf {
     let parent = marketplace_path.parent().unwrap_or_else(|| Path::new("."));
     if parent.file_name().and_then(|s| s.to_str()) == Some("plugins")
