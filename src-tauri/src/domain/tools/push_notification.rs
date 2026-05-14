@@ -65,13 +65,13 @@ fn send_desktop_notification(title: &str, body: &str) {
 
     #[cfg(target_os = "windows")]
     {
-        let script = format!(
-            r#"[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; $t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); $t.GetElementsByTagName('text')[0].AppendChild($t.CreateTextNode('{}')); $t.GetElementsByTagName('text')[1].AppendChild($t.CreateTextNode('{}')); [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Omiga').Show([Windows.UI.Notifications.ToastNotification]::new($t))"#,
-            title.replace('\'', "''"),
-            body.replace('\'', "''")
-        );
+        // Pass title and body via environment variables to avoid any shell injection.
+        // The PowerShell script reads $env:OMIGA_NOTIF_TITLE and $env:OMIGA_NOTIF_BODY.
+        let script = r#"[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; $t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); $t.GetElementsByTagName('text')[0].AppendChild($t.CreateTextNode($env:OMIGA_NOTIF_TITLE)); $t.GetElementsByTagName('text')[1].AppendChild($t.CreateTextNode($env:OMIGA_NOTIF_BODY)); [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Omiga').Show([Windows.UI.Notifications.ToastNotification]::new($t))"#;
         let _ = std::process::Command::new("powershell")
-            .args(["-Command", &script])
+            .args(["-Command", script])
+            .env("OMIGA_NOTIF_TITLE", title)
+            .env("OMIGA_NOTIF_BODY", body)
             .output();
     }
 }

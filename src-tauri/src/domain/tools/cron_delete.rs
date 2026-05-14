@@ -39,21 +39,34 @@ impl super::ToolImpl for CronDeleteTool {
             });
         };
 
-        let result = sqlx::query(
-            r#"UPDATE cron_jobs SET enabled = 0 WHERE id = ? AND enabled = 1"#,
-        )
-        .bind(&id)
-        .execute(pool)
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to delete cron job: {}", e),
-        })?;
+        // Check existence first so we can distinguish "not found" from "already deleted".
+        let exists: Option<i64> = sqlx::query_scalar("SELECT enabled FROM cron_jobs WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("Failed to look up cron job: {}", e),
+            })?;
 
-        let deleted = result.rows_affected() > 0;
+        let (deleted, message) = match exists {
+            None => (false, "not_found"),
+            Some(0) => (false, "already_deleted"),
+            Some(_) => {
+                sqlx::query("UPDATE cron_jobs SET enabled = 0 WHERE id = ?")
+                    .bind(&id)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        message: format!("Failed to delete cron job: {}", e),
+                    })?;
+                (true, "deleted")
+            }
+        };
 
         let text = serde_json::to_string_pretty(&serde_json::json!({
             "deleted": deleted,
-            "id": id
+            "id": id,
+            "status": message
         }))
         .map_err(|e| ToolError::ExecutionFailed {
             message: e.to_string(),

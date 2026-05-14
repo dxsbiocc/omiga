@@ -61,9 +61,23 @@ impl super::ToolImpl for MonitorTool {
         loop {
             match manager.get_task(&args.task_id).await {
                 None => {
-                    return Err(ToolError::ExecutionFailed {
-                        message: format!("Task '{}' not found.", args.task_id),
-                    });
+                    // The task may have completed and been reaped from the manager between
+                    // poll iterations. Treat this as completion rather than a hard error.
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(ToolError::ExecutionFailed {
+                            message: format!(
+                                "Task '{}' not found (may have completed); monitor timed out.",
+                                args.task_id
+                            ),
+                        });
+                    }
+                    let result = serde_json::to_string_pretty(&serde_json::json!({
+                        "task_id": args.task_id,
+                        "trigger": "completed",
+                        "output": "",
+                    }))
+                    .unwrap_or_default();
+                    return Ok(MonitorOutput(result).into_stream());
                 }
                 Some(task) => {
                     let output = read_output_so_far(&task).await;

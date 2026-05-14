@@ -34,7 +34,7 @@ impl super::ToolImpl for ExitWorktreeTool {
             })
         })?;
         // find_worktree must be called on the principal repo, not the linked worktree repo.
-        // worktree.path = .../repo/.claude/worktrees/<name> — go up 3 levels.
+        // Convention: worktree.path = .../repo/.claude/worktrees/<name> — go up 3 levels.
         let main_repo_root = worktree
             .path
             .parent()
@@ -47,6 +47,19 @@ impl super::ToolImpl for ExitWorktreeTool {
             Repository::discover(main_repo_root).map_err(|e| ToolError::ExecutionFailed {
                 message: format!("open main repository: {}", e),
             })?;
+        // Verify the discovered repo actually contains the worktree we intend to prune.
+        // This guards against accidentally operating on a parent repository when the
+        // .claude/worktrees/ layout is not followed.
+        if repo.find_worktree(&worktree.name).is_err() {
+            return Err(ToolError::ExecutionFailed {
+                message: format!(
+                    "worktree '{}' not found in repository at '{}'; \
+                     cannot safely prune",
+                    worktree.name,
+                    main_repo_root.display()
+                ),
+            });
+        }
 
         let pruned = if args.keep != Some(true) {
             let wt =

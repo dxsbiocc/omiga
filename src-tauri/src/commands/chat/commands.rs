@@ -239,9 +239,11 @@ pub async fn export_session_markdown(
         match record.role.as_str() {
             "system" => continue,
             "user" => {
-                md.push_str("## User\n\n");
-                md.push_str(&record.content);
-                md.push_str("\n\n");
+                // Wrap in a fenced block to prevent user content from injecting
+                // Markdown headings or HTML into the exported document structure.
+                md.push_str("## User\n\n```\n");
+                md.push_str(&record.content.replace("```", "` ` `"));
+                md.push_str("\n```\n\n");
             }
             "assistant" => {
                 md.push_str("## Assistant\n\n");
@@ -249,16 +251,20 @@ pub async fn export_session_markdown(
                     md.push_str(&record.content);
                     md.push('\n');
                 }
-                // Append tool call summaries if present
                 if let Some(tc_json) = &record.tool_calls {
                     if let Ok(calls) =
                         serde_json::from_str::<Vec<serde_json::Value>>(tc_json)
                     {
                         for call in &calls {
-                            let name = call
+                            // Allowlist characters in tool names — they are internal identifiers.
+                            let raw_name = call
                                 .get("name")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown_tool");
+                            let name: String = raw_name
+                                .chars()
+                                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                                .collect();
                             md.push_str(&format!("\n**Tool call:** `{name}`\n"));
                         }
                     }
@@ -268,21 +274,19 @@ pub async fn export_session_markdown(
             "tool" => {
                 let output = &record.content;
                 let truncated = if output.chars().count() > 500 {
-                    let truncated_str: String = output.chars().take(500).collect();
-                    format!("{truncated_str}\n\n*[output truncated]*")
+                    let s: String = output.chars().take(500).collect();
+                    format!("{s}\n\n*[output truncated]*")
                 } else {
                     output.clone()
                 };
+                // Tool output is already wrapped in a fenced code block — safe.
+                let safe = truncated.replace("```", "` ` `");
                 md.push_str("**Tool result:**\n\n```\n");
-                md.push_str(&truncated);
+                md.push_str(&safe);
                 md.push_str("\n```\n\n");
             }
-            _ => {
-                // Unknown roles — include as plain text
-                md.push_str(&format!("## {}\n\n", record.role));
-                md.push_str(&record.content);
-                md.push_str("\n\n");
-            }
+            // Skip unknown roles entirely rather than interpolating them as headings.
+            _ => continue,
         }
     }
 
