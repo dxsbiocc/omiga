@@ -297,6 +297,7 @@ pub fn run() {
             commands::operators::cleanup_operator_runs,
             commands::cron::list_cron_jobs,
             commands::cron::delete_cron_job,
+            commands::cron::create_cron_job,
             commands::extensions::vscode_extensions_dir,
             commands::extensions::install_vscode_extension,
             commands::extensions::list_recommended_vscode_extensions,

@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Box,
+  Button,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   IconButton,
   Paper,
   Stack,
@@ -11,11 +16,16 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
-import { DeleteOutlineRounded, ScheduleRounded } from "@mui/icons-material";
+import {
+  AddRounded,
+  DeleteOutlineRounded,
+  ScheduleRounded,
+} from "@mui/icons-material";
 import { invoke } from "@tauri-apps/api/core";
 
 interface CronJobSummary {
@@ -40,12 +50,145 @@ function formatDate(iso: string): string {
   }
 }
 
+const SCHEDULE_HELPER = [
+  "每天早8点: 0 8 * * *",
+  "每周一早9点: 0 9 * * 1",
+  "每小时: 0 * * * *",
+  "每15分钟: */15 * * * *",
+  "每月1号: 0 9 1 * *",
+].join("  |  ");
+
+function validateSchedule(value: string): string | null {
+  const parts = value.trim().split(/\s+/);
+  if (parts.length < 5) {
+    return "Cron expression must have at least 5 space-separated fields (min hour dom month dow)";
+  }
+  return null;
+}
+
+interface CreateCronJobDialogProps {
+  open: boolean;
+  onClose: () => void;
+  onCreated: (job: CronJobSummary) => void;
+}
+
+function CreateCronJobDialog({
+  open,
+  onClose,
+  onCreated,
+}: CreateCronJobDialogProps) {
+  const [schedule, setSchedule] = useState("");
+  const [task, setTask] = useState("");
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  const handleClose = useCallback(() => {
+    setSchedule("");
+    setTask("");
+    setScheduleError(null);
+    setSubmitError(null);
+    setCreating(false);
+    onClose();
+  }, [onClose]);
+
+  const handleScheduleChange = useCallback(
+    (value: string) => {
+      setSchedule(value);
+      setScheduleError(value.trim() ? validateSchedule(value) : null);
+    },
+    [],
+  );
+
+  const handleCreate = useCallback(async () => {
+    const schErr = validateSchedule(schedule);
+    if (schErr) {
+      setScheduleError(schErr);
+      return;
+    }
+    if (!task.trim()) {
+      setSubmitError("Task description must not be empty.");
+      return;
+    }
+
+    setCreating(true);
+    setSubmitError(null);
+    try {
+      const created = await invoke<CronJobSummary>("create_cron_job", {
+        schedule: schedule.trim(),
+        task: task.trim(),
+      });
+      onCreated(created);
+      handleClose();
+    } catch (err) {
+      setSubmitError(String(err));
+    } finally {
+      setCreating(false);
+    }
+  }, [schedule, task, onCreated, handleClose]);
+
+  return (
+    <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
+      <DialogTitle>New Scheduled Job</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          <TextField
+            label="Schedule (cron expression)"
+            value={schedule}
+            onChange={(e) => handleScheduleChange(e.target.value)}
+            error={Boolean(scheduleError)}
+            helperText={
+              scheduleError ??
+              `Examples — ${SCHEDULE_HELPER}`
+            }
+            placeholder="0 8 * * *"
+            fullWidth
+            size="small"
+            autoFocus
+          />
+          <TextField
+            label="Task description"
+            value={task}
+            onChange={(e) => setTask(e.target.value)}
+            placeholder="描述 AI 应该执行什么任务，例如：检查项目的 TODO 列表并生成日报"
+            multiline
+            rows={3}
+            fullWidth
+            size="small"
+          />
+          {submitError && (
+            <Typography variant="body2" color="error">
+              {submitError}
+            </Typography>
+          )}
+        </Stack>
+      </DialogContent>
+      <DialogActions sx={{ px: 3, pb: 2 }}>
+        <Button onClick={handleClose} disabled={creating}>
+          Cancel
+        </Button>
+        <Button
+          variant="contained"
+          onClick={() => void handleCreate()}
+          disabled={creating || !schedule.trim() || !task.trim()}
+          startIcon={
+            creating ? <CircularProgress size={14} color="inherit" /> : undefined
+          }
+        >
+          Create
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 export function CronJobsPanel() {
   const theme = useTheme();
   const [jobs, setJobs] = useState<CronJobSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
 
   const loadJobs = useCallback(async () => {
     setLoading(true);
@@ -79,13 +222,25 @@ export function CronJobsPanel() {
     [],
   );
 
+  const handleCreated = useCallback((job: CronJobSummary) => {
+    setJobs((prev) => [job, ...prev]);
+  }, []);
+
   return (
     <Box>
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 2 }}>
         <ScheduleRounded fontSize="small" color="action" />
-        <Typography variant="subtitle2" fontWeight={600}>
+        <Typography variant="subtitle2" fontWeight={600} sx={{ flex: 1 }}>
           Scheduled Jobs
         </Typography>
+        <Button
+          variant="contained"
+          size="small"
+          startIcon={<AddRounded />}
+          onClick={() => setDialogOpen(true)}
+        >
+          New Job
+        </Button>
       </Stack>
 
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
@@ -204,6 +359,12 @@ export function CronJobsPanel() {
           </Table>
         </TableContainer>
       )}
+
+      <CreateCronJobDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+        onCreated={handleCreated}
+      />
     </Box>
   );
 }
