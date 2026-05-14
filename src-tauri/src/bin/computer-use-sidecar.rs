@@ -965,9 +965,9 @@ fn real_validate_target_result(args: &Map<String, Value>) -> Value {
         "observationId": observation_id,
         "targetWindowId": expected_window_id,
         "target": current_target,
-        "targetVisible": observation.get("targetVisible").cloned().unwrap_or_else(|| json!(true)),
+        "targetVisible": observation.get("targetVisible").cloned().unwrap_or(Value::Bool(true)),
         "occluded": false,
-        "safeToAct": observation.get("safeToAct").cloned().unwrap_or_else(|| json!(true)),
+        "safeToAct": observation.get("safeToAct").cloned().unwrap_or(Value::Bool(true)),
     })
 }
 
@@ -1573,8 +1573,8 @@ fn real_set_target_result(args: &Map<String, Value>) -> Value {
         "target": observation.get("target").cloned().unwrap_or(Value::Null),
         "frontmostApp": observation.get("frontmostApp").cloned().unwrap_or(Value::Null),
         "activeWindowTitle": observation.get("activeWindowTitle").cloned().unwrap_or(Value::Null),
-        "targetVisible": observation.get("targetVisible").cloned().unwrap_or_else(|| json!(false)),
-        "safeToAct": observation.get("safeToAct").cloned().unwrap_or_else(|| json!(false)),
+        "targetVisible": observation.get("targetVisible").cloned().unwrap_or(Value::Bool(false)),
+        "safeToAct": observation.get("safeToAct").cloned().unwrap_or(Value::Bool(false)),
     })
 }
 
@@ -1831,10 +1831,7 @@ return appName & (character id 31) & appBundle & (character id 31) & appPid & (c
         &bundle_id,
         pid,
         &window_title,
-        x,
-        y,
-        width,
-        height,
+        [x, y, width, height],
     );
 
     Ok(MacWindowInfo {
@@ -2286,16 +2283,12 @@ fn capture_screenshot(run_id: &str, observation_id: &str) -> (Option<String>, Op
         Ok(output) => {
             let _ = fs::remove_file(&path);
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let message = permission_error_message(&stderr)
+            let permission_message = permission_error_message(&stderr)
                 .map(str::to_string)
-                .filter(|message| !message.is_empty())
-                .or_else(|| {
-                    if stderr.is_empty() {
-                        None
-                    } else {
-                        Some(stderr)
-                    }
-                })
+                .filter(|message| !message.is_empty());
+            let stderr_message = (!stderr.is_empty()).then_some(stderr);
+            let message = permission_message
+                .or(stderr_message)
                 .unwrap_or_else(|| "screencapture failed".to_string());
             (None, Some(message))
         }
@@ -2348,16 +2341,12 @@ fn capture_screenshot_region(
         Ok(output) => {
             let _ = fs::remove_file(&path);
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let message = permission_error_message(&stderr)
+            let permission_message = permission_error_message(&stderr)
                 .map(str::to_string)
-                .filter(|message| !message.is_empty())
-                .or_else(|| {
-                    if stderr.is_empty() {
-                        None
-                    } else {
-                        Some(stderr)
-                    }
-                })
+                .filter(|message| !message.is_empty());
+            let stderr_message = (!stderr.is_empty()).then_some(stderr);
+            let message = permission_message
+                .or(stderr_message)
                 .unwrap_or_else(|| "screencapture region failed".to_string());
             (None, Some(message))
         }
@@ -2462,22 +2451,12 @@ fn run_visual_text_ocr(image_path: &str) -> Result<Vec<Value>, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let message = permission_error_message(&stderr)
-            .map(str::to_string)
-            .or_else(|| {
-                if stderr.is_empty() {
-                    None
-                } else {
-                    Some(stderr)
-                }
-            })
-            .or_else(|| {
-                if stdout.is_empty() {
-                    None
-                } else {
-                    Some(stdout)
-                }
-            })
+        let permission_message = permission_error_message(&stderr).map(str::to_string);
+        let stderr_message = (!stderr.is_empty()).then_some(stderr);
+        let stdout_message = (!stdout.is_empty()).then_some(stdout);
+        let message = permission_message
+            .or(stderr_message)
+            .or(stdout_message)
             .unwrap_or_else(|| "vision_ocr_failed".to_string());
         return Err(message);
     }
@@ -2505,11 +2484,7 @@ fn run_fixed_click(x: f64, y: f64) -> Result<(), String> {
 }
 
 fn normalize_key_name(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
-        .replace('-', "_")
-        .replace(' ', "_")
+    value.trim().to_ascii_lowercase().replace(['-', ' '], "_")
 }
 
 fn key_code_for_name(key: &str) -> Option<i64> {
@@ -2556,11 +2531,7 @@ end tell"#
 }
 
 fn normalize_scroll_direction(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
-        .replace('-', "_")
-        .replace(' ', "_")
+    value.trim().to_ascii_lowercase().replace(['-', ' '], "_")
 }
 
 fn bounded_scroll_amount(args: &Map<String, Value>) -> i64 {
@@ -2763,11 +2734,7 @@ fn run_drag_event(
 }
 
 fn normalize_shortcut_name(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
-        .replace('-', "_")
-        .replace(' ', "_")
+    value.trim().to_ascii_lowercase().replace(['-', ' '], "_")
 }
 
 fn shortcut_supported(shortcut: &str) -> bool {
@@ -2894,17 +2861,14 @@ fn stable_window_id(
     bundle_id: &str,
     pid: i64,
     window_title: &str,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+    bounds: [f64; 4],
 ) -> String {
     let stable = json!({
         "appName": app_name,
         "bundleId": bundle_id,
         "pid": pid,
         "windowTitle": window_title,
-        "bounds": [x, y, width, height],
+        "bounds": bounds,
     });
     let mut hasher = Sha256::new();
     hasher.update(stable.to_string().as_bytes());

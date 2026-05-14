@@ -5279,9 +5279,7 @@ fn operator_environment_ref_error_command(
         return None;
     }
     let env_ref = operator_runtime_env_ref(spec)?;
-    let Some(profile) = operator_environment_profile(spec) else {
-        return None;
-    };
+    let profile = operator_environment_profile(spec)?;
     let kind = profile
         .runtime
         .kind
@@ -5468,9 +5466,7 @@ fn operator_conda_environment_command(
     if surface_kind == OperatorExecutionSurfaceKind::Sandbox {
         return None;
     }
-    let Some(env_ref) = operator_runtime_env_ref(spec) else {
-        return None;
-    };
+    let env_ref = operator_runtime_env_ref(spec)?;
     let Some(profile) = operator_environment_profile(spec) else {
         return Some(command_with_log_capture(&[
             "/bin/sh".to_string(),

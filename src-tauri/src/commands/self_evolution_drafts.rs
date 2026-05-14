@@ -2517,6 +2517,8 @@ pub async fn validate_self_evolution_draft_promotion_apply_request(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+// Tauri invoke callers pass these confirmations as flat command arguments.
 pub async fn apply_self_evolution_draft_promotion(
     project_root: Option<String>,
     artifact_dir: String,
@@ -2752,7 +2754,7 @@ pub async fn apply_self_evolution_draft_promotion(
         target_previous_sha256: plan.target_current_sha256.clone(),
         target_new_sha256,
         companion_drafts: plan.companion_drafts.clone(),
-        bytes_written: proposed_content.as_bytes().len() as u64,
+        bytes_written: proposed_content.len() as u64,
         checks,
         suggested_verification: plan.suggested_verification.clone(),
         apply_command_available: true,
@@ -2994,7 +2996,7 @@ pub async fn save_self_evolution_draft_promotion_artifact(
             let companion_source = resolve_draft_file_path(&project_root_path, companion_path)?;
             let companion_text = read_text_strict(&companion_source, MAX_PROMOTION_CONTENT_BYTES)?;
             let companion_sha256 = sha256_text(&companion_text);
-            let companion_bytes = companion_text.as_bytes().len() as u64;
+            let companion_bytes = companion_text.len() as u64;
             let source_name = companion_source
                 .file_name()
                 .and_then(|name| name.to_str())
