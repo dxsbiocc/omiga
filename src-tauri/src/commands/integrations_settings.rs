@@ -231,7 +231,7 @@ pub(crate) async fn build_integrations_catalog(
                     .get(&key)
                     .map(oauth_authenticated_for_config)
                     .unwrap_or(false);
-                let (tool_list_checked, list_tools_error, tools) = if probe_tools {
+                let (tool_list_checked, list_tools_error, tools) = if probe_tools && enabled {
                     let tools_res =
                         list_tools_for_server(&root_c, &key, CATALOG_TOOL_LIST_TIMEOUT).await;
                     match tools_res {

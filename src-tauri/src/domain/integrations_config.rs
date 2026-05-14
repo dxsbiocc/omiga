@@ -9,7 +9,7 @@ use std::path::Path;
 
 const FILE_NAME: &str = "integrations.json";
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntegrationsConfig {
     /// Normalized MCP server segment (same as in `mcp__{here}__tool`).
@@ -18,6 +18,18 @@ pub struct IntegrationsConfig {
     /// Skill display names (`SkillEntry.name`) to hide from the model and block at invoke.
     #[serde(default)]
     pub disabled_skills: Vec<String>,
+}
+
+impl Default for IntegrationsConfig {
+    fn default() -> Self {
+        Self {
+            // Bundled remote MCP servers must be opt-in. If the Paperclip endpoint is
+            // temporarily unreachable it can otherwise be probed by chat prewarm and
+            // produce noisy rmcp transport errors before the user has chosen to use it.
+            disabled_mcp_servers: vec!["paperclip".to_string()],
+            disabled_skills: Vec::new(),
+        }
+    }
 }
 
 impl IntegrationsConfig {
@@ -43,7 +55,12 @@ impl IntegrationsConfig {
     }
 }
 
-/// Load integrations toggles; missing file → all enabled.
+/// Load integrations toggles; missing file → safe defaults.
+///
+/// Local skills remain enabled. Bundled remote MCP servers are disabled until
+/// the user explicitly enables them in Settings, because probing third-party
+/// HTTP endpoints during normal chat/session warmup can fail loudly outside the
+/// user's control.
 pub fn load_integrations_config(project_root: &Path) -> IntegrationsConfig {
     let path = project_root.join(".omiga").join(FILE_NAME);
     let raw = match std::fs::read_to_string(&path) {
@@ -128,5 +145,11 @@ mod tests {
         let f = filter_mcp_tools_by_integrations(tools, &cfg);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].name, "mcp__other__y");
+    }
+
+    #[test]
+    fn default_disables_bundled_remote_paperclip() {
+        let cfg = IntegrationsConfig::default();
+        assert!(is_mcp_config_server_disabled(&cfg, "paperclip"));
     }
 }
